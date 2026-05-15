@@ -7,5 +7,3 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-hubu-common.workspace = true
-thiserror.workspace = true

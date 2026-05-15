@@ -7,8 +7,3 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-anyhow.workspace = true
-hubu-common.workspace = true
-hubu-core.workspace = true
-serde.workspace = true
-serde_json.workspace = true
