@@ -12,8 +12,8 @@ The core idea is simple: agents can have budgets, but they should not hold
 private keys.
 
 Humans fund a shared wallet and define spending policies. Agents register as
-separate accounts and submit structured `PaymentIntent`s. Hubu validates each
-intent through deterministic policies, merchant verification, risk guardrails,
+separate accounts and submit structured payment requests. Hubu validates each
+request through deterministic policies, merchant verification, risk guardrails,
 and concurrency-safe budget controls before executing payment and recording the
 result in an audit ledger.
 
@@ -22,7 +22,7 @@ logic, MCP integration layer, shared models, and optional HTTP API.
 
 ## Crates
 
-- `hubu-common`: shared data models such as `PaymentIntent` and `LedgerEntry`
+- `hubu-common`: shared agent identity, ownership, and session/account models
 - `hubu-core`: core policy engine and budget manager
 - `hubu-wallet`: wallet logic, private key handling, signing, and future Alloy integration
 - `hubu-mcp`: MCP server adapter layer

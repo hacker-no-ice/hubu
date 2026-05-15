@@ -8,6 +8,3 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-anyhow.workspace = true
-hubu-common.workspace = true
-hubu-core.workspace = true
