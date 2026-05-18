@@ -1,5 +1,5 @@
 /// Agent Session track session metadata foreach time an agent is connected to the MCP server
-use crate::ids::{AgentSessionId, AgentId};
+use crate::ids::{AgentId, AgentSessionId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct AgentSession {
     pub id: AgentSessionId,
     pub pub_id: String, // External opaque ID, example "ags_..."
-    
+
     pub agent_id: AgentId,
 
     pub mcp_client_name: Option<String>,

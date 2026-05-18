@@ -26,7 +26,7 @@ pub struct AgentIdentity {
 pub struct AgentVersion {
     pub id: AgentVersionId,
     pub pub_id: String, // External opaque ID, example "agv_..."
-    
+
     pub agent_id: AgentId,
 
     pub fingerprint: String, // hash of key fields to identify the agent version
