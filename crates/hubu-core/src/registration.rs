@@ -13,6 +13,7 @@ use hubu_common::{
         session::AgentSession,
     },
 };
+use crate::errors::RegistrationError;
 
 pub struct RegistrationManager {
     agents: HashMap<AgentId, AgentIdentity>,
@@ -24,6 +25,7 @@ pub struct RegistrationManager {
     account_by_agent: HashMap<AgentId, AgentAccountId>,
 }
 
+#[derive(Debug)]
 pub struct RegisterAgentRequest {
     pub display_name: String,
     pub description: Option<String>,
@@ -40,6 +42,7 @@ pub struct RegisterAgentRequest {
     pub mcp_client_version: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct RegisterAgentResponse {
     pub agent: AgentIdentity,
     pub version: AgentVersion,
@@ -59,18 +62,27 @@ impl RegistrationManager {
         }
     }
 
-    pub fn register_agent(&mut self, request: RegisterAgentRequest) -> RegisterAgentResponse {
+    fn validate_request(& self, request: &RegisterAgentRequest) -> Result<(), RegistrationError> {
+        if request.identity_fingerprint.is_empty() || request.version_fingerprint.is_empty() {
+            return Err(RegistrationError::MissingFingerprint)
+        }
+        Ok(())
+    }
+
+    pub fn register_agent(&mut self, request: RegisterAgentRequest) -> Result<RegisterAgentResponse, RegistrationError> {
+        self.validate_request(&request)?;
+
         let agent = self.resolve_or_create_agent(&request);
         let version = self.create_agent_version(&agent, &request);
         let account = self.resolve_or_create_account(&agent);
         let session = self.create_session(&agent, &request);
 
-        RegisterAgentResponse {
+        Ok(RegisterAgentResponse {
             agent,
             version,
             account,
             session,
-        }
+        })
     }
 
     fn resolve_or_create_agent(&mut self, request: &RegisterAgentRequest) -> AgentIdentity {
@@ -210,7 +222,7 @@ mod tests {
     #[test]
     fn registering_new_agent_creates_identity_version_account_and_session() {
         let mut manager = RegistrationManager::new();
-        let response = manager.register_agent(test_request("sha256:agent-a", "sha256:version-a"));
+        let response = manager.register_agent(test_request("sha256:agent-a", "sha256:version-a")).unwrap();
     
         assert_eq!(response.agent.display_name, "Test Agent");
         assert_eq!(response.agent.fingerprint, "sha256:agent-a");
@@ -223,12 +235,29 @@ mod tests {
     #[test]
     fn registering_same_identity_fingerprint_reuses_agent_and_account_but_create_new_session() {
         let mut manager = RegistrationManager::new();
-        let first = manager.register_agent(test_request("sha256:agent-a", "sha256:version-a"));
-        let second = manager.register_agent(test_request("sha256:agent-a", "sha256:version-b"));
+        let first = manager.register_agent(test_request("sha256:agent-a", "sha256:version-a")).unwrap();
+        let second = manager.register_agent(test_request("sha256:agent-a", "sha256:version-b")).unwrap();
     
         assert_eq!(first.agent.id, second.agent.id);
         assert_eq!(first.account.id, second.account.id);
         assert_ne!(first.version.id, second.version.id);
         assert_ne!(first.session.id, second.session.id);
+    }
+
+    #[test]
+    fn registering_without_fingerprint_fails() {
+        let mut manager = RegistrationManager::new();
+
+        let request1 = test_request("", "sha256:version-a");
+        let error1 = manager.register_agent(request1).unwrap_err();
+        assert_eq!(error1, RegistrationError::MissingFingerprint);
+
+        let request2 = test_request("sha256:agent-a", "");
+        let error2 = manager.register_agent(request2).unwrap_err();
+        assert_eq!(error2, RegistrationError::MissingFingerprint);
+
+        let request3 = test_request("", "");
+        let error3 = manager.register_agent(request3).unwrap_err();
+        assert_eq!(error3, RegistrationError::MissingFingerprint);
     }
 }
