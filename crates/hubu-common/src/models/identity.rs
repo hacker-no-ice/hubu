@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentIdentity {
     pub id: AgentId,
-    pub pub_id: String, // External opaque ID, example "agt_..."
+    pub pub_id: String,      // External opaque ID, example "agt_..."
     pub fingerprint: String, // hash of key fields to identify agent identity
 
     pub display_name: String,

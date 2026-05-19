@@ -1,3 +1,2 @@
-pub mod registration;
 pub mod errors;
-
+pub mod registration;

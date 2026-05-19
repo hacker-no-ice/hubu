@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::errors::RegistrationError;
 use chrono::Utc;
 use hubu_common::{
     actor::OwnerRef,
@@ -13,7 +14,6 @@ use hubu_common::{
         session::AgentSession,
     },
 };
-use crate::errors::RegistrationError;
 
 pub struct RegistrationManager {
     agents: HashMap<AgentId, AgentIdentity>,
@@ -62,14 +62,17 @@ impl RegistrationManager {
         }
     }
 
-    fn validate_request(& self, request: &RegisterAgentRequest) -> Result<(), RegistrationError> {
+    fn validate_request(&self, request: &RegisterAgentRequest) -> Result<(), RegistrationError> {
         if request.identity_fingerprint.is_empty() || request.version_fingerprint.is_empty() {
-            return Err(RegistrationError::MissingFingerprint)
+            return Err(RegistrationError::MissingFingerprint);
         }
         Ok(())
     }
 
-    pub fn register_agent(&mut self, request: RegisterAgentRequest) -> Result<RegisterAgentResponse, RegistrationError> {
+    pub fn register_agent(
+        &mut self,
+        request: RegisterAgentRequest,
+    ) -> Result<RegisterAgentResponse, RegistrationError> {
         self.validate_request(&request)?;
 
         let agent = self.resolve_or_create_agent(&request);
@@ -90,7 +93,11 @@ impl RegistrationManager {
             .agent_by_identity_fingerprint
             .get(&request.identity_fingerprint)
         {
-            return self.agents.get(agent_id).expect("agent index is stale").clone();
+            return self
+                .agents
+                .get(agent_id)
+                .expect("agent index is stale")
+                .clone();
         }
 
         let now = Utc::now();
@@ -215,15 +222,17 @@ mod tests {
                 environment: RuntimeEnvironment::Production,
             }),
             mcp_client_name: Some("codex-cli".to_string()),
-            mcp_client_version: Some("0.12.3".to_string()),            
+            mcp_client_version: Some("0.12.3".to_string()),
         }
     }
 
     #[test]
     fn registering_new_agent_creates_identity_version_account_and_session() {
         let mut manager = RegistrationManager::new();
-        let response = manager.register_agent(test_request("sha256:agent-a", "sha256:version-a")).unwrap();
-    
+        let response = manager
+            .register_agent(test_request("sha256:agent-a", "sha256:version-a"))
+            .unwrap();
+
         assert_eq!(response.agent.display_name, "Test Agent");
         assert_eq!(response.agent.fingerprint, "sha256:agent-a");
         assert_eq!(response.version.fingerprint, "sha256:version-a");
@@ -231,13 +240,17 @@ mod tests {
         assert_eq!(response.account.agent_id, response.agent.id);
         assert_eq!(response.session.agent_id, response.agent.id);
     }
-    
+
     #[test]
     fn registering_same_identity_fingerprint_reuses_agent_and_account_but_create_new_session() {
         let mut manager = RegistrationManager::new();
-        let first = manager.register_agent(test_request("sha256:agent-a", "sha256:version-a")).unwrap();
-        let second = manager.register_agent(test_request("sha256:agent-a", "sha256:version-b")).unwrap();
-    
+        let first = manager
+            .register_agent(test_request("sha256:agent-a", "sha256:version-a"))
+            .unwrap();
+        let second = manager
+            .register_agent(test_request("sha256:agent-a", "sha256:version-b"))
+            .unwrap();
+
         assert_eq!(first.agent.id, second.agent.id);
         assert_eq!(first.account.id, second.account.id);
         assert_ne!(first.version.id, second.version.id);
