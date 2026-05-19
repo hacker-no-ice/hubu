@@ -3,3 +3,5 @@ pub mod identity;
 pub mod session;
 
 pub use identity::*;
+pub use account::*;
+pub use session::*;

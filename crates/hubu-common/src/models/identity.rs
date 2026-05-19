@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct AgentIdentity {
     pub id: AgentId,
     pub pub_id: String, // External opaque ID, example "agt_..."
+    pub fingerprint: String, // hash of key fields to identify agent identity
 
     pub display_name: String,
     pub description: Option<String>,
@@ -100,6 +101,7 @@ mod tests {
         let identity = AgentIdentity {
             id: agent_id(),
             pub_id: "agt_123".to_string(),
+            fingerprint: "sha256:identity123".to_string(),
             display_name: "Settlement Agent".to_string(),
             description: Some("Handles settlement approvals".to_string()),
             owner: OwnerRef {

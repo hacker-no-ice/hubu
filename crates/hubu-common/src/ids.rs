@@ -1,14 +1,38 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct AgentId(Uuid);
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+impl AgentId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct AgentVersionId(Uuid);
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+impl AgentVersionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct AgentAccountId(Uuid);
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+impl AgentAccountId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct AgentSessionId(Uuid);
+
+impl AgentSessionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
