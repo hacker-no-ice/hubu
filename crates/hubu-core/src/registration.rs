@@ -21,8 +21,13 @@ pub struct RegistrationManager {
     accounts: HashMap<AgentAccountId, AgentAccount>,
     sessions: HashMap<AgentSessionId, AgentSession>,
 
+    // lookup agent by identity fingerprint, identity fingerprint is global unique for an agent
     agent_by_identity_fingerprint: HashMap<String, AgentId>,
+    // lookup account by agent ID, one agent can only have one account for now
     account_by_agent: HashMap<AgentId, AgentAccountId>,
+    // lookup agent version by agent id and version fingerprint, version fingerprint is only unique
+    // in the context of an agent
+    version_by_agent_and_fingerprint: HashMap<(AgentId, String), AgentVersionId>,
 }
 
 #[derive(Debug)]
@@ -59,6 +64,7 @@ impl RegistrationManager {
             sessions: HashMap::new(),
             agent_by_identity_fingerprint: HashMap::new(),
             account_by_agent: HashMap::new(),
+            version_by_agent_and_fingerprint: HashMap::new(),
         }
     }
 
@@ -75,8 +81,8 @@ impl RegistrationManager {
     ) -> Result<RegisterAgentResponse, RegistrationError> {
         self.validate_request(&request)?;
 
-        let agent = self.resolve_or_create_agent(&request);
-        let version = self.create_agent_version(&agent, &request);
+        let agent = self.resolve_or_create_agent(&request)?;
+        let version = self.resolve_or_create_agent_version(&agent, &request)?;
         let account = self.resolve_or_create_account(&agent);
         let session = self.create_session(&agent, &request);
 
@@ -88,16 +94,24 @@ impl RegistrationManager {
         })
     }
 
-    fn resolve_or_create_agent(&mut self, request: &RegisterAgentRequest) -> AgentIdentity {
+    fn resolve_or_create_agent(
+        &mut self,
+        request: &RegisterAgentRequest,
+    ) -> Result<AgentIdentity, RegistrationError> {
         if let Some(agent_id) = self
             .agent_by_identity_fingerprint
             .get(&request.identity_fingerprint)
         {
-            return self
+            let agent = self
                 .agents
                 .get(agent_id)
                 .expect("agent index is stale")
                 .clone();
+            // conflict check
+            if agent.owner != request.owner || agent.agent_type != request.agent_type {
+                return Err(RegistrationError::IdentityConflict);
+            }
+            return Ok(agent);
         }
 
         let now = Utc::now();
@@ -119,14 +133,29 @@ impl RegistrationManager {
             .insert(request.identity_fingerprint.clone(), id.clone());
         self.agents.insert(id, agent.clone());
 
-        agent
+        Ok(agent)
     }
 
-    fn create_agent_version(
+    fn resolve_or_create_agent_version(
         &mut self,
         agent: &AgentIdentity,
         request: &RegisterAgentRequest,
-    ) -> AgentVersion {
+    ) -> Result<AgentVersion, RegistrationError> {
+        let key = (agent.id.clone(), request.version_fingerprint.clone());
+        if let Some(agent_version_id) = self.version_by_agent_and_fingerprint.get(&key) {
+            let version = self
+                .versions
+                .get(agent_version_id)
+                .expect("agent version index is stale");
+            // version conflict check here
+            if version.code_ref != request.code_ref
+                || version.model != request.model
+                || version.runtime != request.runtime
+            {
+                return Err(RegistrationError::VersionConflict);
+            }
+            return Ok(version.clone());
+        }
         let id = AgentVersionId::new();
         let version = AgentVersion {
             id: id.clone(),
@@ -139,9 +168,11 @@ impl RegistrationManager {
             created_at: Utc::now(),
         };
 
+        self.version_by_agent_and_fingerprint
+            .insert(key, id.clone());
         self.versions.insert(id, version.clone());
 
-        version
+        Ok(version)
     }
 
     fn resolve_or_create_account(&mut self, agent: &AgentIdentity) -> AgentAccount {
@@ -272,5 +303,52 @@ mod tests {
         let request3 = test_request("", "");
         let error3 = manager.register_agent(request3).unwrap_err();
         assert_eq!(error3, RegistrationError::MissingFingerprint);
+    }
+
+    #[test]
+    fn registering_same_agent_and_same_version_fingerprint_reuses_version() {
+        let mut manager = RegistrationManager::new();
+        let first = manager
+            .register_agent(test_request("sha256:agent-a", "sha256:version-a"))
+            .unwrap();
+        let second = manager
+            .register_agent(test_request("sha256:agent-a", "sha256:version-a"))
+            .unwrap();
+
+        assert_eq!(first.agent.id, second.agent.id);
+        assert_eq!(first.account.id, second.account.id);
+        assert_eq!(first.version.id, second.version.id);
+        assert_ne!(first.session.id, second.session.id);
+    }
+
+    #[test]
+    fn registering_identity_fingerprint_with_different_owner_fails() {
+        let mut manager = RegistrationManager::new();
+        let request = test_request("sha256:agent-a", "sha256:version-a");
+        // calls unwrap to make sure register agent is successful
+        manager.register_agent(request).unwrap();
+
+        let mut conflicting_request = test_request("sha256:agent-a", "sha256:version-a");
+        conflicting_request.owner.owner_id = "user_456".to_string();
+
+        let error = manager.register_agent(conflicting_request).unwrap_err();
+        assert_eq!(error, RegistrationError::IdentityConflict);
+    }
+
+    #[test]
+    fn registering_same_agent_and_version_finderprint_with_different_config_fails() {
+        let mut manager = RegistrationManager::new();
+        let request = test_request("sha256:agent-a", "sha256:version-a");
+        manager.register_agent(request).unwrap();
+
+        let mut conflicting_request = test_request("sha256:agent-a", "sha256:version-a");
+        conflicting_request.model = Some(ModelIdentity {
+            provider: "anthropic".to_string(),
+            model: "claude".to_string(),
+            version: None,
+        });
+
+        let error = manager.register_agent(conflicting_request).unwrap_err();
+        assert_eq!(error, RegistrationError::VersionConflict);
     }
 }
