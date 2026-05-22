@@ -1,58 +1,39 @@
 use std::collections::HashMap;
 
-use crate::errors::RegistrationError;
 use chrono::Utc;
 use hubu_common::{
-    actor::OwnerRef,
     ids::{AgentAccountId, AgentId, AgentSessionId, AgentVersionId},
     models::{
         account::{AccountStatus, AgentAccount},
-        identity::{
-            AgentIdentity, AgentStatus, AgentType, AgentVersion, CodeReference, ModelIdentity,
-            RuntimeIdentity,
-        },
+        identity::{AgentIdentity, AgentStatus, AgentVersion},
         session::AgentSession,
     },
 };
 
+use crate::registration::error::RegistrationError;
+use crate::registration::model::{RegisterAgentRequest, RegisterAgentResponse};
+
+/// In-memory registration coordinator.
+///
+/// This prototype manager owns the current registration state directly. Later,
+/// these maps can become repository/storage traits without changing the high
+/// level registration flow.
 pub struct RegistrationManager {
     agents: HashMap<AgentId, AgentIdentity>,
     versions: HashMap<AgentVersionId, AgentVersion>,
     accounts: HashMap<AgentAccountId, AgentAccount>,
     sessions: HashMap<AgentSessionId, AgentSession>,
 
-    // lookup agent by identity fingerprint, identity fingerprint is global unique for an agent
+    /// Lookup agent by globally unique identity fingerprint.
     agent_by_identity_fingerprint: HashMap<String, AgentId>,
-    // lookup account by agent ID, one agent can only have one account for now
+
+    /// Lookup account by agent ID. For now, each agent has exactly one account.
     account_by_agent: HashMap<AgentId, AgentAccountId>,
-    // lookup agent version by agent id and version fingerprint, version fingerprint is only unique
-    // in the context of an agent
+
+    /// Lookup version by agent ID and version fingerprint.
+    ///
+    /// Version fingerprints are unique within one agent lineage, not globally.
     version_by_agent_and_fingerprint: HashMap<(AgentId, String), AgentVersionId>,
-}
-
-#[derive(Debug)]
-pub struct RegisterAgentRequest {
-    pub display_name: String,
-    pub description: Option<String>,
-    pub owner: OwnerRef,
-    pub agent_type: AgentType,
-
-    pub identity_fingerprint: String,
-    pub version_fingerprint: String,
-    pub code_ref: Option<CodeReference>,
-    pub model: Option<ModelIdentity>,
-    pub runtime: Option<RuntimeIdentity>,
-
-    pub mcp_client_name: Option<String>,
-    pub mcp_client_version: Option<String>,
-}
-
-#[derive(Debug)]
-pub struct RegisterAgentResponse {
-    pub agent: AgentIdentity,
-    pub version: AgentVersion,
-    pub account: AgentAccount,
-    pub session: AgentSession,
 }
 
 impl RegistrationManager {
@@ -68,13 +49,10 @@ impl RegistrationManager {
         }
     }
 
-    fn validate_request(&self, request: &RegisterAgentRequest) -> Result<(), RegistrationError> {
-        if request.identity_fingerprint.is_empty() || request.version_fingerprint.is_empty() {
-            return Err(RegistrationError::MissingFingerprint);
-        }
-        Ok(())
-    }
-
+    /// Register an agent connection.
+    ///
+    /// The happy path is idempotent for identity, version, and account, but
+    /// intentionally creates a fresh session for every successful call.
     pub fn register_agent(
         &mut self,
         request: RegisterAgentRequest,
@@ -94,6 +72,13 @@ impl RegistrationManager {
         })
     }
 
+    fn validate_request(&self, request: &RegisterAgentRequest) -> Result<(), RegistrationError> {
+        if request.identity_fingerprint.is_empty() || request.version_fingerprint.is_empty() {
+            return Err(RegistrationError::MissingFingerprint);
+        }
+        Ok(())
+    }
+
     fn resolve_or_create_agent(
         &mut self,
         request: &RegisterAgentRequest,
@@ -107,10 +92,11 @@ impl RegistrationManager {
                 .get(agent_id)
                 .expect("agent index is stale")
                 .clone();
-            // conflict check
+
             if agent.owner != request.owner || agent.agent_type != request.agent_type {
                 return Err(RegistrationError::IdentityConflict);
             }
+
             return Ok(agent);
         }
 
@@ -142,20 +128,23 @@ impl RegistrationManager {
         request: &RegisterAgentRequest,
     ) -> Result<AgentVersion, RegistrationError> {
         let key = (agent.id.clone(), request.version_fingerprint.clone());
+
         if let Some(agent_version_id) = self.version_by_agent_and_fingerprint.get(&key) {
             let version = self
                 .versions
                 .get(agent_version_id)
                 .expect("agent version index is stale");
-            // version conflict check here
+
             if version.code_ref != request.code_ref
                 || version.model != request.model
                 || version.runtime != request.runtime
             {
                 return Err(RegistrationError::VersionConflict);
             }
+
             return Ok(version.clone());
         }
+
         let id = AgentVersionId::new();
         let version = AgentVersion {
             id: id.clone(),
@@ -222,11 +211,21 @@ impl RegistrationManager {
     }
 }
 
+impl Default for RegistrationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hubu_common::actor::OwnerType;
-    use hubu_common::models::identity::RuntimeEnvironment;
+    use hubu_common::{
+        actor::{OwnerRef, OwnerType},
+        models::identity::{
+            AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
+        },
+    };
 
     fn test_request(identity_fingerprint: &str, version_fingerprint: &str) -> RegisterAgentRequest {
         RegisterAgentRequest {
@@ -292,17 +291,18 @@ mod tests {
     fn registering_without_fingerprint_fails() {
         let mut manager = RegistrationManager::new();
 
-        let request1 = test_request("", "sha256:version-a");
-        let error1 = manager.register_agent(request1).unwrap_err();
-        assert_eq!(error1, RegistrationError::MissingFingerprint);
+        let error = manager
+            .register_agent(test_request("", "sha256:version-a"))
+            .unwrap_err();
+        assert_eq!(error, RegistrationError::MissingFingerprint);
 
-        let request2 = test_request("sha256:agent-a", "");
-        let error2 = manager.register_agent(request2).unwrap_err();
-        assert_eq!(error2, RegistrationError::MissingFingerprint);
+        let error = manager
+            .register_agent(test_request("sha256:agent-a", ""))
+            .unwrap_err();
+        assert_eq!(error, RegistrationError::MissingFingerprint);
 
-        let request3 = test_request("", "");
-        let error3 = manager.register_agent(request3).unwrap_err();
-        assert_eq!(error3, RegistrationError::MissingFingerprint);
+        let error = manager.register_agent(test_request("", "")).unwrap_err();
+        assert_eq!(error, RegistrationError::MissingFingerprint);
     }
 
     #[test]
@@ -325,7 +325,6 @@ mod tests {
     fn registering_identity_fingerprint_with_different_owner_fails() {
         let mut manager = RegistrationManager::new();
         let request = test_request("sha256:agent-a", "sha256:version-a");
-        // calls unwrap to make sure register agent is successful
         manager.register_agent(request).unwrap();
 
         let mut conflicting_request = test_request("sha256:agent-a", "sha256:version-a");
@@ -336,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn registering_same_agent_and_version_finderprint_with_different_config_fails() {
+    fn registering_same_agent_and_version_fingerprint_with_different_config_fails() {
         let mut manager = RegistrationManager::new();
         let request = test_request("sha256:agent-a", "sha256:version-a");
         manager.register_agent(request).unwrap();
