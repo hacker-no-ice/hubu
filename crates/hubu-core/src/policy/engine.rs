@@ -2,6 +2,12 @@ use crate::policy::error::PolicyValidationError;
 use crate::policy::model::{Effect, Evaluation, Policy, Rule, RuleResult, SpendRequest};
 
 /// Evaluate a spend request against a policy and return the final decision trace.
+///
+/// This validates the policy first. Invalid policy returns
+/// [`PolicyValidationError`] and the request is not evaluated.
+///
+/// Every rule is evaluated so the returned [`Evaluation`] can explain both the
+/// final decision and the matching rule reasons.
 pub fn evaluate_policy(
     request: &SpendRequest,
     policy: &Policy,
@@ -24,6 +30,11 @@ pub fn evaluate_policy(
     })
 }
 
+/// Validate a policy before it is used for spend evaluation.
+///
+/// This first pass catches shape and type errors that would otherwise make rule
+/// evaluation ambiguous, such as comparing `amount` to a string or using `gt`
+/// on `category`.
 pub fn validate_policy(policy: &Policy) -> Result<(), PolicyValidationError> {
     if policy.id.trim().is_empty() {
         return Err(PolicyValidationError::EmptyPolicyId);
@@ -55,7 +66,10 @@ fn evaluate_rules(request: &SpendRequest, rules: &[Rule]) -> Vec<RuleResult> {
     rules.iter().map(|rule| rule.evaluate(request)).collect()
 }
 
-/// Merge rule evaluation results. If no rule matched, return the policy default.
+/// Merge rule evaluation results.
+///
+/// If no rule matched, return the policy default. Otherwise merge by fixed
+/// precedence: deny > needs_approval > allow.
 fn final_decision(default: Effect, results: &[RuleResult]) -> Effect {
     let mut decision: Option<Effect> = None;
 
