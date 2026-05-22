@@ -1,6 +1,28 @@
 use crate::policy::condition::{Field, ValueKind};
 
 #[derive(Debug, thiserror::Error)]
+pub enum PolicyLoadError {
+    #[error("failed to read policy file `{path}`")]
+    ReadFile {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to parse policy yaml")]
+    ParseYaml {
+        #[from]
+        source: serde_yaml::Error,
+    },
+
+    #[error("invalid policy")]
+    Validation {
+        #[from]
+        source: PolicyValidationError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum PolicyValidationError {
     #[error("policy id cannot be empty")]
     EmptyPolicyId,
