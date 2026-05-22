@@ -263,13 +263,29 @@ rules:
             money_cents: 5000
 ```
 
+Policies can be loaded directly from YAML:
+
+```rust
+use hubu_core::policy::Policy;
+
+let policy = Policy::from_yaml_file("policies/base.yaml")?;
+```
+
+Loading performs three steps:
+
+```txt
+read file -> parse yaml -> validate policy
+```
+
+If the YAML parses but the policy is invalid, loading returns a validation
+error before the policy can be used for evaluation.
+
 ## Future Extensions
 
 The v1 API intentionally keeps the core small. Natural next steps:
 
 - return policy id/version on each individual `RuleResult`
 - validate duplicate rule ids
-- add policy loading from YAML/TOML
 - add mandate context with the same rule/condition model
 - add multi-policy evaluation by evaluating each policy and merging all matched
   effects with the same precedence
