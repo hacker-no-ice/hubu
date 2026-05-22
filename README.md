@@ -12,7 +12,7 @@ The core idea is simple: agents can have budgets, but they should not hold
 private keys.
 
 Humans fund a shared wallet and define spending policies. Agents register as
-separate accounts and submit structured payment requests. Hubu validates each
+separate accounts and submit structured spend requests. Hubu validates each
 request through deterministic policies, merchant verification, risk guardrails,
 and concurrency-safe budget controls before executing payment and recording the
 result in an audit ledger.
@@ -39,3 +39,16 @@ Start a local Anvil chain:
 ```sh
 ./scripts/start-anvil.sh
 ```
+
+## Policy Engine
+
+Hubu's policy engine deterministically evaluates a structured `SpendRequest`
+against a human-authored `Policy`. Policies are validated before evaluation, and
+matching rule effects are merged with this precedence:
+
+```txt
+deny > needs_approval > allow > policy default
+```
+
+See [docs/policy-engine.md](docs/policy-engine.md) for the evaluation strategy,
+rule format, validation behavior, and examples.
