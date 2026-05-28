@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, SpendAuthTokenId, SpendDecisionId};
+use hubu_common::ids::{AgentId, PaymentId, SpendAuthTokenId, SpendDecisionId};
 use hubu_common::money::Currency;
 
 use crate::policy::model::Evaluation;
@@ -30,6 +30,7 @@ pub struct SpendAuthTokenRecord {
     pub spend_decision_id: SpendDecisionId,
     pub expires_at: DateTime<Utc>,
     pub used_at: Option<DateTime<Utc>>,
+    pub used_by_payment_id: Option<PaymentId>,
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
@@ -43,5 +44,22 @@ pub struct SpendEvaluationResponse {
 #[derive(Debug, Clone)]
 pub struct IssuedSpendAuthToken {
     pub id: SpendAuthTokenId,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpendPaymentValidationRequest {
+    pub spend_auth_token_id: SpendAuthTokenId,
+    pub agent_id: AgentId,
+    pub amount_cents: i64,
+    pub currency: Currency,
+    pub merchant: Option<String>,
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidatedSpendAuthorization {
+    pub spend_auth_token_id: SpendAuthTokenId,
+    pub spend_decision_id: SpendDecisionId,
     pub expires_at: DateTime<Utc>,
 }

@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use hubu_common::ids::{SpendAuthTokenId, SpendDecisionId};
+use hubu_common::ids::{PaymentId, SpendAuthTokenId, SpendDecisionId};
 
 use crate::policy::engine;
 use crate::policy::model::{Effect, Policy};
 use crate::spend::error::SpendError;
 use crate::spend::model::{
     IssuedSpendAuthToken, SpendAuthTokenRecord, SpendDecisionRecord, SpendEvaluationResponse,
-    SpendRequest,
+    SpendPaymentValidationRequest, SpendRequest, ValidatedSpendAuthorization,
 };
 
 const DEFAULT_SPEND_AUTH_TOKEN_TTL: chrono::Duration = chrono::Duration::minutes(5);
@@ -52,6 +52,7 @@ impl SpendManager {
                 spend_decision_id: decision_id.clone(),
                 expires_at,
                 used_at: None,
+                used_by_payment_id: None,
                 revoked_at: None,
             };
             self.tokens.insert(spend_auth_id.clone(), spend_auth_record);
@@ -70,6 +71,78 @@ impl SpendManager {
             auth_token,
         })
     }
+
+    pub fn validate_auth_token_for_payment(
+        &self,
+        request: &SpendPaymentValidationRequest,
+    ) -> Result<ValidatedSpendAuthorization, SpendError> {
+        let token = self
+            .tokens
+            .get(&request.spend_auth_token_id)
+            .ok_or(SpendError::UnknownSpendAuthToken)?;
+
+        if token.revoked_at.is_some() {
+            return Err(SpendError::RevokedSpendAuthToken);
+        }
+
+        if token.used_at.is_some() {
+            return Err(SpendError::UsedSpendAuthToken);
+        }
+
+        if token.expires_at <= Utc::now() {
+            return Err(SpendError::ExpiredSpendAuthToken);
+        }
+
+        let decision = self
+            .decisions
+            .get(&token.spend_decision_id)
+            .ok_or(SpendError::MissingSpendDecision)?;
+
+        if decision.evaluation.decision != Effect::Allow {
+            return Err(SpendError::SpendDecisionNotAllowed);
+        }
+
+        if !payment_matches_authorized_spend(request, &decision.request) {
+            return Err(SpendError::PaymentRequestMismatch);
+        }
+
+        Ok(ValidatedSpendAuthorization {
+            spend_auth_token_id: token.id.clone(),
+            spend_decision_id: token.spend_decision_id.clone(),
+            expires_at: token.expires_at,
+        })
+    }
+
+    pub fn mark_auth_token_used(
+        &mut self,
+        token_id: &SpendAuthTokenId,
+        payment_id: PaymentId,
+    ) -> Result<(), SpendError> {
+        let token = self
+            .tokens
+            .get_mut(token_id)
+            .ok_or(SpendError::UnknownSpendAuthToken)?;
+
+        if token.used_at.is_some() {
+            return Err(SpendError::UsedSpendAuthToken);
+        }
+
+        token.used_at = Some(Utc::now());
+        token.used_by_payment_id = Some(payment_id);
+
+        Ok(())
+    }
+}
+
+fn payment_matches_authorized_spend(
+    payment: &SpendPaymentValidationRequest,
+    spend: &SpendRequest,
+) -> bool {
+    payment.agent_id == spend.agent_id
+        && payment.amount_cents == spend.amount_cents
+        && payment.currency == spend.currency
+        && payment.merchant == spend.merchant
+        && payment.task_id == spend.task_id
 }
 
 impl Default for SpendManager {
@@ -81,7 +154,7 @@ impl Default for SpendManager {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use hubu_common::ids::AgentId;
+    use hubu_common::ids::{AgentId, PaymentId};
 
     use super::*;
     use crate::policy::condition::{Condition, Field, PolicyValue};
@@ -160,7 +233,100 @@ mod tests {
         assert_eq!(token_record.spend_decision_id, response.decision_id);
         assert_eq!(token_record.expires_at, token.expires_at);
         assert_eq!(token_record.used_at, None);
+        assert_eq!(token_record.used_by_payment_id, None);
         assert_eq!(token_record.revoked_at, None);
+    }
+
+    #[test]
+    fn validates_auth_token_when_payment_matches_authorized_spend() {
+        let mut manager = SpendManager::new();
+        let request = spend_request(2_500);
+        let policy = policy(
+            Effect::NeedsApproval,
+            vec![amount_rule("allow_small_spend", Effect::Allow, 5_000)],
+        );
+        let evaluation = manager
+            .evaluate_spend(request.clone(), &policy)
+            .expect("spend evaluation should succeed");
+        let token = evaluation
+            .auth_token
+            .expect("allow decision should issue auth token");
+
+        let validation = manager
+            .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
+                spend_auth_token_id: token.id.clone(),
+                agent_id: request.agent_id,
+                amount_cents: request.amount_cents,
+                currency: request.currency,
+                merchant: request.merchant,
+                task_id: request.task_id,
+            })
+            .expect("matching payment should validate");
+
+        assert_eq!(validation.spend_auth_token_id, token.id);
+        assert_eq!(validation.spend_decision_id, evaluation.decision_id);
+    }
+
+    #[test]
+    fn rejects_auth_token_when_payment_amount_differs_from_authorized_spend() {
+        let mut manager = SpendManager::new();
+        let request = spend_request(2_500);
+        let policy = policy(
+            Effect::NeedsApproval,
+            vec![amount_rule("allow_small_spend", Effect::Allow, 5_000)],
+        );
+        let evaluation = manager
+            .evaluate_spend(request.clone(), &policy)
+            .expect("spend evaluation should succeed");
+        let token = evaluation
+            .auth_token
+            .expect("allow decision should issue auth token");
+
+        let error = manager
+            .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
+                spend_auth_token_id: token.id,
+                agent_id: request.agent_id,
+                amount_cents: request.amount_cents + 1,
+                currency: request.currency,
+                merchant: request.merchant,
+                task_id: request.task_id,
+            })
+            .expect_err("mismatched amount should fail validation");
+
+        assert!(matches!(error, SpendError::PaymentRequestMismatch));
+    }
+
+    #[test]
+    fn used_auth_token_cannot_validate_again() {
+        let mut manager = SpendManager::new();
+        let request = spend_request(2_500);
+        let policy = policy(
+            Effect::NeedsApproval,
+            vec![amount_rule("allow_small_spend", Effect::Allow, 5_000)],
+        );
+        let evaluation = manager
+            .evaluate_spend(request.clone(), &policy)
+            .expect("spend evaluation should succeed");
+        let token = evaluation
+            .auth_token
+            .expect("allow decision should issue auth token");
+
+        manager
+            .mark_auth_token_used(&token.id, PaymentId::new())
+            .expect("token should be marked used");
+
+        let error = manager
+            .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
+                spend_auth_token_id: token.id,
+                agent_id: request.agent_id,
+                amount_cents: request.amount_cents,
+                currency: request.currency,
+                merchant: request.merchant,
+                task_id: request.task_id,
+            })
+            .expect_err("used token should fail validation");
+
+        assert!(matches!(error, SpendError::UsedSpendAuthToken));
     }
 
     #[test]
