@@ -303,6 +303,30 @@ impl SqliteLedger {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn list_transactions(&self) -> Result<Vec<LedgerTransaction>, LedgerError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, external_ref, description, created_at
+             FROM ledger_transactions
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let created_at: String = row.get(3)?;
+
+            Ok(LedgerTransaction {
+                id: LedgerTransactionId::from_str(&id)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                external_ref: row.get(1)?,
+                description: row.get(2)?,
+                created_at: DateTime::parse_from_rfc3339(&created_at)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?
+                    .with_timezone(&Utc),
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     #[cfg(test)]
     fn raw_connection(&self) -> &Connection {
         &self.conn
