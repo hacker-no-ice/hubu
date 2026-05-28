@@ -18,21 +18,74 @@ and concurrency-safe budget controls before executing payment and recording the
 result in an audit ledger.
 
 This repository contains the Rust workspace for Hubu's policy engine, wallet
-logic, MCP integration layer, shared models, and optional HTTP API.
+logic, MCP integration layer, shared models, optional HTTP API, and local demo
+CLI.
+
+## What Hubu Does Today
+
+- Registers agents with stable identity, version, account, and session records
+- Evaluates spend requests through deterministic policy rules
+- Issues spend authorization tokens for allowed requests
+- Orchestrates mock payments after spend authorization
+- Records successful payments in an immutable double-entry SQLite ledger
+- Exposes a local `hubu-server` and `hubu` CLI for live demos
 
 ## Crates
 
 - `hubu-common`: shared agent identity, ownership, and session/account models
-- `hubu-core`: core policy engine and budget manager
-- `hubu-wallet`: wallet logic, private key handling, signing, and future Alloy integration
+- `hubu-core`: registration, policy, and spend authorization logic
+- `hubu-wallet`: payment orchestration, mock rails, and ledger recording
 - `hubu-mcp`: MCP server adapter layer
-- `hubu-api`: optional standalone HTTP API layer
+- `hubu-api`: local demo HTTP API and `hubu-server` binary
+- `hubu-cli`: demo-friendly `hubu` CLI binary
 
 ## Quick Start
 
 ```sh
 cargo test --workspace
 ```
+
+Build the workspace:
+
+```sh
+cargo build
+```
+
+Run the automated local demo:
+
+```sh
+./scripts/demo.sh
+```
+
+The demo starts Hubu locally, registers an agent, adds a policy, submits
+allowed, approval-required, and denied spend requests, and prints the resulting
+ledger.
+
+## CLI Demo
+
+Install the local CLI so `hubu ...` works from your shell:
+
+```sh
+cargo install --path crates/hubu-cli
+```
+
+Start the local demo server:
+
+```sh
+cargo run --bin hubu-server
+```
+
+Then use the CLI from another terminal:
+
+```sh
+hubu register-agent --name codex-agent --version 1.0
+hubu add-policy --agent-id AGENT_ID --daily-limit 100
+hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
+hubu ledger list
+```
+
+See [docs/demo.md](docs/demo.md) for the full walkthrough, expected output,
+CLI installation notes, demo script pacing options, and known limitations.
 
 Start a local Anvil chain:
 
@@ -52,3 +105,15 @@ deny > needs_approval > allow > policy default
 
 See [docs/policy-engine.md](docs/policy-engine.md) for the evaluation strategy,
 rule format, validation behavior, and examples.
+
+## Documentation
+
+- [docs/demo.md](docs/demo.md): local server and CLI demo walkthrough
+- [docs/demo-findings.md](docs/demo-findings.md): findings and improvement
+  opportunities from the demo implementation
+- [docs/registration-flow.md](docs/registration-flow.md): agent registration
+  model and flow
+- [docs/policy-engine.md](docs/policy-engine.md): policy rule format and
+  evaluation behavior
+- [docs/payment-ledger-flow.md](docs/payment-ledger-flow.md): payment
+  orchestration and ledger recording flow
