@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEMO_ADDR="${HUBU_DEMO_ADDR:-127.0.0.1:8787}"
+DEMO_URL="http://${DEMO_ADDR}"
+DEMO_STEP_DELAY="${HUBU_DEMO_STEP_DELAY:-1.6}"
+DEMO_READ_DELAY="${HUBU_DEMO_READ_DELAY:-2.4}"
+SERVER_LOG="$(mktemp -t hubu-demo-server.XXXXXX.log)"
+SERVER_PID=""
+
+if [[ ! -t 1 || "${NO_COLOR:-}" != "" ]]; then
+  BOLD=""
+  DIM=""
+  RESET=""
+  RED=""
+  GREEN=""
+  YELLOW=""
+  BLUE=""
+  MAGENTA=""
+  CYAN=""
+else
+  BOLD="$(printf '\033[1m')"
+  DIM="$(printf '\033[2m')"
+  RESET="$(printf '\033[0m')"
+  RED="$(printf '\033[31m')"
+  GREEN="$(printf '\033[32m')"
+  YELLOW="$(printf '\033[33m')"
+  BLUE="$(printf '\033[34m')"
+  MAGENTA="$(printf '\033[35m')"
+  CYAN="$(printf '\033[36m')"
+fi
+
+cleanup() {
+  if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
+    kill "${SERVER_PID}" >/dev/null 2>&1 || true
+    wait "${SERVER_PID}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${SERVER_LOG}"
+}
+trap cleanup EXIT
+
+say() {
+  printf '%b\n' "$*"
+}
+
+banner() {
+  say ""
+  say "${BOLD}${CYAN}██╗  ██╗${MAGENTA}██╗   ██╗${BLUE}██████╗ ${GREEN}██╗   ██╗${RESET}"
+  say "${BOLD}${CYAN}██║  ██║${MAGENTA}██║   ██║${BLUE}██╔══██╗${GREEN}██║   ██║${RESET}"
+  say "${BOLD}${CYAN}███████║${MAGENTA}██║   ██║${BLUE}██████╔╝${GREEN}██║   ██║${RESET}"
+  say "${BOLD}${CYAN}██╔══██║${MAGENTA}██║   ██║${BLUE}██╔══██╗${GREEN}██║   ██║${RESET}"
+  say "${BOLD}${CYAN}██║  ██║${MAGENTA}╚██████╔╝${BLUE}██████╔╝${GREEN}╚██████╔╝${RESET}"
+  say "${BOLD}${CYAN}╚═╝  ╚═╝${MAGENTA} ╚═════╝ ${BLUE}╚═════╝ ${GREEN} ╚═════╝ ${RESET}"
+  say "${DIM}local agent spend control plane demo${RESET}"
+  say ""
+}
+
+step() {
+  sleep "${DEMO_STEP_DELAY}"
+  say "${BOLD}${BLUE}==>${RESET} ${BOLD}$*${RESET}"
+}
+
+note() {
+  say "${DIM}    $*${RESET}"
+}
+
+run() {
+  say "${YELLOW}\$ $*${RESET}"
+  sleep 0.4
+  "$@"
+}
+
+pause_for_reading() {
+  sleep "${DEMO_READ_DELAY}"
+}
+
+show_cli_output() {
+  local output="$1"
+  local line
+
+  while IFS= read -r line; do
+    case "${line}" in
+      "  decision: allow")
+        say "  decision: ${BOLD}${GREEN}allow${RESET}"
+        ;;
+      "  decision: needs_approval")
+        say "  decision: ${BOLD}${YELLOW}needs_approval${RESET}"
+        ;;
+      "  decision: deny")
+        say "  decision: ${BOLD}${RED}deny${RESET}"
+        ;;
+      "  status: succeeded")
+        say "  status: ${BOLD}${GREEN}succeeded${RESET}"
+        ;;
+      *)
+        say "${line}"
+        ;;
+    esac
+  done <<< "${output}"
+}
+
+hubu() {
+  "${ROOT_DIR}/target/debug/hubu" --url "${DEMO_URL}" "$@"
+}
+
+wait_for_server() {
+  for _ in $(seq 1 50); do
+    if hubu health >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  say "${RED}Hubu server did not become ready.${RESET}" >&2
+  say "${DIM}Server log:${RESET}" >&2
+  sed 's/^/  /' "${SERVER_LOG}" >&2 || true
+  return 1
+}
+
+cd "${ROOT_DIR}"
+
+banner
+
+step "Build the demo binaries"
+run cargo build --bin hubu-server --bin hubu
+pause_for_reading
+
+step "Start Hubu locally"
+note "server: ${DEMO_URL}"
+"${ROOT_DIR}/target/debug/hubu-server" "${DEMO_ADDR}" >"${SERVER_LOG}" 2>&1 &
+SERVER_PID="$!"
+wait_for_server
+say "${GREEN}Hubu server is ready.${RESET}"
+pause_for_reading
+
+step "Register an agent"
+REGISTER_OUTPUT="$(hubu register-agent --name codex-agent --version 1.0)"
+say "${REGISTER_OUTPUT}"
+AGENT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/agent_id:/ { print $2; exit }')"
+if [[ -z "${AGENT_ID}" ]]; then
+  say "${RED}Could not parse agent_id from registration output.${RESET}" >&2
+  exit 1
+fi
+note "captured agent_id=${AGENT_ID}"
+pause_for_reading
+
+step "Attach a spending policy"
+hubu add-policy --agent-id "${AGENT_ID}" --daily-limit 100
+pause_for_reading
+
+step "Submit an allowed spend request"
+ALLOW_OUTPUT="$(hubu spend \
+  --agent-id "${AGENT_ID}" \
+  --amount 20 \
+  --reason "Purchase API credits")"
+show_cli_output "${ALLOW_OUTPUT}"
+pause_for_reading
+
+step "Submit an over-limit spend request"
+NEEDS_APPROVAL_OUTPUT="$(hubu spend \
+  --agent-id "${AGENT_ID}" \
+  --amount 120 \
+  --reason "Large API credit purchase")"
+show_cli_output "${NEEDS_APPROVAL_OUTPUT}"
+pause_for_reading
+
+step "Submit a denied spend request"
+DENY_OUTPUT="$(hubu spend \
+  --agent-id "${AGENT_ID}" \
+  --amount 20 \
+  --reason "Attempt blocked merchant purchase" \
+  --merchant blocked-merchant)"
+show_cli_output "${DENY_OUTPUT}"
+pause_for_reading
+
+step "Inspect the ledger"
+hubu ledger list
+pause_for_reading
+
+say ""
+say "${BOLD}${GREEN}Demo complete.${RESET} ${DIM}Allowed spend produced a mock payment and ledger entry; over-limit and denied spends did not execute payment.${RESET}"
