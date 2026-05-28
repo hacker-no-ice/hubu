@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -54,3 +56,91 @@ impl SpendAuthTokenId {
         Self(Uuid::new_v4())
     }
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct PaymentId(Uuid);
+
+impl PaymentId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct LedgerAccountId(Uuid);
+
+impl LedgerAccountId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct LedgerTransactionId(Uuid);
+
+impl LedgerTransactionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct LedgerEntryId(Uuid);
+
+impl LedgerEntryId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+macro_rules! display_uuid_id {
+    ($($id:ty),+ $(,)?) => {
+        $(
+            impl fmt::Display for $id {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    write!(f, "{}", self.0)
+                }
+            }
+        )+
+    };
+}
+
+display_uuid_id!(
+    AgentId,
+    AgentVersionId,
+    AgentAccountId,
+    AgentSessionId,
+    SpendDecisionId,
+    SpendAuthTokenId,
+    PaymentId,
+    LedgerAccountId,
+    LedgerTransactionId,
+    LedgerEntryId,
+);
+
+macro_rules! parse_uuid_id {
+    ($($id:ty),+ $(,)?) => {
+        $(
+            impl FromStr for $id {
+                type Err = uuid::Error;
+
+                fn from_str(value: &str) -> Result<Self, Self::Err> {
+                    Ok(Self(Uuid::parse_str(value)?))
+                }
+            }
+        )+
+    };
+}
+
+parse_uuid_id!(
+    AgentId,
+    AgentVersionId,
+    AgentAccountId,
+    AgentSessionId,
+    SpendDecisionId,
+    SpendAuthTokenId,
+    PaymentId,
+    LedgerAccountId,
+    LedgerTransactionId,
+    LedgerEntryId,
+);
