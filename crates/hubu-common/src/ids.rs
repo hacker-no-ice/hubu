@@ -36,3 +36,21 @@ impl AgentSessionId {
         Self(Uuid::new_v4())
     }
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct SpendDecisionId(Uuid);
+
+impl SpendDecisionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct SpendAuthTokenId(Uuid);
+
+impl SpendAuthTokenId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}

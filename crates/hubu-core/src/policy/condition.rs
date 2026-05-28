@@ -1,9 +1,10 @@
 use hubu_common::ids::AgentId;
+use hubu_common::money::Currency;
 use serde::Deserialize;
 use std::fmt;
 
 use crate::policy::error::PolicyValidationError;
-use crate::policy::model::{Currency, SpendRequest};
+use crate::spend::model::SpendRequest;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -328,6 +329,7 @@ mod tests {
             agent_id: AgentId::new(),
             merchant: Some("Acme Cafe".to_string()),
             category: Some("meals".to_string()),
+            task_id: None,
         }
     }
 

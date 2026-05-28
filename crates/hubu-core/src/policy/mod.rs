@@ -25,9 +25,10 @@
 //! ```rust,ignore
 //! use hubu_common::ids::AgentId;
 //! use hubu_core::policy::{
-//!     evaluate_policy, Condition, Currency, Effect, Field, Policy, PolicyValue, Rule,
-//!     SpendRequest,
+//!     evaluate_policy, Condition, Effect, Field, Policy, PolicyValue, Rule,
 //! };
+//! use hubu_core::spend::SpendRequest;
+//! use hubu_common::money::Currency;
 //!
 //! let request = SpendRequest {
 //!     amount_cents: 4_500,
