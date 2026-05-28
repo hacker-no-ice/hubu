@@ -1,5 +1,6 @@
 use crate::policy::error::PolicyValidationError;
-use crate::policy::model::{Effect, Evaluation, Policy, Rule, RuleResult, SpendRequest};
+use crate::policy::model::{Effect, Evaluation, Policy, Rule, RuleResult};
+use crate::spend::model::SpendRequest;
 
 /// Evaluate a spend request against a policy and return the final decision trace.
 ///
@@ -103,7 +104,7 @@ mod tests {
 
     use super::*;
     use crate::policy::condition::{Condition, Field, PolicyValue, ValueKind};
-    use crate::policy::model::Currency;
+    use hubu_common::money::Currency;
 
     fn spend_request(amount_cents: i64, category: Option<&str>) -> SpendRequest {
         SpendRequest {
@@ -112,6 +113,7 @@ mod tests {
             agent_id: AgentId::new(),
             merchant: Some("Acme Cafe".to_string()),
             category: category.map(str::to_string),
+            task_id: None,
         }
     }
 

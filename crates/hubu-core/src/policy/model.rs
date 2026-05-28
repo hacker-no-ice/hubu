@@ -1,16 +1,7 @@
-use hubu_common::ids::AgentId;
 use serde::{Deserialize, Serialize};
 
 use crate::policy::condition::Condition;
-
-#[derive(Debug, Clone)]
-pub struct SpendRequest {
-    pub amount_cents: i64, // in minor unit
-    pub currency: Currency,
-    pub agent_id: AgentId,
-    pub merchant: Option<String>,
-    pub category: Option<String>,
-}
+use crate::spend::model::SpendRequest;
 
 /// A human-authored policy version.
 ///
@@ -68,12 +59,6 @@ pub enum Effect {
     Allow,
     Deny,
     NeedsApproval,
-}
-
-#[derive(Debug, Copy, Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Currency {
-    Usd,
 }
 
 impl Rule {
