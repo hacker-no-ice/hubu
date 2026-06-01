@@ -134,6 +134,17 @@ wait_for_server
 say "${GREEN}Hubu server is ready.${RESET}"
 pause_for_reading
 
+step "Initialize the human user"
+INIT_OUTPUT="$(hubu init --display-name "Alice Example" --email alice@example.com)"
+say "${INIT_OUTPUT}"
+USER_ID="$(printf '%s\n' "${INIT_OUTPUT}" | awk -F': ' '/^  user_id:/ { print $2; exit }')"
+if [[ -z "${USER_ID}" ]]; then
+  say "${RED}Could not parse user_id from init output.${RESET}" >&2
+  exit 1
+fi
+note "captured public user_id=${USER_ID}"
+pause_for_reading
+
 step "Register an agent"
 REGISTER_OUTPUT="$(hubu register-agent --name codex-agent --version 1.0)"
 say "${REGISTER_OUTPUT}"

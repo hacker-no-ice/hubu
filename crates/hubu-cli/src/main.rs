@@ -149,6 +149,11 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         println!("Payment");
         println!("  status: {}", string_at(payment, "status")?);
         println!("  payment_id: {}", string_at(payment, "payment_id")?);
+        println!(
+            "  owner_user: {} ({})",
+            string_at(payment, "owner_user_name")?,
+            string_at(payment, "owner_user_id")?
+        );
         if let Some(tx_id) = payment.get("ledger_transaction_id").and_then(Value::as_str) {
             println!("  ledger_transaction_id: {tx_id}");
         }
@@ -175,10 +180,12 @@ fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
 
             for transaction in transactions {
                 println!(
-                    "{}  {}  {}",
+                    "{}  {}  {}  owner: {} ({})",
                     string_at(transaction, "created_at")?,
                     string_at(transaction, "id")?,
-                    string_at(transaction, "description")?
+                    string_at(transaction, "description")?,
+                    string_at(transaction, "owner_user_name")?,
+                    string_at(transaction, "owner_user_id")?
                 );
 
                 for entry in transaction
@@ -187,10 +194,12 @@ fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
                     .ok_or_else(|| anyhow!("ledger transaction missing entries"))?
                 {
                     println!(
-                        "  {:<6} {:>10}  {}",
+                        "  {:<6} {:>10}  {}  owner: {} ({})",
                         string_at(entry, "direction")?,
                         money_at(entry, "amount_cents")?,
-                        string_at(entry, "account_id")?
+                        string_at(entry, "account_id")?,
+                        string_at(entry, "owner_user_name")?,
+                        string_at(entry, "owner_user_id")?
                     );
                 }
             }
