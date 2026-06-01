@@ -159,7 +159,7 @@ struct RegisterAgentHttpResponse {
 
 #[derive(Debug, Deserialize)]
 struct AddPolicyHttpRequest {
-    agent_id: AgentId,
+    agent_id: String,
     daily_limit_cents: i64,
 }
 
@@ -172,7 +172,7 @@ struct AddPolicyHttpResponse {
 
 #[derive(Debug, Deserialize)]
 struct SpendHttpRequest {
-    agent_id: AgentId,
+    agent_id: String,
     amount_cents: i64,
     reason: String,
     merchant: Option<String>,
@@ -285,11 +285,11 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         .register_agent(registration_request)?;
 
     Ok(RegisterAgentHttpResponse {
-        agent_id: response.agent.id.to_string(),
+        agent_id: response.agent.pub_id.clone(),
         agent_pub_id: response.agent.pub_id,
-        version_id: response.version.id.to_string(),
-        account_id: response.account.id.to_string(),
-        session_id: response.session.id.to_string(),
+        version_id: response.version.pub_id,
+        account_id: response.account.pub_id,
+        session_id: response.session.pub_id,
     })
 }
 
@@ -299,7 +299,9 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         return Err(anyhow!("daily limit must be positive"));
     }
 
-    let policy_id = format!("demo_policy_{}", request.agent_id);
+    let agent_pub_id = request.agent_id;
+    let agent_id = resolve_agent_id(&agent_pub_id, state)?;
+    let policy_id = format!("demo_policy_{agent_pub_id}");
     let policy = Policy {
         id: policy_id.clone(),
         version: "demo-1".to_string(),
@@ -333,10 +335,10 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         .policies
         .lock()
         .map_err(|_| anyhow!("policy store lock poisoned"))?
-        .insert(request.agent_id.clone(), policy);
+        .insert(agent_id, policy);
 
     Ok(AddPolicyHttpResponse {
-        agent_id: request.agent_id.to_string(),
+        agent_id: agent_pub_id,
         policy_id,
         daily_limit_cents: request.daily_limit_cents,
     })
@@ -348,18 +350,20 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         return Err(anyhow!("spend amount must be positive"));
     }
 
+    let agent_pub_id = request.agent_id;
+    let agent_id = resolve_agent_id(&agent_pub_id, state)?;
     let policy = state
         .policies
         .lock()
         .map_err(|_| anyhow!("policy store lock poisoned"))?
-        .get(&request.agent_id)
+        .get(&agent_id)
         .cloned()
-        .ok_or_else(|| anyhow!("no policy found for agent {}", request.agent_id))?;
+        .ok_or_else(|| anyhow!("no policy found for agent {agent_pub_id}"))?;
 
     let spend_request = SpendRequest {
         amount_cents: request.amount_cents,
         currency: Currency::Usd,
-        agent_id: request.agent_id.clone(),
+        agent_id: agent_id.clone(),
         merchant: request.merchant.clone(),
         category: None,
         task_id: Some(request.reason.clone()),
@@ -383,7 +387,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
             .submit_payment(PaymentRequest {
                 idempotency_key: format!("{}:{}", evaluation.decision_id, request.reason),
                 spend_auth_token_id: token.id,
-                agent_id: request.agent_id,
+                agent_id,
                 amount_cents: request.amount_cents,
                 currency: Currency::Usd,
                 merchant: request.merchant,
@@ -416,6 +420,15 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         auth_token_id,
         payment,
     })
+}
+
+fn resolve_agent_id(agent_pub_id: &str, state: &ServerState) -> Result<AgentId> {
+    state
+        .registration
+        .lock()
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?
+        .agent_id_for_pub_id(agent_pub_id)
+        .ok_or_else(|| anyhow!("unknown public agent id {agent_pub_id}"))
 }
 
 fn list_ledger(state: &ServerState) -> Result<LedgerHttpResponse> {

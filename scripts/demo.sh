@@ -137,12 +137,12 @@ pause_for_reading
 step "Register an agent"
 REGISTER_OUTPUT="$(hubu register-agent --name codex-agent --version 1.0)"
 say "${REGISTER_OUTPUT}"
-AGENT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/agent_id:/ { print $2; exit }')"
+AGENT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/^  agent_id:/ { print $2; exit }')"
 if [[ -z "${AGENT_ID}" ]]; then
   say "${RED}Could not parse agent_id from registration output.${RESET}" >&2
   exit 1
 fi
-note "captured agent_id=${AGENT_ID}"
+note "captured public agent_id=${AGENT_ID}"
 pause_for_reading
 
 step "Attach a spending policy"

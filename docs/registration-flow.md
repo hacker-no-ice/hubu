@@ -10,6 +10,14 @@ Registration turns an MCP client connection into four records:
 The prototype keeps all records in memory with `HashMap` indexes. The shape is
 intended to move cleanly to storage later.
 
+Each record has an internal UUID-backed `id` and an external `pub_id`.
+Internally, Hubu uses the UUID as the stable unique identifier. Public API and
+CLI surfaces use shorter public IDs with meaningful prefixes, such as
+`agt_8x7k2m4q9v1c`, `agv_5f0p3tn8wqj2`, `aga_c6q3d9m1v8ra`, and
+`ags_2h7rx0cq4p9w`. The suffix is derived from the internal UUID, so it is
+short and copyable but does not encode display name, fingerprint, model, owner,
+or other agent metadata.
+
 ## Flow
 
 ```text
@@ -37,6 +45,10 @@ This gives the important invariant:
 ```text
 (agent_id, version_fingerprint) identifies one AgentVersion
 ```
+
+Here, `agent_id` means the internal UUID-backed `AgentId`. Public requests pass
+the `agt_...` public agent ID, which the API resolves before invoking core
+policy, spend, wallet, or registration internals.
 
 ## Conflict Handling
 
