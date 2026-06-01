@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, LedgerTransactionId, PaymentId, SpendAuthTokenId};
+use hubu_common::ids::{AgentId, LedgerTransactionId, PaymentId, SpendAuthTokenId, UserId};
 use hubu_common::money::Currency;
 
 use crate::ledger::{
@@ -69,6 +69,7 @@ pub enum PaymentDestination {
 pub struct PaymentRequest {
     pub idempotency_key: String,
     pub spend_auth_token_id: SpendAuthTokenId,
+    pub owner_user_id: UserId,
     pub agent_id: AgentId,
     pub amount_cents: i64,
     pub currency: Currency,
@@ -82,6 +83,7 @@ pub struct PaymentRequest {
 #[derive(Debug, Clone)]
 pub struct PaymentResponse {
     pub payment_id: PaymentId,
+    pub owner_user_id: UserId,
     pub status: PaymentStatus,
     pub amount_cents: i64,
     pub currency: Currency,
@@ -94,6 +96,7 @@ pub struct PaymentResponse {
 #[derive(Debug, Clone)]
 pub struct ValidatedSpendAuthorization {
     pub spend_auth_token_id: SpendAuthTokenId,
+    pub owner_user_id: UserId,
 }
 
 pub trait SpendAuthorizationValidator {
@@ -125,7 +128,7 @@ pub struct PaymentManager<R, A> {
     rail: R,
     authorizer: A,
     ledger: SqliteLedger,
-    ledger_accounts: PaymentLedgerAccounts,
+    ledger_accounts_by_user: HashMap<UserId, PaymentLedgerAccounts>,
     payments_by_idempotency_key: HashMap<String, StoredPayment>,
 }
 
@@ -134,26 +137,38 @@ where
     R: PaymentRail,
     A: SpendAuthorizationValidator,
 {
-    pub fn new(rail: R, authorizer: A, ledger: SqliteLedger) -> Result<Self, PaymentError> {
+    pub fn new(
+        owner_user_id: UserId,
+        rail: R,
+        authorizer: A,
+        ledger: SqliteLedger,
+    ) -> Result<Self, PaymentError> {
         let wallet_cash = ledger.create_account(
+            owner_user_id.clone(),
             "Hubu wallet cash",
             LedgerAccountKind::UserWalletCash,
             Currency::Usd,
         )?;
         let agent_spend_expense = ledger.create_account(
+            owner_user_id.clone(),
             "Agent spend expense",
             LedgerAccountKind::AgentSpendExpense,
             Currency::Usd,
         )?;
+        let mut ledger_accounts_by_user = HashMap::new();
+        ledger_accounts_by_user.insert(
+            owner_user_id,
+            PaymentLedgerAccounts {
+                wallet_cash,
+                agent_spend_expense,
+            },
+        );
 
         Ok(Self {
             rail,
             authorizer,
             ledger,
-            ledger_accounts: PaymentLedgerAccounts {
-                wallet_cash,
-                agent_spend_expense,
-            },
+            ledger_accounts_by_user,
             payments_by_idempotency_key: HashMap::new(),
         })
     }
@@ -182,18 +197,26 @@ where
         let rail_result = self.rail.execute(&request)?;
 
         let response = if rail_result.status == PaymentStatus::Succeeded {
+            let ledger_accounts = ledger_accounts_for_user(
+                &mut self.ledger,
+                &mut self.ledger_accounts_by_user,
+                &request.owner_user_id,
+            )?;
             let ledger_transaction = self.ledger.record_transaction(
+                request.owner_user_id.clone(),
                 Some(payment_id.to_string()),
                 format!("payment {} via {}", payment_id, request.rail.as_ref()),
                 vec![
                     LedgerEntryDraft {
-                        account_id: self.ledger_accounts.agent_spend_expense.id.clone(),
+                        owner_user_id: request.owner_user_id.clone(),
+                        account_id: ledger_accounts.agent_spend_expense.id.clone(),
                         direction: LedgerDirection::Debit,
                         amount_cents: request.amount_cents,
                         currency: request.currency,
                     },
                     LedgerEntryDraft {
-                        account_id: self.ledger_accounts.wallet_cash.id.clone(),
+                        owner_user_id: request.owner_user_id.clone(),
+                        account_id: ledger_accounts.wallet_cash.id.clone(),
                         direction: LedgerDirection::Credit,
                         amount_cents: request.amount_cents,
                         currency: request.currency,
@@ -206,6 +229,7 @@ where
 
             PaymentResponse {
                 payment_id,
+                owner_user_id: request.owner_user_id.clone(),
                 status: PaymentStatus::Succeeded,
                 amount_cents: request.amount_cents,
                 currency: request.currency,
@@ -217,6 +241,7 @@ where
         } else {
             PaymentResponse {
                 payment_id,
+                owner_user_id: request.owner_user_id.clone(),
                 status: PaymentStatus::Failed,
                 amount_cents: request.amount_cents,
                 currency: request.currency,
@@ -255,6 +280,36 @@ where
     }
 }
 
+fn ledger_accounts_for_user(
+    ledger: &SqliteLedger,
+    ledger_accounts_by_user: &mut HashMap<UserId, PaymentLedgerAccounts>,
+    owner_user_id: &UserId,
+) -> Result<PaymentLedgerAccounts, PaymentError> {
+    if let Some(accounts) = ledger_accounts_by_user.get(owner_user_id) {
+        return Ok(accounts.clone());
+    }
+
+    let wallet_cash = ledger.create_account(
+        owner_user_id.clone(),
+        "Hubu wallet cash",
+        LedgerAccountKind::UserWalletCash,
+        Currency::Usd,
+    )?;
+    let agent_spend_expense = ledger.create_account(
+        owner_user_id.clone(),
+        "Agent spend expense",
+        LedgerAccountKind::AgentSpendExpense,
+        Currency::Usd,
+    )?;
+    let accounts = PaymentLedgerAccounts {
+        wallet_cash,
+        agent_spend_expense,
+    };
+    ledger_accounts_by_user.insert(owner_user_id.clone(), accounts.clone());
+
+    Ok(accounts)
+}
+
 #[cfg(test)]
 mod tests {
     use hubu_common::ids::SpendAuthTokenId;
@@ -265,6 +320,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct TestAuthorizer {
         token_id: SpendAuthTokenId,
+        owner_user_id: UserId,
         agent_id: AgentId,
         amount_cents: i64,
         currency: Currency,
@@ -277,6 +333,7 @@ mod tests {
         fn for_request(request: &PaymentRequest) -> Self {
             Self {
                 token_id: request.spend_auth_token_id.clone(),
+                owner_user_id: request.owner_user_id.clone(),
                 agent_id: request.agent_id.clone(),
                 amount_cents: request.amount_cents,
                 currency: request.currency,
@@ -293,6 +350,7 @@ mod tests {
             request: &PaymentRequest,
         ) -> Result<ValidatedSpendAuthorization, PaymentError> {
             let matches_authorized_spend = request.spend_auth_token_id == self.token_id
+                && request.owner_user_id == self.owner_user_id
                 && request.agent_id == self.agent_id
                 && request.amount_cents == self.amount_cents
                 && request.currency == self.currency
@@ -307,6 +365,7 @@ mod tests {
 
             Ok(ValidatedSpendAuthorization {
                 spend_auth_token_id: request.spend_auth_token_id.clone(),
+                owner_user_id: request.owner_user_id.clone(),
             })
         }
 
@@ -340,6 +399,7 @@ mod tests {
         PaymentRequest {
             idempotency_key: format!("idem_{}", rail.as_ref()),
             spend_auth_token_id: SpendAuthTokenId::new(),
+            owner_user_id: test_user_id(),
             agent_id: AgentId::new(),
             amount_cents: 2_500,
             currency: Currency::Usd,
@@ -351,10 +411,15 @@ mod tests {
         }
     }
 
+    fn test_user_id() -> UserId {
+        "00000000-0000-4000-8000-000000000123".parse().unwrap()
+    }
+
     fn payment_manager(
         request: &PaymentRequest,
     ) -> PaymentManager<MockPaymentRail, TestAuthorizer> {
         PaymentManager::new(
+            request.owner_user_id.clone(),
             MockPaymentRail,
             TestAuthorizer::for_request(request),
             SqliteLedger::in_memory().expect("ledger should initialize"),
@@ -372,6 +437,7 @@ mod tests {
             .expect("payment should succeed");
 
         assert_eq!(response.status, PaymentStatus::Succeeded);
+        assert_eq!(response.owner_user_id, test_user_id());
         assert_eq!(response.amount_cents, 2_500);
         assert_eq!(response.currency, Currency::Usd);
         assert!(response
@@ -393,6 +459,9 @@ mod tests {
             .expect("ledger entries should be readable");
 
         assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .all(|entry| entry.owner_user_id == test_user_id()));
         assert_eq!(
             entries
                 .iter()

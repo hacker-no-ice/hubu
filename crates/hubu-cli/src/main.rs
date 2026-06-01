@@ -29,6 +29,7 @@ fn run() -> Result<()> {
     args.remove(0);
 
     match command.as_str() {
+        "init" => init(&base_url, args),
         "register-agent" => register_agent(&base_url, args),
         "add-policy" => add_policy(&base_url, args),
         "spend" => spend(&base_url, args),
@@ -40,6 +41,27 @@ fn run() -> Result<()> {
         }
         _ => bail!("unknown command `{command}`"),
     }
+}
+
+fn init(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    let display_name =
+        take_value(&mut args, "--display-name").unwrap_or_else(|| "Hubu User".to_string());
+    let email = take_value(&mut args, "--email");
+    ensure_no_args(args)?;
+
+    let response = post_json(
+        base_url,
+        "/init",
+        json!({
+            "display_name": display_name,
+            "email": email,
+        }),
+    )?;
+
+    println!("Hubu initialized");
+    println!("  user_id: {}", string_at(&response, "user_id")?);
+    println!("  display_name: {}", string_at(&response, "display_name")?);
+    Ok(())
 }
 
 fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
@@ -127,6 +149,11 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         println!("Payment");
         println!("  status: {}", string_at(payment, "status")?);
         println!("  payment_id: {}", string_at(payment, "payment_id")?);
+        println!(
+            "  owner_user: {} ({})",
+            string_at(payment, "owner_user_name")?,
+            string_at(payment, "owner_user_id")?
+        );
         if let Some(tx_id) = payment.get("ledger_transaction_id").and_then(Value::as_str) {
             println!("  ledger_transaction_id: {tx_id}");
         }
@@ -153,10 +180,12 @@ fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
 
             for transaction in transactions {
                 println!(
-                    "{}  {}  {}",
+                    "{}  {}  {}  owner: {} ({})",
                     string_at(transaction, "created_at")?,
                     string_at(transaction, "id")?,
-                    string_at(transaction, "description")?
+                    string_at(transaction, "description")?,
+                    string_at(transaction, "owner_user_name")?,
+                    string_at(transaction, "owner_user_id")?
                 );
 
                 for entry in transaction
@@ -165,10 +194,12 @@ fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
                     .ok_or_else(|| anyhow!("ledger transaction missing entries"))?
                 {
                     println!(
-                        "  {:<6} {:>10}  {}",
+                        "  {:<6} {:>10}  {}  owner: {} ({})",
                         string_at(entry, "direction")?,
                         money_at(entry, "amount_cents")?,
-                        string_at(entry, "account_id")?
+                        string_at(entry, "account_id")?,
+                        string_at(entry, "owner_user_name")?,
+                        string_at(entry, "owner_user_id")?
                     );
                 }
             }
@@ -303,6 +334,7 @@ fn print_help() {
 
 Usage:
   hubu [--url http://127.0.0.1:8787] register-agent --name NAME --version VERSION
+  hubu [--url http://127.0.0.1:8787] init [--display-name NAME] [--email EMAIL]
   hubu [--url http://127.0.0.1:8787] add-policy --agent-id ID --daily-limit AMOUNT
   hubu [--url http://127.0.0.1:8787] spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
   hubu [--url http://127.0.0.1:8787] ledger list

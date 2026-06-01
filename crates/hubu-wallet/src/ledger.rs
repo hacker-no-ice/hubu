@@ -3,7 +3,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{LedgerAccountId, LedgerEntryId, LedgerTransactionId};
+use hubu_common::ids::{LedgerAccountId, LedgerEntryId, LedgerTransactionId, UserId};
 use hubu_common::money::Currency;
 use rusqlite::{params, Connection};
 
@@ -26,6 +26,8 @@ pub enum LedgerError {
     },
     #[error("ledger entry amount must be positive")]
     NonPositiveAmount,
+    #[error("ledger entry owner does not match transaction owner")]
+    OwnerMismatch,
     #[error("unsupported currency in ledger store")]
     UnsupportedCurrency {
         #[from]
@@ -78,6 +80,7 @@ impl LedgerDirection {
 #[derive(Debug, Clone)]
 pub struct LedgerAccount {
     pub id: LedgerAccountId,
+    pub owner_user_id: UserId,
     pub name: String,
     pub kind: LedgerAccountKind,
     pub currency: Currency,
@@ -86,6 +89,7 @@ pub struct LedgerAccount {
 
 #[derive(Debug, Clone)]
 pub struct LedgerEntryDraft {
+    pub owner_user_id: UserId,
     pub account_id: LedgerAccountId,
     pub direction: LedgerDirection,
     pub amount_cents: i64,
@@ -95,6 +99,7 @@ pub struct LedgerEntryDraft {
 #[derive(Debug, Clone)]
 pub struct LedgerTransaction {
     pub id: LedgerTransactionId,
+    pub owner_user_id: UserId,
     pub external_ref: Option<String>,
     pub description: String,
     pub created_at: DateTime<Utc>,
@@ -104,6 +109,7 @@ pub struct LedgerTransaction {
 pub struct LedgerEntry {
     pub id: LedgerEntryId,
     pub transaction_id: LedgerTransactionId,
+    pub owner_user_id: UserId,
     pub account_id: LedgerAccountId,
     pub direction: LedgerDirection,
     pub amount_cents: i64,
@@ -135,6 +141,7 @@ impl SqliteLedger {
             "
             CREATE TABLE IF NOT EXISTS ledger_accounts (
                 id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 currency TEXT NOT NULL,
@@ -143,6 +150,7 @@ impl SqliteLedger {
 
             CREATE TABLE IF NOT EXISTS ledger_transactions (
                 id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
                 external_ref TEXT,
                 description TEXT NOT NULL,
                 created_at TEXT NOT NULL
@@ -151,6 +159,7 @@ impl SqliteLedger {
             CREATE TABLE IF NOT EXISTS ledger_entries (
                 id TEXT PRIMARY KEY,
                 transaction_id TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
                 account_id TEXT NOT NULL,
                 direction TEXT NOT NULL,
                 amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
@@ -191,12 +200,14 @@ impl SqliteLedger {
 
     pub fn create_account(
         &self,
+        owner_user_id: UserId,
         name: impl Into<String>,
         kind: LedgerAccountKind,
         currency: Currency,
     ) -> Result<LedgerAccount, LedgerError> {
         let account = LedgerAccount {
             id: LedgerAccountId::new(),
+            owner_user_id,
             name: name.into(),
             kind,
             currency,
@@ -204,10 +215,11 @@ impl SqliteLedger {
         };
 
         self.conn.execute(
-            "INSERT INTO ledger_accounts (id, name, kind, currency, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO ledger_accounts (id, owner_user_id, name, kind, currency, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 account.id.to_string(),
+                account.owner_user_id.to_string(),
                 account.name,
                 account.kind.as_str(),
                 account.currency.to_string(),
@@ -220,14 +232,17 @@ impl SqliteLedger {
 
     pub fn record_transaction(
         &mut self,
+        owner_user_id: UserId,
         external_ref: Option<String>,
         description: impl Into<String>,
         entries: Vec<LedgerEntryDraft>,
     ) -> Result<LedgerTransaction, LedgerError> {
         validate_entries_balance(&entries)?;
+        validate_entries_owner(&owner_user_id, &entries)?;
 
         let ledger_tx = LedgerTransaction {
             id: LedgerTransactionId::new(),
+            owner_user_id,
             external_ref,
             description: description.into(),
             created_at: Utc::now(),
@@ -235,10 +250,11 @@ impl SqliteLedger {
 
         let sqlite_tx = self.conn.transaction()?;
         sqlite_tx.execute(
-            "INSERT INTO ledger_transactions (id, external_ref, description, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO ledger_transactions (id, owner_user_id, external_ref, description, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 ledger_tx.id.to_string(),
+                ledger_tx.owner_user_id.to_string(),
                 ledger_tx.external_ref,
                 ledger_tx.description,
                 ledger_tx.created_at.to_rfc3339(),
@@ -249,11 +265,12 @@ impl SqliteLedger {
             let id = LedgerEntryId::new();
             sqlite_tx.execute(
                 "INSERT INTO ledger_entries
-                 (id, transaction_id, account_id, direction, amount_cents, currency, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (id, transaction_id, owner_user_id, account_id, direction, amount_cents, currency, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     id.to_string(),
                     ledger_tx.id.to_string(),
+                    entry.owner_user_id.to_string(),
                     entry.account_id.to_string(),
                     entry.direction.as_str(),
                     entry.amount_cents,
@@ -273,25 +290,28 @@ impl SqliteLedger {
         transaction_id: &LedgerTransactionId,
     ) -> Result<Vec<LedgerEntry>, LedgerError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, account_id, direction, amount_cents, currency, created_at
+            "SELECT id, owner_user_id, account_id, direction, amount_cents, currency, created_at
              FROM ledger_entries
              WHERE transaction_id = ?1
              ORDER BY id",
         )?;
         let rows = stmt.query_map(params![transaction_id.to_string()], |row| {
             let id: String = row.get(0)?;
-            let account_id: String = row.get(1)?;
-            let direction: String = row.get(2)?;
-            let currency: String = row.get(4)?;
-            let created_at: String = row.get(5)?;
+            let owner_user_id: String = row.get(1)?;
+            let account_id: String = row.get(2)?;
+            let direction: String = row.get(3)?;
+            let currency: String = row.get(5)?;
+            let created_at: String = row.get(6)?;
 
             Ok(LedgerEntry {
                 id: LedgerEntryId::from_str(&id).map_err(|_| rusqlite::Error::InvalidQuery)?,
                 transaction_id: transaction_id.clone(),
+                owner_user_id: UserId::from_str(&owner_user_id)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 account_id: LedgerAccountId::from_str(&account_id)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 direction: LedgerDirection::from_str(&direction)?,
-                amount_cents: row.get(3)?,
+                amount_cents: row.get(4)?,
                 currency: Currency::from_str(&currency)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 created_at: DateTime::parse_from_rfc3339(&created_at)
@@ -305,19 +325,22 @@ impl SqliteLedger {
 
     pub fn list_transactions(&self) -> Result<Vec<LedgerTransaction>, LedgerError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, external_ref, description, created_at
+            "SELECT id, owner_user_id, external_ref, description, created_at
              FROM ledger_transactions
              ORDER BY created_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
-            let created_at: String = row.get(3)?;
+            let owner_user_id: String = row.get(1)?;
+            let created_at: String = row.get(4)?;
 
             Ok(LedgerTransaction {
                 id: LedgerTransactionId::from_str(&id)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                external_ref: row.get(1)?,
-                description: row.get(2)?,
+                owner_user_id: UserId::from_str(&owner_user_id)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                external_ref: row.get(2)?,
+                description: row.get(3)?,
                 created_at: DateTime::parse_from_rfc3339(&created_at)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?
                     .with_timezone(&Utc),
@@ -365,14 +388,30 @@ fn validate_entries_balance(entries: &[LedgerEntryDraft]) -> Result<(), LedgerEr
     Ok(())
 }
 
+fn validate_entries_owner(
+    owner_user_id: &UserId,
+    entries: &[LedgerEntryDraft],
+) -> Result<(), LedgerError> {
+    if entries
+        .iter()
+        .all(|entry| &entry.owner_user_id == owner_user_id)
+    {
+        Ok(())
+    } else {
+        Err(LedgerError::OwnerMismatch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ledger_with_accounts() -> (SqliteLedger, LedgerAccount, LedgerAccount) {
         let ledger = SqliteLedger::in_memory().expect("ledger should initialize");
+        let owner_user_id = test_user_id();
         let debit_account = ledger
             .create_account(
+                owner_user_id.clone(),
                 "Agent spend expense",
                 LedgerAccountKind::AgentSpendExpense,
                 Currency::Usd,
@@ -380,6 +419,7 @@ mod tests {
             .expect("debit account should be created");
         let credit_account = ledger
             .create_account(
+                owner_user_id,
                 "Hubu wallet cash",
                 LedgerAccountKind::UserWalletCash,
                 Currency::Usd,
@@ -389,22 +429,29 @@ mod tests {
         (ledger, debit_account, credit_account)
     }
 
+    fn test_user_id() -> UserId {
+        "00000000-0000-4000-8000-000000000123".parse().unwrap()
+    }
+
     #[test]
     fn records_balanced_double_entry_transaction() {
         let (mut ledger, debit_account, credit_account) = ledger_with_accounts();
 
         let transaction = ledger
             .record_transaction(
+                test_user_id(),
                 Some("payment_1".to_string()),
                 "mock payment",
                 vec![
                     LedgerEntryDraft {
+                        owner_user_id: debit_account.owner_user_id.clone(),
                         account_id: debit_account.id,
                         direction: LedgerDirection::Debit,
                         amount_cents: 2_500,
                         currency: Currency::Usd,
                     },
                     LedgerEntryDraft {
+                        owner_user_id: credit_account.owner_user_id.clone(),
                         account_id: credit_account.id,
                         direction: LedgerDirection::Credit,
                         amount_cents: 2_500,
@@ -419,6 +466,9 @@ mod tests {
             .expect("entries should be readable");
 
         assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .all(|entry| entry.owner_user_id == test_user_id()));
         assert_eq!(
             entries
                 .iter()
@@ -443,16 +493,19 @@ mod tests {
 
         let error = ledger
             .record_transaction(
+                test_user_id(),
                 None,
                 "bad payment",
                 vec![
                     LedgerEntryDraft {
+                        owner_user_id: debit_account.owner_user_id.clone(),
                         account_id: debit_account.id,
                         direction: LedgerDirection::Debit,
                         amount_cents: 2_500,
                         currency: Currency::Usd,
                     },
                     LedgerEntryDraft {
+                        owner_user_id: credit_account.owner_user_id.clone(),
                         account_id: credit_account.id,
                         direction: LedgerDirection::Credit,
                         amount_cents: 2_499,
@@ -471,16 +524,19 @@ mod tests {
 
         let transaction = ledger
             .record_transaction(
+                test_user_id(),
                 None,
                 "mock payment",
                 vec![
                     LedgerEntryDraft {
+                        owner_user_id: debit_account.owner_user_id.clone(),
                         account_id: debit_account.id,
                         direction: LedgerDirection::Debit,
                         amount_cents: 2_500,
                         currency: Currency::Usd,
                     },
                     LedgerEntryDraft {
+                        owner_user_id: credit_account.owner_user_id.clone(),
                         account_id: credit_account.id,
                         direction: LedgerDirection::Credit,
                         amount_cents: 2_500,

@@ -1,5 +1,5 @@
 use hubu_common::{
-    actor::OwnerRef,
+    ids::UserId,
     models::{
         account::AgentAccount,
         identity::{
@@ -17,7 +17,7 @@ use hubu_common::{
 pub struct RegisterAgentRequest {
     pub display_name: String,
     pub description: Option<String>,
-    pub owner: OwnerRef,
+    pub owner_user_id: UserId,
     pub agent_type: AgentType,
 
     pub identity_fingerprint: String,

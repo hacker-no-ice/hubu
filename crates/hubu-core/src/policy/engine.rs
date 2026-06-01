@@ -100,7 +100,7 @@ fn merge_effects(current: Effect, effect: Effect) -> Effect {
 
 #[cfg(test)]
 mod tests {
-    use hubu_common::ids::AgentId;
+    use hubu_common::ids::{AgentId, UserId};
 
     use super::*;
     use crate::policy::condition::{Condition, Field, PolicyValue, ValueKind};
@@ -110,6 +110,7 @@ mod tests {
         SpendRequest {
             amount_cents,
             currency: Currency::Usd,
+            owner_user_id: test_user_id(),
             agent_id: AgentId::new(),
             merchant: Some("Acme Cafe".to_string()),
             category: category.map(str::to_string),
@@ -130,9 +131,14 @@ mod tests {
         Policy {
             id: "base_spending_policy".to_string(),
             version: "2026-05-22.1".to_string(),
+            owner_user_id: test_user_id(),
             rules,
             default_effect,
         }
+    }
+
+    fn test_user_id() -> UserId {
+        "00000000-0000-4000-8000-000000000123".parse().unwrap()
     }
 
     #[test]

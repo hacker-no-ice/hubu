@@ -1,5 +1,4 @@
-use crate::actor::OwnerRef;
-use crate::ids::{AgentId, AgentVersionId};
+use crate::ids::{AgentId, AgentVersionId, UserId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +12,7 @@ pub struct AgentIdentity {
     pub display_name: String,
     pub description: Option<String>,
 
-    pub owner: OwnerRef,
+    pub owner_user_id: UserId,
 
     pub agent_type: AgentType,
     pub agent_status: AgentStatus,
@@ -80,7 +79,6 @@ pub enum RuntimeEnvironment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actor::{OwnerRef, OwnerType};
 
     fn agent_id() -> AgentId {
         serde_json::from_str("\"00000000-0000-4000-8000-000000000001\"").unwrap()
@@ -104,10 +102,8 @@ mod tests {
             fingerprint: "sha256:identity123".to_string(),
             display_name: "Settlement Agent".to_string(),
             description: Some("Handles settlement approvals".to_string()),
-            owner: OwnerRef {
-                owner_type: OwnerType::Organization,
-                owner_id: "org_123".to_string(),
-            },
+            owner_user_id: serde_json::from_str("\"00000000-0000-4000-8000-000000000003\"")
+                .unwrap(),
             agent_type: AgentType::AutonomousAgent,
             agent_status: AgentStatus::Active,
             created_at: timestamp(),

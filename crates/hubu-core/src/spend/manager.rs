@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use hubu_common::ids::{PaymentId, SpendAuthTokenId, SpendDecisionId};
+use hubu_common::models::UserContext;
 
 use crate::policy::engine;
 use crate::policy::model::{Effect, Policy};
@@ -31,13 +32,19 @@ impl SpendManager {
 
     pub fn evaluate_spend(
         &mut self,
+        user: &UserContext,
         request: SpendRequest,
         policy: &Policy,
     ) -> Result<SpendEvaluationResponse, SpendError> {
+        if request.owner_user_id != user.user_id || policy.owner_user_id != user.user_id {
+            return Err(SpendError::UserScopeMismatch);
+        }
+
         let evaluation = engine::evaluate_policy(&request, policy)?;
         let decision_id = SpendDecisionId::new();
         let decision_record = SpendDecisionRecord {
             id: decision_id.clone(),
+            owner_user_id: user.user_id.clone(),
             request: request.clone(),
             evaluation: evaluation.clone(),
             created_at: Utc::now(),
@@ -49,6 +56,7 @@ impl SpendManager {
             let expires_at = Utc::now() + self.token_ttl;
             let spend_auth_record = SpendAuthTokenRecord {
                 id: spend_auth_id.clone(),
+                owner_user_id: user.user_id.clone(),
                 spend_decision_id: decision_id.clone(),
                 expires_at,
                 used_at: None,
@@ -102,12 +110,17 @@ impl SpendManager {
             return Err(SpendError::SpendDecisionNotAllowed);
         }
 
+        if request.owner_user_id != decision.owner_user_id {
+            return Err(SpendError::UserScopeMismatch);
+        }
+
         if !payment_matches_authorized_spend(request, &decision.request) {
             return Err(SpendError::PaymentRequestMismatch);
         }
 
         Ok(ValidatedSpendAuthorization {
             spend_auth_token_id: token.id.clone(),
+            owner_user_id: token.owner_user_id.clone(),
             spend_decision_id: token.spend_decision_id.clone(),
             expires_at: token.expires_at,
         })
@@ -154,7 +167,7 @@ impl Default for SpendManager {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use hubu_common::ids::{AgentId, PaymentId};
+    use hubu_common::ids::{AgentId, PaymentId, UserId};
 
     use super::*;
     use crate::policy::condition::{Condition, Field, PolicyValue};
@@ -166,6 +179,7 @@ mod tests {
         SpendRequest {
             amount_cents,
             currency: Currency::Usd,
+            owner_user_id: test_user_id(),
             agent_id: AgentId::new(),
             merchant: Some("Acme Cafe".to_string()),
             category: Some("meals".to_string()),
@@ -177,9 +191,18 @@ mod tests {
         Policy {
             id: "base_spending_policy".to_string(),
             version: "2026-05-22.1".to_string(),
+            owner_user_id: test_user_id(),
             rules,
             default_effect,
         }
+    }
+
+    fn test_user_id() -> UserId {
+        "00000000-0000-4000-8000-000000000123".parse().unwrap()
+    }
+
+    fn user_context() -> UserContext {
+        UserContext::new(test_user_id())
     }
 
     fn amount_rule(id: &str, effect: Effect, limit_cents: i64) -> Rule {
@@ -205,7 +228,7 @@ mod tests {
         let before = Utc::now();
 
         let response = manager
-            .evaluate_spend(request.clone(), &policy)
+            .evaluate_spend(&user_context(), request.clone(), &policy)
             .expect("spend evaluation should succeed");
 
         assert_eq!(response.evaluation.decision, Effect::Allow);
@@ -217,6 +240,7 @@ mod tests {
             .get(&response.decision_id)
             .expect("decision record should be stored");
         assert_eq!(decision_record.id, response.decision_id);
+        assert_eq!(decision_record.owner_user_id, test_user_id());
         assert_eq!(decision_record.request.task_id, request.task_id);
         assert_eq!(decision_record.evaluation.decision, Effect::Allow);
 
@@ -230,6 +254,7 @@ mod tests {
             .get(&token.id)
             .expect("auth token record should be stored");
         assert_eq!(token_record.id, token.id);
+        assert_eq!(token_record.owner_user_id, test_user_id());
         assert_eq!(token_record.spend_decision_id, response.decision_id);
         assert_eq!(token_record.expires_at, token.expires_at);
         assert_eq!(token_record.used_at, None);
@@ -246,7 +271,7 @@ mod tests {
             vec![amount_rule("allow_small_spend", Effect::Allow, 5_000)],
         );
         let evaluation = manager
-            .evaluate_spend(request.clone(), &policy)
+            .evaluate_spend(&user_context(), request.clone(), &policy)
             .expect("spend evaluation should succeed");
         let token = evaluation
             .auth_token
@@ -255,6 +280,7 @@ mod tests {
         let validation = manager
             .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
                 spend_auth_token_id: token.id.clone(),
+                owner_user_id: request.owner_user_id,
                 agent_id: request.agent_id,
                 amount_cents: request.amount_cents,
                 currency: request.currency,
@@ -263,6 +289,7 @@ mod tests {
             })
             .expect("matching payment should validate");
 
+        assert_eq!(validation.owner_user_id, test_user_id());
         assert_eq!(validation.spend_auth_token_id, token.id);
         assert_eq!(validation.spend_decision_id, evaluation.decision_id);
     }
@@ -276,7 +303,7 @@ mod tests {
             vec![amount_rule("allow_small_spend", Effect::Allow, 5_000)],
         );
         let evaluation = manager
-            .evaluate_spend(request.clone(), &policy)
+            .evaluate_spend(&user_context(), request.clone(), &policy)
             .expect("spend evaluation should succeed");
         let token = evaluation
             .auth_token
@@ -285,6 +312,7 @@ mod tests {
         let error = manager
             .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
                 spend_auth_token_id: token.id,
+                owner_user_id: request.owner_user_id,
                 agent_id: request.agent_id,
                 amount_cents: request.amount_cents + 1,
                 currency: request.currency,
@@ -305,7 +333,7 @@ mod tests {
             vec![amount_rule("allow_small_spend", Effect::Allow, 5_000)],
         );
         let evaluation = manager
-            .evaluate_spend(request.clone(), &policy)
+            .evaluate_spend(&user_context(), request.clone(), &policy)
             .expect("spend evaluation should succeed");
         let token = evaluation
             .auth_token
@@ -318,6 +346,7 @@ mod tests {
         let error = manager
             .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
                 spend_auth_token_id: token.id,
+                owner_user_id: request.owner_user_id,
                 agent_id: request.agent_id,
                 amount_cents: request.amount_cents,
                 currency: request.currency,
@@ -339,7 +368,7 @@ mod tests {
         );
 
         let response = manager
-            .evaluate_spend(request, &policy)
+            .evaluate_spend(&user_context(), request, &policy)
             .expect("spend evaluation should succeed");
 
         assert_eq!(response.evaluation.decision, Effect::NeedsApproval);
@@ -356,16 +385,32 @@ mod tests {
         let policy = Policy {
             id: String::new(),
             version: "2026-05-22.1".to_string(),
+            owner_user_id: test_user_id(),
             rules: Vec::new(),
             default_effect: Effect::Allow,
         };
 
         let error = manager
-            .evaluate_spend(request, &policy)
+            .evaluate_spend(&user_context(), request, &policy)
             .expect_err("invalid policy should fail spend evaluation");
 
         assert!(matches!(error, SpendError::PolicyValidation { .. }));
         assert_eq!(manager.decisions.len(), 0);
         assert_eq!(manager.tokens.len(), 0);
+    }
+
+    #[test]
+    fn rejects_spend_evaluation_outside_user_context() {
+        let mut manager = SpendManager::new();
+        let mut request = spend_request(2_500);
+        request.owner_user_id = "00000000-0000-4000-8000-000000000456".parse().unwrap();
+        let policy = policy(Effect::Allow, Vec::new());
+
+        let error = manager
+            .evaluate_spend(&user_context(), request, &policy)
+            .expect_err("wrong user context should fail");
+
+        assert!(matches!(error, SpendError::UserScopeMismatch));
+        assert_eq!(manager.decisions.len(), 0);
     }
 }

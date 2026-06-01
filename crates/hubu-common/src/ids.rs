@@ -144,7 +144,13 @@ macro_rules! public_uuid_suffix {
     };
 }
 
-public_uuid_suffix!(AgentId, AgentVersionId, AgentAccountId, AgentSessionId,);
+public_uuid_suffix!(
+    AgentId,
+    AgentVersionId,
+    AgentAccountId,
+    AgentSessionId,
+    UserId,
+);
 
 fn public_suffix_from_uuid(uuid: Uuid) -> String {
     let mut value = uuid.as_u128();

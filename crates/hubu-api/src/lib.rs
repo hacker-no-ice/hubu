@@ -8,11 +8,11 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use hubu_common::{
-    actor::{OwnerRef, OwnerType},
-    ids::{AgentId, SpendAuthTokenId},
+    ids::{AgentId, SpendAuthTokenId, UserId},
     models::identity::{
         AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
     },
+    models::UserContext,
     money::Currency,
 };
 use hubu_core::{
@@ -25,6 +25,7 @@ use hubu_core::{
         model::{SpendPaymentValidationRequest, SpendRequest},
         SpendManager,
     },
+    user::{CreateUserRequest, UserManager},
 };
 use hubu_wallet::{
     LedgerTransaction, MockPaymentRail, PaymentDestination, PaymentError, PaymentManager,
@@ -66,19 +67,23 @@ pub fn run_server(bind_addr: &str) -> Result<()> {
 }
 
 struct ServerState {
+    users: Mutex<UserManager>,
     registration: Mutex<RegistrationManager>,
     spend: Arc<Mutex<SpendManager>>,
-    policies: Mutex<HashMap<AgentId, Policy>>,
+    policies: Mutex<HashMap<(UserId, AgentId), Policy>>,
     payments: Mutex<DemoPaymentManager>,
 }
 
 impl ServerState {
     fn new() -> Result<Self> {
+        let mut users = UserManager::new();
+        let default_user = users.ensure_default_user();
         let spend = Arc::new(Mutex::new(SpendManager::new()));
         let authorizer = SharedSpendAuthorizer {
             spend: Arc::clone(&spend),
         };
         let payments = PaymentManager::new(
+            default_user.id,
             MockPaymentRail,
             authorizer,
             SqliteLedger::in_memory().context("initialize in-memory ledger")?,
@@ -86,6 +91,7 @@ impl ServerState {
         .context("initialize payment manager")?;
 
         Ok(Self {
+            users: Mutex::new(users),
             registration: Mutex::new(RegistrationManager::new()),
             spend,
             policies: Mutex::new(HashMap::new()),
@@ -111,14 +117,16 @@ impl SpendAuthorizationValidator for SharedSpendAuthorizer {
             })?
             .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
                 spend_auth_token_id: request.spend_auth_token_id.clone(),
+                owner_user_id: request.owner_user_id.clone(),
                 agent_id: request.agent_id.clone(),
                 amount_cents: request.amount_cents,
                 currency: request.currency,
                 merchant: request.merchant.clone(),
                 task_id: request.task_id.clone(),
             })
-            .map(|_| hubu_wallet::ValidatedSpendAuthorization {
+            .map(|validation| hubu_wallet::ValidatedSpendAuthorization {
                 spend_auth_token_id: request.spend_auth_token_id.clone(),
+                owner_user_id: validation.owner_user_id,
             })
             .map_err(|error| PaymentError::AuthorizationRejected {
                 reason: error.to_string(),
@@ -150,11 +158,24 @@ struct RegisterAgentHttpRequest {
 
 #[derive(Debug, Serialize)]
 struct RegisterAgentHttpResponse {
+    user_id: String,
     agent_id: String,
     agent_pub_id: String,
     version_id: String,
     account_id: String,
     session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InitHttpRequest {
+    display_name: Option<String>,
+    email: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct InitHttpResponse {
+    user_id: String,
+    display_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +211,8 @@ struct SpendHttpResponse {
 #[derive(Debug, Serialize)]
 struct PaymentHttpResponse {
     payment_id: String,
+    owner_user_id: String,
+    owner_user_name: String,
     status: String,
     ledger_transaction_id: Option<String>,
     rail_reference: Option<String>,
@@ -203,6 +226,8 @@ struct LedgerHttpResponse {
 #[derive(Debug, Serialize)]
 struct LedgerTransactionHttpResponse {
     id: String,
+    owner_user_id: String,
+    owner_user_name: String,
     external_ref: Option<String>,
     description: String,
     created_at: String,
@@ -212,6 +237,8 @@ struct LedgerTransactionHttpResponse {
 #[derive(Debug, Serialize)]
 struct LedgerEntryHttpResponse {
     id: String,
+    owner_user_id: String,
+    owner_user_name: String,
     account_id: String,
     direction: String,
     amount_cents: i64,
@@ -233,6 +260,7 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
 fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
+        ("POST", "/init") => init(request.body, state).map(to_json),
         ("POST", "/agents/register") => register_agent(request.body, state).map(to_json),
         ("POST", "/policies") => add_policy(request.body, state).map(to_json),
         ("POST", "/spend") => spend(request.body, state).map(to_json),
@@ -249,15 +277,40 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
     }
 }
 
+fn init(body: String, state: &ServerState) -> Result<InitHttpResponse> {
+    let request: InitHttpRequest = if body.trim().is_empty() {
+        InitHttpRequest {
+            display_name: None,
+            email: None,
+        }
+    } else {
+        serde_json::from_str(&body)?
+    };
+
+    let user = state
+        .users
+        .lock()
+        .map_err(|_| anyhow!("user manager lock poisoned"))?
+        .create_user(CreateUserRequest {
+            display_name: request
+                .display_name
+                .unwrap_or_else(|| "Hubu User".to_string()),
+            email: request.email,
+        });
+
+    Ok(InitHttpResponse {
+        user_id: user.pub_id,
+        display_name: user.display_name,
+    })
+}
+
 fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttpResponse> {
     let request: RegisterAgentHttpRequest = serde_json::from_str(&body)?;
+    let user = default_user_context(state)?;
     let registration_request = RegisterAgentRequest {
         display_name: request.name.clone(),
         description: Some("Registered through the Hubu demo CLI".to_string()),
-        owner: OwnerRef {
-            owner_type: OwnerType::Human,
-            owner_id: "demo-user".to_string(),
-        },
+        owner_user_id: user.user_id.clone(),
         agent_type: AgentType::AutonomousAgent,
         identity_fingerprint: format!("demo:agent:{}", request.name),
         version_fingerprint: format!("demo:agent:{}:{}", request.name, request.version),
@@ -285,6 +338,7 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         .register_agent(registration_request)?;
 
     Ok(RegisterAgentHttpResponse {
+        user_id: default_user_pub_id(state)?,
         agent_id: response.agent.pub_id.clone(),
         agent_pub_id: response.agent.pub_id,
         version_id: response.version.pub_id,
@@ -300,11 +354,13 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
     }
 
     let agent_pub_id = request.agent_id;
-    let agent_id = resolve_agent_id(&agent_pub_id, state)?;
+    let user = default_user_context(state)?;
+    let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
     let policy_id = format!("demo_policy_{agent_pub_id}");
     let policy = Policy {
         id: policy_id.clone(),
         version: "demo-1".to_string(),
+        owner_user_id: user.user_id.clone(),
         default_effect: Effect::NeedsApproval,
         rules: vec![
             Rule {
@@ -335,7 +391,7 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         .policies
         .lock()
         .map_err(|_| anyhow!("policy store lock poisoned"))?
-        .insert(agent_id, policy);
+        .insert((user.user_id, agent_id), policy);
 
     Ok(AddPolicyHttpResponse {
         agent_id: agent_pub_id,
@@ -351,18 +407,20 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     }
 
     let agent_pub_id = request.agent_id;
-    let agent_id = resolve_agent_id(&agent_pub_id, state)?;
+    let user = default_user_context(state)?;
+    let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
     let policy = state
         .policies
         .lock()
         .map_err(|_| anyhow!("policy store lock poisoned"))?
-        .get(&agent_id)
+        .get(&(user.user_id.clone(), agent_id.clone()))
         .cloned()
         .ok_or_else(|| anyhow!("no policy found for agent {agent_pub_id}"))?;
 
     let spend_request = SpendRequest {
         amount_cents: request.amount_cents,
         currency: Currency::Usd,
+        owner_user_id: user.user_id.clone(),
         agent_id: agent_id.clone(),
         merchant: request.merchant.clone(),
         category: None,
@@ -373,12 +431,13 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         .spend
         .lock()
         .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .evaluate_spend(spend_request.clone(), &policy)?;
+        .evaluate_spend(&user, spend_request.clone(), &policy)?;
 
     let auth_token_id = evaluation
         .auth_token
         .as_ref()
         .map(|token| token.id.to_string());
+    let owner = owner_metadata_for_user_id(&user.user_id, state)?;
     let payment = if let Some(token) = evaluation.auth_token {
         let payment = state
             .payments
@@ -387,6 +446,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
             .submit_payment(PaymentRequest {
                 idempotency_key: format!("{}:{}", evaluation.decision_id, request.reason),
                 spend_auth_token_id: token.id,
+                owner_user_id: user.user_id.clone(),
                 agent_id,
                 amount_cents: request.amount_cents,
                 currency: Currency::Usd,
@@ -401,6 +461,8 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
 
         Some(PaymentHttpResponse {
             payment_id: payment.payment_id.to_string(),
+            owner_user_id: owner.pub_id,
+            owner_user_name: owner.display_name,
             status: match payment.status {
                 PaymentStatus::Succeeded => "succeeded",
                 PaymentStatus::Failed => "failed",
@@ -422,13 +484,59 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     })
 }
 
-fn resolve_agent_id(agent_pub_id: &str, state: &ServerState) -> Result<AgentId> {
-    state
+fn resolve_agent_id_for_user(
+    agent_pub_id: &str,
+    user: &UserContext,
+    state: &ServerState,
+) -> Result<AgentId> {
+    let registration = state
         .registration
         .lock()
-        .map_err(|_| anyhow!("registration manager lock poisoned"))?
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?;
+    let agent_id = registration
         .agent_id_for_pub_id(agent_pub_id)
-        .ok_or_else(|| anyhow!("unknown public agent id {agent_pub_id}"))
+        .ok_or_else(|| anyhow!("unknown public agent id {agent_pub_id}"))?;
+    let agent = registration
+        .agent_for_id(&agent_id)
+        .ok_or_else(|| anyhow!("agent index is stale for {agent_pub_id}"))?;
+    if agent.owner_user_id != user.user_id {
+        return Err(anyhow!(
+            "agent {agent_pub_id} is not owned by resolved user"
+        ));
+    }
+    Ok(agent_id)
+}
+
+fn default_user_context(state: &ServerState) -> Result<UserContext> {
+    let mut users = state
+        .users
+        .lock()
+        .map_err(|_| anyhow!("user manager lock poisoned"))?;
+    users.ensure_default_user();
+    Ok(users.default_user_context()?)
+}
+
+fn default_user_pub_id(state: &ServerState) -> Result<String> {
+    let mut users = state
+        .users
+        .lock()
+        .map_err(|_| anyhow!("user manager lock poisoned"))?;
+    Ok(users.ensure_default_user().pub_id)
+}
+
+fn owner_metadata_for_user_id(user_id: &UserId, state: &ServerState) -> Result<OwnerHttpMetadata> {
+    let users = state
+        .users
+        .lock()
+        .map_err(|_| anyhow!("user manager lock poisoned"))?;
+    let user = users
+        .user_for_id(user_id)
+        .ok_or_else(|| anyhow!("unknown owner user {user_id}"))?;
+
+    Ok(OwnerHttpMetadata {
+        pub_id: user.pub_id,
+        display_name: user.display_name,
+    })
 }
 
 fn list_ledger(state: &ServerState) -> Result<LedgerHttpResponse> {
@@ -440,7 +548,7 @@ fn list_ledger(state: &ServerState) -> Result<LedgerHttpResponse> {
         .ledger()
         .list_transactions()?
         .into_iter()
-        .map(|transaction| ledger_transaction_response(payments.ledger(), transaction))
+        .map(|transaction| ledger_transaction_response(payments.ledger(), transaction, state))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(LedgerHttpResponse { transactions })
@@ -449,25 +557,34 @@ fn list_ledger(state: &ServerState) -> Result<LedgerHttpResponse> {
 fn ledger_transaction_response(
     ledger: &SqliteLedger,
     transaction: LedgerTransaction,
+    state: &ServerState,
 ) -> Result<LedgerTransactionHttpResponse> {
+    let transaction_owner = owner_metadata_for_user_id(&transaction.owner_user_id, state)?;
     let entries = ledger
         .entries_for_transaction(&transaction.id)?
         .into_iter()
-        .map(|entry| LedgerEntryHttpResponse {
-            id: entry.id.to_string(),
-            account_id: entry.account_id.to_string(),
-            direction: match entry.direction {
-                hubu_wallet::LedgerDirection::Debit => "debit",
-                hubu_wallet::LedgerDirection::Credit => "credit",
-            }
-            .to_string(),
-            amount_cents: entry.amount_cents,
-            currency: entry.currency.to_string(),
+        .map(|entry| {
+            let entry_owner = owner_metadata_for_user_id(&entry.owner_user_id, state)?;
+            Ok(LedgerEntryHttpResponse {
+                id: entry.id.to_string(),
+                owner_user_id: entry_owner.pub_id,
+                owner_user_name: entry_owner.display_name,
+                account_id: entry.account_id.to_string(),
+                direction: match entry.direction {
+                    hubu_wallet::LedgerDirection::Debit => "debit",
+                    hubu_wallet::LedgerDirection::Credit => "credit",
+                }
+                .to_string(),
+                amount_cents: entry.amount_cents,
+                currency: entry.currency.to_string(),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(LedgerTransactionHttpResponse {
         id: transaction.id.to_string(),
+        owner_user_id: transaction_owner.pub_id,
+        owner_user_name: transaction_owner.display_name,
         external_ref: transaction.external_ref,
         description: transaction.description,
         created_at: transaction.created_at.to_rfc3339(),
@@ -496,6 +613,11 @@ struct HttpRequest {
 struct HttpResponse {
     status: u16,
     body: Value,
+}
+
+struct OwnerHttpMetadata {
+    pub_id: String,
+    display_name: String,
 }
 
 fn parse_request(raw: &str) -> Result<HttpRequest> {
@@ -538,4 +660,68 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
         body
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_user_is_shown_on_payment_and_ledger_records() {
+        let state = ServerState::new().expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "settlement-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+        assert_eq!(agent.user_id, user.user_id);
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 5_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should be added under initialized user");
+
+        let spend = spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 2_500,
+                "reason": "test purchase",
+                "merchant": "Acme Cafe",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should be approved and paid");
+        let payment = spend.payment.expect("allowed spend should pay");
+        assert_eq!(payment.owner_user_id, user.user_id);
+        assert_eq!(payment.owner_user_name, "Alice Example");
+
+        let ledger = list_ledger(&state).expect("ledger should list");
+        assert_eq!(ledger.transactions.len(), 1);
+        let transaction = &ledger.transactions[0];
+        assert_eq!(transaction.owner_user_id, user.user_id);
+        assert_eq!(transaction.owner_user_name, "Alice Example");
+        assert!(transaction.entries.iter().all(|entry| {
+            entry.owner_user_id == user.user_id && entry.owner_user_name == "Alice Example"
+        }));
+    }
 }
