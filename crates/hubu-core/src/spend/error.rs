@@ -21,4 +21,6 @@ pub enum SpendError {
     SpendDecisionNotAllowed,
     #[error("payment request does not match authorized spend")]
     PaymentRequestMismatch,
+    #[error("request is outside the resolved user context")]
+    UserScopeMismatch,
 }

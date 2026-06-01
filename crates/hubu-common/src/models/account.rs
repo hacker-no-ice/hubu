@@ -1,5 +1,5 @@
 /// Agent Account is used for tracking agent spending, balance and other financial operations
-use crate::ids::{AgentAccountId, AgentId};
+use crate::ids::{AgentAccountId, AgentId, UserId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +9,7 @@ pub struct AgentAccount {
     pub pub_id: String, // External opaque ID, example "aga_..."
 
     pub agent_id: AgentId,
+    pub owner_user_id: UserId,
 
     pub account_status: AccountStatus,
     pub created_at: DateTime<Utc>,
@@ -45,6 +46,8 @@ mod tests {
             id: agent_account_id(),
             pub_id: "aga_123".to_string(),
             agent_id: agent_id(),
+            owner_user_id: serde_json::from_str("\"00000000-0000-4000-8000-000000000003\"")
+                .unwrap(),
             account_status: AccountStatus::Active,
             created_at: timestamp(),
             updated_at: timestamp(),

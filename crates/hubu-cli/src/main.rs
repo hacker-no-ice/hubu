@@ -29,6 +29,7 @@ fn run() -> Result<()> {
     args.remove(0);
 
     match command.as_str() {
+        "init" => init(&base_url, args),
         "register-agent" => register_agent(&base_url, args),
         "add-policy" => add_policy(&base_url, args),
         "spend" => spend(&base_url, args),
@@ -40,6 +41,27 @@ fn run() -> Result<()> {
         }
         _ => bail!("unknown command `{command}`"),
     }
+}
+
+fn init(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    let display_name =
+        take_value(&mut args, "--display-name").unwrap_or_else(|| "Hubu User".to_string());
+    let email = take_value(&mut args, "--email");
+    ensure_no_args(args)?;
+
+    let response = post_json(
+        base_url,
+        "/init",
+        json!({
+            "display_name": display_name,
+            "email": email,
+        }),
+    )?;
+
+    println!("Hubu initialized");
+    println!("  user_id: {}", string_at(&response, "user_id")?);
+    println!("  display_name: {}", string_at(&response, "display_name")?);
+    Ok(())
 }
 
 fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
@@ -303,6 +325,7 @@ fn print_help() {
 
 Usage:
   hubu [--url http://127.0.0.1:8787] register-agent --name NAME --version VERSION
+  hubu [--url http://127.0.0.1:8787] init [--display-name NAME] [--email EMAIL]
   hubu [--url http://127.0.0.1:8787] add-policy --agent-id ID --daily-limit AMOUNT
   hubu [--url http://127.0.0.1:8787] spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
   hubu [--url http://127.0.0.1:8787] ledger list

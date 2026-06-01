@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, PaymentId, SpendAuthTokenId, SpendDecisionId};
+use hubu_common::ids::{AgentId, PaymentId, SpendAuthTokenId, SpendDecisionId, UserId};
 use hubu_common::money::Currency;
 
 use crate::policy::model::Evaluation;
@@ -8,6 +8,7 @@ use crate::policy::model::Evaluation;
 pub struct SpendRequest {
     pub amount_cents: i64, // in minor unit
     pub currency: Currency,
+    pub owner_user_id: UserId,
     pub agent_id: AgentId,
     pub merchant: Option<String>,
     pub category: Option<String>,
@@ -18,6 +19,7 @@ pub struct SpendRequest {
 #[derive(Debug, Clone)]
 pub struct SpendDecisionRecord {
     pub id: SpendDecisionId,
+    pub owner_user_id: UserId,
     pub request: SpendRequest,
     pub evaluation: Evaluation,
     pub created_at: DateTime<Utc>,
@@ -27,6 +29,7 @@ pub struct SpendDecisionRecord {
 #[derive(Debug, Clone)]
 pub struct SpendAuthTokenRecord {
     pub id: SpendAuthTokenId,
+    pub owner_user_id: UserId,
     pub spend_decision_id: SpendDecisionId,
     pub expires_at: DateTime<Utc>,
     pub used_at: Option<DateTime<Utc>>,
@@ -50,6 +53,7 @@ pub struct IssuedSpendAuthToken {
 #[derive(Debug, Clone)]
 pub struct SpendPaymentValidationRequest {
     pub spend_auth_token_id: SpendAuthTokenId,
+    pub owner_user_id: UserId,
     pub agent_id: AgentId,
     pub amount_cents: i64,
     pub currency: Currency,
@@ -60,6 +64,7 @@ pub struct SpendPaymentValidationRequest {
 #[derive(Debug, Clone)]
 pub struct ValidatedSpendAuthorization {
     pub spend_auth_token_id: SpendAuthTokenId,
+    pub owner_user_id: UserId,
     pub spend_decision_id: SpendDecisionId,
     pub expires_at: DateTime<Utc>,
 }

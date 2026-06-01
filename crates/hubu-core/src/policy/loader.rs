@@ -43,6 +43,7 @@ mod tests {
         r#"
 id: base_spending_policy
 version: 2026-05-22.1
+owner_user_id: 00000000-0000-4000-8000-000000000123
 default_effect: needs_approval
 rules:
   - id: deny_large_purchase
@@ -90,6 +91,10 @@ rules:
 
         assert_eq!(policy.id, "base_spending_policy");
         assert_eq!(policy.version, "2026-05-22.1");
+        assert_eq!(
+            policy.owner_user_id.to_string(),
+            "00000000-0000-4000-8000-000000000123"
+        );
         assert_eq!(policy.default_effect, Effect::NeedsApproval);
         assert_eq!(policy.rules.len(), 2);
     }
@@ -111,6 +116,7 @@ rules:
         let invalid_yaml = r#"
 id: base_spending_policy
 version: 2026-05-22.1
+owner_user_id: 00000000-0000-4000-8000-000000000123
 default_effect: needs_approval
 rules:
   - id: invalid_amount_type

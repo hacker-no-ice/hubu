@@ -57,6 +57,10 @@ impl RegistrationManager {
         self.agent_by_pub_id.get(pub_id).cloned()
     }
 
+    pub fn agent_for_id(&self, agent_id: &AgentId) -> Option<AgentIdentity> {
+        self.agents.get(agent_id).cloned()
+    }
+
     /// Register an agent connection.
     ///
     /// The happy path is idempotent for identity, version, and account, but
@@ -101,7 +105,9 @@ impl RegistrationManager {
                 .expect("agent index is stale")
                 .clone();
 
-            if agent.owner != request.owner || agent.agent_type != request.agent_type {
+            if agent.owner_user_id != request.owner_user_id
+                || agent.agent_type != request.agent_type
+            {
                 return Err(RegistrationError::IdentityConflict);
             }
 
@@ -116,7 +122,7 @@ impl RegistrationManager {
             fingerprint: request.identity_fingerprint.clone(),
             display_name: request.display_name.clone(),
             description: request.description.clone(),
-            owner: request.owner.clone(),
+            owner_user_id: request.owner_user_id.clone(),
             agent_type: request.agent_type.clone(),
             agent_status: AgentStatus::Active,
             created_at: now,
@@ -189,6 +195,7 @@ impl RegistrationManager {
             id: id.clone(),
             pub_id: format!("aga_{}", id.public_suffix()),
             agent_id: agent.id.clone(),
+            owner_user_id: agent.owner_user_id.clone(),
             account_status: AccountStatus::Active,
             created_at: now,
             updated_at: now,
@@ -210,6 +217,7 @@ impl RegistrationManager {
             id: id.clone(),
             pub_id: format!("ags_{}", id.public_suffix()),
             agent_id: agent.id.clone(),
+            owner_user_id: agent.owner_user_id.clone(),
             mcp_client_name: request.mcp_client_name.clone(),
             mcp_client_version: request.mcp_client_version.clone(),
             created_at: Utc::now(),
@@ -240,21 +248,20 @@ impl Default for RegistrationManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hubu_common::{
-        actor::{OwnerRef, OwnerType},
-        models::identity::{
-            AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
-        },
+    use hubu_common::ids::UserId;
+    use hubu_common::models::identity::{
+        AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
     };
+
+    fn user_id(value: &str) -> UserId {
+        value.parse().unwrap()
+    }
 
     fn test_request(identity_fingerprint: &str, version_fingerprint: &str) -> RegisterAgentRequest {
         RegisterAgentRequest {
             display_name: "Test Agent".to_string(),
             description: Some("MVE Agent to make money".to_string()),
-            owner: OwnerRef {
-                owner_type: OwnerType::Human,
-                owner_id: "user_123".to_string(),
-            },
+            owner_user_id: user_id("00000000-0000-4000-8000-000000000123"),
             agent_type: AgentType::AutonomousAgent,
             identity_fingerprint: identity_fingerprint.to_string(),
             version_fingerprint: version_fingerprint.to_string(),
@@ -320,6 +327,8 @@ mod tests {
         assert_eq!(response.version.agent_id, response.agent.id);
         assert_eq!(response.account.agent_id, response.agent.id);
         assert_eq!(response.session.agent_id, response.agent.id);
+        assert_eq!(response.agent.owner_user_id, response.account.owner_user_id);
+        assert_eq!(response.agent.owner_user_id, response.session.owner_user_id);
     }
 
     #[test]
@@ -402,7 +411,7 @@ mod tests {
         manager.register_agent(request).unwrap();
 
         let mut conflicting_request = test_request("sha256:agent-a", "sha256:version-a");
-        conflicting_request.owner.owner_id = "user_456".to_string();
+        conflicting_request.owner_user_id = user_id("00000000-0000-4000-8000-000000000456");
 
         let error = manager.register_agent(conflicting_request).unwrap_err();
         assert_eq!(error, RegistrationError::IdentityConflict);

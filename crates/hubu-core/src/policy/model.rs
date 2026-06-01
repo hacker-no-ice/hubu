@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use hubu_common::ids::UserId;
+
 use crate::policy::condition::Condition;
 use crate::spend::model::SpendRequest;
 
@@ -11,6 +13,7 @@ use crate::spend::model::SpendRequest;
 pub struct Policy {
     pub id: String,
     pub version: String,
+    pub owner_user_id: UserId,
     pub rules: Vec<Rule>,
     pub default_effect: Effect,
 }

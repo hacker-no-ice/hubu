@@ -321,16 +321,22 @@ impl fmt::Display for ValueKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hubu_common::ids::UserId;
 
     fn spend_request() -> SpendRequest {
         SpendRequest {
             amount_cents: 4_500,
             currency: Currency::Usd,
+            owner_user_id: test_user_id(),
             agent_id: AgentId::new(),
             merchant: Some("Acme Cafe".to_string()),
             category: Some("meals".to_string()),
             task_id: None,
         }
+    }
+
+    fn test_user_id() -> UserId {
+        "00000000-0000-4000-8000-000000000123".parse().unwrap()
     }
 
     #[test]
