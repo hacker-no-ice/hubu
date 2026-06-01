@@ -93,6 +93,42 @@ impl LedgerEntryId {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct BudgetId(Uuid);
+
+impl BudgetId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct UserId(Uuid);
+
+impl UserId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct TaskId(Uuid);
+
+impl TaskId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct BudgetHoldId(Uuid);
+
+impl BudgetHoldId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
 macro_rules! display_uuid_id {
     ($($id:ty),+ $(,)?) => {
         $(
@@ -110,12 +146,16 @@ display_uuid_id!(
     AgentVersionId,
     AgentAccountId,
     AgentSessionId,
+    BudgetId,
     SpendDecisionId,
     SpendAuthTokenId,
     PaymentId,
     LedgerAccountId,
     LedgerTransactionId,
     LedgerEntryId,
+    TaskId,
+    UserId,
+    BudgetHoldId,
 );
 
 macro_rules! parse_uuid_id {
@@ -137,10 +177,14 @@ parse_uuid_id!(
     AgentVersionId,
     AgentAccountId,
     AgentSessionId,
+    BudgetId,
     SpendDecisionId,
     SpendAuthTokenId,
     PaymentId,
     LedgerAccountId,
     LedgerTransactionId,
     LedgerEntryId,
+    TaskId,
+    UserId,
+    BudgetHoldId,
 );
