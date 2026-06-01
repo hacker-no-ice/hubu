@@ -12,9 +12,11 @@ intended to move cleanly to storage later.
 
 Each record has an internal UUID-backed `id` and an external `pub_id`.
 Internally, Hubu uses the UUID as the stable unique identifier. Public API and
-CLI surfaces use the shorter public IDs with meaningful prefixes, such as
-`agt_codex_agent`, `agv_demo_agent_codex_agent_1_0`, `aga_agt_codex_agent`, and
-`ags_000001`.
+CLI surfaces use shorter public IDs with meaningful prefixes, such as
+`agt_8x7k2m4q9v1c`, `agv_5f0p3tn8wqj2`, `aga_c6q3d9m1v8ra`, and
+`ags_2h7rx0cq4p9w`. The suffix is derived from the internal UUID, so it is
+short and copyable but does not encode display name, fingerprint, model, owner,
+or other agent metadata.
 
 ## Flow
 
