@@ -203,10 +203,29 @@ impl AgentSessionPubId {
 }
 
 fn public_suffix_from_uuid(uuid: Uuid) -> String {
-    let mut value = uuid.as_u128();
+    let mut value = 0_u128;
+    let mut bits_collected = 0;
     let mut suffix = [0_u8; PUBLIC_ID_SUFFIX_LEN];
 
-    // Encode the low 80 UUID bits as 16 base-32 characters.
+    // Collect 80 random UUIDv4 bits, skipping the fixed version and variant bits.
+    for (byte_index, byte) in uuid.as_bytes().iter().enumerate() {
+        for bit_index in (0..8).rev() {
+            if byte_index == 6 && bit_index >= 4 {
+                continue;
+            }
+            if byte_index == 8 && bit_index >= 6 {
+                continue;
+            }
+            if bits_collected == PUBLIC_ID_SUFFIX_LEN * 5 {
+                break;
+            }
+
+            value = (value << 1) | (((byte >> bit_index) & 1) as u128);
+            bits_collected += 1;
+        }
+    }
+    debug_assert_eq!(bits_collected, PUBLIC_ID_SUFFIX_LEN * 5);
+
     for character in suffix.iter_mut().rev() {
         *character = PUBLIC_ID_ALPHABET[(value & 0b11111) as usize];
         value >>= 5;
@@ -371,5 +390,16 @@ mod tests {
         assert!("agv_123456789abcdefg".parse::<AgentPubId>().is_err());
         assert!("agt_123".parse::<AgentPubId>().is_err());
         assert!("agt_123456789abcdefi".parse::<AgentPubId>().is_err());
+    }
+
+    #[test]
+    fn public_suffix_skips_uuid_version_and_variant_bits() {
+        let normal: Uuid = "00000000-0000-4000-8000-000000000000".parse().unwrap();
+        let changed_fixed_bits: Uuid = "00000000-0000-f000-0000-000000000000".parse().unwrap();
+
+        assert_eq!(
+            public_suffix_from_uuid(normal),
+            public_suffix_from_uuid(changed_fixed_bits)
+        );
     }
 }
