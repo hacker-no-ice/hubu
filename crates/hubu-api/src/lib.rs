@@ -25,7 +25,7 @@ use hubu_core::{
         model::{SpendPaymentValidationRequest, SpendRequest},
         SpendManager,
     },
-    user::{CreateDefaultUserRequest, UserManager},
+    user::{CreateUserRequest, UserManager},
 };
 use hubu_wallet::{
     LedgerTransaction, MockPaymentRail, PaymentDestination, PaymentError, PaymentManager,
@@ -287,7 +287,7 @@ fn init(body: String, state: &ServerState) -> Result<InitHttpResponse> {
         .users
         .lock()
         .map_err(|_| anyhow!("user manager lock poisoned"))?
-        .create_default_user(CreateDefaultUserRequest {
+        .create_user(CreateUserRequest {
             display_name: request
                 .display_name
                 .unwrap_or_else(|| "Hubu User".to_string()),

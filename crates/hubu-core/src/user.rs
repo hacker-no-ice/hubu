@@ -13,7 +13,7 @@ pub enum UserError {
 }
 
 #[derive(Debug, Clone)]
-pub struct CreateDefaultUserRequest {
+pub struct CreateUserRequest {
     pub display_name: String,
     pub email: Option<String>,
 }
@@ -33,11 +33,7 @@ impl UserManager {
         }
     }
 
-    pub fn create_default_user(&mut self, request: CreateDefaultUserRequest) -> User {
-        if let Some(user) = self.default_user() {
-            return user;
-        }
-
+    pub fn create_user(&mut self, request: CreateUserRequest) -> User {
         let now = Utc::now();
         let (id, pub_id) = self.new_public_user_id();
         let user = User {
@@ -58,9 +54,11 @@ impl UserManager {
     }
 
     pub fn ensure_default_user(&mut self) -> User {
-        self.create_default_user(CreateDefaultUserRequest {
-            display_name: "Hubu User".to_string(),
-            email: None,
+        self.default_user().unwrap_or_else(|| {
+            self.create_user(CreateUserRequest {
+                display_name: "Hubu User".to_string(),
+                email: None,
+            })
         })
     }
 
@@ -109,17 +107,34 @@ mod tests {
     fn creates_default_user_once_with_public_id() {
         let mut manager = UserManager::new();
 
-        let first = manager.create_default_user(CreateDefaultUserRequest {
-            display_name: "Demo User".to_string(),
-            email: Some("demo@example.com".to_string()),
-        });
+        let first = manager.ensure_default_user();
         let second = manager.ensure_default_user();
 
         assert_eq!(first.id, second.id);
-        assert_eq!(first.display_name, "Demo User");
+        assert_eq!(first.display_name, "Hubu User");
         assert!(first.pub_id.starts_with("usr_"));
         assert_eq!(first.pub_id.len(), "usr_".len() + 12);
         assert_eq!(manager.user_id_for_pub_id(&first.pub_id), Some(first.id));
         assert_eq!(manager.default_user_context().unwrap().user_id, second.id);
+    }
+
+    #[test]
+    fn explicit_user_creation_adds_new_default_user() {
+        let mut manager = UserManager::new();
+        let fallback = manager.ensure_default_user();
+
+        let explicit = manager.create_user(CreateUserRequest {
+            display_name: "Demo User".to_string(),
+            email: Some("demo@example.com".to_string()),
+        });
+
+        assert_ne!(fallback.id, explicit.id);
+        assert_eq!(explicit.display_name, "Demo User");
+        assert_eq!(explicit.email.as_deref(), Some("demo@example.com"));
+        assert_eq!(
+            manager.user_id_for_pub_id(&explicit.pub_id),
+            Some(explicit.id.clone())
+        );
+        assert_eq!(manager.default_user_context().unwrap().user_id, explicit.id);
     }
 }

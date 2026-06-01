@@ -128,7 +128,7 @@ pub struct PaymentManager<R, A> {
     rail: R,
     authorizer: A,
     ledger: SqliteLedger,
-    ledger_accounts: PaymentLedgerAccounts,
+    ledger_accounts_by_user: HashMap<UserId, PaymentLedgerAccounts>,
     payments_by_idempotency_key: HashMap<String, StoredPayment>,
 }
 
@@ -150,20 +150,25 @@ where
             Currency::Usd,
         )?;
         let agent_spend_expense = ledger.create_account(
-            owner_user_id,
+            owner_user_id.clone(),
             "Agent spend expense",
             LedgerAccountKind::AgentSpendExpense,
             Currency::Usd,
         )?;
+        let mut ledger_accounts_by_user = HashMap::new();
+        ledger_accounts_by_user.insert(
+            owner_user_id,
+            PaymentLedgerAccounts {
+                wallet_cash,
+                agent_spend_expense,
+            },
+        );
 
         Ok(Self {
             rail,
             authorizer,
             ledger,
-            ledger_accounts: PaymentLedgerAccounts {
-                wallet_cash,
-                agent_spend_expense,
-            },
+            ledger_accounts_by_user,
             payments_by_idempotency_key: HashMap::new(),
         })
     }
@@ -192,6 +197,11 @@ where
         let rail_result = self.rail.execute(&request)?;
 
         let response = if rail_result.status == PaymentStatus::Succeeded {
+            let ledger_accounts = ledger_accounts_for_user(
+                &mut self.ledger,
+                &mut self.ledger_accounts_by_user,
+                &request.owner_user_id,
+            )?;
             let ledger_transaction = self.ledger.record_transaction(
                 request.owner_user_id.clone(),
                 Some(payment_id.to_string()),
@@ -199,14 +209,14 @@ where
                 vec![
                     LedgerEntryDraft {
                         owner_user_id: request.owner_user_id.clone(),
-                        account_id: self.ledger_accounts.agent_spend_expense.id.clone(),
+                        account_id: ledger_accounts.agent_spend_expense.id.clone(),
                         direction: LedgerDirection::Debit,
                         amount_cents: request.amount_cents,
                         currency: request.currency,
                     },
                     LedgerEntryDraft {
                         owner_user_id: request.owner_user_id.clone(),
-                        account_id: self.ledger_accounts.wallet_cash.id.clone(),
+                        account_id: ledger_accounts.wallet_cash.id.clone(),
                         direction: LedgerDirection::Credit,
                         amount_cents: request.amount_cents,
                         currency: request.currency,
@@ -268,6 +278,36 @@ where
 
         Ok(())
     }
+}
+
+fn ledger_accounts_for_user(
+    ledger: &SqliteLedger,
+    ledger_accounts_by_user: &mut HashMap<UserId, PaymentLedgerAccounts>,
+    owner_user_id: &UserId,
+) -> Result<PaymentLedgerAccounts, PaymentError> {
+    if let Some(accounts) = ledger_accounts_by_user.get(owner_user_id) {
+        return Ok(accounts.clone());
+    }
+
+    let wallet_cash = ledger.create_account(
+        owner_user_id.clone(),
+        "Hubu wallet cash",
+        LedgerAccountKind::UserWalletCash,
+        Currency::Usd,
+    )?;
+    let agent_spend_expense = ledger.create_account(
+        owner_user_id.clone(),
+        "Agent spend expense",
+        LedgerAccountKind::AgentSpendExpense,
+        Currency::Usd,
+    )?;
+    let accounts = PaymentLedgerAccounts {
+        wallet_cash,
+        agent_spend_expense,
+    };
+    ledger_accounts_by_user.insert(owner_user_id.clone(), accounts.clone());
+
+    Ok(accounts)
 }
 
 #[cfg(test)]
