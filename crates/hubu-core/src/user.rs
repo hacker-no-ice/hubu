@@ -82,6 +82,10 @@ impl UserManager {
         self.user_by_pub_id.get(pub_id).cloned()
     }
 
+    pub fn user_for_id(&self, user_id: &UserId) -> Option<User> {
+        self.users.get(user_id).cloned()
+    }
+
     fn new_public_user_id(&self) -> (UserId, String) {
         loop {
             let id = UserId::new();
@@ -135,6 +139,7 @@ mod tests {
             manager.user_id_for_pub_id(&explicit.pub_id),
             Some(explicit.id.clone())
         );
+        assert_eq!(manager.user_for_id(&explicit.id), Some(explicit.clone()));
         assert_eq!(manager.default_user_context().unwrap().user_id, explicit.id);
     }
 }

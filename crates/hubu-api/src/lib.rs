@@ -211,6 +211,8 @@ struct SpendHttpResponse {
 #[derive(Debug, Serialize)]
 struct PaymentHttpResponse {
     payment_id: String,
+    owner_user_id: String,
+    owner_user_name: String,
     status: String,
     ledger_transaction_id: Option<String>,
     rail_reference: Option<String>,
@@ -225,6 +227,7 @@ struct LedgerHttpResponse {
 struct LedgerTransactionHttpResponse {
     id: String,
     owner_user_id: String,
+    owner_user_name: String,
     external_ref: Option<String>,
     description: String,
     created_at: String,
@@ -235,6 +238,7 @@ struct LedgerTransactionHttpResponse {
 struct LedgerEntryHttpResponse {
     id: String,
     owner_user_id: String,
+    owner_user_name: String,
     account_id: String,
     direction: String,
     amount_cents: i64,
@@ -433,6 +437,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         .auth_token
         .as_ref()
         .map(|token| token.id.to_string());
+    let owner = owner_metadata_for_user_id(&user.user_id, state)?;
     let payment = if let Some(token) = evaluation.auth_token {
         let payment = state
             .payments
@@ -441,7 +446,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
             .submit_payment(PaymentRequest {
                 idempotency_key: format!("{}:{}", evaluation.decision_id, request.reason),
                 spend_auth_token_id: token.id,
-                owner_user_id: user.user_id,
+                owner_user_id: user.user_id.clone(),
                 agent_id,
                 amount_cents: request.amount_cents,
                 currency: Currency::Usd,
@@ -456,6 +461,8 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
 
         Some(PaymentHttpResponse {
             payment_id: payment.payment_id.to_string(),
+            owner_user_id: owner.pub_id,
+            owner_user_name: owner.display_name,
             status: match payment.status {
                 PaymentStatus::Succeeded => "succeeded",
                 PaymentStatus::Failed => "failed",
@@ -517,6 +524,21 @@ fn default_user_pub_id(state: &ServerState) -> Result<String> {
     Ok(users.ensure_default_user().pub_id)
 }
 
+fn owner_metadata_for_user_id(user_id: &UserId, state: &ServerState) -> Result<OwnerHttpMetadata> {
+    let users = state
+        .users
+        .lock()
+        .map_err(|_| anyhow!("user manager lock poisoned"))?;
+    let user = users
+        .user_for_id(user_id)
+        .ok_or_else(|| anyhow!("unknown owner user {user_id}"))?;
+
+    Ok(OwnerHttpMetadata {
+        pub_id: user.pub_id,
+        display_name: user.display_name,
+    })
+}
+
 fn list_ledger(state: &ServerState) -> Result<LedgerHttpResponse> {
     let payments = state
         .payments
@@ -526,7 +548,7 @@ fn list_ledger(state: &ServerState) -> Result<LedgerHttpResponse> {
         .ledger()
         .list_transactions()?
         .into_iter()
-        .map(|transaction| ledger_transaction_response(payments.ledger(), transaction))
+        .map(|transaction| ledger_transaction_response(payments.ledger(), transaction, state))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(LedgerHttpResponse { transactions })
@@ -535,27 +557,34 @@ fn list_ledger(state: &ServerState) -> Result<LedgerHttpResponse> {
 fn ledger_transaction_response(
     ledger: &SqliteLedger,
     transaction: LedgerTransaction,
+    state: &ServerState,
 ) -> Result<LedgerTransactionHttpResponse> {
+    let transaction_owner = owner_metadata_for_user_id(&transaction.owner_user_id, state)?;
     let entries = ledger
         .entries_for_transaction(&transaction.id)?
         .into_iter()
-        .map(|entry| LedgerEntryHttpResponse {
-            id: entry.id.to_string(),
-            owner_user_id: format!("usr_{}", entry.owner_user_id.public_suffix()),
-            account_id: entry.account_id.to_string(),
-            direction: match entry.direction {
-                hubu_wallet::LedgerDirection::Debit => "debit",
-                hubu_wallet::LedgerDirection::Credit => "credit",
-            }
-            .to_string(),
-            amount_cents: entry.amount_cents,
-            currency: entry.currency.to_string(),
+        .map(|entry| {
+            let entry_owner = owner_metadata_for_user_id(&entry.owner_user_id, state)?;
+            Ok(LedgerEntryHttpResponse {
+                id: entry.id.to_string(),
+                owner_user_id: entry_owner.pub_id,
+                owner_user_name: entry_owner.display_name,
+                account_id: entry.account_id.to_string(),
+                direction: match entry.direction {
+                    hubu_wallet::LedgerDirection::Debit => "debit",
+                    hubu_wallet::LedgerDirection::Credit => "credit",
+                }
+                .to_string(),
+                amount_cents: entry.amount_cents,
+                currency: entry.currency.to_string(),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(LedgerTransactionHttpResponse {
         id: transaction.id.to_string(),
-        owner_user_id: format!("usr_{}", transaction.owner_user_id.public_suffix()),
+        owner_user_id: transaction_owner.pub_id,
+        owner_user_name: transaction_owner.display_name,
         external_ref: transaction.external_ref,
         description: transaction.description,
         created_at: transaction.created_at.to_rfc3339(),
@@ -584,6 +613,11 @@ struct HttpRequest {
 struct HttpResponse {
     status: u16,
     body: Value,
+}
+
+struct OwnerHttpMetadata {
+    pub_id: String,
+    display_name: String,
 }
 
 fn parse_request(raw: &str) -> Result<HttpRequest> {
@@ -626,4 +660,68 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
         body
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_user_is_shown_on_payment_and_ledger_records() {
+        let state = ServerState::new().expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "settlement-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+        assert_eq!(agent.user_id, user.user_id);
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 5_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should be added under initialized user");
+
+        let spend = spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 2_500,
+                "reason": "test purchase",
+                "merchant": "Acme Cafe",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should be approved and paid");
+        let payment = spend.payment.expect("allowed spend should pay");
+        assert_eq!(payment.owner_user_id, user.user_id);
+        assert_eq!(payment.owner_user_name, "Alice Example");
+
+        let ledger = list_ledger(&state).expect("ledger should list");
+        assert_eq!(ledger.transactions.len(), 1);
+        let transaction = &ledger.transactions[0];
+        assert_eq!(transaction.owner_user_id, user.user_id);
+        assert_eq!(transaction.owner_user_name, "Alice Example");
+        assert!(transaction.entries.iter().all(|entry| {
+            entry.owner_user_id == user.user_id && entry.owner_user_name == "Alice Example"
+        }));
+    }
 }
