@@ -86,20 +86,20 @@ Expected output:
 
 ```txt
 Agent registered
-  agent_id: 7a6f8a36-2f32-42df-9f6f-8d6df8a77285
-  agent_pub_id: agt_demo:agent:codex-agent
-  version_id: 0c864900-a32b-43d5-8661-aceb4b60e263
-  account_id: 68ad0a2d-cf5a-44f5-b737-d8e71f266e8f
-  session_id: e207d1e0-493d-468f-b3ef-b69a65c16dc5
+  agent_id: agt_codex_agent
+  version_id: agv_demo_agent_codex_agent_1_0
+  account_id: aga_agt_codex_agent
+  session_id: ags_000001
 ```
 
-Copy the `agent_id` for the next commands.
+Copy the public `agent_id` for the next commands. Internally, Hubu still uses a
+UUID-backed `AgentId`; the CLI and HTTP demo API use the shorter public ID.
 
 ### 2. Add a Policy
 
 ```sh
 hubu add-policy \
-  --agent-id 7a6f8a36-2f32-42df-9f6f-8d6df8a77285 \
+  --agent-id agt_codex_agent \
   --daily-limit 100
 ```
 
@@ -107,8 +107,8 @@ Expected output:
 
 ```txt
 Policy added
-  agent_id: 7a6f8a36-2f32-42df-9f6f-8d6df8a77285
-  policy_id: demo_policy_7a6f8a36-2f32-42df-9f6f-8d6df8a77285
+  agent_id: agt_codex_agent
+  policy_id: demo_policy_agt_codex_agent
   per_request_limit: $100.00
   default_decision: needs_approval
 ```
@@ -117,7 +117,7 @@ Policy added
 
 ```sh
 hubu spend \
-  --agent-id 7a6f8a36-2f32-42df-9f6f-8d6df8a77285 \
+  --agent-id agt_codex_agent \
   --amount 20 \
   --reason "Purchase API credits"
 ```
@@ -140,7 +140,7 @@ Payment
 
 ```sh
 hubu spend \
-  --agent-id 7a6f8a36-2f32-42df-9f6f-8d6df8a77285 \
+  --agent-id agt_codex_agent \
   --amount 120 \
   --reason "Large API credit purchase"
 ```
@@ -160,7 +160,7 @@ returns `allow`.
 
 ```sh
 hubu spend \
-  --agent-id 7a6f8a36-2f32-42df-9f6f-8d6df8a77285 \
+  --agent-id agt_codex_agent \
   --amount 20 \
   --reason "Attempt blocked merchant purchase" \
   --merchant blocked-merchant

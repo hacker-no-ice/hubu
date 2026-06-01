@@ -27,6 +27,9 @@ pub struct RegistrationManager {
     /// Lookup agent by globally unique identity fingerprint.
     agent_by_identity_fingerprint: HashMap<String, AgentId>,
 
+    /// Lookup agent by public, human-readable ID.
+    agent_by_pub_id: HashMap<String, AgentId>,
+
     /// Lookup account by agent ID. For now, each agent has exactly one account.
     account_by_agent: HashMap<AgentId, AgentAccountId>,
 
@@ -44,9 +47,14 @@ impl RegistrationManager {
             accounts: HashMap::new(),
             sessions: HashMap::new(),
             agent_by_identity_fingerprint: HashMap::new(),
+            agent_by_pub_id: HashMap::new(),
             account_by_agent: HashMap::new(),
             version_by_agent_and_fingerprint: HashMap::new(),
         }
+    }
+
+    pub fn agent_id_for_pub_id(&self, pub_id: &str) -> Option<AgentId> {
+        self.agent_by_pub_id.get(pub_id).cloned()
     }
 
     /// Register an agent connection.
@@ -102,9 +110,10 @@ impl RegistrationManager {
 
         let now = Utc::now();
         let id = AgentId::new();
+        let pub_id = self.unique_agent_pub_id(&request.display_name);
         let agent = AgentIdentity {
             id: id.clone(),
-            pub_id: format!("agt_{}", request.identity_fingerprint),
+            pub_id,
             fingerprint: request.identity_fingerprint.clone(),
             display_name: request.display_name.clone(),
             description: request.description.clone(),
@@ -117,6 +126,8 @@ impl RegistrationManager {
 
         self.agent_by_identity_fingerprint
             .insert(request.identity_fingerprint.clone(), id.clone());
+        self.agent_by_pub_id
+            .insert(agent.pub_id.clone(), id.clone());
         self.agents.insert(id, agent.clone());
 
         Ok(agent)
@@ -148,7 +159,7 @@ impl RegistrationManager {
         let id = AgentVersionId::new();
         let version = AgentVersion {
             id: id.clone(),
-            pub_id: format!("agv_{}", request.version_fingerprint),
+            pub_id: public_id("agv", &request.version_fingerprint),
             agent_id: agent.id.clone(),
             fingerprint: request.version_fingerprint.clone(),
             code_ref: request.code_ref.clone(),
@@ -177,7 +188,7 @@ impl RegistrationManager {
         let id = AgentAccountId::new();
         let account = AgentAccount {
             id: id.clone(),
-            pub_id: format!("aga_{}", agent.fingerprint),
+            pub_id: public_id("aga", &agent.pub_id),
             agent_id: agent.id.clone(),
             account_status: AccountStatus::Active,
             created_at: now,
@@ -198,7 +209,7 @@ impl RegistrationManager {
         let id = AgentSessionId::new();
         let session = AgentSession {
             id: id.clone(),
-            pub_id: format!("ags_{}", self.sessions.len() + 1),
+            pub_id: format!("ags_{:06}", self.sessions.len() + 1),
             agent_id: agent.id.clone(),
             mcp_client_name: request.mcp_client_name.clone(),
             mcp_client_version: request.mcp_client_version.clone(),
@@ -209,6 +220,48 @@ impl RegistrationManager {
 
         session
     }
+
+    fn unique_agent_pub_id(&self, display_name: &str) -> String {
+        let base = public_id("agt", display_name);
+        if !self.agent_by_pub_id.contains_key(&base) {
+            return base;
+        }
+
+        for suffix in 2.. {
+            let candidate = format!("{base}_{suffix}");
+            if !self.agent_by_pub_id.contains_key(&candidate) {
+                return candidate;
+            }
+        }
+
+        unreachable!("unbounded suffix search should always find a public ID")
+    }
+}
+
+fn public_id(prefix: &str, seed: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+
+    for character in seed.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character);
+            last_was_separator = false;
+        } else if !last_was_separator && !slug.is_empty() {
+            slug.push('_');
+            last_was_separator = true;
+        }
+    }
+
+    while slug.ends_with('_') {
+        slug.pop();
+    }
+
+    if slug.is_empty() {
+        slug.push_str("agent");
+    }
+
+    slug.truncate(40);
+    format!("{prefix}_{slug}")
 }
 
 impl Default for RegistrationManager {
@@ -265,7 +318,11 @@ mod tests {
 
         assert_eq!(response.agent.display_name, "Test Agent");
         assert_eq!(response.agent.fingerprint, "sha256:agent-a");
+        assert_eq!(response.agent.pub_id, "agt_test_agent");
         assert_eq!(response.version.fingerprint, "sha256:version-a");
+        assert_eq!(response.version.pub_id, "agv_sha256_version_a");
+        assert_eq!(response.account.pub_id, "aga_agt_test_agent");
+        assert_eq!(response.session.pub_id, "ags_000001");
         assert_eq!(response.version.agent_id, response.agent.id);
         assert_eq!(response.account.agent_id, response.agent.id);
         assert_eq!(response.session.agent_id, response.agent.id);
@@ -285,6 +342,28 @@ mod tests {
         assert_eq!(first.account.id, second.account.id);
         assert_ne!(first.version.id, second.version.id);
         assert_ne!(first.session.id, second.session.id);
+    }
+
+    #[test]
+    fn public_agent_ids_are_unique_and_resolve_to_internal_ids() {
+        let mut manager = RegistrationManager::new();
+        let first = manager
+            .register_agent(test_request("sha256:agent-a", "sha256:version-a"))
+            .unwrap();
+        let second = manager
+            .register_agent(test_request("sha256:agent-b", "sha256:version-a"))
+            .unwrap();
+
+        assert_eq!(first.agent.pub_id, "agt_test_agent");
+        assert_eq!(second.agent.pub_id, "agt_test_agent_2");
+        assert_eq!(
+            manager.agent_id_for_pub_id(&first.agent.pub_id),
+            Some(first.agent.id)
+        );
+        assert_eq!(
+            manager.agent_id_for_pub_id(&second.agent.pub_id),
+            Some(second.agent.id)
+        );
     }
 
     #[test]

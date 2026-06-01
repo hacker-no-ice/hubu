@@ -58,7 +58,6 @@ fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
 
     println!("Agent registered");
     println!("  agent_id: {}", string_at(&response, "agent_id")?);
-    println!("  agent_pub_id: {}", string_at(&response, "agent_pub_id")?);
     println!("  version_id: {}", string_at(&response, "version_id")?);
     println!("  account_id: {}", string_at(&response, "account_id")?);
     println!("  session_id: {}", string_at(&response, "session_id")?);
