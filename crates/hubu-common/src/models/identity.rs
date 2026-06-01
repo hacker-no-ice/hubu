@@ -1,5 +1,5 @@
 use crate::actor::OwnerRef;
-use crate::ids::{AgentId, AgentVersionId};
+use crate::ids::{AgentId, AgentPubId, AgentVersionId, AgentVersionPubId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentIdentity {
     pub id: AgentId,
-    pub pub_id: String,      // External opaque ID, example "agt_..."
+    pub pub_id: AgentPubId,  // External opaque ID, example "agt_..."
     pub fingerprint: String, // hash of key fields to identify agent identity
 
     pub display_name: String,
@@ -26,7 +26,7 @@ pub struct AgentIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentVersion {
     pub id: AgentVersionId,
-    pub pub_id: String, // External opaque ID, example "agv_..."
+    pub pub_id: AgentVersionPubId, // External opaque ID, example "agv_..."
 
     pub agent_id: AgentId,
 
@@ -90,6 +90,14 @@ mod tests {
         serde_json::from_str("\"00000000-0000-4000-8000-000000000002\"").unwrap()
     }
 
+    fn agent_pub_id() -> AgentPubId {
+        serde_json::from_str("\"agt_123456789abcdefg\"").unwrap()
+    }
+
+    fn agent_version_pub_id() -> AgentVersionPubId {
+        serde_json::from_str("\"agv_123456789abcdefg\"").unwrap()
+    }
+
     fn timestamp() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-05-15T12:00:00Z")
             .unwrap()
@@ -100,7 +108,7 @@ mod tests {
     fn agent_identity_can_be_constructed_and_round_tripped() {
         let identity = AgentIdentity {
             id: agent_id(),
-            pub_id: "agt_123".to_string(),
+            pub_id: agent_pub_id(),
             fingerprint: "sha256:identity123".to_string(),
             display_name: "Settlement Agent".to_string(),
             description: Some("Handles settlement approvals".to_string()),
@@ -124,7 +132,7 @@ mod tests {
     fn agent_version_can_be_constructed_and_round_tripped() {
         let version = AgentVersion {
             id: agent_version_id(),
-            pub_id: "agv_123".to_string(),
+            pub_id: agent_version_pub_id(),
             agent_id: agent_id(),
             fingerprint: "sha256:abc123".to_string(),
             code_ref: Some(CodeReference {

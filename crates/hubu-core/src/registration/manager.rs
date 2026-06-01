@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use hubu_common::{
-    ids::{AgentAccountId, AgentId, AgentSessionId, AgentVersionId},
+    ids::{
+        AgentAccountId, AgentAccountPubId, AgentId, AgentPubId, AgentSessionId, AgentSessionPubId,
+        AgentVersionId, AgentVersionPubId,
+    },
     models::{
         account::{AccountStatus, AgentAccount},
         identity::{AgentIdentity, AgentStatus, AgentVersion},
@@ -28,7 +31,7 @@ pub struct RegistrationManager {
     agent_by_identity_fingerprint: HashMap<String, AgentId>,
 
     /// Lookup agent by public, human-readable ID.
-    agent_by_pub_id: HashMap<String, AgentId>,
+    agent_by_pub_id: HashMap<AgentPubId, AgentId>,
 
     /// Lookup account by agent ID. For now, each agent has exactly one account.
     account_by_agent: HashMap<AgentId, AgentAccountId>,
@@ -53,7 +56,7 @@ impl RegistrationManager {
         }
     }
 
-    pub fn agent_id_for_pub_id(&self, pub_id: &str) -> Option<AgentId> {
+    pub fn agent_id_for_pub_id(&self, pub_id: &AgentPubId) -> Option<AgentId> {
         self.agent_by_pub_id.get(pub_id).cloned()
     }
 
@@ -158,7 +161,7 @@ impl RegistrationManager {
         let id = AgentVersionId::new();
         let version = AgentVersion {
             id: id.clone(),
-            pub_id: format!("agv_{}", id.public_suffix()),
+            pub_id: AgentVersionPubId::from_agent_version_id(&id),
             agent_id: agent.id.clone(),
             fingerprint: request.version_fingerprint.clone(),
             code_ref: request.code_ref.clone(),
@@ -187,7 +190,7 @@ impl RegistrationManager {
         let id = AgentAccountId::new();
         let account = AgentAccount {
             id: id.clone(),
-            pub_id: format!("aga_{}", id.public_suffix()),
+            pub_id: AgentAccountPubId::from_agent_account_id(&id),
             agent_id: agent.id.clone(),
             account_status: AccountStatus::Active,
             created_at: now,
@@ -208,7 +211,7 @@ impl RegistrationManager {
         let id = AgentSessionId::new();
         let session = AgentSession {
             id: id.clone(),
-            pub_id: format!("ags_{}", id.public_suffix()),
+            pub_id: AgentSessionPubId::from_agent_session_id(&id),
             agent_id: agent.id.clone(),
             mcp_client_name: request.mcp_client_name.clone(),
             mcp_client_version: request.mcp_client_version.clone(),
@@ -220,10 +223,10 @@ impl RegistrationManager {
         session
     }
 
-    fn new_public_agent_id(&self) -> (AgentId, String) {
+    fn new_public_agent_id(&self) -> (AgentId, AgentPubId) {
         loop {
             let id = AgentId::new();
-            let pub_id = format!("agt_{}", id.public_suffix());
+            let pub_id = AgentPubId::from_agent_id(&id);
             if !self.agent_by_pub_id.contains_key(&pub_id) {
                 return (id, pub_id);
             }
@@ -276,7 +279,8 @@ mod tests {
         }
     }
 
-    fn assert_public_id(pub_id: &str, prefix: &str) {
+    fn assert_public_id(pub_id: impl ToString, prefix: &str) {
+        let pub_id = pub_id.to_string();
         let expected_prefix = format!("{prefix}_");
         assert!(pub_id.starts_with(&expected_prefix));
         assert_eq!(pub_id.len(), expected_prefix.len() + 16);
@@ -297,26 +301,26 @@ mod tests {
         assert_eq!(response.version.fingerprint, "sha256:version-a");
         assert_eq!(
             response.agent.pub_id,
-            format!("agt_{}", response.agent.id.public_suffix())
+            AgentPubId::from_agent_id(&response.agent.id)
         );
         assert_eq!(
             response.version.pub_id,
-            format!("agv_{}", response.version.id.public_suffix())
+            AgentVersionPubId::from_agent_version_id(&response.version.id)
         );
         assert_eq!(
             response.account.pub_id,
-            format!("aga_{}", response.account.id.public_suffix())
+            AgentAccountPubId::from_agent_account_id(&response.account.id)
         );
         assert_eq!(
             response.session.pub_id,
-            format!("ags_{}", response.session.id.public_suffix())
+            AgentSessionPubId::from_agent_session_id(&response.session.id)
         );
         assert_public_id(&response.agent.pub_id, "agt");
         assert_public_id(&response.version.pub_id, "agv");
         assert_public_id(&response.account.pub_id, "aga");
         assert_public_id(&response.session.pub_id, "ags");
-        assert!(!response.agent.pub_id.contains("test"));
-        assert!(!response.agent.pub_id.contains("agent"));
+        assert!(!response.agent.pub_id.to_string().contains("test"));
+        assert!(!response.agent.pub_id.to_string().contains("agent"));
         assert_eq!(response.version.agent_id, response.agent.id);
         assert_eq!(response.account.agent_id, response.agent.id);
         assert_eq!(response.session.agent_id, response.agent.id);
