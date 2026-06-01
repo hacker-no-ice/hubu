@@ -13,10 +13,24 @@ intended to move cleanly to storage later.
 Each record has an internal UUID-backed `id` and an external `pub_id`.
 Internally, Hubu uses the UUID as the stable unique identifier. Public API and
 CLI surfaces use shorter public IDs with meaningful prefixes, such as
-`agt_8x7k2m4q9v1c`, `agv_5f0p3tn8wqj2`, `aga_c6q3d9m1v8ra`, and
-`ags_2h7rx0cq4p9w`. The suffix is derived from the internal UUID, so it is
-short and copyable but does not encode display name, fingerprint, model, owner,
-or other agent metadata.
+`agt_1p8x7k2m4q9v1c6d`, `agv_0r5f0p3tn8wqj2az`,
+`aga_3hc6q3d9m1v8ra7k`, and `ags_9g2h7rx0cq4p9w5e`.
+
+The public ID suffix is derived from the internal UUID by taking 16 groups of 5
+bits from the UUID value and encoding those 80 bits with the Crockford-style
+base-32 alphabet `0123456789abcdefghjkmnpqrstvwxyz`. The suffix is therefore
+short and copyable, but it does not encode display name, fingerprint, model,
+owner, or other agent metadata.
+
+The internal UUID remains the source of identity. A UUIDv4 has roughly 122
+random bits, while the public suffix currently carries 80 UUID-derived bits.
+Using birthday-bound estimates, public-ID collision probability is about
+`n^2 / (2 * 2^80)` for `n` IDs with the same prefix. That is roughly
+0.00000000004% at 1 million IDs, 0.000000004% at 10 million IDs,
+0.0000004% at 100 million IDs, and 0.00004% at 1 billion IDs. Revisit this
+once public IDs approach large multi-million scale, and enforce a storage-level
+unique constraint on `pub_id` with retry metrics before moving beyond the
+in-memory prototype.
 
 ## Flow
 

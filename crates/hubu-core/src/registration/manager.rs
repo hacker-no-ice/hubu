@@ -279,7 +279,7 @@ mod tests {
     fn assert_public_id(pub_id: &str, prefix: &str) {
         let expected_prefix = format!("{prefix}_");
         assert!(pub_id.starts_with(&expected_prefix));
-        assert_eq!(pub_id.len(), expected_prefix.len() + 12);
+        assert_eq!(pub_id.len(), expected_prefix.len() + 16);
         assert!(pub_id[expected_prefix.len()..]
             .chars()
             .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit()));

@@ -3,7 +3,7 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
-const PUBLIC_ID_SUFFIX_LEN: usize = 12;
+const PUBLIC_ID_SUFFIX_LEN: usize = 16;
 const PUBLIC_ID_ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -150,6 +150,7 @@ fn public_suffix_from_uuid(uuid: Uuid) -> String {
     let mut value = uuid.as_u128();
     let mut suffix = [0_u8; PUBLIC_ID_SUFFIX_LEN];
 
+    // Encode the low 80 UUID bits as 16 base-32 characters.
     for character in suffix.iter_mut().rev() {
         *character = PUBLIC_ID_ALPHABET[(value & 0b11111) as usize];
         value >>= 5;
