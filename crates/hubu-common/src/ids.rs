@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
-const PUBLIC_ID_SUFFIX_LEN: usize = 12;
+const PUBLIC_ID_SUFFIX_LEN: usize = 16;
 const PUBLIC_ID_ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -146,9 +146,85 @@ macro_rules! public_uuid_suffix {
 
 public_uuid_suffix!(AgentId, AgentVersionId, AgentAccountId, AgentSessionId,);
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct AgentPubId(String);
+
+impl AgentPubId {
+    pub fn from_agent_id(id: &AgentId) -> Self {
+        Self(format!("agt_{}", id.public_suffix()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct AgentVersionPubId(String);
+
+impl AgentVersionPubId {
+    pub fn from_agent_version_id(id: &AgentVersionId) -> Self {
+        Self(format!("agv_{}", id.public_suffix()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct AgentAccountPubId(String);
+
+impl AgentAccountPubId {
+    pub fn from_agent_account_id(id: &AgentAccountId) -> Self {
+        Self(format!("aga_{}", id.public_suffix()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct AgentSessionPubId(String);
+
+impl AgentSessionPubId {
+    pub fn from_agent_session_id(id: &AgentSessionId) -> Self {
+        Self(format!("ags_{}", id.public_suffix()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 fn public_suffix_from_uuid(uuid: Uuid) -> String {
-    let mut value = uuid.as_u128();
+    let mut value = 0_u128;
+    let mut bits_collected = 0;
     let mut suffix = [0_u8; PUBLIC_ID_SUFFIX_LEN];
+
+    // Collect 80 random UUIDv4 bits, skipping the fixed version and variant bits.
+    for (byte_index, byte) in uuid.as_bytes().iter().enumerate() {
+        for bit_index in (0..8).rev() {
+            if byte_index == 6 && bit_index >= 4 {
+                continue;
+            }
+            if byte_index == 8 && bit_index >= 6 {
+                continue;
+            }
+            if bits_collected == PUBLIC_ID_SUFFIX_LEN * 5 {
+                break;
+            }
+
+            value = (value << 1) | (((byte >> bit_index) & 1) as u128);
+            bits_collected += 1;
+        }
+    }
+    debug_assert_eq!(bits_collected, PUBLIC_ID_SUFFIX_LEN * 5);
 
     for character in suffix.iter_mut().rev() {
         *character = PUBLIC_ID_ALPHABET[(value & 0b11111) as usize];
@@ -157,6 +233,71 @@ fn public_suffix_from_uuid(uuid: Uuid) -> String {
 
     String::from_utf8(suffix.to_vec()).expect("public ID alphabet is ASCII")
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParsePublicIdError {
+    expected_prefix: &'static str,
+    value: String,
+}
+
+impl fmt::Display for ParsePublicIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid public ID `{}`; expected {}_<{} base-32 chars>",
+            self.value, self.expected_prefix, PUBLIC_ID_SUFFIX_LEN
+        )
+    }
+}
+
+impl std::error::Error for ParsePublicIdError {}
+
+macro_rules! parse_public_id {
+    ($id:ty, $prefix:literal) => {
+        impl FromStr for $id {
+            type Err = ParsePublicIdError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                let expected_start = concat!($prefix, "_");
+                let suffix =
+                    value
+                        .strip_prefix(expected_start)
+                        .ok_or_else(|| ParsePublicIdError {
+                            expected_prefix: $prefix,
+                            value: value.to_string(),
+                        })?;
+
+                if suffix.len() != PUBLIC_ID_SUFFIX_LEN
+                    || !suffix
+                        .bytes()
+                        .all(|byte| PUBLIC_ID_ALPHABET.contains(&byte))
+                {
+                    return Err(ParsePublicIdError {
+                        expected_prefix: $prefix,
+                        value: value.to_string(),
+                    });
+                }
+
+                Ok(Self(value.to_string()))
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $id {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                value.parse().map_err(de::Error::custom)
+            }
+        }
+    };
+}
+
+parse_public_id!(AgentPubId, "agt");
+parse_public_id!(AgentVersionPubId, "agv");
+parse_public_id!(AgentAccountPubId, "aga");
+parse_public_id!(AgentSessionPubId, "ags");
 
 macro_rules! display_uuid_id {
     ($($id:ty),+ $(,)?) => {
@@ -185,6 +326,13 @@ display_uuid_id!(
     TaskId,
     UserId,
     BudgetHoldId,
+);
+
+display_uuid_id!(
+    AgentPubId,
+    AgentVersionPubId,
+    AgentAccountPubId,
+    AgentSessionPubId,
 );
 
 macro_rules! parse_uuid_id {
@@ -217,3 +365,41 @@ parse_uuid_id!(
     UserId,
     BudgetHoldId,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_ids_parse_and_serialize_as_strings() {
+        let agent_pub_id: AgentPubId = "agt_123456789abcdefg".parse().unwrap();
+
+        assert_eq!(agent_pub_id.to_string(), "agt_123456789abcdefg");
+        assert_eq!(
+            serde_json::to_string(&agent_pub_id).unwrap(),
+            "\"agt_123456789abcdefg\""
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentPubId>("\"agt_123456789abcdefg\"").unwrap(),
+            agent_pub_id
+        );
+    }
+
+    #[test]
+    fn public_ids_reject_wrong_prefix_length_or_alphabet() {
+        assert!("agv_123456789abcdefg".parse::<AgentPubId>().is_err());
+        assert!("agt_123".parse::<AgentPubId>().is_err());
+        assert!("agt_123456789abcdefi".parse::<AgentPubId>().is_err());
+    }
+
+    #[test]
+    fn public_suffix_skips_uuid_version_and_variant_bits() {
+        let normal: Uuid = "00000000-0000-4000-8000-000000000000".parse().unwrap();
+        let changed_fixed_bits: Uuid = "00000000-0000-f000-0000-000000000000".parse().unwrap();
+
+        assert_eq!(
+            public_suffix_from_uuid(normal),
+            public_suffix_from_uuid(changed_fixed_bits)
+        );
+    }
+}

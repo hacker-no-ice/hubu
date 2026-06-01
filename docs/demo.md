@@ -86,10 +86,10 @@ Expected output:
 
 ```txt
 Agent registered
-  agent_id: agt_8x7k2m4q9v1c
-  version_id: agv_5f0p3tn8wqj2
-  account_id: aga_c6q3d9m1v8ra
-  session_id: ags_2h7rx0cq4p9w
+  agent_id: agt_1p8x7k2m4q9v1c6d
+  version_id: agv_0r5f0p3tn8wqj2az
+  account_id: aga_3hc6q3d9m1v8ra7k
+  session_id: ags_9g2h7rx0cq4p9w5e
 ```
 
 Copy the public `agent_id` for the next commands. Internally, Hubu still uses a
@@ -101,7 +101,7 @@ internal UUID.
 
 ```sh
 hubu add-policy \
-  --agent-id agt_8x7k2m4q9v1c \
+  --agent-id agt_1p8x7k2m4q9v1c6d \
   --daily-limit 100
 ```
 
@@ -109,8 +109,8 @@ Expected output:
 
 ```txt
 Policy added
-  agent_id: agt_8x7k2m4q9v1c
-  policy_id: demo_policy_agt_8x7k2m4q9v1c
+  agent_id: agt_1p8x7k2m4q9v1c6d
+  policy_id: demo_policy_agt_1p8x7k2m4q9v1c6d
   per_request_limit: $100.00
   default_decision: needs_approval
 ```
@@ -119,7 +119,7 @@ Policy added
 
 ```sh
 hubu spend \
-  --agent-id agt_8x7k2m4q9v1c \
+  --agent-id agt_1p8x7k2m4q9v1c6d \
   --amount 20 \
   --reason "Purchase API credits"
 ```
@@ -142,7 +142,7 @@ Payment
 
 ```sh
 hubu spend \
-  --agent-id agt_8x7k2m4q9v1c \
+  --agent-id agt_1p8x7k2m4q9v1c6d \
   --amount 120 \
   --reason "Large API credit purchase"
 ```
@@ -162,7 +162,7 @@ returns `allow`.
 
 ```sh
 hubu spend \
-  --agent-id agt_8x7k2m4q9v1c \
+  --agent-id agt_1p8x7k2m4q9v1c6d \
   --amount 20 \
   --reason "Attempt blocked merchant purchase" \
   --merchant blocked-merchant

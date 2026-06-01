@@ -9,7 +9,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use hubu_common::{
     actor::{OwnerRef, OwnerType},
-    ids::{AgentId, SpendAuthTokenId},
+    ids::{AgentId, AgentPubId, SpendAuthTokenId},
     models::identity::{
         AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
     },
@@ -159,7 +159,7 @@ struct RegisterAgentHttpResponse {
 
 #[derive(Debug, Deserialize)]
 struct AddPolicyHttpRequest {
-    agent_id: String,
+    agent_id: AgentPubId,
     daily_limit_cents: i64,
 }
 
@@ -172,7 +172,7 @@ struct AddPolicyHttpResponse {
 
 #[derive(Debug, Deserialize)]
 struct SpendHttpRequest {
-    agent_id: String,
+    agent_id: AgentPubId,
     amount_cents: i64,
     reason: String,
     merchant: Option<String>,
@@ -285,11 +285,11 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         .register_agent(registration_request)?;
 
     Ok(RegisterAgentHttpResponse {
-        agent_id: response.agent.pub_id.clone(),
-        agent_pub_id: response.agent.pub_id,
-        version_id: response.version.pub_id,
-        account_id: response.account.pub_id,
-        session_id: response.session.pub_id,
+        agent_id: response.agent.pub_id.to_string(),
+        agent_pub_id: response.agent.pub_id.to_string(),
+        version_id: response.version.pub_id.to_string(),
+        account_id: response.account.pub_id.to_string(),
+        session_id: response.session.pub_id.to_string(),
     })
 }
 
@@ -338,7 +338,7 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         .insert(agent_id, policy);
 
     Ok(AddPolicyHttpResponse {
-        agent_id: agent_pub_id,
+        agent_id: agent_pub_id.to_string(),
         policy_id,
         daily_limit_cents: request.daily_limit_cents,
     })
@@ -422,7 +422,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     })
 }
 
-fn resolve_agent_id(agent_pub_id: &str, state: &ServerState) -> Result<AgentId> {
+fn resolve_agent_id(agent_pub_id: &AgentPubId, state: &ServerState) -> Result<AgentId> {
     state
         .registration
         .lock()
