@@ -32,6 +32,9 @@ pub enum BudgetManagerError {
     #[error("spend decision already has a budget hold")]
     DuplicateSpendDecisionHold,
 
+    #[error("budget hold has expired")]
+    ExpiredBudgetHold,
+
     #[error("invalid budget hold transition: {0:?}")]
     InvalidBudgetHoldTransition(BudgetHoldError),
 

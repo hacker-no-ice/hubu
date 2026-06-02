@@ -188,6 +188,10 @@ impl BudgetManager {
             .get_mut(hold_id)
             .ok_or(BudgetManagerError::UnknownBudgetHold)?;
 
+        if hold.expires_at <= Utc::now() {
+            return Err(BudgetManagerError::ExpiredBudgetHold);
+        }
+
         let balance = self
             .budget_balances
             .get_mut(&hold.budget_id)
@@ -714,6 +718,38 @@ mod tests {
         assert_eq!(response.balance.frozen_amount_cents, 0);
         assert_eq!(response.balance.consumed_amount_cents, 3_000);
         assert_eq!(response.balance.remaining_amount_cents, 7_000);
+    }
+
+    #[test]
+    fn settle_budget_rejects_expired_hold_without_consuming_balance() {
+        let mut manager = BudgetManager::new();
+        let created = create_user_budget(&mut manager, 10_000);
+        let reservation = manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: created.budget.id.clone(),
+                spend_decision_id: SpendDecisionId::new(),
+                amount_cents: 3_000,
+                currency: Currency::Usd,
+                expires_at: Utc::now() - Duration::minutes(1),
+            })
+            .expect("budget should be reserved");
+
+        let error = manager
+            .settle_budget(&reservation.hold.id)
+            .expect_err("expired hold should not settle");
+        let balance = manager
+            .get_budget_balance(&created.budget.id)
+            .expect("balance should exist");
+        let hold = manager
+            .budget_holds
+            .get(&reservation.hold.id)
+            .expect("hold should exist");
+
+        assert!(matches!(error, BudgetManagerError::ExpiredBudgetHold));
+        assert!(matches!(hold.status, BudgetHoldStatus::Frozen));
+        assert_eq!(balance.frozen_amount_cents, 3_000);
+        assert_eq!(balance.consumed_amount_cents, 0);
+        assert_eq!(balance.remaining_amount_cents, 7_000);
     }
 
     #[test]
