@@ -1,3 +1,5 @@
+use crate::storage::StorageError;
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RegistrationError {
     #[error("missing agent identity or version fingerprint")]
@@ -14,4 +16,19 @@ pub enum RegistrationError {
 
     #[error("agent account is suspended")]
     SuspendedAccount,
+
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+impl From<rusqlite::Error> for RegistrationError {
+    fn from(error: rusqlite::Error) -> Self {
+        StorageError::from(error).into()
+    }
+}
+
+impl From<serde_json::Error> for RegistrationError {
+    fn from(error: serde_json::Error) -> Self {
+        StorageError::from(error).into()
+    }
 }

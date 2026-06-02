@@ -3,6 +3,7 @@ use std::{
     env,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -76,8 +77,14 @@ struct ServerState {
 
 impl ServerState {
     fn new() -> Result<Self> {
-        let mut users = UserManager::new();
-        let default_user = users.ensure_default_user();
+        Self::new_with_db_path(
+            env::var("HUBU_DB_PATH").unwrap_or_else(|_| "hubu.sqlite3".to_string()),
+        )
+    }
+
+    fn new_with_db_path(path: impl AsRef<Path>) -> Result<Self> {
+        let mut users = UserManager::open(path.as_ref()).context("initialize user store")?;
+        let default_user = users.ensure_default_user()?;
         let spend = Arc::new(Mutex::new(SpendManager::new()));
         let authorizer = SharedSpendAuthorizer {
             spend: Arc::clone(&spend),
@@ -92,7 +99,9 @@ impl ServerState {
 
         Ok(Self {
             users: Mutex::new(users),
-            registration: Mutex::new(RegistrationManager::new()),
+            registration: Mutex::new(
+                RegistrationManager::open(path).context("initialize agent registration store")?,
+            ),
             spend,
             policies: Mutex::new(HashMap::new()),
             payments: Mutex::new(payments),
@@ -296,7 +305,7 @@ fn init(body: String, state: &ServerState) -> Result<InitHttpResponse> {
                 .display_name
                 .unwrap_or_else(|| "Hubu User".to_string()),
             email: request.email,
-        });
+        })?;
 
     Ok(InitHttpResponse {
         user_id: user.pub_id,
@@ -494,10 +503,10 @@ fn resolve_agent_id_for_user(
         .lock()
         .map_err(|_| anyhow!("registration manager lock poisoned"))?;
     let agent_id = registration
-        .agent_id_for_pub_id(agent_pub_id)
+        .agent_id_for_pub_id(agent_pub_id)?
         .ok_or_else(|| anyhow!("unknown public agent id {agent_pub_id}"))?;
     let agent = registration
-        .agent_for_id(&agent_id)
+        .agent_for_id(&agent_id)?
         .ok_or_else(|| anyhow!("agent index is stale for {agent_pub_id}"))?;
     if agent.owner_user_id != user.user_id {
         return Err(anyhow!(
@@ -512,7 +521,7 @@ fn default_user_context(state: &ServerState) -> Result<UserContext> {
         .users
         .lock()
         .map_err(|_| anyhow!("user manager lock poisoned"))?;
-    users.ensure_default_user();
+    users.ensure_default_user()?;
     Ok(users.default_user_context()?)
 }
 
@@ -521,7 +530,7 @@ fn default_user_pub_id(state: &ServerState) -> Result<String> {
         .users
         .lock()
         .map_err(|_| anyhow!("user manager lock poisoned"))?;
-    Ok(users.ensure_default_user().pub_id)
+    Ok(users.ensure_default_user()?.pub_id)
 }
 
 fn owner_metadata_for_user_id(user_id: &UserId, state: &ServerState) -> Result<OwnerHttpMetadata> {
@@ -530,7 +539,7 @@ fn owner_metadata_for_user_id(user_id: &UserId, state: &ServerState) -> Result<O
         .lock()
         .map_err(|_| anyhow!("user manager lock poisoned"))?;
     let user = users
-        .user_for_id(user_id)
+        .user_for_id(user_id)?
         .ok_or_else(|| anyhow!("unknown owner user {user_id}"))?;
 
     Ok(OwnerHttpMetadata {
@@ -668,7 +677,8 @@ mod tests {
 
     #[test]
     fn init_user_is_shown_on_payment_and_ledger_records() {
-        let state = ServerState::new().expect("server state should initialize");
+        let path = std::env::temp_dir().join(format!("hubu-api-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
         let user = init(
             json!({
                 "display_name": "Alice Example",
@@ -723,5 +733,52 @@ mod tests {
         assert!(transaction.entries.iter().all(|entry| {
             entry.owner_user_id == user.user_id && entry.owner_user_name == "Alice Example"
         }));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn initialized_user_remains_registration_owner_after_restart() {
+        let path = std::env::temp_dir().join(format!("hubu-api-restart-{}.sqlite", UserId::new()));
+        let (user, first_agent_id) = {
+            let state =
+                ServerState::new_with_db_path(&path).expect("server state should initialize");
+            let user = init(
+                json!({
+                    "display_name": "Alice Example",
+                    "email": "alice@example.com",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("init should create an explicit user");
+
+            let agent = register_agent(
+                json!({
+                    "name": "settlement-agent",
+                    "version": "v1",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("agent should register under initialized user");
+            assert_eq!(agent.user_id, user.user_id);
+            (user, agent.agent_id)
+        };
+
+        let restarted =
+            ServerState::new_with_db_path(&path).expect("server state should reload from storage");
+        let resumed_agent = register_agent(
+            json!({
+                "name": "settlement-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &restarted,
+        )
+        .expect("agent should still register under initialized user after restart");
+
+        assert_eq!(resumed_agent.user_id, user.user_id);
+        assert_eq!(resumed_agent.agent_id, first_agent_id);
+        std::fs::remove_file(path).ok();
     }
 }

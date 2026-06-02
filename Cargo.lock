@@ -231,7 +231,9 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hubu-common",
+ "rusqlite",
  "serde",
+ "serde_json",
  "serde_yaml",
  "thiserror",
 ]
