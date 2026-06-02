@@ -1,6 +1,6 @@
 # Hubu Local Demo
 
-This demo runs Hubu locally and exercises the existing registration, policy,
+This demo runs Hubu locally and exercises the onboarding, registration, policy,
 spend evaluation, mock payment orchestration, and ledger recording flow through
 the `hubu` CLI.
 
@@ -64,9 +64,9 @@ For an automated walkthrough with colorful progress output, run:
 ./scripts/demo.sh
 ```
 
-The script builds the binaries, starts `hubu-server`, registers an agent, adds a
-policy, submits allowed and over-limit spend requests, prints the ledger, and
-stops the server on exit.
+The script builds the binaries, starts `hubu-server`, initializes a human user,
+registers an agent, adds a policy, submits allowed and over-limit spend
+requests, prints the ledger, and stops the server on exit.
 
 To adjust pacing:
 
@@ -74,7 +74,28 @@ To adjust pacing:
 HUBU_DEMO_STEP_DELAY=2 HUBU_DEMO_READ_DELAY=4 ./scripts/demo.sh
 ```
 
-### 1. Register an Agent
+### 1. Initialize the Human User
+
+```sh
+hubu init \
+  --display-name "Alice Example" \
+  --email alice@example.com
+```
+
+Expected output:
+
+```txt
+Hubu initialized
+  user_id: usr_6qqcj94w6pr5
+  display_name: Alice Example
+```
+
+The demo server creates a fallback default user on startup so core workflows can
+run in single-user MVP mode. Calling `hubu init` explicitly creates a new human
+user from the provided display name and email, then makes that user the active
+default for subsequent agent, policy, spend, payment, and ledger operations.
+
+### 2. Register an Agent
 
 ```sh
 hubu register-agent \
@@ -92,12 +113,12 @@ Agent registered
   session_id: ags_2h7rx0cq4p9w
 ```
 
-Copy the public `agent_id` for the next commands. Internally, Hubu still uses a
-UUID-backed `AgentId`; the CLI and HTTP demo API use the shorter public ID. The
-suffix will differ for each new registration because it is derived from the
-internal UUID.
+Copy the public `agent_id` for the next commands. Internally, Hubu still uses
+UUID-backed IDs; the CLI and HTTP demo API use shorter public IDs such as
+`usr_...` and `agt_...`. The suffixes will differ for each new user and agent
+because they are derived from internal UUIDs.
 
-### 2. Add a Policy
+### 3. Add a Policy
 
 ```sh
 hubu add-policy \
@@ -115,7 +136,7 @@ Policy added
   default_decision: needs_approval
 ```
 
-### 3. Submit an Allowed Spend Request
+### 4. Submit an Allowed Spend Request
 
 ```sh
 hubu spend \
@@ -134,11 +155,15 @@ Spend evaluated
 Payment
   status: succeeded
   payment_id: dfd9a10f-e80f-4c17-b3ec-944d2114d4b9
+  owner_user: Alice Example (usr_6qqcj94w6pr5)
   ledger_transaction_id: 87b1cb7f-0fdf-40c8-b260-343cf4939be9
   rail_reference: fiat_mock_7da692a8-d5a7-4028-b5db-fc8b0de79d10:Purchase API credits
 ```
 
-### 4. Submit an Over-Limit Spend Request
+The owner shown on the payment is the initialized human user. The agent spends
+under authority delegated by that user.
+
+### 5. Submit an Over-Limit Spend Request
 
 ```sh
 hubu spend \
@@ -158,7 +183,7 @@ Spend evaluated
 The demo server only orchestrates a payment when the existing spend manager
 returns `allow`.
 
-### 5. Submit a Denied Spend Request
+### 6. Submit a Denied Spend Request
 
 ```sh
 hubu spend \
@@ -181,7 +206,7 @@ Spend evaluated
 The policy engine gives `deny` precedence over `allow`, so no payment is
 orchestrated.
 
-### 6. Inspect the Ledger
+### 7. Inspect the Ledger
 
 ```sh
 hubu ledger list
@@ -190,16 +215,18 @@ hubu ledger list
 Expected output:
 
 ```txt
-2026-05-28T22:16:36.508390+00:00  87b1cb7f-0fdf-40c8-b260-343cf4939be9  payment dfd9a10f-e80f-4c17-b3ec-944d2114d4b9 via fiat_mock
-  debit      $20.00  2d2221f0-2a82-458c-bbd1-6a777a3fc6f8
-  credit     $20.00  6fa2b721-c070-4d75-8689-1703dcbb0e9c
+2026-06-01T23:49:51.098978+00:00  87b1cb7f-0fdf-40c8-b260-343cf4939be9  payment dfd9a10f-e80f-4c17-b3ec-944d2114d4b9 via fiat_mock  owner: Alice Example (usr_6qqcj94w6pr5)
+  debit      $20.00  2d2221f0-2a82-458c-bbd1-6a777a3fc6f8  owner: Alice Example (usr_6qqcj94w6pr5)
+  credit     $20.00  6fa2b721-c070-4d75-8689-1703dcbb0e9c  owner: Alice Example (usr_6qqcj94w6pr5)
 ```
 
-Only successful mock payments create ledger transactions.
+Only successful mock payments create ledger transactions. The ledger output
+shows the owning human user for both the transaction and its entries.
 
 ## CLI Reference
 
 ```sh
+hubu [--url http://127.0.0.1:8787] init [--display-name NAME] [--email EMAIL]
 hubu [--url http://127.0.0.1:8787] register-agent --name NAME --version VERSION
 hubu [--url http://127.0.0.1:8787] add-policy --agent-id ID --daily-limit AMOUNT
 hubu [--url http://127.0.0.1:8787] spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
