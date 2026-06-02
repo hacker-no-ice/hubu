@@ -10,6 +10,7 @@ use hubu_common::models::{
 use rusqlite::{Connection, Row};
 
 pub(crate) const DEFAULT_USER_IDENTITY_KEY: &str = "system:local-default";
+pub(crate) const SELECTED_DEFAULT_USER_ID_KEY: &str = "selected_default_user_id";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum StorageError {
@@ -54,6 +55,12 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<(), StorageError> {
         CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique
         ON users(email)
         WHERE email IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS app_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
 
         CREATE TABLE IF NOT EXISTS agent_identities (
             id TEXT PRIMARY KEY,

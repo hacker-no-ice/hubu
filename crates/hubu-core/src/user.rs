@@ -9,6 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::storage::{
     init_schema, user_from_row, user_status, StorageError, DEFAULT_USER_IDENTITY_KEY,
+    SELECTED_DEFAULT_USER_ID_KEY,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -40,17 +41,11 @@ impl UserManager {
     }
 
     pub fn in_memory_sqlite() -> Result<Self, UserError> {
-        Ok(Self {
-            store: UserStore::Sqlite(SqliteUserStore::in_memory()?),
-            default_user_id: None,
-        })
+        Self::from_store(UserStore::Sqlite(SqliteUserStore::in_memory()?))
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, UserError> {
-        Ok(Self {
-            store: UserStore::Sqlite(SqliteUserStore::open(path)?),
-            default_user_id: None,
-        })
+        Self::from_store(UserStore::Sqlite(SqliteUserStore::open(path)?))
     }
 
     pub fn create_user(&mut self, request: CreateUserRequest) -> Result<User, UserError> {
@@ -60,7 +55,7 @@ impl UserManager {
             .map(|email| format!("email:{}", email.trim().to_ascii_lowercase()));
         if let Some(identity_key) = identity_key.as_deref() {
             if let Some(existing) = self.store.user_by_identity_key(identity_key)? {
-                self.default_user_id = Some(existing.id.clone());
+                self.select_default_user(&existing)?;
                 return Ok(existing);
             }
         }
@@ -78,7 +73,7 @@ impl UserManager {
         };
 
         self.store.insert_user(&user, identity_key.as_deref())?;
-        self.default_user_id = Some(id);
+        self.select_default_user(&user)?;
 
         Ok(user)
     }
@@ -142,6 +137,20 @@ impl UserManager {
             }
         }
     }
+
+    fn from_store(store: UserStore) -> Result<Self, UserError> {
+        let default_user_id = store.selected_default_user()?.map(|user| user.id);
+        Ok(Self {
+            store,
+            default_user_id,
+        })
+    }
+
+    fn select_default_user(&mut self, user: &User) -> Result<(), UserError> {
+        self.store.set_selected_default_user(&user.id)?;
+        self.default_user_id = Some(user.id.clone());
+        Ok(())
+    }
 }
 
 impl Default for UserManager {
@@ -183,12 +192,27 @@ impl UserStore {
             UserStore::Sqlite(store) => store.user_by_identity_key(identity_key),
         }
     }
+
+    fn selected_default_user(&self) -> Result<Option<User>, StorageError> {
+        match self {
+            UserStore::Memory(store) => store.selected_default_user(),
+            UserStore::Sqlite(store) => store.selected_default_user(),
+        }
+    }
+
+    fn set_selected_default_user(&mut self, user_id: &UserId) -> Result<(), StorageError> {
+        match self {
+            UserStore::Memory(store) => store.set_selected_default_user(user_id),
+            UserStore::Sqlite(store) => store.set_selected_default_user(user_id),
+        }
+    }
 }
 
 struct MemoryUserStore {
     users: HashMap<UserId, User>,
     user_by_pub_id: HashMap<String, UserId>,
     user_by_identity_key: HashMap<String, UserId>,
+    selected_default_user_id: Option<UserId>,
 }
 
 impl MemoryUserStore {
@@ -197,6 +221,7 @@ impl MemoryUserStore {
             users: HashMap::new(),
             user_by_pub_id: HashMap::new(),
             user_by_identity_key: HashMap::new(),
+            selected_default_user_id: None,
         }
     }
 
@@ -229,6 +254,19 @@ impl MemoryUserStore {
             .get(identity_key)
             .and_then(|id| self.users.get(id))
             .cloned())
+    }
+
+    fn selected_default_user(&self) -> Result<Option<User>, StorageError> {
+        Ok(self
+            .selected_default_user_id
+            .as_ref()
+            .and_then(|id| self.users.get(id))
+            .cloned())
+    }
+
+    fn set_selected_default_user(&mut self, user_id: &UserId) -> Result<(), StorageError> {
+        self.selected_default_user_id = Some(user_id.clone());
+        Ok(())
     }
 }
 
@@ -309,6 +347,40 @@ impl SqliteUserStore {
             )
             .optional()?;
         Ok(user)
+    }
+
+    fn selected_default_user(&self) -> Result<Option<User>, StorageError> {
+        let selected_user_id = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_state WHERE key = ?1",
+                params![SELECTED_DEFAULT_USER_ID_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match selected_user_id {
+            Some(user_id) => {
+                let user_id = user_id
+                    .parse()
+                    .map_err(|_| StorageError::InvalidData("selected default user id".into()))?;
+                self.user_for_id(&user_id)
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn set_selected_default_user(&mut self, user_id: &UserId) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO app_state (key, value, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![
+                SELECTED_DEFAULT_USER_ID_KEY,
+                user_id.to_string(),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
     }
 }
 
@@ -422,5 +494,25 @@ mod tests {
         assert_ne!(default.id, first.id);
         assert_eq!(first.id, second.id);
         assert_eq!(first.display_name, "Alice");
+    }
+
+    #[test]
+    fn sqlite_explicit_user_selection_is_persisted_after_restart() {
+        let path = std::env::temp_dir().join(format!("hubu-selected-{}.sqlite", UserId::new()));
+        let explicit = {
+            let mut manager = UserManager::open(&path).unwrap();
+            manager.ensure_default_user().unwrap();
+            manager
+                .create_user(CreateUserRequest {
+                    display_name: "Selected User".to_string(),
+                    email: Some("selected@example.com".to_string()),
+                })
+                .unwrap()
+        };
+
+        let manager = UserManager::open(&path).unwrap();
+        assert_eq!(manager.default_user_context().unwrap().user_id, explicit.id);
+        assert_eq!(manager.default_user().unwrap(), Some(explicit));
+        std::fs::remove_file(path).ok();
     }
 }

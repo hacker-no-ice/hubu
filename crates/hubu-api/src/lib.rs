@@ -735,4 +735,50 @@ mod tests {
         }));
         std::fs::remove_file(path).ok();
     }
+
+    #[test]
+    fn initialized_user_remains_registration_owner_after_restart() {
+        let path = std::env::temp_dir().join(format!("hubu-api-restart-{}.sqlite", UserId::new()));
+        let (user, first_agent_id) = {
+            let state =
+                ServerState::new_with_db_path(&path).expect("server state should initialize");
+            let user = init(
+                json!({
+                    "display_name": "Alice Example",
+                    "email": "alice@example.com",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("init should create an explicit user");
+
+            let agent = register_agent(
+                json!({
+                    "name": "settlement-agent",
+                    "version": "v1",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("agent should register under initialized user");
+            assert_eq!(agent.user_id, user.user_id);
+            (user, agent.agent_id)
+        };
+
+        let restarted =
+            ServerState::new_with_db_path(&path).expect("server state should reload from storage");
+        let resumed_agent = register_agent(
+            json!({
+                "name": "settlement-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &restarted,
+        )
+        .expect("agent should still register under initialized user after restart");
+
+        assert_eq!(resumed_agent.user_id, user.user_id);
+        assert_eq!(resumed_agent.agent_id, first_agent_id);
+        std::fs::remove_file(path).ok();
+    }
 }
