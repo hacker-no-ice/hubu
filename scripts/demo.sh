@@ -7,6 +7,7 @@ DEMO_URL="http://${DEMO_ADDR}"
 DEMO_STEP_DELAY="${HUBU_DEMO_STEP_DELAY:-1.6}"
 DEMO_READ_DELAY="${HUBU_DEMO_READ_DELAY:-2.4}"
 SERVER_LOG="$(mktemp -t hubu-demo-server.XXXXXX.log)"
+POLICY_FILE="$(mktemp -t hubu-demo-policy.XXXXXX.yaml)"
 SERVER_PID=""
 
 if [[ ! -t 1 || "${NO_COLOR:-}" != "" ]]; then
@@ -36,7 +37,7 @@ cleanup() {
     kill "${SERVER_PID}" >/dev/null 2>&1 || true
     wait "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
-  rm -f "${SERVER_LOG}"
+  rm -f "${SERVER_LOG}" "${POLICY_FILE}"
 }
 trap cleanup EXIT
 
@@ -115,6 +116,12 @@ hubu() {
 
 wait_for_server() {
   for _ in $(seq 1 50); do
+    if [[ -n "${SERVER_PID}" ]] && ! kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
+      say "${RED}Hubu server exited before becoming ready.${RESET}" >&2
+      say "${DIM}Server log:${RESET}" >&2
+      sed 's/^/  /' "${SERVER_LOG}" >&2 || true
+      return 1
+    fi
     if hubu health >/dev/null 2>&1; then
       return 0
     fi
@@ -143,8 +150,8 @@ wait_for_server
 say "${GREEN}Hubu server is ready.${RESET}"
 pause_for_reading
 
-step "Initialize the human user"
-INIT_OUTPUT="$(hubu init --display-name "Alice Example" --email alice@example.com)"
+step "Register the human user"
+INIT_OUTPUT="$(hubu register human --display-name "Alice Example" --email alice@example.com)"
 say "${INIT_OUTPUT}"
 USER_ID="$(printf '%s\n' "${INIT_OUTPUT}" | awk -F': ' '/^  user_id:/ { print $2; exit }')"
 if [[ -z "${USER_ID}" ]]; then
@@ -155,7 +162,7 @@ note "captured public user_id=${USER_ID}"
 pause_for_reading
 
 step "Register an agent"
-REGISTER_OUTPUT="$(hubu register-agent --name codex-agent --version 1.0)"
+REGISTER_OUTPUT="$(hubu register agent --name codex-agent --version 1.0)"
 say "${REGISTER_OUTPUT}"
 AGENT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/^  agent_id:/ { print $2; exit }')"
 if [[ -z "${AGENT_ID}" ]]; then
@@ -165,8 +172,14 @@ fi
 note "captured public agent_id=${AGENT_ID}"
 pause_for_reading
 
-step "Attach a spending policy"
-hubu add-policy --agent-id "${AGENT_ID}" --daily-limit 100
+step "Generate and attach a spending policy"
+rm -f "${POLICY_FILE}"
+hubu init --policy "${POLICY_FILE}"
+hubu policy add --agent-id "${AGENT_ID}" --path "${POLICY_FILE}"
+pause_for_reading
+
+step "List registered agents"
+hubu agent list
 pause_for_reading
 
 step "Create a recurring human budget"

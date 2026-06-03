@@ -1,7 +1,8 @@
 use std::{
-    env,
+    env, fs,
     io::{Read, Write},
     net::{Shutdown, TcpStream},
+    path::Path,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -29,9 +30,10 @@ fn run() -> Result<()> {
     args.remove(0);
 
     match command.as_str() {
-        "init" => init(&base_url, args),
-        "register-agent" => register_agent(&base_url, args),
-        "add-policy" => add_policy(&base_url, args),
+        "init" => init(args),
+        "register" => register(&base_url, args),
+        "policy" => policy(&base_url, args),
+        "agent" => agent(&base_url, args),
         "budget" => budget(&base_url, args),
         "spend" => spend(&base_url, args),
         "ledger" => ledger(&base_url, args),
@@ -44,7 +46,57 @@ fn run() -> Result<()> {
     }
 }
 
-fn init(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn init(mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_init_help();
+        return Ok(());
+    }
+
+    let policy_path =
+        take_value(&mut args, "--policy").unwrap_or_else(|| "policy.yaml".to_string());
+    let force = take_flag(&mut args, "--force");
+    ensure_no_args(args)?;
+
+    let path = Path::new(&policy_path);
+    if path.exists() && !force {
+        bail!("policy file `{policy_path}` already exists; pass --force to overwrite");
+    }
+
+    fs::write(path, default_policy_template())
+        .with_context(|| format!("write default policy template to `{policy_path}`"))?;
+    println!("Hubu policy template created");
+    println!("  path: {policy_path}");
+    println!(
+        "  next: edit the file, then run hubu policy add --agent-id AGENT_ID --path {policy_path}"
+    );
+    Ok(())
+}
+
+fn register(base_url: &str, args: Vec<String>) -> Result<()> {
+    let Some(command) = args.first().cloned() else {
+        print_register_help();
+        return Ok(());
+    };
+    let mut args = args;
+    args.remove(0);
+
+    match command.as_str() {
+        "human" => register_human(base_url, args),
+        "agent" => register_agent(base_url, args),
+        "-h" | "--help" | "help" => {
+            print_register_help();
+            Ok(())
+        }
+        _ => bail!("unknown register command `{command}`"),
+    }
+}
+
+fn register_human(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_register_human_help();
+        return Ok(());
+    }
+
     let display_name =
         take_value(&mut args, "--display-name").unwrap_or_else(|| "Hubu User".to_string());
     let email = take_value(&mut args, "--email");
@@ -59,13 +111,18 @@ fn init(base_url: &str, mut args: Vec<String>) -> Result<()> {
         }),
     )?;
 
-    println!("Hubu initialized");
+    println!("Human registered");
     println!("  user_id: {}", string_at(&response, "user_id")?);
     println!("  display_name: {}", string_at(&response, "display_name")?);
     Ok(())
 }
 
 fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_register_agent_help();
+        return Ok(());
+    }
+
     let name = take_required(&mut args, "--name")?;
     let version = take_required(&mut args, "--version")?;
     ensure_no_args(args)?;
@@ -87,34 +144,99 @@ fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn policy(base_url: &str, args: Vec<String>) -> Result<()> {
+    let Some(command) = args.first().cloned() else {
+        print_policy_help();
+        return Ok(());
+    };
+    let mut args = args;
+    args.remove(0);
+
+    match command.as_str() {
+        "add" => add_policy(base_url, args),
+        "-h" | "--help" | "help" => {
+            print_policy_help();
+            Ok(())
+        }
+        _ => bail!("unknown policy command `{command}`"),
+    }
+}
+
 fn add_policy(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_policy_add_help();
+        return Ok(());
+    }
+
     let agent_id = take_required(&mut args, "--agent-id")?;
-    let daily_limit = take_required(&mut args, "--daily-limit")?;
+    let path = take_required(&mut args, "--path")?;
     ensure_no_args(args)?;
 
-    let response = post_json(
-        base_url,
-        "/policies",
-        json!({
-            "agent_id": agent_id,
-            "daily_limit_cents": amount_to_cents(&daily_limit)?,
-        }),
-    )?;
+    let body = json!({
+        "agent_id": agent_id,
+        "policy_yaml": fs::read_to_string(&path)
+            .with_context(|| format!("read policy file `{path}`"))?,
+    });
+
+    let response = post_json(base_url, "/policies", body)?;
 
     println!("Policy added");
     println!("  agent_id: {}", string_at(&response, "agent_id")?);
     println!("  policy_id: {}", string_at(&response, "policy_id")?);
     println!(
-        "  per_request_limit: {}",
-        money_at(&response, "daily_limit_cents")?
+        "  policy_version: {}",
+        string_at(&response, "policy_version")?
     );
-    println!("  default_decision: needs_approval");
+    println!(
+        "  default_decision: {}",
+        string_at(&response, "default_decision")?
+    );
+    Ok(())
+}
+
+fn agent(base_url: &str, args: Vec<String>) -> Result<()> {
+    match args.as_slice() {
+        [] => {
+            print_agent_help();
+            Ok(())
+        }
+        [command] if command == "help" || command == "-h" || command == "--help" => {
+            print_agent_help();
+            Ok(())
+        }
+        [command] if command == "list" => agent_list(base_url),
+        _ => bail!("usage: hubu agent list"),
+    }
+}
+
+fn agent_list(base_url: &str) -> Result<()> {
+    let response = get_json(base_url, "/agents")?;
+    let agents = response
+        .get("agents")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `agents`"))?;
+
+    if agents.is_empty() {
+        println!("No agents registered.");
+        return Ok(());
+    }
+
+    for agent in agents {
+        println!(
+            "{}  {}  account: {}  status: {}",
+            string_at(agent, "agent_id")?,
+            string_at(agent, "display_name")?,
+            string_at(agent, "account_id")?,
+            string_at(agent, "status")?
+        );
+    }
     Ok(())
 }
 
 fn budget(base_url: &str, args: Vec<String>) -> Result<()> {
     let Some(command) = args.first().cloned() else {
-        bail!("usage: hubu budget create|create-recurring|list");
+        print_budget_help();
+        return Ok(());
     };
     let mut args = args;
     args.remove(0);
@@ -123,11 +245,20 @@ fn budget(base_url: &str, args: Vec<String>) -> Result<()> {
         "create" => budget_create(base_url, args),
         "create-recurring" => budget_create_recurring(base_url, args),
         "list" => budget_list(base_url, args),
+        "-h" | "--help" | "help" => {
+            print_budget_help();
+            Ok(())
+        }
         _ => bail!("unknown budget command `{command}`"),
     }
 }
 
 fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_budget_create_help();
+        return Ok(());
+    }
+
     let amount = take_required(&mut args, "--amount")?;
     let starting_at = take_value(&mut args, "--starting-at");
     let ending_before = take_value(&mut args, "--ending-before");
@@ -153,6 +284,11 @@ fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
 }
 
 fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_budget_create_recurring_help();
+        return Ok(());
+    }
+
     let amount = take_required(&mut args, "--amount")?;
     let recurrence = take_required(&mut args, "--recurrence")?;
     let period_count = take_required(&mut args, "--period-count")?;
@@ -182,6 +318,11 @@ fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> 
 }
 
 fn budget_list(base_url: &str, args: Vec<String>) -> Result<()> {
+    let mut args = args;
+    if take_help(&mut args) {
+        print_budget_list_help();
+        return Ok(());
+    }
     ensure_no_args(args)?;
     let response = get_json(base_url, "/budgets")?;
     let budgets = response
@@ -201,6 +342,11 @@ fn budget_list(base_url: &str, args: Vec<String>) -> Result<()> {
 }
 
 fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_spend_help();
+        return Ok(());
+    }
+
     let agent_id = take_required(&mut args, "--agent-id")?;
     let amount = take_required(&mut args, "--amount")?;
     let reason = take_required(&mut args, "--reason")?;
@@ -269,6 +415,14 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
 
 fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
     match args.as_slice() {
+        [] => {
+            print_ledger_help();
+            Ok(())
+        }
+        [command] if command == "help" || command == "-h" || command == "--help" => {
+            print_ledger_help();
+            Ok(())
+        }
         [command] if command == "list" => {
             let response = get_json(base_url, "/ledger")?;
             let transactions = response
@@ -410,6 +564,19 @@ fn take_global_value(args: &mut Vec<String>, name: &str) -> Option<String> {
     take_value(args, name)
 }
 
+fn take_help(args: &mut Vec<String>) -> bool {
+    take_flag(args, "-h") || take_flag(args, "--help") || take_flag(args, "help")
+}
+
+fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
+    if let Some(index) = args.iter().position(|arg| arg == name) {
+        args.remove(index);
+        true
+    } else {
+        false
+    }
+}
+
 fn take_required(args: &mut Vec<String>, name: &str) -> Result<String> {
     take_value(args, name).ok_or_else(|| anyhow!("missing required argument `{name}`"))
 }
@@ -456,19 +623,181 @@ fn amount_to_cents(value: &str) -> Result<i64> {
     Ok(dollars * 100 + cents)
 }
 
+fn default_policy_template() -> &'static str {
+    r#"id: demo_spending_policy
+version: demo-1
+# The demo server rewrites owner_user_id to the active registered human user.
+owner_user_id: 00000000-0000-4000-8000-000000000000
+default_effect: needs_approval
+rules:
+  - id: deny_blocked_demo_merchant
+    effect: deny
+    reason: merchant is blocked by the demo policy
+    when:
+      op: eq
+      field: merchant
+      value:
+        string: blocked-merchant
+
+  - id: allow_small_demo_spend
+    effect: allow
+    reason: amount is at or below the configured demo limit of 10000 cents
+    when:
+      op: lte
+      field: amount
+      value:
+        money_cents: 10000
+"#
+}
+
 fn print_help() {
     println!(
         "Hubu demo CLI
 
 Usage:
-  hubu [--url http://127.0.0.1:8787] register-agent --name NAME --version VERSION
-  hubu [--url http://127.0.0.1:8787] init [--display-name NAME] [--email EMAIL]
-  hubu [--url http://127.0.0.1:8787] add-policy --agent-id ID --daily-limit AMOUNT
-  hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
-  hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
-  hubu [--url http://127.0.0.1:8787] budget list
-  hubu [--url http://127.0.0.1:8787] spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu [--url http://127.0.0.1:8787] ledger list
-  hubu [--url http://127.0.0.1:8787] health"
+  hubu [--url URL] <command>
+
+Commands:
+  register   Register human users and agents
+  policy     Manage spending policies
+  init       Generate local Hubu starter files
+  agent      Read registered agents
+  budget     Create and list budgets
+  spend      Submit an agent spend request
+  ledger     Read ledger transactions
+  health     Check the Hubu server
+
+Global options:
+  --url URL   Hubu server URL (default: http://127.0.0.1:8787)
+
+Run `hubu <command> --help` for command-specific help."
+    );
+}
+
+fn print_register_help() {
+    println!(
+        "Register human users and agents
+
+Usage:
+  hubu register human [--display-name NAME] [--email EMAIL]
+  hubu register agent --name NAME --version VERSION"
+    );
+}
+
+fn print_register_human_help() {
+    println!(
+        "Register the active human user
+
+Usage:
+  hubu register human [--display-name NAME] [--email EMAIL]"
+    );
+}
+
+fn print_register_agent_help() {
+    println!(
+        "Register an agent for the active human user
+
+Usage:
+  hubu register agent --name NAME --version VERSION"
+    );
+}
+
+fn print_policy_help() {
+    println!(
+        "Manage spending policies
+
+Usage:
+  hubu policy add --agent-id ID --path FILE"
+    );
+}
+
+fn print_policy_add_help() {
+    println!(
+        "Attach a spending policy to an agent
+
+Usage:
+  hubu policy add --agent-id ID --path FILE
+
+Options:
+  --agent-id ID   Public agent ID, such as agt_...
+  --path FILE     YAML policy file generated by `hubu init` or written by hand"
+    );
+}
+
+fn print_init_help() {
+    println!(
+        "Generate local Hubu starter files
+
+Usage:
+  hubu init [--policy FILE] [--force]
+
+Options:
+  --policy FILE   Policy template path (default: policy.yaml)
+  --force         Overwrite an existing policy file"
+    );
+}
+
+fn print_agent_help() {
+    println!(
+        "Read registered agents
+
+Usage:
+  hubu agent list"
+    );
+}
+
+fn print_budget_help() {
+    println!(
+        "Create and list budgets
+
+Usage:
+  hubu budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+  hubu budget list"
+    );
+}
+
+fn print_budget_create_help() {
+    println!(
+        "Create a single human-scoped budget
+
+Usage:
+  hubu budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]"
+    );
+}
+
+fn print_budget_create_recurring_help() {
+    println!(
+        "Create a recurring human-scoped budget series
+
+Usage:
+  hubu budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]"
+    );
+}
+
+fn print_budget_list_help() {
+    println!(
+        "List budgets for the active human user
+
+Usage:
+  hubu budget list"
+    );
+}
+
+fn print_spend_help() {
+    println!(
+        "Submit an agent spend request
+
+Usage:
+  hubu spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]"
+    );
+}
+
+fn print_ledger_help() {
+    println!(
+        "Read ledger transactions
+
+Usage:
+  hubu ledger list"
     );
 }

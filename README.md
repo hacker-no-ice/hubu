@@ -80,8 +80,11 @@ cargo run --bin hubu-server
 Then use the CLI from another terminal:
 
 ```sh
-hubu register-agent --name codex-agent --version 1.0
-hubu add-policy --agent-id AGENT_ID --daily-limit 100
+hubu register human --display-name "Alice Example" --email alice@example.com
+hubu register agent --name codex-agent --version 1.0
+hubu init --policy policy.yaml
+hubu policy add --agent-id AGENT_ID --path policy.yaml
+hubu agent list
 hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
 hubu ledger list
 ```

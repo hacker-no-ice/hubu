@@ -26,6 +26,7 @@ use hubu_core::{
     },
     policy::{
         condition::{Condition, Field, PolicyValue},
+        engine::validate_policy,
         model::{Effect, Policy, Rule},
     },
     registration::{RegisterAgentRequest, RegistrationManager},
@@ -199,14 +200,33 @@ struct InitHttpResponse {
 #[derive(Debug, Deserialize)]
 struct AddPolicyHttpRequest {
     agent_id: String,
-    daily_limit_cents: i64,
+    daily_limit_cents: Option<i64>,
+    policy_yaml: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct AddPolicyHttpResponse {
     agent_id: String,
     policy_id: String,
-    daily_limit_cents: i64,
+    policy_version: String,
+    default_decision: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentListHttpResponse {
+    agents: Vec<AgentHttpResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentHttpResponse {
+    agent_id: String,
+    display_name: String,
+    description: Option<String>,
+    agent_type: String,
+    status: String,
+    account_id: String,
+    account_status: String,
+    created_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -345,6 +365,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
         ("POST", "/init") => init(request.body, state).map(to_json),
         ("POST", "/agents/register") => register_agent(request.body, state).map(to_json),
+        ("GET", "/agents") => list_agents(state).map(to_json),
         ("POST", "/policies") => add_policy(request.body, state).map(to_json),
         ("POST", "/budgets") => create_budget(request.body, state).map(to_json),
         ("POST", "/budgets/series") => create_budget_series(request.body, state).map(to_json),
@@ -435,43 +456,57 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
 
 fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse> {
     let request: AddPolicyHttpRequest = serde_json::from_str(&body)?;
-    if request.daily_limit_cents <= 0 {
-        return Err(anyhow!("daily limit must be positive"));
-    }
 
     let agent_pub_id = request.agent_id;
     let user = default_user_context(state)?;
     let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
-    let policy_id = format!("demo_policy_{agent_pub_id}");
-    let policy = Policy {
-        id: policy_id.clone(),
-        version: "demo-1".to_string(),
-        owner_user_id: user.user_id.clone(),
-        default_effect: Effect::NeedsApproval,
-        rules: vec![
-            Rule {
-                id: "deny_blocked_demo_merchant".to_string(),
-                effect: Effect::Deny,
-                when: Condition::Eq {
-                    field: Field::Merchant,
-                    value: PolicyValue::String("blocked-merchant".to_string()),
+    let policy = if let Some(policy_yaml) = request.policy_yaml {
+        let mut policy: Policy = serde_yaml::from_str(&policy_yaml)?;
+        policy.owner_user_id = user.user_id.clone();
+        validate_policy(&policy)?;
+        policy
+    } else {
+        let daily_limit_cents = request
+            .daily_limit_cents
+            .ok_or_else(|| anyhow!("policy add requires `policy_yaml` or `daily_limit_cents`"))?;
+        if daily_limit_cents <= 0 {
+            return Err(anyhow!("daily limit must be positive"));
+        }
+
+        Policy {
+            id: format!("demo_policy_{agent_pub_id}"),
+            version: "demo-1".to_string(),
+            owner_user_id: user.user_id.clone(),
+            default_effect: Effect::NeedsApproval,
+            rules: vec![
+                Rule {
+                    id: "deny_blocked_demo_merchant".to_string(),
+                    effect: Effect::Deny,
+                    when: Condition::Eq {
+                        field: Field::Merchant,
+                        value: PolicyValue::String("blocked-merchant".to_string()),
+                    },
+                    reason: "merchant is blocked by the demo policy".to_string(),
                 },
-                reason: "merchant is blocked by the demo policy".to_string(),
-            },
-            Rule {
-                id: "allow_within_demo_limit".to_string(),
-                effect: Effect::Allow,
-                when: Condition::Lte {
-                    field: Field::Amount,
-                    value: PolicyValue::MoneyCents(request.daily_limit_cents),
+                Rule {
+                    id: "allow_within_demo_limit".to_string(),
+                    effect: Effect::Allow,
+                    when: Condition::Lte {
+                        field: Field::Amount,
+                        value: PolicyValue::MoneyCents(daily_limit_cents),
+                    },
+                    reason: format!(
+                        "amount is at or below the configured demo limit of {} cents",
+                        daily_limit_cents
+                    ),
                 },
-                reason: format!(
-                    "amount is at or below the configured demo limit of {} cents",
-                    request.daily_limit_cents
-                ),
-            },
-        ],
+            ],
+        }
     };
+
+    let policy_id = policy.id.clone();
+    let policy_version = policy.version.clone();
+    let default_decision = effect_name(policy.default_effect).to_string();
 
     state
         .policies
@@ -482,8 +517,44 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
     Ok(AddPolicyHttpResponse {
         agent_id: agent_pub_id,
         policy_id,
-        daily_limit_cents: request.daily_limit_cents,
+        policy_version,
+        default_decision,
     })
+}
+
+fn list_agents(state: &ServerState) -> Result<AgentListHttpResponse> {
+    let user = default_user_context(state)?;
+    let agents = state
+        .registration
+        .lock()
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?
+        .agents_for_user(&user.user_id)?
+        .into_iter()
+        .map(|agent| AgentHttpResponse {
+            agent_id: agent.agent.pub_id,
+            display_name: agent.agent.display_name,
+            description: agent.agent.description,
+            agent_type: match agent.agent.agent_type {
+                AgentType::InteractiveAgent => "interactive_agent",
+                AgentType::AutonomousAgent => "agent",
+            }
+            .to_string(),
+            status: match agent.agent.agent_status {
+                hubu_common::models::identity::AgentStatus::Active => "active",
+                hubu_common::models::identity::AgentStatus::Suspended => "suspended",
+            }
+            .to_string(),
+            account_id: agent.account.pub_id,
+            account_status: match agent.account.account_status {
+                hubu_common::models::account::AccountStatus::Active => "active",
+                hubu_common::models::account::AccountStatus::Suspended => "suspended",
+            }
+            .to_string(),
+            created_at: agent.agent.created_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(AgentListHttpResponse { agents })
 }
 
 fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpResponse> {
@@ -1047,6 +1118,91 @@ mod tests {
         assert!(transaction.entries.iter().all(|entry| {
             entry.owner_user_id == user.user_id && entry.owner_user_name == "Alice Example"
         }));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn yaml_policy_add_and_agent_list_use_registered_user() {
+        let path = std::env::temp_dir().join(format!("hubu-api-policy-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "yaml-policy-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register");
+
+        let agents = list_agents(&state).expect("agents should list");
+        assert_eq!(agents.agents.len(), 1);
+        assert_eq!(agents.agents[0].agent_id, agent.agent_id);
+        assert_eq!(agents.agents[0].display_name, "yaml-policy-agent");
+
+        let policy = add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "policy_yaml": r#"
+id: yaml_demo_policy
+version: demo-1
+owner_user_id: 00000000-0000-4000-8000-000000000000
+default_effect: needs_approval
+rules:
+  - id: allow_small_yaml_spend
+    effect: allow
+    reason: yaml policy allowed this spend
+    when:
+      op: lte
+      field: amount
+      value:
+        money_cents: 5000
+"#,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("yaml policy should be added");
+        assert_eq!(policy.policy_id, "yaml_demo_policy");
+        assert_eq!(policy.policy_version, "demo-1");
+
+        create_budget(
+            json!({
+                "amount_cents": 10_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should be created");
+
+        let spend = spend(
+            json!({
+                "agent_id": agents.agents[0].agent_id,
+                "amount_cents": 2_500,
+                "reason": "yaml-backed policy spend",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should use yaml policy");
+        assert_eq!(spend.decision, "allow");
+        assert_eq!(
+            spend
+                .payment
+                .expect("allowed spend should pay")
+                .owner_user_id,
+            user.user_id
+        );
         std::fs::remove_file(path).ok();
     }
 

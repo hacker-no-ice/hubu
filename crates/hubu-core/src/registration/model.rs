@@ -42,3 +42,10 @@ pub struct RegisterAgentResponse {
     pub account: AgentAccount,
     pub session: AgentSession,
 }
+
+/// Agent identity plus its spend account.
+#[derive(Debug)]
+pub struct AgentWithAccount {
+    pub agent: AgentIdentity,
+    pub account: AgentAccount,
+}
