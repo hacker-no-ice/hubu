@@ -93,6 +93,15 @@ show_cli_output() {
       "  status: succeeded")
         say "  status: ${BOLD}${GREEN}succeeded${RESET}"
         ;;
+      "  status: failed")
+        say "  status: ${BOLD}${RED}failed${RESET}"
+        ;;
+      "  status: settled")
+        say "  status: ${BOLD}${GREEN}settled${RESET}"
+        ;;
+      "  status: released")
+        say "  status: ${BOLD}${YELLOW}released${RESET}"
+        ;;
       *)
         say "${line}"
         ;;
@@ -160,12 +169,29 @@ step "Attach a spending policy"
 hubu add-policy --agent-id "${AGENT_ID}" --daily-limit 100
 pause_for_reading
 
+step "Create a recurring human budget"
+BUDGET_OUTPUT="$(hubu budget create-recurring \
+  --amount 75 \
+  --recurrence monthly \
+  --period-count 2)"
+say "${BUDGET_OUTPUT}"
+pause_for_reading
+
 step "Submit an allowed spend request"
 ALLOW_OUTPUT="$(hubu spend \
   --agent-id "${AGENT_ID}" \
   --amount 20 \
   --reason "Purchase API credits")"
 show_cli_output "${ALLOW_OUTPUT}"
+pause_for_reading
+
+step "Submit an allowed spend whose mock payment fails"
+FAILED_PAYMENT_OUTPUT="$(hubu spend \
+  --agent-id "${AGENT_ID}" \
+  --amount 15 \
+  --reason "Test failed merchant payout" \
+  --merchant fail)"
+show_cli_output "${FAILED_PAYMENT_OUTPUT}"
 pause_for_reading
 
 step "Submit an over-limit spend request"
@@ -185,9 +211,13 @@ DENY_OUTPUT="$(hubu spend \
 show_cli_output "${DENY_OUTPUT}"
 pause_for_reading
 
+step "Inspect the budget balance"
+hubu budget list
+pause_for_reading
+
 step "Inspect the ledger"
 hubu ledger list
 pause_for_reading
 
 say ""
-say "${BOLD}${GREEN}Demo complete.${RESET} ${DIM}Allowed spend produced a mock payment and ledger entry; over-limit and denied spends did not execute payment.${RESET}"
+say "${BOLD}${GREEN}Demo complete.${RESET} ${DIM}Allowed spend settled budget into consumed balance; failed payment released frozen budget; over-limit and denied spends did not execute payment.${RESET}"

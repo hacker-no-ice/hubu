@@ -26,6 +26,8 @@ CLI.
 - Registers agents with stable identity, version, account, and session records
 - Evaluates spend requests through deterministic policy rules
 - Issues spend authorization tokens for allowed requests
+- Creates human-scoped single or recurring budgets and tracks available balance
+- Reserves budget before payment, then settles or releases the hold from the payment result
 - Orchestrates mock payments after spend authorization
 - Records successful payments in an immutable double-entry SQLite ledger
 - Exposes a local `hubu-server` and `hubu` CLI for live demos
@@ -57,9 +59,9 @@ Run the automated local demo:
 ./scripts/demo.sh
 ```
 
-The demo starts Hubu locally, registers an agent, adds a policy, submits
-allowed, approval-required, and denied spend requests, and prints the resulting
-ledger.
+The demo starts Hubu locally, registers an agent, adds a policy, creates a
+recurring budget, submits allowed, failed-payment, approval-required, and denied
+spend requests, then prints the resulting budget balance and ledger.
 
 ## CLI Demo
 

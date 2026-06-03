@@ -8,15 +8,22 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
 use hubu_common::{
-    ids::{AgentId, SpendAuthTokenId, UserId},
+    ids::{AgentId, BudgetId, SpendAuthTokenId, UserId},
     models::identity::{
         AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
     },
     models::UserContext,
     money::Currency,
+    time::TimePeriod,
 };
 use hubu_core::{
+    budget::{
+        BudgetManager, BudgetRecurrence, BudgetScope, BudgetWithBalance, CreateBudgetSeriesRequest,
+        CreateSingleBudgetRequest, ReleaseBudgetResponse, ReserveBudgetRequest,
+        SettleBudgetResponse,
+    },
     policy::{
         condition::{Condition, Field, PolicyValue},
         model::{Effect, Policy, Rule},
@@ -71,6 +78,7 @@ struct ServerState {
     users: Mutex<UserManager>,
     registration: Mutex<RegistrationManager>,
     spend: Arc<Mutex<SpendManager>>,
+    budgets: Mutex<BudgetManager>,
     policies: Mutex<HashMap<(UserId, AgentId), Policy>>,
     payments: Mutex<DemoPaymentManager>,
 }
@@ -103,6 +111,7 @@ impl ServerState {
                 RegistrationManager::open(path).context("initialize agent registration store")?,
             ),
             spend,
+            budgets: Mutex::new(BudgetManager::new()),
             policies: Mutex::new(HashMap::new()),
             payments: Mutex::new(payments),
         })
@@ -201,6 +210,58 @@ struct AddPolicyHttpResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateBudgetHttpRequest {
+    amount_cents: i64,
+    starting_at: Option<String>,
+    ending_before: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateBudgetSeriesHttpRequest {
+    amount_cents: i64,
+    starting_at: Option<String>,
+    recurrence: BudgetRecurrenceHttp,
+    period_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BudgetRecurrenceHttp {
+    Daily,
+    Monthly,
+    Yearly,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateBudgetHttpResponse {
+    budget: BudgetHttpResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateBudgetSeriesHttpResponse {
+    budgets: Vec<BudgetHttpResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListBudgetsHttpResponse {
+    budgets: Vec<BudgetHttpResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct BudgetHttpResponse {
+    budget_id: String,
+    scope: String,
+    amount_limit_cents: i64,
+    currency: String,
+    starting_at: String,
+    ending_before: Option<String>,
+    status: String,
+    consumed_amount_cents: i64,
+    frozen_amount_cents: i64,
+    remaining_amount_cents: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct SpendHttpRequest {
     agent_id: String,
     amount_cents: i64,
@@ -214,7 +275,19 @@ struct SpendHttpResponse {
     decision: String,
     reasons: Vec<String>,
     auth_token_id: Option<String>,
+    budget_hold: Option<BudgetHoldHttpResponse>,
     payment: Option<PaymentHttpResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct BudgetHoldHttpResponse {
+    hold_id: String,
+    budget_id: String,
+    status: String,
+    amount_cents: i64,
+    consumed_amount_cents: i64,
+    frozen_amount_cents: i64,
+    remaining_amount_cents: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,6 +298,7 @@ struct PaymentHttpResponse {
     status: String,
     ledger_transaction_id: Option<String>,
     rail_reference: Option<String>,
+    failure_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -272,6 +346,9 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("POST", "/init") => init(request.body, state).map(to_json),
         ("POST", "/agents/register") => register_agent(request.body, state).map(to_json),
         ("POST", "/policies") => add_policy(request.body, state).map(to_json),
+        ("POST", "/budgets") => create_budget(request.body, state).map(to_json),
+        ("POST", "/budgets/series") => create_budget_series(request.body, state).map(to_json),
+        ("GET", "/budgets") => list_budgets(state).map(to_json),
         ("POST", "/spend") => spend(request.body, state).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
         _ => Err(anyhow!("no route for {} {}", request.method, request.path)),
@@ -409,6 +486,86 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
     })
 }
 
+fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpResponse> {
+    let request: CreateBudgetHttpRequest = serde_json::from_str(&body)?;
+    if request.amount_cents <= 0 {
+        return Err(anyhow!("budget amount must be positive"));
+    }
+
+    let user = default_user_context(state)?;
+    let period = TimePeriod::new(
+        parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now),
+        parse_optional_datetime(request.ending_before)?,
+    )
+    .map_err(|error| anyhow!("invalid budget period: {error:?}"))?;
+
+    let response = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .create_single_budget(CreateSingleBudgetRequest {
+            scope: BudgetScope::User(user.user_id),
+            amount_limit_cents: request.amount_cents,
+            currency: Currency::Usd,
+            period,
+        })?;
+
+    Ok(CreateBudgetHttpResponse {
+        budget: budget_response(BudgetWithBalance {
+            budget: response.budget,
+            balance: response.balance,
+        }),
+    })
+}
+
+fn create_budget_series(
+    body: String,
+    state: &ServerState,
+) -> Result<CreateBudgetSeriesHttpResponse> {
+    let request: CreateBudgetSeriesHttpRequest = serde_json::from_str(&body)?;
+    if request.amount_cents <= 0 {
+        return Err(anyhow!("budget amount must be positive"));
+    }
+
+    let user = default_user_context(state)?;
+    let starting_at = parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now);
+
+    let response = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .create_budget_series(CreateBudgetSeriesRequest {
+            scope: BudgetScope::User(user.user_id),
+            amount_limit_cents: request.amount_cents,
+            currency: Currency::Usd,
+            starting_at,
+            recurrence: match request.recurrence {
+                BudgetRecurrenceHttp::Daily => BudgetRecurrence::Daily,
+                BudgetRecurrenceHttp::Monthly => BudgetRecurrence::Monthly,
+                BudgetRecurrenceHttp::Yearly => BudgetRecurrence::Yearly,
+            },
+            period_count: request.period_count,
+        })?;
+
+    Ok(CreateBudgetSeriesHttpResponse {
+        budgets: response.budgets.into_iter().map(budget_response).collect(),
+    })
+}
+
+fn list_budgets(state: &ServerState) -> Result<ListBudgetsHttpResponse> {
+    let user = default_user_context(state)?;
+    let budgets = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .get_budgets_by_user_id(&user.user_id)
+        .into_iter()
+        .map(budget_response)
+        .collect();
+
+    Ok(ListBudgetsHttpResponse { budgets })
+}
+
 fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let request: SpendHttpRequest = serde_json::from_str(&body)?;
     if request.amount_cents <= 0 {
@@ -447,41 +604,92 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         .as_ref()
         .map(|token| token.id.to_string());
     let owner = owner_metadata_for_user_id(&user.user_id, state)?;
-    let payment = if let Some(token) = evaluation.auth_token {
-        let payment = state
+    let (budget_hold, payment) = if let Some(token) = evaluation.auth_token {
+        let budget_id = active_budget_id_for_user(&user.user_id, state)?;
+        let reservation = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id,
+                spend_decision_id: evaluation.decision_id.clone(),
+                amount_cents: request.amount_cents,
+                currency: Currency::Usd,
+                expires_at: token.expires_at,
+            })?;
+
+        let payment_request = PaymentRequest {
+            idempotency_key: format!("{}:{}", evaluation.decision_id, request.reason),
+            spend_auth_token_id: token.id,
+            owner_user_id: user.user_id.clone(),
+            agent_id,
+            amount_cents: request.amount_cents,
+            currency: Currency::Usd,
+            merchant: request.merchant,
+            task_id: Some(request.reason),
+            rail: PaymentRailKind::FiatMock,
+            destination: PaymentDestination::FiatAccount {
+                account_ref: "demo-merchant-account".to_string(),
+            },
+            memo: Some("Hubu demo payment".to_string()),
+        };
+
+        let payment_result = state
             .payments
             .lock()
             .map_err(|_| anyhow!("payment manager lock poisoned"))?
-            .submit_payment(PaymentRequest {
-                idempotency_key: format!("{}:{}", evaluation.decision_id, request.reason),
-                spend_auth_token_id: token.id,
-                owner_user_id: user.user_id.clone(),
-                agent_id,
-                amount_cents: request.amount_cents,
-                currency: Currency::Usd,
-                merchant: request.merchant,
-                task_id: Some(request.reason),
-                rail: PaymentRailKind::FiatMock,
-                destination: PaymentDestination::FiatAccount {
-                    account_ref: "demo-merchant-account".to_string(),
-                },
-                memo: Some("Hubu demo payment".to_string()),
-            })?;
+            .submit_payment(payment_request);
 
-        Some(PaymentHttpResponse {
-            payment_id: payment.payment_id.to_string(),
-            owner_user_id: owner.pub_id,
-            owner_user_name: owner.display_name,
-            status: match payment.status {
-                PaymentStatus::Succeeded => "succeeded",
-                PaymentStatus::Failed => "failed",
+        match payment_result {
+            Ok(payment) => {
+                let hold_update = if payment.status == PaymentStatus::Succeeded {
+                    BudgetHoldUpdate::Settled(
+                        state
+                            .budgets
+                            .lock()
+                            .map_err(|_| anyhow!("budget manager lock poisoned"))?
+                            .settle_budget(&reservation.hold.id)?,
+                    )
+                } else {
+                    BudgetHoldUpdate::Released(
+                        state
+                            .budgets
+                            .lock()
+                            .map_err(|_| anyhow!("budget manager lock poisoned"))?
+                            .release_budget(&reservation.hold.id)?,
+                    )
+                };
+
+                (
+                    Some(budget_hold_response(hold_update)),
+                    Some(PaymentHttpResponse {
+                        payment_id: payment.payment_id.to_string(),
+                        owner_user_id: owner.pub_id,
+                        owner_user_name: owner.display_name,
+                        status: match payment.status {
+                            PaymentStatus::Succeeded => "succeeded",
+                            PaymentStatus::Failed => "failed",
+                        }
+                        .to_string(),
+                        ledger_transaction_id: payment
+                            .ledger_transaction_id
+                            .map(|id| id.to_string()),
+                        rail_reference: payment.rail_reference,
+                        failure_reason: payment.failure_reason,
+                    }),
+                )
             }
-            .to_string(),
-            ledger_transaction_id: payment.ledger_transaction_id.map(|id| id.to_string()),
-            rail_reference: payment.rail_reference,
-        })
+            Err(error) => {
+                state
+                    .budgets
+                    .lock()
+                    .map_err(|_| anyhow!("budget manager lock poisoned"))?
+                    .release_budget(&reservation.hold.id)?;
+                return Err(error.into());
+            }
+        }
     } else {
-        None
+        (None, None)
     };
 
     Ok(SpendHttpResponse {
@@ -489,8 +697,98 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         decision: effect_name(evaluation.evaluation.decision).to_string(),
         reasons: evaluation.evaluation.reasons,
         auth_token_id,
+        budget_hold,
         payment,
     })
+}
+
+enum BudgetHoldUpdate {
+    Settled(SettleBudgetResponse),
+    Released(ReleaseBudgetResponse),
+}
+
+fn active_budget_id_for_user(user_id: &UserId, state: &ServerState) -> Result<BudgetId> {
+    let now = Utc::now();
+    state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .get_budgets_by_user_id(user_id)
+        .into_iter()
+        .find(|budget| {
+            budget.budget.currency == Currency::Usd && budget.budget.period.contains(now)
+        })
+        .map(|budget| budget.budget.id)
+        .ok_or_else(|| anyhow!("no active USD budget found for current user"))
+}
+
+fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
+    match update {
+        BudgetHoldUpdate::Settled(response) => BudgetHoldHttpResponse {
+            hold_id: response.hold.id.to_string(),
+            budget_id: response.hold.budget_id.to_string(),
+            status: "settled".to_string(),
+            amount_cents: response.hold.amount_cents,
+            consumed_amount_cents: response.balance.consumed_amount_cents,
+            frozen_amount_cents: response.balance.frozen_amount_cents,
+            remaining_amount_cents: response.balance.remaining_amount_cents,
+        },
+        BudgetHoldUpdate::Released(response) => BudgetHoldHttpResponse {
+            hold_id: response.hold.id.to_string(),
+            budget_id: response.hold.budget_id.to_string(),
+            status: "released".to_string(),
+            amount_cents: response.hold.amount_cents,
+            consumed_amount_cents: response.balance.consumed_amount_cents,
+            frozen_amount_cents: response.balance.frozen_amount_cents,
+            remaining_amount_cents: response.balance.remaining_amount_cents,
+        },
+    }
+}
+
+fn budget_response(budget: BudgetWithBalance) -> BudgetHttpResponse {
+    BudgetHttpResponse {
+        budget_id: budget.budget.id.to_string(),
+        scope: budget_scope_name(&budget.budget.scope).to_string(),
+        amount_limit_cents: budget.budget.amount_limit_cents,
+        currency: budget.budget.currency.to_string(),
+        starting_at: budget.budget.period.starting_at.to_rfc3339(),
+        ending_before: budget
+            .budget
+            .period
+            .ending_before
+            .map(|ending_before| ending_before.to_rfc3339()),
+        status: budget_status_name(budget.budget.status).to_string(),
+        consumed_amount_cents: budget.balance.consumed_amount_cents,
+        frozen_amount_cents: budget.balance.frozen_amount_cents,
+        remaining_amount_cents: budget.balance.remaining_amount_cents,
+    }
+}
+
+fn budget_scope_name(scope: &BudgetScope) -> &'static str {
+    match scope {
+        BudgetScope::User(_) => "user",
+        BudgetScope::Agent(_) => "agent",
+        BudgetScope::Task(_) => "task",
+    }
+}
+
+fn budget_status_name(status: hubu_core::budget::BudgetStatus) -> &'static str {
+    match status {
+        hubu_core::budget::BudgetStatus::Active => "active",
+        hubu_core::budget::BudgetStatus::Exhausted => "exhausted",
+        hubu_core::budget::BudgetStatus::Expired => "expired",
+        hubu_core::budget::BudgetStatus::Revoked => "revoked",
+    }
+}
+
+fn parse_optional_datetime(value: Option<String>) -> Result<Option<DateTime<Utc>>> {
+    value
+        .map(|value| {
+            DateTime::parse_from_rfc3339(&value)
+                .map(|parsed| parsed.with_timezone(&Utc))
+                .with_context(|| format!("parse datetime `{value}`"))
+        })
+        .transpose()
 }
 
 fn resolve_agent_id_for_user(
@@ -710,6 +1008,15 @@ mod tests {
         )
         .expect("policy should be added under initialized user");
 
+        create_budget(
+            json!({
+                "amount_cents": 10_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should be created for initialized user");
+
         let spend = spend(
             json!({
                 "agent_id": agent.agent_id,
@@ -724,6 +1031,13 @@ mod tests {
         let payment = spend.payment.expect("allowed spend should pay");
         assert_eq!(payment.owner_user_id, user.user_id);
         assert_eq!(payment.owner_user_name, "Alice Example");
+        let budget_hold = spend
+            .budget_hold
+            .expect("allowed spend should reserve budget");
+        assert_eq!(budget_hold.status, "settled");
+        assert_eq!(budget_hold.consumed_amount_cents, 2_500);
+        assert_eq!(budget_hold.frozen_amount_cents, 0);
+        assert_eq!(budget_hold.remaining_amount_cents, 7_500);
 
         let ledger = list_ledger(&state).expect("ledger should list");
         assert_eq!(ledger.transactions.len(), 1);
@@ -733,6 +1047,79 @@ mod tests {
         assert!(transaction.entries.iter().all(|entry| {
             entry.owner_user_id == user.user_id && entry.owner_user_name == "Alice Example"
         }));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn failed_mock_payment_releases_reserved_budget() {
+        let path = std::env::temp_dir().join(format!("hubu-api-failed-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "failed-payment-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 5_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should be added under initialized user");
+
+        create_budget(
+            json!({
+                "amount_cents": 10_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should be created for initialized user");
+
+        let spend = spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 1_500,
+                "reason": "failed test purchase",
+                "merchant": "fail",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("allowed spend should submit a failed mock payment");
+
+        let payment = spend.payment.expect("allowed spend should attempt payment");
+        assert_eq!(payment.status, "failed");
+        assert_eq!(payment.owner_user_id, user.user_id);
+        assert!(payment.failure_reason.is_some());
+
+        let budget_hold = spend
+            .budget_hold
+            .expect("allowed spend should reserve and release budget");
+        assert_eq!(budget_hold.status, "released");
+        assert_eq!(budget_hold.consumed_amount_cents, 0);
+        assert_eq!(budget_hold.frozen_amount_cents, 0);
+        assert_eq!(budget_hold.remaining_amount_cents, 10_000);
+
+        let ledger = list_ledger(&state).expect("ledger should list");
+        assert!(ledger.transactions.is_empty());
         std::fs::remove_file(path).ok();
     }
 
