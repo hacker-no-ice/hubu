@@ -64,10 +64,10 @@ For an automated walkthrough with colorful progress output, run:
 ./scripts/demo.sh
 ```
 
-The script builds the binaries, starts `hubu-server`, initializes a human user,
-registers an agent, adds a policy, creates a recurring budget, submits allowed,
-failed-payment, over-limit, and denied spend requests, prints the budget balance
-and ledger, and stops the server on exit.
+The script builds the binaries, starts `hubu-server`, registers a human user,
+registers an agent, generates and attaches a policy, creates a recurring budget,
+submits allowed, failed-payment, over-limit, and denied spend requests, prints
+the budget balance and ledger, and stops the server on exit.
 
 To adjust pacing:
 
@@ -75,10 +75,10 @@ To adjust pacing:
 HUBU_DEMO_STEP_DELAY=2 HUBU_DEMO_READ_DELAY=4 ./scripts/demo.sh
 ```
 
-### 1. Initialize the Human User
+### 1. Register the Human User
 
 ```sh
-hubu init \
+hubu register human \
   --display-name "Alice Example" \
   --email alice@example.com
 ```
@@ -86,20 +86,21 @@ hubu init \
 Expected output:
 
 ```txt
-Hubu initialized
+Human registered
   user_id: usr_6qqcj94w6pr5
   display_name: Alice Example
 ```
 
 The demo server creates a fallback default user on startup so core workflows can
-run in single-user MVP mode. Calling `hubu init` explicitly creates a new human
-user from the provided display name and email, then makes that user the active
-default for subsequent agent, policy, spend, payment, and ledger operations.
+run in single-user MVP mode. Calling `hubu register human` explicitly creates a
+new human user from the provided display name and email, then makes that user
+the active default for subsequent agent, policy, spend, payment, and ledger
+operations.
 
 ### 2. Register an Agent
 
 ```sh
-hubu register-agent \
+hubu register agent \
   --name codex-agent \
   --version 1.0
 ```
@@ -119,25 +120,47 @@ UUID-backed IDs; the CLI and HTTP demo API use shorter public IDs such as
 `usr_...` and `agt_...`. The suffixes will differ for each new user and agent
 because they are derived from internal UUIDs.
 
-### 3. Add a Policy
+### 3. Generate and Add a Policy
 
 ```sh
-hubu add-policy \
+hubu init --policy policy.yaml
+hubu policy add \
   --agent-id agt_8x7k2m4q9v1c \
-  --daily-limit 100
+  --path policy.yaml
 ```
 
 Expected output:
 
 ```txt
+Hubu policy template created
+  path: policy.yaml
+  next: edit the file, then run hubu policy add --agent-id AGENT_ID --path policy.yaml
 Policy added
   agent_id: agt_8x7k2m4q9v1c
-  policy_id: demo_policy_agt_8x7k2m4q9v1c
-  per_request_limit: $100.00
+  policy_id: demo_spending_policy
+  policy_version: demo-1
   default_decision: needs_approval
 ```
 
-### 4. Create a Recurring Budget
+`hubu init` now generates starter files for the local workflow. Human
+registration lives under `hubu register human`, while `hubu policy add --path`
+loads a YAML policy file. The demo server stamps the policy to the active human
+user before validation, so the template's placeholder `owner_user_id` does not
+need manual editing for the local demo.
+
+### 4. List Registered Agents
+
+```sh
+hubu agent list
+```
+
+Expected output:
+
+```txt
+agt_8x7k2m4q9v1c  codex-agent  account: aga_c6q3d9m1v8ra  status: active
+```
+
+### 5. Create a Recurring Budget
 
 ```sh
 hubu budget create-recurring \
@@ -162,7 +185,7 @@ Hubu enforces non-overlapping periods for a given budget scope and currency. The
 recurring budget call is atomic: if any generated period would overlap an
 existing budget, none of the periods are created.
 
-### 5. Submit an Allowed Spend Request
+### 6. Submit an Allowed Spend Request
 
 ```sh
 hubu spend \
@@ -198,7 +221,7 @@ The owner shown on the payment is the initialized human user. The agent spends
 under authority delegated by that user. Allowed spend reserves the active budget
 before payment; successful payment settles the hold into consumed balance.
 
-### 6. Submit an Allowed Spend Whose Mock Payment Fails
+### 7. Submit an Allowed Spend Whose Mock Payment Fails
 
 ```sh
 hubu spend \
@@ -233,7 +256,7 @@ Budget hold
 Failed mock payments release the frozen amount back to the active budget. Only
 successful payments become ledger transactions.
 
-### 7. Submit an Over-Limit Spend Request
+### 8. Submit an Over-Limit Spend Request
 
 ```sh
 hubu spend \
@@ -253,7 +276,7 @@ Spend evaluated
 The demo server only orchestrates a payment when the existing spend manager
 returns `allow`.
 
-### 8. Submit a Denied Spend Request
+### 9. Submit a Denied Spend Request
 
 ```sh
 hubu spend \
@@ -276,7 +299,7 @@ Spend evaluated
 The policy engine gives `deny` precedence over `allow`, so no payment is
 orchestrated.
 
-### 9. Inspect the Budget Balance
+### 10. Inspect the Budget Balance
 
 ```sh
 hubu budget list
@@ -296,7 +319,7 @@ Expected output:
 The balance reflects settled spend only. Released holds do not reduce remaining
 budget.
 
-### 10. Inspect the Ledger
+### 11. Inspect the Ledger
 
 ```sh
 hubu ledger list
@@ -316,9 +339,11 @@ shows the owning human user for both the transaction and its entries.
 ## CLI Reference
 
 ```sh
-hubu [--url http://127.0.0.1:8787] init [--display-name NAME] [--email EMAIL]
-hubu [--url http://127.0.0.1:8787] register-agent --name NAME --version VERSION
-hubu [--url http://127.0.0.1:8787] add-policy --agent-id ID --daily-limit AMOUNT
+hubu [--url http://127.0.0.1:8787] init [--policy FILE] [--force]
+hubu [--url http://127.0.0.1:8787] register human [--display-name NAME] [--email EMAIL]
+hubu [--url http://127.0.0.1:8787] register agent --name NAME --version VERSION
+hubu [--url http://127.0.0.1:8787] policy add --agent-id ID --path FILE
+hubu [--url http://127.0.0.1:8787] agent list
 hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
 hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
 hubu [--url http://127.0.0.1:8787] budget list
@@ -335,8 +360,8 @@ after `cargo build`.
 
 - Server state is in memory. Restarting `hubu-server` clears registered agents,
   policies, spend decisions, budgets, payments, and ledger records.
-- `--daily-limit` is demo wording for an existing per-request amount policy
-  rule. The current demo does not aggregate spend across a calendar day.
+- Agent-scoped budget and ledger filtering are not yet implemented. The read
+  CLI currently lists agents, human-scoped budgets, and the full local ledger.
 - The server uses a minimal local HTTP adapter for demo use, not a production
   web framework.
 - Payments use the existing mock rail only. No real payment provider is called.

@@ -12,7 +12,7 @@ use hubu_common::{
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::registration::error::RegistrationError;
-use crate::registration::model::{RegisterAgentRequest, RegisterAgentResponse};
+use crate::registration::model::{AgentWithAccount, RegisterAgentRequest, RegisterAgentResponse};
 use crate::storage::{
     account_from_row, account_status, agent_from_row, agent_status, agent_type, init_schema,
     session_from_row, version_from_row, StorageError,
@@ -65,6 +65,13 @@ impl RegistrationManager {
         agent_id: &AgentId,
     ) -> Result<Option<AgentAccount>, RegistrationError> {
         Ok(self.store.account_for_agent(agent_id)?)
+    }
+
+    pub fn agents_for_user(
+        &self,
+        owner_user_id: &UserId,
+    ) -> Result<Vec<AgentWithAccount>, RegistrationError> {
+        Ok(self.store.agents_for_user(owner_user_id)?)
     }
 
     pub fn session_for_id(
@@ -147,6 +154,16 @@ impl RegistrationStore {
         }
     }
 
+    fn agents_for_user(
+        &self,
+        owner_user_id: &UserId,
+    ) -> Result<Vec<AgentWithAccount>, StorageError> {
+        match self {
+            RegistrationStore::Memory(store) => store.agents_for_user(owner_user_id),
+            RegistrationStore::Sqlite(store) => store.agents_for_user(owner_user_id),
+        }
+    }
+
     fn session_for_id(
         &self,
         session_id: &AgentSessionId,
@@ -225,6 +242,28 @@ impl MemoryRegistrationStore {
             .get(agent_id)
             .and_then(|id| self.accounts.get(id))
             .cloned())
+    }
+
+    fn agents_for_user(
+        &self,
+        owner_user_id: &UserId,
+    ) -> Result<Vec<AgentWithAccount>, StorageError> {
+        let mut agents = self
+            .agents
+            .values()
+            .filter(|agent| &agent.owner_user_id == owner_user_id)
+            .filter_map(|agent| {
+                self.account_by_agent
+                    .get(&agent.id)
+                    .and_then(|account_id| self.accounts.get(account_id))
+                    .map(|account| AgentWithAccount {
+                        agent: agent.clone(),
+                        account: account.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        agents.sort_by(|left, right| left.agent.created_at.cmp(&right.agent.created_at));
+        Ok(agents)
     }
 
     fn session_for_id(
@@ -446,6 +485,13 @@ impl SqliteRegistrationStore {
 
     fn account_for_agent(&self, agent_id: &AgentId) -> Result<Option<AgentAccount>, StorageError> {
         query_account_for_agent(&self.conn, agent_id)
+    }
+
+    fn agents_for_user(
+        &self,
+        owner_user_id: &UserId,
+    ) -> Result<Vec<AgentWithAccount>, StorageError> {
+        query_agents_for_user(&self.conn, owner_user_id)
     }
 
     fn session_for_id(
@@ -704,6 +750,63 @@ fn query_account_for_agent(
          WHERE agent_id = ?1",
         &[agent_id.to_string()],
     )
+}
+
+fn query_agents_for_user(
+    conn: &Connection,
+    owner_user_id: &UserId,
+) -> Result<Vec<AgentWithAccount>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT
+             a.id, a.pub_id, a.fingerprint, a.display_name, a.description, a.owner_user_id,
+             a.agent_type, a.agent_status, a.created_at, a.updated_at,
+             acct.id, acct.pub_id, acct.agent_id, acct.owner_user_id, acct.account_status,
+             acct.created_at, acct.updated_at
+         FROM agent_identities a
+         JOIN agent_accounts acct ON acct.agent_id = a.id
+         WHERE a.owner_user_id = ?1
+         ORDER BY a.created_at ASC, a.id ASC",
+    )?;
+    let rows = stmt.query_map(params![owner_user_id.to_string()], |row| {
+        Ok(AgentWithAccount {
+            agent: agent_from_row(row)?,
+            account: account_from_row_offset(row, 10)?,
+        })
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn account_from_row_offset(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<AgentAccount> {
+    use std::str::FromStr;
+
+    let id: String = row.get(offset)?;
+    let agent_id: String = row.get(offset + 2)?;
+    let owner_user_id: String = row.get(offset + 3)?;
+    let created_at: String = row.get(offset + 5)?;
+    let updated_at: String = row.get(offset + 6)?;
+
+    Ok(AgentAccount {
+        id: AgentAccountId::from_str(&id).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        pub_id: row.get(offset + 1)?,
+        agent_id: AgentId::from_str(&agent_id).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        owner_user_id: UserId::from_str(&owner_user_id)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        account_status: match row.get::<_, String>(offset + 4)?.as_str() {
+            "active" => AccountStatus::Active,
+            "suspended" => AccountStatus::Suspended,
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        },
+        created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?
+            .with_timezone(&Utc),
+        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?
+            .with_timezone(&Utc),
+    })
 }
 
 trait Queryable {

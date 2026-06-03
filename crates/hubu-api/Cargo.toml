@@ -14,6 +14,7 @@ hubu-core.workspace = true
 hubu-wallet.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 
 [[bin]]
 name = "hubu-server"
