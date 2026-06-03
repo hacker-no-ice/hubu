@@ -32,6 +32,7 @@ fn run() -> Result<()> {
         "init" => init(&base_url, args),
         "register-agent" => register_agent(&base_url, args),
         "add-policy" => add_policy(&base_url, args),
+        "budget" => budget(&base_url, args),
         "spend" => spend(&base_url, args),
         "ledger" => ledger(&base_url, args),
         "health" => health(&base_url),
@@ -111,6 +112,94 @@ fn add_policy(base_url: &str, mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn budget(base_url: &str, args: Vec<String>) -> Result<()> {
+    let Some(command) = args.first().cloned() else {
+        bail!("usage: hubu budget create|create-recurring|list");
+    };
+    let mut args = args;
+    args.remove(0);
+
+    match command.as_str() {
+        "create" => budget_create(base_url, args),
+        "create-recurring" => budget_create_recurring(base_url, args),
+        "list" => budget_list(base_url, args),
+        _ => bail!("unknown budget command `{command}`"),
+    }
+}
+
+fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    let amount = take_required(&mut args, "--amount")?;
+    let starting_at = take_value(&mut args, "--starting-at");
+    let ending_before = take_value(&mut args, "--ending-before");
+    ensure_no_args(args)?;
+
+    let response = post_json(
+        base_url,
+        "/budgets",
+        json!({
+            "amount_cents": amount_to_cents(&amount)?,
+            "starting_at": starting_at,
+            "ending_before": ending_before,
+        }),
+    )?;
+
+    println!("Budget created");
+    print_budget(
+        response
+            .get("budget")
+            .ok_or_else(|| anyhow!("server response missing `budget`"))?,
+    )?;
+    Ok(())
+}
+
+fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    let amount = take_required(&mut args, "--amount")?;
+    let recurrence = take_required(&mut args, "--recurrence")?;
+    let period_count = take_required(&mut args, "--period-count")?;
+    let starting_at = take_value(&mut args, "--starting-at");
+    ensure_no_args(args)?;
+
+    let response = post_json(
+        base_url,
+        "/budgets/series",
+        json!({
+            "amount_cents": amount_to_cents(&amount)?,
+            "starting_at": starting_at,
+            "recurrence": recurrence,
+            "period_count": period_count.parse::<usize>()?,
+        }),
+    )?;
+
+    println!("Budget series created");
+    for budget in response
+        .get("budgets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `budgets`"))?
+    {
+        print_budget(budget)?;
+    }
+    Ok(())
+}
+
+fn budget_list(base_url: &str, args: Vec<String>) -> Result<()> {
+    ensure_no_args(args)?;
+    let response = get_json(base_url, "/budgets")?;
+    let budgets = response
+        .get("budgets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `budgets`"))?;
+
+    if budgets.is_empty() {
+        println!("No budgets configured.");
+        return Ok(());
+    }
+
+    for budget in budgets {
+        print_budget(budget)?;
+    }
+    Ok(())
+}
+
 fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let agent_id = take_required(&mut args, "--agent-id")?;
     let amount = take_required(&mut args, "--amount")?;
@@ -160,6 +249,20 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         if let Some(rail_ref) = payment.get("rail_reference").and_then(Value::as_str) {
             println!("  rail_reference: {rail_ref}");
         }
+        if let Some(reason) = payment.get("failure_reason").and_then(Value::as_str) {
+            println!("  failure_reason: {reason}");
+        }
+    }
+
+    if let Some(hold) = response.get("budget_hold").filter(|hold| hold.is_object()) {
+        println!("Budget hold");
+        println!("  status: {}", string_at(hold, "status")?);
+        println!("  hold_id: {}", string_at(hold, "hold_id")?);
+        println!("  budget_id: {}", string_at(hold, "budget_id")?);
+        println!("  amount: {}", money_at(hold, "amount_cents")?);
+        println!("  consumed: {}", money_at(hold, "consumed_amount_cents")?);
+        println!("  frozen: {}", money_at(hold, "frozen_amount_cents")?);
+        println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
     }
     Ok(())
 }
@@ -207,6 +310,31 @@ fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
         }
         _ => bail!("usage: hubu ledger list"),
     }
+}
+
+fn print_budget(budget: &Value) -> Result<()> {
+    println!(
+        "  budget_id: {}  scope: {}  status: {}",
+        string_at(budget, "budget_id")?,
+        string_at(budget, "scope")?,
+        string_at(budget, "status")?
+    );
+    println!(
+        "    limit: {}  consumed: {}  frozen: {}  remaining: {}",
+        money_at(budget, "amount_limit_cents")?,
+        money_at(budget, "consumed_amount_cents")?,
+        money_at(budget, "frozen_amount_cents")?,
+        money_at(budget, "remaining_amount_cents")?
+    );
+    println!(
+        "    period: {} -> {}",
+        string_at(budget, "starting_at")?,
+        budget
+            .get("ending_before")
+            .and_then(Value::as_str)
+            .unwrap_or("open-ended")
+    );
+    Ok(())
 }
 
 fn health(base_url: &str) -> Result<()> {
@@ -336,6 +464,9 @@ Usage:
   hubu [--url http://127.0.0.1:8787] register-agent --name NAME --version VERSION
   hubu [--url http://127.0.0.1:8787] init [--display-name NAME] [--email EMAIL]
   hubu [--url http://127.0.0.1:8787] add-policy --agent-id ID --daily-limit AMOUNT
+  hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+  hubu [--url http://127.0.0.1:8787] budget list
   hubu [--url http://127.0.0.1:8787] spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
   hubu [--url http://127.0.0.1:8787] ledger list
   hubu [--url http://127.0.0.1:8787] health"

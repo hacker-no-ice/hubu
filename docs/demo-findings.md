@@ -14,9 +14,12 @@ here rather than folded into behavior changes.
 - Ledger records were writeable and transaction entries were readable by ID, but
   there was no public list operation for demo inspection. A read-only transaction
   listing method was added to support `hubu ledger list`.
+- The demo API now owns an in-process budget manager. Human-scoped budgets are
+  reserved before payment; successful payments settle the hold into consumed
+  balance, while failed payments release the hold back to available balance.
 - Registration, spend decisions, auth tokens, policies, and payments are all
-  process-local in this demo path. The SQLite ledger also uses an in-memory
-  database through the existing `SqliteLedger::in_memory` constructor.
+  process-local in this demo path. Budget state and the SQLite ledger are also
+  in memory.
 
 ## Improvement Opportunities
 

@@ -1,8 +1,8 @@
 # Hubu Local Demo
 
 This demo runs Hubu locally and exercises the onboarding, registration, policy,
-spend evaluation, mock payment orchestration, and ledger recording flow through
-the `hubu` CLI.
+budget creation, spend evaluation, mock payment orchestration, budget hold, and
+ledger recording flow through the `hubu` CLI.
 
 ## Setup
 
@@ -65,8 +65,9 @@ For an automated walkthrough with colorful progress output, run:
 ```
 
 The script builds the binaries, starts `hubu-server`, initializes a human user,
-registers an agent, adds a policy, submits allowed and over-limit spend
-requests, prints the ledger, and stops the server on exit.
+registers an agent, adds a policy, creates a recurring budget, submits allowed,
+failed-payment, over-limit, and denied spend requests, prints the budget balance
+and ledger, and stops the server on exit.
 
 To adjust pacing:
 
@@ -136,7 +137,32 @@ Policy added
   default_decision: needs_approval
 ```
 
-### 4. Submit an Allowed Spend Request
+### 4. Create a Recurring Budget
+
+```sh
+hubu budget create-recurring \
+  --amount 75 \
+  --recurrence monthly \
+  --period-count 2
+```
+
+Expected output:
+
+```txt
+Budget series created
+  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user  status: active
+    limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
+    period: 2026-06-03T17:19:20.123456+00:00 -> 2026-07-03T17:19:20.123456+00:00
+  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user  status: active
+    limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
+    period: 2026-07-03T17:19:20.123456+00:00 -> 2026-08-03T17:19:20.123456+00:00
+```
+
+Hubu enforces non-overlapping periods for a given budget scope and currency. The
+recurring budget call is atomic: if any generated period would overlap an
+existing budget, none of the periods are created.
+
+### 5. Submit an Allowed Spend Request
 
 ```sh
 hubu spend \
@@ -158,12 +184,56 @@ Payment
   owner_user: Alice Example (usr_6qqcj94w6pr5)
   ledger_transaction_id: 87b1cb7f-0fdf-40c8-b260-343cf4939be9
   rail_reference: fiat_mock_7da692a8-d5a7-4028-b5db-fc8b0de79d10:Purchase API credits
+Budget hold
+  status: settled
+  hold_id: e9ee93b7-dac7-4c23-946f-2a7bc2835c24
+  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c
+  amount: $20.00
+  consumed: $20.00
+  frozen: $0.00
+  remaining: $55.00
 ```
 
 The owner shown on the payment is the initialized human user. The agent spends
-under authority delegated by that user.
+under authority delegated by that user. Allowed spend reserves the active budget
+before payment; successful payment settles the hold into consumed balance.
 
-### 5. Submit an Over-Limit Spend Request
+### 6. Submit an Allowed Spend Whose Mock Payment Fails
+
+```sh
+hubu spend \
+  --agent-id agt_8x7k2m4q9v1c \
+  --amount 15 \
+  --reason "Test failed merchant payout" \
+  --merchant fail
+```
+
+Expected output:
+
+```txt
+Spend evaluated
+  decision: allow
+  decision_id: 9ed7d2a1-782f-45d3-9262-a69f7e610d7d
+  reason: amount is at or below the configured demo limit of 10000 cents
+Payment
+  status: failed
+  payment_id: 11f94960-2b30-429b-8d2f-0069eac928b5
+  owner_user: Alice Example (usr_6qqcj94w6pr5)
+  failure_reason: mock rail declined merchant
+Budget hold
+  status: released
+  hold_id: 098cbd0f-ff3d-4817-a741-1e58158f65df
+  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c
+  amount: $15.00
+  consumed: $20.00
+  frozen: $0.00
+  remaining: $55.00
+```
+
+Failed mock payments release the frozen amount back to the active budget. Only
+successful payments become ledger transactions.
+
+### 7. Submit an Over-Limit Spend Request
 
 ```sh
 hubu spend \
@@ -183,7 +253,7 @@ Spend evaluated
 The demo server only orchestrates a payment when the existing spend manager
 returns `allow`.
 
-### 6. Submit a Denied Spend Request
+### 8. Submit a Denied Spend Request
 
 ```sh
 hubu spend \
@@ -206,7 +276,27 @@ Spend evaluated
 The policy engine gives `deny` precedence over `allow`, so no payment is
 orchestrated.
 
-### 7. Inspect the Ledger
+### 9. Inspect the Budget Balance
+
+```sh
+hubu budget list
+```
+
+Expected output:
+
+```txt
+  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user  status: active
+    limit: $75.00  consumed: $20.00  frozen: $0.00  remaining: $55.00
+    period: 2026-06-03T17:19:20.123456+00:00 -> 2026-07-03T17:19:20.123456+00:00
+  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user  status: active
+    limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
+    period: 2026-07-03T17:19:20.123456+00:00 -> 2026-08-03T17:19:20.123456+00:00
+```
+
+The balance reflects settled spend only. Released holds do not reduce remaining
+budget.
+
+### 10. Inspect the Ledger
 
 ```sh
 hubu ledger list
@@ -229,6 +319,9 @@ shows the owning human user for both the transaction and its entries.
 hubu [--url http://127.0.0.1:8787] init [--display-name NAME] [--email EMAIL]
 hubu [--url http://127.0.0.1:8787] register-agent --name NAME --version VERSION
 hubu [--url http://127.0.0.1:8787] add-policy --agent-id ID --daily-limit AMOUNT
+hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+hubu [--url http://127.0.0.1:8787] budget list
 hubu [--url http://127.0.0.1:8787] spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
 hubu [--url http://127.0.0.1:8787] ledger list
 hubu [--url http://127.0.0.1:8787] health
@@ -241,7 +334,7 @@ after `cargo build`.
 ## Known Limitations
 
 - Server state is in memory. Restarting `hubu-server` clears registered agents,
-  policies, spend decisions, payments, and ledger records.
+  policies, spend decisions, budgets, payments, and ledger records.
 - `--daily-limit` is demo wording for an existing per-request amount policy
   rule. The current demo does not aggregate spend across a calendar day.
 - The server uses a minimal local HTTP adapter for demo use, not a production
