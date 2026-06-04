@@ -81,13 +81,18 @@ Then use the CLI from another terminal:
 
 ```sh
 hubu register human --display-name "Alice Example" --email alice@example.com
-hubu register agent --name codex-agent --version 1.0
+hubu registration guidance
+hubu register agent
 hubu init --policy policy.yaml
 hubu policy add --agent-id AGENT_ID --path policy.yaml
 hubu agent list
 hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
 hubu ledger list
 ```
+
+`hubu register agent` uses the guidance-provided vendor/workspace name template
+and the git short SHA as defaults. Pass `--name`, `--version`, or `--dry-run` to
+override or inspect the computed registration envelope.
 
 See [docs/demo.md](docs/demo.md) for the full walkthrough, expected output,
 CLI installation notes, demo script pacing options, and known limitations.
@@ -113,6 +118,9 @@ rule format, validation behavior, and examples.
 
 ## Documentation
 
+- [docs/agent-registration-protocol.md](docs/agent-registration-protocol.md):
+  v1 registration envelope, fingerprint fields, server validation, and
+  low-friction human review flow
 - [docs/demo.md](docs/demo.md): local server and CLI demo walkthrough
 - [docs/demo-findings.md](docs/demo-findings.md): findings and improvement
   opportunities from the demo implementation

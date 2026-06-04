@@ -1,6 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env,
+    fmt::Write as _,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
@@ -14,7 +15,7 @@ use hubu_common::{
     models::identity::{
         AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
     },
-    models::UserContext,
+    models::{User, UserContext},
     money::Currency,
     time::TimePeriod,
 };
@@ -42,6 +43,7 @@ use hubu_wallet::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
 
@@ -169,10 +171,41 @@ impl SpendAuthorizationValidator for SharedSpendAuthorizer {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RegisterAgentHttpRequest {
+const REGISTRATION_PROTOCOL_VERSION: &str = "hubu-agent-registration-v1";
+const FINGERPRINT_PREFIX: &str = "sha256:";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum RegisterAgentHttpRequest {
+    Envelope(RegistrationEnvelope),
+    Simple(SimpleRegisterAgentHttpRequest),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SimpleRegisterAgentHttpRequest {
     name: String,
     version: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RegistrationEnvelope {
+    protocol_version: String,
+    identity: RegistrationPayloadWithFingerprint,
+    version: RegistrationPayloadWithFingerprint,
+    review: Option<RegistrationReview>,
+    signature: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RegistrationPayloadWithFingerprint {
+    payload: Value,
+    fingerprint: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RegistrationReview {
+    display_name: Option<String>,
+    description: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -183,6 +216,13 @@ struct RegisterAgentHttpResponse {
     version_id: String,
     account_id: String,
     session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CurrentUserHttpResponse {
+    user_id: String,
+    display_name: String,
+    email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,6 +403,9 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
 fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
+        ("GET", "/registration/guidance")
+        | ("GET", "/.well-known/hubu-agent-registration.json") => Ok(registration_guidance()),
+        ("GET", "/user") => current_user(state).map(to_json),
         ("POST", "/init") => init(request.body, state).map(to_json),
         ("POST", "/agents/register") => register_agent(request.body, state).map(to_json),
         ("GET", "/agents") => list_agents(state).map(to_json),
@@ -382,6 +425,82 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             body: json!({ "error": error.to_string() }),
         },
     }
+}
+
+fn registration_guidance() -> Value {
+    json!({
+        "protocol_version": "hubu-agent-registration-v1",
+        "fingerprint": {
+            "algorithm": "sha256",
+            "encoding": "hex",
+            "prefix": "sha256:",
+            "canonicalization": "canonical_json_v1"
+        },
+        "signature_policy": "not_supported",
+        "human_inputs": [
+            {
+                "name": "agent_name",
+                "required": true,
+                "prompt": "Agent name",
+                "default_strategy": "workspace_or_runtime_name"
+            },
+            {
+                "name": "version_label",
+                "required": true,
+                "prompt": "Version",
+                "default_strategy": "git_commit_or_dev"
+            }
+        ],
+        "client_filled": {
+            "agent_identity.vendor": "codex",
+            "agent_name.default_template": "{vendor}-{workspace}",
+            "owner": "active_hubu_user",
+            "agent_kind": "codex_agent",
+            "runtime.provider": "codex",
+            "runtime.environment": "development",
+            "hubu_client.name": "current_client_name",
+            "hubu_client.version": "current_client_version"
+        },
+        "identity_payload": {
+            "required": [
+                "protocol_version",
+                "owner",
+                "agent_name",
+                "agent_kind"
+            ],
+            "optional": [
+                "source_repository_url",
+                "package_ref",
+                "issuer",
+                "agent_public_key_id"
+            ]
+        },
+        "version_payload": {
+            "required": [
+                "protocol_version",
+                "identity_fingerprint",
+                "version_label",
+                "runtime",
+                "hubu_client"
+            ],
+            "optional": [
+                "code",
+                "model",
+                "tool_manifest_digest",
+                "permission_manifest_digest",
+                "config_digest"
+            ]
+        },
+        "review_fields": [
+            "agent_name",
+            "owner",
+            "agent_kind",
+            "version_label",
+            "runtime.provider",
+            "runtime.environment",
+            "code.repository_url"
+        ]
+    })
 }
 
 fn init(body: String, state: &ServerState) -> Result<InitHttpResponse> {
@@ -411,32 +530,25 @@ fn init(body: String, state: &ServerState) -> Result<InitHttpResponse> {
     })
 }
 
+fn current_user(state: &ServerState) -> Result<CurrentUserHttpResponse> {
+    let user = default_user(state)?;
+    Ok(CurrentUserHttpResponse {
+        user_id: user.pub_id,
+        display_name: user.display_name,
+        email: user.email,
+    })
+}
+
 fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttpResponse> {
     let request: RegisterAgentHttpRequest = serde_json::from_str(&body)?;
-    let user = default_user_context(state)?;
-    let registration_request = RegisterAgentRequest {
-        display_name: request.name.clone(),
-        description: Some("Registered through the Hubu demo CLI".to_string()),
-        owner_user_id: user.user_id.clone(),
-        agent_type: AgentType::AutonomousAgent,
-        identity_fingerprint: format!("demo:agent:{}", request.name),
-        version_fingerprint: format!("demo:agent:{}:{}", request.name, request.version),
-        code_ref: Some(CodeReference {
-            repository_url: None,
-            commit_sha: Some(request.version.clone()),
-        }),
-        model: Some(ModelIdentity {
-            provider: "demo".to_string(),
-            model: request.name.clone(),
-            version: Some(request.version),
-        }),
-        runtime: Some(RuntimeIdentity {
-            runtime_provider: "hubu-cli".to_string(),
-            environment: RuntimeEnvironment::Development,
-        }),
-        mcp_client_name: Some("hubu-cli".to_string()),
-        mcp_client_version: env!("CARGO_PKG_VERSION").to_string().into(),
+    let user = default_user(state)?;
+    let envelope = match request {
+        RegisterAgentHttpRequest::Envelope(envelope) => envelope,
+        RegisterAgentHttpRequest::Simple(request) => {
+            simple_registration_envelope(&request.name, &request.version, &user.pub_id)
+        }
     };
+    let registration_request = registration_request_from_envelope(envelope, &user)?;
 
     let response = state
         .registration
@@ -445,13 +557,305 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         .register_agent(registration_request)?;
 
     Ok(RegisterAgentHttpResponse {
-        user_id: default_user_pub_id(state)?,
+        user_id: user.pub_id,
         agent_id: response.agent.pub_id.clone(),
         agent_pub_id: response.agent.pub_id,
         version_id: response.version.pub_id,
         account_id: response.account.pub_id,
         session_id: response.session.pub_id,
     })
+}
+
+fn simple_registration_envelope(
+    agent_name: &str,
+    version_label: &str,
+    owner_pub_id: &str,
+) -> RegistrationEnvelope {
+    let identity_payload = json!({
+        "protocol_version": REGISTRATION_PROTOCOL_VERSION,
+        "owner": {
+            "type": "hubu_user",
+            "pub_id": owner_pub_id
+        },
+        "agent_name": agent_name,
+        "agent_kind": "codex_agent"
+    });
+    let identity_fingerprint = fingerprint_payload(&identity_payload);
+    let version_payload = json!({
+        "protocol_version": REGISTRATION_PROTOCOL_VERSION,
+        "identity_fingerprint": identity_fingerprint,
+        "version_label": version_label,
+        "runtime": {
+            "provider": "codex",
+            "environment": "development"
+        },
+        "hubu_client": {
+            "name": "hubu-cli",
+            "version": env!("CARGO_PKG_VERSION")
+        }
+    });
+    let version_fingerprint = fingerprint_payload(&version_payload);
+
+    RegistrationEnvelope {
+        protocol_version: REGISTRATION_PROTOCOL_VERSION.to_string(),
+        identity: RegistrationPayloadWithFingerprint {
+            payload: identity_payload,
+            fingerprint: identity_fingerprint,
+        },
+        version: RegistrationPayloadWithFingerprint {
+            payload: version_payload,
+            fingerprint: version_fingerprint,
+        },
+        review: Some(RegistrationReview {
+            display_name: Some(agent_name.to_string()),
+            description: Some("Registered through the Hubu demo CLI".to_string()),
+        }),
+        signature: None,
+    }
+}
+
+fn registration_request_from_envelope(
+    envelope: RegistrationEnvelope,
+    user: &User,
+) -> Result<RegisterAgentRequest> {
+    if envelope.protocol_version != REGISTRATION_PROTOCOL_VERSION {
+        return Err(anyhow!(
+            "unsupported registration protocol version `{}`",
+            envelope.protocol_version
+        ));
+    }
+    if envelope.signature.is_some() {
+        return Err(anyhow!("registration signatures are not supported yet"));
+    }
+
+    verify_payload_fingerprint("identity", &envelope.identity)?;
+    verify_payload_fingerprint("version", &envelope.version)?;
+    validate_required_registration_payloads(&envelope)?;
+
+    let identity_fingerprint = envelope.identity.fingerprint;
+    let version_fingerprint = envelope.version.fingerprint;
+    if string_field(&envelope.version.payload, "identity_fingerprint")? != identity_fingerprint {
+        return Err(anyhow!(
+            "version payload identity_fingerprint does not match identity fingerprint"
+        ));
+    }
+
+    let owner = envelope
+        .identity
+        .payload
+        .get("owner")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("identity payload missing owner object"))?;
+    if owner.get("type").and_then(Value::as_str) != Some("hubu_user") {
+        return Err(anyhow!("identity payload owner.type must be `hubu_user`"));
+    }
+    if owner.get("pub_id").and_then(Value::as_str) != Some(user.pub_id.as_str()) {
+        return Err(anyhow!(
+            "identity payload owner.pub_id does not match active Hubu user"
+        ));
+    }
+
+    let agent_name = string_field(&envelope.identity.payload, "agent_name")?;
+    let agent_kind = string_field(&envelope.identity.payload, "agent_kind")?;
+    let agent_type = match agent_kind.as_str() {
+        "codex_agent" => AgentType::AutonomousAgent,
+        other => return Err(anyhow!("unsupported agent_kind `{other}`")),
+    };
+    let version_label = string_field(&envelope.version.payload, "version_label")?;
+
+    let review = envelope.review;
+    let display_name = review
+        .as_ref()
+        .and_then(|review| review.display_name.clone())
+        .unwrap_or_else(|| agent_name.clone());
+    let description = review
+        .and_then(|review| review.description)
+        .or_else(|| Some("Registered through the Hubu registration protocol".to_string()));
+
+    Ok(RegisterAgentRequest {
+        display_name,
+        description,
+        owner_user_id: user.id.clone(),
+        agent_type,
+        identity_fingerprint,
+        version_fingerprint,
+        code_ref: code_reference_from_payload(&envelope.version.payload),
+        model: model_identity_from_payload(&envelope.version.payload),
+        runtime: runtime_identity_from_payload(&envelope.version.payload)?,
+        mcp_client_name: nested_string_field(&envelope.version.payload, "hubu_client", "name"),
+        mcp_client_version: nested_string_field(
+            &envelope.version.payload,
+            "hubu_client",
+            "version",
+        )
+        .or(Some(version_label)),
+    })
+}
+
+fn validate_required_registration_payloads(envelope: &RegistrationEnvelope) -> Result<()> {
+    require_payload_protocol_version("identity", &envelope.identity.payload)?;
+    require_payload_protocol_version("version", &envelope.version.payload)?;
+    require_object_field("identity", &envelope.identity.payload, "owner")?;
+    string_field(&envelope.identity.payload, "agent_name")?;
+    string_field(&envelope.identity.payload, "agent_kind")?;
+    string_field(&envelope.version.payload, "identity_fingerprint")?;
+    string_field(&envelope.version.payload, "version_label")?;
+    let runtime = require_object_field("version", &envelope.version.payload, "runtime")?;
+    require_nested_string_field("version", runtime, "runtime", "provider")?;
+    require_nested_string_field("version", runtime, "runtime", "environment")?;
+    let hubu_client = require_object_field("version", &envelope.version.payload, "hubu_client")?;
+    require_nested_string_field("version", hubu_client, "hubu_client", "name")?;
+    require_nested_string_field("version", hubu_client, "hubu_client", "version")?;
+    Ok(())
+}
+
+fn require_payload_protocol_version(label: &str, payload: &Value) -> Result<()> {
+    let protocol_version = string_field(payload, "protocol_version")?;
+    if protocol_version != REGISTRATION_PROTOCOL_VERSION {
+        return Err(anyhow!(
+            "{label} payload protocol_version must be `{REGISTRATION_PROTOCOL_VERSION}`"
+        ));
+    }
+    Ok(())
+}
+
+fn require_object_field<'a>(
+    label: &str,
+    payload: &'a Value,
+    field: &str,
+) -> Result<&'a serde_json::Map<String, Value>> {
+    payload
+        .get(field)
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("{label} payload missing object field `{field}`"))
+}
+
+fn require_nested_string_field(
+    label: &str,
+    object: &serde_json::Map<String, Value>,
+    object_name: &str,
+    field: &str,
+) -> Result<String> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("{label} payload missing string field `{object_name}.{field}`"))
+}
+
+fn verify_payload_fingerprint(
+    label: &str,
+    payload: &RegistrationPayloadWithFingerprint,
+) -> Result<()> {
+    let expected = fingerprint_payload(&payload.payload);
+    if payload.fingerprint != expected {
+        return Err(anyhow!(
+            "{label} fingerprint mismatch: expected {expected}, got {}",
+            payload.fingerprint
+        ));
+    }
+    Ok(())
+}
+
+fn string_field(payload: &Value, field: &str) -> Result<String> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("payload missing string field `{field}`"))
+}
+
+fn nested_string_field(payload: &Value, object: &str, field: &str) -> Option<String> {
+    payload
+        .get(object)
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(field))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn code_reference_from_payload(payload: &Value) -> Option<CodeReference> {
+    let code = payload.get("code")?.as_object()?;
+    Some(CodeReference {
+        repository_url: code
+            .get("repository_url")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        commit_sha: code
+            .get("commit_sha")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn model_identity_from_payload(payload: &Value) -> Option<ModelIdentity> {
+    let model = payload.get("model")?.as_object()?;
+    Some(ModelIdentity {
+        provider: model.get("provider")?.as_str()?.to_string(),
+        model: model.get("model")?.as_str()?.to_string(),
+        version: model
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn runtime_identity_from_payload(payload: &Value) -> Result<Option<RuntimeIdentity>> {
+    let Some(runtime) = payload.get("runtime").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let runtime_provider = runtime
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("version payload runtime.provider must be a string"))?
+        .to_string();
+    let environment = match runtime
+        .get("environment")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("version payload runtime.environment must be a string"))?
+    {
+        "production" => RuntimeEnvironment::Production,
+        "staging" => RuntimeEnvironment::Staging,
+        "development" => RuntimeEnvironment::Development,
+        other => return Err(anyhow!("unsupported runtime.environment `{other}`")),
+    };
+
+    Ok(Some(RuntimeIdentity {
+        runtime_provider,
+        environment,
+    }))
+}
+
+fn fingerprint_payload(payload: &Value) -> String {
+    let canonical = canonical_json(payload);
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("{FINGERPRINT_PREFIX}{}", hex_encode(&digest))
+}
+
+fn canonical_json(value: &Value) -> String {
+    serde_json::to_string(&canonical_value(value)).expect("canonical JSON should serialize")
+}
+
+fn canonical_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(canonical_value).collect()),
+        Value::Object(object) => {
+            let sorted = object
+                .iter()
+                .map(|(key, value)| (key.clone(), canonical_value(value)))
+                .collect::<BTreeMap<_, _>>();
+            Value::Object(sorted.into_iter().collect())
+        }
+        _ => value.clone(),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to string should not fail");
+    }
+    encoded
 }
 
 fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse> {
@@ -894,12 +1298,12 @@ fn default_user_context(state: &ServerState) -> Result<UserContext> {
     Ok(users.default_user_context()?)
 }
 
-fn default_user_pub_id(state: &ServerState) -> Result<String> {
+fn default_user(state: &ServerState) -> Result<User> {
     let mut users = state
         .users
         .lock()
         .map_err(|_| anyhow!("user manager lock poisoned"))?;
-    Ok(users.ensure_default_user()?.pub_id)
+    Ok(users.ensure_default_user()?)
 }
 
 fn owner_metadata_for_user_id(user_id: &UserId, state: &ServerState) -> Result<OwnerHttpMetadata> {
@@ -1043,6 +1447,224 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_guidance_is_available_for_agents() {
+        let path = std::env::temp_dir().join(format!("hubu-api-guidance-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+
+        for path in [
+            "/registration/guidance",
+            "/.well-known/hubu-agent-registration.json",
+        ] {
+            let response = route(
+                HttpRequest {
+                    method: "GET".to_string(),
+                    path: path.to_string(),
+                    body: String::new(),
+                },
+                &state,
+            );
+
+            assert_eq!(response.status, 200);
+            assert_eq!(
+                response.body["protocol_version"],
+                "hubu-agent-registration-v1"
+            );
+            assert_eq!(response.body["fingerprint"]["algorithm"], "sha256");
+            assert_eq!(response.body["signature_policy"], "not_supported");
+            assert!(response.body["human_inputs"]
+                .as_array()
+                .expect("human_inputs should be an array")
+                .iter()
+                .any(|field| field["name"] == "agent_name"));
+            assert!(response.body["identity_payload"]["required"]
+                .as_array()
+                .expect("identity required fields should be an array")
+                .iter()
+                .any(|field| field == "owner"));
+            assert!(response.body["version_payload"]["required"]
+                .as_array()
+                .expect("version required fields should be an array")
+                .iter()
+                .any(|field| field == "identity_fingerprint"));
+        }
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn registration_envelope_registers_agent() {
+        let path = std::env::temp_dir().join(format!("hubu-api-envelope-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create user");
+        let envelope = simple_registration_envelope("protocol-agent", "dev", &user.user_id);
+
+        let agent = register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect("protocol envelope should register");
+
+        assert!(agent.agent_id.starts_with("agt_"));
+        assert_eq!(agent.user_id, user.user_id);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn registration_envelope_rejects_tampered_identity_payload() {
+        let path = std::env::temp_dir().join(format!("hubu-api-identity-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create user");
+        let mut envelope = simple_registration_envelope("protocol-agent", "dev", &user.user_id);
+        envelope.identity.payload["agent_name"] = json!("different-agent");
+
+        let error = register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect_err("tampered identity payload should fail");
+
+        assert!(error.to_string().contains("identity fingerprint mismatch"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn registration_envelope_rejects_tampered_version_payload() {
+        let path = std::env::temp_dir().join(format!("hubu-api-version-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create user");
+        let mut envelope = simple_registration_envelope("protocol-agent", "dev", &user.user_id);
+        envelope.version.payload["version_label"] = json!("v2");
+
+        let error = register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect_err("tampered version payload should fail");
+
+        assert!(error.to_string().contains("version fingerprint mismatch"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn registration_envelope_rejects_missing_required_runtime() {
+        let path = std::env::temp_dir().join(format!("hubu-api-runtime-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create user");
+        let mut envelope = simple_registration_envelope("protocol-agent", "dev", &user.user_id);
+        envelope
+            .version
+            .payload
+            .as_object_mut()
+            .expect("version payload should be an object")
+            .remove("runtime");
+        envelope.version.fingerprint = fingerprint_payload(&envelope.version.payload);
+
+        let error = register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect_err("missing runtime should fail");
+
+        assert!(error
+            .to_string()
+            .contains("version payload missing object field `runtime`"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn registration_envelope_rejects_missing_required_hubu_client() {
+        let path = std::env::temp_dir().join(format!("hubu-api-client-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create user");
+        let mut envelope = simple_registration_envelope("protocol-agent", "dev", &user.user_id);
+        envelope
+            .version
+            .payload
+            .as_object_mut()
+            .expect("version payload should be an object")
+            .remove("hubu_client");
+        envelope.version.fingerprint = fingerprint_payload(&envelope.version.payload);
+
+        let error = register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect_err("missing hubu_client should fail");
+
+        assert!(error
+            .to_string()
+            .contains("version payload missing object field `hubu_client`"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn registration_envelope_rejects_owner_mismatch() {
+        let path = std::env::temp_dir().join(format!("hubu-api-owner-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create user");
+        let envelope = simple_registration_envelope("protocol-agent", "dev", "usr_wrongowner");
+
+        let error = register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect_err("owner mismatch should fail");
+
+        assert!(error
+            .to_string()
+            .contains("owner.pub_id does not match active Hubu user"));
+        std::fs::remove_file(path).ok();
+    }
 
     #[test]
     fn init_user_is_shown_on_payment_and_ledger_records() {

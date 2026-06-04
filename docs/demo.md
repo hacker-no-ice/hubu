@@ -341,7 +341,8 @@ shows the owning human user for both the transaction and its entries.
 ```sh
 hubu [--url http://127.0.0.1:8787] init [--policy FILE] [--force]
 hubu [--url http://127.0.0.1:8787] register human [--display-name NAME] [--email EMAIL]
-hubu [--url http://127.0.0.1:8787] register agent --name NAME --version VERSION
+hubu [--url http://127.0.0.1:8787] registration guidance
+hubu [--url http://127.0.0.1:8787] register agent [--name NAME] [--version VERSION] [--dry-run]
 hubu [--url http://127.0.0.1:8787] policy add --agent-id ID --path FILE
 hubu [--url http://127.0.0.1:8787] agent list
 hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
