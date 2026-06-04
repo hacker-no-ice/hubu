@@ -289,7 +289,9 @@ fn run_benchmark(client: &HubuClient, scenario: &Scenario, config: &Config) -> R
 
     let budgets = client.get("/budgets")?;
     let ledger = client.get("/ledger")?;
-    Ok(BenchReport::new(results, elapsed, config, budgets, ledger))
+    Ok(BenchReport::new(
+        results, elapsed, config, scenario, budgets, ledger,
+    ))
 }
 
 fn submit_spend(
@@ -405,6 +407,7 @@ impl BenchReport {
         results: Vec<RequestResult>,
         elapsed: Duration,
         config: &Config,
+        scenario: &Scenario,
         budgets: Value,
         ledger: Value,
     ) -> Self {
@@ -444,8 +447,9 @@ impl BenchReport {
             .and_then(Value::as_array)
             .map(Vec::len)
             .unwrap_or_default();
+        let budget_totals = budget_totals(&budgets, &scenario.budget_id);
         let (budget_consumed_cents, budget_frozen_cents, budget_remaining_cents) =
-            budget_totals(&budgets);
+            budget_totals.unwrap_or_default();
 
         let mut correctness_notes = Vec::new();
         let expected_total = config.planned_requests() as usize;
@@ -482,6 +486,12 @@ impl BenchReport {
         if ledger_transactions != payments_succeeded {
             correctness_notes.push(format!(
                 "ledger transaction count {ledger_transactions} did not match successful payments {payments_succeeded}"
+            ));
+        }
+        if budget_totals.is_none() {
+            correctness_notes.push(format!(
+                "created budget {} was not found in the budget list",
+                scenario.budget_id
             ));
         }
         let expected_consumed = payments_succeeded as i64 * config.amount_cents;
@@ -624,11 +634,15 @@ fn count_hold_status(results: &[RequestResult], status: &str) -> usize {
         .count()
 }
 
-fn budget_totals(value: &Value) -> (i64, i64, i64) {
+fn budget_totals(value: &Value, budget_id: &str) -> Option<(i64, i64, i64)> {
     value
         .get("budgets")
         .and_then(Value::as_array)
-        .and_then(|budgets| budgets.first())
+        .and_then(|budgets| {
+            budgets
+                .iter()
+                .find(|budget| budget.get("budget_id").and_then(Value::as_str) == Some(budget_id))
+        })
         .map(|budget| {
             (
                 integer_at_or_zero(budget, "consumed_amount_cents"),
@@ -636,7 +650,6 @@ fn budget_totals(value: &Value) -> (i64, i64, i64) {
                 integer_at_or_zero(budget, "remaining_amount_cents"),
             )
         })
-        .unwrap_or_default()
 }
 
 fn integer_at_or_zero(value: &Value, key: &str) -> i64 {
@@ -824,5 +837,51 @@ impl fmt::Display for HelpText {
         )?;
         writeln!(f, "  -h, --help                   print help")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_totals_selects_created_budget_by_id() {
+        let budgets = json!({
+            "budgets": [
+                {
+                    "budget_id": "older-budget",
+                    "consumed_amount_cents": 999,
+                    "frozen_amount_cents": 10,
+                    "remaining_amount_cents": 1,
+                },
+                {
+                    "budget_id": "created-budget",
+                    "consumed_amount_cents": 8000,
+                    "frozen_amount_cents": 0,
+                    "remaining_amount_cents": 8000,
+                }
+            ]
+        });
+
+        assert_eq!(
+            budget_totals(&budgets, "created-budget"),
+            Some((8000, 0, 8000))
+        );
+    }
+
+    #[test]
+    fn budget_totals_returns_none_when_created_budget_is_missing() {
+        let budgets = json!({
+            "budgets": [
+                {
+                    "budget_id": "other-budget",
+                    "consumed_amount_cents": 999,
+                    "frozen_amount_cents": 10,
+                    "remaining_amount_cents": 1,
+                }
+            ]
+        });
+
+        assert_eq!(budget_totals(&budgets, "created-budget"), None);
     }
 }
