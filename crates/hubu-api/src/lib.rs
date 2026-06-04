@@ -630,6 +630,7 @@ fn registration_request_from_envelope(
 
     verify_payload_fingerprint("identity", &envelope.identity)?;
     verify_payload_fingerprint("version", &envelope.version)?;
+    validate_required_registration_payloads(&envelope)?;
 
     let identity_fingerprint = envelope.identity.fingerprint;
     let version_fingerprint = envelope.version.fingerprint;
@@ -689,6 +690,57 @@ fn registration_request_from_envelope(
         )
         .or(Some(version_label)),
     })
+}
+
+fn validate_required_registration_payloads(envelope: &RegistrationEnvelope) -> Result<()> {
+    require_payload_protocol_version("identity", &envelope.identity.payload)?;
+    require_payload_protocol_version("version", &envelope.version.payload)?;
+    require_object_field("identity", &envelope.identity.payload, "owner")?;
+    string_field(&envelope.identity.payload, "agent_name")?;
+    string_field(&envelope.identity.payload, "agent_kind")?;
+    string_field(&envelope.version.payload, "identity_fingerprint")?;
+    string_field(&envelope.version.payload, "version_label")?;
+    let runtime = require_object_field("version", &envelope.version.payload, "runtime")?;
+    require_nested_string_field("version", runtime, "runtime", "provider")?;
+    require_nested_string_field("version", runtime, "runtime", "environment")?;
+    let hubu_client = require_object_field("version", &envelope.version.payload, "hubu_client")?;
+    require_nested_string_field("version", hubu_client, "hubu_client", "name")?;
+    require_nested_string_field("version", hubu_client, "hubu_client", "version")?;
+    Ok(())
+}
+
+fn require_payload_protocol_version(label: &str, payload: &Value) -> Result<()> {
+    let protocol_version = string_field(payload, "protocol_version")?;
+    if protocol_version != REGISTRATION_PROTOCOL_VERSION {
+        return Err(anyhow!(
+            "{label} payload protocol_version must be `{REGISTRATION_PROTOCOL_VERSION}`"
+        ));
+    }
+    Ok(())
+}
+
+fn require_object_field<'a>(
+    label: &str,
+    payload: &'a Value,
+    field: &str,
+) -> Result<&'a serde_json::Map<String, Value>> {
+    payload
+        .get(field)
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("{label} payload missing object field `{field}`"))
+}
+
+fn require_nested_string_field(
+    label: &str,
+    object: &serde_json::Map<String, Value>,
+    object_name: &str,
+    field: &str,
+) -> Result<String> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("{label} payload missing string field `{object_name}.{field}`"))
 }
 
 fn verify_payload_fingerprint(
@@ -1516,6 +1568,74 @@ mod tests {
         .expect_err("tampered version payload should fail");
 
         assert!(error.to_string().contains("version fingerprint mismatch"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn registration_envelope_rejects_missing_required_runtime() {
+        let path = std::env::temp_dir().join(format!("hubu-api-runtime-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create user");
+        let mut envelope = simple_registration_envelope("protocol-agent", "dev", &user.user_id);
+        envelope
+            .version
+            .payload
+            .as_object_mut()
+            .expect("version payload should be an object")
+            .remove("runtime");
+        envelope.version.fingerprint = fingerprint_payload(&envelope.version.payload);
+
+        let error = register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect_err("missing runtime should fail");
+
+        assert!(error
+            .to_string()
+            .contains("version payload missing object field `runtime`"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn registration_envelope_rejects_missing_required_hubu_client() {
+        let path = std::env::temp_dir().join(format!("hubu-api-client-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create user");
+        let mut envelope = simple_registration_envelope("protocol-agent", "dev", &user.user_id);
+        envelope
+            .version
+            .payload
+            .as_object_mut()
+            .expect("version payload should be an object")
+            .remove("hubu_client");
+        envelope.version.fingerprint = fingerprint_payload(&envelope.version.payload);
+
+        let error = register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect_err("missing hubu_client should fail");
+
+        assert!(error
+            .to_string()
+            .contains("version payload missing object field `hubu_client`"));
         std::fs::remove_file(path).ok();
     }
 
