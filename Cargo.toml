@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/hubu-api",
+    "crates/hubu-bench",
     "crates/hubu-cli",
     "crates/hubu-common",
     "crates/hubu-core",
