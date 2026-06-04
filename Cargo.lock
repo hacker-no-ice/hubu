@@ -257,6 +257,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hubu-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
 name = "hubu-cli"
 version = "0.1.0"
 dependencies = [

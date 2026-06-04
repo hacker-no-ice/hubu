@@ -40,6 +40,7 @@ CLI.
 - `hubu-mcp`: MCP server adapter layer
 - `hubu-api`: local demo HTTP API and `hubu-server` binary
 - `hubu-cli`: demo-friendly `hubu` CLI binary
+- `hubu-bench`: local benchmark tool for spend approval throughput and correctness
 
 ## Quick Start
 
@@ -62,6 +63,18 @@ Run the automated local demo:
 The demo starts Hubu locally, registers an agent, adds a policy, creates a
 recurring budget, submits allowed, failed-payment, approval-required, and denied
 spend requests, then prints the resulting budget balance and ledger.
+
+Run the conservative local benchmark:
+
+```sh
+./scripts/benchmark-local.sh
+```
+
+The benchmark starts an isolated local server, simulates multiple agents owned
+by one user submitting paced spend requests, samples server CPU/RSS, and writes
+a report under `target/hubu-bench/`. See
+[docs/benchmarking.md](docs/benchmarking.md) for options and the current MVP
+results.
 
 ## CLI Demo
 
@@ -124,6 +137,8 @@ rule format, validation behavior, and examples.
 - [docs/demo.md](docs/demo.md): local server and CLI demo walkthrough
 - [docs/demo-findings.md](docs/demo-findings.md): findings and improvement
   opportunities from the demo implementation
+- [docs/benchmarking.md](docs/benchmarking.md): local spend benchmark usage and
+  the latest MVP performance, scalability, and reliability report
 - [docs/registration-flow.md](docs/registration-flow.md): agent registration
   model and flow
 - [docs/policy-engine.md](docs/policy-engine.md): policy rule format and
