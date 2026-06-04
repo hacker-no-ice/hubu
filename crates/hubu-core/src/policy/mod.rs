@@ -1,6 +1,6 @@
 //! Deterministic spending policy evaluation.
 //!
-//! The policy engine evaluates a structured [`SpendRequest`] against a
+//! The policy engine evaluates a structured [`crate::spend::SpendRequest`] against a
 //! human-authored [`Policy`] and returns an auditable [`Evaluation`].
 //!
 //! Evaluation is intentionally boring:
