@@ -7,6 +7,10 @@ Registration turns an MCP client connection into four records:
 - `AgentAccount`: the spending account for the agent.
 - `AgentSession`: the current connection/session.
 
+See [Agent Registration Protocol](agent-registration-protocol.md) for the v1
+client/server protocol, fingerprint payloads, canonicalization rules, and
+low-friction human review flow.
+
 The prototype keeps all records in memory with `HashMap` indexes. The shape is
 intended to move cleanly to storage later.
 

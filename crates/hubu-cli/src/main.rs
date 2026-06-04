@@ -1,14 +1,20 @@
 use std::{
-    env, fs,
+    collections::BTreeMap,
+    env,
+    fmt::Write as _,
+    fs,
     io::{Read, Write},
     net::{Shutdown, TcpStream},
     path::Path,
+    process::Command,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
+const FINGERPRINT_PREFIX: &str = "sha256:";
 
 fn main() {
     if let Err(error) = run() {
@@ -32,6 +38,7 @@ fn run() -> Result<()> {
     match command.as_str() {
         "init" => init(args),
         "register" => register(&base_url, args),
+        "registration" => registration(&base_url, args),
         "policy" => policy(&base_url, args),
         "agent" => agent(&base_url, args),
         "budget" => budget(&base_url, args),
@@ -69,6 +76,27 @@ fn init(mut args: Vec<String>) -> Result<()> {
     println!(
         "  next: edit the file, then run hubu policy add --agent-id AGENT_ID --path {policy_path}"
     );
+    Ok(())
+}
+
+fn registration(base_url: &str, args: Vec<String>) -> Result<()> {
+    match args.as_slice() {
+        [] => {
+            print_registration_help();
+            Ok(())
+        }
+        [command] if command == "help" || command == "-h" || command == "--help" => {
+            print_registration_help();
+            Ok(())
+        }
+        [command] if command == "guidance" => registration_guidance(base_url),
+        _ => bail!("usage: hubu registration guidance"),
+    }
+}
+
+fn registration_guidance(base_url: &str) -> Result<()> {
+    let response = get_json(base_url, "/registration/guidance")?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
 
@@ -123,18 +151,19 @@ fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
-    let name = take_required(&mut args, "--name")?;
-    let version = take_required(&mut args, "--version")?;
+    let dry_run = take_flag(&mut args, "--dry-run");
+    let name = take_value(&mut args, "--name");
+    let version = take_value(&mut args, "--version").unwrap_or_else(default_version_label);
     ensure_no_args(args)?;
 
-    let response = post_json(
-        base_url,
-        "/agents/register",
-        json!({
-            "name": name,
-            "version": version
-        }),
-    )?;
+    let prepared = build_registration_envelope(base_url, name, &version)?;
+    if dry_run {
+        println!("{}", serde_json::to_string_pretty(&prepared.envelope)?);
+        return Ok(());
+    }
+
+    print_registration_review(&prepared);
+    let response = post_json(base_url, "/agents/register", prepared.envelope)?;
 
     println!("Agent registered");
     println!("  agent_id: {}", string_at(&response, "agent_id")?);
@@ -142,6 +171,160 @@ fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
     println!("  account_id: {}", string_at(&response, "account_id")?);
     println!("  session_id: {}", string_at(&response, "session_id")?);
     Ok(())
+}
+
+struct PreparedRegistration {
+    envelope: Value,
+    review: Vec<(String, String)>,
+}
+
+fn build_registration_envelope(
+    base_url: &str,
+    name: Option<String>,
+    version: &str,
+) -> Result<PreparedRegistration> {
+    let guidance = get_json(base_url, "/registration/guidance")?;
+    let protocol_version = string_at(&guidance, "protocol_version")?;
+    let user = get_json(base_url, "/user")?;
+    let user_id = string_at(&user, "user_id")?;
+    let user_name = string_at(&user, "display_name").unwrap_or("Hubu User");
+    let client_filled = guidance
+        .get("client_filled")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("registration guidance missing `client_filled`"))?;
+    let agent_kind = client_filled
+        .get("agent_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("codex_agent");
+    let runtime_provider = client_filled
+        .get("runtime.provider")
+        .and_then(Value::as_str)
+        .unwrap_or("codex");
+    let runtime_environment = client_filled
+        .get("runtime.environment")
+        .and_then(Value::as_str)
+        .unwrap_or("development");
+    let name = name.unwrap_or_else(|| default_agent_name(client_filled));
+
+    let identity_payload = json!({
+        "protocol_version": protocol_version,
+        "owner": {
+            "type": "hubu_user",
+            "pub_id": user_id
+        },
+        "agent_name": name.as_str(),
+        "agent_kind": agent_kind
+    });
+    let identity_fingerprint = fingerprint_payload(&identity_payload);
+    let version_payload = json!({
+        "protocol_version": protocol_version,
+        "identity_fingerprint": identity_fingerprint,
+        "version_label": version,
+        "runtime": {
+            "provider": runtime_provider,
+            "environment": runtime_environment
+        },
+        "hubu_client": {
+            "name": "hubu-cli",
+            "version": env!("CARGO_PKG_VERSION")
+        }
+    });
+    let version_fingerprint = fingerprint_payload(&version_payload);
+
+    let envelope = json!({
+        "protocol_version": protocol_version,
+        "identity": {
+            "payload": identity_payload,
+            "fingerprint": identity_fingerprint
+        },
+        "version": {
+            "payload": version_payload,
+            "fingerprint": version_fingerprint
+        },
+        "review": {
+            "display_name": name.as_str(),
+            "description": "Registered through the Hubu CLI"
+        },
+        "signature": null
+    });
+    let review = vec![
+        ("agent_name".to_string(), name.clone()),
+        ("owner".to_string(), format!("{user_name} ({user_id})")),
+        ("agent_kind".to_string(), agent_kind.to_string()),
+        ("version_label".to_string(), version.to_string()),
+        ("runtime.provider".to_string(), runtime_provider.to_string()),
+        (
+            "runtime.environment".to_string(),
+            runtime_environment.to_string(),
+        ),
+        (
+            "identity_fingerprint".to_string(),
+            compact_fingerprint(&identity_fingerprint),
+        ),
+        (
+            "version_fingerprint".to_string(),
+            compact_fingerprint(&version_fingerprint),
+        ),
+    ];
+
+    Ok(PreparedRegistration { envelope, review })
+}
+
+fn print_registration_review(prepared: &PreparedRegistration) {
+    println!("Registration review");
+    for (label, value) in &prepared.review {
+        println!("  {label}: {value}");
+    }
+}
+
+fn compact_fingerprint(fingerprint: &str) -> String {
+    let Some((prefix, digest)) = fingerprint.split_once(':') else {
+        return fingerprint.to_string();
+    };
+    if digest.len() <= 16 {
+        fingerprint.to_string()
+    } else {
+        format!("{prefix}:{}...", &digest[..16])
+    }
+}
+
+fn default_agent_name(client_filled: &serde_json::Map<String, Value>) -> String {
+    let vendor = client_filled
+        .get("agent_identity.vendor")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            client_filled
+                .get("runtime.provider")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("agent");
+    let template = client_filled
+        .get("agent_name.default_template")
+        .and_then(Value::as_str)
+        .unwrap_or("{vendor}-{workspace}");
+    let workspace_name = env::current_dir()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "agent".to_string());
+    template
+        .replace("{vendor}", vendor)
+        .replace("{workspace}", &workspace_name)
+}
+
+fn default_version_label() -> String {
+    Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "dev".to_string())
 }
 
 fn policy(base_url: &str, args: Vec<String>) -> Result<()> {
@@ -536,6 +719,38 @@ fn post_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
     request_json(base_url, "POST", path, Some(body))
 }
 
+fn fingerprint_payload(payload: &Value) -> String {
+    let canonical = canonical_json(payload);
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("{FINGERPRINT_PREFIX}{}", hex_encode(&digest))
+}
+
+fn canonical_json(value: &Value) -> String {
+    serde_json::to_string(&canonical_value(value)).expect("canonical JSON should serialize")
+}
+
+fn canonical_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(canonical_value).collect()),
+        Value::Object(object) => {
+            let sorted = object
+                .iter()
+                .map(|(key, value)| (key.clone(), canonical_value(value)))
+                .collect::<BTreeMap<_, _>>();
+            Value::Object(sorted.into_iter().collect())
+        }
+        _ => value.clone(),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to string should not fail");
+    }
+    encoded
+}
+
 fn parse_base_url(base_url: &str) -> Result<(String, u16)> {
     let trimmed = base_url
         .strip_prefix("http://")
@@ -659,6 +874,8 @@ Usage:
 
 Commands:
   register   Register human users and agents
+  registration
+             Read agent registration protocol guidance
   policy     Manage spending policies
   init       Generate local Hubu starter files
   agent      Read registered agents
@@ -674,13 +891,22 @@ Run `hubu <command> --help` for command-specific help."
     );
 }
 
+fn print_registration_help() {
+    println!(
+        "Read agent registration protocol guidance
+
+Usage:
+  hubu registration guidance"
+    );
+}
+
 fn print_register_help() {
     println!(
         "Register human users and agents
 
 Usage:
   hubu register human [--display-name NAME] [--email EMAIL]
-  hubu register agent --name NAME --version VERSION"
+  hubu register agent [--name NAME] [--version VERSION] [--dry-run]"
     );
 }
 
@@ -698,7 +924,12 @@ fn print_register_agent_help() {
         "Register an agent for the active human user
 
 Usage:
-  hubu register agent --name NAME --version VERSION"
+  hubu register agent [--name NAME] [--version VERSION] [--dry-run]
+
+Options:
+  --name NAME      Agent name (default: guidance vendor/workspace template)
+  --version VALUE  Version label (default: current git short SHA, or dev)
+  --dry-run        Print the computed registration envelope without submitting it"
     );
 }
 

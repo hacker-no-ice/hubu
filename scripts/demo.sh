@@ -122,7 +122,7 @@ wait_for_server() {
       sed 's/^/  /' "${SERVER_LOG}" >&2 || true
       return 1
     fi
-    if hubu health >/dev/null 2>&1; then
+    if hubu health >/dev/null 2>&1 && kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.1
@@ -161,8 +161,12 @@ fi
 note "captured public user_id=${USER_ID}"
 pause_for_reading
 
+step "Read agent registration guidance"
+hubu registration guidance
+pause_for_reading
+
 step "Register an agent"
-REGISTER_OUTPUT="$(hubu register agent --name codex-agent --version 1.0)"
+REGISTER_OUTPUT="$(hubu register agent)"
 say "${REGISTER_OUTPUT}"
 AGENT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/^  agent_id:/ { print $2; exit }')"
 if [[ -z "${AGENT_ID}" ]]; then
