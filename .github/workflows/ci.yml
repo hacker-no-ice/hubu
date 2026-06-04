@@ -20,5 +20,8 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
+      - name: Run core integration flow
+        run: ./scripts/integration-core-flow.sh
+
       - name: Build docs
         run: cargo doc --workspace --no-deps --locked
