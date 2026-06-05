@@ -228,6 +228,27 @@ before payment; successful payment settles the hold into consumed balance.
 ### 6a. Authorize Spend Without Executing Payment
 
 ```sh
+hubu model-call image-guidance
+```
+
+Expected output:
+
+```txt
+Image proxy guidance
+  provider: hubu-demo
+  model: demo-image-v1
+  provider_api_key_configured: false
+  provider_adapter_supported: true
+Required spend
+  merchant: hubu-model-proxy
+  amount: $5.00
+  currency: usd
+Flow
+  authorize: hubu spend authorize
+  generate: hubu model-call image
+```
+
+```sh
 hubu budget create \
   --agent-id agt_8x7k2m4q9v1c \
   --amount 5

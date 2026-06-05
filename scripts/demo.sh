@@ -212,6 +212,10 @@ show_cli_output "${ALLOW_OUTPUT}"
 pause_for_reading
 
 step "Authorize a \$5 logo-generation budget"
+IMAGE_GUIDANCE_OUTPUT="$(hubu model-call image-guidance)"
+show_cli_output "${IMAGE_GUIDANCE_OUTPUT}"
+pause_for_reading
+
 LOGO_BUDGET_OUTPUT="$(hubu budget create \
   --agent-id "${AGENT_ID}" \
   --amount 5)"

@@ -48,6 +48,7 @@ Agents can call directly:
 - `hubu_registration_guidance`
 - `hubu_list_agents`
 - `hubu_list_budgets`
+- `hubu_image_proxy_guidance`
 - `hubu_list_ledger`
 - `hubu_authorize_spend`
 - `hubu_generate_image`
@@ -69,6 +70,11 @@ payment is executed and the MCP response includes:
 This first scaffold exposes the approval boundary but does not yet implement a
 durable approval queue or a follow-up endpoint that resumes payment after a
 human approves a `needs_approval` spend decision.
+
+`hubu_image_proxy_guidance` returns the configured image provider/model plus
+the exact spend merchant, amount, currency, and review fields an agent should
+use before calling `hubu_authorize_spend`. It intentionally returns only
+non-secret provider readiness booleans, never the provider endpoint or API key.
 
 `hubu_authorize_spend` uses the same policy and budget checks as
 `hubu_submit_spend`, but stops after issuing a spend authorization token and
@@ -121,6 +127,7 @@ structured provider error code plus HTTP status when available.
 | `hubu_create_budget` | `POST /budgets` | required |
 | `hubu_create_recurring_budget` | `POST /budgets/series` | required |
 | `hubu_authorize_spend` | `POST /spend/authorize` | conditional on policy result |
+| `hubu_image_proxy_guidance` | `GET /model-calls/image/guidance` | none |
 | `hubu_generate_image` | `POST /model-calls/image` | conditional on policy result |
 | `hubu_submit_spend` | `POST /spend` | conditional on policy result |
 | `hubu_list_agents` | `GET /agents` | none |

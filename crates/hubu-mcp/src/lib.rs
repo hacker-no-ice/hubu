@@ -208,6 +208,11 @@ fn tool_definitions() -> Vec<Value> {
             json_schema(json!({})),
         ),
         read_tool(
+            "hubu_image_proxy_guidance",
+            "Read the configured image proxy provider, model, price, and spend authorization guidance without exposing provider credentials.",
+            json_schema(json!({})),
+        ),
+        read_tool(
             "hubu_list_ledger",
             "List local ledger transactions.",
             json_schema(json!({})),
@@ -301,6 +306,7 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
         "hubu_generate_image" => post_json(base_url, "/model-calls/image", arguments)?,
         "hubu_list_agents" => get_json(base_url, "/agents")?,
         "hubu_list_budgets" => get_json(base_url, "/budgets")?,
+        "hubu_image_proxy_guidance" => get_json(base_url, "/model-calls/image/guidance")?,
         "hubu_list_ledger" => get_json(base_url, "/ledger")?,
         _ => bail!("unknown Hubu MCP tool `{name}`"),
     };
@@ -483,6 +489,19 @@ mod tests {
         assert_eq!(tool["annotations"]["x_hubu_human_approval"], "conditional");
         assert_eq!(tool["annotations"]["destructiveHint"], false);
         assert!(tool["inputSchema"]["properties"]["spend_auth_token_id"].is_object());
+    }
+
+    #[test]
+    fn image_proxy_guidance_tool_is_read_only() {
+        let tools = tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "hubu_image_proxy_guidance")
+            .expect("image proxy guidance tool should exist");
+
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["annotations"]["x_hubu_human_approval"], "none");
+        assert_eq!(tool["annotations"]["destructiveHint"], false);
     }
 
     #[test]

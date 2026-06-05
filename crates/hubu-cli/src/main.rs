@@ -675,6 +675,7 @@ fn model_call(base_url: &str, args: Vec<String>) -> Result<()> {
     rest.remove(0);
 
     match command.as_str() {
+        "image-guidance" => model_call_image_guidance(base_url),
         "image" => model_call_image(base_url, rest),
         "-h" | "--help" | "help" => {
             print_model_call_help();
@@ -682,6 +683,32 @@ fn model_call(base_url: &str, args: Vec<String>) -> Result<()> {
         }
         _ => bail!("unknown model-call command `{command}`"),
     }
+}
+
+fn model_call_image_guidance(base_url: &str) -> Result<()> {
+    let response = get_json(base_url, "/model-calls/image/guidance")?;
+    let required_spend = response
+        .get("required_spend")
+        .ok_or_else(|| anyhow!("server response missing `required_spend`"))?;
+    println!("Image proxy guidance");
+    println!("  provider: {}", string_at(&response, "provider")?);
+    println!("  model: {}", string_at(&response, "model")?);
+    println!(
+        "  provider_api_key_configured: {}",
+        bool_at(&response, "provider_api_key_configured")?
+    );
+    println!(
+        "  provider_adapter_supported: {}",
+        bool_at(&response, "provider_adapter_supported")?
+    );
+    println!("Required spend");
+    println!("  merchant: {}", string_at(required_spend, "merchant")?);
+    println!("  amount: {}", money_at(required_spend, "amount_cents")?);
+    println!("  currency: {}", string_at(required_spend, "currency")?);
+    println!("Flow");
+    println!("  authorize: hubu spend authorize");
+    println!("  generate: hubu model-call image");
+    Ok(())
 }
 
 fn model_call_image(base_url: &str, mut args: Vec<String>) -> Result<()> {
@@ -966,6 +993,13 @@ fn string_at<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow!("server response missing `{key}`"))
 }
 
+fn bool_at(value: &Value, key: &str) -> Result<bool> {
+    value
+        .get(key)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("server response missing `{key}`"))
+}
+
 fn money_at(value: &Value, key: &str) -> Result<String> {
     let cents = value
         .get(key)
@@ -1189,6 +1223,7 @@ fn print_model_call_help() {
         "Proxy model calls through Hubu
 
 Usage:
+  hubu model-call image-guidance
   hubu model-call image --spend-auth-token-id ID --prompt TEXT [--provider NAME] [--model NAME]"
     );
 }

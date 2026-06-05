@@ -1029,6 +1029,32 @@ struct GenerateImageHttpRequest {
 }
 
 #[derive(Debug, Serialize)]
+struct ImageProxyGuidanceHttpResponse {
+    provider: String,
+    model: String,
+    required_spend: ImageProxySpendGuidanceHttpResponse,
+    spend_authorization: ImageProxyToolGuidanceHttpResponse,
+    image_generation: ImageProxyToolGuidanceHttpResponse,
+    provider_api_key_configured: bool,
+    provider_adapter_supported: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ImageProxySpendGuidanceHttpResponse {
+    merchant: String,
+    amount_cents: i64,
+    currency: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ImageProxyToolGuidanceHttpResponse {
+    tool: String,
+    required_fields: Vec<String>,
+    optional_fields: Vec<String>,
+    review_fields: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct GenerateImageHttpResponse {
     provider: String,
     model: String,
@@ -1150,6 +1176,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("GET", "/budgets") => list_budgets(state).map(to_json),
         ("POST", "/spend/authorize") => authorize_spend(request.body, state).map(to_json),
         ("POST", "/spend") => spend(request.body, state).map(to_json),
+        ("GET", "/model-calls/image/guidance") => image_proxy_guidance(state).map(to_json),
         ("POST", "/model-calls/image") => generate_image(request.body, state).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
         _ => Err(anyhow!("no route for {} {}", request.method, request.path)),
@@ -2304,6 +2331,50 @@ fn evaluate_and_reserve_spend(
         token,
         reservation,
     }))
+}
+
+fn image_proxy_guidance(state: &ServerState) -> Result<ImageProxyGuidanceHttpResponse> {
+    Ok(ImageProxyGuidanceHttpResponse {
+        provider: state.image_provider.provider.clone(),
+        model: state.image_provider.model.clone(),
+        required_spend: ImageProxySpendGuidanceHttpResponse {
+            merchant: state.image_provider.merchant.clone(),
+            amount_cents: state.image_provider.price_cents,
+            currency: Currency::Usd.to_string(),
+        },
+        spend_authorization: ImageProxyToolGuidanceHttpResponse {
+            tool: "hubu_authorize_spend".to_string(),
+            required_fields: vec![
+                "agent_id".to_string(),
+                "amount_cents".to_string(),
+                "reason".to_string(),
+                "merchant".to_string(),
+                "budget_id".to_string(),
+            ],
+            optional_fields: vec!["account_id".to_string()],
+            review_fields: vec![
+                "agent_id".to_string(),
+                "budget_id".to_string(),
+                "amount_cents".to_string(),
+                "currency".to_string(),
+                "merchant".to_string(),
+                "reason".to_string(),
+            ],
+        },
+        image_generation: ImageProxyToolGuidanceHttpResponse {
+            tool: "hubu_generate_image".to_string(),
+            required_fields: vec!["spend_auth_token_id".to_string(), "prompt".to_string()],
+            optional_fields: vec!["provider".to_string(), "model".to_string()],
+            review_fields: vec![
+                "provider".to_string(),
+                "model".to_string(),
+                "prompt".to_string(),
+                "spend_auth_token_id".to_string(),
+            ],
+        },
+        provider_api_key_configured: state.image_provider.has_api_key(),
+        provider_adapter_supported: state.image_provider.adapter_kind.is_supported(),
+    })
 }
 
 fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttpResponse> {
@@ -3579,6 +3650,50 @@ mod tests {
         assert!(error
             .to_string()
             .contains("requested image provider/model is not configured in Hubu"));
+    }
+
+    #[test]
+    fn image_proxy_guidance_exposes_spend_requirements_without_api_key() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-image-guidance-{}.sqlite", UserId::new()));
+        let mut state =
+            ServerState::new_with_db_path(&path).expect("server state should initialize");
+        state.image_provider = ImageProviderConfig {
+            provider: "nano-banana".to_string(),
+            model: "logo-v1".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
+            api_key: Some("server-side-secret".to_string()),
+            endpoint: Some("https://vendor.example/v1/images".to_string()),
+            price_cents: 500,
+            timeout_ms: 30_000,
+            max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
+            output_dir: std::env::temp_dir(),
+            adapter_kind: ImageProviderAdapterKind::HttpJson,
+        };
+
+        let guidance = image_proxy_guidance(&state).expect("guidance should be available");
+        assert_eq!(guidance.provider, "nano-banana");
+        assert_eq!(guidance.model, "logo-v1");
+        assert_eq!(guidance.required_spend.merchant, "hubu-model-proxy");
+        assert_eq!(guidance.required_spend.amount_cents, 500);
+        assert_eq!(guidance.required_spend.currency, "usd");
+        assert!(guidance.provider_api_key_configured);
+        assert!(guidance.provider_adapter_supported);
+        assert!(guidance
+            .spend_authorization
+            .required_fields
+            .contains(&"amount_cents".to_string()));
+        assert!(guidance
+            .image_generation
+            .required_fields
+            .contains(&"spend_auth_token_id".to_string()));
+
+        let body = serde_json::to_string(&guidance).expect("guidance should serialize");
+        assert!(body.contains("\"provider_api_key_configured\":true"));
+        assert!(!body.contains("server-side-secret"));
+        assert!(!body.contains("vendor.example"));
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
