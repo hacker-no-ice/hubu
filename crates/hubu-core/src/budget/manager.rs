@@ -490,6 +490,15 @@ impl BudgetManager {
         self.budget_holds.get(hold_id).cloned()
     }
 
+    pub fn get_budget_hold_by_spend_decision(
+        &self,
+        spend_decision_id: &SpendDecisionId,
+    ) -> Option<BudgetHold> {
+        self.hold_by_spend_decision
+            .get(spend_decision_id)
+            .and_then(|hold_id| self.get_budget_hold(hold_id))
+    }
+
     fn create_budget_for_period(
         &mut self,
         scope: BudgetScope,

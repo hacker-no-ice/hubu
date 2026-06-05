@@ -13,7 +13,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use hubu_common::{
-    ids::{AgentId, BudgetId, SpendAuthTokenId, UserId},
+    ids::{AgentId, BudgetId, PaymentId, SpendAuthTokenId, UserId},
     models::account::{AccountStatus, AgentAccount},
     models::identity::{
         AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
@@ -24,9 +24,9 @@ use hubu_common::{
 };
 use hubu_core::{
     budget::{
-        BudgetManager, BudgetManagerError, BudgetRecurrence, BudgetScope, BudgetWithBalance,
-        CreateBudgetSeriesRequest, CreateSingleBudgetRequest, ReleaseBudgetResponse,
-        ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
+        BudgetHold, BudgetHoldStatus, BudgetManager, BudgetManagerError, BudgetRecurrence,
+        BudgetScope, BudgetWithBalance, CreateBudgetSeriesRequest, CreateSingleBudgetRequest,
+        ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyRepository, SpendRepository, SqliteGovernanceRepository,
@@ -460,6 +460,36 @@ struct SpendHttpResponse {
     payment: Option<PaymentHttpResponse>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ExecutorSpendHttpRequest {
+    spend_auth_token_id: String,
+    agent_id: Option<String>,
+    account_id: Option<String>,
+    amount_cents: i64,
+    merchant: Option<String>,
+    task_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutorSpendHttpResponse {
+    spend_auth_token_id: String,
+    decision_id: String,
+    account_id: String,
+    agent_id: String,
+    amount_cents: i64,
+    currency: String,
+    merchant: Option<String>,
+    task_id: Option<String>,
+    expires_at: String,
+    budget_hold: BudgetHoldHttpResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutorSpendSettlementHttpResponse {
+    settlement_id: String,
+    spend: ExecutorSpendHttpResponse,
+}
+
 #[derive(Debug, Serialize)]
 struct BudgetHoldHttpResponse {
     hold_id: String,
@@ -571,6 +601,18 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("POST", "/budgets/series") => create_budget_series(request.body, state).map(to_json),
         ("GET", "/budgets") => list_budgets(state).map(to_json),
         ("POST", "/spend/authorize") => authorize_spend(request.body, state).map(to_json),
+        ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
+            Ok(spend_executor_guidance())
+        }
+        ("POST", "/spend/executor/validate") => {
+            validate_executor_spend(request.body, state).map(to_json)
+        }
+        ("POST", "/spend/executor/settle") => {
+            settle_executor_spend(request.body, state).map(to_json)
+        }
+        ("POST", "/spend/executor/release") => {
+            release_executor_spend(request.body, state).map(to_json)
+        }
         ("POST", "/spend") => spend(request.body, state).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
         _ => Err(anyhow!("no route for {} {}", request.method, request.path)),
@@ -594,6 +636,74 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             }
         }
     }
+}
+
+fn spend_executor_guidance() -> Value {
+    json!({
+        "protocol_version": "hubu-spend-executor-v1",
+        "role_boundary": {
+            "hubu": [
+                "register agents and owners",
+                "evaluate policy",
+                "reserve budget holds",
+                "validate executor spend authorization",
+                "settle or release reserved budget"
+            ],
+            "executor": [
+                "hold vendor credentials outside Hubu",
+                "perform work such as model calls or API operations",
+                "call Hubu only for spend validation and settlement state"
+            ]
+        },
+        "executor_flow": [
+            "agent requests POST /spend/authorize with merchant and task scope for the executor",
+            "agent sends the spend_auth_token_id and matching scope to an executor",
+            "executor calls POST /spend/executor/validate before irreversible work",
+            "executor performs work with its own credentials",
+            "executor calls POST /spend/executor/settle after successful irreversible work or POST /spend/executor/release before work is performed"
+        ],
+        "routes": {
+            "guidance": [
+                "GET /spend/executor/guidance",
+                "GET /.well-known/hubu-spend-executor.json"
+            ],
+            "validate": "POST /spend/executor/validate",
+            "settle": "POST /spend/executor/settle",
+            "release": "POST /spend/executor/release"
+        },
+        "validate_request": {
+            "required": [
+                "spend_auth_token_id",
+                "amount_cents"
+            ],
+            "one_of": [
+                "agent_id",
+                "account_id"
+            ],
+            "optional": [
+                "merchant",
+                "task_id"
+            ],
+            "currency": "USD in v1"
+        },
+        "scope_rules": [
+            "amount_cents, merchant, task_id, and account/agent must match the original authorized spend",
+            "the spend auth token must be unexpired, unused, and unrevoked",
+            "the associated budget hold must still be frozen before executor work starts",
+            "Hubu does not accept vendor API keys or model/provider payloads in this protocol"
+        ],
+        "settlement_rules": [
+            "settle only after the executor has performed irreversible billable work",
+            "release only before irreversible billable work has occurred",
+            "settlement marks the spend auth token used and consumes the reserved budget hold",
+            "release returns the reserved amount to remaining budget and future validation rejects the non-frozen hold"
+        ],
+        "merchant_examples": [
+            "gongbu.image",
+            "gongbu.browser",
+            "example.executor"
+        ]
+    })
 }
 
 fn registration_guidance() -> Value {
@@ -1472,6 +1582,219 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     })
 }
 
+fn validate_executor_spend(body: String, state: &ServerState) -> Result<ExecutorSpendHttpResponse> {
+    let request: ExecutorSpendHttpRequest = serde_json::from_str(&body)?;
+    let validated = validate_executor_spend_request(request, state)?;
+    Ok(executor_spend_response(&validated))
+}
+
+fn settle_executor_spend(
+    body: String,
+    state: &ServerState,
+) -> Result<ExecutorSpendSettlementHttpResponse> {
+    let request: ExecutorSpendHttpRequest = serde_json::from_str(&body)?;
+    let validated = validate_executor_spend_request(request, state)?;
+    let settlement_id = PaymentId::new();
+
+    let used_token = {
+        let mut spend = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        spend.mark_auth_token_used(&validated.token_id, settlement_id.clone())?;
+        spend
+            .auth_token_record(&validated.token_id)
+            .ok_or_else(|| anyhow!("used spend auth token was not recorded"))?
+    };
+    state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .update_spend_auth_token(&used_token)?;
+
+    let settlement = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .settle_budget(&validated.hold.id)?;
+    state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .update_budget_hold(&settlement.hold, &settlement.balance)?;
+
+    log_event(
+        "info",
+        "executor_spend_settled",
+        json!({
+            "settlement_id": settlement_id.to_string(),
+            "spend_auth_token_id": validated.token_id.to_string(),
+            "decision_id": validated.validation.spend_decision_id.to_string(),
+            "hold_id": settlement.hold.id.to_string(),
+            "amount_cents": settlement.hold.amount_cents,
+            "merchant": validated.request.merchant.clone(),
+            "task_id": validated.request.task_id.clone(),
+        }),
+    );
+
+    Ok(ExecutorSpendSettlementHttpResponse {
+        settlement_id: settlement_id.to_string(),
+        spend: executor_spend_response_with_hold(&validated, settlement.hold, settlement.balance),
+    })
+}
+
+fn release_executor_spend(body: String, state: &ServerState) -> Result<ExecutorSpendHttpResponse> {
+    let request: ExecutorSpendHttpRequest = serde_json::from_str(&body)?;
+    let validated = validate_executor_spend_request(request, state)?;
+
+    let release = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .release_budget(&validated.hold.id)?;
+    state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .update_budget_hold(&release.hold, &release.balance)?;
+
+    log_event(
+        "info",
+        "executor_spend_released",
+        json!({
+            "spend_auth_token_id": validated.token_id.to_string(),
+            "decision_id": validated.validation.spend_decision_id.to_string(),
+            "hold_id": release.hold.id.to_string(),
+            "amount_cents": release.hold.amount_cents,
+            "merchant": validated.request.merchant.clone(),
+            "task_id": validated.request.task_id.clone(),
+        }),
+    );
+
+    Ok(executor_spend_response_with_hold(
+        &validated,
+        release.hold,
+        release.balance,
+    ))
+}
+
+struct ValidatedExecutorSpend {
+    request: ExecutorSpendHttpRequest,
+    account_pub_id: String,
+    agent_pub_id: String,
+    token_id: SpendAuthTokenId,
+    validation: hubu_core::spend::ValidatedSpendAuthorization,
+    hold: BudgetHold,
+    balance: hubu_core::budget::BudgetBalance,
+}
+
+fn validate_executor_spend_request(
+    request: ExecutorSpendHttpRequest,
+    state: &ServerState,
+) -> Result<ValidatedExecutorSpend> {
+    if request.amount_cents <= 0 {
+        return Err(anyhow!("executor spend amount must be positive"));
+    }
+    reconcile_expired_budget_holds(state)?;
+
+    let user = default_user_context(state)?;
+    let spend_request = SpendHttpRequest {
+        agent_id: request.agent_id.clone(),
+        account_id: request.account_id.clone(),
+        amount_cents: request.amount_cents,
+        reason: request.task_id.clone().unwrap_or_default(),
+        merchant: request.merchant.clone(),
+    };
+    let account = resolve_agent_account_for_spend(&spend_request, &user, state)?;
+    let account_pub_id = account.pub_id.clone();
+    let agent_id = account.agent_id.clone();
+    let agent_pub_id = registration_agent_pub_id(&agent_id, state)?;
+    let token_id: SpendAuthTokenId = request
+        .spend_auth_token_id
+        .parse()
+        .with_context(|| "parse spend_auth_token_id")?;
+
+    let validation = state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
+            spend_auth_token_id: token_id.clone(),
+            owner_user_id: user.user_id,
+            agent_id,
+            agent_account_id: account.id,
+            amount_cents: request.amount_cents,
+            currency: Currency::Usd,
+            merchant: request.merchant.clone(),
+            task_id: request.task_id.clone(),
+        })?;
+
+    let (hold, balance) = {
+        let budgets = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let hold = budgets
+            .get_budget_hold_by_spend_decision(&validation.spend_decision_id)
+            .ok_or_else(|| anyhow!("spend authorization does not have a budget hold"))?;
+        if !matches!(hold.status, BudgetHoldStatus::Frozen) {
+            return Err(anyhow!("spend authorization budget hold is not frozen"));
+        }
+        let balance = budgets
+            .get_budget_balance(&hold.budget_id)
+            .ok_or_else(|| anyhow!("spend authorization budget balance is missing"))?;
+        (hold, balance)
+    };
+
+    log_event(
+        "info",
+        "executor_spend_validated",
+        json!({
+            "spend_auth_token_id": token_id.to_string(),
+            "decision_id": validation.spend_decision_id.to_string(),
+            "hold_id": hold.id.to_string(),
+            "account_pub_id": account_pub_id,
+            "agent_pub_id": agent_pub_id,
+            "amount_cents": request.amount_cents,
+            "merchant": request.merchant.clone(),
+            "task_id": request.task_id.clone(),
+        }),
+    );
+
+    Ok(ValidatedExecutorSpend {
+        request,
+        account_pub_id,
+        agent_pub_id,
+        token_id,
+        validation,
+        hold,
+        balance,
+    })
+}
+
+fn executor_spend_response(validated: &ValidatedExecutorSpend) -> ExecutorSpendHttpResponse {
+    executor_spend_response_with_hold(validated, validated.hold.clone(), validated.balance.clone())
+}
+
+fn executor_spend_response_with_hold(
+    validated: &ValidatedExecutorSpend,
+    hold: BudgetHold,
+    balance: hubu_core::budget::BudgetBalance,
+) -> ExecutorSpendHttpResponse {
+    ExecutorSpendHttpResponse {
+        spend_auth_token_id: validated.token_id.to_string(),
+        decision_id: validated.validation.spend_decision_id.to_string(),
+        account_id: validated.account_pub_id.clone(),
+        agent_id: validated.agent_pub_id.clone(),
+        amount_cents: validated.request.amount_cents,
+        currency: Currency::Usd.to_string(),
+        merchant: validated.request.merchant.clone(),
+        task_id: validated.request.task_id.clone(),
+        expires_at: validated.validation.expires_at.to_rfc3339(),
+        budget_hold: budget_hold_state_response(hold, balance),
+    }
+}
+
 struct AuthorizedSpend {
     user: UserContext,
     account: AgentAccount,
@@ -1820,6 +2143,21 @@ fn frozen_budget_hold_response(response: ReserveBudgetResponse) -> BudgetHoldHtt
     }
 }
 
+fn budget_hold_state_response(
+    hold: BudgetHold,
+    balance: hubu_core::budget::BudgetBalance,
+) -> BudgetHoldHttpResponse {
+    BudgetHoldHttpResponse {
+        hold_id: hold.id.to_string(),
+        budget_id: hold.budget_id.to_string(),
+        status: budget_hold_status_name(&hold.status).to_string(),
+        amount_cents: hold.amount_cents,
+        consumed_amount_cents: balance.consumed_amount_cents,
+        frozen_amount_cents: balance.frozen_amount_cents,
+        remaining_amount_cents: balance.remaining_amount_cents,
+    }
+}
+
 fn budget_response(budget: BudgetWithBalance) -> BudgetHttpResponse {
     BudgetHttpResponse {
         budget_id: budget.budget.id.to_string(),
@@ -1853,6 +2191,15 @@ fn budget_status_name(status: hubu_core::budget::BudgetStatus) -> &'static str {
         hubu_core::budget::BudgetStatus::Exhausted => "exhausted",
         hubu_core::budget::BudgetStatus::Expired => "expired",
         hubu_core::budget::BudgetStatus::Revoked => "revoked",
+    }
+}
+
+fn budget_hold_status_name(status: &BudgetHoldStatus) -> &'static str {
+    match status {
+        BudgetHoldStatus::Frozen => "frozen",
+        BudgetHoldStatus::Settled => "settled",
+        BudgetHoldStatus::Released => "released",
+        BudgetHoldStatus::Expired => "expired",
     }
 }
 
@@ -2480,6 +2827,117 @@ mod tests {
     }
 
     #[test]
+    fn spend_executor_guidance_defines_external_work_boundary() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-executor-guidance-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+
+        for path in [
+            "/spend/executor/guidance",
+            "/.well-known/hubu-spend-executor.json",
+        ] {
+            let response = route(
+                HttpRequest {
+                    method: "GET".to_string(),
+                    path: path.to_string(),
+                    body: String::new(),
+                },
+                &state,
+            );
+
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body["protocol_version"], "hubu-spend-executor-v1");
+            assert!(response.body["role_boundary"]["hubu"]
+                .as_array()
+                .expect("hubu role list should be an array")
+                .iter()
+                .any(|item| item == "validate executor spend authorization"));
+            assert!(response.body["role_boundary"]["executor"]
+                .as_array()
+                .expect("executor role list should be an array")
+                .iter()
+                .any(|item| item == "hold vendor credentials outside Hubu"));
+            assert!(response.body["scope_rules"]
+                .as_array()
+                .expect("scope rules should be an array")
+                .iter()
+                .any(|item| item == "Hubu does not accept vendor API keys or model/provider payloads in this protocol"));
+        }
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn executor_can_validate_and_settle_authorized_spend() {
+        let (path, state, agent, authorization) = setup_executor_authorization("executor-settle");
+        let token = authorization
+            .auth_token_id
+            .clone()
+            .expect("authorization should issue a token");
+        let request = json!({
+            "spend_auth_token_id": token,
+            "agent_id": agent.agent_id,
+            "amount_cents": 500,
+            "merchant": "gongbu.image",
+            "task_id": "hubu-logo-demo",
+        });
+
+        let validation = validate_executor_spend(request.to_string(), &state)
+            .expect("executor spend should validate");
+        assert_eq!(validation.agent_id, agent.agent_id);
+        assert_eq!(validation.account_id, agent.account_id);
+        assert_eq!(validation.merchant.as_deref(), Some("gongbu.image"));
+        assert_eq!(validation.task_id.as_deref(), Some("hubu-logo-demo"));
+        assert_eq!(validation.budget_hold.status, "frozen");
+
+        let settlement = settle_executor_spend(request.to_string(), &state)
+            .expect("executor spend should settle");
+        assert_eq!(settlement.spend.budget_hold.status, "settled");
+        assert_eq!(settlement.spend.budget_hold.consumed_amount_cents, 500);
+        assert_eq!(settlement.spend.budget_hold.frozen_amount_cents, 0);
+        assert_eq!(settlement.spend.budget_hold.remaining_amount_cents, 0);
+
+        let retry_error = validate_executor_spend(request.to_string(), &state)
+            .expect_err("settled token should not validate again");
+        assert!(retry_error
+            .to_string()
+            .contains("spend auth token has already been used"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn executor_release_returns_budget_and_blocks_reuse() {
+        let (path, state, agent, authorization) = setup_executor_authorization("executor-release");
+        let token = authorization
+            .auth_token_id
+            .clone()
+            .expect("authorization should issue a token");
+        let request = json!({
+            "spend_auth_token_id": token,
+            "agent_id": agent.agent_id,
+            "amount_cents": 500,
+            "merchant": "gongbu.image",
+            "task_id": "hubu-logo-demo",
+        });
+
+        let release = release_executor_spend(request.to_string(), &state)
+            .expect("executor spend should release");
+        assert_eq!(release.budget_hold.status, "released");
+        assert_eq!(release.budget_hold.consumed_amount_cents, 0);
+        assert_eq!(release.budget_hold.frozen_amount_cents, 0);
+        assert_eq!(release.budget_hold.remaining_amount_cents, 500);
+
+        let retry_error = validate_executor_spend(request.to_string(), &state)
+            .expect_err("released hold should not validate again");
+        assert!(retry_error
+            .to_string()
+            .contains("spend authorization budget hold is not frozen"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn spend_rejects_conflicting_account_and_agent_anchors() {
         let path = std::env::temp_dir().join(format!(
             "hubu-api-conflicting-anchors-{}.sqlite",
@@ -2895,5 +3353,70 @@ rules:
         .expect("restarted server should still have the policy assignment");
         assert_eq!(resumed_spend.decision, "allow");
         std::fs::remove_file(path).ok();
+    }
+
+    fn setup_executor_authorization(
+        test_name: &str,
+    ) -> (
+        std::path::PathBuf,
+        ServerState,
+        RegisterAgentHttpResponse,
+        SpendHttpResponse,
+    ) {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-{test_name}-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": format!("{test_name}-agent"),
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should allow executor spend");
+
+        create_budget(
+            json!({
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should be created for initialized user");
+
+        let authorization = authorize_spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 500,
+                "reason": "hubu-logo-demo",
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should authorize");
+
+        (path, state, agent, authorization)
     }
 }
