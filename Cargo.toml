@@ -7,7 +7,6 @@ members = [
     "crates/hubu-core",
     "crates/hubu-mcp",
     "crates/hubu-wallet",
-    "examples/authorize-payment",
 ]
 resolver = "2"
 
