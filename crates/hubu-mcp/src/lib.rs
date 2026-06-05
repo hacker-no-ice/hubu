@@ -10,19 +10,43 @@ use serde_json::{json, Value};
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+#[derive(Debug, Clone, Copy)]
+struct McpConfig {
+    protected_tools_enabled: bool,
+}
+
 pub fn run_stdio_from_env() -> Result<()> {
     let base_url = env::var("HUBU_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-    run_stdio(&base_url, io::stdin().lock(), io::stdout().lock())
+    let config = McpConfig {
+        protected_tools_enabled: env_flag("HUBU_MCP_TRUST_CLIENT_APPROVAL"),
+    };
+    run_stdio_with_config(&base_url, config, io::stdin().lock(), io::stdout().lock())
 }
 
 pub fn run_stdio(base_url: &str, input: impl BufRead, mut output: impl Write) -> Result<()> {
+    run_stdio_with_config(
+        base_url,
+        McpConfig {
+            protected_tools_enabled: false,
+        },
+        input,
+        &mut output,
+    )
+}
+
+fn run_stdio_with_config(
+    base_url: &str,
+    config: McpConfig,
+    input: impl BufRead,
+    mut output: impl Write,
+) -> Result<()> {
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         let request: Value = serde_json::from_str(&line)?;
-        if let Some(response) = handle_json_rpc(base_url, request) {
+        if let Some(response) = handle_json_rpc(base_url, config, request) {
             writeln!(output, "{}", serde_json::to_string(&response)?)?;
             output.flush()?;
         }
@@ -30,7 +54,13 @@ pub fn run_stdio(base_url: &str, input: impl BufRead, mut output: impl Write) ->
     Ok(())
 }
 
-fn handle_json_rpc(base_url: &str, request: Value) -> Option<Value> {
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn handle_json_rpc(base_url: &str, config: McpConfig, request: Value) -> Option<Value> {
     let id = request.get("id").cloned();
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let result = match method {
@@ -47,7 +77,7 @@ fn handle_json_rpc(base_url: &str, request: Value) -> Option<Value> {
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-            call_tool(base_url, params)
+            call_tool(base_url, config, params)
         }
         "notifications/initialized" => return None,
         _ => Err(anyhow!("unsupported MCP method `{method}`")),
@@ -90,8 +120,7 @@ fn tool_definitions() -> Vec<Value> {
             "Register or select the active human user. Requires a human click.",
             json_schema(json!({
                 "display_name": { "type": "string" },
-                "email": { "type": "string" },
-                "human_approved": { "type": "boolean" }
+                "email": { "type": "string" }
             })),
         ),
         approval_tool(
@@ -99,8 +128,7 @@ fn tool_definitions() -> Vec<Value> {
             "Register an agent for the active Hubu user. Requires a human click.",
             json_schema(json!({
                 "name": { "type": "string" },
-                "version": { "type": "string" },
-                "human_approved": { "type": "boolean" }
+                "version": { "type": "string" }
             })),
         ),
         approval_tool(
@@ -109,8 +137,7 @@ fn tool_definitions() -> Vec<Value> {
             json_schema(json!({
                 "agent_id": { "type": "string" },
                 "policy_yaml": { "type": "string" },
-                "daily_limit_cents": { "type": "integer" },
-                "human_approved": { "type": "boolean" }
+                "daily_limit_cents": { "type": "integer" }
             })),
         ),
         approval_tool(
@@ -119,8 +146,7 @@ fn tool_definitions() -> Vec<Value> {
             json_schema(json!({
                 "amount_cents": { "type": "integer" },
                 "starting_at": { "type": "string" },
-                "ending_before": { "type": "string" },
-                "human_approved": { "type": "boolean" }
+                "ending_before": { "type": "string" }
             })),
         ),
         approval_tool(
@@ -133,8 +159,7 @@ fn tool_definitions() -> Vec<Value> {
                     "enum": ["daily", "monthly", "yearly"]
                 },
                 "period_count": { "type": "integer" },
-                "starting_at": { "type": "string" },
-                "human_approved": { "type": "boolean" }
+                "starting_at": { "type": "string" }
             })),
         ),
         write_tool(
@@ -208,7 +233,7 @@ fn tool(
     })
 }
 
-fn call_tool(base_url: &str, params: Value) -> Result<Value> {
+fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -222,28 +247,24 @@ fn call_tool(base_url: &str, params: Value) -> Result<Value> {
         "hubu_health" => get_json(base_url, "/health")?,
         "hubu_registration_guidance" => get_json(base_url, "/registration/guidance")?,
         "hubu_register_human" => {
-            require_human_approval(&arguments, name)?;
-            post_json(base_url, "/init", strip_human_approved(arguments))?
+            require_trusted_client_approval(config, name)?;
+            post_json(base_url, "/init", arguments)?
         }
         "hubu_register_agent" => {
-            require_human_approval(&arguments, name)?;
-            post_json(
-                base_url,
-                "/agents/register",
-                strip_human_approved(arguments),
-            )?
+            require_trusted_client_approval(config, name)?;
+            post_json(base_url, "/agents/register", arguments)?
         }
         "hubu_add_policy" => {
-            require_human_approval(&arguments, name)?;
-            post_json(base_url, "/policies", strip_human_approved(arguments))?
+            require_trusted_client_approval(config, name)?;
+            post_json(base_url, "/policies", arguments)?
         }
         "hubu_create_budget" => {
-            require_human_approval(&arguments, name)?;
-            post_json(base_url, "/budgets", strip_human_approved(arguments))?
+            require_trusted_client_approval(config, name)?;
+            post_json(base_url, "/budgets", arguments)?
         }
         "hubu_create_recurring_budget" => {
-            require_human_approval(&arguments, name)?;
-            post_json(base_url, "/budgets/series", strip_human_approved(arguments))?
+            require_trusted_client_approval(config, name)?;
+            post_json(base_url, "/budgets/series", arguments)?
         }
         "hubu_submit_spend" => {
             let response = post_json(base_url, "/spend", arguments)?;
@@ -258,25 +279,14 @@ fn call_tool(base_url: &str, params: Value) -> Result<Value> {
     Ok(tool_result(response))
 }
 
-fn require_human_approval(arguments: &Value, tool_name: &str) -> Result<()> {
-    if arguments
-        .get("human_approved")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+fn require_trusted_client_approval(config: McpConfig, tool_name: &str) -> Result<()> {
+    if config.protected_tools_enabled {
         Ok(())
     } else {
         Err(anyhow!(
-            "{tool_name} requires human approval; retry after the human approves this MCP tool call"
+            "{tool_name} requires a trusted MCP client approval gate; set HUBU_MCP_TRUST_CLIENT_APPROVAL=1 only when the MCP client prompts a human before invoking destructive tools"
         ))
     }
-}
-
-fn strip_human_approved(mut arguments: Value) -> Value {
-    if let Some(object) = arguments.as_object_mut() {
-        object.remove("human_approved");
-    }
-    arguments
 }
 
 fn spend_response_with_approval_hint(mut response: Value) -> Value {
@@ -421,13 +431,28 @@ mod tests {
     }
 
     #[test]
-    fn approval_flag_is_removed_before_forwarding() {
-        let stripped = strip_human_approved(json!({
-            "agent_id": "agt_123",
-            "human_approved": true
-        }));
+    fn protected_tool_schema_does_not_accept_agent_controlled_approval() {
+        let tools = tool_definitions();
+        let protected = tools
+            .iter()
+            .find(|tool| tool["name"] == "hubu_create_budget")
+            .expect("budget tool should exist");
 
-        assert!(stripped.get("human_approved").is_none());
-        assert_eq!(stripped["agent_id"], "agt_123");
+        assert!(protected["inputSchema"]["properties"]
+            .get("human_approved")
+            .is_none());
+    }
+
+    #[test]
+    fn protected_tool_rejects_without_trusted_client_gate() {
+        let error = require_trusted_client_approval(
+            McpConfig {
+                protected_tools_enabled: false,
+            },
+            "hubu_create_budget",
+        )
+        .expect_err("protected tool should require trusted client gate");
+
+        assert!(error.to_string().contains("trusted MCP client approval"));
     }
 }

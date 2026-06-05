@@ -17,6 +17,9 @@ cargo run --bin hubu-mcp-server
 ```
 
 The MCP server reads `HUBU_URL` and defaults to `http://127.0.0.1:8787`.
+Protected write tools are disabled unless the MCP process is started with
+`HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. Only set that variable when the MCP client
+is trusted to show a human approval prompt before invoking destructive tools.
 
 ## Approval Boundaries
 
@@ -32,9 +35,12 @@ Human approval is required for:
 - `hubu_create_recurring_budget`
 
 These tools are marked with `x_hubu_human_approval: "required"` and
-`destructiveHint: true`. The scaffold also requires the tool arguments to
-include `human_approved: true` before forwarding the request to `hubu-server`.
-That field is removed before the HTTP request is sent.
+`destructiveHint: true`. The scaffold does not accept approval as a tool
+argument, because tool arguments are controlled by the caller. Instead, the
+operator must start the MCP server with `HUBU_MCP_TRUST_CLIENT_APPROVAL=1`
+after choosing an MCP client that enforces a human click for destructive tools.
+Without that trusted-client gate, protected tools return an error and do not
+forward requests to `hubu-server`.
 
 Agents can call directly:
 
