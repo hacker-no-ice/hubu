@@ -365,6 +365,7 @@ impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
             .ok_or_else(|| anyhow!("http-json image adapter requires an API key"))?;
         let timeout = std::time::Duration::from_millis(self.config.timeout_ms);
         let response = ureq::AgentBuilder::new()
+            .timeout(timeout)
             .timeout_connect(timeout)
             .timeout_read(timeout)
             .timeout_write(timeout)
