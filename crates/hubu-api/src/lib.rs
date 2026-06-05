@@ -109,16 +109,17 @@ pub fn run_server(bind_addr: &str) -> Result<()> {
 }
 
 fn configure_server_logging() -> Result<()> {
-    let log_path = env::var("HUBU_LOG_FILE").unwrap_or_else(|_| "hubu-server.log".to_string());
-    configure_file_logging(&log_path)
-        .with_context(|| format!("configure Hubu log file at {log_path}"))?;
-    log_event(
-        "info",
-        "log_file_configured",
-        json!({
-            "path": log_path,
-        }),
-    );
+    if let Ok(log_path) = env::var("HUBU_LOG_FILE") {
+        configure_file_logging(&log_path)
+            .with_context(|| format!("configure Hubu log file at {log_path}"))?;
+        log_event(
+            "info",
+            "log_file_configured",
+            json!({
+                "path": log_path,
+            }),
+        );
+    }
     Ok(())
 }
 
