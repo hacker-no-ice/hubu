@@ -17,8 +17,8 @@ request through deterministic policies and budget controls before executing a
 mock payment and recording successful money movement in an audit ledger.
 
 This repository contains the Rust workspace for Hubu's policy engine, wallet
-logic, shared models, local demo HTTP API, demo CLI, benchmark tool, and an MCP
-adapter placeholder.
+logic, shared models, local demo HTTP API, demo CLI, benchmark tool, and MCP
+transport adapter.
 
 ## What Hubu Does Today
 
@@ -39,7 +39,7 @@ adapter placeholder.
 - `hubu-api`: local demo HTTP API and `hubu-server` binary
 - `hubu-cli`: demo-friendly `hubu` CLI binary
 - `hubu-bench`: local benchmark tool for spend approval throughput and correctness
-- `hubu-mcp`: placeholder crate for the MCP server adapter layer
+- `hubu-mcp`: MCP stdio transport adapter and `hubu-mcp-server` binary
 
 ## Quick Start
 
@@ -110,6 +110,33 @@ override or inspect the computed registration envelope.
 See [docs/demo.md](docs/demo.md) for the full walkthrough, expected output,
 CLI installation notes, demo script pacing options, and known limitations.
 
+## MCP Transport
+
+Hubu includes an MCP stdio transport scaffold for agent-facing tool calls. Start
+the local Hubu server first:
+
+```sh
+cargo run --bin hubu-server
+```
+
+Then point an MCP client at:
+
+```sh
+cargo run --bin hubu-mcp-server
+```
+
+Set `HUBU_URL` to target a non-default Hubu server URL. The MCP transport
+forwards to the existing local HTTP API, marks read-only tools as safe for agent
+inspection, and marks human/agent registration, policy creation, and budget
+creation as human-approval-required tools. Protected write tools are disabled
+unless the MCP process is started with `HUBU_MCP_TRUST_CLIENT_APPROVAL=1` behind
+a trusted client that prompts the human before destructive calls. Agents can
+submit spend requests directly; if policy returns `needs_approval`, the MCP
+response includes `requires_human_approval: true` and no payment is executed.
+
+See [docs/mcp-transport.md](docs/mcp-transport.md) for the current tool and
+approval model.
+
 ## Policy Engine
 
 Hubu's policy engine deterministically evaluates a structured `SpendRequest`
@@ -139,3 +166,5 @@ rule format, validation behavior, and examples.
   evaluation behavior
 - [docs/payment-ledger-flow.md](docs/payment-ledger-flow.md): payment
   orchestration and ledger recording flow
+- [docs/mcp-transport.md](docs/mcp-transport.md): MCP stdio transport scaffold
+  and approval boundaries
