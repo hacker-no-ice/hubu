@@ -325,7 +325,8 @@ Hubu with `HUBU_IMAGE_PROVIDER_ADAPTER=http-json`,
 `HUBU_IMAGE_PROVIDER_API_KEY`, and optionally `HUBU_IMAGE_PROVIDER_TIMEOUT_MS`
 and `HUBU_IMAGE_PROXY_MERCHANT`. The `http-json` adapter sends the server-side
 configured API key as an authorization header, uses a default 30000 ms provider
-timeout, and expects the provider to return JSON with a non-empty `output_ref`.
+timeout, sends the request id as `Idempotency-Key` and `X-Hubu-Request-Id`, and
+expects the provider to return JSON with a non-empty `output_ref`.
 Agents may only request the configured provider/model, image calls only consume
 spend authorizations scoped to the configured proxy merchant and exact
 server-side provider price, and the API key is not returned in API, CLI, MCP, or

@@ -437,12 +437,13 @@ impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
             .timeout_read(timeout)
             .timeout_write(timeout)
             .build()
-            .post(endpoint)
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Content-Type", "application/json")
-            .set("Accept", "application/json")
-            .send_json(http_json_image_provider_payload(&request))
-            .map_err(classify_http_json_provider_error)?;
+            .post(endpoint);
+        let response = apply_http_json_image_provider_headers(
+            response,
+            &http_json_image_provider_headers(api_key, request.artifact_id),
+        )
+        .send_json(http_json_image_provider_payload(&request))
+        .map_err(classify_http_json_provider_error)?;
         let body: serde_json::Value = response.into_json().map_err(|error| {
             ImageProviderError::new(
                 "provider_response_invalid",
@@ -502,6 +503,29 @@ fn http_json_image_provider_payload(request: &ImageGenerationRequest<'_>) -> ser
         "prompt": request.prompt,
         "request_id": request.artifact_id,
     })
+}
+
+fn http_json_image_provider_headers(
+    api_key: &str,
+    request_id: &str,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("Authorization", format!("Bearer {api_key}")),
+        ("Content-Type", "application/json".to_string()),
+        ("Accept", "application/json".to_string()),
+        ("Idempotency-Key", request_id.to_string()),
+        ("X-Hubu-Request-Id", request_id.to_string()),
+    ]
+}
+
+fn apply_http_json_image_provider_headers(
+    mut request: ureq::Request,
+    headers: &[(&'static str, String)],
+) -> ureq::Request {
+    for (name, value) in headers {
+        request = request.set(name, value);
+    }
+    request
 }
 
 fn is_allowed_provider_endpoint(endpoint: &str) -> bool {
@@ -3581,6 +3605,30 @@ mod tests {
         assert!(!is_allowed_provider_endpoint(
             "http://localhost:9000@vendor.example/v1/images"
         ));
+    }
+
+    #[test]
+    fn http_json_image_adapter_sets_server_side_idempotency_headers() {
+        let headers = http_json_image_provider_headers("server-side-secret", "sat_test");
+
+        assert!(headers.iter().any(|(name, value)| {
+            *name == "Authorization" && value == "Bearer server-side-secret"
+        }));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| { *name == "Idempotency-Key" && value == "sat_test" }));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| { *name == "X-Hubu-Request-Id" && value == "sat_test" }));
+
+        let payload = http_json_image_provider_payload(&ImageGenerationRequest {
+            provider: "nano-banana",
+            model: "logo-v1",
+            prompt: "Create a crisp logo for Project Hubu",
+            artifact_id: "sat_test",
+        });
+        assert_eq!(payload["request_id"], "sat_test");
+        assert!(!payload.to_string().contains("server-side-secret"));
     }
 
     #[test]

@@ -91,9 +91,10 @@ server-side Hubu configuration
 `HUBU_IMAGE_PROVIDER_*`, `HUBU_IMAGE_PROXY_MERCHANT`,
 `HUBU_IMAGE_OUTPUT_DIR`). The generic `http-json` adapter posts provider,
 model, prompt, and request id to the configured endpoint, sends the API key in
-Hubu's authorization header, applies `HUBU_IMAGE_PROVIDER_TIMEOUT_MS` with a
-default of `30000`, and expects JSON with a non-empty `output_ref`. Agent
-requests must match the configured provider/model, the spend
+Hubu's authorization header, sends the same request id as `Idempotency-Key` and
+`X-Hubu-Request-Id`, applies `HUBU_IMAGE_PROVIDER_TIMEOUT_MS` with a default of
+`30000`, and expects JSON with a non-empty `output_ref`. Agent requests must
+match the configured provider/model, the spend
 authorization must be scoped to the configured image proxy merchant and exact
 provider price (`HUBU_IMAGE_PROVIDER_PRICE_CENTS`, default `500`), and remote
 provider endpoints must use HTTPS. If provider generation fails before payment,
