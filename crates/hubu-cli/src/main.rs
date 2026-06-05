@@ -675,7 +675,7 @@ fn model_call(base_url: &str, args: Vec<String>) -> Result<()> {
     rest.remove(0);
 
     match command.as_str() {
-        "image-guidance" => model_call_image_guidance(base_url),
+        "image-guidance" => model_call_image_guidance(base_url, rest),
         "image" => model_call_image(base_url, rest),
         "-h" | "--help" | "help" => {
             print_model_call_help();
@@ -685,18 +685,29 @@ fn model_call(base_url: &str, args: Vec<String>) -> Result<()> {
     }
 }
 
-fn model_call_image_guidance(base_url: &str) -> Result<()> {
+fn model_call_image_guidance(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_model_call_image_guidance_help();
+        return Ok(());
+    }
+    let mut require_ready = false;
+    while let Some(arg) = args.first().cloned() {
+        args.remove(0);
+        match arg.as_str() {
+            "--require-ready" => require_ready = true,
+            _ => bail!("unknown image-guidance option `{arg}`"),
+        }
+    }
+
     let response = get_json(base_url, "/model-calls/image/guidance")?;
     let required_spend = response
         .get("required_spend")
         .ok_or_else(|| anyhow!("server response missing `required_spend`"))?;
+    let provider_ready = bool_at(&response, "provider_ready")?;
     println!("Image proxy guidance");
     println!("  provider: {}", string_at(&response, "provider")?);
     println!("  model: {}", string_at(&response, "model")?);
-    println!(
-        "  provider_ready: {}",
-        bool_at(&response, "provider_ready")?
-    );
+    println!("  provider_ready: {provider_ready}");
     println!(
         "  provider_api_key_configured: {}",
         bool_at(&response, "provider_api_key_configured")?
@@ -726,6 +737,23 @@ fn model_call_image_guidance(base_url: &str) -> Result<()> {
     println!("Flow");
     println!("  authorize: hubu spend authorize");
     println!("  generate: hubu model-call image");
+
+    if require_ready && !provider_ready {
+        let missing = response
+            .get("missing_configuration")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "unknown image provider readiness requirement".to_string());
+        bail!("image provider is not ready: {missing}");
+    }
+
     Ok(())
 }
 
@@ -1241,8 +1269,20 @@ fn print_model_call_help() {
         "Proxy model calls through Hubu
 
 Usage:
-  hubu model-call image-guidance
+  hubu model-call image-guidance [--require-ready]
   hubu model-call image --spend-auth-token-id ID --prompt TEXT [--provider NAME] [--model NAME]"
+    );
+}
+
+fn print_model_call_image_guidance_help() {
+    println!(
+        "Read image proxy provider and spend guidance
+
+Usage:
+  hubu model-call image-guidance [--require-ready]
+
+Options:
+  --require-ready  Exit with an error unless the configured provider is ready"
     );
 }
 

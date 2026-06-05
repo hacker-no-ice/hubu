@@ -94,10 +94,11 @@ export HUBU_IMAGE_PROVIDER_API_KEY=...
 ./scripts/demo.sh
 ```
 
-Run `hubu model-call image-guidance` before authorizing spend to confirm
-`provider_ready: true`. Guidance returns only non-secret readiness booleans,
-missing environment variable names, provider/model, and the required spend
-merchant/amount; it never returns the provider endpoint value or API key.
+Run `hubu model-call image-guidance --require-ready` before authorizing spend to
+fail fast unless `provider_ready: true`. Guidance returns only non-secret
+readiness booleans, missing environment variable names, provider/model, and the
+required spend merchant/amount; it never returns the provider endpoint value or
+API key.
 
 Run the conservative local benchmark:
 

@@ -367,10 +367,11 @@ For Gemini/Nano Banana style `generateContent`, configure
 the key as `x-goog-api-key`, requests image output, extracts the first inline
 image from `candidates[0].content.parts`, writes it under
 `HUBU_IMAGE_OUTPUT_DIR`, and returns a `file://...` output reference.
-`hubu model-call image-guidance` and `hubu_image_proxy_guidance` expose a
-non-secret readiness check: `provider_ready`, configured/not-configured
-booleans for server-held key and endpoint, and missing environment variable
-names when Hubu cannot safely call the configured provider yet.
+`hubu model-call image-guidance --require-ready` and
+`hubu_image_proxy_guidance` expose a non-secret readiness check:
+`provider_ready`, configured/not-configured booleans for server-held key and
+endpoint, and missing environment variable names when Hubu cannot safely call
+the configured provider yet.
 Agents may only request the configured provider/model, image calls only consume
 spend authorizations scoped to the configured proxy merchant and exact
 server-side provider price, and the API key is not returned in API, CLI, MCP, or

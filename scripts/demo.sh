@@ -212,7 +212,7 @@ show_cli_output "${ALLOW_OUTPUT}"
 pause_for_reading
 
 step "Authorize a \$5 logo-generation budget"
-IMAGE_GUIDANCE_OUTPUT="$(hubu model-call image-guidance)"
+IMAGE_GUIDANCE_OUTPUT="$(hubu model-call image-guidance --require-ready)"
 show_cli_output "${IMAGE_GUIDANCE_OUTPUT}"
 pause_for_reading
 
