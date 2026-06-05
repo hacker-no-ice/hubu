@@ -1585,6 +1585,12 @@ fn resolve_agent_account_for_spend(
     user: &UserContext,
     state: &ServerState,
 ) -> Result<AgentAccount> {
+    if request.account_id.is_some() == request.agent_id.is_some() {
+        return Err(anyhow!(
+            "spend request must include exactly one of account_id or agent_id"
+        ));
+    }
+
     let registration = state
         .registration
         .lock()
@@ -2236,6 +2242,51 @@ mod tests {
         let payment = spend.payment.expect("allowed spend should pay");
         assert_eq!(payment.account_id, agent.account_id);
         assert_eq!(payment.owner_user_id, user.user_id);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn spend_rejects_conflicting_account_and_agent_anchors() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-conflicting-anchors-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "conflicting-anchor-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        let error = spend(
+            json!({
+                "account_id": agent.account_id,
+                "agent_id": agent.agent_id,
+                "amount_cents": 2_500,
+                "reason": "ambiguous anchored purchase",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("spend should reject conflicting anchors");
+
+        assert!(error
+            .to_string()
+            .contains("spend request must include exactly one of account_id or agent_id"));
         std::fs::remove_file(path).ok();
     }
 
