@@ -111,9 +111,10 @@ omitted by setting their field name to an empty string. Agent requests must
 match the configured provider/model, the spend
 authorization must be scoped to the configured image proxy merchant and exact
 provider price (`HUBU_IMAGE_PROVIDER_PRICE_CENTS`, default `500`), and remote
-provider endpoints must use HTTPS. If provider generation fails before payment,
-Hubu releases the frozen hold, leaves the spend token unused, and records a
-structured provider error code plus HTTP status when available.
+provider endpoints must use HTTPS. If provider configuration or generation
+fails before payment, Hubu releases the frozen hold, leaves the spend token
+unused, and records a structured provider error code plus HTTP status when
+available.
 
 ## Tool Mapping
 

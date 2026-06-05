@@ -25,9 +25,10 @@ use hubu_common::{
 };
 use hubu_core::{
     budget::{
-        BudgetHoldStatus, BudgetManager, BudgetManagerError, BudgetRecurrence, BudgetScope,
-        BudgetWithBalance, CreateBudgetSeriesRequest, CreateSingleBudgetRequest,
-        ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
+        BudgetHold, BudgetHoldStatus, BudgetManager, BudgetManagerError, BudgetRecurrence,
+        BudgetScope, BudgetWithBalance,
+        CreateBudgetSeriesRequest, CreateSingleBudgetRequest, ReleaseBudgetResponse,
+        ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyRepository, SpendRepository, SqliteGovernanceRepository,
@@ -2377,6 +2378,50 @@ fn image_proxy_guidance(state: &ServerState) -> Result<ImageProxyGuidanceHttpRes
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn release_image_proxy_hold_after_provider_failure(
+    state: &ServerState,
+    frozen_hold: &BudgetHold,
+    token_id: &SpendAuthTokenId,
+    provider: &str,
+    model: &str,
+    provider_error_code: &str,
+    provider_http_status: Option<u16>,
+    amount_cents: i64,
+    currency: Currency,
+    error: &dyn std::fmt::Display,
+) -> Result<()> {
+    let release = {
+        let mut budgets = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        budgets.release_budget(&frozen_hold.id)?
+    };
+    state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .update_budget_hold(&release.hold, &release.balance)?;
+    log_event(
+        "warn",
+        "image_provider_generation_failed",
+        json!({
+            "provider": provider,
+            "model": model,
+            "provider_error_code": provider_error_code,
+            "provider_http_status": provider_http_status,
+            "spend_auth_token_id": token_id.to_string(),
+            "hold_id": frozen_hold.id.to_string(),
+            "budget_id": frozen_hold.budget_id.to_string(),
+            "amount_cents": amount_cents,
+            "currency": currency.to_string(),
+            "failure": error.to_string(),
+        }),
+    );
+    Ok(())
+}
+
 fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttpResponse> {
     let request: GenerateImageHttpRequest = serde_json::from_str(&body)?;
     if request.prompt.trim().is_empty() {
@@ -2386,7 +2431,6 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
     let (provider, model) = state
         .image_provider
         .resolve(request.provider, request.model)?;
-    let image_adapter = state.image_provider.adapter()?;
     let user = default_user_context(state)?;
     let token_id = SpendAuthTokenId::from_str(&request.spend_auth_token_id)
         .map_err(|error| anyhow!("invalid spend_auth_token_id: {error}"))?;
@@ -2445,6 +2489,25 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
         return Err(anyhow!("spend authorization budget hold is not frozen"));
     }
 
+    let image_adapter = match state.image_provider.adapter() {
+        Ok(adapter) => adapter,
+        Err(error) => {
+            release_image_proxy_hold_after_provider_failure(
+                state,
+                &frozen_hold,
+                &token_record.id,
+                &provider,
+                &model,
+                "provider_config_invalid",
+                None,
+                authorized_spend.amount_cents,
+                authorized_spend.currency,
+                &error,
+            )?;
+            return Err(anyhow!("image provider configuration invalid: {error}"));
+        }
+    };
+
     let artifact_id = token_record.id.to_string();
     let image_output = match image_adapter.generate(ImageGenerationRequest {
         provider: &provider,
@@ -2454,34 +2517,18 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
     }) {
         Ok(output) => output,
         Err(error) => {
-            let release = {
-                let mut budgets = state
-                    .budgets
-                    .lock()
-                    .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-                budgets.release_budget(&frozen_hold.id)?
-            };
-            state
-                .governance
-                .lock()
-                .map_err(|_| anyhow!("governance store lock poisoned"))?
-                .update_budget_hold(&release.hold, &release.balance)?;
-            log_event(
-                "warn",
-                "image_provider_generation_failed",
-                json!({
-                    "provider": provider,
-                    "model": model,
-                    "provider_error_code": error.code,
-                    "provider_http_status": error.status,
-                    "spend_auth_token_id": token_record.id.to_string(),
-                    "hold_id": frozen_hold.id.to_string(),
-                    "budget_id": frozen_hold.budget_id.to_string(),
-                    "amount_cents": authorized_spend.amount_cents,
-                    "currency": authorized_spend.currency.to_string(),
-                    "failure": error.to_string(),
-                }),
-            );
+            release_image_proxy_hold_after_provider_failure(
+                state,
+                &frozen_hold,
+                &token_record.id,
+                &provider,
+                &model,
+                error.code,
+                error.status,
+                authorized_spend.amount_cents,
+                authorized_spend.currency,
+                &error,
+            )?;
             return Err(anyhow!("image provider generation failed: {error}"));
         }
     };
@@ -3009,6 +3056,8 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hubu_common::ids::BudgetHoldId;
+    use hubu_core::budget::BudgetHoldStatus;
 
     #[test]
     fn registration_guidance_is_available_for_agents() {
@@ -4188,22 +4237,29 @@ mod tests {
             .auth_token_record(&token_id)
             .expect("token should still exist");
         assert!(token.used_at.is_none());
-        let hold = authorization
+        let authorized_hold = authorization
             .budget_hold
-            .expect("authorized spend should freeze the logo budget");
-        assert_eq!(hold.status, "frozen");
-        assert_eq!(hold.frozen_amount_cents, 500);
+            .expect("authorized spend should initially freeze the logo budget");
+        assert_eq!(authorized_hold.status, "frozen");
+        assert_eq!(authorized_hold.frozen_amount_cents, 500);
         let logo_budget_internal_id =
             BudgetId::from_str(&logo_budget_id).expect("budget id should parse");
-        let logo_budget = state
+        let budgets = state
             .budgets
             .lock()
-            .expect("budget manager lock should not be poisoned")
+            .expect("budget manager lock should not be poisoned");
+        let released_hold = budgets
+            .get_budget_hold(
+                &BudgetHoldId::from_str(&authorized_hold.hold_id).expect("hold id should parse"),
+            )
+            .expect("logo budget hold should still exist");
+        let logo_budget = budgets
             .get_budget_by_id(&logo_budget_internal_id)
             .expect("logo budget should still exist");
+        assert!(matches!(released_hold.status, BudgetHoldStatus::Released));
         assert_eq!(logo_budget.balance.consumed_amount_cents, 0);
-        assert_eq!(logo_budget.balance.frozen_amount_cents, 500);
-        assert_eq!(logo_budget.balance.remaining_amount_cents, 0);
+        assert_eq!(logo_budget.balance.frozen_amount_cents, 0);
+        assert_eq!(logo_budget.balance.remaining_amount_cents, 500);
         std::fs::remove_file(path).ok();
     }
 
