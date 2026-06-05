@@ -488,6 +488,17 @@ impl std::fmt::Display for ImageProviderError {
 
 impl std::error::Error for ImageProviderError {}
 
+fn redact_image_provider_error_message(message: &str, config: &ImageProviderConfig) -> String {
+    let mut redacted = message.to_string();
+    if let Some(endpoint) = config.endpoint.as_deref().filter(|value| !value.is_empty()) {
+        redacted = redacted.replace(endpoint, "[redacted image provider endpoint]");
+    }
+    if let Some(api_key) = config.api_key.as_deref().filter(|value| !value.is_empty()) {
+        redacted = redacted.replace(api_key, "[redacted image provider api key]");
+    }
+    redacted
+}
+
 struct DemoImageProviderAdapter<'a> {
     config: &'a ImageProviderConfig,
 }
@@ -2786,6 +2797,8 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
     let image_adapter = match state.image_provider.adapter() {
         Ok(adapter) => adapter,
         Err(error) => {
+            let failure =
+                redact_image_provider_error_message(&error.to_string(), &state.image_provider);
             release_image_proxy_hold_after_provider_failure(
                 state,
                 &frozen_hold,
@@ -2796,9 +2809,9 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
                 None,
                 authorized_spend.amount_cents,
                 authorized_spend.currency,
-                &error,
+                &failure,
             )?;
-            return Err(anyhow!("image provider configuration invalid: {error}"));
+            return Err(anyhow!("image provider configuration invalid: {failure}"));
         }
     };
 
@@ -2811,6 +2824,8 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
     }) {
         Ok(output) => output,
         Err(error) => {
+            let failure =
+                redact_image_provider_error_message(&error.to_string(), &state.image_provider);
             release_image_proxy_hold_after_provider_failure(
                 state,
                 &frozen_hold,
@@ -2821,9 +2836,9 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
                 error.status,
                 authorized_spend.amount_cents,
                 authorized_spend.currency,
-                &error,
+                &failure,
             )?;
-            return Err(anyhow!("image provider generation failed: {error}"));
+            return Err(anyhow!("image provider generation failed: {failure}"));
         }
     };
 
@@ -4550,6 +4565,31 @@ mod tests {
         assert_eq!(error.code, "provider_http_status");
         assert_eq!(error.status, Some(429));
         assert!(error.to_string().contains("429"));
+    }
+
+    #[test]
+    fn image_provider_error_redaction_hides_server_side_config() {
+        let config = ImageProviderConfig {
+            provider: "google-gemini".to_string(),
+            model: "gemini-2.5-flash-image".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
+            api_key: Some("server-side-secret".to_string()),
+            endpoint: Some("https://vendor.example/v1/images?key=server-side-secret".to_string()),
+            price_cents: 500,
+            timeout_ms: 30_000,
+            max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
+            output_dir: std::env::temp_dir(),
+            adapter_kind: ImageProviderAdapterKind::GeminiGenerateContent,
+        };
+
+        let message = "call https://vendor.example/v1/images?key=server-side-secret failed with token server-side-secret";
+        let redacted = redact_image_provider_error_message(message, &config);
+
+        assert!(!redacted.contains("server-side-secret"));
+        assert!(!redacted.contains("https://vendor.example/v1/images"));
+        assert!(redacted.contains("[redacted image provider endpoint]"));
+        assert!(redacted.contains("[redacted image provider api key]"));
     }
 
     #[test]
