@@ -97,6 +97,12 @@ Start the local demo server:
 cargo run --bin hubu-server
 ```
 
+On startup the server reads `HUBU_AUTH_TOKEN`, or creates/reads
+`hubu.auth-token` in the current directory. The CLI, MCP adapter, and benchmark
+client read the same token automatically and send it as a local bearer token for
+protected API routes. Use `HUBU_AUTH_TOKEN_FILE` if the server and clients need
+to share a token file at a different path.
+
 Then use the CLI from another terminal:
 
 ```sh
@@ -135,13 +141,14 @@ cargo run --bin hubu-mcp-server
 ```
 
 Set `HUBU_URL` to target a non-default Hubu server URL. The MCP transport
-forwards to the existing local HTTP API, marks read-only tools as safe for agent
-inspection, and marks human/agent registration, policy creation, and budget
-creation as human-approval-required tools. Protected write tools are disabled
-unless the MCP process is started with `HUBU_MCP_TRUST_CLIENT_APPROVAL=1` behind
-a trusted client that prompts the human before destructive calls. Agents can
-submit spend requests directly; if policy returns `needs_approval`, the MCP
-response includes `requires_human_approval: true` and no payment is executed.
+forwards to the existing local HTTP API with the Hubu bearer token, marks
+read-only tools as safe for agent inspection, and marks human/agent
+registration, policy creation, and budget creation as human-approval-required
+tools. Protected write tools are disabled unless the MCP process is started with
+`HUBU_MCP_TRUST_CLIENT_APPROVAL=1` behind a trusted client that prompts the
+human before destructive calls. Agents can submit spend requests directly; if
+policy returns `needs_approval`, the MCP response includes
+`requires_human_approval: true` and no payment is executed.
 
 See [docs/mcp-transport.md](docs/mcp-transport.md) for the current tool and
 approval model.

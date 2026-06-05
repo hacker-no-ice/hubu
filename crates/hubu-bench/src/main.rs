@@ -1,7 +1,7 @@
 use std::{
     cmp,
     collections::BTreeMap,
-    env, fmt,
+    env, fmt, fs,
     io::{Read, Write},
     net::{Shutdown, TcpStream},
     sync::{
@@ -16,6 +16,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
+const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
+const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
+const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
 
 fn main() {
     if let Err(error) = run() {
@@ -686,12 +689,15 @@ impl HubuClient {
 
     fn request_json(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
         let body_text = body.map(|body| body.to_string()).unwrap_or_default();
+        let authorization_header = auth_token()?
+            .map(|token| format!("Authorization: Bearer {token}\r\n"))
+            .unwrap_or_default();
         let mut stream = TcpStream::connect((self.host.as_str(), self.port))
             .with_context(|| format!("connect to Hubu server at {}:{}", self.host, self.port))?;
 
         write!(
             stream,
-            "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\n{authorization_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             self.host,
             self.port,
             body_text.len(),
@@ -714,6 +720,31 @@ impl HubuClient {
         }
 
         Ok(json)
+    }
+}
+
+fn auth_token() -> Result<Option<String>> {
+    if let Ok(token) = env::var(AUTH_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{AUTH_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(Some(token));
+    }
+
+    let path =
+        env::var(AUTH_TOKEN_FILE_ENV).unwrap_or_else(|_| DEFAULT_AUTH_TOKEN_FILE.to_string());
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                Err(anyhow!("Hubu auth token file `{path}` is empty"))
+            } else {
+                Ok(Some(token))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read Hubu auth token file `{path}`")),
     }
 }
 

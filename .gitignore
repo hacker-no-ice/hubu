@@ -3,3 +3,4 @@
 .env
 .DS_Store
 /hubu.sqlite3
+/hubu.auth-token

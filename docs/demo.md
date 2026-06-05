@@ -38,6 +38,11 @@ address:
 cargo run --bin hubu-server -- 127.0.0.1:8788
 ```
 
+The server reads `HUBU_AUTH_TOKEN`, or creates/reads `hubu.auth-token` in the
+current directory. The CLI reads `HUBU_AUTH_TOKEN` or the same token file and
+sends it as a bearer token for protected routes. Set `HUBU_AUTH_TOKEN_FILE` if
+the server and CLI run from different working directories.
+
 In another terminal, check that the CLI can reach it:
 
 ```sh
@@ -407,8 +412,9 @@ after `cargo build`.
 
 - Server state is in memory. Restarting `hubu-server` clears registered agents,
   policies, spend decisions, budgets, payments, and ledger records.
-- Agent-scoped budget and ledger filtering are not yet implemented. The read
-  CLI currently lists agents, human-scoped budgets, and the full local ledger.
+- Agent-scoped budget filtering is not yet implemented. The read CLI currently
+  lists agents, human-scoped budgets, and ledger entries for the token-selected
+  owner.
 - The server uses a minimal local HTTP adapter for demo use, not a production
   web framework.
 - Payments use the existing mock rail only. No real payment provider is called.
