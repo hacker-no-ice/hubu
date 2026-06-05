@@ -231,6 +231,13 @@ LOGO_OUTPUT="$(hubu model-call image \
   --spend-auth-token-id "${LOGO_AUTH_TOKEN_ID}" \
   --prompt "Create a crisp logo for Project Hubu")"
 show_cli_output "${LOGO_OUTPUT}"
+LOGO_OUTPUT_REF="$(printf '%s\n' "${LOGO_OUTPUT}" | awk -F': ' '/^  output_ref:/ { print $2; exit }')"
+LOGO_OUTPUT_PATH="${LOGO_OUTPUT_REF#file://}"
+if [[ -z "${LOGO_OUTPUT_REF}" || "${LOGO_OUTPUT_REF}" == "${LOGO_OUTPUT_PATH}" || ! -f "${LOGO_OUTPUT_PATH}" ]]; then
+  say "${RED}Could not verify logo artifact from output_ref=${LOGO_OUTPUT_REF}.${RESET}" >&2
+  exit 1
+fi
+note "verified logo artifact=${LOGO_OUTPUT_PATH}"
 pause_for_reading
 
 step "Submit an allowed spend whose mock payment fails"

@@ -79,11 +79,13 @@ the agent.
 
 `hubu_generate_image` consumes one spend authorization token through
 `POST /model-calls/image`, settles the matching frozen budget hold, records the
-payment in the ledger, and returns image output metadata. The current provider
-is a local `hubu-demo` adapter; real vendor adapters can be added behind the
-same Hubu-hosted boundary without passing API keys to agents. Provider name,
-model, and API key are server-side Hubu configuration (`HUBU_IMAGE_PROVIDER_*`);
-agent requests must match the configured provider/model.
+payment in the ledger, writes a local demo SVG artifact, and returns image
+output metadata. The current provider is a local `hubu-demo` adapter; real
+vendor adapters can be added behind the same Hubu-hosted boundary without
+passing API keys to agents. Provider name, model, API key, and output directory
+are server-side Hubu configuration (`HUBU_IMAGE_PROVIDER_*`,
+`HUBU_IMAGE_OUTPUT_DIR`); agent requests must match the configured
+provider/model.
 
 ## Tool Mapping
 

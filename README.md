@@ -72,10 +72,12 @@ The demo starts Hubu locally, registers an agent, adds a policy, creates a
 recurring budget, submits allowed, failed-payment, approval-required, and denied
 spend requests, then prints the resulting budget balance and ledger.
 
-The demo image model proxy defaults to the local `hubu-demo` provider. Real
-adapters can be configured server-side with `HUBU_IMAGE_PROVIDER_NAME`,
-`HUBU_IMAGE_PROVIDER_MODEL`, and `HUBU_IMAGE_PROVIDER_API_KEY`; agents receive
-only provider results and never the configured API key.
+The demo image model proxy defaults to the local `hubu-demo` provider, which
+writes an SVG artifact under `target/hubu-image-outputs/`. Real adapters can be
+configured server-side with `HUBU_IMAGE_PROVIDER_NAME`,
+`HUBU_IMAGE_PROVIDER_MODEL`, `HUBU_IMAGE_PROVIDER_API_KEY`, and optionally
+`HUBU_IMAGE_OUTPUT_DIR`; agents receive only provider results and never the
+configured API key.
 
 Run the conservative local benchmark:
 

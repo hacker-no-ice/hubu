@@ -274,7 +274,7 @@ Expected output:
 Image model call proxied
   provider: hubu-demo
   model: demo-image-v1
-  output_ref: hubu-demo-image://dfd9a10f-e80f-4c17-b3ec-944d2114d4b9
+  output_ref: file:///path/to/hubu/target/hubu-image-outputs/hubu-logo-dfd9a10f-e80f-4c17-b3ec-944d2114d4b9.svg
   spend_auth_token_id: 1e48e2ec-564e-4519-9db4-d7892012ca78
 Payment
   status: succeeded
@@ -290,17 +290,18 @@ Budget hold
   remaining: $50.00
 ```
 
-The demo image provider returns a deterministic `hubu-demo-image://...` output
-reference rather than calling an external model vendor. The important boundary
-is already in place: the agent presents a scoped Hubu spend token, Hubu consumes
-it once, settles the budget hold, records the ledger transaction, and keeps
-provider selection/configuration server-side.
+The demo image provider writes a local SVG artifact and returns a `file://...`
+output reference rather than calling an external model vendor. The important
+boundary is already in place: the agent presents a scoped Hubu spend token, Hubu
+consumes it once, settles the budget hold, records the ledger transaction, and
+keeps provider selection/configuration server-side.
 
-The server-side image provider defaults to `hubu-demo` / `demo-image-v1`. For a
-real adapter, configure Hubu with `HUBU_IMAGE_PROVIDER_NAME`,
-`HUBU_IMAGE_PROVIDER_MODEL`, and `HUBU_IMAGE_PROVIDER_API_KEY`; agents may only
-request the configured provider/model, and the API key is not returned in API,
-CLI, MCP, or ledger responses.
+The server-side image provider defaults to `hubu-demo` / `demo-image-v1`, and
+the artifact directory defaults to `target/hubu-image-outputs/`. For a real
+adapter, configure Hubu with `HUBU_IMAGE_PROVIDER_NAME`,
+`HUBU_IMAGE_PROVIDER_MODEL`, `HUBU_IMAGE_PROVIDER_API_KEY`, and optionally
+`HUBU_IMAGE_OUTPUT_DIR`; agents may only request the configured provider/model,
+and the API key is not returned in API, CLI, MCP, or ledger responses.
 
 ### 7. Submit an Allowed Spend Whose Mock Payment Fails
 
