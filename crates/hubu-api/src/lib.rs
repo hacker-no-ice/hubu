@@ -191,6 +191,53 @@ fn image_output_dir_from_env() -> PathBuf {
         })
 }
 
+struct ImageGenerationRequest<'a> {
+    provider: &'a str,
+    model: &'a str,
+    prompt: &'a str,
+    payment_id: &'a str,
+}
+
+struct ImageGenerationOutput {
+    output_ref: String,
+}
+
+trait ImageProviderAdapter {
+    fn generate(&self, request: ImageGenerationRequest<'_>) -> Result<ImageGenerationOutput>;
+}
+
+struct DemoImageProviderAdapter<'a> {
+    config: &'a ImageProviderConfig,
+}
+
+impl ImageProviderAdapter for DemoImageProviderAdapter<'_> {
+    fn generate(&self, request: ImageGenerationRequest<'_>) -> Result<ImageGenerationOutput> {
+        std::fs::create_dir_all(&self.config.output_dir).with_context(|| {
+            format!(
+                "create image output directory {}",
+                self.config.output_dir.display()
+            )
+        })?;
+        let path = self
+            .config
+            .output_dir
+            .join(format!("hubu-logo-{}.svg", request.payment_id));
+        std::fs::write(
+            &path,
+            demo_image_svg(request.provider, request.model, request.prompt),
+        )
+        .with_context(|| format!("write demo image artifact to {}", path.display()))?;
+        let absolute_path = if path.is_absolute() {
+            path
+        } else {
+            env::current_dir()?.join(path)
+        };
+        Ok(ImageGenerationOutput {
+            output_ref: format!("file://{}", absolute_path.display()),
+        })
+    }
+}
+
 impl ServerState {
     fn new() -> Result<Self> {
         Self::new_with_db_path(
@@ -1936,13 +1983,16 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
         ));
     }
 
-    let output_ref = write_demo_image_artifact(
-        &state.image_provider,
-        &provider,
-        &model,
-        &request.prompt,
-        &payment.payment_id.to_string(),
-    )?;
+    let payment_id = payment.payment_id.to_string();
+    let image_output = DemoImageProviderAdapter {
+        config: &state.image_provider,
+    }
+    .generate(ImageGenerationRequest {
+        provider: &provider,
+        model: &model,
+        prompt: &request.prompt,
+        payment_id: &payment_id,
+    })?;
 
     log_event(
         "info",
@@ -1951,8 +2001,8 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
             "provider": provider,
             "model": model,
             "spend_auth_token_id": token_record.id.to_string(),
-            "payment_id": payment.payment_id.to_string(),
-            "output_ref": output_ref.clone(),
+            "payment_id": payment_id,
+            "output_ref": image_output.output_ref.clone(),
             "amount_cents": payment.amount_cents,
             "currency": payment.currency.to_string(),
             "provider_api_key_configured": state.image_provider.has_api_key(),
@@ -1962,7 +2012,7 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
     Ok(GenerateImageHttpResponse {
         provider,
         model,
-        output_ref,
+        output_ref: image_output.output_ref,
         spend_auth_token_id: token_record.id.to_string(),
         payment: PaymentHttpResponse {
             payment_id: payment.payment_id.to_string(),
@@ -1976,32 +2026,6 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
         },
         budget_hold: budget_hold_response(hold_update),
     })
-}
-
-fn write_demo_image_artifact(
-    config: &ImageProviderConfig,
-    provider: &str,
-    model: &str,
-    prompt: &str,
-    payment_id: &str,
-) -> Result<String> {
-    std::fs::create_dir_all(&config.output_dir).with_context(|| {
-        format!(
-            "create image output directory {}",
-            config.output_dir.display()
-        )
-    })?;
-    let path = config
-        .output_dir
-        .join(format!("hubu-logo-{payment_id}.svg"));
-    std::fs::write(&path, demo_image_svg(provider, model, prompt))
-        .with_context(|| format!("write demo image artifact to {}", path.display()))?;
-    let absolute_path = if path.is_absolute() {
-        path
-    } else {
-        env::current_dir()?.join(path)
-    };
-    Ok(format!("file://{}", absolute_path.display()))
 }
 
 fn demo_image_svg(provider: &str, model: &str, prompt: &str) -> String {
