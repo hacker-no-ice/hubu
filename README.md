@@ -13,13 +13,12 @@ private keys.
 
 Humans fund a shared wallet and define spending policies. Agents register as
 separate accounts and submit structured spend requests. Hubu validates each
-request through deterministic policies, merchant verification, risk guardrails,
-and concurrency-safe budget controls before executing payment and recording the
-result in an audit ledger.
+request through deterministic policies and budget controls before executing a
+mock payment and recording successful money movement in an audit ledger.
 
 This repository contains the Rust workspace for Hubu's policy engine, wallet
-logic, MCP integration layer, shared models, optional HTTP API, and local demo
-CLI.
+logic, shared models, local demo HTTP API, demo CLI, benchmark tool, and MCP
+transport adapter.
 
 ## What Hubu Does Today
 
@@ -37,10 +36,10 @@ CLI.
 - `hubu-common`: shared agent identity, ownership, and session/account models
 - `hubu-core`: registration, policy, and spend authorization logic
 - `hubu-wallet`: payment orchestration, mock rails, and ledger recording
-- `hubu-mcp`: MCP server adapter layer
 - `hubu-api`: local demo HTTP API and `hubu-server` binary
 - `hubu-cli`: demo-friendly `hubu` CLI binary
 - `hubu-bench`: local benchmark tool for spend approval throughput and correctness
+- `hubu-mcp`: MCP stdio transport adapter and `hubu-mcp-server` binary
 
 ## Quick Start
 
@@ -99,6 +98,7 @@ hubu register agent
 hubu init --policy policy.yaml
 hubu policy add --agent-id AGENT_ID --path policy.yaml
 hubu agent list
+hubu budget create-recurring --amount 100 --recurrence daily --period-count 1
 hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
 hubu ledger list
 ```
@@ -136,12 +136,6 @@ response includes `requires_human_approval: true` and no payment is executed.
 
 See [docs/mcp-transport.md](docs/mcp-transport.md) for the current tool and
 approval model.
-
-Start a local Anvil chain:
-
-```sh
-./scripts/start-anvil.sh
-```
 
 ## Policy Engine
 
