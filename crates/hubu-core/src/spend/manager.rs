@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::Utc;
 use hubu_common::ids::{PaymentId, SpendAuthTokenId, SpendDecisionId};
 use hubu_common::models::UserContext;
+use serde_json::json;
 
 use crate::policy::engine;
 use crate::policy::model::{Effect, Policy};
@@ -11,6 +12,7 @@ use crate::spend::model::{
     IssuedSpendAuthToken, SpendAuthTokenRecord, SpendDecisionRecord, SpendEvaluationResponse,
     SpendPaymentValidationRequest, SpendRequest, ValidatedSpendAuthorization,
 };
+use crate::telemetry::log_event;
 
 const DEFAULT_SPEND_AUTH_TOKEN_TTL: chrono::Duration = chrono::Duration::minutes(5);
 
@@ -37,6 +39,18 @@ impl SpendManager {
         policy: &Policy,
     ) -> Result<SpendEvaluationResponse, SpendError> {
         if request.owner_user_id != user.user_id || policy.owner_user_id != user.user_id {
+            log_event(
+                "warn",
+                "spend_evaluation_rejected",
+                json!({
+                    "reason": "user_scope_mismatch",
+                    "user_id": user.user_id.to_string(),
+                    "request_owner_user_id": request.owner_user_id.to_string(),
+                    "policy_owner_user_id": policy.owner_user_id.to_string(),
+                    "agent_id": request.agent_id.to_string(),
+                    "amount_cents": request.amount_cents,
+                }),
+            );
             return Err(SpendError::UserScopeMismatch);
         }
 
@@ -73,6 +87,25 @@ impl SpendManager {
             None
         };
 
+        log_event(
+            "info",
+            "spend_evaluated",
+            json!({
+                "decision_id": decision_id.to_string(),
+                "decision": effect_name(evaluation.decision),
+                "owner_user_id": user.user_id.to_string(),
+                "agent_id": request.agent_id.to_string(),
+                "amount_cents": request.amount_cents,
+                "currency": request.currency.to_string(),
+                "merchant": request.merchant,
+                "task_id": request.task_id,
+                "policy_id": evaluation.policy_id,
+                "policy_version": evaluation.policy_version,
+                "matched_rule_count": evaluation.rule_results.iter().filter(|result| result.matched).count(),
+                "auth_token_issued": auth_token.is_some(),
+                "auth_token_expires_at": auth_token.as_ref().map(|token| token.expires_at.to_rfc3339()),
+            }),
+        );
         Ok(SpendEvaluationResponse {
             decision_id,
             evaluation,
@@ -87,37 +120,61 @@ impl SpendManager {
         let token = self
             .tokens
             .get(&request.spend_auth_token_id)
-            .ok_or(SpendError::UnknownSpendAuthToken)?;
+            .ok_or_else(|| {
+                log_auth_validation_rejected(request, "unknown_spend_auth_token");
+                SpendError::UnknownSpendAuthToken
+            })?;
 
         if token.revoked_at.is_some() {
+            log_auth_validation_rejected(request, "revoked_spend_auth_token");
             return Err(SpendError::RevokedSpendAuthToken);
         }
 
         if token.used_at.is_some() {
+            log_auth_validation_rejected(request, "used_spend_auth_token");
             return Err(SpendError::UsedSpendAuthToken);
         }
 
         if token.expires_at <= Utc::now() {
+            log_auth_validation_rejected(request, "expired_spend_auth_token");
             return Err(SpendError::ExpiredSpendAuthToken);
         }
 
         let decision = self
             .decisions
             .get(&token.spend_decision_id)
-            .ok_or(SpendError::MissingSpendDecision)?;
+            .ok_or_else(|| {
+                log_auth_validation_rejected(request, "missing_spend_decision");
+                SpendError::MissingSpendDecision
+            })?;
 
         if decision.evaluation.decision != Effect::Allow {
+            log_auth_validation_rejected(request, "spend_decision_not_allowed");
             return Err(SpendError::SpendDecisionNotAllowed);
         }
 
         if request.owner_user_id != decision.owner_user_id {
+            log_auth_validation_rejected(request, "user_scope_mismatch");
             return Err(SpendError::UserScopeMismatch);
         }
 
         if !payment_matches_authorized_spend(request, &decision.request) {
+            log_auth_validation_rejected(request, "payment_request_mismatch");
             return Err(SpendError::PaymentRequestMismatch);
         }
 
+        log_event(
+            "info",
+            "spend_auth_token_validated",
+            json!({
+                "spend_auth_token_id": token.id.to_string(),
+                "spend_decision_id": token.spend_decision_id.to_string(),
+                "owner_user_id": token.owner_user_id.to_string(),
+                "agent_id": request.agent_id.to_string(),
+                "amount_cents": request.amount_cents,
+                "currency": request.currency.to_string(),
+            }),
+        );
         Ok(ValidatedSpendAuthorization {
             spend_auth_token_id: token.id.clone(),
             owner_user_id: token.owner_user_id.clone(),
@@ -131,18 +188,45 @@ impl SpendManager {
         token_id: &SpendAuthTokenId,
         payment_id: PaymentId,
     ) -> Result<(), SpendError> {
-        let token = self
-            .tokens
-            .get_mut(token_id)
-            .ok_or(SpendError::UnknownSpendAuthToken)?;
+        let token = self.tokens.get_mut(token_id).ok_or_else(|| {
+            log_event(
+                "warn",
+                "spend_auth_token_mark_used_rejected",
+                json!({
+                    "reason": "unknown_spend_auth_token",
+                    "spend_auth_token_id": token_id.to_string(),
+                    "payment_id": payment_id.to_string(),
+                }),
+            );
+            SpendError::UnknownSpendAuthToken
+        })?;
 
         if token.used_at.is_some() {
+            log_event(
+                "warn",
+                "spend_auth_token_mark_used_rejected",
+                json!({
+                    "reason": "used_spend_auth_token",
+                    "spend_auth_token_id": token_id.to_string(),
+                    "payment_id": payment_id.to_string(),
+                }),
+            );
             return Err(SpendError::UsedSpendAuthToken);
         }
 
         token.used_at = Some(Utc::now());
         token.used_by_payment_id = Some(payment_id);
 
+        log_event(
+            "info",
+            "spend_auth_token_marked_used",
+            json!({
+                "spend_auth_token_id": token.id.to_string(),
+                "spend_decision_id": token.spend_decision_id.to_string(),
+                "owner_user_id": token.owner_user_id.to_string(),
+                "payment_id": token.used_by_payment_id.as_ref().map(ToString::to_string),
+            }),
+        );
         Ok(())
     }
 }
@@ -156,6 +240,31 @@ fn payment_matches_authorized_spend(
         && payment.currency == spend.currency
         && payment.merchant == spend.merchant
         && payment.task_id == spend.task_id
+}
+
+fn log_auth_validation_rejected(request: &SpendPaymentValidationRequest, reason: &str) {
+    log_event(
+        "warn",
+        "spend_auth_token_validation_rejected",
+        json!({
+            "reason": reason,
+            "spend_auth_token_id": request.spend_auth_token_id.to_string(),
+            "owner_user_id": request.owner_user_id.to_string(),
+            "agent_id": request.agent_id.to_string(),
+            "amount_cents": request.amount_cents,
+            "currency": request.currency.to_string(),
+            "merchant": request.merchant,
+            "task_id": request.task_id,
+        }),
+    );
+}
+
+fn effect_name(effect: Effect) -> &'static str {
+    match effect {
+        Effect::Allow => "allow",
+        Effect::Deny => "deny",
+        Effect::NeedsApproval => "needs_approval",
+    }
 }
 
 impl Default for SpendManager {

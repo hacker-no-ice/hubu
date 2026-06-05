@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration, Months, Utc};
 use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId, TaskId, UserId};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
+use serde_json::json;
 
 use crate::budget::dto::{
     BudgetRecurrence, BudgetWithBalance, CreateBudgetSeriesRequest, CreateBudgetSeriesResponse,
@@ -14,6 +15,7 @@ use crate::budget::error::BudgetManagerError;
 use crate::budget::model::{
     Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetScope, BudgetStatus,
 };
+use crate::telemetry::log_event;
 
 pub struct BudgetManager {
     budgets: HashMap<BudgetId, Budget>,
@@ -67,6 +69,16 @@ impl BudgetManager {
         request: CreateBudgetSeriesRequest,
     ) -> Result<CreateBudgetSeriesResponse, BudgetManagerError> {
         if request.period_count == 0 {
+            log_event(
+                "warn",
+                "budget_series_create_rejected",
+                json!({
+                    "reason": "empty_budget_series",
+                    "scope": budget_scope_name(&request.scope),
+                    "amount_limit_cents": request.amount_limit_cents,
+                    "currency": request.currency.to_string(),
+                }),
+            );
             return Err(BudgetManagerError::EmptyBudgetSeries);
         }
 
@@ -85,6 +97,17 @@ impl BudgetManager {
             .iter()
             .any(|period| self.has_overlapping_budget(&request.scope, request.currency, period))
         {
+            log_event(
+                "warn",
+                "budget_series_create_rejected",
+                json!({
+                    "reason": "overlapping_budget_period",
+                    "scope": budget_scope_name(&request.scope),
+                    "amount_limit_cents": request.amount_limit_cents,
+                    "currency": request.currency.to_string(),
+                    "period_count": request.period_count,
+                }),
+            );
             return Err(BudgetManagerError::OverlappingBudgetPeriod);
         }
 
@@ -103,6 +126,16 @@ impl BudgetManager {
             self.insert_budget(budget_with_balance);
         }
 
+        log_event(
+            "info",
+            "budget_series_created",
+            json!({
+                "scope": budget_scope_name(&request.scope),
+                "amount_limit_cents": request.amount_limit_cents,
+                "currency": request.currency.to_string(),
+                "period_count": budgets.len(),
+            }),
+        );
         Ok(CreateBudgetSeriesResponse { budgets })
     }
 
@@ -116,6 +149,7 @@ impl BudgetManager {
         request: ReserveBudgetRequest,
     ) -> Result<ReserveBudgetResponse, BudgetManagerError> {
         if request.amount_cents <= 0 {
+            log_budget_reservation_rejected(&request, "amount_must_be_positive");
             return Err(BudgetManagerError::AmountMustBePositive);
         }
 
@@ -123,32 +157,40 @@ impl BudgetManager {
             .hold_by_spend_decision
             .contains_key(&request.spend_decision_id)
         {
+            log_budget_reservation_rejected(&request, "duplicate_spend_decision_hold");
             return Err(BudgetManagerError::DuplicateSpendDecisionHold);
         }
 
-        let budget = self
-            .budgets
-            .get(&request.budget_id)
-            .ok_or(BudgetManagerError::UnknownBudget)?;
+        let budget = self.budgets.get(&request.budget_id).ok_or_else(|| {
+            log_budget_reservation_rejected(&request, "unknown_budget");
+            BudgetManagerError::UnknownBudget
+        })?;
 
         if !matches!(budget.status, BudgetStatus::Active) {
+            log_budget_reservation_rejected(&request, "budget_not_active");
             return Err(BudgetManagerError::BudgetNotActive);
         }
 
         if !budget.period.contains(Utc::now()) {
+            log_budget_reservation_rejected(&request, "budget_period_inactive");
             return Err(BudgetManagerError::BudgetPeriodInactive);
         }
 
         if budget.currency != request.currency {
+            log_budget_reservation_rejected(&request, "currency_mismatch");
             return Err(BudgetManagerError::CurrencyMismatch);
         }
 
         let balance = self
             .budget_balances
             .get_mut(&request.budget_id)
-            .ok_or(BudgetManagerError::MissingBudgetBalance)?;
+            .ok_or_else(|| {
+                log_budget_reservation_rejected(&request, "missing_budget_balance");
+                BudgetManagerError::MissingBudgetBalance
+            })?;
 
         if balance.remaining_amount_cents < request.amount_cents {
+            log_budget_reservation_rejected(&request, "insufficient_remaining_budget");
             return Err(BudgetManagerError::InsufficientRemainingBudget);
         }
 
@@ -172,6 +214,21 @@ impl BudgetManager {
             .insert(hold.spend_decision_id.clone(), hold.id.clone());
         self.budget_holds.insert(hold.id.clone(), hold.clone());
 
+        log_event(
+            "info",
+            "budget_reserved",
+            json!({
+                "budget_id": hold.budget_id.to_string(),
+                "hold_id": hold.id.to_string(),
+                "spend_decision_id": hold.spend_decision_id.to_string(),
+                "amount_cents": hold.amount_cents,
+                "currency": hold.currency.to_string(),
+                "consumed_amount_cents": balance.consumed_amount_cents,
+                "frozen_amount_cents": balance.frozen_amount_cents,
+                "remaining_amount_cents": balance.remaining_amount_cents,
+                "expires_at": hold.expires_at.to_rfc3339(),
+            }),
+        );
         Ok(ReserveBudgetResponse {
             hold,
             balance: balance.clone(),
@@ -183,24 +240,66 @@ impl BudgetManager {
         &mut self,
         hold_id: &BudgetHoldId,
     ) -> Result<SettleBudgetResponse, BudgetManagerError> {
-        let hold = self
-            .budget_holds
-            .get_mut(hold_id)
-            .ok_or(BudgetManagerError::UnknownBudgetHold)?;
+        let hold = self.budget_holds.get_mut(hold_id).ok_or_else(|| {
+            log_event(
+                "warn",
+                "budget_settle_rejected",
+                json!({
+                    "reason": "unknown_budget_hold",
+                    "hold_id": hold_id.to_string(),
+                }),
+            );
+            BudgetManagerError::UnknownBudgetHold
+        })?;
 
         if hold.expires_at <= Utc::now() {
+            log_event(
+                "warn",
+                "budget_settle_rejected",
+                json!({
+                    "reason": "expired_budget_hold",
+                    "budget_id": hold.budget_id.to_string(),
+                    "hold_id": hold.id.to_string(),
+                    "spend_decision_id": hold.spend_decision_id.to_string(),
+                    "expires_at": hold.expires_at.to_rfc3339(),
+                }),
+            );
             return Err(BudgetManagerError::ExpiredBudgetHold);
         }
 
         let balance = self
             .budget_balances
             .get_mut(&hold.budget_id)
-            .ok_or(BudgetManagerError::MissingBudgetBalance)?;
+            .ok_or_else(|| {
+                log_event(
+                    "warn",
+                    "budget_settle_rejected",
+                    json!({
+                        "reason": "missing_budget_balance",
+                        "budget_id": hold.budget_id.to_string(),
+                        "hold_id": hold.id.to_string(),
+                    }),
+                );
+                BudgetManagerError::MissingBudgetBalance
+            })?;
 
         hold.settle()?;
         balance.frozen_amount_cents -= hold.amount_cents;
         balance.consumed_amount_cents += hold.amount_cents;
 
+        log_event(
+            "info",
+            "budget_settled",
+            json!({
+                "budget_id": hold.budget_id.to_string(),
+                "hold_id": hold.id.to_string(),
+                "spend_decision_id": hold.spend_decision_id.to_string(),
+                "amount_cents": hold.amount_cents,
+                "consumed_amount_cents": balance.consumed_amount_cents,
+                "frozen_amount_cents": balance.frozen_amount_cents,
+                "remaining_amount_cents": balance.remaining_amount_cents,
+            }),
+        );
         Ok(SettleBudgetResponse {
             hold: hold.clone(),
             balance: balance.clone(),
@@ -212,20 +311,51 @@ impl BudgetManager {
         &mut self,
         hold_id: &BudgetHoldId,
     ) -> Result<ReleaseBudgetResponse, BudgetManagerError> {
-        let hold = self
-            .budget_holds
-            .get_mut(hold_id)
-            .ok_or(BudgetManagerError::UnknownBudgetHold)?;
+        let hold = self.budget_holds.get_mut(hold_id).ok_or_else(|| {
+            log_event(
+                "warn",
+                "budget_release_rejected",
+                json!({
+                    "reason": "unknown_budget_hold",
+                    "hold_id": hold_id.to_string(),
+                }),
+            );
+            BudgetManagerError::UnknownBudgetHold
+        })?;
 
         let balance = self
             .budget_balances
             .get_mut(&hold.budget_id)
-            .ok_or(BudgetManagerError::MissingBudgetBalance)?;
+            .ok_or_else(|| {
+                log_event(
+                    "warn",
+                    "budget_release_rejected",
+                    json!({
+                        "reason": "missing_budget_balance",
+                        "budget_id": hold.budget_id.to_string(),
+                        "hold_id": hold.id.to_string(),
+                    }),
+                );
+                BudgetManagerError::MissingBudgetBalance
+            })?;
 
         hold.release()?;
         balance.frozen_amount_cents -= hold.amount_cents;
         balance.remaining_amount_cents += hold.amount_cents;
 
+        log_event(
+            "info",
+            "budget_released",
+            json!({
+                "budget_id": hold.budget_id.to_string(),
+                "hold_id": hold.id.to_string(),
+                "spend_decision_id": hold.spend_decision_id.to_string(),
+                "amount_cents": hold.amount_cents,
+                "consumed_amount_cents": balance.consumed_amount_cents,
+                "frozen_amount_cents": balance.frozen_amount_cents,
+                "remaining_amount_cents": balance.remaining_amount_cents,
+            }),
+        );
         Ok(ReleaseBudgetResponse {
             hold: hold.clone(),
             balance: balance.clone(),
@@ -269,6 +399,17 @@ impl BudgetManager {
         period: TimePeriod,
     ) -> Result<CreateSingleBudgetResponse, BudgetManagerError> {
         if self.has_overlapping_budget(&scope, currency, &period) {
+            log_event(
+                "warn",
+                "budget_create_rejected",
+                json!({
+                    "reason": "overlapping_budget_period",
+                    "scope": budget_scope_name(&scope),
+                    "currency": currency.to_string(),
+                    "starting_at": period.starting_at.to_rfc3339(),
+                    "ending_before": period.ending_before.map(|value| value.to_rfc3339()),
+                }),
+            );
             return Err(BudgetManagerError::OverlappingBudgetPeriod);
         }
 
@@ -276,6 +417,18 @@ impl BudgetManager {
             build_budget_for_period(scope, amount_limit_cents, currency, period)?;
         self.insert_budget(&budget_with_balance);
 
+        log_event(
+            "info",
+            "budget_created",
+            json!({
+                "budget_id": budget_with_balance.budget.id.to_string(),
+                "scope": budget_scope_name(&budget_with_balance.budget.scope),
+                "amount_limit_cents": budget_with_balance.budget.amount_limit_cents,
+                "currency": budget_with_balance.budget.currency.to_string(),
+                "starting_at": budget_with_balance.budget.period.starting_at.to_rfc3339(),
+                "ending_before": budget_with_balance.budget.period.ending_before.map(|value| value.to_rfc3339()),
+            }),
+        );
         Ok(CreateSingleBudgetResponse {
             budget: budget_with_balance.budget,
             balance: budget_with_balance.balance,
@@ -331,6 +484,29 @@ impl BudgetManager {
                 && scopes_match(&budget.scope, scope)
                 && periods_overlap(&budget.period, period)
         })
+    }
+}
+
+fn log_budget_reservation_rejected(request: &ReserveBudgetRequest, reason: &str) {
+    log_event(
+        "warn",
+        "budget_reservation_rejected",
+        json!({
+            "reason": reason,
+            "budget_id": request.budget_id.to_string(),
+            "spend_decision_id": request.spend_decision_id.to_string(),
+            "amount_cents": request.amount_cents,
+            "currency": request.currency.to_string(),
+            "expires_at": request.expires_at.to_rfc3339(),
+        }),
+    );
+}
+
+fn budget_scope_name(scope: &BudgetScope) -> &'static str {
+    match scope {
+        BudgetScope::User(_) => "user",
+        BudgetScope::Agent(_) => "agent",
+        BudgetScope::Task(_) => "task",
     }
 }
 

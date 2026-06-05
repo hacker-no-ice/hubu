@@ -52,7 +52,7 @@ printf 'Building benchmark binaries...\n'
 cargo build --bin hubu-server --bin hubu-bench --bin hubu
 
 printf 'Starting Hubu server at %s...\n' "${BENCH_URL}"
-HUBU_DB_PATH="${DB_PATH}" "${ROOT_DIR}/target/debug/hubu-server" "${BENCH_ADDR}" >"${SERVER_LOG}" 2>&1 &
+HUBU_DB_PATH="${DB_PATH}" HUBU_LOG_FILE="${SERVER_LOG}" HUBU_LOG_STDERR=0 "${ROOT_DIR}/target/debug/hubu-server" "${BENCH_ADDR}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID="$!"
 sleep 0.2
 
