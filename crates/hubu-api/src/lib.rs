@@ -26,7 +26,7 @@ use hubu_core::{
     budget::{
         BudgetManager, BudgetManagerError, BudgetRecurrence, BudgetScope, BudgetWithBalance,
         CreateBudgetSeriesRequest, CreateSingleBudgetRequest, ReleaseBudgetResponse,
-        ReserveBudgetResponse, SettleBudgetResponse,
+        ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyRepository, SpendRepository, SqliteGovernanceRepository,
@@ -1298,7 +1298,10 @@ fn list_budgets(state: &ServerState) -> Result<ListBudgetsHttpResponse> {
 
 fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let request: SpendHttpRequest = serde_json::from_str(&body)?;
-    let authorization = evaluate_and_reserve_spend(request, state)?;
+    let authorization = match evaluate_and_reserve_spend(request, state)? {
+        SpendAuthorization::Authorized(authorization) => authorization,
+        SpendAuthorization::Response(response) => return Ok(response),
+    };
 
     Ok(SpendHttpResponse {
         account_id: authorization.account_pub_id,
@@ -1314,7 +1317,10 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
 
 fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let request: SpendHttpRequest = serde_json::from_str(&body)?;
-    let authorization = evaluate_and_reserve_spend(request, state)?;
+    let authorization = match evaluate_and_reserve_spend(request, state)? {
+        SpendAuthorization::Authorized(authorization) => authorization,
+        SpendAuthorization::Response(response) => return Ok(response),
+    };
     let owner = owner_metadata_for_user_id(&authorization.user.user_id, state)?;
     let (budget_hold, payment) = if let Some(token) = authorization.token {
         let reservation = authorization
@@ -1480,10 +1486,15 @@ struct AuthorizedSpend {
     reservation: Option<ReserveBudgetResponse>,
 }
 
+enum SpendAuthorization {
+    Authorized(AuthorizedSpend),
+    Response(SpendHttpResponse),
+}
+
 fn evaluate_and_reserve_spend(
     request: SpendHttpRequest,
     state: &ServerState,
-) -> Result<AuthorizedSpend> {
+) -> Result<SpendAuthorization> {
     if request.amount_cents <= 0 {
         return Err(anyhow!("spend amount must be positive"));
     }
@@ -1597,7 +1608,7 @@ fn evaluate_and_reserve_spend(
                             "reason": "insufficient_remaining_budget",
                         }),
                     );
-                    return Ok(SpendHttpResponse {
+                    return Ok(SpendAuthorization::Response(SpendHttpResponse {
                         account_id: account_pub_id,
                         agent_id: agent_pub_id,
                         decision_id: evaluation.decision_id.to_string(),
@@ -1606,7 +1617,7 @@ fn evaluate_and_reserve_spend(
                         auth_token_id: None,
                         budget_hold: None,
                         payment: None,
-                    });
+                    }));
                 }
                 Err(error) => return Err(error.into()),
             };
@@ -1660,7 +1671,7 @@ fn evaluate_and_reserve_spend(
         None
     };
 
-    Ok(AuthorizedSpend {
+    Ok(SpendAuthorization::Authorized(AuthorizedSpend {
         user,
         account,
         account_pub_id,
@@ -1673,7 +1684,7 @@ fn evaluate_and_reserve_spend(
         auth_token_id,
         token,
         reservation,
-    })
+    }))
 }
 
 enum BudgetHoldUpdate {
