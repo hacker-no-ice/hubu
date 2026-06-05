@@ -1391,14 +1391,25 @@ fn create_budget_series(
 fn list_budgets(state: &ServerState) -> Result<ListBudgetsHttpResponse> {
     let user = default_user_context(state)?;
     reconcile_expired_budget_holds(state)?;
-    let budgets = state
-        .budgets
+    let agent_ids = state
+        .registration
         .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .get_budgets_by_user_id(&user.user_id)
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?
+        .agents_for_user(&user.user_id)?
         .into_iter()
-        .map(budget_response)
-        .collect();
+        .map(|agent| agent.agent.id)
+        .collect::<Vec<_>>();
+    let budgets = {
+        let budgets = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let mut visible_budgets = budgets.get_budgets_by_user_id(&user.user_id);
+        for agent_id in agent_ids {
+            visible_budgets.extend(budgets.get_budgets_by_agent_id(&agent_id));
+        }
+        visible_budgets.into_iter().map(budget_response).collect()
+    };
 
     Ok(ListBudgetsHttpResponse { budgets })
 }
@@ -2841,6 +2852,64 @@ mod tests {
 
         let ledger = list_ledger(&state).expect("ledger should list");
         assert!(ledger.transactions.is_empty());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn list_budgets_includes_registered_agent_budgets() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-list-agent-budgets-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "logo-design-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        create_budget(
+            json!({
+                "amount_cents": 1_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("user budget should be created");
+        create_budget(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent budget should be created");
+
+        let budgets = list_budgets(&state).expect("budgets should list");
+        let mut scopes = budgets
+            .budgets
+            .iter()
+            .map(|budget| budget.scope.clone())
+            .collect::<Vec<_>>();
+        scopes.sort();
+
+        assert_eq!(budgets.budgets.len(), 2);
+        assert_eq!(scopes, vec!["agent".to_string(), "user".to_string()]);
         std::fs::remove_file(path).ok();
     }
 
