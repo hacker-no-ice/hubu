@@ -14,6 +14,7 @@ const sharedLinks = {
   policyCondition: ["Policy conditions", "crates/hubu-core/src/policy/condition.rs"],
   spend: ["Spend manager", "crates/hubu-core/src/spend/manager.rs"],
   spendModel: ["Spend model", "crates/hubu-core/src/spend/model.rs"],
+  spendExecutor: ["Spend executor contract", "docs/spend-executor-contract.md"],
   budget: ["Budget manager", "crates/hubu-core/src/budget/manager.rs"],
   budgetModel: ["Budget model", "crates/hubu-core/src/budget/model.rs"],
   payment: ["Payment manager", "crates/hubu-wallet/src/payment.rs"],
@@ -33,10 +34,11 @@ const components = {
     responsibilities: [
       "Humans register, attach policies, create budgets, and review protected actions.",
       "Agents use CLI or MCP surfaces to register and submit structured spend requests.",
-      "The API coordinates core governance managers and wallet execution.",
+      "External executors can validate, settle, or release authorized spend without Hubu performing the work.",
+      "The API coordinates core governance managers, wallet execution, and executor-facing spend state.",
       "SQLite-backed records preserve users, agents, budgets, policies, payments, and ledger entries.",
     ],
-    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.cli, sharedLinks.mcp],
+    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.cli, sharedLinks.mcp, sharedLinks.spendExecutor],
     nodes: [
       { id: "human", label: "Human owner", sub: "funds + policy", x: 58, y: 80, w: 190, h: 94, tone: "human" },
       { id: "agent", label: "AI agent", sub: "spend requests", x: 58, y: 305, w: 190, h: 94, tone: "agent" },
@@ -66,13 +68,13 @@ const components = {
     title: "Local HTTP API",
     kind: "Component",
     copy:
-      "The demo server is a small TCP HTTP API. It owns the shared process state, exposes JSON routes, and stitches together registration, policy, budget, spend, payment, and ledger managers.",
+      "The demo server is a small TCP HTTP API. It owns the shared process state, exposes JSON routes, and stitches together registration, policy, budget, spend, payment, executor, and ledger managers.",
     responsibilities: [
-      "Routes health, registration guidance, user setup, agent registration, policies, budgets, spend, and ledger listing.",
+      "Routes health, registration guidance, executor guidance, user setup, agent registration, policies, budgets, spend, and ledger listing.",
       "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
-      "Bridges wallet payment authorization through a shared spend authorizer.",
+      "Bridges wallet payment authorization and external executor validation through shared spend state.",
     ],
-    links: [sharedLinks.api, sharedLinks.persistence, sharedLinks.telemetry],
+    links: [sharedLinks.api, sharedLinks.spendExecutor, sharedLinks.persistence, sharedLinks.telemetry],
     nodes: [
       { id: "routes", label: "Routes", sub: "GET/POST JSON", x: 80, y: 92, w: 190, h: 90, tone: "agent" },
       { id: "state", label: "ServerState", sub: "shared managers", x: 420, y: 90, w: 210, h: 96, tone: "core" },
@@ -149,9 +151,9 @@ const components = {
     responsibilities: [
       "Creates single or finite recurring budget periods with overlap checks.",
       "Indexes budgets by user, agent, and task scope.",
-      "Reserves, settles, releases, and expires budget holds.",
+      "Reserves, settles, releases, and expires budget holds for wallet payments and external executors.",
     ],
-    links: [sharedLinks.budget, sharedLinks.budgetModel, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
+    links: [sharedLinks.budget, sharedLinks.budgetModel, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
     nodes: [
       { id: "create", label: "Create budget", sub: "single/series", x: 76, y: 92, w: 206, h: 92, tone: "human" },
       { id: "periods", label: "Periods", sub: "half-open windows", x: 420, y: 92, w: 210, h: 92, tone: "core" },
