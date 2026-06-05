@@ -150,6 +150,7 @@ struct ImageProviderConfig {
     endpoint: Option<String>,
     price_cents: i64,
     timeout_ms: u64,
+    max_retries: u32,
     output_dir: PathBuf,
     adapter_kind: ImageProviderAdapterKind,
 }
@@ -169,6 +170,7 @@ impl ImageProviderConfig {
             endpoint: env::var("HUBU_IMAGE_PROVIDER_ENDPOINT").ok(),
             price_cents: image_provider_price_cents_from_env()?,
             timeout_ms: image_provider_timeout_ms_from_env()?,
+            max_retries: image_provider_max_retries_from_env()?,
             output_dir: image_output_dir_from_env(),
         })
     }
@@ -245,6 +247,23 @@ fn image_provider_timeout_ms_from_env() -> Result<u64> {
         Ok(value) => parse_positive_millis_env("HUBU_IMAGE_PROVIDER_TIMEOUT_MS", &value),
         Err(_) => Ok(30_000),
     }
+}
+
+fn image_provider_max_retries_from_env() -> Result<u32> {
+    match env::var("HUBU_IMAGE_PROVIDER_MAX_RETRIES") {
+        Ok(value) => parse_max_retries_env(&value),
+        Err(_) => Ok(0),
+    }
+}
+
+fn parse_max_retries_env(value: &str) -> Result<u32> {
+    let max_retries = value
+        .parse::<u32>()
+        .with_context(|| "parse HUBU_IMAGE_PROVIDER_MAX_RETRIES as a count")?;
+    if max_retries > 3 {
+        return Err(anyhow!("HUBU_IMAGE_PROVIDER_MAX_RETRIES must be 3 or less"));
+    }
+    Ok(max_retries)
 }
 
 fn parse_positive_millis_env(name: &str, value: &str) -> Result<u64> {
@@ -341,6 +360,16 @@ impl ImageProviderError {
             message: message.into(),
         }
     }
+
+    fn is_retryable(&self) -> bool {
+        match self.code {
+            "provider_timeout" | "provider_transport" => true,
+            "provider_http_status" => self
+                .status
+                .is_some_and(|status| status == 429 || (500..=599).contains(&status)),
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Display for ImageProviderError {
@@ -430,20 +459,13 @@ impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
                     "http-json image adapter requires an API key",
                 )
             })?;
-        let timeout = std::time::Duration::from_millis(self.config.timeout_ms);
-        let response = ureq::AgentBuilder::new()
-            .timeout(timeout)
-            .timeout_connect(timeout)
-            .timeout_read(timeout)
-            .timeout_write(timeout)
-            .build()
-            .post(endpoint);
-        let response = apply_http_json_image_provider_headers(
-            response,
-            &http_json_image_provider_headers(api_key, request.artifact_id),
-        )
-        .send_json(http_json_image_provider_payload(&request))
-        .map_err(classify_http_json_provider_error)?;
+        let response = send_http_json_image_provider_request(
+            endpoint,
+            api_key,
+            self.config.timeout_ms,
+            self.config.max_retries,
+            &request,
+        )?;
         let body: serde_json::Value = response.into_json().map_err(|error| {
             ImageProviderError::new(
                 "provider_response_invalid",
@@ -451,6 +473,37 @@ impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
             )
         })?;
         image_generation_output_from_provider_body(&body)
+    }
+}
+
+fn send_http_json_image_provider_request(
+    endpoint: &str,
+    api_key: &str,
+    timeout_ms: u64,
+    max_retries: u32,
+    request: &ImageGenerationRequest<'_>,
+) -> Result<ureq::Response, ImageProviderError> {
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let agent = ureq::AgentBuilder::new()
+        .timeout(timeout)
+        .timeout_connect(timeout)
+        .timeout_read(timeout)
+        .timeout_write(timeout)
+        .build();
+    let headers = http_json_image_provider_headers(api_key, request.artifact_id);
+    let payload = http_json_image_provider_payload(request);
+    let mut attempts = 0;
+    loop {
+        let response = apply_http_json_image_provider_headers(agent.post(endpoint), &headers)
+            .send_json(payload.clone())
+            .map_err(classify_http_json_provider_error);
+        match response {
+            Ok(response) => return Ok(response),
+            Err(error) if attempts < max_retries && error.is_retryable() => {
+                attempts += 1;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -648,6 +701,7 @@ impl ServerState {
                 "image_provider_endpoint_configured": state.image_provider.endpoint.as_ref().is_some_and(|endpoint| !endpoint.is_empty()),
                 "image_provider_price_cents": state.image_provider.price_cents,
                 "image_provider_timeout_ms": state.image_provider.timeout_ms,
+                "image_provider_max_retries": state.image_provider.max_retries,
                 "image_output_dir": state.image_provider.output_dir.display().to_string(),
             }),
         );
@@ -3417,6 +3471,7 @@ mod tests {
             endpoint: None,
             price_cents: 500,
             timeout_ms: 30_000,
+            max_retries: 0,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Demo,
         };
@@ -3448,6 +3503,7 @@ mod tests {
             endpoint: None,
             price_cents: 500,
             timeout_ms: 30_000,
+            max_retries: 0,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
         };
@@ -3488,6 +3544,7 @@ mod tests {
             endpoint: Some("https://vendor.example/v1/images".to_string()),
             price_cents: 500,
             timeout_ms: 30_000,
+            max_retries: 0,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::HttpJson,
         };
@@ -3555,6 +3612,26 @@ mod tests {
     }
 
     #[test]
+    fn image_provider_max_retries_config_is_bounded() {
+        assert_eq!(
+            parse_max_retries_env("0").expect("zero retries should parse"),
+            0
+        );
+        assert_eq!(
+            parse_max_retries_env("3").expect("three retries should parse"),
+            3
+        );
+        let excessive = parse_max_retries_env("4").expect_err("retries should be bounded");
+        assert!(excessive
+            .to_string()
+            .contains("HUBU_IMAGE_PROVIDER_MAX_RETRIES must be 3 or less"));
+        let invalid = parse_max_retries_env("soon").expect_err("non-numeric retries should fail");
+        assert!(invalid
+            .to_string()
+            .contains("parse HUBU_IMAGE_PROVIDER_MAX_RETRIES as a count"));
+    }
+
+    #[test]
     fn http_json_image_adapter_classifies_invalid_provider_response() {
         let error = image_generation_output_from_provider_body(&json!({
             "images": []
@@ -3577,6 +3654,28 @@ mod tests {
         assert_eq!(error.code, "provider_http_status");
         assert_eq!(error.status, Some(429));
         assert!(error.to_string().contains("429"));
+    }
+
+    #[test]
+    fn image_provider_retry_policy_only_retries_transient_failures() {
+        assert!(ImageProviderError::new("provider_timeout", "timed out").is_retryable());
+        assert!(ImageProviderError::new("provider_transport", "connection reset").is_retryable());
+        assert!(
+            ImageProviderError::with_status("provider_http_status", 429, "rate limited")
+                .is_retryable()
+        );
+        assert!(
+            ImageProviderError::with_status("provider_http_status", 503, "unavailable")
+                .is_retryable()
+        );
+        assert!(
+            !ImageProviderError::with_status("provider_http_status", 400, "bad request")
+                .is_retryable()
+        );
+        assert!(
+            !ImageProviderError::new("provider_response_invalid", "missing output_ref")
+                .is_retryable()
+        );
     }
 
     #[test]
@@ -3799,6 +3898,7 @@ mod tests {
             endpoint: None,
             price_cents: 500,
             timeout_ms: 30_000,
+            max_retries: 0,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
         };
