@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, PaymentId, SpendAuthTokenId, SpendDecisionId, UserId};
+use hubu_common::ids::{
+    AgentAccountId, AgentId, PaymentId, SpendAuthTokenId, SpendDecisionId, UserId,
+};
 use hubu_common::money::Currency;
 
 use crate::policy::model::Evaluation;
@@ -10,6 +12,7 @@ pub struct SpendRequest {
     pub currency: Currency,
     pub owner_user_id: UserId,
     pub agent_id: AgentId,
+    pub agent_account_id: AgentAccountId,
     pub merchant: Option<String>,
     pub category: Option<String>,
     pub task_id: Option<String>,
@@ -55,6 +58,7 @@ pub struct SpendPaymentValidationRequest {
     pub spend_auth_token_id: SpendAuthTokenId,
     pub owner_user_id: UserId,
     pub agent_id: AgentId,
+    pub agent_account_id: AgentAccountId,
     pub amount_cents: i64,
     pub currency: Currency,
     pub merchant: Option<String>,

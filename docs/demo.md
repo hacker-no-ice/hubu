@@ -115,10 +115,11 @@ Agent registered
   session_id: ags_2h7rx0cq4p9w
 ```
 
-Copy the public `agent_id` for the next commands. Internally, Hubu still uses
-UUID-backed IDs; the CLI and HTTP demo API use shorter public IDs such as
-`usr_...` and `agt_...`. The suffixes will differ for each new user and agent
-because they are derived from internal UUIDs.
+Copy the public `agent_id` for policy commands and `account_id` for spend
+commands. Internally, Hubu still uses UUID-backed IDs; the CLI and HTTP demo API
+use shorter public IDs such as `usr_...`, `agt_...`, and `aga_...`. The suffixes
+will differ for each new user and agent because they are derived from internal
+UUIDs.
 
 ### 3. Generate and Add a Policy
 
@@ -189,7 +190,7 @@ existing budget, none of the periods are created.
 
 ```sh
 hubu spend \
-  --agent-id agt_8x7k2m4q9v1c \
+  --account-id aga_c6q3d9m1v8ra \
   --amount 20 \
   --reason "Purchase API credits"
 ```
@@ -198,6 +199,8 @@ Expected output:
 
 ```txt
 Spend evaluated
+  account_id: aga_c6q3d9m1v8ra
+  agent_id: agt_8x7k2m4q9v1c
   decision: allow
   decision_id: 7da692a8-d5a7-4028-b5db-fc8b0de79d10
   reason: amount is at or below the configured demo limit of 10000 cents
@@ -205,6 +208,7 @@ Payment
   status: succeeded
   payment_id: dfd9a10f-e80f-4c17-b3ec-944d2114d4b9
   owner_user: Alice Example (usr_6qqcj94w6pr5)
+  account_id: aga_c6q3d9m1v8ra
   ledger_transaction_id: 87b1cb7f-0fdf-40c8-b260-343cf4939be9
   rail_reference: fiat_mock_7da692a8-d5a7-4028-b5db-fc8b0de79d10:Purchase API credits
 Budget hold
@@ -225,7 +229,7 @@ before payment; successful payment settles the hold into consumed balance.
 
 ```sh
 hubu spend \
-  --agent-id agt_8x7k2m4q9v1c \
+  --account-id aga_c6q3d9m1v8ra \
   --amount 15 \
   --reason "Test failed merchant payout" \
   --merchant fail
@@ -235,6 +239,8 @@ Expected output:
 
 ```txt
 Spend evaluated
+  account_id: aga_c6q3d9m1v8ra
+  agent_id: agt_8x7k2m4q9v1c
   decision: allow
   decision_id: 9ed7d2a1-782f-45d3-9262-a69f7e610d7d
   reason: amount is at or below the configured demo limit of 10000 cents
@@ -242,6 +248,7 @@ Payment
   status: failed
   payment_id: 11f94960-2b30-429b-8d2f-0069eac928b5
   owner_user: Alice Example (usr_6qqcj94w6pr5)
+  account_id: aga_c6q3d9m1v8ra
   failure_reason: mock rail declined merchant
 Budget hold
   status: released
@@ -260,7 +267,7 @@ successful payments become ledger transactions.
 
 ```sh
 hubu spend \
-  --agent-id agt_8x7k2m4q9v1c \
+  --account-id aga_c6q3d9m1v8ra \
   --amount 120 \
   --reason "Large API credit purchase"
 ```
@@ -269,6 +276,8 @@ Expected output:
 
 ```txt
 Spend evaluated
+  account_id: aga_c6q3d9m1v8ra
+  agent_id: agt_8x7k2m4q9v1c
   decision: needs_approval
   decision_id: b58e1683-6707-41ec-b8c8-1ab1c52c2632
 ```
@@ -280,7 +289,7 @@ returns `allow`.
 
 ```sh
 hubu spend \
-  --agent-id agt_8x7k2m4q9v1c \
+  --account-id aga_c6q3d9m1v8ra \
   --amount 20 \
   --reason "Attempt blocked merchant purchase" \
   --merchant blocked-merchant
@@ -290,6 +299,8 @@ Expected output:
 
 ```txt
 Spend evaluated
+  account_id: aga_c6q3d9m1v8ra
+  agent_id: agt_8x7k2m4q9v1c
   decision: deny
   decision_id: 6f8625e8-426f-40f1-91ff-bef0efb9600b
   reason: merchant is blocked by the demo policy
@@ -348,7 +359,7 @@ hubu [--url http://127.0.0.1:8787] agent list
 hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
 hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
 hubu [--url http://127.0.0.1:8787] budget list
-hubu [--url http://127.0.0.1:8787] spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+hubu [--url http://127.0.0.1:8787] spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
 hubu [--url http://127.0.0.1:8787] ledger list
 hubu [--url http://127.0.0.1:8787] health
 ```

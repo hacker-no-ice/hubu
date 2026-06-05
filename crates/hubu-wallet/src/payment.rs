@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, LedgerTransactionId, PaymentId, SpendAuthTokenId, UserId};
+use hubu_common::ids::{
+    AgentAccountId, AgentId, LedgerTransactionId, PaymentId, SpendAuthTokenId, UserId,
+};
 use hubu_common::money::Currency;
 
 use crate::ledger::{
@@ -71,6 +73,7 @@ pub struct PaymentRequest {
     pub spend_auth_token_id: SpendAuthTokenId,
     pub owner_user_id: UserId,
     pub agent_id: AgentId,
+    pub agent_account_id: AgentAccountId,
     pub amount_cents: i64,
     pub currency: Currency,
     pub merchant: Option<String>,
@@ -84,6 +87,7 @@ pub struct PaymentRequest {
 pub struct PaymentResponse {
     pub payment_id: PaymentId,
     pub owner_user_id: UserId,
+    pub agent_account_id: AgentAccountId,
     pub status: PaymentStatus,
     pub amount_cents: i64,
     pub currency: Currency,
@@ -230,6 +234,7 @@ where
             PaymentResponse {
                 payment_id,
                 owner_user_id: request.owner_user_id.clone(),
+                agent_account_id: request.agent_account_id.clone(),
                 status: PaymentStatus::Succeeded,
                 amount_cents: request.amount_cents,
                 currency: request.currency,
@@ -242,6 +247,7 @@ where
             PaymentResponse {
                 payment_id,
                 owner_user_id: request.owner_user_id.clone(),
+                agent_account_id: request.agent_account_id.clone(),
                 status: PaymentStatus::Failed,
                 amount_cents: request.amount_cents,
                 currency: request.currency,
@@ -322,6 +328,7 @@ mod tests {
         token_id: SpendAuthTokenId,
         owner_user_id: UserId,
         agent_id: AgentId,
+        agent_account_id: AgentAccountId,
         amount_cents: i64,
         currency: Currency,
         merchant: Option<String>,
@@ -335,6 +342,7 @@ mod tests {
                 token_id: request.spend_auth_token_id.clone(),
                 owner_user_id: request.owner_user_id.clone(),
                 agent_id: request.agent_id.clone(),
+                agent_account_id: request.agent_account_id.clone(),
                 amount_cents: request.amount_cents,
                 currency: request.currency,
                 merchant: request.merchant.clone(),
@@ -352,6 +360,7 @@ mod tests {
             let matches_authorized_spend = request.spend_auth_token_id == self.token_id
                 && request.owner_user_id == self.owner_user_id
                 && request.agent_id == self.agent_id
+                && request.agent_account_id == self.agent_account_id
                 && request.amount_cents == self.amount_cents
                 && request.currency == self.currency
                 && request.merchant == self.merchant
@@ -401,6 +410,7 @@ mod tests {
             spend_auth_token_id: SpendAuthTokenId::new(),
             owner_user_id: test_user_id(),
             agent_id: AgentId::new(),
+            agent_account_id: AgentAccountId::new(),
             amount_cents: 2_500,
             currency: Currency::Usd,
             merchant: Some("Acme Cafe".to_string()),

@@ -100,7 +100,7 @@ fn merge_effects(current: Effect, effect: Effect) -> Effect {
 
 #[cfg(test)]
 mod tests {
-    use hubu_common::ids::{AgentId, UserId};
+    use hubu_common::ids::{AgentAccountId, AgentId, UserId};
 
     use super::*;
     use crate::policy::condition::{Condition, Field, PolicyValue, ValueKind};
@@ -112,6 +112,7 @@ mod tests {
             currency: Currency::Usd,
             owner_user_id: test_user_id(),
             agent_id: AgentId::new(),
+            agent_account_id: AgentAccountId::new(),
             merchant: Some("Acme Cafe".to_string()),
             category: category.map(str::to_string),
             task_id: None,
