@@ -25,9 +25,9 @@ use hubu_common::{
 };
 use hubu_core::{
     budget::{
-        BudgetManager, BudgetManagerError, BudgetRecurrence, BudgetScope, BudgetWithBalance,
-        CreateBudgetSeriesRequest, CreateSingleBudgetRequest, ReleaseBudgetResponse,
-        ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
+        BudgetHoldStatus, BudgetManager, BudgetManagerError, BudgetRecurrence, BudgetScope,
+        BudgetWithBalance, CreateBudgetSeriesRequest, CreateSingleBudgetRequest,
+        ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyRepository, SpendRepository, SqliteGovernanceRepository,
@@ -1959,6 +1959,9 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
         .get_budget_hold_by_spend_decision(&decision_record.id)
         .ok_or_else(|| anyhow!("authorized spend has no reserved budget hold"))?;
+    if !matches!(frozen_hold.status, BudgetHoldStatus::Frozen) {
+        return Err(anyhow!("spend authorization budget hold is not frozen"));
+    }
 
     let artifact_id = token_record.id.to_string();
     let image_output = match image_adapter.generate(ImageGenerationRequest {
@@ -3421,6 +3424,18 @@ mod tests {
         assert_eq!(logo_budget.balance.consumed_amount_cents, 0);
         assert_eq!(logo_budget.balance.frozen_amount_cents, 0);
         assert_eq!(logo_budget.balance.remaining_amount_cents, 500);
+        let retry_error = generate_image(
+            json!({
+                "spend_auth_token_id": auth_token_id,
+                "prompt": "Create a crisp logo for Project Hubu",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("released hold should not call the provider again");
+        assert!(retry_error
+            .to_string()
+            .contains("spend authorization budget hold is not frozen"));
         std::fs::remove_file(blocked_output_dir).ok();
         std::fs::remove_file(path).ok();
     }
