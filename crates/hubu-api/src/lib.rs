@@ -242,7 +242,7 @@ struct ImageGenerationRequest<'a> {
     provider: &'a str,
     model: &'a str,
     prompt: &'a str,
-    payment_id: &'a str,
+    artifact_id: &'a str,
 }
 
 struct ImageGenerationOutput {
@@ -268,7 +268,7 @@ impl ImageProviderAdapter for DemoImageProviderAdapter<'_> {
         let path = self
             .config
             .output_dir
-            .join(format!("hubu-logo-{}.svg", request.payment_id));
+            .join(format!("hubu-logo-{}.svg", request.artifact_id));
         std::fs::write(
             &path,
             demo_image_svg(request.provider, request.model, request.prompt),
@@ -1960,6 +1960,45 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
         .get_budget_hold_by_spend_decision(&decision_record.id)
         .ok_or_else(|| anyhow!("authorized spend has no reserved budget hold"))?;
 
+    let artifact_id = token_record.id.to_string();
+    let image_output = match image_adapter.generate(ImageGenerationRequest {
+        provider: &provider,
+        model: &model,
+        prompt: &request.prompt,
+        artifact_id: &artifact_id,
+    }) {
+        Ok(output) => output,
+        Err(error) => {
+            let release = {
+                let mut budgets = state
+                    .budgets
+                    .lock()
+                    .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+                budgets.release_budget(&frozen_hold.id)?
+            };
+            state
+                .governance
+                .lock()
+                .map_err(|_| anyhow!("governance store lock poisoned"))?
+                .update_budget_hold(&release.hold, &release.balance)?;
+            log_event(
+                "warn",
+                "image_provider_generation_failed",
+                json!({
+                    "provider": provider,
+                    "model": model,
+                    "spend_auth_token_id": token_record.id.to_string(),
+                    "hold_id": frozen_hold.id.to_string(),
+                    "budget_id": frozen_hold.budget_id.to_string(),
+                    "amount_cents": authorized_spend.amount_cents,
+                    "currency": authorized_spend.currency.to_string(),
+                    "failure": error.to_string(),
+                }),
+            );
+            return Err(anyhow!("image provider generation failed: {error}"));
+        }
+    };
+
     let payment_request = PaymentRequest {
         idempotency_key: format!("image-proxy:{}", token_record.id),
         spend_auth_token_id: token_record.id.clone(),
@@ -2033,14 +2072,6 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
         ));
     }
 
-    let payment_id = payment.payment_id.to_string();
-    let image_output = image_adapter.generate(ImageGenerationRequest {
-        provider: &provider,
-        model: &model,
-        prompt: &request.prompt,
-        payment_id: &payment_id,
-    })?;
-
     log_event(
         "info",
         "image_model_call_proxied",
@@ -2048,7 +2079,7 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
             "provider": provider,
             "model": model,
             "spend_auth_token_id": token_record.id.to_string(),
-            "payment_id": payment_id,
+            "payment_id": payment.payment_id.to_string(),
             "output_ref": image_output.output_ref.clone(),
             "amount_cents": payment.amount_cents,
             "currency": payment.currency.to_string(),
@@ -3281,6 +3312,116 @@ mod tests {
         assert_eq!(logo_budget.balance.consumed_amount_cents, 0);
         assert_eq!(logo_budget.balance.frozen_amount_cents, 500);
         assert_eq!(logo_budget.balance.remaining_amount_cents, 0);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn image_proxy_releases_hold_without_payment_when_provider_generation_fails() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-image-provider-failure-{}.sqlite",
+            UserId::new()
+        ));
+        let blocked_output_dir = std::env::temp_dir().join(format!(
+            "hubu-api-image-provider-output-blocker-{}",
+            UserId::new()
+        ));
+        std::fs::write(&blocked_output_dir, "not a directory")
+            .expect("test blocker file should be writable");
+        let mut state =
+            ServerState::new_with_db_path(&path).expect("server state should initialize");
+        state.image_provider.output_dir = blocked_output_dir.clone();
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "logo-design-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should allow the logo budget");
+
+        let logo_budget = create_budget(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent logo budget should be created");
+        let logo_budget_id = logo_budget.budget.budget_id.clone();
+
+        let authorization = authorize_spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "budget_id": logo_budget_id,
+                "amount_cents": 500,
+                "reason": "Generate Project Hubu logo",
+                "merchant": "hubu-model-proxy",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should authorize");
+        let auth_token_id = authorization
+            .auth_token_id
+            .expect("allowed spend should issue a token");
+
+        let error = generate_image(
+            json!({
+                "spend_auth_token_id": auth_token_id,
+                "prompt": "Create a crisp logo for Project Hubu",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("provider generation should fail before payment");
+        assert!(error
+            .to_string()
+            .contains("image provider generation failed"));
+
+        let ledger = list_ledger(&state).expect("ledger should list");
+        assert_eq!(ledger.transactions.len(), 0);
+        let token_id = SpendAuthTokenId::from_str(&auth_token_id).expect("token id should parse");
+        let token = state
+            .spend
+            .lock()
+            .expect("spend manager lock should not be poisoned")
+            .auth_token_record(&token_id)
+            .expect("token should still exist");
+        assert!(token.used_at.is_none());
+        let logo_budget_internal_id =
+            BudgetId::from_str(&logo_budget_id).expect("budget id should parse");
+        let logo_budget = state
+            .budgets
+            .lock()
+            .expect("budget manager lock should not be poisoned")
+            .get_budget_by_id(&logo_budget_internal_id)
+            .expect("logo budget should still exist");
+        assert_eq!(logo_budget.balance.consumed_amount_cents, 0);
+        assert_eq!(logo_budget.balance.frozen_amount_cents, 0);
+        assert_eq!(logo_budget.balance.remaining_amount_cents, 500);
+        std::fs::remove_file(blocked_output_dir).ok();
         std::fs::remove_file(path).ok();
     }
 

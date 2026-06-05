@@ -80,9 +80,9 @@ agent budget, which lets the logo flow use a dedicated `$5` agent budget without
 changing the default spend path.
 
 `hubu_generate_image` consumes one spend authorization token through
-`POST /model-calls/image`, settles the matching frozen budget hold, records the
-payment in the ledger, writes a local demo SVG artifact, and returns image
-output metadata. The current provider is a local `hubu-demo` adapter; real
+`POST /model-calls/image`, writes a local demo SVG artifact, settles the
+matching frozen budget hold, records the payment in the ledger, and returns
+image output metadata. The current provider is a local `hubu-demo` adapter; real
 vendor adapters can be added behind the same Hubu-hosted boundary without
 passing API keys to agents. Adapter kind, provider name, model, API key, and
 output directory are server-side Hubu configuration
@@ -90,7 +90,8 @@ output directory are server-side Hubu configuration
 `HUBU_IMAGE_PROXY_MERCHANT`, `HUBU_IMAGE_OUTPUT_DIR`); agent requests must match
 the configured provider/model, the spend authorization must be scoped to the
 configured image proxy merchant, and non-demo providers do not fall back to the
-local demo artifact writer.
+local demo artifact writer. If provider generation fails before payment, Hubu
+releases the frozen hold and leaves the spend token unused.
 
 ## Tool Mapping
 

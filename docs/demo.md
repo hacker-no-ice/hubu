@@ -309,8 +309,10 @@ Budget hold
 The demo image provider writes a local SVG artifact and returns a `file://...`
 output reference rather than calling an external model vendor. The important
 boundary is already in place: the agent presents a scoped Hubu spend token, Hubu
-consumes it once, settles the budget hold, records the ledger transaction, and
-keeps provider selection/configuration server-side.
+generates through the configured provider, consumes the token once, settles the
+budget hold, records the ledger transaction, and keeps provider
+selection/configuration server-side. If provider generation fails before
+payment, Hubu releases the frozen hold and leaves the spend token unused.
 
 The server-side image provider defaults to
 `HUBU_IMAGE_PROVIDER_ADAPTER=demo`, `HUBU_IMAGE_PROVIDER_NAME=hubu-demo`, and
