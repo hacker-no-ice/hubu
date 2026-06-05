@@ -1424,18 +1424,36 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
                 Err(error) => return Err(error.into()),
             };
             drop(budgets);
+            if let Some(token_record) = &token_record {
+                if let Err(error) = state
+                    .governance
+                    .lock()
+                    .map_err(|_| anyhow!("governance store lock poisoned"))?
+                    .save_spend_auth_token(token_record)
+                {
+                    let release = state
+                        .budgets
+                        .lock()
+                        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+                        .release_budget(&reservation.hold.id)?;
+                    log_event(
+                        "warn",
+                        "spend_budget_reservation_released",
+                        json!({
+                            "decision_id": evaluation.decision_id.to_string(),
+                            "hold_id": reservation.hold.id.to_string(),
+                            "remaining_amount_cents": release.balance.remaining_amount_cents,
+                            "error": error.to_string(),
+                        }),
+                    );
+                    return Err(error.into());
+                }
+            }
             state
                 .governance
                 .lock()
                 .map_err(|_| anyhow!("governance store lock poisoned"))?
                 .save_budget_hold(&reservation.hold, &reservation.balance)?;
-            if let Some(token_record) = &token_record {
-                state
-                    .governance
-                    .lock()
-                    .map_err(|_| anyhow!("governance store lock poisoned"))?
-                    .save_spend_auth_token(token_record)?;
-            }
             reservation
         };
         log_event(
