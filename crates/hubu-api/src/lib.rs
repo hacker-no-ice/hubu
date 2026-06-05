@@ -397,6 +397,10 @@ impl ImageProviderAdapterKind {
             Self::Demo | Self::HttpJson | Self::GeminiGenerateContent
         )
     }
+
+    fn writes_local_artifact(&self) -> bool {
+        matches!(self, Self::Demo | Self::GeminiGenerateContent)
+    }
 }
 
 fn image_provider_adapter_kind_from_env(provider: &str) -> ImageProviderAdapterKind {
@@ -507,6 +511,41 @@ fn redact_image_provider_error_message(message: &str, config: &ImageProviderConf
         redacted = redacted.replace(api_key, "[redacted image provider api key]");
     }
     redacted
+}
+
+fn ensure_image_output_dir_ready(
+    output_dir: &Path,
+    artifact_id: &str,
+) -> Result<(), ImageProviderError> {
+    std::fs::create_dir_all(output_dir).map_err(|error| {
+        ImageProviderError::new(
+            "provider_artifact_write_failed",
+            format!(
+                "create image output directory {}: {error}",
+                output_dir.display()
+            ),
+        )
+    })?;
+    let probe_path = output_dir.join(format!(".hubu-write-test-{artifact_id}"));
+    std::fs::write(&probe_path, b"hubu image output write test").map_err(|error| {
+        ImageProviderError::new(
+            "provider_artifact_write_failed",
+            format!(
+                "write image output probe to {}: {error}",
+                probe_path.display()
+            ),
+        )
+    })?;
+    std::fs::remove_file(&probe_path).map_err(|error| {
+        ImageProviderError::new(
+            "provider_artifact_write_failed",
+            format!(
+                "remove image output probe from {}: {error}",
+                probe_path.display()
+            ),
+        )
+    })?;
+    Ok(())
 }
 
 struct DemoImageProviderAdapter<'a> {
@@ -2826,6 +2865,27 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
     };
 
     let artifact_id = token_record.id.to_string();
+    if state.image_provider.adapter_kind.writes_local_artifact() {
+        if let Err(error) =
+            ensure_image_output_dir_ready(&state.image_provider.output_dir, &artifact_id)
+        {
+            let failure =
+                redact_image_provider_error_message(&error.to_string(), &state.image_provider);
+            release_image_proxy_hold_after_provider_failure(
+                state,
+                &frozen_hold,
+                &token_record.id,
+                &provider,
+                &model,
+                error.code,
+                error.status,
+                authorized_spend.amount_cents,
+                authorized_spend.currency,
+                &failure,
+            )?;
+            return Err(anyhow!("image provider generation failed: {failure}"));
+        }
+    }
     let image_output = match image_adapter.generate(ImageGenerationRequest {
         provider: &provider,
         model: &model,
@@ -4189,6 +4249,138 @@ mod tests {
 
         std::fs::remove_file(output_path).ok();
         std::fs::remove_dir(output_dir).ok();
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn image_proxy_checks_output_dir_before_calling_gemini_provider() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fake provider should bind");
+        let endpoint = format!(
+            "http://{}/v1/models/gemini-2.5-flash-image:generateContent",
+            listener
+                .local_addr()
+                .expect("fake provider should have local address")
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-gemini-output-preflight-{}.sqlite",
+            UserId::new()
+        ));
+        let output_dir = std::env::temp_dir().join(format!(
+            "hubu-api-gemini-output-preflight-blocker-{}",
+            UserId::new()
+        ));
+        std::fs::write(&output_dir, b"not a directory")
+            .expect("output blocker file should be created");
+
+        let mut state =
+            ServerState::new_with_db_path(&path).expect("server state should initialize");
+        state.image_provider = ImageProviderConfig {
+            provider: "google-gemini".to_string(),
+            model: "gemini-2.5-flash-image".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
+            api_key: Some("server-side-secret".to_string()),
+            endpoint: Some(endpoint),
+            price_cents: 500,
+            timeout_ms: 100,
+            max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
+            output_dir: output_dir.clone(),
+            adapter_kind: ImageProviderAdapterKind::GeminiGenerateContent,
+        };
+
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "logo-design-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should allow the logo budget");
+
+        let logo_budget = create_budget(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent logo budget should be created");
+
+        let authorization = authorize_spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "budget_id": logo_budget.budget.budget_id,
+                "amount_cents": 500,
+                "reason": "Generate Project Hubu logo",
+                "merchant": "hubu-model-proxy",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should authorize");
+        let auth_token_id = authorization
+            .auth_token_id
+            .expect("allowed spend should issue a token");
+
+        let error = generate_image(
+            json!({
+                "spend_auth_token_id": auth_token_id,
+                "prompt": "Create a crisp logo for Project Hubu",
+                "provider": "google-gemini",
+                "model": "gemini-2.5-flash-image",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("image proxy should fail before calling provider");
+
+        assert!(error.to_string().contains("provider_artifact_write_failed"));
+        listener
+            .set_nonblocking(true)
+            .expect("fake provider listener should become nonblocking");
+        let accept_error = listener
+            .accept()
+            .expect_err("Gemini provider should not receive a request");
+        assert_eq!(accept_error.kind(), std::io::ErrorKind::WouldBlock);
+
+        let hold_id = authorization
+            .budget_hold
+            .expect("authorized spend should freeze the logo budget")
+            .hold_id;
+        let hold = state
+            .budgets
+            .lock()
+            .expect("budget manager lock should not be poisoned")
+            .get_budget_hold(&BudgetHoldId::from_str(&hold_id).expect("hold id should parse"))
+            .expect("hold should still be stored");
+        assert!(matches!(hold.status, BudgetHoldStatus::Released));
+        let ledger = list_ledger(&state).expect("ledger should list");
+        assert!(ledger.transactions.is_empty());
+
+        std::fs::remove_file(output_dir).ok();
         std::fs::remove_file(path).ok();
     }
 
