@@ -8,8 +8,8 @@ use serde_json::json;
 
 use crate::budget::dto::{
     BudgetRecurrence, BudgetWithBalance, CreateBudgetSeriesRequest, CreateBudgetSeriesResponse,
-    CreateSingleBudgetRequest, CreateSingleBudgetResponse, ReleaseBudgetResponse,
-    ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
+    CreateSingleBudgetRequest, CreateSingleBudgetResponse, ExpireBudgetHoldResponse,
+    ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
 };
 use crate::budget::error::BudgetManagerError;
 use crate::budget::model::{
@@ -384,6 +384,77 @@ impl BudgetManager {
             hold: hold.clone(),
             balance: balance.clone(),
         })
+    }
+
+    /// Expire frozen holds whose authorization window has passed.
+    pub fn expire_overdue_budget_holds(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ExpireBudgetHoldResponse>, BudgetManagerError> {
+        let expired_hold_ids: Vec<BudgetHoldId> = self
+            .budget_holds
+            .values()
+            .filter(|hold| {
+                matches!(hold.status, BudgetHoldStatus::Frozen) && hold.expires_at <= now
+            })
+            .map(|hold| hold.id.clone())
+            .collect();
+        let mut responses = Vec::with_capacity(expired_hold_ids.len());
+
+        for hold_id in expired_hold_ids {
+            let hold = self.budget_holds.get_mut(&hold_id).ok_or_else(|| {
+                log_event(
+                    "warn",
+                    "budget_expire_rejected",
+                    json!({
+                        "reason": "unknown_budget_hold",
+                        "hold_id": hold_id.to_string(),
+                    }),
+                );
+                BudgetManagerError::UnknownBudgetHold
+            })?;
+            let balance = self
+                .budget_balances
+                .get_mut(&hold.budget_id)
+                .ok_or_else(|| {
+                    log_event(
+                        "warn",
+                        "budget_expire_rejected",
+                        json!({
+                            "reason": "missing_budget_balance",
+                            "budget_id": hold.budget_id.to_string(),
+                            "hold_id": hold.id.to_string(),
+                        }),
+                    );
+                    BudgetManagerError::MissingBudgetBalance
+                })?;
+
+            hold.status = BudgetHoldStatus::Expired;
+            hold.updated_at = now;
+            balance.frozen_amount_cents -= hold.amount_cents;
+            balance.remaining_amount_cents += hold.amount_cents;
+
+            log_event(
+                "info",
+                "budget_hold_expired",
+                json!({
+                    "budget_id": hold.budget_id.to_string(),
+                    "hold_id": hold.id.to_string(),
+                    "spend_decision_id": hold.spend_decision_id.to_string(),
+                    "amount_cents": hold.amount_cents,
+                    "consumed_amount_cents": balance.consumed_amount_cents,
+                    "frozen_amount_cents": balance.frozen_amount_cents,
+                    "remaining_amount_cents": balance.remaining_amount_cents,
+                    "expires_at": hold.expires_at.to_rfc3339(),
+                }),
+            );
+            responses.push(ExpireBudgetHoldResponse {
+                hold: hold.clone(),
+                balance: balance.clone(),
+            });
+        }
+
+        Ok(responses)
     }
 
     pub fn get_budget_by_id(&self, budget_id: &BudgetId) -> Option<BudgetWithBalance> {
@@ -978,5 +1049,35 @@ mod tests {
         assert_eq!(response.balance.frozen_amount_cents, 0);
         assert_eq!(response.balance.consumed_amount_cents, 0);
         assert_eq!(response.balance.remaining_amount_cents, 10_000);
+    }
+
+    #[test]
+    fn expire_overdue_budget_holds_returns_frozen_amount_to_remaining() {
+        let mut manager = BudgetManager::new();
+        let created = create_user_budget(&mut manager, 10_000);
+        let reservation = manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: created.budget.id.clone(),
+                spend_decision_id: SpendDecisionId::new(),
+                amount_cents: 3_000,
+                currency: Currency::Usd,
+                expires_at: Utc::now() + Duration::minutes(5),
+            })
+            .expect("budget should be reserved");
+
+        let expired = manager
+            .expire_overdue_budget_holds(reservation.hold.expires_at + Duration::seconds(1))
+            .expect("overdue hold should expire");
+        let balance = manager
+            .get_budget_balance(&created.budget.id)
+            .expect("balance should exist");
+
+        assert_eq!(expired.len(), 1);
+        assert!(matches!(expired[0].hold.status, BudgetHoldStatus::Expired));
+        assert_eq!(expired[0].balance.frozen_amount_cents, 0);
+        assert_eq!(expired[0].balance.remaining_amount_cents, 10_000);
+        assert_eq!(balance.frozen_amount_cents, 0);
+        assert_eq!(balance.consumed_amount_cents, 0);
+        assert_eq!(balance.remaining_amount_cents, 10_000);
     }
 }

@@ -173,6 +173,17 @@ fn tool_definitions() -> Vec<Value> {
                 "merchant": { "type": "string" }
             })),
         ),
+        write_tool(
+            "hubu_authorize_spend",
+            "Authorize an agent spend request and reserve budget without executing payment.",
+            json_schema(json!({
+                "agent_id": { "type": "string" },
+                "account_id": { "type": "string" },
+                "amount_cents": { "type": "integer" },
+                "reason": { "type": "string" },
+                "merchant": { "type": "string" }
+            })),
+        ),
         read_tool(
             "hubu_list_agents",
             "List registered agents for the active Hubu user.",
@@ -268,6 +279,10 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
         }
         "hubu_submit_spend" => {
             let response = post_json(base_url, "/spend", arguments)?;
+            return Ok(tool_result(spend_response_with_approval_hint(response)));
+        }
+        "hubu_authorize_spend" => {
+            let response = post_json(base_url, "/spend/authorize", arguments)?;
             return Ok(tool_result(spend_response_with_approval_hint(response)));
         }
         "hubu_list_agents" => get_json(base_url, "/agents")?,
@@ -428,6 +443,19 @@ mod tests {
 
         assert_eq!(response["requires_human_approval"], true);
         assert!(response["approval_reason"].is_string());
+    }
+
+    #[test]
+    fn authorize_spend_tool_is_agent_callable() {
+        let tools = tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "hubu_authorize_spend")
+            .expect("authorize spend tool should exist");
+
+        assert_eq!(tool["annotations"]["x_hubu_human_approval"], "conditional");
+        assert_eq!(tool["annotations"]["destructiveHint"], false);
+        assert!(tool["inputSchema"]["properties"]["amount_cents"].is_object());
     }
 
     #[test]

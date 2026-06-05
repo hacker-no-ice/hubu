@@ -225,6 +225,41 @@ The owner shown on the payment is the initialized human user. The agent spends
 under authority delegated by that user. Allowed spend reserves the active budget
 before payment; successful payment settles the hold into consumed balance.
 
+### 6a. Authorize Spend Without Executing Payment
+
+```sh
+hubu spend authorize \
+  --account-id aga_c6q3d9m1v8ra \
+  --amount 5 \
+  --reason "Generate Project Hubu logo" \
+  --merchant hubu-model-proxy
+```
+
+Expected output:
+
+```txt
+Spend evaluated
+  account_id: aga_c6q3d9m1v8ra
+  agent_id: agt_8x7k2m4q9v1c
+  decision: allow
+  decision_id: 7da692a8-d5a7-4028-b5db-fc8b0de79d10
+  auth_token_id: 1e48e2ec-564e-4519-9db4-d7892012ca78
+  reason: amount is at or below the configured demo limit of 10000 cents
+Budget hold
+  status: frozen
+  hold_id: e9ee93b7-dac7-4c23-946f-2a7bc2835c24
+  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c
+  amount: $5.00
+  consumed: $20.00
+  frozen: $5.00
+  remaining: $50.00
+```
+
+This is the first slice of the logo-generation demo path: Hubu evaluates policy,
+issues a spend authorization token, and freezes budget, but does not submit
+payment or write a ledger transaction. A later vendor/model proxy can consume
+the token while keeping provider API keys inside Hubu.
+
 ### 7. Submit an Allowed Spend Whose Mock Payment Fails
 
 ```sh

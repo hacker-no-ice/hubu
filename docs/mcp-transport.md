@@ -49,6 +49,7 @@ Agents can call directly:
 - `hubu_list_agents`
 - `hubu_list_budgets`
 - `hubu_list_ledger`
+- `hubu_authorize_spend`
 - `hubu_submit_spend`
 
 `hubu_submit_spend` forwards the spend request immediately. If policy returns
@@ -68,6 +69,13 @@ This first scaffold exposes the approval boundary but does not yet implement a
 durable approval queue or a follow-up endpoint that resumes payment after a
 human approves a `needs_approval` spend decision.
 
+`hubu_authorize_spend` uses the same policy and budget checks as
+`hubu_submit_spend`, but stops after issuing a spend authorization token and
+freezing budget. It does not submit payment or write a ledger transaction. This
+is the handoff point for future Hubu-hosted vendor/model proxy tools that need
+to consume a scoped spend authorization without exposing provider credentials to
+the agent.
+
 ## Tool Mapping
 
 | MCP tool | HTTP route | Approval |
@@ -79,6 +87,7 @@ human approves a `needs_approval` spend decision.
 | `hubu_add_policy` | `POST /policies` | required |
 | `hubu_create_budget` | `POST /budgets` | required |
 | `hubu_create_recurring_budget` | `POST /budgets/series` | required |
+| `hubu_authorize_spend` | `POST /spend/authorize` | conditional on policy result |
 | `hubu_submit_spend` | `POST /spend` | conditional on policy result |
 | `hubu_list_agents` | `GET /agents` | none |
 | `hubu_list_budgets` | `GET /budgets` | none |
