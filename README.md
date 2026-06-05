@@ -58,7 +58,7 @@ cargo build
 Open the interactive architecture visualizer:
 
 ```sh
-open docs/architecture.html
+open architecture/index.html
 ```
 
 Run the automated local demo:
@@ -161,7 +161,7 @@ rule format, validation behavior, and examples.
 
 ## Documentation
 
-- [docs/architecture.html](docs/architecture.html): interactive sketch-style
+- [architecture/index.html](architecture/index.html): interactive sketch-style
   architecture map with drill-down component diagrams and GitHub code links
 - [docs/agent-registration-protocol.md](docs/agent-registration-protocol.md):
   v1 registration envelope, fingerprint fields, server validation, and

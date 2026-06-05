@@ -17,8 +17,8 @@ Constraints:
 ## Architecture visualization
 
 Hubu includes an interactive sketch-style architecture visualizer at
-`docs/architecture.html`, with supporting files `docs/architecture.css` and
-`docs/architecture.js`.
+`architecture/index.html`, with supporting files `architecture/architecture.css`
+and `architecture/architecture.js`.
 
 When making changes that alter major components, request flows, storage
 boundaries, public interfaces, or code ownership links, update the visualizer in
