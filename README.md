@@ -69,17 +69,35 @@ Run the automated local demo:
 ```
 
 The demo starts Hubu locally, registers an agent, adds a policy, creates a
-recurring budget, submits allowed, failed-payment, approval-required, and denied
-spend requests, then prints the resulting budget balance and ledger.
+recurring budget, authorizes a dedicated `$5` logo-generation budget, proxies an
+image model call through Hubu, submits allowed, failed-payment,
+approval-required, and denied spend requests, then prints the resulting budget
+balance and ledger.
 
 The demo image model proxy defaults to the local `hubu-demo` provider, which
-writes an SVG artifact under `target/hubu-image-outputs/`. Real adapters can be
-configured server-side with `HUBU_IMAGE_PROVIDER_NAME`,
-`HUBU_IMAGE_PROVIDER_MODEL`, `HUBU_IMAGE_PROVIDER_API_KEY`, and optionally
-`HUBU_IMAGE_PROXY_MERCHANT` and `HUBU_IMAGE_OUTPUT_DIR`; agents receive only
-provider results and never the configured API key. Image proxy calls only
-consume spend authorizations scoped to the configured proxy merchant, which
-defaults to `hubu-model-proxy`.
+writes an SVG artifact under `target/hubu-image-outputs/`. The proxy uses
+scoped Hubu spend authorization tokens: Hubu checks the configured proxy
+merchant and exact provider price, keeps provider credentials server-side,
+settles the frozen `$5` hold after success, and releases the hold if provider
+configuration or generation fails before payment.
+
+For a Gemini/Nano Banana backed run, start `hubu-server` with provider
+configuration like this:
+
+```sh
+export HUBU_IMAGE_PROVIDER_ADAPTER=gemini-generate-content
+export HUBU_IMAGE_PROVIDER_NAME=google-gemini
+export HUBU_IMAGE_PROVIDER_MODEL=gemini-2.5-flash-image
+export HUBU_IMAGE_PROVIDER_ENDPOINT=https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent
+export HUBU_IMAGE_PROVIDER_PRICE_CENTS=500
+export HUBU_IMAGE_PROVIDER_API_KEY=...
+./scripts/demo.sh
+```
+
+Run `hubu model-call image-guidance` before authorizing spend to confirm
+`provider_ready: true`. Guidance returns only non-secret readiness booleans,
+missing environment variable names, provider/model, and the required spend
+merchant/amount; it never returns the provider endpoint value or API key.
 
 Run the conservative local benchmark:
 
@@ -117,8 +135,9 @@ hubu init --policy policy.yaml
 hubu policy add --agent-id AGENT_ID --path policy.yaml
 hubu agent list
 hubu budget create-recurring --amount 100 --recurrence daily --period-count 1
+hubu model-call image-guidance
 hubu budget create --agent-id AGENT_ID --amount 5
-hubu spend authorize --agent-id AGENT_ID --budget-id BUDGET_ID --amount 5 --reason "Generate Project Hubu logo"
+hubu spend authorize --agent-id AGENT_ID --budget-id BUDGET_ID --amount 5 --reason "Generate Project Hubu logo" --merchant hubu-model-proxy
 hubu model-call image --spend-auth-token-id TOKEN_ID --prompt "Create a logo for Project Hubu"
 hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
 hubu ledger list
