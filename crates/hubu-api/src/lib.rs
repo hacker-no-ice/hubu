@@ -3353,6 +3353,50 @@ mod tests {
     use hubu_common::ids::BudgetHoldId;
     use hubu_core::budget::BudgetHoldStatus;
 
+    fn read_test_http_request(stream: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 1024];
+
+        loop {
+            let read = stream
+                .read(&mut buffer)
+                .expect("fake provider should read request");
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+
+            if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                let body_start = header_end + 4;
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if bytes.len() >= body_start + content_length {
+                    break;
+                }
+            }
+        }
+
+        String::from_utf8(bytes).expect("fake provider request should be UTF-8")
+    }
+
+    fn write_test_http_json_response(stream: &mut TcpStream, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("fake provider should write response");
+    }
+
     #[test]
     fn registration_guidance_is_available_for_agents() {
         let path = std::env::temp_dir().join(format!("hubu-api-guidance-{}.sqlite", UserId::new()));
@@ -3959,6 +4003,167 @@ mod tests {
             .to_string()
             .contains("spend authorization has already been used"));
         std::fs::remove_file(output_path).ok();
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn image_proxy_consumes_authorized_spend_with_gemini_provider() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fake provider should bind");
+        let endpoint = format!(
+            "http://{}/v1/models/gemini-2.5-flash-image:generateContent",
+            listener
+                .local_addr()
+                .expect("fake provider should have local address")
+        );
+        let provider = std::thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("fake provider should accept one request");
+            let request = read_test_http_request(&mut stream);
+            let body = json!({
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "inlineData": {
+                                "mimeType": "image/png",
+                                "data": BASE64_STANDARD.encode(b"png-bytes"),
+                            },
+                        }],
+                    },
+                }],
+            })
+            .to_string();
+            write_test_http_json_response(&mut stream, &body);
+            request
+        });
+
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-gemini-e2e-{}.sqlite", UserId::new()));
+        let output_dir =
+            std::env::temp_dir().join(format!("hubu-api-gemini-e2e-output-{}", UserId::new()));
+        let mut state =
+            ServerState::new_with_db_path(&path).expect("server state should initialize");
+        state.image_provider = ImageProviderConfig {
+            provider: "google-gemini".to_string(),
+            model: "gemini-2.5-flash-image".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
+            api_key: Some("server-side-secret".to_string()),
+            endpoint: Some(endpoint),
+            price_cents: 500,
+            timeout_ms: 30_000,
+            max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
+            output_dir: output_dir.clone(),
+            adapter_kind: ImageProviderAdapterKind::GeminiGenerateContent,
+        };
+
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "logo-design-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should allow the logo budget");
+
+        let logo_budget = create_budget(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent logo budget should be created");
+        let logo_budget_id = logo_budget.budget.budget_id.clone();
+
+        let authorization = authorize_spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "budget_id": logo_budget_id,
+                "amount_cents": 500,
+                "reason": "Generate Project Hubu logo",
+                "merchant": "hubu-model-proxy",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should authorize");
+        let auth_token_id = authorization
+            .auth_token_id
+            .expect("allowed spend should issue a token");
+
+        let generated = generate_image(
+            json!({
+                "spend_auth_token_id": auth_token_id,
+                "prompt": "Create a crisp logo for Project Hubu",
+                "provider": "google-gemini",
+                "model": "gemini-2.5-flash-image",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("Gemini image proxy should consume authorization");
+
+        let provider_request = provider.join().expect("fake provider should finish");
+        let provider_request_lower = provider_request.to_ascii_lowercase();
+        assert!(provider_request
+            .starts_with("POST /v1/models/gemini-2.5-flash-image:generateContent HTTP/1.1"));
+        assert!(provider_request_lower.contains("x-goog-api-key: server-side-secret"));
+        assert!(provider_request.contains("Create a crisp logo for Project Hubu"));
+        assert!(provider_request.contains("\"responseModalities\":[\"IMAGE\"]"));
+
+        assert_eq!(generated.provider, "google-gemini");
+        assert_eq!(generated.model, "gemini-2.5-flash-image");
+        assert!(!serde_json::to_string(&generated)
+            .expect("generated response should serialize")
+            .contains("server-side-secret"));
+        assert!(generated.output_ref.starts_with("file://"));
+        let output_path = generated
+            .output_ref
+            .strip_prefix("file://")
+            .expect("output ref should use file URI");
+        let output_bytes =
+            std::fs::read(output_path).expect("Gemini image artifact should be readable");
+        assert_eq!(output_bytes, b"png-bytes");
+        assert_eq!(generated.payment.status, "succeeded");
+        assert_eq!(generated.payment.owner_user_id, user.user_id);
+        assert!(generated.payment.ledger_transaction_id.is_some());
+        assert_eq!(generated.budget_hold.status, "settled");
+        assert_eq!(
+            generated.budget_hold.budget_id,
+            logo_budget.budget.budget_id
+        );
+        assert_eq!(generated.budget_hold.consumed_amount_cents, 500);
+        assert_eq!(generated.budget_hold.frozen_amount_cents, 0);
+        assert_eq!(generated.budget_hold.remaining_amount_cents, 0);
+
+        let ledger = list_ledger(&state).expect("ledger should list");
+        assert_eq!(ledger.transactions.len(), 1);
+
+        std::fs::remove_file(output_path).ok();
+        std::fs::remove_dir(output_dir).ok();
         std::fs::remove_file(path).ok();
     }
 
