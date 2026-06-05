@@ -2661,6 +2661,9 @@ fn image_provider_readiness(config: &ImageProviderConfig) -> ImageProviderReadin
             if !config.has_api_key() {
                 missing_configuration.push("HUBU_IMAGE_PROVIDER_API_KEY".to_string());
             }
+            if missing_configuration.is_empty() && config.adapter().is_err() {
+                missing_configuration.push("HUBU_IMAGE_PROVIDER_ENDPOINT".to_string());
+            }
         }
     }
     ImageProviderReadiness {
@@ -4078,6 +4081,43 @@ mod tests {
         assert!(body.contains("HUBU_IMAGE_PROVIDER_ENDPOINT"));
         assert!(body.contains("HUBU_IMAGE_PROVIDER_API_KEY"));
         assert!(!body.contains("server-side-secret"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn image_proxy_guidance_rejects_invalid_provider_endpoint() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-image-guidance-invalid-endpoint-{}.sqlite",
+            UserId::new()
+        ));
+        let mut state =
+            ServerState::new_with_db_path(&path).expect("server state should initialize");
+        state.image_provider = ImageProviderConfig {
+            provider: "google-gemini".to_string(),
+            model: "gemini-2.5-flash-image".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
+            api_key: Some("server-side-secret".to_string()),
+            endpoint: Some("http://vendor.example/v1/images".to_string()),
+            price_cents: 500,
+            timeout_ms: 30_000,
+            max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
+            output_dir: std::env::temp_dir(),
+            adapter_kind: ImageProviderAdapterKind::GeminiGenerateContent,
+        };
+
+        let guidance = image_proxy_guidance(&state).expect("guidance should be available");
+
+        assert!(!guidance.provider_ready);
+        assert!(guidance.provider_api_key_configured);
+        assert!(guidance.provider_endpoint_configured);
+        assert_eq!(
+            guidance.missing_configuration,
+            vec!["HUBU_IMAGE_PROVIDER_ENDPOINT".to_string()]
+        );
+        let body = serde_json::to_string(&guidance).expect("guidance should serialize");
+        assert!(!body.contains("server-side-secret"));
+        assert!(!body.contains("vendor.example"));
         std::fs::remove_file(path).ok();
     }
 
