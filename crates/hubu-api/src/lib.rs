@@ -5,7 +5,9 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -38,6 +40,7 @@ use hubu_core::{
         model::{SpendPaymentValidationRequest, SpendRequest},
         SpendManager,
     },
+    telemetry::{configure_file_logging, log_event},
     user::{CreateUserRequest, UserManager},
 };
 use hubu_wallet::{
@@ -50,6 +53,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 type DemoPaymentManager = PaymentManager<MockPaymentRail, SharedSpendAuthorizer>;
 
@@ -62,22 +66,64 @@ pub fn run_server_from_env() -> Result<()> {
 }
 
 pub fn run_server(bind_addr: &str) -> Result<()> {
+    configure_server_logging()?;
+    log_event(
+        "info",
+        "server_starting",
+        json!({
+            "bind_addr": bind_addr,
+        }),
+    );
     let listener = TcpListener::bind(bind_addr)
         .with_context(|| format!("bind Hubu demo server to {bind_addr}"))?;
     let state = ServerState::new()?;
 
-    println!("Hubu demo server listening on http://{bind_addr}");
+    log_event(
+        "info",
+        "server_listening",
+        json!({
+            "bind_addr": bind_addr,
+            "url": format!("http://{bind_addr}"),
+        }),
+    );
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 if let Err(error) = handle_connection(stream, &state) {
-                    eprintln!("request error: {error:#}");
+                    log_event(
+                        "error",
+                        "request_error",
+                        json!({
+                            "error": error.to_string(),
+                        }),
+                    );
                 }
             }
-            Err(error) => eprintln!("connection error: {error:#}"),
+            Err(error) => log_event(
+                "error",
+                "connection_error",
+                json!({
+                    "error": error.to_string(),
+                }),
+            ),
         }
     }
 
+    Ok(())
+}
+
+fn configure_server_logging() -> Result<()> {
+    if let Ok(log_path) = env::var("HUBU_LOG_FILE") {
+        configure_file_logging(&log_path)
+            .with_context(|| format!("configure Hubu log file at {log_path}"))?;
+        log_event(
+            "info",
+            "log_file_configured",
+            json!({
+                "path": log_path,
+            }),
+        );
+    }
     Ok(())
 }
 
@@ -101,6 +147,14 @@ impl ServerState {
 
     fn new_with_db_path(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+        let db_path = path.display().to_string();
+        log_event(
+            "info",
+            "server_state_initializing",
+            json!({
+                "db_path": db_path,
+            }),
+        );
         let mut users = UserManager::open(&path).context("initialize user store")?;
         let default_user = users.ensure_default_user()?;
         let mut governance =
@@ -158,7 +212,7 @@ impl ServerState {
                 .context("hydrate payment idempotency")?;
         }
 
-        Ok(Self {
+        let state = Self {
             users: Mutex::new(users),
             registration: Mutex::new(
                 RegistrationManager::open(&path).context("initialize agent registration store")?,
@@ -169,7 +223,17 @@ impl ServerState {
             governance: Mutex::new(governance),
             payment_attempts: Mutex::new(payment_attempts),
             payments: Mutex::new(payments),
-        })
+        };
+        log_event(
+            "info",
+            "server_state_initialized",
+            json!({
+                "db_path": db_path,
+                "default_user_id": default_user.id.to_string(),
+                "default_user_pub_id": default_user.pub_id,
+            }),
+        );
+        Ok(state)
     }
 }
 
@@ -441,15 +505,50 @@ struct LedgerEntryHttpResponse {
 }
 
 fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
+    let started_at = Instant::now();
+    let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let mut raw = String::new();
     stream.read_to_string(&mut raw)?;
     if raw.is_empty() {
+        log_event(
+            "debug",
+            "http_empty_request",
+            json!({
+                "request_id": request_id,
+            }),
+        );
         return Ok(());
     }
 
     let request = parse_request(&raw)?;
+    log_event(
+        "info",
+        "http_request_started",
+        json!({
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.path,
+            "body_bytes": request.body.len(),
+        }),
+    );
+    let method = request.method.clone();
+    let path = request.path.clone();
     let response = route(request, state);
+    let status = response.status;
     write_response(&mut stream, response)
+        .with_context(|| format!("write response for request {request_id}"))?;
+    log_event(
+        "info",
+        "http_request_finished",
+        json!({
+            "request_id": request_id,
+            "method": method,
+            "path": path,
+            "status": status,
+            "elapsed_ms": started_at.elapsed().as_millis(),
+        }),
+    );
+    Ok(())
 }
 
 fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
@@ -472,10 +571,21 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
 
     match result {
         Ok(body) => HttpResponse { status: 200, body },
-        Err(error) => HttpResponse {
-            status: 400,
-            body: json!({ "error": error.to_string() }),
-        },
+        Err(error) => {
+            log_event(
+                "warn",
+                "http_request_rejected",
+                json!({
+                    "method": request.method,
+                    "path": request.path,
+                    "error": error.to_string(),
+                }),
+            );
+            HttpResponse {
+                status: 400,
+                body: json!({ "error": error.to_string() }),
+            }
+        }
     }
 }
 
@@ -594,12 +704,23 @@ fn current_user(state: &ServerState) -> Result<CurrentUserHttpResponse> {
 fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttpResponse> {
     let request: RegisterAgentHttpRequest = serde_json::from_str(&body)?;
     let user = default_user(state)?;
-    let envelope = match request {
-        RegisterAgentHttpRequest::Envelope(envelope) => envelope,
-        RegisterAgentHttpRequest::Simple(request) => {
-            simple_registration_envelope(&request.name, &request.version, &user.pub_id)
-        }
+    let (request_shape, envelope) = match request {
+        RegisterAgentHttpRequest::Envelope(envelope) => ("envelope", envelope),
+        RegisterAgentHttpRequest::Simple(request) => (
+            "simple",
+            simple_registration_envelope(&request.name, &request.version, &user.pub_id),
+        ),
     };
+    log_event(
+        "info",
+        "agent_registration_received",
+        json!({
+            "request_shape": request_shape,
+            "user_id": user.id.to_string(),
+            "user_pub_id": user.pub_id,
+            "protocol_version": envelope.protocol_version,
+        }),
+    );
     let registration_request = registration_request_from_envelope(envelope, &user)?;
 
     let response = state
@@ -608,6 +729,22 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         .map_err(|_| anyhow!("registration manager lock poisoned"))?
         .register_agent(registration_request)?;
 
+    log_event(
+        "info",
+        "agent_registration_completed",
+        json!({
+            "user_id": user.id.to_string(),
+            "user_pub_id": user.pub_id,
+            "agent_id": response.agent.id.to_string(),
+            "agent_pub_id": response.agent.pub_id,
+            "version_id": response.version.id.to_string(),
+            "version_pub_id": response.version.pub_id,
+            "account_id": response.account.id.to_string(),
+            "account_pub_id": response.account.pub_id,
+            "session_id": response.session.id.to_string(),
+            "session_pub_id": response.session.pub_id,
+        }),
+    );
     Ok(RegisterAgentHttpResponse {
         user_id: user.pub_id,
         agent_id: response.agent.pub_id.clone(),
@@ -682,6 +819,16 @@ fn registration_request_from_envelope(
 
     verify_payload_fingerprint("identity", &envelope.identity)?;
     verify_payload_fingerprint("version", &envelope.version)?;
+    log_event(
+        "info",
+        "agent_registration_fingerprints_verified",
+        json!({
+            "user_id": user.id.to_string(),
+            "user_pub_id": user.pub_id,
+            "identity_fingerprint": envelope.identity.fingerprint,
+            "version_fingerprint": envelope.version.fingerprint,
+        }),
+    );
     validate_required_registration_payloads(&envelope)?;
 
     let identity_fingerprint = envelope.identity.fingerprint;
@@ -975,6 +1122,16 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         .map_err(|_| anyhow!("policy store lock poisoned"))?
         .insert((user.user_id, agent_id), policy);
 
+    log_event(
+        "info",
+        "policy_added",
+        json!({
+            "agent_pub_id": agent_pub_id,
+            "policy_id": policy_id,
+            "policy_version": policy_version,
+            "default_decision": default_decision,
+        }),
+    );
     Ok(AddPolicyHttpResponse {
         agent_id: agent_pub_id,
         policy_id,
@@ -1036,7 +1193,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
         .create_single_budget(CreateSingleBudgetRequest {
-            scope: BudgetScope::User(user.user_id),
+            scope: BudgetScope::User(user.user_id.clone()),
             amount_limit_cents: request.amount_cents,
             currency: Currency::Usd,
             period,
@@ -1047,6 +1204,18 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         .map_err(|_| anyhow!("governance store lock poisoned"))?
         .save_budget_with_balance(&response.budget, &response.balance)?;
 
+    log_event(
+        "info",
+        "budget_created",
+        json!({
+            "budget_id": response.budget.id.to_string(),
+            "user_id": user.user_id.to_string(),
+            "amount_cents": response.budget.amount_limit_cents,
+            "currency": response.budget.currency.to_string(),
+            "starting_at": response.budget.period.starting_at.to_rfc3339(),
+            "ending_before": response.budget.period.ending_before.map(|value| value.to_rfc3339()),
+        }),
+    );
     Ok(CreateBudgetHttpResponse {
         budget: budget_response(BudgetWithBalance {
             budget: response.budget,
@@ -1072,7 +1241,7 @@ fn create_budget_series(
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
         .create_budget_series(CreateBudgetSeriesRequest {
-            scope: BudgetScope::User(user.user_id),
+            scope: BudgetScope::User(user.user_id.clone()),
             amount_limit_cents: request.amount_cents,
             currency: Currency::Usd,
             starting_at,
@@ -1093,6 +1262,14 @@ fn create_budget_series(
         }
     }
 
+    log_event(
+        "info",
+        "budget_series_created",
+        json!({
+            "user_id": user.user_id.to_string(),
+            "budget_count": response.budgets.len(),
+        }),
+    );
     Ok(CreateBudgetSeriesHttpResponse {
         budgets: response.budgets.into_iter().map(budget_response).collect(),
     })
@@ -1120,6 +1297,18 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
 
     let agent_pub_id = request.agent_id;
     let user = default_user_context(state)?;
+    log_event(
+        "info",
+        "spend_request_received",
+        json!({
+            "agent_pub_id": agent_pub_id,
+            "user_id": user.user_id.to_string(),
+            "amount_cents": request.amount_cents,
+            "currency": Currency::Usd.to_string(),
+            "merchant": request.merchant,
+            "reason": request.reason,
+        }),
+    );
     let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
     let policy = state
         .policies
@@ -1169,6 +1358,20 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         .auth_token
         .as_ref()
         .map(|token| token.id.to_string());
+    log_event(
+        "info",
+        "spend_policy_evaluated",
+        json!({
+            "agent_pub_id": agent_pub_id,
+            "agent_id": agent_id.to_string(),
+            "user_id": user.user_id.to_string(),
+            "decision_id": evaluation.decision_id.to_string(),
+            "decision": effect_name(evaluation.evaluation.decision),
+            "policy_id": evaluation.evaluation.policy_id,
+            "policy_version": evaluation.evaluation.policy_version,
+            "auth_token_issued": auth_token_id.is_some(),
+        }),
+    );
     let owner = owner_metadata_for_user_id(&user.user_id, state)?;
     let (budget_hold, payment) = if let Some(token) = evaluation.auth_token {
         let budget_id = active_budget_id_for_user(&user.user_id, state)?;
@@ -1192,6 +1395,18 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
                 .save_budget_hold(&reservation.hold, &reservation.balance)?;
             reservation
         };
+        log_event(
+            "info",
+            "budget_reserved_for_spend",
+            json!({
+                "budget_id": reservation.hold.budget_id.to_string(),
+                "hold_id": reservation.hold.id.to_string(),
+                "decision_id": evaluation.decision_id.to_string(),
+                "amount_cents": reservation.hold.amount_cents,
+                "remaining_amount_cents": reservation.balance.remaining_amount_cents,
+                "frozen_amount_cents": reservation.balance.frozen_amount_cents,
+            }),
+        );
 
         let payment_request = PaymentRequest {
             idempotency_key: format!("{}:{}", evaluation.decision_id, request.reason),
@@ -1260,6 +1475,21 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
                     hold_update
                 };
 
+                log_event(
+                    "info",
+                    "payment_submitted_for_spend",
+                    json!({
+                        "decision_id": evaluation.decision_id.to_string(),
+                        "payment_id": payment.payment_id.to_string(),
+                        "payment_status": match payment.status {
+                            PaymentStatus::Succeeded => "succeeded",
+                            PaymentStatus::Failed => "failed",
+                        },
+                        "ledger_transaction_id": payment.ledger_transaction_id.as_ref().map(ToString::to_string),
+                        "rail_reference": payment.rail_reference,
+                        "failure_reason": payment.failure_reason,
+                    }),
+                );
                 (
                     Some(budget_hold_response(hold_update)),
                     Some(PaymentHttpResponse {
@@ -1290,6 +1520,15 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
                     .lock()
                     .map_err(|_| anyhow!("governance store lock poisoned"))?
                     .update_budget_hold(&release.hold, &release.balance)?;
+                log_event(
+                    "warn",
+                    "payment_failed_budget_released",
+                    json!({
+                        "decision_id": evaluation.decision_id.to_string(),
+                        "hold_id": reservation.hold.id.to_string(),
+                        "error": error.to_string(),
+                    }),
+                );
                 return Err(error.into());
             }
         }
