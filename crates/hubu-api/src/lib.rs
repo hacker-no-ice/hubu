@@ -27,9 +27,8 @@ use hubu_common::{
 use hubu_core::{
     budget::{
         BudgetHold, BudgetHoldStatus, BudgetManager, BudgetManagerError, BudgetRecurrence,
-        BudgetScope, BudgetWithBalance,
-        CreateBudgetSeriesRequest, CreateSingleBudgetRequest, ReleaseBudgetResponse,
-        ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
+        BudgetScope, BudgetWithBalance, CreateBudgetSeriesRequest, CreateSingleBudgetRequest,
+        ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyRepository, SpendRepository, SqliteGovernanceRepository,
@@ -675,6 +674,7 @@ fn send_gemini_generate_content_image_provider_request(
 ) -> Result<ureq::Response, ImageProviderError> {
     let timeout = std::time::Duration::from_millis(timeout_ms);
     let agent = ureq::AgentBuilder::new()
+        .timeout(timeout)
         .timeout_connect(timeout)
         .timeout_read(timeout)
         .timeout_write(timeout)
@@ -4128,6 +4128,15 @@ mod tests {
             Err(error) => error,
         };
         assert!(insecure_endpoint
+            .to_string()
+            .contains("endpoint must use https"));
+
+        config.endpoint = Some("http://localhost:9000@vendor.example/v1/images".to_string());
+        let smuggled_remote_endpoint = match config.adapter() {
+            Ok(_) => panic!("Gemini adapter should parse host before allowing loopback HTTP"),
+            Err(error) => error,
+        };
+        assert!(smuggled_remote_endpoint
             .to_string()
             .contains("endpoint must use https"));
 
