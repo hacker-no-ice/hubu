@@ -228,8 +228,24 @@ before payment; successful payment settles the hold into consumed balance.
 ### 6a. Authorize Spend Without Executing Payment
 
 ```sh
+hubu budget create \
+  --agent-id agt_8x7k2m4q9v1c \
+  --amount 5
+```
+
+Expected output:
+
+```txt
+Budget created
+  budget_id: 4bd937d0-c546-4424-a2c6-7aac10769149  scope: agent  status: active
+    limit: $5.00  consumed: $0.00  frozen: $0.00  remaining: $5.00
+    period: 2026-06-03T17:19:20.123456+00:00 -> open-ended
+```
+
+```sh
 hubu spend authorize \
   --account-id aga_c6q3d9m1v8ra \
+  --budget-id 4bd937d0-c546-4424-a2c6-7aac10769149 \
   --amount 5 \
   --reason "Generate Project Hubu logo" \
   --merchant hubu-model-proxy
@@ -248,17 +264,17 @@ Spend evaluated
 Budget hold
   status: frozen
   hold_id: e9ee93b7-dac7-4c23-946f-2a7bc2835c24
-  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c
+  budget_id: 4bd937d0-c546-4424-a2c6-7aac10769149
   amount: $5.00
-  consumed: $20.00
+  consumed: $0.00
   frozen: $5.00
-  remaining: $50.00
+  remaining: $0.00
 ```
 
 This is the first slice of the logo-generation demo path: Hubu evaluates policy,
-issues a spend authorization token, and freezes budget, but does not submit
-payment or write a ledger transaction. A later vendor/model proxy can consume
-the token while keeping provider API keys inside Hubu.
+issues a spend authorization token, and freezes a dedicated `$5` agent budget,
+but does not submit payment or write a ledger transaction. A later vendor/model
+proxy can consume the token while keeping provider API keys inside Hubu.
 
 ### 6b. Generate An Image Through Hubu
 
@@ -285,9 +301,9 @@ Budget hold
   status: settled
   hold_id: e9ee93b7-dac7-4c23-946f-2a7bc2835c24
   amount: $5.00
-  consumed: $25.00
+  consumed: $5.00
   frozen: $0.00
-  remaining: $50.00
+  remaining: $0.00
 ```
 
 The demo image provider writes a local SVG artifact and returns a `file://...`

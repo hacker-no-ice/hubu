@@ -142,8 +142,9 @@ fn tool_definitions() -> Vec<Value> {
         ),
         approval_tool(
             "hubu_create_budget",
-            "Create a human-scoped budget. Requires a human click.",
+            "Create a human- or agent-scoped budget. Requires a human click.",
             json_schema(json!({
+                "agent_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "starting_at": { "type": "string" },
                 "ending_before": { "type": "string" }
@@ -170,7 +171,8 @@ fn tool_definitions() -> Vec<Value> {
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
-                "merchant": { "type": "string" }
+                "merchant": { "type": "string" },
+                "budget_id": { "type": "string" }
             })),
         ),
         write_tool(
@@ -181,7 +183,8 @@ fn tool_definitions() -> Vec<Value> {
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
-                "merchant": { "type": "string" }
+                "merchant": { "type": "string" },
+                "budget_id": { "type": "string" }
             })),
         ),
         write_tool(

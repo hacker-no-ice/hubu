@@ -447,6 +447,7 @@ struct AgentHttpResponse {
 
 #[derive(Debug, Deserialize)]
 struct CreateBudgetHttpRequest {
+    agent_id: Option<String>,
     amount_cents: i64,
     starting_at: Option<String>,
     ending_before: Option<String>,
@@ -504,6 +505,7 @@ struct SpendHttpRequest {
     amount_cents: i64,
     reason: String,
     merchant: Option<String>,
+    budget_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1266,6 +1268,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
     }
 
     let user = default_user_context(state)?;
+    let scope = budget_scope_from_create_request(&request, &user, state)?;
     let period = TimePeriod::new(
         parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now),
         parse_optional_datetime(request.ending_before)?,
@@ -1277,7 +1280,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
         .create_single_budget(CreateSingleBudgetRequest {
-            scope: BudgetScope::User(user.user_id.clone()),
+            scope,
             amount_limit_cents: request.amount_cents,
             currency: Currency::Usd,
             period,
@@ -1306,6 +1309,32 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
             balance: response.balance,
         }),
     })
+}
+
+fn budget_scope_from_create_request(
+    request: &CreateBudgetHttpRequest,
+    user: &UserContext,
+    state: &ServerState,
+) -> Result<BudgetScope> {
+    let Some(agent_pub_id) = request.agent_id.as_deref() else {
+        return Ok(BudgetScope::User(user.user_id.clone()));
+    };
+    let registration = state
+        .registration
+        .lock()
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?;
+    let agent_id = registration
+        .agent_id_for_pub_id(agent_pub_id)?
+        .ok_or_else(|| anyhow!("unknown public agent id {agent_pub_id}"))?;
+    let account = registration
+        .account_for_agent(&agent_id)?
+        .ok_or_else(|| anyhow!("no account found for agent {agent_pub_id}"))?;
+    if account.owner_user_id != user.user_id {
+        return Err(anyhow!(
+            "agent {agent_pub_id} is not owned by resolved user"
+        ));
+    }
+    Ok(BudgetScope::Agent(agent_id))
 }
 
 fn create_budget_series(
@@ -1658,7 +1687,7 @@ fn evaluate_and_reserve_spend(
     );
     let token = evaluation.auth_token.clone();
     let reservation = if let Some(token) = token.as_ref() {
-        let budget_id = active_budget_id_for_user(&user.user_id, state)?;
+        let budget_id = budget_id_for_spend_reservation(&request, &user, &agent_id, state)?;
         let reservation = {
             let mut budgets = state
                 .budgets
@@ -2032,6 +2061,34 @@ fn active_budget_id_for_user(user_id: &UserId, state: &ServerState) -> Result<Bu
         })
         .map(|budget| budget.budget.id)
         .ok_or_else(|| anyhow!("no active USD budget found for current user"))
+}
+
+fn budget_id_for_spend_reservation(
+    request: &SpendHttpRequest,
+    user: &UserContext,
+    agent_id: &AgentId,
+    state: &ServerState,
+) -> Result<BudgetId> {
+    let Some(budget_id) = request.budget_id.as_deref() else {
+        return active_budget_id_for_user(&user.user_id, state);
+    };
+    let requested_budget_id = BudgetId::from_str(budget_id)
+        .map_err(|error| anyhow!("invalid budget_id `{budget_id}`: {error}"))?;
+    let now = Utc::now();
+    let budgets = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+    let budget = budgets
+        .get_budgets_by_user_id(&user.user_id)
+        .into_iter()
+        .chain(budgets.get_budgets_by_agent_id(agent_id))
+        .find(|budget| budget.budget.id == requested_budget_id)
+        .ok_or_else(|| anyhow!("budget_id is not available to this spend request"))?;
+    if budget.budget.currency != Currency::Usd || !budget.budget.period.contains(now) {
+        return Err(anyhow!("budget_id is not an active USD budget"));
+    }
+    Ok(requested_budget_id)
 }
 
 fn resolve_agent_account_for_spend(
@@ -2746,18 +2803,21 @@ mod tests {
         )
         .expect("policy should allow the logo budget");
 
-        create_budget(
+        let logo_budget = create_budget(
             json!({
+                "agent_id": agent.agent_id,
                 "amount_cents": 500,
             })
             .to_string(),
             &state,
         )
-        .expect("budget should be created for initialized user");
+        .expect("agent logo budget should be created");
+        let logo_budget_id = logo_budget.budget.budget_id.clone();
 
         let authorization = authorize_spend(
             json!({
                 "agent_id": agent.agent_id,
+                "budget_id": logo_budget_id,
                 "amount_cents": 500,
                 "reason": "Generate Project Hubu logo",
                 "merchant": "hubu-model-proxy",
@@ -2819,18 +2879,21 @@ mod tests {
         )
         .expect("policy should allow the logo budget");
 
-        create_budget(
+        let logo_budget = create_budget(
             json!({
+                "agent_id": agent.agent_id,
                 "amount_cents": 500,
             })
             .to_string(),
             &state,
         )
-        .expect("budget should be created for initialized user");
+        .expect("agent logo budget should be created");
+        let logo_budget_id = logo_budget.budget.budget_id.clone();
 
         let authorization = authorize_spend(
             json!({
                 "agent_id": agent.agent_id,
+                "budget_id": logo_budget_id,
                 "amount_cents": 500,
                 "reason": "Generate Project Hubu logo",
                 "merchant": "hubu-model-proxy",
@@ -2870,6 +2933,10 @@ mod tests {
         assert_eq!(generated.payment.owner_user_id, user.user_id);
         assert!(generated.payment.ledger_transaction_id.is_some());
         assert_eq!(generated.budget_hold.status, "settled");
+        assert_eq!(
+            generated.budget_hold.budget_id,
+            logo_budget.budget.budget_id
+        );
         assert_eq!(generated.budget_hold.consumed_amount_cents, 500);
         assert_eq!(generated.budget_hold.frozen_amount_cents, 0);
         assert_eq!(generated.budget_hold.remaining_amount_cents, 0);

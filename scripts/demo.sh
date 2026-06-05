@@ -212,11 +212,22 @@ show_cli_output "${ALLOW_OUTPUT}"
 pause_for_reading
 
 step "Authorize a \$5 logo-generation budget"
+LOGO_BUDGET_OUTPUT="$(hubu budget create \
+  --agent-id "${AGENT_ID}" \
+  --amount 5)"
+show_cli_output "${LOGO_BUDGET_OUTPUT}"
+LOGO_BUDGET_ID="$(printf '%s\n' "${LOGO_BUDGET_OUTPUT}" | awk -F': ' '/^  budget_id:/ { split($2, parts, "  "); print parts[1]; exit }')"
+if [[ -z "${LOGO_BUDGET_ID}" ]]; then
+  say "${RED}Could not parse budget_id from logo budget output.${RESET}" >&2
+  exit 1
+fi
+note "captured logo budget_id=${LOGO_BUDGET_ID}"
 LOGO_AUTH_OUTPUT="$(hubu spend authorize \
   --account-id "${ACCOUNT_ID}" \
   --amount 5 \
   --reason "Generate Project Hubu logo" \
-  --merchant hubu-model-proxy)"
+  --merchant hubu-model-proxy \
+  --budget-id "${LOGO_BUDGET_ID}")"
 show_cli_output "${LOGO_AUTH_OUTPUT}"
 LOGO_AUTH_TOKEN_ID="$(printf '%s\n' "${LOGO_AUTH_OUTPUT}" | awk -F': ' '/^  auth_token_id:/ { print $2; exit }')"
 if [[ -z "${LOGO_AUTH_TOKEN_ID}" ]]; then

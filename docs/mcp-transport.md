@@ -75,7 +75,9 @@ human approves a `needs_approval` spend decision.
 freezing budget. It does not submit payment or write a ledger transaction. This
 is the handoff point for future Hubu-hosted vendor/model proxy tools that need
 to consume a scoped spend authorization without exposing provider credentials to
-the agent.
+the agent. Callers may pass `budget_id` to reserve a specific active user or
+agent budget, which lets the logo flow use a dedicated `$5` agent budget without
+changing the default spend path.
 
 `hubu_generate_image` consumes one spend authorization token through
 `POST /model-calls/image`, settles the matching frozen budget hold, records the

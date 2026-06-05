@@ -444,19 +444,21 @@ fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
     }
 
     let amount = take_required(&mut args, "--amount")?;
+    let agent_id = take_value(&mut args, "--agent-id");
     let starting_at = take_value(&mut args, "--starting-at");
     let ending_before = take_value(&mut args, "--ending-before");
     ensure_no_args(args)?;
 
-    let response = post_json(
-        base_url,
-        "/budgets",
-        json!({
-            "amount_cents": amount_to_cents(&amount)?,
-            "starting_at": starting_at,
-            "ending_before": ending_before,
-        }),
-    )?;
+    let mut body = json!({
+        "amount_cents": amount_to_cents(&amount)?,
+        "starting_at": starting_at,
+        "ending_before": ending_before,
+    });
+    if let Some(agent_id) = agent_id {
+        body["agent_id"] = json!(agent_id);
+    }
+
+    let response = post_json(base_url, "/budgets", body)?;
 
     println!("Budget created");
     print_budget(
@@ -541,6 +543,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
         take_value(&mut args, "--merchant").unwrap_or_else(|| "demo-merchant".to_string());
+    let budget_id = take_value(&mut args, "--budget-id");
     ensure_no_args(args)?;
 
     if account_id.is_some() == agent_id.is_some() {
@@ -559,6 +562,9 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     }
     if let Some(agent_id) = agent_id {
         body["agent_id"] = json!(agent_id);
+    }
+    if let Some(budget_id) = budget_id {
+        body["budget_id"] = json!(budget_id);
     }
 
     let response = post_json(base_url, "/spend", body)?;
@@ -577,6 +583,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
         take_value(&mut args, "--merchant").unwrap_or_else(|| "demo-merchant".to_string());
+    let budget_id = take_value(&mut args, "--budget-id");
     ensure_no_args(args)?;
 
     if account_id.is_some() == agent_id.is_some() {
@@ -595,6 +602,9 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     }
     if let Some(agent_id) = agent_id {
         body["agent_id"] = json!(agent_id);
+    }
+    if let Some(budget_id) = budget_id {
+        body["budget_id"] = json!(budget_id);
     }
 
     let response = post_json(base_url, "/spend/authorize", body)?;
@@ -1119,7 +1129,7 @@ fn print_budget_help() {
         "Create and list budgets
 
 Usage:
-  hubu budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
   hubu budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
   hubu budget list"
     );
@@ -1127,10 +1137,10 @@ Usage:
 
 fn print_budget_create_help() {
     println!(
-        "Create a single human-scoped budget
+        "Create a single human- or agent-scoped budget
 
 Usage:
-  hubu budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]"
+  hubu budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]"
     );
 }
 
@@ -1157,10 +1167,10 @@ fn print_spend_help() {
         "Submit an agent spend request
 
 Usage:
-  hubu spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]"
+  hubu spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--budget-id ID]
+  hubu spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--budget-id ID]
+  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--budget-id ID]
+  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--budget-id ID]"
     );
 }
 
@@ -1169,8 +1179,8 @@ fn print_spend_authorize_help() {
         "Authorize spend and reserve budget without executing payment
 
 Usage:
-  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]"
+  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--budget-id ID]
+  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--budget-id ID]"
     );
 }
 
