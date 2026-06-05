@@ -13,6 +13,8 @@ Hubu controls spend; executors do work.
 Gongbu can implement this contract for model calls, image generation, or other
 vendor-backed work. Other services can implement the same contract without
 Hubu knowing their vendor APIs, credentials, retries, or artifact formats.
+See `docs/gongbu-carry-forward.md` for the Hubu image-proxy PR ideas that
+should carry into a future Gongbu implementation.
 
 ## Boundary
 
@@ -192,4 +194,3 @@ vendor.
 - Executors must not reuse a token after settlement or release.
 - Hubu rejects validation when the budget hold is no longer frozen.
 - Hubu never stores executor vendor secrets through this contract.
-
