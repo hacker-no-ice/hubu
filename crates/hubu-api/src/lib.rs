@@ -25,6 +25,9 @@ use hubu_core::{
         CreateSingleBudgetRequest, ReleaseBudgetResponse, ReserveBudgetRequest,
         SettleBudgetResponse,
     },
+    persistence::{
+        BudgetRepository, PolicyRepository, SpendRepository, SqliteGovernanceRepository,
+    },
     policy::{
         condition::{Condition, Field, PolicyValue},
         engine::validate_policy,
@@ -38,8 +41,9 @@ use hubu_core::{
     user::{CreateUserRequest, UserManager},
 };
 use hubu_wallet::{
-    LedgerTransaction, MockPaymentRail, PaymentDestination, PaymentError, PaymentManager,
-    PaymentRailKind, PaymentRequest, PaymentStatus, SpendAuthorizationValidator, SqliteLedger,
+    LedgerTransaction, MockPaymentRail, PaymentAttemptRepository, PaymentDestination, PaymentError,
+    PaymentManager, PaymentRailKind, PaymentRequest, PaymentStatus, SpendAuthorizationValidator,
+    SqliteLedger, SqlitePaymentAttemptRepository,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -83,6 +87,8 @@ struct ServerState {
     spend: Arc<Mutex<SpendManager>>,
     budgets: Mutex<BudgetManager>,
     policies: Mutex<HashMap<(UserId, AgentId), Policy>>,
+    governance: Mutex<SqliteGovernanceRepository>,
+    payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
     payments: Mutex<DemoPaymentManager>,
 }
 
@@ -94,28 +100,74 @@ impl ServerState {
     }
 
     fn new_with_db_path(path: impl AsRef<Path>) -> Result<Self> {
-        let mut users = UserManager::open(path.as_ref()).context("initialize user store")?;
+        let path = path.as_ref().to_path_buf();
+        let mut users = UserManager::open(&path).context("initialize user store")?;
         let default_user = users.ensure_default_user()?;
-        let spend = Arc::new(Mutex::new(SpendManager::new()));
+        let mut governance =
+            SqliteGovernanceRepository::open(&path).context("initialize governance store")?;
+        governance
+            .expire_overdue_budget_holds(Utc::now())
+            .context("reconcile expired budget holds")?;
+        let policy_assignments = governance
+            .load_policy_assignments()
+            .context("load policy assignments")?;
+        let policies = policy_assignments
+            .into_iter()
+            .map(|assignment| {
+                (
+                    (assignment.owner_user_id, assignment.agent_id),
+                    assignment.policy,
+                )
+            })
+            .collect();
+        let spend = Arc::new(Mutex::new(SpendManager::from_records(
+            governance
+                .load_spend_decisions()
+                .context("load spend decisions")?,
+            governance
+                .load_spend_auth_tokens()
+                .context("load spend auth tokens")?,
+        )));
+        let budgets = BudgetManager::from_records(
+            governance.load_budgets().context("load budgets")?,
+            governance
+                .load_budget_balances()
+                .context("load budget balances")?,
+            governance
+                .load_budget_holds()
+                .context("load budget holds")?,
+        );
         let authorizer = SharedSpendAuthorizer {
             spend: Arc::clone(&spend),
         };
-        let payments = PaymentManager::new(
-            default_user.id,
+        let mut payments = PaymentManager::new(
+            default_user.id.clone(),
             MockPaymentRail,
             authorizer,
-            SqliteLedger::in_memory().context("initialize in-memory ledger")?,
+            SqliteLedger::open(&path).context("initialize ledger")?,
         )
         .context("initialize payment manager")?;
+        let payment_attempts = SqlitePaymentAttemptRepository::open(&path)
+            .context("initialize payment attempt store")?;
+        for attempt in payment_attempts
+            .list_payment_attempts()
+            .context("load payment attempts")?
+        {
+            payments
+                .remember_payment_attempt(attempt.request(), attempt.response())
+                .context("hydrate payment idempotency")?;
+        }
 
         Ok(Self {
             users: Mutex::new(users),
             registration: Mutex::new(
-                RegistrationManager::open(path).context("initialize agent registration store")?,
+                RegistrationManager::open(&path).context("initialize agent registration store")?,
             ),
             spend,
-            budgets: Mutex::new(BudgetManager::new()),
-            policies: Mutex::new(HashMap::new()),
+            budgets: Mutex::new(budgets),
+            policies: Mutex::new(policies),
+            governance: Mutex::new(governance),
+            payment_attempts: Mutex::new(payment_attempts),
             payments: Mutex::new(payments),
         })
     }
@@ -911,6 +963,11 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
     let policy_id = policy.id.clone();
     let policy_version = policy.version.clone();
     let default_decision = effect_name(policy.default_effect).to_string();
+    state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .save_policy_assignment(&user.user_id, &agent_id, &policy)?;
 
     state
         .policies
@@ -984,6 +1041,11 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
             currency: Currency::Usd,
             period,
         })?;
+    state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .save_budget_with_balance(&response.budget, &response.balance)?;
 
     Ok(CreateBudgetHttpResponse {
         budget: budget_response(BudgetWithBalance {
@@ -1021,6 +1083,15 @@ fn create_budget_series(
             },
             period_count: request.period_count,
         })?;
+    {
+        let mut governance = state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        for budget in &response.budgets {
+            governance.save_budget_with_balance(&budget.budget, &budget.balance)?;
+        }
+    }
 
     Ok(CreateBudgetSeriesHttpResponse {
         budgets: response.budgets.into_iter().map(budget_response).collect(),
@@ -1068,11 +1139,31 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         task_id: Some(request.reason.clone()),
     };
 
-    let evaluation = state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .evaluate_spend(&user, spend_request.clone(), &policy)?;
+    let evaluation = {
+        let mut spend = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let evaluation = spend.evaluate_spend(&user, spend_request.clone(), &policy)?;
+        let decision_record = spend
+            .decision_record(&evaluation.decision_id)
+            .ok_or_else(|| anyhow!("spend decision was not recorded"))?;
+        let token_record = evaluation
+            .auth_token
+            .as_ref()
+            .and_then(|token| spend.auth_token_record(&token.id));
+        drop(spend);
+
+        let mut governance = state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        governance.save_spend_decision(&decision_record)?;
+        if let Some(token_record) = token_record {
+            governance.save_spend_auth_token(&token_record)?;
+        }
+        evaluation
+    };
 
     let auth_token_id = evaluation
         .auth_token
@@ -1081,17 +1172,26 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let owner = owner_metadata_for_user_id(&user.user_id, state)?;
     let (budget_hold, payment) = if let Some(token) = evaluation.auth_token {
         let budget_id = active_budget_id_for_user(&user.user_id, state)?;
-        let reservation = state
-            .budgets
-            .lock()
-            .map_err(|_| anyhow!("budget manager lock poisoned"))?
-            .reserve_budget(ReserveBudgetRequest {
+        let reservation = {
+            let mut budgets = state
+                .budgets
+                .lock()
+                .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+            let reservation = budgets.reserve_budget(ReserveBudgetRequest {
                 budget_id,
                 spend_decision_id: evaluation.decision_id.clone(),
                 amount_cents: request.amount_cents,
                 currency: Currency::Usd,
                 expires_at: token.expires_at,
             })?;
+            drop(budgets);
+            state
+                .governance
+                .lock()
+                .map_err(|_| anyhow!("governance store lock poisoned"))?
+                .save_budget_hold(&reservation.hold, &reservation.balance)?;
+            reservation
+        };
 
         let payment_request = PaymentRequest {
             idempotency_key: format!("{}:{}", evaluation.decision_id, request.reason),
@@ -1109,6 +1209,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
             memo: Some("Hubu demo payment".to_string()),
         };
 
+        let payment_audit_request = payment_request.clone();
         let payment_result = state
             .payments
             .lock()
@@ -1117,22 +1218,46 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
 
         match payment_result {
             Ok(payment) => {
-                let hold_update = if payment.status == PaymentStatus::Succeeded {
-                    BudgetHoldUpdate::Settled(
-                        state
-                            .budgets
-                            .lock()
-                            .map_err(|_| anyhow!("budget manager lock poisoned"))?
-                            .settle_budget(&reservation.hold.id)?,
-                    )
-                } else {
-                    BudgetHoldUpdate::Released(
-                        state
-                            .budgets
-                            .lock()
-                            .map_err(|_| anyhow!("budget manager lock poisoned"))?
-                            .release_budget(&reservation.hold.id)?,
-                    )
+                state
+                    .payment_attempts
+                    .lock()
+                    .map_err(|_| anyhow!("payment attempt store lock poisoned"))?
+                    .save_payment_attempt(&payment_audit_request, &payment)?;
+
+                if payment.status == PaymentStatus::Succeeded {
+                    let used_token = state
+                        .spend
+                        .lock()
+                        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+                        .auth_token_record(&payment_audit_request.spend_auth_token_id)
+                        .ok_or_else(|| anyhow!("used spend auth token was not recorded"))?;
+                    state
+                        .governance
+                        .lock()
+                        .map_err(|_| anyhow!("governance store lock poisoned"))?
+                        .update_spend_auth_token(&used_token)?;
+                }
+
+                let hold_update = {
+                    let mut budgets = state
+                        .budgets
+                        .lock()
+                        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+                    let hold_update = if payment.status == PaymentStatus::Succeeded {
+                        BudgetHoldUpdate::Settled(budgets.settle_budget(&reservation.hold.id)?)
+                    } else {
+                        BudgetHoldUpdate::Released(budgets.release_budget(&reservation.hold.id)?)
+                    };
+                    let (hold, balance) = match &hold_update {
+                        BudgetHoldUpdate::Settled(response) => (&response.hold, &response.balance),
+                        BudgetHoldUpdate::Released(response) => (&response.hold, &response.balance),
+                    };
+                    state
+                        .governance
+                        .lock()
+                        .map_err(|_| anyhow!("governance store lock poisoned"))?
+                        .update_budget_hold(hold, balance)?;
+                    hold_update
                 };
 
                 (
@@ -1155,11 +1280,16 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
                 )
             }
             Err(error) => {
-                state
+                let release = state
                     .budgets
                     .lock()
                     .map_err(|_| anyhow!("budget manager lock poisoned"))?
                     .release_budget(&reservation.hold.id)?;
+                state
+                    .governance
+                    .lock()
+                    .map_err(|_| anyhow!("governance store lock poisoned"))?
+                    .update_budget_hold(&release.hold, &release.balance)?;
                 return Err(error.into());
             }
         }
@@ -1944,6 +2074,99 @@ rules:
 
         assert_eq!(resumed_agent.user_id, user.user_id);
         assert_eq!(resumed_agent.agent_id, first_agent_id);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn governance_and_payment_audit_state_survive_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-governance-restart-{}.sqlite",
+            UserId::new()
+        ));
+        let (user_id, agent_id) = {
+            let state =
+                ServerState::new_with_db_path(&path).expect("server state should initialize");
+            let user = init(
+                json!({
+                    "display_name": "Alice Example",
+                    "email": "alice@example.com",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("init should create an explicit user");
+            let agent = register_agent(
+                json!({
+                    "name": "durable-agent",
+                    "version": "v1",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("agent should register");
+            add_policy(
+                json!({
+                    "agent_id": agent.agent_id,
+                    "daily_limit_cents": 5_000,
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("policy should be added");
+            create_budget(
+                json!({
+                    "amount_cents": 10_000,
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("budget should be created");
+            spend(
+                json!({
+                    "agent_id": agent.agent_id,
+                    "amount_cents": 2_500,
+                    "reason": "restart audit purchase",
+                    "merchant": "Acme Cafe",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("spend should be approved and paid");
+            (user.user_id, agent.agent_id)
+        };
+
+        let restarted =
+            ServerState::new_with_db_path(&path).expect("server state should reload from storage");
+        let budgets = list_budgets(&restarted).expect("budgets should reload");
+        assert_eq!(budgets.budgets.len(), 1);
+        assert_eq!(budgets.budgets[0].consumed_amount_cents, 2_500);
+        assert_eq!(budgets.budgets[0].remaining_amount_cents, 7_500);
+
+        let ledger = list_ledger(&restarted).expect("ledger should reload");
+        assert_eq!(ledger.transactions.len(), 1);
+        assert_eq!(ledger.transactions[0].owner_user_id, user_id);
+
+        let attempts = restarted
+            .payment_attempts
+            .lock()
+            .expect("payment attempt store lock should not be poisoned")
+            .list_payment_attempts()
+            .expect("payment attempts should reload");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status, PaymentStatus::Succeeded);
+
+        let resumed_spend = spend(
+            json!({
+                "agent_id": agent_id,
+                "amount_cents": 1_000,
+                "reason": "post-restart policy spend",
+                "merchant": "Acme Cafe",
+            })
+            .to_string(),
+            &restarted,
+        )
+        .expect("restarted server should still have the policy assignment");
+        assert_eq!(resumed_spend.decision, "allow");
         std::fs::remove_file(path).ok();
     }
 }
