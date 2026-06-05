@@ -24,9 +24,9 @@ use hubu_common::{
 };
 use hubu_core::{
     budget::{
-        BudgetManager, BudgetRecurrence, BudgetScope, BudgetWithBalance, CreateBudgetSeriesRequest,
-        CreateSingleBudgetRequest, ReleaseBudgetResponse, ReserveBudgetRequest,
-        SettleBudgetResponse,
+        BudgetManager, BudgetManagerError, BudgetRecurrence, BudgetScope, BudgetWithBalance,
+        CreateBudgetSeriesRequest, CreateSingleBudgetRequest, ReleaseBudgetResponse,
+        ReserveBudgetRequest, SettleBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyRepository, SpendRepository, SqliteGovernanceRepository,
@@ -1338,7 +1338,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         task_id: Some(request.reason.clone()),
     };
 
-    let evaluation = {
+    let (evaluation, token_record) = {
         let mut spend = state
             .spend
             .lock()
@@ -1358,10 +1358,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
         governance.save_spend_decision(&decision_record)?;
-        if let Some(token_record) = token_record {
-            governance.save_spend_auth_token(&token_record)?;
-        }
-        evaluation
+        (evaluation, token_record)
     };
 
     let auth_token_id = evaluation
@@ -1390,19 +1387,55 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
                 .budgets
                 .lock()
                 .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-            let reservation = budgets.reserve_budget(ReserveBudgetRequest {
-                budget_id,
+            let reservation = match budgets.reserve_budget(ReserveBudgetRequest {
+                budget_id: budget_id.clone(),
                 spend_decision_id: evaluation.decision_id.clone(),
                 amount_cents: request.amount_cents,
                 currency: Currency::Usd,
                 expires_at: token.expires_at,
-            })?;
+            }) {
+                Ok(reservation) => reservation,
+                Err(BudgetManagerError::InsufficientRemainingBudget) => {
+                    log_event(
+                        "warn",
+                        "spend_budget_denied",
+                        json!({
+                            "agent_pub_id": agent_pub_id,
+                            "agent_id": agent_id.to_string(),
+                            "account_pub_id": account_pub_id,
+                            "user_id": user.user_id.to_string(),
+                            "decision_id": evaluation.decision_id.to_string(),
+                            "budget_id": budget_id.to_string(),
+                            "amount_cents": request.amount_cents,
+                            "reason": "insufficient_remaining_budget",
+                        }),
+                    );
+                    return Ok(SpendHttpResponse {
+                        account_id: account_pub_id,
+                        agent_id: agent_pub_id,
+                        decision_id: evaluation.decision_id.to_string(),
+                        decision: "deny".to_string(),
+                        reasons: vec!["budget does not have enough remaining balance".to_string()],
+                        auth_token_id: None,
+                        budget_hold: None,
+                        payment: None,
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
             drop(budgets);
             state
                 .governance
                 .lock()
                 .map_err(|_| anyhow!("governance store lock poisoned"))?
                 .save_budget_hold(&reservation.hold, &reservation.balance)?;
+            if let Some(token_record) = &token_record {
+                state
+                    .governance
+                    .lock()
+                    .map_err(|_| anyhow!("governance store lock poisoned"))?
+                    .save_spend_auth_token(token_record)?;
+            }
             reservation
         };
         log_event(
@@ -2445,6 +2478,82 @@ rules:
 
         let ledger = list_ledger(&state).expect("ledger should list");
         assert!(ledger.transactions.is_empty());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn over_budget_spend_returns_structured_denial_response() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-over-budget-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "over-budget-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 5_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should allow the attempted spend");
+
+        create_budget(
+            json!({
+                "amount_cents": 1_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should be created for initialized user");
+
+        let response = route(
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/spend".to_string(),
+                body: json!({
+                    "agent_id": agent.agent_id,
+                    "amount_cents": 2_500,
+                    "reason": "over budget purchase",
+                    "merchant": "Acme Cafe",
+                })
+                .to_string(),
+            },
+            &state,
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["decision"], "deny");
+        assert_eq!(response.body["auth_token_id"], Value::Null);
+        assert_eq!(response.body["budget_hold"], Value::Null);
+        assert_eq!(response.body["payment"], Value::Null);
+        assert!(response.body["reasons"]
+            .as_array()
+            .expect("reasons should be an array")
+            .iter()
+            .any(|reason| reason == "budget does not have enough remaining balance"));
+
+        let budgets = list_budgets(&state).expect("budgets should list");
+        assert_eq!(budgets.budgets[0].remaining_amount_cents, 1_000);
+        assert_eq!(budgets.budgets[0].frozen_amount_cents, 0);
         std::fs::remove_file(path).ok();
     }
 

@@ -130,6 +130,18 @@ assert_contains "failed payment spend" "${FAILED_OUTPUT}" 'consumed: $20.00'
 assert_contains "failed payment spend" "${FAILED_OUTPUT}" 'frozen: $0.00'
 assert_contains "failed payment spend" "${FAILED_OUTPUT}" 'remaining: $55.00'
 
+OVER_BUDGET_OUTPUT="$(hubu spend --agent-id "${AGENT_ID}" --amount 60 --reason "Over budget purchase")"
+assert_contains "over budget spend" "${OVER_BUDGET_OUTPUT}" "decision: deny"
+assert_contains "over budget spend" "${OVER_BUDGET_OUTPUT}" "budget does not have enough remaining balance"
+if [[ "${OVER_BUDGET_OUTPUT}" == *"Payment"* ]]; then
+  printf '%s\n' "${OVER_BUDGET_OUTPUT}" >&2
+  fail "over budget spend should not create a payment"
+fi
+if [[ "${OVER_BUDGET_OUTPUT}" == *"Budget hold"* ]]; then
+  printf '%s\n' "${OVER_BUDGET_OUTPUT}" >&2
+  fail "over budget spend should not create a budget hold"
+fi
+
 NEEDS_APPROVAL_OUTPUT="$(hubu spend --agent-id "${AGENT_ID}" --amount 120 --reason "Large API credit purchase")"
 assert_contains "approval spend" "${NEEDS_APPROVAL_OUTPUT}" "decision: needs_approval"
 if [[ "${NEEDS_APPROVAL_OUTPUT}" == *"Payment"* ]]; then
