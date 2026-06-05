@@ -357,9 +357,19 @@ fn http_json_image_provider_payload(request: &ImageGenerationRequest<'_>) -> ser
 }
 
 fn is_allowed_provider_endpoint(endpoint: &str) -> bool {
-    endpoint.starts_with("https://")
-        || endpoint.starts_with("http://127.0.0.1:")
-        || endpoint.starts_with("http://localhost:")
+    let Some((scheme, rest)) = endpoint.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let host = authority
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(authority);
+
+    scheme == "https" || (scheme == "http" && matches!(host, "127.0.0.1" | "localhost"))
 }
 
 impl ServerState {
@@ -3312,6 +3322,15 @@ mod tests {
             .to_string()
             .contains("endpoint must use https"));
 
+        config.endpoint = Some("http://127.0.0.1:9000@vendor.example/v1/images".to_string());
+        let smuggled_remote_endpoint = match config.adapter() {
+            Ok(_) => panic!("http-json adapter should parse host before allowing loopback HTTP"),
+            Err(error) => error,
+        };
+        assert!(smuggled_remote_endpoint
+            .to_string()
+            .contains("endpoint must use https"));
+
         config.endpoint = Some("http://127.0.0.1:9000/v1/images".to_string());
         assert!(config.adapter().is_ok());
 
@@ -3344,6 +3363,12 @@ mod tests {
         ));
         assert!(!is_allowed_provider_endpoint(
             "http://vendor.example/v1/images"
+        ));
+        assert!(!is_allowed_provider_endpoint(
+            "http://127.0.0.1:9000@vendor.example/v1/images"
+        ));
+        assert!(!is_allowed_provider_endpoint(
+            "http://localhost:9000@vendor.example/v1/images"
         ));
     }
 
