@@ -107,8 +107,13 @@ configuration too: `HUBU_IMAGE_PROVIDER_HTTP_JSON_PROVIDER_FIELD`,
 `HUBU_IMAGE_PROVIDER_HTTP_JSON_PROMPT_FIELD`,
 `HUBU_IMAGE_PROVIDER_HTTP_JSON_REQUEST_ID_FIELD`, and
 `HUBU_IMAGE_PROVIDER_HTTP_JSON_OUTPUT_REF_FIELD`. Optional request fields can be
-omitted by setting their field name to an empty string. Agent requests must
-match the configured provider/model, the spend
+omitted by setting their field name to an empty string. The
+`gemini-generate-content` adapter is the narrow Gemini/Nano Banana bridge: it
+posts the prompt to the configured Gemini `:generateContent` endpoint, sends the
+server-side API key as `x-goog-api-key`, requests image output, extracts the
+first inline image from `candidates[0].content.parts`, writes it under
+`HUBU_IMAGE_OUTPUT_DIR`, and returns a `file://...` output reference. Agent
+requests must match the configured provider/model, the spend
 authorization must be scoped to the configured image proxy merchant and exact
 provider price (`HUBU_IMAGE_PROVIDER_PRICE_CENTS`, default `500`), and remote
 provider endpoints must use HTTPS. If provider configuration or generation

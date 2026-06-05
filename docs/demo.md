@@ -357,6 +357,14 @@ server-side mapping with `HUBU_IMAGE_PROVIDER_HTTP_JSON_PROVIDER_FIELD`,
 `HUBU_IMAGE_PROVIDER_HTTP_JSON_REQUEST_ID_FIELD`, and
 `HUBU_IMAGE_PROVIDER_HTTP_JSON_OUTPUT_REF_FIELD`; set optional request field
 names to an empty string to omit them.
+For Gemini/Nano Banana style `generateContent`, configure
+`HUBU_IMAGE_PROVIDER_ADAPTER=gemini-generate-content`,
+`HUBU_IMAGE_PROVIDER_ENDPOINT` to the Gemini `:generateContent` URL,
+`HUBU_IMAGE_PROVIDER_NAME`, `HUBU_IMAGE_PROVIDER_MODEL`,
+`HUBU_IMAGE_PROVIDER_PRICE_CENTS`, and `HUBU_IMAGE_PROVIDER_API_KEY`. Hubu sends
+the key as `x-goog-api-key`, requests image output, extracts the first inline
+image from `candidates[0].content.parts`, writes it under
+`HUBU_IMAGE_OUTPUT_DIR`, and returns a `file://...` output reference.
 Agents may only request the configured provider/model, image calls only consume
 spend authorizations scoped to the configured proxy merchant and exact
 server-side provider price, and the API key is not returned in API, CLI, MCP, or

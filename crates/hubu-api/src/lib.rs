@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use hubu_common::{
     ids::{AgentId, BudgetId, SpendAuthTokenId, UserId},
@@ -223,6 +224,30 @@ impl ImageProviderConfig {
                 }
                 Ok(Box::new(HttpJsonImageProviderAdapter { config: self }))
             }
+            ImageProviderAdapterKind::GeminiGenerateContent => {
+                let endpoint = self
+                    .endpoint
+                    .as_deref()
+                    .filter(|endpoint| !endpoint.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "gemini-generate-content image adapter requires HUBU_IMAGE_PROVIDER_ENDPOINT"
+                        )
+                    })?;
+                if !is_allowed_provider_endpoint(endpoint) {
+                    return Err(anyhow!(
+                        "gemini-generate-content image adapter endpoint must use https, except loopback http for local testing"
+                    ));
+                }
+                if !self.has_api_key() {
+                    return Err(anyhow!(
+                        "gemini-generate-content image adapter requires HUBU_IMAGE_PROVIDER_API_KEY"
+                    ));
+                }
+                Ok(Box::new(GeminiGenerateContentImageProviderAdapter {
+                    config: self,
+                }))
+            }
             ImageProviderAdapterKind::Unsupported(adapter) => Err(anyhow!(
                 "image provider adapter '{adapter}' is not supported by this Hubu build"
             )),
@@ -353,6 +378,7 @@ fn parse_positive_millis_env(name: &str, value: &str) -> Result<u64> {
 enum ImageProviderAdapterKind {
     Demo,
     HttpJson,
+    GeminiGenerateContent,
     Unsupported(String),
 }
 
@@ -361,12 +387,16 @@ impl ImageProviderAdapterKind {
         match self {
             Self::Demo => "demo",
             Self::HttpJson => "http-json",
+            Self::GeminiGenerateContent => "gemini-generate-content",
             Self::Unsupported(adapter) => adapter,
         }
     }
 
     fn is_supported(&self) -> bool {
-        matches!(self, Self::Demo | Self::HttpJson)
+        matches!(
+            self,
+            Self::Demo | Self::HttpJson | Self::GeminiGenerateContent
+        )
     }
 }
 
@@ -374,6 +404,9 @@ fn image_provider_adapter_kind_from_env(provider: &str) -> ImageProviderAdapterK
     match env::var("HUBU_IMAGE_PROVIDER_ADAPTER") {
         Ok(adapter) if adapter == "demo" => ImageProviderAdapterKind::Demo,
         Ok(adapter) if adapter == "http-json" => ImageProviderAdapterKind::HttpJson,
+        Ok(adapter) if adapter == "gemini-generate-content" => {
+            ImageProviderAdapterKind::GeminiGenerateContent
+        }
         Ok(adapter) => ImageProviderAdapterKind::Unsupported(adapter),
         Err(_) if provider == "hubu-demo" => ImageProviderAdapterKind::Demo,
         Err(_) => ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
@@ -550,6 +583,57 @@ impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
     }
 }
 
+struct GeminiGenerateContentImageProviderAdapter<'a> {
+    config: &'a ImageProviderConfig,
+}
+
+impl ImageProviderAdapter for GeminiGenerateContentImageProviderAdapter<'_> {
+    fn generate(
+        &self,
+        request: ImageGenerationRequest<'_>,
+    ) -> Result<ImageGenerationOutput, ImageProviderError> {
+        let endpoint = self.config.endpoint.as_deref().ok_or_else(|| {
+            ImageProviderError::new(
+                "provider_config_invalid",
+                "gemini-generate-content image adapter requires an endpoint",
+            )
+        })?;
+        let api_key = self
+            .config
+            .api_key
+            .as_deref()
+            .filter(|api_key| !api_key.is_empty())
+            .ok_or_else(|| {
+                ImageProviderError::new(
+                    "provider_config_invalid",
+                    "gemini-generate-content image adapter requires an API key",
+                )
+            })?;
+
+        let response = send_gemini_generate_content_image_provider_request(
+            endpoint,
+            api_key,
+            self.config.timeout_ms,
+            self.config.max_retries,
+            &request,
+        )?;
+        let body: serde_json::Value = response.into_json().map_err(|error| {
+            ImageProviderError::new(
+                "provider_response_invalid",
+                format!("parse Gemini image provider JSON response: {error}"),
+            )
+        })?;
+        let image = gemini_image_from_provider_body(&body)?;
+        write_gemini_image_artifact(&self.config.output_dir, request.artifact_id, image)
+    }
+}
+
+#[derive(Debug)]
+struct GeminiInlineImage<'a> {
+    mime_type: &'a str,
+    data: &'a str,
+}
+
 fn send_http_json_image_provider_request(
     endpoint: &str,
     api_key: &str,
@@ -567,6 +651,36 @@ fn send_http_json_image_provider_request(
         .build();
     let headers = http_json_image_provider_headers(api_key, request.artifact_id);
     let payload = http_json_image_provider_payload(request, fields);
+    let mut attempts = 0;
+    loop {
+        let response = apply_http_json_image_provider_headers(agent.post(endpoint), &headers)
+            .send_json(payload.clone())
+            .map_err(classify_http_json_provider_error);
+        match response {
+            Ok(response) => return Ok(response),
+            Err(error) if attempts < max_retries && error.is_retryable() => {
+                attempts += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn send_gemini_generate_content_image_provider_request(
+    endpoint: &str,
+    api_key: &str,
+    timeout_ms: u64,
+    max_retries: u32,
+    request: &ImageGenerationRequest<'_>,
+) -> Result<ureq::Response, ImageProviderError> {
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(timeout)
+        .timeout_read(timeout)
+        .timeout_write(timeout)
+        .build();
+    let headers = gemini_generate_content_headers(api_key, request.artifact_id);
+    let payload = gemini_generate_content_payload(request);
     let mut attempts = 0;
     loop {
         let response = apply_http_json_image_provider_headers(agent.post(endpoint), &headers)
@@ -604,6 +718,61 @@ fn image_generation_output_from_provider_body(
     })
 }
 
+fn gemini_image_from_provider_body(
+    body: &serde_json::Value,
+) -> Result<GeminiInlineImage<'_>, ImageProviderError> {
+    let parts = body
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ImageProviderError::new(
+                "provider_response_invalid",
+                "Gemini response missing candidates[0].content.parts",
+            )
+        })?;
+
+    for part in parts {
+        let inline_data = part
+            .get("inlineData")
+            .or_else(|| part.get("inline_data"))
+            .and_then(Value::as_object);
+        let Some(inline_data) = inline_data else {
+            continue;
+        };
+        let mime_type = inline_data
+            .get("mimeType")
+            .or_else(|| inline_data.get("mime_type"))
+            .and_then(Value::as_str)
+            .filter(|value| value.starts_with("image/"))
+            .ok_or_else(|| {
+                ImageProviderError::new(
+                    "provider_response_invalid",
+                    "Gemini inline image missing image mime type",
+                )
+            })?;
+        let data = inline_data
+            .get("data")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                ImageProviderError::new(
+                    "provider_response_invalid",
+                    "Gemini inline image missing base64 data",
+                )
+            })?;
+        return Ok(GeminiInlineImage { mime_type, data });
+    }
+
+    Err(ImageProviderError::new(
+        "provider_response_invalid",
+        "Gemini response did not include inline image data",
+    ))
+}
+
 fn classify_http_json_provider_error(error: ureq::Error) -> ImageProviderError {
     match error {
         ureq::Error::Status(status, response) => ImageProviderError::with_status(
@@ -628,6 +797,63 @@ fn classify_http_json_provider_error(error: ureq::Error) -> ImageProviderError {
     }
 }
 
+fn write_gemini_image_artifact(
+    output_dir: &Path,
+    artifact_id: &str,
+    image: GeminiInlineImage<'_>,
+) -> Result<ImageGenerationOutput, ImageProviderError> {
+    std::fs::create_dir_all(output_dir).map_err(|error| {
+        ImageProviderError::new(
+            "provider_artifact_write_failed",
+            format!(
+                "create image output directory {}: {error}",
+                output_dir.display()
+            ),
+        )
+    })?;
+    let extension = image_extension_for_mime_type(image.mime_type)?;
+    let image_bytes = BASE64_STANDARD.decode(image.data).map_err(|error| {
+        ImageProviderError::new(
+            "provider_response_invalid",
+            format!("decode Gemini inline image data: {error}"),
+        )
+    })?;
+    let path = output_dir.join(format!("hubu-logo-{artifact_id}.{extension}"));
+    std::fs::write(&path, image_bytes).map_err(|error| {
+        ImageProviderError::new(
+            "provider_artifact_write_failed",
+            format!("write Gemini image artifact to {}: {error}", path.display()),
+        )
+    })?;
+    let absolute_path = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .map_err(|error| {
+                ImageProviderError::new(
+                    "provider_artifact_write_failed",
+                    format!("resolve current directory: {error}"),
+                )
+            })?
+            .join(path)
+    };
+    Ok(ImageGenerationOutput {
+        output_ref: format!("file://{}", absolute_path.display()),
+    })
+}
+
+fn image_extension_for_mime_type(mime_type: &str) -> Result<&'static str, ImageProviderError> {
+    match mime_type {
+        "image/png" => Ok("png"),
+        "image/jpeg" | "image/jpg" => Ok("jpg"),
+        "image/webp" => Ok("webp"),
+        other => Err(ImageProviderError::new(
+            "provider_response_invalid",
+            format!("unsupported Gemini image mime type: {other}"),
+        )),
+    }
+}
+
 fn http_json_image_provider_payload(
     request: &ImageGenerationRequest<'_>,
     fields: &HttpJsonImageProviderFields,
@@ -646,6 +872,20 @@ fn http_json_image_provider_payload(
     Value::Object(payload)
 }
 
+fn gemini_generate_content_payload(request: &ImageGenerationRequest<'_>) -> serde_json::Value {
+    json!({
+        "contents": [{
+            "role": "user",
+            "parts": [{
+                "text": request.prompt
+            }]
+        }],
+        "generationConfig": {
+            "responseModalities": ["IMAGE"]
+        }
+    })
+}
+
 fn http_json_image_provider_headers(
     api_key: &str,
     request_id: &str,
@@ -655,6 +895,15 @@ fn http_json_image_provider_headers(
         ("Content-Type", "application/json".to_string()),
         ("Accept", "application/json".to_string()),
         ("Idempotency-Key", request_id.to_string()),
+        ("X-Hubu-Request-Id", request_id.to_string()),
+    ]
+}
+
+fn gemini_generate_content_headers(api_key: &str, request_id: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("x-goog-api-key", api_key.to_string()),
+        ("Content-Type", "application/json".to_string()),
+        ("Accept", "application/json".to_string()),
         ("X-Hubu-Request-Id", request_id.to_string()),
     ]
 }
@@ -3847,6 +4096,55 @@ mod tests {
     }
 
     #[test]
+    fn gemini_image_adapter_requires_server_side_endpoint_and_api_key() {
+        let mut config = ImageProviderConfig {
+            provider: "google-gemini".to_string(),
+            model: "gemini-2.5-flash-image".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
+            api_key: Some("server-side-secret".to_string()),
+            endpoint: Some("https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent".to_string()),
+            price_cents: 500,
+            timeout_ms: 30_000,
+            max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
+            output_dir: std::env::temp_dir(),
+            adapter_kind: ImageProviderAdapterKind::GeminiGenerateContent,
+        };
+
+        assert!(config.adapter().is_ok());
+
+        config.endpoint = None;
+        let missing_endpoint = match config.adapter() {
+            Ok(_) => panic!("Gemini adapter should require an endpoint"),
+            Err(error) => error,
+        };
+        assert!(missing_endpoint
+            .to_string()
+            .contains("requires HUBU_IMAGE_PROVIDER_ENDPOINT"));
+
+        config.endpoint = Some("http://vendor.example/v1/images".to_string());
+        let insecure_endpoint = match config.adapter() {
+            Ok(_) => panic!("Gemini adapter should reject remote plain HTTP"),
+            Err(error) => error,
+        };
+        assert!(insecure_endpoint
+            .to_string()
+            .contains("endpoint must use https"));
+
+        config.endpoint = Some("http://127.0.0.1:9000/v1/images".to_string());
+        assert!(config.adapter().is_ok());
+
+        config.api_key = None;
+        let missing_api_key = match config.adapter() {
+            Ok(_) => panic!("Gemini adapter should require an API key"),
+            Err(error) => error,
+        };
+        assert!(missing_api_key
+            .to_string()
+            .contains("requires HUBU_IMAGE_PROVIDER_API_KEY"));
+    }
+
+    #[test]
     fn image_provider_timeout_config_must_be_positive_millis() {
         assert_eq!(
             parse_positive_millis_env("HUBU_IMAGE_PROVIDER_TIMEOUT_MS", "1500")
@@ -4036,6 +4334,85 @@ mod tests {
         );
         assert_eq!(payload["request_id"], "sat_test");
         assert!(!payload.to_string().contains("server-side-secret"));
+    }
+
+    #[test]
+    fn gemini_image_adapter_payload_and_headers_keep_api_key_server_side() {
+        let request = ImageGenerationRequest {
+            provider: "google-gemini",
+            model: "gemini-2.5-flash-image",
+            prompt: "Create a crisp logo for Project Hubu",
+            artifact_id: "sat_test",
+        };
+        let payload = gemini_generate_content_payload(&request);
+        let headers = gemini_generate_content_headers("server-side-secret", request.artifact_id);
+
+        assert_eq!(
+            payload["contents"][0]["parts"][0]["text"],
+            "Create a crisp logo for Project Hubu"
+        );
+        assert_eq!(
+            payload["generationConfig"]["responseModalities"][0],
+            "IMAGE"
+        );
+        assert!(!payload.to_string().contains("server-side-secret"));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| { *name == "x-goog-api-key" && value == "server-side-secret" }));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| { *name == "X-Hubu-Request-Id" && value == "sat_test" }));
+    }
+
+    #[test]
+    fn gemini_image_adapter_extracts_inline_image_and_writes_artifact() {
+        let image_data = BASE64_STANDARD.encode("png-bytes");
+        let body = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "image/png",
+                            "data": image_data,
+                        }
+                    }]
+                }
+            }]
+        });
+        let image = gemini_image_from_provider_body(&body).expect("inline image should parse");
+        let output_dir =
+            std::env::temp_dir().join(format!("hubu-api-gemini-image-output-{}", UserId::new()));
+        let output = write_gemini_image_artifact(&output_dir, "sat_test", image)
+            .expect("Gemini image artifact should write");
+
+        let output_path = output
+            .output_ref
+            .strip_prefix("file://")
+            .expect("output should be a file ref");
+        assert!(output_path.ends_with("hubu-logo-sat_test.png"));
+        assert_eq!(
+            std::fs::read(output_path).expect("artifact should be readable"),
+            b"png-bytes"
+        );
+        std::fs::remove_file(output_path).ok();
+        std::fs::remove_dir(output_dir).ok();
+    }
+
+    #[test]
+    fn gemini_image_adapter_rejects_missing_inline_image() {
+        let error = gemini_image_from_provider_body(&json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "text": "No image generated"
+                    }]
+                }
+            }]
+        }))
+        .expect_err("text-only Gemini response should be rejected");
+
+        assert_eq!(error.code, "provider_response_invalid");
+        assert!(error.to_string().contains("inline image data"));
     }
 
     #[test]
