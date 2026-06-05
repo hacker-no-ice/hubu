@@ -148,15 +148,16 @@ struct ImageProviderConfig {
     merchant: String,
     api_key: Option<String>,
     endpoint: Option<String>,
+    price_cents: i64,
     output_dir: PathBuf,
     adapter_kind: ImageProviderAdapterKind,
 }
 
 impl ImageProviderConfig {
-    fn from_env() -> Self {
+    fn from_env() -> Result<Self> {
         let provider =
             env::var("HUBU_IMAGE_PROVIDER_NAME").unwrap_or_else(|_| "hubu-demo".to_string());
-        Self {
+        Ok(Self {
             adapter_kind: image_provider_adapter_kind_from_env(&provider),
             provider,
             model: env::var("HUBU_IMAGE_PROVIDER_MODEL")
@@ -165,8 +166,9 @@ impl ImageProviderConfig {
                 .unwrap_or_else(|_| "hubu-model-proxy".to_string()),
             api_key: env::var("HUBU_IMAGE_PROVIDER_API_KEY").ok(),
             endpoint: env::var("HUBU_IMAGE_PROVIDER_ENDPOINT").ok(),
+            price_cents: image_provider_price_cents_from_env()?,
             output_dir: image_output_dir_from_env(),
-        }
+        })
     }
 
     fn resolve(&self, provider: Option<String>, model: Option<String>) -> Result<(String, String)> {
@@ -218,6 +220,21 @@ impl ImageProviderConfig {
                 "image provider adapter '{adapter}' is not supported by this Hubu build"
             )),
         }
+    }
+}
+
+fn image_provider_price_cents_from_env() -> Result<i64> {
+    match env::var("HUBU_IMAGE_PROVIDER_PRICE_CENTS") {
+        Ok(value) => {
+            let price_cents = value
+                .parse::<i64>()
+                .with_context(|| "parse HUBU_IMAGE_PROVIDER_PRICE_CENTS as cents")?;
+            if price_cents <= 0 {
+                return Err(anyhow!("HUBU_IMAGE_PROVIDER_PRICE_CENTS must be positive"));
+            }
+            Ok(price_cents)
+        }
+        Err(_) => Ok(500),
     }
 }
 
@@ -457,7 +474,8 @@ impl ServerState {
             governance: Mutex::new(governance),
             payment_attempts: Mutex::new(payment_attempts),
             payments: Mutex::new(payments),
-            image_provider: ImageProviderConfig::from_env(),
+            image_provider: ImageProviderConfig::from_env()
+                .context("load image provider config")?,
         };
         log_event(
             "info",
@@ -473,6 +491,7 @@ impl ServerState {
                 "image_provider_adapter": state.image_provider.adapter_kind.label(),
                 "image_provider_adapter_supported": state.image_provider.adapter_kind.is_supported(),
                 "image_provider_endpoint_configured": state.image_provider.endpoint.as_ref().is_some_and(|endpoint| !endpoint.is_empty()),
+                "image_provider_price_cents": state.image_provider.price_cents,
                 "image_output_dir": state.image_provider.output_dir.display().to_string(),
             }),
         );
@@ -2028,6 +2047,13 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
             "spend authorization is not scoped to the configured image proxy merchant"
         ));
     }
+    if authorized_spend.currency != Currency::Usd
+        || authorized_spend.amount_cents != state.image_provider.price_cents
+    {
+        return Err(anyhow!(
+            "spend authorization amount does not match configured image provider price"
+        ));
+    }
     let account = state
         .registration
         .lock()
@@ -3231,6 +3257,7 @@ mod tests {
             merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
             endpoint: None,
+            price_cents: 500,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Demo,
         };
@@ -3260,6 +3287,7 @@ mod tests {
             merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
             endpoint: None,
+            price_cents: 500,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
         };
@@ -3298,6 +3326,7 @@ mod tests {
             merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
             endpoint: Some("https://vendor.example/v1/images".to_string()),
+            price_cents: 500,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::HttpJson,
         };
@@ -3373,6 +3402,101 @@ mod tests {
     }
 
     #[test]
+    fn image_proxy_rejects_spend_that_does_not_match_configured_price() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-image-price-guard-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "logo-design-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should allow the logo budget");
+
+        let logo_budget = create_budget(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent logo budget should be created");
+
+        let authorization = authorize_spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "budget_id": logo_budget.budget.budget_id,
+                "amount_cents": 1,
+                "reason": "Generate Project Hubu logo",
+                "merchant": "hubu-model-proxy",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should authorize below the configured model-call price");
+        let auth_token_id = authorization
+            .auth_token_id
+            .expect("allowed spend should issue a token");
+
+        let error = generate_image(
+            json!({
+                "spend_auth_token_id": auth_token_id,
+                "prompt": "Create a crisp logo for Project Hubu",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("image proxy should reject underpriced spend authorization");
+        assert!(error
+            .to_string()
+            .contains("spend authorization amount does not match configured image provider price"));
+
+        let ledger = list_ledger(&state).expect("ledger should list");
+        assert_eq!(ledger.transactions.len(), 0);
+        let token_id = SpendAuthTokenId::from_str(&auth_token_id).expect("token id should parse");
+        let token = state
+            .spend
+            .lock()
+            .expect("spend manager lock should not be poisoned")
+            .auth_token_record(&token_id)
+            .expect("token should still exist");
+        assert!(token.used_at.is_none());
+        let hold = authorization
+            .budget_hold
+            .expect("authorized spend should freeze the requested amount");
+        assert_eq!(hold.status, "frozen");
+        assert_eq!(hold.amount_cents, 1);
+        assert_eq!(hold.frozen_amount_cents, 1);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn image_proxy_rejects_unwired_external_adapter_without_consuming_spend() {
         let path = std::env::temp_dir().join(format!(
             "hubu-api-unwired-image-provider-{}.sqlite",
@@ -3443,6 +3567,7 @@ mod tests {
             merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
             endpoint: None,
+            price_cents: 500,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
         };

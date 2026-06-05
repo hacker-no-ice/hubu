@@ -85,14 +85,15 @@ matching frozen budget hold, records the payment in the ledger, and returns
 image output metadata. The current provider is a local `hubu-demo` adapter; real
 vendor adapters can be added behind the same Hubu-hosted boundary without
 passing API keys to agents. Adapter kind, provider endpoint, provider name,
-model, API key, and output directory are server-side Hubu configuration
+model, provider price, API key, and output directory are server-side Hubu configuration
 (`HUBU_IMAGE_PROVIDER_ADAPTER`, `HUBU_IMAGE_PROVIDER_ENDPOINT`,
 `HUBU_IMAGE_PROVIDER_*`, `HUBU_IMAGE_PROXY_MERCHANT`,
 `HUBU_IMAGE_OUTPUT_DIR`). The generic `http-json` adapter posts provider,
 model, prompt, and request id to the configured endpoint, sends the API key in
 Hubu's authorization header, and expects JSON with a non-empty `output_ref`.
 Agent requests must match the configured provider/model, the spend
-authorization must be scoped to the configured image proxy merchant, and remote
+authorization must be scoped to the configured image proxy merchant and exact
+provider price (`HUBU_IMAGE_PROVIDER_PRICE_CENTS`, default `500`), and remote
 provider endpoints must use HTTPS. If provider generation fails before payment,
 Hubu releases the frozen hold and leaves the spend token unused.
 
