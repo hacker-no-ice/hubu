@@ -33,7 +33,7 @@ const components = {
     responsibilities: [
       "Humans register, attach policies, create budgets, and review protected actions.",
       "Agents use CLI or MCP surfaces to register and submit structured spend requests.",
-      "The API coordinates core governance managers and wallet execution.",
+      "The API coordinates core governance managers, image model-call proxying, and wallet execution.",
       "SQLite-backed records preserve users, agents, budgets, policies, payments, and ledger entries.",
     ],
     links: [sharedLinks.readme, sharedLinks.api, sharedLinks.cli, sharedLinks.mcp],
@@ -68,8 +68,8 @@ const components = {
     copy:
       "The demo server is a small TCP HTTP API. It owns the shared process state, exposes JSON routes, and stitches together registration, policy, budget, spend, payment, and ledger managers.",
     responsibilities: [
-      "Routes health, registration guidance, user setup, agent registration, policies, budgets, spend, and ledger listing.",
-      "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
+      "Routes health, registration guidance, image proxy guidance, user setup, agent registration, policies, budgets, spend, image generation, and ledger listing.",
+      "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup and request boundaries.",
       "Bridges wallet payment authorization through a shared spend authorizer.",
     ],
     links: [sharedLinks.api, sharedLinks.persistence, sharedLinks.telemetry],
@@ -254,7 +254,8 @@ const components = {
     responsibilities: [
       "Implements initialize, tools/list, and tools/call over JSON-RPC stdio.",
       "Annotates tools with read-only, destructive, idempotent, open-world, and Hubu approval hints.",
-      "Forwards tool calls to the local HTTP API and marks needs_approval spend responses for the agent client.",
+      "Forwards registration, spend, budget, image proxy guidance, and image generation calls to the local HTTP API.",
+      "Marks needs_approval spend responses for the agent client.",
     ],
     links: [sharedLinks.mcp, ["MCP transport doc", "docs/mcp-transport.md"], sharedLinks.api],
     nodes: [
