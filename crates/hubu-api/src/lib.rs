@@ -306,24 +306,70 @@ struct ImageGenerationRequest<'a> {
     artifact_id: &'a str,
 }
 
+#[derive(Debug)]
 struct ImageGenerationOutput {
     output_ref: String,
 }
 
 trait ImageProviderAdapter {
-    fn generate(&self, request: ImageGenerationRequest<'_>) -> Result<ImageGenerationOutput>;
+    fn generate(
+        &self,
+        request: ImageGenerationRequest<'_>,
+    ) -> Result<ImageGenerationOutput, ImageProviderError>;
 }
+
+#[derive(Debug)]
+struct ImageProviderError {
+    code: &'static str,
+    status: Option<u16>,
+    message: String,
+}
+
+impl ImageProviderError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            status: None,
+            message: message.into(),
+        }
+    }
+
+    fn with_status(code: &'static str, status: u16, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            status: Some(status),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ImageProviderError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.status {
+            Some(status) => write!(formatter, "{} ({status}): {}", self.code, self.message),
+            None => write!(formatter, "{}: {}", self.code, self.message),
+        }
+    }
+}
+
+impl std::error::Error for ImageProviderError {}
 
 struct DemoImageProviderAdapter<'a> {
     config: &'a ImageProviderConfig,
 }
 
 impl ImageProviderAdapter for DemoImageProviderAdapter<'_> {
-    fn generate(&self, request: ImageGenerationRequest<'_>) -> Result<ImageGenerationOutput> {
-        std::fs::create_dir_all(&self.config.output_dir).with_context(|| {
-            format!(
-                "create image output directory {}",
-                self.config.output_dir.display()
+    fn generate(
+        &self,
+        request: ImageGenerationRequest<'_>,
+    ) -> Result<ImageGenerationOutput, ImageProviderError> {
+        std::fs::create_dir_all(&self.config.output_dir).map_err(|error| {
+            ImageProviderError::new(
+                "provider_artifact_write_failed",
+                format!(
+                    "create image output directory {}: {error}",
+                    self.config.output_dir.display()
+                ),
             )
         })?;
         let path = self
@@ -334,11 +380,23 @@ impl ImageProviderAdapter for DemoImageProviderAdapter<'_> {
             &path,
             demo_image_svg(request.provider, request.model, request.prompt),
         )
-        .with_context(|| format!("write demo image artifact to {}", path.display()))?;
+        .map_err(|error| {
+            ImageProviderError::new(
+                "provider_artifact_write_failed",
+                format!("write demo image artifact to {}: {error}", path.display()),
+            )
+        })?;
         let absolute_path = if path.is_absolute() {
             path
         } else {
-            env::current_dir()?.join(path)
+            env::current_dir()
+                .map_err(|error| {
+                    ImageProviderError::new(
+                        "provider_artifact_write_failed",
+                        format!("resolve current directory: {error}"),
+                    )
+                })?
+                .join(path)
         };
         Ok(ImageGenerationOutput {
             output_ref: format!("file://{}", absolute_path.display()),
@@ -351,18 +409,27 @@ struct HttpJsonImageProviderAdapter<'a> {
 }
 
 impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
-    fn generate(&self, request: ImageGenerationRequest<'_>) -> Result<ImageGenerationOutput> {
-        let endpoint = self
-            .config
-            .endpoint
-            .as_deref()
-            .ok_or_else(|| anyhow!("http-json image adapter requires an endpoint"))?;
+    fn generate(
+        &self,
+        request: ImageGenerationRequest<'_>,
+    ) -> Result<ImageGenerationOutput, ImageProviderError> {
+        let endpoint = self.config.endpoint.as_deref().ok_or_else(|| {
+            ImageProviderError::new(
+                "provider_config_invalid",
+                "http-json image adapter requires an endpoint",
+            )
+        })?;
         let api_key = self
             .config
             .api_key
             .as_deref()
             .filter(|api_key| !api_key.is_empty())
-            .ok_or_else(|| anyhow!("http-json image adapter requires an API key"))?;
+            .ok_or_else(|| {
+                ImageProviderError::new(
+                    "provider_config_invalid",
+                    "http-json image adapter requires an API key",
+                )
+            })?;
         let timeout = std::time::Duration::from_millis(self.config.timeout_ms);
         let response = ureq::AgentBuilder::new()
             .timeout(timeout)
@@ -375,18 +442,56 @@ impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
             .set("Content-Type", "application/json")
             .set("Accept", "application/json")
             .send_json(http_json_image_provider_payload(&request))
-            .map_err(|error| anyhow!("call image provider endpoint: {error}"))?;
-        let body: serde_json::Value = response
-            .into_json()
-            .context("parse image provider JSON response")?;
-        let output_ref = body
-            .get("output_ref")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow!("image provider response missing non-empty output_ref"))?;
-        Ok(ImageGenerationOutput {
-            output_ref: output_ref.to_string(),
-        })
+            .map_err(classify_http_json_provider_error)?;
+        let body: serde_json::Value = response.into_json().map_err(|error| {
+            ImageProviderError::new(
+                "provider_response_invalid",
+                format!("parse image provider JSON response: {error}"),
+            )
+        })?;
+        image_generation_output_from_provider_body(&body)
+    }
+}
+
+fn image_generation_output_from_provider_body(
+    body: &serde_json::Value,
+) -> Result<ImageGenerationOutput, ImageProviderError> {
+    let output_ref = body
+        .get("output_ref")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            ImageProviderError::new(
+                "provider_response_invalid",
+                "image provider response missing non-empty output_ref",
+            )
+        })?;
+    Ok(ImageGenerationOutput {
+        output_ref: output_ref.to_string(),
+    })
+}
+
+fn classify_http_json_provider_error(error: ureq::Error) -> ImageProviderError {
+    match error {
+        ureq::Error::Status(status, response) => ImageProviderError::with_status(
+            "provider_http_status",
+            status,
+            format!(
+                "image provider returned HTTP {status}: {}",
+                response.status_text()
+            ),
+        ),
+        ureq::Error::Transport(transport) => {
+            let message = transport.to_string();
+            let code = if message.to_ascii_lowercase().contains("timed out")
+                || message.to_ascii_lowercase().contains("timeout")
+            {
+                "provider_timeout"
+            } else {
+                "provider_transport"
+            };
+            ImageProviderError::new(code, format!("call image provider endpoint: {message}"))
+        }
     }
 }
 
@@ -2131,6 +2236,8 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
                 json!({
                     "provider": provider,
                     "model": model,
+                    "provider_error_code": error.code,
+                    "provider_http_status": error.status,
                     "spend_auth_token_id": token_record.id.to_string(),
                     "hold_id": frozen_hold.id.to_string(),
                     "budget_id": frozen_hold.budget_id.to_string(),
@@ -3421,6 +3528,31 @@ mod tests {
         assert!(invalid
             .to_string()
             .contains("parse HUBU_IMAGE_PROVIDER_TIMEOUT_MS as milliseconds"));
+    }
+
+    #[test]
+    fn http_json_image_adapter_classifies_invalid_provider_response() {
+        let error = image_generation_output_from_provider_body(&json!({
+            "images": []
+        }))
+        .expect_err("provider response without output_ref should be rejected");
+
+        assert_eq!(error.code, "provider_response_invalid");
+        assert_eq!(error.status, None);
+        assert!(error.to_string().contains("missing non-empty output_ref"));
+    }
+
+    #[test]
+    fn http_json_image_adapter_classifies_http_status_errors() {
+        let error = ImageProviderError::with_status(
+            "provider_http_status",
+            429,
+            "image provider returned HTTP 429: Too Many Requests",
+        );
+
+        assert_eq!(error.code, "provider_http_status");
+        assert_eq!(error.status, Some(429));
+        assert!(error.to_string().contains("429"));
     }
 
     #[test]
