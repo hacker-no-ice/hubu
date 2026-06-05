@@ -5,7 +5,9 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -26,6 +28,9 @@ use hubu_core::{
         CreateSingleBudgetRequest, ReleaseBudgetResponse, ReserveBudgetRequest,
         SettleBudgetResponse,
     },
+    persistence::{
+        BudgetRepository, PolicyRepository, SpendRepository, SqliteGovernanceRepository,
+    },
     policy::{
         condition::{Condition, Field, PolicyValue},
         engine::validate_policy,
@@ -36,17 +41,20 @@ use hubu_core::{
         model::{SpendPaymentValidationRequest, SpendRequest},
         SpendManager,
     },
+    telemetry::{configure_file_logging, log_event},
     user::{CreateUserRequest, UserManager},
 };
 use hubu_wallet::{
-    LedgerTransaction, MockPaymentRail, PaymentDestination, PaymentError, PaymentManager,
-    PaymentRailKind, PaymentRequest, PaymentStatus, SpendAuthorizationValidator, SqliteLedger,
+    LedgerTransaction, MockPaymentRail, PaymentAttemptRepository, PaymentDestination, PaymentError,
+    PaymentManager, PaymentRailKind, PaymentRequest, PaymentStatus, SpendAuthorizationValidator,
+    SqliteLedger, SqlitePaymentAttemptRepository,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 type DemoPaymentManager = PaymentManager<MockPaymentRail, SharedSpendAuthorizer>;
 
@@ -59,22 +67,64 @@ pub fn run_server_from_env() -> Result<()> {
 }
 
 pub fn run_server(bind_addr: &str) -> Result<()> {
+    configure_server_logging()?;
+    log_event(
+        "info",
+        "server_starting",
+        json!({
+            "bind_addr": bind_addr,
+        }),
+    );
     let listener = TcpListener::bind(bind_addr)
         .with_context(|| format!("bind Hubu demo server to {bind_addr}"))?;
     let state = ServerState::new()?;
 
-    println!("Hubu demo server listening on http://{bind_addr}");
+    log_event(
+        "info",
+        "server_listening",
+        json!({
+            "bind_addr": bind_addr,
+            "url": format!("http://{bind_addr}"),
+        }),
+    );
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 if let Err(error) = handle_connection(stream, &state) {
-                    eprintln!("request error: {error:#}");
+                    log_event(
+                        "error",
+                        "request_error",
+                        json!({
+                            "error": error.to_string(),
+                        }),
+                    );
                 }
             }
-            Err(error) => eprintln!("connection error: {error:#}"),
+            Err(error) => log_event(
+                "error",
+                "connection_error",
+                json!({
+                    "error": error.to_string(),
+                }),
+            ),
         }
     }
 
+    Ok(())
+}
+
+fn configure_server_logging() -> Result<()> {
+    if let Ok(log_path) = env::var("HUBU_LOG_FILE") {
+        configure_file_logging(&log_path)
+            .with_context(|| format!("configure Hubu log file at {log_path}"))?;
+        log_event(
+            "info",
+            "log_file_configured",
+            json!({
+                "path": log_path,
+            }),
+        );
+    }
     Ok(())
 }
 
@@ -84,6 +134,8 @@ struct ServerState {
     spend: Arc<Mutex<SpendManager>>,
     budgets: Mutex<BudgetManager>,
     policies: Mutex<HashMap<(UserId, AgentId), Policy>>,
+    governance: Mutex<SqliteGovernanceRepository>,
+    payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
     payments: Mutex<DemoPaymentManager>,
 }
 
@@ -95,30 +147,94 @@ impl ServerState {
     }
 
     fn new_with_db_path(path: impl AsRef<Path>) -> Result<Self> {
-        let mut users = UserManager::open(path.as_ref()).context("initialize user store")?;
+        let path = path.as_ref().to_path_buf();
+        let db_path = path.display().to_string();
+        log_event(
+            "info",
+            "server_state_initializing",
+            json!({
+                "db_path": db_path,
+            }),
+        );
+        let mut users = UserManager::open(&path).context("initialize user store")?;
         let default_user = users.ensure_default_user()?;
-        let spend = Arc::new(Mutex::new(SpendManager::new()));
+        let mut governance =
+            SqliteGovernanceRepository::open(&path).context("initialize governance store")?;
+        governance
+            .expire_overdue_budget_holds(Utc::now())
+            .context("reconcile expired budget holds")?;
+        let policy_assignments = governance
+            .load_policy_assignments()
+            .context("load policy assignments")?;
+        let policies = policy_assignments
+            .into_iter()
+            .map(|assignment| {
+                (
+                    (assignment.owner_user_id, assignment.agent_id),
+                    assignment.policy,
+                )
+            })
+            .collect();
+        let spend = Arc::new(Mutex::new(SpendManager::from_records(
+            governance
+                .load_spend_decisions()
+                .context("load spend decisions")?,
+            governance
+                .load_spend_auth_tokens()
+                .context("load spend auth tokens")?,
+        )));
+        let budgets = BudgetManager::from_records(
+            governance.load_budgets().context("load budgets")?,
+            governance
+                .load_budget_balances()
+                .context("load budget balances")?,
+            governance
+                .load_budget_holds()
+                .context("load budget holds")?,
+        );
         let authorizer = SharedSpendAuthorizer {
             spend: Arc::clone(&spend),
         };
-        let payments = PaymentManager::new(
-            default_user.id,
+        let mut payments = PaymentManager::new(
+            default_user.id.clone(),
             MockPaymentRail,
             authorizer,
-            SqliteLedger::in_memory().context("initialize in-memory ledger")?,
+            SqliteLedger::open(&path).context("initialize ledger")?,
         )
         .context("initialize payment manager")?;
+        let payment_attempts = SqlitePaymentAttemptRepository::open(&path)
+            .context("initialize payment attempt store")?;
+        for attempt in payment_attempts
+            .list_payment_attempts()
+            .context("load payment attempts")?
+        {
+            payments
+                .remember_payment_attempt(attempt.request(), attempt.response())
+                .context("hydrate payment idempotency")?;
+        }
 
-        Ok(Self {
+        let state = Self {
             users: Mutex::new(users),
             registration: Mutex::new(
-                RegistrationManager::open(path).context("initialize agent registration store")?,
+                RegistrationManager::open(&path).context("initialize agent registration store")?,
             ),
             spend,
-            budgets: Mutex::new(BudgetManager::new()),
-            policies: Mutex::new(HashMap::new()),
+            budgets: Mutex::new(budgets),
+            policies: Mutex::new(policies),
+            governance: Mutex::new(governance),
+            payment_attempts: Mutex::new(payment_attempts),
             payments: Mutex::new(payments),
-        })
+        };
+        log_event(
+            "info",
+            "server_state_initialized",
+            json!({
+                "db_path": db_path,
+                "default_user_id": default_user.id.to_string(),
+                "default_user_pub_id": default_user.pub_id,
+            }),
+        );
+        Ok(state)
     }
 }
 
@@ -395,15 +511,50 @@ struct LedgerEntryHttpResponse {
 }
 
 fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
+    let started_at = Instant::now();
+    let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let mut raw = String::new();
     stream.read_to_string(&mut raw)?;
     if raw.is_empty() {
+        log_event(
+            "debug",
+            "http_empty_request",
+            json!({
+                "request_id": request_id,
+            }),
+        );
         return Ok(());
     }
 
     let request = parse_request(&raw)?;
+    log_event(
+        "info",
+        "http_request_started",
+        json!({
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.path,
+            "body_bytes": request.body.len(),
+        }),
+    );
+    let method = request.method.clone();
+    let path = request.path.clone();
     let response = route(request, state);
+    let status = response.status;
     write_response(&mut stream, response)
+        .with_context(|| format!("write response for request {request_id}"))?;
+    log_event(
+        "info",
+        "http_request_finished",
+        json!({
+            "request_id": request_id,
+            "method": method,
+            "path": path,
+            "status": status,
+            "elapsed_ms": started_at.elapsed().as_millis(),
+        }),
+    );
+    Ok(())
 }
 
 fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
@@ -426,10 +577,21 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
 
     match result {
         Ok(body) => HttpResponse { status: 200, body },
-        Err(error) => HttpResponse {
-            status: 400,
-            body: json!({ "error": error.to_string() }),
-        },
+        Err(error) => {
+            log_event(
+                "warn",
+                "http_request_rejected",
+                json!({
+                    "method": request.method,
+                    "path": request.path,
+                    "error": error.to_string(),
+                }),
+            );
+            HttpResponse {
+                status: 400,
+                body: json!({ "error": error.to_string() }),
+            }
+        }
     }
 }
 
@@ -548,12 +710,23 @@ fn current_user(state: &ServerState) -> Result<CurrentUserHttpResponse> {
 fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttpResponse> {
     let request: RegisterAgentHttpRequest = serde_json::from_str(&body)?;
     let user = default_user(state)?;
-    let envelope = match request {
-        RegisterAgentHttpRequest::Envelope(envelope) => envelope,
-        RegisterAgentHttpRequest::Simple(request) => {
-            simple_registration_envelope(&request.name, &request.version, &user.pub_id)
-        }
+    let (request_shape, envelope) = match request {
+        RegisterAgentHttpRequest::Envelope(envelope) => ("envelope", envelope),
+        RegisterAgentHttpRequest::Simple(request) => (
+            "simple",
+            simple_registration_envelope(&request.name, &request.version, &user.pub_id),
+        ),
     };
+    log_event(
+        "info",
+        "agent_registration_received",
+        json!({
+            "request_shape": request_shape,
+            "user_id": user.id.to_string(),
+            "user_pub_id": user.pub_id,
+            "protocol_version": envelope.protocol_version,
+        }),
+    );
     let registration_request = registration_request_from_envelope(envelope, &user)?;
 
     let response = state
@@ -562,6 +735,22 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         .map_err(|_| anyhow!("registration manager lock poisoned"))?
         .register_agent(registration_request)?;
 
+    log_event(
+        "info",
+        "agent_registration_completed",
+        json!({
+            "user_id": user.id.to_string(),
+            "user_pub_id": user.pub_id,
+            "agent_id": response.agent.id.to_string(),
+            "agent_pub_id": response.agent.pub_id,
+            "version_id": response.version.id.to_string(),
+            "version_pub_id": response.version.pub_id,
+            "account_id": response.account.id.to_string(),
+            "account_pub_id": response.account.pub_id,
+            "session_id": response.session.id.to_string(),
+            "session_pub_id": response.session.pub_id,
+        }),
+    );
     Ok(RegisterAgentHttpResponse {
         user_id: user.pub_id,
         agent_id: response.agent.pub_id.clone(),
@@ -636,6 +825,16 @@ fn registration_request_from_envelope(
 
     verify_payload_fingerprint("identity", &envelope.identity)?;
     verify_payload_fingerprint("version", &envelope.version)?;
+    log_event(
+        "info",
+        "agent_registration_fingerprints_verified",
+        json!({
+            "user_id": user.id.to_string(),
+            "user_pub_id": user.pub_id,
+            "identity_fingerprint": envelope.identity.fingerprint,
+            "version_fingerprint": envelope.version.fingerprint,
+        }),
+    );
     validate_required_registration_payloads(&envelope)?;
 
     let identity_fingerprint = envelope.identity.fingerprint;
@@ -917,6 +1116,11 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
     let policy_id = policy.id.clone();
     let policy_version = policy.version.clone();
     let default_decision = effect_name(policy.default_effect).to_string();
+    state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .save_policy_assignment(&user.user_id, &agent_id, &policy)?;
 
     state
         .policies
@@ -924,6 +1128,16 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         .map_err(|_| anyhow!("policy store lock poisoned"))?
         .insert((user.user_id, agent_id), policy);
 
+    log_event(
+        "info",
+        "policy_added",
+        json!({
+            "agent_pub_id": agent_pub_id,
+            "policy_id": policy_id,
+            "policy_version": policy_version,
+            "default_decision": default_decision,
+        }),
+    );
     Ok(AddPolicyHttpResponse {
         agent_id: agent_pub_id,
         policy_id,
@@ -985,12 +1199,29 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
         .create_single_budget(CreateSingleBudgetRequest {
-            scope: BudgetScope::User(user.user_id),
+            scope: BudgetScope::User(user.user_id.clone()),
             amount_limit_cents: request.amount_cents,
             currency: Currency::Usd,
             period,
         })?;
+    state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .save_budget_with_balance(&response.budget, &response.balance)?;
 
+    log_event(
+        "info",
+        "budget_created",
+        json!({
+            "budget_id": response.budget.id.to_string(),
+            "user_id": user.user_id.to_string(),
+            "amount_cents": response.budget.amount_limit_cents,
+            "currency": response.budget.currency.to_string(),
+            "starting_at": response.budget.period.starting_at.to_rfc3339(),
+            "ending_before": response.budget.period.ending_before.map(|value| value.to_rfc3339()),
+        }),
+    );
     Ok(CreateBudgetHttpResponse {
         budget: budget_response(BudgetWithBalance {
             budget: response.budget,
@@ -1016,7 +1247,7 @@ fn create_budget_series(
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
         .create_budget_series(CreateBudgetSeriesRequest {
-            scope: BudgetScope::User(user.user_id),
+            scope: BudgetScope::User(user.user_id.clone()),
             amount_limit_cents: request.amount_cents,
             currency: Currency::Usd,
             starting_at,
@@ -1027,7 +1258,24 @@ fn create_budget_series(
             },
             period_count: request.period_count,
         })?;
+    {
+        let mut governance = state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        for budget in &response.budgets {
+            governance.save_budget_with_balance(&budget.budget, &budget.balance)?;
+        }
+    }
 
+    log_event(
+        "info",
+        "budget_series_created",
+        json!({
+            "user_id": user.user_id.to_string(),
+            "budget_count": response.budgets.len(),
+        }),
+    );
     Ok(CreateBudgetSeriesHttpResponse {
         budgets: response.budgets.into_iter().map(budget_response).collect(),
     })
@@ -1058,6 +1306,19 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let account_pub_id = account.pub_id.clone();
     let agent_id = account.agent_id.clone();
     let agent_pub_id = registration_agent_pub_id(&agent_id, state)?;
+    log_event(
+        "info",
+        "spend_request_received",
+        json!({
+            "agent_pub_id": agent_pub_id,
+            "account_pub_id": account_pub_id,
+            "user_id": user.user_id.to_string(),
+            "amount_cents": request.amount_cents,
+            "currency": Currency::Usd.to_string(),
+            "merchant": request.merchant.clone(),
+            "reason": request.reason.clone(),
+        }),
+    );
     let policy = state
         .policies
         .lock()
@@ -1077,30 +1338,85 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         task_id: Some(request.reason.clone()),
     };
 
-    let evaluation = state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .evaluate_spend(&user, spend_request.clone(), &policy)?;
+    let evaluation = {
+        let mut spend = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let evaluation = spend.evaluate_spend(&user, spend_request.clone(), &policy)?;
+        let decision_record = spend
+            .decision_record(&evaluation.decision_id)
+            .ok_or_else(|| anyhow!("spend decision was not recorded"))?;
+        let token_record = evaluation
+            .auth_token
+            .as_ref()
+            .and_then(|token| spend.auth_token_record(&token.id));
+        drop(spend);
+
+        let mut governance = state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        governance.save_spend_decision(&decision_record)?;
+        if let Some(token_record) = token_record {
+            governance.save_spend_auth_token(&token_record)?;
+        }
+        evaluation
+    };
 
     let auth_token_id = evaluation
         .auth_token
         .as_ref()
         .map(|token| token.id.to_string());
+    log_event(
+        "info",
+        "spend_policy_evaluated",
+        json!({
+            "agent_pub_id": agent_pub_id,
+            "agent_id": agent_id.to_string(),
+            "user_id": user.user_id.to_string(),
+            "decision_id": evaluation.decision_id.to_string(),
+            "decision": effect_name(evaluation.evaluation.decision),
+            "policy_id": evaluation.evaluation.policy_id,
+            "policy_version": evaluation.evaluation.policy_version,
+            "auth_token_issued": auth_token_id.is_some(),
+        }),
+    );
     let owner = owner_metadata_for_user_id(&user.user_id, state)?;
     let (budget_hold, payment) = if let Some(token) = evaluation.auth_token {
         let budget_id = active_budget_id_for_user(&user.user_id, state)?;
-        let reservation = state
-            .budgets
-            .lock()
-            .map_err(|_| anyhow!("budget manager lock poisoned"))?
-            .reserve_budget(ReserveBudgetRequest {
+        let reservation = {
+            let mut budgets = state
+                .budgets
+                .lock()
+                .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+            let reservation = budgets.reserve_budget(ReserveBudgetRequest {
                 budget_id,
                 spend_decision_id: evaluation.decision_id.clone(),
                 amount_cents: request.amount_cents,
                 currency: Currency::Usd,
                 expires_at: token.expires_at,
             })?;
+            drop(budgets);
+            state
+                .governance
+                .lock()
+                .map_err(|_| anyhow!("governance store lock poisoned"))?
+                .save_budget_hold(&reservation.hold, &reservation.balance)?;
+            reservation
+        };
+        log_event(
+            "info",
+            "budget_reserved_for_spend",
+            json!({
+                "budget_id": reservation.hold.budget_id.to_string(),
+                "hold_id": reservation.hold.id.to_string(),
+                "decision_id": evaluation.decision_id.to_string(),
+                "amount_cents": reservation.hold.amount_cents,
+                "remaining_amount_cents": reservation.balance.remaining_amount_cents,
+                "frozen_amount_cents": reservation.balance.frozen_amount_cents,
+            }),
+        );
 
         let payment_request = PaymentRequest {
             idempotency_key: format!("{}:{}", evaluation.decision_id, request.reason),
@@ -1119,6 +1435,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
             memo: Some("Hubu demo payment".to_string()),
         };
 
+        let payment_audit_request = payment_request.clone();
         let payment_result = state
             .payments
             .lock()
@@ -1127,24 +1444,63 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
 
         match payment_result {
             Ok(payment) => {
-                let hold_update = if payment.status == PaymentStatus::Succeeded {
-                    BudgetHoldUpdate::Settled(
-                        state
-                            .budgets
-                            .lock()
-                            .map_err(|_| anyhow!("budget manager lock poisoned"))?
-                            .settle_budget(&reservation.hold.id)?,
-                    )
-                } else {
-                    BudgetHoldUpdate::Released(
-                        state
-                            .budgets
-                            .lock()
-                            .map_err(|_| anyhow!("budget manager lock poisoned"))?
-                            .release_budget(&reservation.hold.id)?,
-                    )
+                state
+                    .payment_attempts
+                    .lock()
+                    .map_err(|_| anyhow!("payment attempt store lock poisoned"))?
+                    .save_payment_attempt(&payment_audit_request, &payment)?;
+
+                if payment.status == PaymentStatus::Succeeded {
+                    let used_token = state
+                        .spend
+                        .lock()
+                        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+                        .auth_token_record(&payment_audit_request.spend_auth_token_id)
+                        .ok_or_else(|| anyhow!("used spend auth token was not recorded"))?;
+                    state
+                        .governance
+                        .lock()
+                        .map_err(|_| anyhow!("governance store lock poisoned"))?
+                        .update_spend_auth_token(&used_token)?;
+                }
+
+                let hold_update = {
+                    let mut budgets = state
+                        .budgets
+                        .lock()
+                        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+                    let hold_update = if payment.status == PaymentStatus::Succeeded {
+                        BudgetHoldUpdate::Settled(budgets.settle_budget(&reservation.hold.id)?)
+                    } else {
+                        BudgetHoldUpdate::Released(budgets.release_budget(&reservation.hold.id)?)
+                    };
+                    let (hold, balance) = match &hold_update {
+                        BudgetHoldUpdate::Settled(response) => (&response.hold, &response.balance),
+                        BudgetHoldUpdate::Released(response) => (&response.hold, &response.balance),
+                    };
+                    state
+                        .governance
+                        .lock()
+                        .map_err(|_| anyhow!("governance store lock poisoned"))?
+                        .update_budget_hold(hold, balance)?;
+                    hold_update
                 };
 
+                log_event(
+                    "info",
+                    "payment_submitted_for_spend",
+                    json!({
+                        "decision_id": evaluation.decision_id.to_string(),
+                        "payment_id": payment.payment_id.to_string(),
+                        "payment_status": match payment.status {
+                            PaymentStatus::Succeeded => "succeeded",
+                            PaymentStatus::Failed => "failed",
+                        },
+                        "ledger_transaction_id": payment.ledger_transaction_id.as_ref().map(ToString::to_string),
+                        "rail_reference": payment.rail_reference,
+                        "failure_reason": payment.failure_reason,
+                    }),
+                );
                 (
                     Some(budget_hold_response(hold_update)),
                     Some(PaymentHttpResponse {
@@ -1166,11 +1522,25 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
                 )
             }
             Err(error) => {
-                state
+                let release = state
                     .budgets
                     .lock()
                     .map_err(|_| anyhow!("budget manager lock poisoned"))?
                     .release_budget(&reservation.hold.id)?;
+                state
+                    .governance
+                    .lock()
+                    .map_err(|_| anyhow!("governance store lock poisoned"))?
+                    .update_budget_hold(&release.hold, &release.balance)?;
+                log_event(
+                    "warn",
+                    "payment_failed_budget_released",
+                    json!({
+                        "decision_id": evaluation.decision_id.to_string(),
+                        "hold_id": reservation.hold.id.to_string(),
+                        "error": error.to_string(),
+                    }),
+                );
                 return Err(error.into());
             }
         }
@@ -2070,6 +2440,99 @@ rules:
 
         assert_eq!(resumed_agent.user_id, user.user_id);
         assert_eq!(resumed_agent.agent_id, first_agent_id);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn governance_and_payment_audit_state_survive_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-governance-restart-{}.sqlite",
+            UserId::new()
+        ));
+        let (user_id, agent_id) = {
+            let state =
+                ServerState::new_with_db_path(&path).expect("server state should initialize");
+            let user = init(
+                json!({
+                    "display_name": "Alice Example",
+                    "email": "alice@example.com",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("init should create an explicit user");
+            let agent = register_agent(
+                json!({
+                    "name": "durable-agent",
+                    "version": "v1",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("agent should register");
+            add_policy(
+                json!({
+                    "agent_id": agent.agent_id,
+                    "daily_limit_cents": 5_000,
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("policy should be added");
+            create_budget(
+                json!({
+                    "amount_cents": 10_000,
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("budget should be created");
+            spend(
+                json!({
+                    "agent_id": agent.agent_id,
+                    "amount_cents": 2_500,
+                    "reason": "restart audit purchase",
+                    "merchant": "Acme Cafe",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("spend should be approved and paid");
+            (user.user_id, agent.agent_id)
+        };
+
+        let restarted =
+            ServerState::new_with_db_path(&path).expect("server state should reload from storage");
+        let budgets = list_budgets(&restarted).expect("budgets should reload");
+        assert_eq!(budgets.budgets.len(), 1);
+        assert_eq!(budgets.budgets[0].consumed_amount_cents, 2_500);
+        assert_eq!(budgets.budgets[0].remaining_amount_cents, 7_500);
+
+        let ledger = list_ledger(&restarted).expect("ledger should reload");
+        assert_eq!(ledger.transactions.len(), 1);
+        assert_eq!(ledger.transactions[0].owner_user_id, user_id);
+
+        let attempts = restarted
+            .payment_attempts
+            .lock()
+            .expect("payment attempt store lock should not be poisoned")
+            .list_payment_attempts()
+            .expect("payment attempts should reload");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status, PaymentStatus::Succeeded);
+
+        let resumed_spend = spend(
+            json!({
+                "agent_id": agent_id,
+                "amount_cents": 1_000,
+                "reason": "post-restart policy spend",
+                "merchant": "Acme Cafe",
+            })
+            .to_string(),
+            &restarted,
+        )
+        .expect("restarted server should still have the policy assignment");
+        assert_eq!(resumed_spend.decision, "allow");
         std::fs::remove_file(path).ok();
     }
 }

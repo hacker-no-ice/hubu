@@ -10,6 +10,7 @@ use hubu_common::{
     },
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use serde_json::json;
 
 use crate::registration::error::RegistrationError;
 use crate::registration::model::{AgentWithAccount, RegisterAgentRequest, RegisterAgentResponse};
@@ -17,6 +18,7 @@ use crate::storage::{
     account_from_row, account_status, agent_from_row, agent_status, agent_type, init_schema,
     session_from_row, version_from_row, StorageError,
 };
+use crate::telemetry::log_event;
 
 /// Registration coordinator backed by a replaceable storage layer.
 pub struct RegistrationManager {
@@ -97,11 +99,49 @@ impl RegistrationManager {
         request: RegisterAgentRequest,
     ) -> Result<RegisterAgentResponse, RegistrationError> {
         self.validate_request(&request)?;
-        Ok(self.store.register_agent(&request)?)
+        log_event(
+            "info",
+            "registration_started",
+            json!({
+                "owner_user_id": request.owner_user_id.to_string(),
+                "identity_fingerprint": request.identity_fingerprint,
+                "version_fingerprint": request.version_fingerprint,
+                "display_name": request.display_name,
+                "agent_type": agent_type_name(&request.agent_type),
+                "mcp_client_name": request.mcp_client_name,
+                "mcp_client_version": request.mcp_client_version,
+            }),
+        );
+        let response = self.store.register_agent(&request)?;
+        log_event(
+            "info",
+            "registration_completed",
+            json!({
+                "owner_user_id": response.agent.owner_user_id.to_string(),
+                "agent_id": response.agent.id.to_string(),
+                "agent_pub_id": response.agent.pub_id,
+                "version_id": response.version.id.to_string(),
+                "version_pub_id": response.version.pub_id,
+                "account_id": response.account.id.to_string(),
+                "account_pub_id": response.account.pub_id,
+                "session_id": response.session.id.to_string(),
+                "session_pub_id": response.session.pub_id,
+            }),
+        );
+        Ok(response)
     }
 
     fn validate_request(&self, request: &RegisterAgentRequest) -> Result<(), RegistrationError> {
         if request.identity_fingerprint.is_empty() || request.version_fingerprint.is_empty() {
+            log_event(
+                "warn",
+                "registration_rejected",
+                json!({
+                    "reason": "missing_fingerprint",
+                    "owner_user_id": request.owner_user_id.to_string(),
+                    "display_name": request.display_name,
+                }),
+            );
             return Err(RegistrationError::MissingFingerprint);
         }
         Ok(())
@@ -313,9 +353,31 @@ impl MemoryRegistrationStore {
                 .clone();
 
             if agent.agent_type != request.agent_type {
+                log_event(
+                    "warn",
+                    "registration_identity_conflict",
+                    json!({
+                        "store": "memory",
+                        "agent_id": agent.id.to_string(),
+                        "agent_pub_id": agent.pub_id,
+                        "owner_user_id": agent.owner_user_id.to_string(),
+                        "identity_fingerprint": request.identity_fingerprint,
+                    }),
+                );
                 return Err(RegistrationError::IdentityConflict);
             }
 
+            log_event(
+                "info",
+                "registration_agent_reused",
+                json!({
+                    "store": "memory",
+                    "agent_id": agent.id.to_string(),
+                    "agent_pub_id": agent.pub_id,
+                    "owner_user_id": agent.owner_user_id.to_string(),
+                    "identity_fingerprint": request.identity_fingerprint,
+                }),
+            );
             return Ok(agent);
         }
 
@@ -339,6 +401,18 @@ impl MemoryRegistrationStore {
             .insert(agent.pub_id.clone(), id.clone());
         self.agents.insert(id, agent.clone());
 
+        log_event(
+            "info",
+            "registration_agent_created",
+            json!({
+                "store": "memory",
+                "agent_id": agent.id.to_string(),
+                "agent_pub_id": agent.pub_id,
+                "owner_user_id": agent.owner_user_id.to_string(),
+                "identity_fingerprint": agent.fingerprint,
+                "agent_type": agent_type_name(&agent.agent_type),
+            }),
+        );
         Ok(agent)
     }
 
@@ -359,9 +433,33 @@ impl MemoryRegistrationStore {
                 || version.model != request.model
                 || version.runtime != request.runtime
             {
+                log_event(
+                    "warn",
+                    "registration_version_conflict",
+                    json!({
+                        "store": "memory",
+                        "agent_id": agent.id.to_string(),
+                        "agent_pub_id": agent.pub_id,
+                        "version_id": version.id.to_string(),
+                        "version_pub_id": version.pub_id,
+                        "version_fingerprint": request.version_fingerprint,
+                    }),
+                );
                 return Err(RegistrationError::VersionConflict);
             }
 
+            log_event(
+                "info",
+                "registration_version_reused",
+                json!({
+                    "store": "memory",
+                    "agent_id": agent.id.to_string(),
+                    "agent_pub_id": agent.pub_id,
+                    "version_id": version.id.to_string(),
+                    "version_pub_id": version.pub_id,
+                    "version_fingerprint": request.version_fingerprint,
+                }),
+            );
             return Ok(version.clone());
         }
 
@@ -381,16 +479,40 @@ impl MemoryRegistrationStore {
             .insert(key, id.clone());
         self.versions.insert(id, version.clone());
 
+        log_event(
+            "info",
+            "registration_version_created",
+            json!({
+                "store": "memory",
+                "agent_id": agent.id.to_string(),
+                "agent_pub_id": agent.pub_id,
+                "version_id": version.id.to_string(),
+                "version_pub_id": version.pub_id,
+                "version_fingerprint": version.fingerprint,
+            }),
+        );
         Ok(version)
     }
 
     fn resolve_or_create_account(&mut self, agent: &AgentIdentity) -> AgentAccount {
         if let Some(account_id) = self.account_by_agent.get(&agent.id) {
-            return self
+            let account = self
                 .accounts
                 .get(account_id)
                 .expect("account index is stale")
                 .clone();
+            log_event(
+                "info",
+                "registration_account_reused",
+                json!({
+                    "store": "memory",
+                    "agent_id": agent.id.to_string(),
+                    "agent_pub_id": agent.pub_id,
+                    "account_id": account.id.to_string(),
+                    "account_pub_id": account.pub_id,
+                }),
+            );
+            return account;
         }
 
         let now = Utc::now();
@@ -410,6 +532,17 @@ impl MemoryRegistrationStore {
             .insert(account.pub_id.clone(), id.clone());
         self.accounts.insert(id, account.clone());
 
+        log_event(
+            "info",
+            "registration_account_created",
+            json!({
+                "store": "memory",
+                "agent_id": agent.id.to_string(),
+                "agent_pub_id": agent.pub_id,
+                "account_id": account.id.to_string(),
+                "account_pub_id": account.pub_id,
+            }),
+        );
         account
     }
 
@@ -431,6 +564,19 @@ impl MemoryRegistrationStore {
 
         self.sessions.insert(id, session.clone());
 
+        log_event(
+            "info",
+            "registration_session_created",
+            json!({
+                "store": "memory",
+                "agent_id": agent.id.to_string(),
+                "agent_pub_id": agent.pub_id,
+                "session_id": session.id.to_string(),
+                "session_pub_id": session.pub_id,
+                "mcp_client_name": session.mcp_client_name,
+                "mcp_client_version": session.mcp_client_version,
+            }),
+        );
         session
     }
 
@@ -557,8 +703,30 @@ fn resolve_or_create_agent_sqlite(
         &request.identity_fingerprint,
     )? {
         if agent.agent_type != request.agent_type {
+            log_event(
+                "warn",
+                "registration_identity_conflict",
+                json!({
+                    "store": "sqlite",
+                    "agent_id": agent.id.to_string(),
+                    "agent_pub_id": agent.pub_id,
+                    "owner_user_id": agent.owner_user_id.to_string(),
+                    "identity_fingerprint": request.identity_fingerprint,
+                }),
+            );
             return Err(RegistrationError::IdentityConflict);
         }
+        log_event(
+            "info",
+            "registration_agent_reused",
+            json!({
+                "store": "sqlite",
+                "agent_id": agent.id.to_string(),
+                "agent_pub_id": agent.pub_id,
+                "owner_user_id": agent.owner_user_id.to_string(),
+                "identity_fingerprint": request.identity_fingerprint,
+            }),
+        );
         return Ok(agent);
     }
 
@@ -595,6 +763,18 @@ fn resolve_or_create_agent_sqlite(
         ],
     )?;
 
+    log_event(
+        "info",
+        "registration_agent_created",
+        json!({
+            "store": "sqlite",
+            "agent_id": agent.id.to_string(),
+            "agent_pub_id": agent.pub_id,
+            "owner_user_id": agent.owner_user_id.to_string(),
+            "identity_fingerprint": agent.fingerprint,
+            "agent_type": agent_type_name(&agent.agent_type),
+        }),
+    );
     Ok(agent)
 }
 
@@ -610,8 +790,32 @@ fn resolve_or_create_agent_version_sqlite(
             || version.model != request.model
             || version.runtime != request.runtime
         {
+            log_event(
+                "warn",
+                "registration_version_conflict",
+                json!({
+                    "store": "sqlite",
+                    "agent_id": agent.id.to_string(),
+                    "agent_pub_id": agent.pub_id,
+                    "version_id": version.id.to_string(),
+                    "version_pub_id": version.pub_id,
+                    "version_fingerprint": request.version_fingerprint,
+                }),
+            );
             return Err(RegistrationError::VersionConflict);
         }
+        log_event(
+            "info",
+            "registration_version_reused",
+            json!({
+                "store": "sqlite",
+                "agent_id": agent.id.to_string(),
+                "agent_pub_id": agent.pub_id,
+                "version_id": version.id.to_string(),
+                "version_pub_id": version.pub_id,
+                "version_fingerprint": request.version_fingerprint,
+            }),
+        );
         return Ok(version);
     }
 
@@ -643,6 +847,18 @@ fn resolve_or_create_agent_version_sqlite(
         ],
     )?;
 
+    log_event(
+        "info",
+        "registration_version_created",
+        json!({
+            "store": "sqlite",
+            "agent_id": agent.id.to_string(),
+            "agent_pub_id": agent.pub_id,
+            "version_id": version.id.to_string(),
+            "version_pub_id": version.pub_id,
+            "version_fingerprint": version.fingerprint,
+        }),
+    );
     Ok(version)
 }
 
@@ -651,6 +867,17 @@ fn resolve_or_create_account_sqlite(
     agent: &AgentIdentity,
 ) -> Result<AgentAccount, RegistrationError> {
     if let Some(account) = query_account_for_agent(tx, &agent.id)? {
+        log_event(
+            "info",
+            "registration_account_reused",
+            json!({
+                "store": "sqlite",
+                "agent_id": agent.id.to_string(),
+                "agent_pub_id": agent.pub_id,
+                "account_id": account.id.to_string(),
+                "account_pub_id": account.pub_id,
+            }),
+        );
         return Ok(account);
     }
 
@@ -681,6 +908,17 @@ fn resolve_or_create_account_sqlite(
         ],
     )?;
 
+    log_event(
+        "info",
+        "registration_account_created",
+        json!({
+            "store": "sqlite",
+            "agent_id": agent.id.to_string(),
+            "agent_pub_id": agent.pub_id,
+            "account_id": account.id.to_string(),
+            "account_pub_id": account.pub_id,
+        }),
+    );
     Ok(account)
 }
 
@@ -717,7 +955,29 @@ fn create_session_sqlite(
         ],
     )?;
 
+    log_event(
+        "info",
+        "registration_session_created",
+        json!({
+            "store": "sqlite",
+            "agent_id": agent.id.to_string(),
+            "agent_pub_id": agent.pub_id,
+            "version_id": version.id.to_string(),
+            "version_pub_id": version.pub_id,
+            "session_id": session.id.to_string(),
+            "session_pub_id": session.pub_id,
+            "mcp_client_name": session.mcp_client_name,
+            "mcp_client_version": session.mcp_client_version,
+        }),
+    );
     Ok(session)
+}
+
+fn agent_type_name(agent_type: &hubu_common::models::identity::AgentType) -> &'static str {
+    match agent_type {
+        hubu_common::models::identity::AgentType::InteractiveAgent => "interactive_agent",
+        hubu_common::models::identity::AgentType::AutonomousAgent => "autonomous_agent",
+    }
 }
 
 fn query_agent_by_owner_and_fingerprint(

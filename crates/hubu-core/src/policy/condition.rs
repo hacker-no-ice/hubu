@@ -1,12 +1,12 @@
 use hubu_common::ids::AgentId;
 use hubu_common::money::Currency;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::policy::error::PolicyValidationError;
 use crate::spend::model::SpendRequest;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Condition {
     All {
@@ -51,7 +51,7 @@ pub enum Condition {
     },
 }
 
-#[derive(Debug, Copy, Clone, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Field {
     Amount,
@@ -69,7 +69,7 @@ pub enum ValueKind {
     AgentId,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyValue {
     String(String),

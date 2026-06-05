@@ -269,6 +269,31 @@ where
         Ok(response)
     }
 
+    pub fn remember_payment_attempt(
+        &mut self,
+        request: PaymentRequest,
+        response: PaymentResponse,
+    ) -> Result<(), PaymentError> {
+        self.validate_request_shape(&request)?;
+
+        if let Some(stored) = self
+            .payments_by_idempotency_key
+            .get(&request.idempotency_key)
+        {
+            if stored.request != request {
+                return Err(PaymentError::IdempotencyConflict);
+            }
+
+            return Ok(());
+        }
+
+        self.payments_by_idempotency_key.insert(
+            request.idempotency_key.clone(),
+            StoredPayment { request, response },
+        );
+        Ok(())
+    }
+
     pub fn ledger(&self) -> &SqliteLedger {
         &self.ledger
     }
@@ -522,6 +547,36 @@ mod tests {
 
         assert_eq!(first.payment_id, second.payment_id);
         assert_eq!(manager.payments_by_idempotency_key.len(), 1);
+    }
+
+    #[test]
+    fn remembered_payment_attempt_returns_original_response_without_revalidating() {
+        let request = payment_request(PaymentRailKind::FiatMock);
+        let mut manager = payment_manager(&request);
+        let response = PaymentResponse {
+            payment_id: PaymentId::new(),
+            owner_user_id: request.owner_user_id.clone(),
+            agent_account_id: request.agent_account_id.clone(),
+            status: PaymentStatus::Succeeded,
+            amount_cents: request.amount_cents,
+            currency: request.currency,
+            ledger_transaction_id: Some(LedgerTransactionId::new()),
+            rail_reference: Some("fiat_mock_restored".to_string()),
+            failure_reason: None,
+            created_at: Utc::now(),
+        };
+        manager
+            .remember_payment_attempt(request.clone(), response.clone())
+            .expect("payment attempt should seed idempotency");
+
+        manager.authorizer.token_id = SpendAuthTokenId::new();
+        let replayed = manager
+            .submit_payment(request)
+            .expect("remembered payment should return without authorization");
+
+        assert_eq!(replayed.payment_id, response.payment_id);
+        assert_eq!(replayed.rail_reference, response.rail_reference);
+        assert_eq!(manager.ledger().list_transactions().unwrap().len(), 0);
     }
 
     #[test]

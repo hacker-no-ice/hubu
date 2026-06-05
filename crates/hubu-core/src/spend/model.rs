@@ -3,10 +3,11 @@ use hubu_common::ids::{
     AgentAccountId, AgentId, PaymentId, SpendAuthTokenId, SpendDecisionId, UserId,
 };
 use hubu_common::money::Currency;
+use serde::{Deserialize, Serialize};
 
 use crate::policy::model::Evaluation;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpendRequest {
     pub amount_cents: i64, // in minor unit
     pub currency: Currency,

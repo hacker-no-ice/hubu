@@ -144,7 +144,7 @@ pause_for_reading
 
 step "Start Hubu locally"
 note "server: ${DEMO_URL}"
-"${ROOT_DIR}/target/debug/hubu-server" "${DEMO_ADDR}" >"${SERVER_LOG}" 2>&1 &
+HUBU_LOG_FILE="${SERVER_LOG}" HUBU_LOG_STDERR=0 "${ROOT_DIR}/target/debug/hubu-server" "${DEMO_ADDR}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID="$!"
 wait_for_server
 say "${GREEN}Hubu server is ready.${RESET}"
