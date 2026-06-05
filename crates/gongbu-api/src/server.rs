@@ -1,5 +1,4 @@
 use std::{
-    io::Read,
     net::{TcpListener, TcpStream},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -14,7 +13,7 @@ use crate::{
         ExecutorSpendRequest, ExecutorSpendResponse, ExecutorSpendSettlementResponse, HubuClient,
     },
     image_jobs::{create_image_job, image_job_guidance, ImageJobRequest},
-    simple_http::{parse_request, write_response, HttpRequest, HttpResponse},
+    simple_http::{parse_request, read_request, write_response, HttpRequest, HttpResponse},
 };
 
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
@@ -50,8 +49,7 @@ impl ServerState {
 }
 
 fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw)?;
+    let raw = read_request(&mut stream)?;
     if raw.is_empty() {
         return Ok(());
     }
@@ -211,8 +209,8 @@ enum SpendClosure {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::Read,
-        net::TcpListener,
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
         sync::{Arc, Mutex},
         thread,
     };
@@ -344,6 +342,37 @@ mod tests {
             .as_str()
             .expect("error should be string")
             .contains("exactly one"));
+    }
+
+    #[test]
+    fn server_responds_without_waiting_for_client_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server addr");
+        let state = ServerState::new(Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            hubu_base_url: "http://127.0.0.1:8787".to_string(),
+            image_provider: mock_provider_config(std::env::temp_dir()),
+        });
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            handle_connection(stream, &state).expect("handle request");
+        });
+
+        let mut client = TcpStream::connect(addr).expect("connect client");
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set read timeout");
+        client
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+            .expect("write request");
+
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("read response without closing write side first");
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(response.contains("\"status\":\"ok\""), "{response}");
+        server.join().expect("server thread finished");
     }
 
     #[test]

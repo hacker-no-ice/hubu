@@ -96,6 +96,33 @@ pub fn parse_request(raw: &str) -> Result<HttpRequest, HttpParseError> {
     })
 }
 
+pub fn read_request(stream: &mut impl Read) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        let Some(header_end) = find_header_end(&bytes) else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = content_length(&headers).unwrap_or(0);
+        let body_start = header_end + 4;
+        while bytes.len() < body_start + content_length {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+        break;
+    }
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
 pub fn write_response(stream: &mut impl Write, response: &HttpResponse) -> std::io::Result<()> {
     let body = response.body.to_string();
     write!(
@@ -139,6 +166,21 @@ where
         });
     }
     Ok(serde_json::from_str(response_body)?)
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn content_length(headers: &str) -> Option<usize> {
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("content-length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    })
 }
 
 fn split_head_and_body(raw: &str) -> (&str, &str) {
