@@ -14,6 +14,19 @@ Constraints:
 - Summarize the diff, tests run, and any caveats.
 - If a Codex review is requested, address review comments in a follow-up commit.
 
+## Architecture visualization
+
+Hubu includes an interactive sketch-style architecture visualizer at
+`docs/architecture.html`, with supporting files `docs/architecture.css` and
+`docs/architecture.js`.
+
+When making changes that alter major components, request flows, storage
+boundaries, public interfaces, or code ownership links, update the visualizer in
+the same task when practical. Keep the top-level diagram, drill-down component
+diagrams, responsibility text, and GitHub code links aligned with the current
+codebase. If the architecture change is intentionally not reflected in the
+visualizer, call that out in the final caveats.
+
 ## Agent registration protocol
 
 When implementing or updating agent registration, keep the human flow low

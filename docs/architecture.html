@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hubu Architecture Map</title>
+    <link rel="stylesheet" href="./architecture.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="kicker">Hubu architecture</p>
+        <h1>Spending control plane for AI agents</h1>
+      </div>
+      <nav aria-label="Architecture views">
+        <button class="icon-button" id="top-view-button" type="button" title="Return to top level">
+          <span aria-hidden="true">↖</span>
+          <span class="sr-only">Return to top level</span>
+        </button>
+        <a
+          class="github-link"
+          href="https://github.com/hacker-no-ice/hubu"
+          target="_blank"
+          rel="noreferrer"
+        >
+          GitHub
+        </a>
+      </nav>
+    </header>
+
+    <main class="workspace">
+      <section class="diagram-region" aria-label="Hubu architecture diagram">
+        <div class="diagram-toolbar">
+          <div>
+            <p class="crumb" id="diagram-crumb">Top level</p>
+            <h2 id="diagram-title">System Map</h2>
+          </div>
+          <div class="legend" aria-label="Diagram legend">
+            <span><i class="swatch human"></i>Human</span>
+            <span><i class="swatch agent"></i>Agent</span>
+            <span><i class="swatch core"></i>Core</span>
+            <span><i class="swatch wallet"></i>Wallet</span>
+            <span><i class="swatch data"></i>Data</span>
+          </div>
+        </div>
+        <svg
+          id="architecture-canvas"
+          class="architecture-canvas"
+          viewBox="0 0 1200 700"
+          role="img"
+          aria-labelledby="diagram-title diagram-summary"
+        ></svg>
+        <p id="diagram-summary" class="diagram-summary">
+          Click a component to drill into its internal flow. Open code links from the detail panel.
+        </p>
+      </section>
+
+      <aside class="details-panel" aria-live="polite">
+        <button class="back-button" id="details-back-button" type="button">
+          <span aria-hidden="true">←</span>
+          Top level
+        </button>
+        <p class="crumb" id="details-kind">Component</p>
+        <h2 id="details-title">System Map</h2>
+        <p id="details-copy">
+          Hubu lets humans fund and govern agent spending while agents submit structured requests
+          through deterministic authorization and payment boundaries.
+        </p>
+        <div class="code-links" id="code-links"></div>
+        <div class="detail-list">
+          <h3>Responsibilities</h3>
+          <ul id="responsibilities"></ul>
+        </div>
+      </aside>
+    </main>
+
+    <script src="./architecture.js"></script>
+  </body>
+</html>
