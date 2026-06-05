@@ -15,6 +15,8 @@ vendor-backed work. Other services can implement the same contract without
 Hubu knowing their vendor APIs, credentials, retries, or artifact formats.
 See `docs/gongbu-carry-forward.md` for the Hubu image-proxy PR ideas that
 should carry into a future Gongbu implementation.
+See `docs/future-wallet-and-credit-use-cases.md` for the related future
+Hubu Wallet and credit-pool modeling discussion.
 
 ## Boundary
 
