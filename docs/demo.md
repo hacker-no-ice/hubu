@@ -317,14 +317,17 @@ payment, Hubu releases the frozen hold and leaves the spend token unused.
 The server-side image provider defaults to
 `HUBU_IMAGE_PROVIDER_ADAPTER=demo`, `HUBU_IMAGE_PROVIDER_NAME=hubu-demo`, and
 `HUBU_IMAGE_PROVIDER_MODEL=demo-image-v1`; the artifact directory defaults to
-`target/hubu-image-outputs/`. For a future real adapter, configure Hubu with
-`HUBU_IMAGE_PROVIDER_ADAPTER`, `HUBU_IMAGE_PROVIDER_NAME`,
+`target/hubu-image-outputs/`. For a generic external JSON provider, configure
+Hubu with `HUBU_IMAGE_PROVIDER_ADAPTER=http-json`,
+`HUBU_IMAGE_PROVIDER_ENDPOINT`, `HUBU_IMAGE_PROVIDER_NAME`,
 `HUBU_IMAGE_PROVIDER_MODEL`, `HUBU_IMAGE_PROVIDER_API_KEY`, and optionally
-`HUBU_IMAGE_PROXY_MERCHANT` and `HUBU_IMAGE_OUTPUT_DIR`; agents may only request
-the configured provider/model, image calls only consume spend authorizations
-scoped to the configured proxy merchant, and the API key is not returned in API,
-CLI, MCP, or ledger responses. Non-demo providers must have an explicit Hubu
-adapter implementation and will not fall back to the local demo artifact writer.
+`HUBU_IMAGE_PROXY_MERCHANT`. The `http-json` adapter sends the server-side
+configured API key as an authorization header and expects the provider to return
+JSON with a non-empty `output_ref`. Agents may only request the configured
+provider/model, image calls only consume spend authorizations scoped to the
+configured proxy merchant, and the API key is not returned in API, CLI, MCP, or
+ledger responses. Remote provider endpoints must use HTTPS; loopback HTTP is
+accepted only for local testing.
 
 ### 7. Submit an Allowed Spend Whose Mock Payment Fails
 

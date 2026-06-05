@@ -147,6 +147,7 @@ struct ImageProviderConfig {
     model: String,
     merchant: String,
     api_key: Option<String>,
+    endpoint: Option<String>,
     output_dir: PathBuf,
     adapter_kind: ImageProviderAdapterKind,
 }
@@ -163,6 +164,7 @@ impl ImageProviderConfig {
             merchant: env::var("HUBU_IMAGE_PROXY_MERCHANT")
                 .unwrap_or_else(|_| "hubu-model-proxy".to_string()),
             api_key: env::var("HUBU_IMAGE_PROVIDER_API_KEY").ok(),
+            endpoint: env::var("HUBU_IMAGE_PROVIDER_ENDPOINT").ok(),
             output_dir: image_output_dir_from_env(),
         }
     }
@@ -192,6 +194,26 @@ impl ImageProviderConfig {
                 }
                 Ok(Box::new(DemoImageProviderAdapter { config: self }))
             }
+            ImageProviderAdapterKind::HttpJson => {
+                let endpoint = self
+                    .endpoint
+                    .as_deref()
+                    .filter(|endpoint| !endpoint.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow!("http-json image adapter requires HUBU_IMAGE_PROVIDER_ENDPOINT")
+                    })?;
+                if !is_allowed_provider_endpoint(endpoint) {
+                    return Err(anyhow!(
+                        "http-json image adapter endpoint must use https, except loopback http for local testing"
+                    ));
+                }
+                if !self.has_api_key() {
+                    return Err(anyhow!(
+                        "http-json image adapter requires HUBU_IMAGE_PROVIDER_API_KEY"
+                    ));
+                }
+                Ok(Box::new(HttpJsonImageProviderAdapter { config: self }))
+            }
             ImageProviderAdapterKind::Unsupported(adapter) => Err(anyhow!(
                 "image provider adapter '{adapter}' is not supported by this Hubu build"
             )),
@@ -202,6 +224,7 @@ impl ImageProviderConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ImageProviderAdapterKind {
     Demo,
+    HttpJson,
     Unsupported(String),
 }
 
@@ -209,18 +232,20 @@ impl ImageProviderAdapterKind {
     fn label(&self) -> &str {
         match self {
             Self::Demo => "demo",
+            Self::HttpJson => "http-json",
             Self::Unsupported(adapter) => adapter,
         }
     }
 
-    fn is_configured(&self) -> bool {
-        matches!(self, Self::Demo)
+    fn is_supported(&self) -> bool {
+        matches!(self, Self::Demo | Self::HttpJson)
     }
 }
 
 fn image_provider_adapter_kind_from_env(provider: &str) -> ImageProviderAdapterKind {
     match env::var("HUBU_IMAGE_PROVIDER_ADAPTER") {
         Ok(adapter) if adapter == "demo" => ImageProviderAdapterKind::Demo,
+        Ok(adapter) if adapter == "http-json" => ImageProviderAdapterKind::HttpJson,
         Ok(adapter) => ImageProviderAdapterKind::Unsupported(adapter),
         Err(_) if provider == "hubu-demo" => ImageProviderAdapterKind::Demo,
         Err(_) => ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
@@ -283,6 +308,58 @@ impl ImageProviderAdapter for DemoImageProviderAdapter<'_> {
             output_ref: format!("file://{}", absolute_path.display()),
         })
     }
+}
+
+struct HttpJsonImageProviderAdapter<'a> {
+    config: &'a ImageProviderConfig,
+}
+
+impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
+    fn generate(&self, request: ImageGenerationRequest<'_>) -> Result<ImageGenerationOutput> {
+        let endpoint = self
+            .config
+            .endpoint
+            .as_deref()
+            .ok_or_else(|| anyhow!("http-json image adapter requires an endpoint"))?;
+        let api_key = self
+            .config
+            .api_key
+            .as_deref()
+            .filter(|api_key| !api_key.is_empty())
+            .ok_or_else(|| anyhow!("http-json image adapter requires an API key"))?;
+        let response = ureq::post(endpoint)
+            .set("Authorization", &format!("Bearer {api_key}"))
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json")
+            .send_json(http_json_image_provider_payload(&request))
+            .map_err(|error| anyhow!("call image provider endpoint: {error}"))?;
+        let body: serde_json::Value = response
+            .into_json()
+            .context("parse image provider JSON response")?;
+        let output_ref = body
+            .get("output_ref")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("image provider response missing non-empty output_ref"))?;
+        Ok(ImageGenerationOutput {
+            output_ref: output_ref.to_string(),
+        })
+    }
+}
+
+fn http_json_image_provider_payload(request: &ImageGenerationRequest<'_>) -> serde_json::Value {
+    json!({
+        "provider": request.provider,
+        "model": request.model,
+        "prompt": request.prompt,
+        "request_id": request.artifact_id,
+    })
+}
+
+fn is_allowed_provider_endpoint(endpoint: &str) -> bool {
+    endpoint.starts_with("https://")
+        || endpoint.starts_with("http://127.0.0.1:")
+        || endpoint.starts_with("http://localhost:")
 }
 
 impl ServerState {
@@ -384,7 +461,8 @@ impl ServerState {
                 "image_proxy_merchant": state.image_provider.merchant.clone(),
                 "image_provider_api_key_configured": state.image_provider.has_api_key(),
                 "image_provider_adapter": state.image_provider.adapter_kind.label(),
-                "image_provider_adapter_configured": state.image_provider.adapter_kind.is_configured(),
+                "image_provider_adapter_supported": state.image_provider.adapter_kind.is_supported(),
+                "image_provider_endpoint_configured": state.image_provider.endpoint.as_ref().is_some_and(|endpoint| !endpoint.is_empty()),
                 "image_output_dir": state.image_provider.output_dir.display().to_string(),
             }),
         );
@@ -3142,6 +3220,7 @@ mod tests {
             model: "demo-image-v1".to_string(),
             merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
+            endpoint: None,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Demo,
         };
@@ -3170,6 +3249,7 @@ mod tests {
             model: "logo-v1".to_string(),
             merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
+            endpoint: None,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
         };
@@ -3198,6 +3278,73 @@ mod tests {
         assert!(demo_error
             .to_string()
             .contains("demo image adapter can only be used with the hubu-demo provider"));
+    }
+
+    #[test]
+    fn http_json_image_adapter_requires_server_side_endpoint_and_api_key() {
+        let mut config = ImageProviderConfig {
+            provider: "nano-banana".to_string(),
+            model: "logo-v1".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
+            api_key: Some("server-side-secret".to_string()),
+            endpoint: Some("https://vendor.example/v1/images".to_string()),
+            output_dir: std::env::temp_dir(),
+            adapter_kind: ImageProviderAdapterKind::HttpJson,
+        };
+
+        assert!(config.adapter().is_ok());
+
+        config.endpoint = None;
+        let missing_endpoint = match config.adapter() {
+            Ok(_) => panic!("http-json adapter should require an endpoint"),
+            Err(error) => error,
+        };
+        assert!(missing_endpoint
+            .to_string()
+            .contains("requires HUBU_IMAGE_PROVIDER_ENDPOINT"));
+
+        config.endpoint = Some("http://vendor.example/v1/images".to_string());
+        let insecure_endpoint = match config.adapter() {
+            Ok(_) => panic!("http-json adapter should reject remote plain HTTP"),
+            Err(error) => error,
+        };
+        assert!(insecure_endpoint
+            .to_string()
+            .contains("endpoint must use https"));
+
+        config.endpoint = Some("http://127.0.0.1:9000/v1/images".to_string());
+        assert!(config.adapter().is_ok());
+
+        config.api_key = None;
+        let missing_api_key = match config.adapter() {
+            Ok(_) => panic!("http-json adapter should require an API key"),
+            Err(error) => error,
+        };
+        assert!(missing_api_key
+            .to_string()
+            .contains("requires HUBU_IMAGE_PROVIDER_API_KEY"));
+    }
+
+    #[test]
+    fn http_json_image_adapter_payload_excludes_api_key() {
+        let payload = http_json_image_provider_payload(&ImageGenerationRequest {
+            provider: "nano-banana",
+            model: "logo-v1",
+            prompt: "Create a crisp logo for Project Hubu",
+            artifact_id: "sat_test",
+        });
+
+        assert_eq!(payload["provider"], "nano-banana");
+        assert_eq!(payload["model"], "logo-v1");
+        assert_eq!(payload["prompt"], "Create a crisp logo for Project Hubu");
+        assert_eq!(payload["request_id"], "sat_test");
+        assert!(!payload.to_string().contains("server-side-secret"));
+        assert!(is_allowed_provider_endpoint(
+            "https://vendor.example/v1/images"
+        ));
+        assert!(!is_allowed_provider_endpoint(
+            "http://vendor.example/v1/images"
+        ));
     }
 
     #[test]
@@ -3270,6 +3417,7 @@ mod tests {
             model: "logo-v1".to_string(),
             merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
+            endpoint: None,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
         };
