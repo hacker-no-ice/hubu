@@ -2,25 +2,13 @@
 
 Gongbu implements Hubu's `hubu-spend-executor-v1` contract.
 
-## Hubu Owns
+The canonical contract, ownership boundary, request shapes, response shapes,
+and safety rules live in Hubu:
 
-- policy evaluation
-- spend authorization tokens
-- frozen budget holds
-- executor validation
-- spend settlement and release
-- spend audit state
+- [Hubu spend executor contract](https://github.com/hacker-no-ice/hubu/blob/main/docs/spend-executor-contract.md)
 
-## Gongbu Owns
-
-- server-side vendor API keys
-- agent work request intake
-- Hubu spend validation before irreversible work
-- model or image vendor calls
-- artifact writing and storage
-- settlement after successful billable work
-- release when no irreversible billable work happened
-- execution result metadata returned to agents
+Keep this document limited to Gongbu-specific implementation notes so it does
+not drift from Hubu's control-plane contract.
 
 ## Secret Handling
 
@@ -37,18 +25,14 @@ The safety boundary depends on IAM: Gongbu's runtime service account may read
 the configured secret, while agents must not share that identity or have shell,
 filesystem, environment, or cloud-credential access to the Gongbu process.
 
-## Current Demo Slice
+## Gongbu Image Jobs
 
 The dry-run endpoint intentionally performs no real vendor work. The
-`POST /mock-executor/dry-run` endpoint proves Gongbu can:
+`POST /mock-executor/dry-run` endpoint exists only to exercise the Hubu
+validate, settle, and release lifecycle.
 
-1. receive agent scope and a Hubu spend authorization token
-2. call `POST /spend/executor/validate`
-3. simulate either successful work or pre-work failure
-4. call `POST /spend/executor/settle` or `POST /spend/executor/release`
-5. return agent-visible lifecycle metadata
-
-The image job endpoint extends that contract for `gongbu.image`:
+The image job endpoint implements the first real Gongbu work domain for
+`gongbu.image`:
 
 1. `GET /image-jobs/guidance` exposes configured provider/model, required Hubu
    merchant and amount, and non-secret readiness.
