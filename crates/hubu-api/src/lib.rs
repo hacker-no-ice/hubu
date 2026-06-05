@@ -492,6 +492,16 @@ fn redact_image_provider_error_message(message: &str, config: &ImageProviderConf
     let mut redacted = message.to_string();
     if let Some(endpoint) = config.endpoint.as_deref().filter(|value| !value.is_empty()) {
         redacted = redacted.replace(endpoint, "[redacted image provider endpoint]");
+        if let Some((_, query)) = endpoint.split_once('?') {
+            for pair in query.split('&') {
+                if let Some((_, value)) = pair.split_once('=') {
+                    if !value.is_empty() {
+                        redacted =
+                            redacted.replace(value, "[redacted image provider endpoint secret]");
+                    }
+                }
+            }
+        }
     }
     if let Some(api_key) = config.api_key.as_deref().filter(|value| !value.is_empty()) {
         redacted = redacted.replace(api_key, "[redacted image provider api key]");
@@ -4574,7 +4584,7 @@ mod tests {
             model: "gemini-2.5-flash-image".to_string(),
             merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
-            endpoint: Some("https://vendor.example/v1/images?key=server-side-secret".to_string()),
+            endpoint: Some("https://vendor.example/v1/images?signature=query-secret".to_string()),
             price_cents: 500,
             timeout_ms: 30_000,
             max_retries: 0,
@@ -4583,13 +4593,15 @@ mod tests {
             adapter_kind: ImageProviderAdapterKind::GeminiGenerateContent,
         };
 
-        let message = "call https://vendor.example/v1/images?key=server-side-secret failed with token server-side-secret";
+        let message = "call https://vendor.example/v1/images?signature=query-secret failed with token server-side-secret and query-secret";
         let redacted = redact_image_provider_error_message(message, &config);
 
         assert!(!redacted.contains("server-side-secret"));
+        assert!(!redacted.contains("query-secret"));
         assert!(!redacted.contains("https://vendor.example/v1/images"));
         assert!(redacted.contains("[redacted image provider endpoint]"));
         assert!(redacted.contains("[redacted image provider api key]"));
+        assert!(redacted.contains("[redacted image provider endpoint secret]"));
     }
 
     #[test]
