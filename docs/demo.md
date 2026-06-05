@@ -312,14 +312,17 @@ boundary is already in place: the agent presents a scoped Hubu spend token, Hubu
 consumes it once, settles the budget hold, records the ledger transaction, and
 keeps provider selection/configuration server-side.
 
-The server-side image provider defaults to `hubu-demo` / `demo-image-v1`, and
-the artifact directory defaults to `target/hubu-image-outputs/`. For a real
-adapter, configure Hubu with `HUBU_IMAGE_PROVIDER_NAME`,
+The server-side image provider defaults to
+`HUBU_IMAGE_PROVIDER_ADAPTER=demo`, `HUBU_IMAGE_PROVIDER_NAME=hubu-demo`, and
+`HUBU_IMAGE_PROVIDER_MODEL=demo-image-v1`; the artifact directory defaults to
+`target/hubu-image-outputs/`. For a future real adapter, configure Hubu with
+`HUBU_IMAGE_PROVIDER_ADAPTER`, `HUBU_IMAGE_PROVIDER_NAME`,
 `HUBU_IMAGE_PROVIDER_MODEL`, `HUBU_IMAGE_PROVIDER_API_KEY`, and optionally
 `HUBU_IMAGE_PROXY_MERCHANT` and `HUBU_IMAGE_OUTPUT_DIR`; agents may only request
 the configured provider/model, image calls only consume spend authorizations
 scoped to the configured proxy merchant, and the API key is not returned in API,
-CLI, MCP, or ledger responses.
+CLI, MCP, or ledger responses. Non-demo providers must have an explicit Hubu
+adapter implementation and will not fall back to the local demo artifact writer.
 
 ### 7. Submit an Allowed Spend Whose Mock Payment Fails
 

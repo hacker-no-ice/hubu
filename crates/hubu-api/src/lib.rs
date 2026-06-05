@@ -148,13 +148,16 @@ struct ImageProviderConfig {
     merchant: String,
     api_key: Option<String>,
     output_dir: PathBuf,
+    adapter_kind: ImageProviderAdapterKind,
 }
 
 impl ImageProviderConfig {
     fn from_env() -> Self {
+        let provider =
+            env::var("HUBU_IMAGE_PROVIDER_NAME").unwrap_or_else(|_| "hubu-demo".to_string());
         Self {
-            provider: env::var("HUBU_IMAGE_PROVIDER_NAME")
-                .unwrap_or_else(|_| "hubu-demo".to_string()),
+            adapter_kind: image_provider_adapter_kind_from_env(&provider),
+            provider,
             model: env::var("HUBU_IMAGE_PROVIDER_MODEL")
                 .unwrap_or_else(|_| "demo-image-v1".to_string()),
             merchant: env::var("HUBU_IMAGE_PROXY_MERCHANT")
@@ -177,6 +180,50 @@ impl ImageProviderConfig {
 
     fn has_api_key(&self) -> bool {
         self.api_key.as_ref().is_some_and(|key| !key.is_empty())
+    }
+
+    fn adapter(&self) -> Result<Box<dyn ImageProviderAdapter + '_>> {
+        match &self.adapter_kind {
+            ImageProviderAdapterKind::Demo => {
+                if self.provider != "hubu-demo" {
+                    return Err(anyhow!(
+                        "demo image adapter can only be used with the hubu-demo provider"
+                    ));
+                }
+                Ok(Box::new(DemoImageProviderAdapter { config: self }))
+            }
+            ImageProviderAdapterKind::Unsupported(adapter) => Err(anyhow!(
+                "image provider adapter '{adapter}' is not supported by this Hubu build"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImageProviderAdapterKind {
+    Demo,
+    Unsupported(String),
+}
+
+impl ImageProviderAdapterKind {
+    fn label(&self) -> &str {
+        match self {
+            Self::Demo => "demo",
+            Self::Unsupported(adapter) => adapter,
+        }
+    }
+
+    fn is_configured(&self) -> bool {
+        matches!(self, Self::Demo)
+    }
+}
+
+fn image_provider_adapter_kind_from_env(provider: &str) -> ImageProviderAdapterKind {
+    match env::var("HUBU_IMAGE_PROVIDER_ADAPTER") {
+        Ok(adapter) if adapter == "demo" => ImageProviderAdapterKind::Demo,
+        Ok(adapter) => ImageProviderAdapterKind::Unsupported(adapter),
+        Err(_) if provider == "hubu-demo" => ImageProviderAdapterKind::Demo,
+        Err(_) => ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
     }
 }
 
@@ -336,6 +383,8 @@ impl ServerState {
                 "image_model": state.image_provider.model.clone(),
                 "image_proxy_merchant": state.image_provider.merchant.clone(),
                 "image_provider_api_key_configured": state.image_provider.has_api_key(),
+                "image_provider_adapter": state.image_provider.adapter_kind.label(),
+                "image_provider_adapter_configured": state.image_provider.adapter_kind.is_configured(),
                 "image_output_dir": state.image_provider.output_dir.display().to_string(),
             }),
         );
@@ -1862,6 +1911,7 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
     let (provider, model) = state
         .image_provider
         .resolve(request.provider, request.model)?;
+    let image_adapter = state.image_provider.adapter()?;
     let user = default_user_context(state)?;
     let token_id = SpendAuthTokenId::from_str(&request.spend_auth_token_id)
         .map_err(|error| anyhow!("invalid spend_auth_token_id: {error}"))?;
@@ -1984,10 +2034,7 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
     }
 
     let payment_id = payment.payment_id.to_string();
-    let image_output = DemoImageProviderAdapter {
-        config: &state.image_provider,
-    }
-    .generate(ImageGenerationRequest {
+    let image_output = image_adapter.generate(ImageGenerationRequest {
         provider: &provider,
         model: &model,
         prompt: &request.prompt,
@@ -3062,6 +3109,7 @@ mod tests {
             merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
             output_dir: std::env::temp_dir(),
+            adapter_kind: ImageProviderAdapterKind::Demo,
         };
 
         let resolved = config
@@ -3079,6 +3127,161 @@ mod tests {
         assert!(error
             .to_string()
             .contains("requested image provider/model is not configured in Hubu"));
+    }
+
+    #[test]
+    fn image_provider_config_rejects_unwired_external_adapter_before_payment() {
+        let config = ImageProviderConfig {
+            provider: "nano-banana".to_string(),
+            model: "logo-v1".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
+            api_key: Some("server-side-secret".to_string()),
+            output_dir: std::env::temp_dir(),
+            adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
+        };
+
+        let resolved = config
+            .resolve(None, None)
+            .expect("configured provider/model should resolve");
+        assert_eq!(resolved, ("nano-banana".to_string(), "logo-v1".to_string()));
+        let error = match config.adapter() {
+            Ok(_) => panic!("external provider should not fall back to the demo adapter"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("image provider adapter 'unconfigured' is not supported"));
+
+        let demo_error = match (ImageProviderConfig {
+            adapter_kind: ImageProviderAdapterKind::Demo,
+            ..config
+        }
+        .adapter())
+        {
+            Ok(_) => panic!("demo adapter should not masquerade as an external provider"),
+            Err(error) => error,
+        };
+        assert!(demo_error
+            .to_string()
+            .contains("demo image adapter can only be used with the hubu-demo provider"));
+    }
+
+    #[test]
+    fn image_proxy_rejects_unwired_external_adapter_without_consuming_spend() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-unwired-image-provider-{}.sqlite",
+            UserId::new()
+        ));
+        let mut state =
+            ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "logo-design-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should allow the logo budget");
+
+        let logo_budget = create_budget(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent logo budget should be created");
+        let logo_budget_id = logo_budget.budget.budget_id.clone();
+
+        let authorization = authorize_spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "budget_id": logo_budget_id,
+                "amount_cents": 500,
+                "reason": "Generate Project Hubu logo",
+                "merchant": "hubu-model-proxy",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should authorize");
+        let auth_token_id = authorization
+            .auth_token_id
+            .expect("allowed spend should issue a token");
+
+        state.image_provider = ImageProviderConfig {
+            provider: "nano-banana".to_string(),
+            model: "logo-v1".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
+            api_key: Some("server-side-secret".to_string()),
+            output_dir: std::env::temp_dir(),
+            adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
+        };
+
+        let error = generate_image(
+            json!({
+                "spend_auth_token_id": auth_token_id,
+                "prompt": "Create a crisp logo for Project Hubu",
+                "provider": "nano-banana",
+                "model": "logo-v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("unwired provider should fail before payment");
+        assert!(error
+            .to_string()
+            .contains("image provider adapter 'unconfigured' is not supported"));
+
+        let ledger = list_ledger(&state).expect("ledger should list");
+        assert_eq!(ledger.transactions.len(), 0);
+        let token_id = SpendAuthTokenId::from_str(&auth_token_id).expect("token id should parse");
+        let token = state
+            .spend
+            .lock()
+            .expect("spend manager lock should not be poisoned")
+            .auth_token_record(&token_id)
+            .expect("token should still exist");
+        assert!(token.used_at.is_none());
+        let hold = authorization
+            .budget_hold
+            .expect("authorized spend should freeze the logo budget");
+        assert_eq!(hold.status, "frozen");
+        assert_eq!(hold.frozen_amount_cents, 500);
+        let logo_budget_internal_id =
+            BudgetId::from_str(&logo_budget_id).expect("budget id should parse");
+        let logo_budget = state
+            .budgets
+            .lock()
+            .expect("budget manager lock should not be poisoned")
+            .get_budget_by_id(&logo_budget_internal_id)
+            .expect("logo budget should still exist");
+        assert_eq!(logo_budget.balance.consumed_amount_cents, 0);
+        assert_eq!(logo_budget.balance.frozen_amount_cents, 500);
+        assert_eq!(logo_budget.balance.remaining_amount_cents, 0);
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
