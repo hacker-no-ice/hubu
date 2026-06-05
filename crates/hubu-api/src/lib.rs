@@ -1285,8 +1285,11 @@ struct ImageProxyGuidanceHttpResponse {
     required_spend: ImageProxySpendGuidanceHttpResponse,
     spend_authorization: ImageProxyToolGuidanceHttpResponse,
     image_generation: ImageProxyToolGuidanceHttpResponse,
+    provider_ready: bool,
     provider_api_key_configured: bool,
+    provider_endpoint_configured: bool,
     provider_adapter_supported: bool,
+    missing_configuration: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2584,6 +2587,7 @@ fn evaluate_and_reserve_spend(
 }
 
 fn image_proxy_guidance(state: &ServerState) -> Result<ImageProxyGuidanceHttpResponse> {
+    let provider_readiness = image_provider_readiness(&state.image_provider);
     Ok(ImageProxyGuidanceHttpResponse {
         provider: state.image_provider.provider.clone(),
         model: state.image_provider.model.clone(),
@@ -2622,9 +2626,47 @@ fn image_proxy_guidance(state: &ServerState) -> Result<ImageProxyGuidanceHttpRes
                 "spend_auth_token_id".to_string(),
             ],
         },
+        provider_ready: provider_readiness.ready,
         provider_api_key_configured: state.image_provider.has_api_key(),
+        provider_endpoint_configured: state
+            .image_provider
+            .endpoint
+            .as_ref()
+            .is_some_and(|endpoint| !endpoint.trim().is_empty()),
         provider_adapter_supported: state.image_provider.adapter_kind.is_supported(),
+        missing_configuration: provider_readiness.missing_configuration,
     })
+}
+
+struct ImageProviderReadiness {
+    ready: bool,
+    missing_configuration: Vec<String>,
+}
+
+fn image_provider_readiness(config: &ImageProviderConfig) -> ImageProviderReadiness {
+    let mut missing_configuration = Vec::new();
+    if !config.adapter_kind.is_supported() {
+        missing_configuration.push("HUBU_IMAGE_PROVIDER_ADAPTER".to_string());
+    }
+    match config.adapter_kind {
+        ImageProviderAdapterKind::Demo | ImageProviderAdapterKind::Unsupported(_) => {}
+        ImageProviderAdapterKind::HttpJson | ImageProviderAdapterKind::GeminiGenerateContent => {
+            if !config
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| !endpoint.trim().is_empty())
+            {
+                missing_configuration.push("HUBU_IMAGE_PROVIDER_ENDPOINT".to_string());
+            }
+            if !config.has_api_key() {
+                missing_configuration.push("HUBU_IMAGE_PROVIDER_API_KEY".to_string());
+            }
+        }
+    }
+    ImageProviderReadiness {
+        ready: missing_configuration.is_empty(),
+        missing_configuration,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3976,8 +4018,11 @@ mod tests {
         assert_eq!(guidance.required_spend.merchant, "hubu-model-proxy");
         assert_eq!(guidance.required_spend.amount_cents, 500);
         assert_eq!(guidance.required_spend.currency, "usd");
+        assert!(guidance.provider_ready);
         assert!(guidance.provider_api_key_configured);
+        assert!(guidance.provider_endpoint_configured);
         assert!(guidance.provider_adapter_supported);
+        assert!(guidance.missing_configuration.is_empty());
         assert!(guidance
             .spend_authorization
             .required_fields
@@ -3991,6 +4036,48 @@ mod tests {
         assert!(body.contains("\"provider_api_key_configured\":true"));
         assert!(!body.contains("server-side-secret"));
         assert!(!body.contains("vendor.example"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn image_proxy_guidance_reports_missing_provider_configuration_without_secrets() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-image-guidance-missing-config-{}.sqlite",
+            UserId::new()
+        ));
+        let mut state =
+            ServerState::new_with_db_path(&path).expect("server state should initialize");
+        state.image_provider = ImageProviderConfig {
+            provider: "google-gemini".to_string(),
+            model: "gemini-2.5-flash-image".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
+            api_key: None,
+            endpoint: None,
+            price_cents: 500,
+            timeout_ms: 30_000,
+            max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
+            output_dir: std::env::temp_dir(),
+            adapter_kind: ImageProviderAdapterKind::GeminiGenerateContent,
+        };
+
+        let guidance = image_proxy_guidance(&state).expect("guidance should be available");
+        assert!(!guidance.provider_ready);
+        assert!(!guidance.provider_api_key_configured);
+        assert!(!guidance.provider_endpoint_configured);
+        assert!(guidance.provider_adapter_supported);
+        assert_eq!(
+            guidance.missing_configuration,
+            vec![
+                "HUBU_IMAGE_PROVIDER_ENDPOINT".to_string(),
+                "HUBU_IMAGE_PROVIDER_API_KEY".to_string()
+            ]
+        );
+
+        let body = serde_json::to_string(&guidance).expect("guidance should serialize");
+        assert!(body.contains("HUBU_IMAGE_PROVIDER_ENDPOINT"));
+        assert!(body.contains("HUBU_IMAGE_PROVIDER_API_KEY"));
+        assert!(!body.contains("server-side-secret"));
         std::fs::remove_file(path).ok();
     }
 

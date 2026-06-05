@@ -74,7 +74,8 @@ human approves a `needs_approval` spend decision.
 `hubu_image_proxy_guidance` returns the configured image provider/model plus
 the exact spend merchant, amount, currency, and review fields an agent should
 use before calling `hubu_authorize_spend`. It intentionally returns only
-non-secret provider readiness booleans, never the provider endpoint or API key.
+non-secret provider readiness booleans and missing environment variable names,
+never the provider endpoint value or API key.
 
 `hubu_authorize_spend` uses the same policy and budget checks as
 `hubu_submit_spend`, but stops after issuing a spend authorization token and

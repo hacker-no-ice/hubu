@@ -694,13 +694,31 @@ fn model_call_image_guidance(base_url: &str) -> Result<()> {
     println!("  provider: {}", string_at(&response, "provider")?);
     println!("  model: {}", string_at(&response, "model")?);
     println!(
+        "  provider_ready: {}",
+        bool_at(&response, "provider_ready")?
+    );
+    println!(
         "  provider_api_key_configured: {}",
         bool_at(&response, "provider_api_key_configured")?
+    );
+    println!(
+        "  provider_endpoint_configured: {}",
+        bool_at(&response, "provider_endpoint_configured")?
     );
     println!(
         "  provider_adapter_supported: {}",
         bool_at(&response, "provider_adapter_supported")?
     );
+    if let Some(missing) = response
+        .get("missing_configuration")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+    {
+        println!("Missing configuration");
+        for value in missing {
+            println!("  {}", value.as_str().unwrap_or("<invalid>"));
+        }
+    }
     println!("Required spend");
     println!("  merchant: {}", string_at(required_spend, "merchant")?);
     println!("  amount: {}", money_at(required_spend, "amount_cents")?);
