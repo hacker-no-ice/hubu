@@ -84,8 +84,9 @@ output metadata. The current provider is a local `hubu-demo` adapter; real
 vendor adapters can be added behind the same Hubu-hosted boundary without
 passing API keys to agents. Provider name, model, API key, and output directory
 are server-side Hubu configuration (`HUBU_IMAGE_PROVIDER_*`,
-`HUBU_IMAGE_OUTPUT_DIR`); agent requests must match the configured
-provider/model.
+`HUBU_IMAGE_PROXY_MERCHANT`, `HUBU_IMAGE_OUTPUT_DIR`); agent requests must match
+the configured provider/model, and the spend authorization must be scoped to the
+configured image proxy merchant.
 
 ## Tool Mapping
 

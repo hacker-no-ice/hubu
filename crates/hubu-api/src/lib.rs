@@ -145,6 +145,7 @@ struct ServerState {
 struct ImageProviderConfig {
     provider: String,
     model: String,
+    merchant: String,
     api_key: Option<String>,
     output_dir: PathBuf,
 }
@@ -156,6 +157,8 @@ impl ImageProviderConfig {
                 .unwrap_or_else(|_| "hubu-demo".to_string()),
             model: env::var("HUBU_IMAGE_PROVIDER_MODEL")
                 .unwrap_or_else(|_| "demo-image-v1".to_string()),
+            merchant: env::var("HUBU_IMAGE_PROXY_MERCHANT")
+                .unwrap_or_else(|_| "hubu-model-proxy".to_string()),
             api_key: env::var("HUBU_IMAGE_PROVIDER_API_KEY").ok(),
             output_dir: image_output_dir_from_env(),
         }
@@ -284,6 +287,7 @@ impl ServerState {
                 "default_user_pub_id": default_user.pub_id,
                 "image_provider": state.image_provider.provider.clone(),
                 "image_model": state.image_provider.model.clone(),
+                "image_proxy_merchant": state.image_provider.merchant.clone(),
                 "image_provider_api_key_configured": state.image_provider.has_api_key(),
                 "image_output_dir": state.image_provider.output_dir.display().to_string(),
             }),
@@ -1794,6 +1798,11 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
     }
 
     let authorized_spend = decision_record.request;
+    if authorized_spend.merchant.as_deref() != Some(state.image_provider.merchant.as_str()) {
+        return Err(anyhow!(
+            "spend authorization is not scoped to the configured image proxy merchant"
+        ));
+    }
     let account = state
         .registration
         .lock()
@@ -2890,6 +2899,7 @@ mod tests {
         let config = ImageProviderConfig {
             provider: "hubu-demo".to_string(),
             model: "demo-image-v1".to_string(),
+            merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
             output_dir: std::env::temp_dir(),
         };
@@ -2909,6 +2919,82 @@ mod tests {
         assert!(error
             .to_string()
             .contains("requested image provider/model is not configured in Hubu"));
+    }
+
+    #[test]
+    fn image_proxy_rejects_spend_authorized_for_other_merchants() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-image-scope-guard-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "logo-design-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should allow the small spend");
+
+        create_budget(
+            json!({
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should be created for initialized user");
+
+        let authorization = authorize_spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 500,
+                "reason": "Generate Project Hubu logo",
+                "merchant": "other-model-proxy",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should authorize for a different merchant");
+        let auth_token_id = authorization
+            .auth_token_id
+            .expect("allowed spend should issue a token");
+
+        let error = generate_image(
+            json!({
+                "spend_auth_token_id": auth_token_id,
+                "prompt": "Create a crisp logo for Project Hubu",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("image proxy should reject unscoped merchant authorization");
+        assert!(error
+            .to_string()
+            .contains("spend authorization is not scoped to the configured image proxy merchant"));
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
