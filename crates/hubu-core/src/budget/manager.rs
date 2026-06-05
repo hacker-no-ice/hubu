@@ -39,6 +39,30 @@ impl BudgetManager {
         }
     }
 
+    pub fn from_records(
+        budgets: Vec<Budget>,
+        balances: Vec<BudgetBalance>,
+        holds: Vec<BudgetHold>,
+    ) -> Self {
+        let mut manager = Self::new();
+        for budget in budgets {
+            manager.index_budget(&budget);
+            manager.budgets.insert(budget.id.clone(), budget);
+        }
+        for balance in balances {
+            manager
+                .budget_balances
+                .insert(balance.budget_id.clone(), balance);
+        }
+        for hold in holds {
+            manager
+                .hold_by_spend_decision
+                .insert(hold.spend_decision_id.clone(), hold.id.clone());
+            manager.budget_holds.insert(hold.id.clone(), hold);
+        }
+        manager
+    }
+
     /// Create one budget and initialize its cached balance.
     ///
     /// A scope may only have one budget for a currency at any point in time.
@@ -259,6 +283,10 @@ impl BudgetManager {
 
     pub fn get_budget_balance(&self, budget_id: &BudgetId) -> Option<BudgetBalance> {
         self.budget_balances.get(budget_id).cloned()
+    }
+
+    pub fn get_budget_hold(&self, hold_id: &BudgetHoldId) -> Option<BudgetHold> {
+        self.budget_holds.get(hold_id).cloned()
     }
 
     fn create_budget_for_period(
