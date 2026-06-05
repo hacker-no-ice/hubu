@@ -25,6 +25,8 @@ transport adapter.
 - Registers agents with stable identity, version, account, and session records
 - Evaluates spend requests through deterministic policy rules
 - Issues spend authorization tokens for allowed requests
+- Can authorize spend and freeze budget without executing payment, so a future
+  Hubu-hosted vendor proxy can consume scoped authorization
 - Creates human-scoped single or recurring budgets and tracks available balance
 - Reserves budget before payment, then settles or releases the hold from the payment result
 - Orchestrates mock payments after spend authorization
@@ -105,6 +107,7 @@ hubu init --policy policy.yaml
 hubu policy add --agent-id AGENT_ID --path policy.yaml
 hubu agent list
 hubu budget create-recurring --amount 100 --recurrence daily --period-count 1
+hubu spend authorize --agent-id AGENT_ID --amount 5 --reason "Generate Project Hubu logo"
 hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
 hubu ledger list
 ```

@@ -26,7 +26,7 @@ use hubu_core::{
     budget::{
         BudgetManager, BudgetManagerError, BudgetRecurrence, BudgetScope, BudgetWithBalance,
         CreateBudgetSeriesRequest, CreateSingleBudgetRequest, ReleaseBudgetResponse,
-        ReserveBudgetRequest, SettleBudgetResponse,
+        ReserveBudgetResponse, SettleBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyRepository, SpendRepository, SqliteGovernanceRepository,
@@ -570,6 +570,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("POST", "/budgets") => create_budget(request.body, state).map(to_json),
         ("POST", "/budgets/series") => create_budget_series(request.body, state).map(to_json),
         ("GET", "/budgets") => list_budgets(state).map(to_json),
+        ("POST", "/spend/authorize") => authorize_spend(request.body, state).map(to_json),
         ("POST", "/spend") => spend(request.body, state).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
         _ => Err(anyhow!("no route for {} {}", request.method, request.path)),
@@ -1295,8 +1296,194 @@ fn list_budgets(state: &ServerState) -> Result<ListBudgetsHttpResponse> {
     Ok(ListBudgetsHttpResponse { budgets })
 }
 
+fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
+    let request: SpendHttpRequest = serde_json::from_str(&body)?;
+    let authorization = evaluate_and_reserve_spend(request, state)?;
+
+    Ok(SpendHttpResponse {
+        account_id: authorization.account_pub_id,
+        agent_id: authorization.agent_pub_id,
+        decision_id: authorization.evaluation.decision_id.to_string(),
+        decision: effect_name(authorization.evaluation.evaluation.decision).to_string(),
+        reasons: authorization.evaluation.evaluation.reasons,
+        auth_token_id: authorization.auth_token_id,
+        budget_hold: authorization.reservation.map(frozen_budget_hold_response),
+        payment: None,
+    })
+}
+
 fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let request: SpendHttpRequest = serde_json::from_str(&body)?;
+    let authorization = evaluate_and_reserve_spend(request, state)?;
+    let owner = owner_metadata_for_user_id(&authorization.user.user_id, state)?;
+    let (budget_hold, payment) = if let Some(token) = authorization.token {
+        let reservation = authorization
+            .reservation
+            .ok_or_else(|| anyhow!("allowed spend did not reserve budget"))?;
+        let payment_request = PaymentRequest {
+            idempotency_key: format!(
+                "{}:{}",
+                authorization.evaluation.decision_id, authorization.reason
+            ),
+            spend_auth_token_id: token.id,
+            owner_user_id: authorization.user.user_id.clone(),
+            agent_id: authorization.agent_id,
+            agent_account_id: authorization.account.id.clone(),
+            amount_cents: authorization.amount_cents,
+            currency: Currency::Usd,
+            merchant: authorization.merchant,
+            task_id: Some(authorization.reason),
+            rail: PaymentRailKind::FiatMock,
+            destination: PaymentDestination::FiatAccount {
+                account_ref: "demo-merchant-account".to_string(),
+            },
+            memo: Some("Hubu demo payment".to_string()),
+        };
+
+        let payment_audit_request = payment_request.clone();
+        let payment_result = state
+            .payments
+            .lock()
+            .map_err(|_| anyhow!("payment manager lock poisoned"))?
+            .submit_payment(payment_request);
+
+        match payment_result {
+            Ok(payment) => {
+                state
+                    .payment_attempts
+                    .lock()
+                    .map_err(|_| anyhow!("payment attempt store lock poisoned"))?
+                    .save_payment_attempt(&payment_audit_request, &payment)?;
+
+                if payment.status == PaymentStatus::Succeeded {
+                    let used_token = state
+                        .spend
+                        .lock()
+                        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+                        .auth_token_record(&payment_audit_request.spend_auth_token_id)
+                        .ok_or_else(|| anyhow!("used spend auth token was not recorded"))?;
+                    state
+                        .governance
+                        .lock()
+                        .map_err(|_| anyhow!("governance store lock poisoned"))?
+                        .update_spend_auth_token(&used_token)?;
+                }
+
+                let hold_update = {
+                    let mut budgets = state
+                        .budgets
+                        .lock()
+                        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+                    let hold_update = if payment.status == PaymentStatus::Succeeded {
+                        BudgetHoldUpdate::Settled(budgets.settle_budget(&reservation.hold.id)?)
+                    } else {
+                        BudgetHoldUpdate::Released(budgets.release_budget(&reservation.hold.id)?)
+                    };
+                    let (hold, balance) = match &hold_update {
+                        BudgetHoldUpdate::Settled(response) => (&response.hold, &response.balance),
+                        BudgetHoldUpdate::Released(response) => (&response.hold, &response.balance),
+                    };
+                    state
+                        .governance
+                        .lock()
+                        .map_err(|_| anyhow!("governance store lock poisoned"))?
+                        .update_budget_hold(hold, balance)?;
+                    hold_update
+                };
+
+                log_event(
+                    "info",
+                    "payment_submitted_for_spend",
+                    json!({
+                        "decision_id": authorization.evaluation.decision_id.to_string(),
+                        "payment_id": payment.payment_id.to_string(),
+                        "payment_status": match payment.status {
+                            PaymentStatus::Succeeded => "succeeded",
+                            PaymentStatus::Failed => "failed",
+                        },
+                        "ledger_transaction_id": payment.ledger_transaction_id.as_ref().map(ToString::to_string),
+                        "rail_reference": payment.rail_reference,
+                        "failure_reason": payment.failure_reason,
+                    }),
+                );
+                (
+                    Some(budget_hold_response(hold_update)),
+                    Some(PaymentHttpResponse {
+                        payment_id: payment.payment_id.to_string(),
+                        owner_user_id: owner.pub_id,
+                        owner_user_name: owner.display_name,
+                        account_id: authorization.account_pub_id.clone(),
+                        status: match payment.status {
+                            PaymentStatus::Succeeded => "succeeded",
+                            PaymentStatus::Failed => "failed",
+                        }
+                        .to_string(),
+                        ledger_transaction_id: payment
+                            .ledger_transaction_id
+                            .map(|id| id.to_string()),
+                        rail_reference: payment.rail_reference,
+                        failure_reason: payment.failure_reason,
+                    }),
+                )
+            }
+            Err(error) => {
+                let release = state
+                    .budgets
+                    .lock()
+                    .map_err(|_| anyhow!("budget manager lock poisoned"))?
+                    .release_budget(&reservation.hold.id)?;
+                state
+                    .governance
+                    .lock()
+                    .map_err(|_| anyhow!("governance store lock poisoned"))?
+                    .update_budget_hold(&release.hold, &release.balance)?;
+                log_event(
+                    "warn",
+                    "payment_failed_budget_released",
+                    json!({
+                        "decision_id": authorization.evaluation.decision_id.to_string(),
+                        "hold_id": reservation.hold.id.to_string(),
+                        "error": error.to_string(),
+                    }),
+                );
+                return Err(error.into());
+            }
+        }
+    } else {
+        (None, None)
+    };
+
+    Ok(SpendHttpResponse {
+        account_id: authorization.account_pub_id,
+        agent_id: authorization.agent_pub_id,
+        decision_id: authorization.evaluation.decision_id.to_string(),
+        decision: effect_name(authorization.evaluation.evaluation.decision).to_string(),
+        reasons: authorization.evaluation.evaluation.reasons,
+        auth_token_id: authorization.auth_token_id,
+        budget_hold,
+        payment,
+    })
+}
+
+struct AuthorizedSpend {
+    user: UserContext,
+    account: AgentAccount,
+    account_pub_id: String,
+    agent_id: AgentId,
+    agent_pub_id: String,
+    amount_cents: i64,
+    merchant: Option<String>,
+    reason: String,
+    evaluation: hubu_core::spend::SpendEvaluationResponse,
+    auth_token_id: Option<String>,
+    token: Option<hubu_core::spend::IssuedSpendAuthToken>,
+    reservation: Option<ReserveBudgetResponse>,
+}
+
+fn evaluate_and_reserve_spend(
+    request: SpendHttpRequest,
+    state: &ServerState,
+) -> Result<AuthorizedSpend> {
     if request.amount_cents <= 0 {
         return Err(anyhow!("spend amount must be positive"));
     }
@@ -1379,8 +1566,8 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
             "auth_token_issued": auth_token_id.is_some(),
         }),
     );
-    let owner = owner_metadata_for_user_id(&user.user_id, state)?;
-    let (budget_hold, payment) = if let Some(token) = evaluation.auth_token {
+    let token = evaluation.auth_token.clone();
+    let reservation = if let Some(token) = token.as_ref() {
         let budget_id = active_budget_id_for_user(&user.user_id, state)?;
         let reservation = {
             let mut budgets = state
@@ -1468,146 +1655,24 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
                 "frozen_amount_cents": reservation.balance.frozen_amount_cents,
             }),
         );
-
-        let payment_request = PaymentRequest {
-            idempotency_key: format!("{}:{}", evaluation.decision_id, request.reason),
-            spend_auth_token_id: token.id,
-            owner_user_id: user.user_id.clone(),
-            agent_id,
-            agent_account_id: account.id.clone(),
-            amount_cents: request.amount_cents,
-            currency: Currency::Usd,
-            merchant: request.merchant,
-            task_id: Some(request.reason),
-            rail: PaymentRailKind::FiatMock,
-            destination: PaymentDestination::FiatAccount {
-                account_ref: "demo-merchant-account".to_string(),
-            },
-            memo: Some("Hubu demo payment".to_string()),
-        };
-
-        let payment_audit_request = payment_request.clone();
-        let payment_result = state
-            .payments
-            .lock()
-            .map_err(|_| anyhow!("payment manager lock poisoned"))?
-            .submit_payment(payment_request);
-
-        match payment_result {
-            Ok(payment) => {
-                state
-                    .payment_attempts
-                    .lock()
-                    .map_err(|_| anyhow!("payment attempt store lock poisoned"))?
-                    .save_payment_attempt(&payment_audit_request, &payment)?;
-
-                if payment.status == PaymentStatus::Succeeded {
-                    let used_token = state
-                        .spend
-                        .lock()
-                        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-                        .auth_token_record(&payment_audit_request.spend_auth_token_id)
-                        .ok_or_else(|| anyhow!("used spend auth token was not recorded"))?;
-                    state
-                        .governance
-                        .lock()
-                        .map_err(|_| anyhow!("governance store lock poisoned"))?
-                        .update_spend_auth_token(&used_token)?;
-                }
-
-                let hold_update = {
-                    let mut budgets = state
-                        .budgets
-                        .lock()
-                        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-                    let hold_update = if payment.status == PaymentStatus::Succeeded {
-                        BudgetHoldUpdate::Settled(budgets.settle_budget(&reservation.hold.id)?)
-                    } else {
-                        BudgetHoldUpdate::Released(budgets.release_budget(&reservation.hold.id)?)
-                    };
-                    let (hold, balance) = match &hold_update {
-                        BudgetHoldUpdate::Settled(response) => (&response.hold, &response.balance),
-                        BudgetHoldUpdate::Released(response) => (&response.hold, &response.balance),
-                    };
-                    state
-                        .governance
-                        .lock()
-                        .map_err(|_| anyhow!("governance store lock poisoned"))?
-                        .update_budget_hold(hold, balance)?;
-                    hold_update
-                };
-
-                log_event(
-                    "info",
-                    "payment_submitted_for_spend",
-                    json!({
-                        "decision_id": evaluation.decision_id.to_string(),
-                        "payment_id": payment.payment_id.to_string(),
-                        "payment_status": match payment.status {
-                            PaymentStatus::Succeeded => "succeeded",
-                            PaymentStatus::Failed => "failed",
-                        },
-                        "ledger_transaction_id": payment.ledger_transaction_id.as_ref().map(ToString::to_string),
-                        "rail_reference": payment.rail_reference,
-                        "failure_reason": payment.failure_reason,
-                    }),
-                );
-                (
-                    Some(budget_hold_response(hold_update)),
-                    Some(PaymentHttpResponse {
-                        payment_id: payment.payment_id.to_string(),
-                        owner_user_id: owner.pub_id,
-                        owner_user_name: owner.display_name,
-                        account_id: account_pub_id.clone(),
-                        status: match payment.status {
-                            PaymentStatus::Succeeded => "succeeded",
-                            PaymentStatus::Failed => "failed",
-                        }
-                        .to_string(),
-                        ledger_transaction_id: payment
-                            .ledger_transaction_id
-                            .map(|id| id.to_string()),
-                        rail_reference: payment.rail_reference,
-                        failure_reason: payment.failure_reason,
-                    }),
-                )
-            }
-            Err(error) => {
-                let release = state
-                    .budgets
-                    .lock()
-                    .map_err(|_| anyhow!("budget manager lock poisoned"))?
-                    .release_budget(&reservation.hold.id)?;
-                state
-                    .governance
-                    .lock()
-                    .map_err(|_| anyhow!("governance store lock poisoned"))?
-                    .update_budget_hold(&release.hold, &release.balance)?;
-                log_event(
-                    "warn",
-                    "payment_failed_budget_released",
-                    json!({
-                        "decision_id": evaluation.decision_id.to_string(),
-                        "hold_id": reservation.hold.id.to_string(),
-                        "error": error.to_string(),
-                    }),
-                );
-                return Err(error.into());
-            }
-        }
+        Some(reservation)
     } else {
-        (None, None)
+        None
     };
 
-    Ok(SpendHttpResponse {
-        account_id: account_pub_id,
-        agent_id: agent_pub_id,
-        decision_id: evaluation.decision_id.to_string(),
-        decision: effect_name(evaluation.evaluation.decision).to_string(),
-        reasons: evaluation.evaluation.reasons,
+    Ok(AuthorizedSpend {
+        user,
+        account,
+        account_pub_id,
+        agent_id,
+        agent_pub_id,
+        amount_cents: request.amount_cents,
+        merchant: request.merchant,
+        reason: request.reason,
+        evaluation,
         auth_token_id,
-        budget_hold,
-        payment,
+        token,
+        reservation,
     })
 }
 
@@ -1707,6 +1772,18 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
             frozen_amount_cents: response.balance.frozen_amount_cents,
             remaining_amount_cents: response.balance.remaining_amount_cents,
         },
+    }
+}
+
+fn frozen_budget_hold_response(response: ReserveBudgetResponse) -> BudgetHoldHttpResponse {
+    BudgetHoldHttpResponse {
+        hold_id: response.hold.id.to_string(),
+        budget_id: response.hold.budget_id.to_string(),
+        status: "frozen".to_string(),
+        amount_cents: response.hold.amount_cents,
+        consumed_amount_cents: response.balance.consumed_amount_cents,
+        frozen_amount_cents: response.balance.frozen_amount_cents,
+        remaining_amount_cents: response.balance.remaining_amount_cents,
     }
 }
 
@@ -2293,6 +2370,79 @@ mod tests {
         let payment = spend.payment.expect("allowed spend should pay");
         assert_eq!(payment.account_id, agent.account_id);
         assert_eq!(payment.owner_user_id, user.user_id);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn authorize_spend_freezes_budget_without_payment_or_ledger() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-authorize-spend-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "logo-design-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should allow the logo budget");
+
+        create_budget(
+            json!({
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should be created for initialized user");
+
+        let authorization = authorize_spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 500,
+                "reason": "Generate Project Hubu logo",
+                "merchant": "hubu-model-proxy",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should authorize");
+
+        assert_eq!(authorization.decision, "allow");
+        assert!(authorization.auth_token_id.is_some());
+        assert!(authorization.payment.is_none());
+        let budget_hold = authorization
+            .budget_hold
+            .expect("allowed authorization should reserve budget");
+        assert_eq!(budget_hold.status, "frozen");
+        assert_eq!(budget_hold.amount_cents, 500);
+        assert_eq!(budget_hold.consumed_amount_cents, 0);
+        assert_eq!(budget_hold.frozen_amount_cents, 500);
+        assert_eq!(budget_hold.remaining_amount_cents, 0);
+
+        let ledger = list_ledger(&state).expect("ledger should list");
+        assert!(ledger.transactions.is_empty());
         std::fs::remove_file(path).ok();
     }
 

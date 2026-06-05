@@ -529,6 +529,10 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         print_spend_help();
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("authorize") {
+        args.remove(0);
+        return spend_authorize(base_url, args);
+    }
 
     let account_id = take_value(&mut args, "--account-id");
     let agent_id = take_value(&mut args, "--agent-id");
@@ -557,12 +561,54 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     }
 
     let response = post_json(base_url, "/spend", body)?;
+    print_spend_response(&response)
+}
 
+fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_spend_authorize_help();
+        return Ok(());
+    }
+
+    let account_id = take_value(&mut args, "--account-id");
+    let agent_id = take_value(&mut args, "--agent-id");
+    let amount = take_required(&mut args, "--amount")?;
+    let reason = take_required(&mut args, "--reason")?;
+    let merchant =
+        take_value(&mut args, "--merchant").unwrap_or_else(|| "demo-merchant".to_string());
+    ensure_no_args(args)?;
+
+    if account_id.is_some() == agent_id.is_some() {
+        return Err(anyhow!(
+            "provide exactly one of --account-id or --agent-id for spend"
+        ));
+    }
+
+    let mut body = json!({
+        "amount_cents": amount_to_cents(&amount)?,
+        "reason": reason,
+        "merchant": merchant,
+    });
+    if let Some(account_id) = account_id {
+        body["account_id"] = json!(account_id);
+    }
+    if let Some(agent_id) = agent_id {
+        body["agent_id"] = json!(agent_id);
+    }
+
+    let response = post_json(base_url, "/spend/authorize", body)?;
+    print_spend_response(&response)
+}
+
+fn print_spend_response(response: &Value) -> Result<()> {
     println!("Spend evaluated");
-    println!("  account_id: {}", string_at(&response, "account_id")?);
-    println!("  agent_id: {}", string_at(&response, "agent_id")?);
-    println!("  decision: {}", string_at(&response, "decision")?);
-    println!("  decision_id: {}", string_at(&response, "decision_id")?);
+    println!("  account_id: {}", string_at(response, "account_id")?);
+    println!("  agent_id: {}", string_at(response, "agent_id")?);
+    println!("  decision: {}", string_at(response, "decision")?);
+    println!("  decision_id: {}", string_at(response, "decision_id")?);
+    if let Some(token_id) = response.get("auth_token_id").and_then(Value::as_str) {
+        println!("  auth_token_id: {token_id}");
+    }
     if let Some(reasons) = response.get("reasons").and_then(Value::as_array) {
         for reason in reasons {
             println!(
@@ -1034,7 +1080,19 @@ fn print_spend_help() {
 
 Usage:
   hubu spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]"
+  hubu spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]"
+    );
+}
+
+fn print_spend_authorize_help() {
+    println!(
+        "Authorize spend and reserve budget without executing payment
+
+Usage:
+  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]"
     );
 }
 
