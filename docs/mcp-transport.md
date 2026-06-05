@@ -95,8 +95,14 @@ Hubu's authorization header, sends the same request id as `Idempotency-Key` and
 `X-Hubu-Request-Id`, applies `HUBU_IMAGE_PROVIDER_TIMEOUT_MS` with a default of
 `30000`, can retry transient provider failures up to
 `HUBU_IMAGE_PROVIDER_MAX_RETRIES` times (default `0`, maximum `3`), and expects
-JSON with a non-empty `output_ref`. Agent requests must match the configured
-provider/model, the spend
+JSON with a non-empty `output_ref`. The JSON field names are server-side
+configuration too: `HUBU_IMAGE_PROVIDER_HTTP_JSON_PROVIDER_FIELD`,
+`HUBU_IMAGE_PROVIDER_HTTP_JSON_MODEL_FIELD`,
+`HUBU_IMAGE_PROVIDER_HTTP_JSON_PROMPT_FIELD`,
+`HUBU_IMAGE_PROVIDER_HTTP_JSON_REQUEST_ID_FIELD`, and
+`HUBU_IMAGE_PROVIDER_HTTP_JSON_OUTPUT_REF_FIELD`. Optional request fields can be
+omitted by setting their field name to an empty string. Agent requests must
+match the configured provider/model, the spend
 authorization must be scoped to the configured image proxy merchant and exact
 provider price (`HUBU_IMAGE_PROVIDER_PRICE_CENTS`, default `500`), and remote
 provider endpoints must use HTTPS. If provider generation fails before payment,

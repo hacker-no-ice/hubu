@@ -328,7 +328,13 @@ Hubu with `HUBU_IMAGE_PROVIDER_ADAPTER=http-json`,
 header, uses a default 30000 ms provider timeout, sends the request id as
 `Idempotency-Key` and `X-Hubu-Request-Id`, can retry transient provider failures
 when configured, and expects the provider to return JSON with a non-empty
-`output_ref`.
+`output_ref`. For providers with different JSON field names, configure the
+server-side mapping with `HUBU_IMAGE_PROVIDER_HTTP_JSON_PROVIDER_FIELD`,
+`HUBU_IMAGE_PROVIDER_HTTP_JSON_MODEL_FIELD`,
+`HUBU_IMAGE_PROVIDER_HTTP_JSON_PROMPT_FIELD`,
+`HUBU_IMAGE_PROVIDER_HTTP_JSON_REQUEST_ID_FIELD`, and
+`HUBU_IMAGE_PROVIDER_HTTP_JSON_OUTPUT_REF_FIELD`; set optional request field
+names to an empty string to omit them.
 Agents may only request the configured provider/model, image calls only consume
 spend authorizations scoped to the configured proxy merchant and exact
 server-side provider price, and the API key is not returned in API, CLI, MCP, or

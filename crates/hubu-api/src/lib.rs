@@ -151,6 +151,7 @@ struct ImageProviderConfig {
     price_cents: i64,
     timeout_ms: u64,
     max_retries: u32,
+    http_json_fields: HttpJsonImageProviderFields,
     output_dir: PathBuf,
     adapter_kind: ImageProviderAdapterKind,
 }
@@ -171,6 +172,7 @@ impl ImageProviderConfig {
             price_cents: image_provider_price_cents_from_env()?,
             timeout_ms: image_provider_timeout_ms_from_env()?,
             max_retries: image_provider_max_retries_from_env()?,
+            http_json_fields: HttpJsonImageProviderFields::from_env()?,
             output_dir: image_output_dir_from_env(),
         })
     }
@@ -224,6 +226,76 @@ impl ImageProviderConfig {
                 "image provider adapter '{adapter}' is not supported by this Hubu build"
             )),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HttpJsonImageProviderFields {
+    provider: Option<String>,
+    model: Option<String>,
+    prompt: String,
+    request_id: Option<String>,
+    output_ref: String,
+}
+
+impl HttpJsonImageProviderFields {
+    fn from_env() -> Result<Self> {
+        Ok(Self {
+            provider: optional_http_json_field_from_env(
+                "HUBU_IMAGE_PROVIDER_HTTP_JSON_PROVIDER_FIELD",
+                Some("provider"),
+            )?,
+            model: optional_http_json_field_from_env(
+                "HUBU_IMAGE_PROVIDER_HTTP_JSON_MODEL_FIELD",
+                Some("model"),
+            )?,
+            prompt: required_http_json_field_from_env(
+                "HUBU_IMAGE_PROVIDER_HTTP_JSON_PROMPT_FIELD",
+                "prompt",
+            )?,
+            request_id: optional_http_json_field_from_env(
+                "HUBU_IMAGE_PROVIDER_HTTP_JSON_REQUEST_ID_FIELD",
+                Some("request_id"),
+            )?,
+            output_ref: required_http_json_field_from_env(
+                "HUBU_IMAGE_PROVIDER_HTTP_JSON_OUTPUT_REF_FIELD",
+                "output_ref",
+            )?,
+        })
+    }
+
+    #[cfg(test)]
+    fn defaults() -> Self {
+        Self {
+            provider: Some("provider".to_string()),
+            model: Some("model".to_string()),
+            prompt: "prompt".to_string(),
+            request_id: Some("request_id".to_string()),
+            output_ref: "output_ref".to_string(),
+        }
+    }
+}
+
+fn required_http_json_field_from_env(name: &str, default: &str) -> Result<String> {
+    let value = env::var(name).unwrap_or_else(|_| default.to_string());
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(anyhow!("{name} must not be empty"));
+    }
+    Ok(value.to_string())
+}
+
+fn optional_http_json_field_from_env(name: &str, default: Option<&str>) -> Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(value.to_string()))
+            }
+        }
+        Err(_) => Ok(default.map(str::to_string)),
     }
 }
 
@@ -464,6 +536,7 @@ impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
             api_key,
             self.config.timeout_ms,
             self.config.max_retries,
+            &self.config.http_json_fields,
             &request,
         )?;
         let body: serde_json::Value = response.into_json().map_err(|error| {
@@ -472,7 +545,7 @@ impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
                 format!("parse image provider JSON response: {error}"),
             )
         })?;
-        image_generation_output_from_provider_body(&body)
+        image_generation_output_from_provider_body(&body, &self.config.http_json_fields)
     }
 }
 
@@ -481,6 +554,7 @@ fn send_http_json_image_provider_request(
     api_key: &str,
     timeout_ms: u64,
     max_retries: u32,
+    fields: &HttpJsonImageProviderFields,
     request: &ImageGenerationRequest<'_>,
 ) -> Result<ureq::Response, ImageProviderError> {
     let timeout = std::time::Duration::from_millis(timeout_ms);
@@ -491,7 +565,7 @@ fn send_http_json_image_provider_request(
         .timeout_write(timeout)
         .build();
     let headers = http_json_image_provider_headers(api_key, request.artifact_id);
-    let payload = http_json_image_provider_payload(request);
+    let payload = http_json_image_provider_payload(request, fields);
     let mut attempts = 0;
     loop {
         let response = apply_http_json_image_provider_headers(agent.post(endpoint), &headers)
@@ -509,15 +583,19 @@ fn send_http_json_image_provider_request(
 
 fn image_generation_output_from_provider_body(
     body: &serde_json::Value,
+    fields: &HttpJsonImageProviderFields,
 ) -> Result<ImageGenerationOutput, ImageProviderError> {
     let output_ref = body
-        .get("output_ref")
+        .get(&fields.output_ref)
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
             ImageProviderError::new(
                 "provider_response_invalid",
-                "image provider response missing non-empty output_ref",
+                format!(
+                    "image provider response missing non-empty {}",
+                    fields.output_ref
+                ),
             )
         })?;
     Ok(ImageGenerationOutput {
@@ -549,13 +627,22 @@ fn classify_http_json_provider_error(error: ureq::Error) -> ImageProviderError {
     }
 }
 
-fn http_json_image_provider_payload(request: &ImageGenerationRequest<'_>) -> serde_json::Value {
-    json!({
-        "provider": request.provider,
-        "model": request.model,
-        "prompt": request.prompt,
-        "request_id": request.artifact_id,
-    })
+fn http_json_image_provider_payload(
+    request: &ImageGenerationRequest<'_>,
+    fields: &HttpJsonImageProviderFields,
+) -> serde_json::Value {
+    let mut payload = serde_json::Map::new();
+    if let Some(field) = &fields.provider {
+        payload.insert(field.clone(), json!(request.provider));
+    }
+    if let Some(field) = &fields.model {
+        payload.insert(field.clone(), json!(request.model));
+    }
+    payload.insert(fields.prompt.clone(), json!(request.prompt));
+    if let Some(field) = &fields.request_id {
+        payload.insert(field.clone(), json!(request.artifact_id));
+    }
+    Value::Object(payload)
 }
 
 fn http_json_image_provider_headers(
@@ -3472,6 +3559,7 @@ mod tests {
             price_cents: 500,
             timeout_ms: 30_000,
             max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Demo,
         };
@@ -3504,6 +3592,7 @@ mod tests {
             price_cents: 500,
             timeout_ms: 30_000,
             max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
         };
@@ -3545,6 +3634,7 @@ mod tests {
             price_cents: 500,
             timeout_ms: 30_000,
             max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::HttpJson,
         };
@@ -3633,9 +3723,12 @@ mod tests {
 
     #[test]
     fn http_json_image_adapter_classifies_invalid_provider_response() {
-        let error = image_generation_output_from_provider_body(&json!({
-            "images": []
-        }))
+        let error = image_generation_output_from_provider_body(
+            &json!({
+                "images": []
+            }),
+            &HttpJsonImageProviderFields::defaults(),
+        )
         .expect_err("provider response without output_ref should be rejected");
 
         assert_eq!(error.code, "provider_response_invalid");
@@ -3680,12 +3773,15 @@ mod tests {
 
     #[test]
     fn http_json_image_adapter_payload_excludes_api_key() {
-        let payload = http_json_image_provider_payload(&ImageGenerationRequest {
-            provider: "nano-banana",
-            model: "logo-v1",
-            prompt: "Create a crisp logo for Project Hubu",
-            artifact_id: "sat_test",
-        });
+        let payload = http_json_image_provider_payload(
+            &ImageGenerationRequest {
+                provider: "nano-banana",
+                model: "logo-v1",
+                prompt: "Create a crisp logo for Project Hubu",
+                artifact_id: "sat_test",
+            },
+            &HttpJsonImageProviderFields::defaults(),
+        );
 
         assert_eq!(payload["provider"], "nano-banana");
         assert_eq!(payload["model"], "logo-v1");
@@ -3707,6 +3803,51 @@ mod tests {
     }
 
     #[test]
+    fn http_json_image_adapter_supports_field_mapping() {
+        let fields = HttpJsonImageProviderFields {
+            provider: None,
+            model: Some("model_name".to_string()),
+            prompt: "input".to_string(),
+            request_id: Some("client_request_id".to_string()),
+            output_ref: "asset_url".to_string(),
+        };
+        let payload = http_json_image_provider_payload(
+            &ImageGenerationRequest {
+                provider: "nano-banana",
+                model: "logo-v1",
+                prompt: "Create a crisp logo for Project Hubu",
+                artifact_id: "sat_test",
+            },
+            &fields,
+        );
+
+        assert!(payload.get("provider").is_none());
+        assert_eq!(payload["model_name"], "logo-v1");
+        assert_eq!(payload["input"], "Create a crisp logo for Project Hubu");
+        assert_eq!(payload["client_request_id"], "sat_test");
+
+        let output = image_generation_output_from_provider_body(
+            &json!({
+                "asset_url": "https://vendor.example/assets/logo.png"
+            }),
+            &fields,
+        )
+        .expect("mapped output field should parse");
+        assert_eq!(output.output_ref, "https://vendor.example/assets/logo.png");
+    }
+
+    #[test]
+    fn http_json_image_adapter_rejects_empty_required_field_mapping() {
+        let error =
+            required_http_json_field_from_env("HUBU_IMAGE_PROVIDER_HTTP_JSON_PROMPT_FIELD", "   ")
+                .expect_err("required field mapping should not be blank");
+
+        assert!(error
+            .to_string()
+            .contains("HUBU_IMAGE_PROVIDER_HTTP_JSON_PROMPT_FIELD must not be empty"));
+    }
+
+    #[test]
     fn http_json_image_adapter_sets_server_side_idempotency_headers() {
         let headers = http_json_image_provider_headers("server-side-secret", "sat_test");
 
@@ -3720,12 +3861,15 @@ mod tests {
             .iter()
             .any(|(name, value)| { *name == "X-Hubu-Request-Id" && value == "sat_test" }));
 
-        let payload = http_json_image_provider_payload(&ImageGenerationRequest {
-            provider: "nano-banana",
-            model: "logo-v1",
-            prompt: "Create a crisp logo for Project Hubu",
-            artifact_id: "sat_test",
-        });
+        let payload = http_json_image_provider_payload(
+            &ImageGenerationRequest {
+                provider: "nano-banana",
+                model: "logo-v1",
+                prompt: "Create a crisp logo for Project Hubu",
+                artifact_id: "sat_test",
+            },
+            &HttpJsonImageProviderFields::defaults(),
+        );
         assert_eq!(payload["request_id"], "sat_test");
         assert!(!payload.to_string().contains("server-side-secret"));
     }
@@ -3899,6 +4043,7 @@ mod tests {
             price_cents: 500,
             timeout_ms: 30_000,
             max_retries: 0,
+            http_json_fields: HttpJsonImageProviderFields::defaults(),
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
         };
