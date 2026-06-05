@@ -14,6 +14,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
+const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
+const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
+const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
 const FINGERPRINT_PREFIX: &str = "sha256:";
 
 fn main() {
@@ -742,12 +745,15 @@ fn health(base_url: &str) -> Result<()> {
 fn request_json(base_url: &str, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
     let (host, port) = parse_base_url(base_url)?;
     let body_text = body.map(|body| body.to_string()).unwrap_or_default();
+    let authorization_header = auth_token()?
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("connect to Hubu server at {base_url}"))?;
 
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body_text.len(),
         body_text
     )?;
@@ -776,6 +782,31 @@ fn get_json(base_url: &str, path: &str) -> Result<Value> {
 
 fn post_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
     request_json(base_url, "POST", path, Some(body))
+}
+
+fn auth_token() -> Result<Option<String>> {
+    if let Ok(token) = env::var(AUTH_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{AUTH_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(Some(token));
+    }
+
+    let path =
+        env::var(AUTH_TOKEN_FILE_ENV).unwrap_or_else(|_| DEFAULT_AUTH_TOKEN_FILE.to_string());
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                Err(anyhow!("Hubu auth token file `{path}` is empty"))
+            } else {
+                Ok(Some(token))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read Hubu auth token file `{path}`")),
+    }
 }
 
 fn fingerprint_payload(payload: &Value) -> String {

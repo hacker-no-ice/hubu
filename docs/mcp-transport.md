@@ -10,6 +10,12 @@ Run the HTTP server first:
 cargo run --bin hubu-server
 ```
 
+The HTTP server reads `HUBU_AUTH_TOKEN`, or creates/reads `hubu.auth-token` in
+its current directory. The MCP adapter reads `HUBU_AUTH_TOKEN` or the same token
+file and forwards protected HTTP requests with `Authorization: Bearer ...`.
+Use `HUBU_AUTH_TOKEN_FILE` when the server and adapter run from different
+working directories.
+
 Then configure an MCP client to launch:
 
 ```sh
@@ -20,6 +26,9 @@ The MCP server reads `HUBU_URL` and defaults to `http://127.0.0.1:8787`.
 Protected write tools are disabled unless the MCP process is started with
 `HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. Only set that variable when the MCP client
 is trusted to show a human approval prompt before invoking destructive tools.
+The bearer token protects the local HTTP API from arbitrary localhost callers;
+the MCP approval gate still protects human-intent workflows from agent-controlled
+tool arguments.
 
 ## Approval Boundaries
 
@@ -92,3 +101,6 @@ the agent.
 | `hubu_list_agents` | `GET /agents` | none |
 | `hubu_list_budgets` | `GET /budgets` | none |
 | `hubu_list_ledger` | `GET /ledger` | none |
+
+All non-public HTTP routes behind these tools require the Hubu bearer token.
+Public HTTP routes are limited to health and protocol guidance.

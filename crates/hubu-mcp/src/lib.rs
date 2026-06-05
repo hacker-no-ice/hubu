@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fs,
     io::{self, BufRead, Read, Write},
     net::{Shutdown, TcpStream},
 };
@@ -8,6 +8,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
+const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
+const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
+const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 #[derive(Debug, Clone, Copy)]
@@ -351,12 +354,15 @@ fn post_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
 fn request_json(base_url: &str, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
     let (host, port) = parse_base_url(base_url)?;
     let body_text = body.map(|body| body.to_string()).unwrap_or_default();
+    let authorization_header = auth_token()?
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("connect to Hubu server at {base_url}"))?;
 
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body_text.len(),
         body_text
     )?;
@@ -388,6 +394,31 @@ fn parse_base_url(base_url: &str) -> Result<(String, u16)> {
         .rsplit_once(':')
         .ok_or_else(|| anyhow!("Hubu URL must include a port"))?;
     Ok((host.to_string(), port.parse()?))
+}
+
+fn auth_token() -> Result<Option<String>> {
+    if let Ok(token) = env::var(AUTH_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{AUTH_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(Some(token));
+    }
+
+    let path =
+        env::var(AUTH_TOKEN_FILE_ENV).unwrap_or_else(|_| DEFAULT_AUTH_TOKEN_FILE.to_string());
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                Err(anyhow!("Hubu auth token file `{path}` is empty"))
+            } else {
+                Ok(Some(token))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read Hubu auth token file `{path}`")),
+    }
 }
 
 fn parse_http_response(raw: &str) -> Result<(u16, &str)> {

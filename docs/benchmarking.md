@@ -22,6 +22,9 @@ The benchmark covers the local MVP HTTP path:
 The script builds `hubu-server` and `hubu-bench`, starts an isolated local
 server on `127.0.0.1:8790`, samples server CPU/RSS once per second with `ps`,
 and writes artifacts under `target/hubu-bench/`.
+The server creates/reads the local Hubu bearer token, and `hubu-bench` reads
+`HUBU_AUTH_TOKEN` or `HUBU_AUTH_TOKEN_FILE`/`hubu.auth-token` before calling
+protected routes.
 
 Useful environment overrides:
 

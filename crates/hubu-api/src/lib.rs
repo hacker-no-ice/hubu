@@ -2,18 +2,22 @@ use std::{
     collections::{BTreeMap, HashMap},
     env,
     fmt::Write as _,
+    fs::{self, OpenOptions},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
     time::Instant,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use hubu_common::{
-    ids::{AgentId, BudgetId, PaymentId, SpendAuthTokenId, UserId},
+    ids::{AgentId, AgentSessionId, BudgetId, PaymentId, SpendAuthTokenId, UserId},
     models::account::{AccountStatus, AgentAccount},
     models::identity::{
         AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
@@ -54,6 +58,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
+const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
+const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
+const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+#[cfg(test)]
+const TEST_AUTH_TOKEN: &str = "test-local-auth-token";
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 type DemoPaymentManager = PaymentManager<MockPaymentRail, SharedSpendAuthorizer>;
@@ -129,6 +138,7 @@ fn configure_server_logging() -> Result<()> {
 }
 
 struct ServerState {
+    auth: LocalAuth,
     users: Mutex<UserManager>,
     registration: Mutex<RegistrationManager>,
     spend: Arc<Mutex<SpendManager>>,
@@ -158,6 +168,16 @@ impl ServerState {
         );
         let mut users = UserManager::open(&path).context("initialize user store")?;
         let default_user = users.ensure_default_user()?;
+        let auth = LocalAuth::new(default_user.id.clone()).context("initialize local API auth")?;
+        log_event(
+            "info",
+            "local_api_auth_configured",
+            json!({
+                "source": auth.source(),
+                "owner_user_id": default_user.id.to_string(),
+                "owner_user_pub_id": default_user.pub_id,
+            }),
+        );
         let mut governance =
             SqliteGovernanceRepository::open(&path).context("initialize governance store")?;
         governance
@@ -214,6 +234,7 @@ impl ServerState {
         }
 
         let state = Self {
+            auth,
             users: Mutex::new(users),
             registration: Mutex::new(
                 RegistrationManager::open(&path).context("initialize agent registration store")?,
@@ -236,6 +257,180 @@ impl ServerState {
         );
         Ok(state)
     }
+}
+
+/// Local API authority for the current Hubu process.
+///
+/// This is intentionally a *baseline localhost hardening layer*, not a complete
+/// money-grade authorization system. It is still meaningfully better than an
+/// unauthenticated localhost API because protected routes reject callers that do
+/// not possess the Hubu token, which blocks accidental external exposure, other
+/// OS users when file permissions hold, and browser-origin blind writes that
+/// cannot attach the bearer token. It also gives the server a concrete
+/// authenticated owner instead of trusting a process-wide default user.
+///
+/// This does **not** defend against a malicious process running as the same OS
+/// user that can read `HUBU_AUTH_TOKEN`, read the token file, or control an
+/// already-authorized client. Real money movement should add scoped,
+/// short-lived capabilities and a durable human approval authority so possession
+/// of this local transport token alone is not enough to create budgets, change
+/// policies, or settle money.
+struct LocalAuth {
+    token_hash: String,
+    token_source: String,
+    owner_user_id: Mutex<UserId>,
+}
+
+impl LocalAuth {
+    fn new(owner_user_id: UserId) -> Result<Self> {
+        let token = load_local_auth_token()?;
+        Ok(Self {
+            token_hash: hash_token(&token.value),
+            token_source: token.source,
+            owner_user_id: Mutex::new(owner_user_id),
+        })
+    }
+
+    fn verifies(&self, token: &str) -> bool {
+        constant_time_eq(hash_token(token).as_bytes(), self.token_hash.as_bytes())
+    }
+
+    fn source(&self) -> &str {
+        &self.token_source
+    }
+
+    fn owner_user_id(&self) -> Result<UserId> {
+        self.owner_user_id
+            .lock()
+            .map_err(|_| anyhow!("local API auth owner lock poisoned"))
+            .map(|owner| owner.clone())
+    }
+
+    fn select_owner_user(&self, user_id: &UserId) -> Result<()> {
+        *self
+            .owner_user_id
+            .lock()
+            .map_err(|_| anyhow!("local API auth owner lock poisoned"))? = user_id.clone();
+        Ok(())
+    }
+}
+
+struct LoadedLocalAuthToken {
+    value: String,
+    source: String,
+}
+
+fn load_local_auth_token() -> Result<LoadedLocalAuthToken> {
+    #[cfg(test)]
+    if env::var(AUTH_TOKEN_ENV).is_err() && env::var(AUTH_TOKEN_FILE_ENV).is_err() {
+        return Ok(LoadedLocalAuthToken {
+            value: TEST_AUTH_TOKEN.to_string(),
+            source: "test".to_string(),
+        });
+    }
+
+    if let Ok(token) = env::var(AUTH_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{AUTH_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(LoadedLocalAuthToken {
+            value: token,
+            source: AUTH_TOKEN_ENV.to_string(),
+        });
+    }
+
+    let path = auth_token_file_path();
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                return Err(anyhow!(
+                    "Hubu auth token file `{}` is empty",
+                    path.display()
+                ));
+            }
+            Ok(LoadedLocalAuthToken {
+                value: token,
+                source: path.display().to_string(),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let token = create_auth_token_file(&path)?;
+            Ok(LoadedLocalAuthToken {
+                value: token,
+                source: path.display().to_string(),
+            })
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("read Hubu auth token file `{}`", path.display()))
+        }
+    }
+}
+
+fn auth_token_file_path() -> PathBuf {
+    env::var(AUTH_TOKEN_FILE_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_AUTH_TOKEN_FILE))
+}
+
+fn create_auth_token_file(path: &Path) -> Result<String> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create auth token directory `{}`", parent.display()))?;
+    }
+
+    let token = format!("hubu_{}", AgentSessionId::new());
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    match options.open(path) {
+        Ok(mut file) => {
+            writeln!(file, "{token}")
+                .with_context(|| format!("write Hubu auth token file `{}`", path.display()))?;
+            Ok(token)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let token = fs::read_to_string(path)
+                .with_context(|| {
+                    format!("read existing Hubu auth token file `{}`", path.display())
+                })?
+                .trim()
+                .to_string();
+            if token.is_empty() {
+                Err(anyhow!(
+                    "Hubu auth token file `{}` is empty",
+                    path.display()
+                ))
+            } else {
+                Ok(token)
+            }
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("create Hubu auth token file `{}`", path.display()))
+        }
+    }
+}
+
+fn hash_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    format!("{FINGERPRINT_PREFIX}{}", hex_encode(&digest))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
+        == 0
 }
 
 #[derive(Clone)]
@@ -588,6 +783,24 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
 }
 
 fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
+    if !is_public_route(&request) {
+        if let Err(error) = authenticate_request(&request, state) {
+            log_event(
+                "warn",
+                "http_request_unauthorized",
+                json!({
+                    "method": request.method,
+                    "path": request.path,
+                    "error": error.to_string(),
+                }),
+            );
+            return HttpResponse {
+                status: 401,
+                body: json!({ "error": error.to_string() }),
+            };
+        }
+    }
+
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
         ("GET", "/registration/guidance")
@@ -636,6 +849,75 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             }
         }
     }
+}
+
+fn is_public_route(request: &HttpRequest) -> bool {
+    matches!(
+        (request.method.as_str(), request.path.as_str()),
+        ("GET", "/health")
+            | ("GET", "/registration/guidance")
+            | ("GET", "/.well-known/hubu-agent-registration.json")
+            | ("GET", "/spend/executor/guidance")
+            | ("GET", "/.well-known/hubu-spend-executor.json")
+    )
+}
+
+// Defense in depth around the bearer token: require JSON POSTs, reject browser
+// origins, and keep protected traffic on loopback hosts. These checks reduce
+// common localhost attack paths, but the token remains the actual local
+// capability and should not be treated as human approval for real-money flows.
+fn authenticate_request(request: &HttpRequest, state: &ServerState) -> Result<()> {
+    if request.headers.contains_key("origin") {
+        return Err(anyhow!(
+            "browser-origin requests are not accepted by the Hubu local API"
+        ));
+    }
+
+    if request.method == "POST" {
+        let content_type = request
+            .headers
+            .get("content-type")
+            .ok_or_else(|| anyhow!("POST requests require Content-Type: application/json"))?;
+        if !content_type
+            .split(';')
+            .next()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+        {
+            return Err(anyhow!(
+                "POST requests require Content-Type: application/json"
+            ));
+        }
+    }
+
+    if let Some(host) = request.headers.get("host") {
+        let host = host.trim();
+        let is_loopback = host == "localhost"
+            || host.starts_with("localhost:")
+            || host == "127.0.0.1"
+            || host.starts_with("127.0.0.1:")
+            || host == "::1"
+            || host == "[::1]"
+            || host.starts_with("[::1]:");
+        if !is_loopback {
+            return Err(anyhow!("Hubu local API only accepts loopback Host headers"));
+        }
+    }
+
+    let authorization = request
+        .headers
+        .get("authorization")
+        .ok_or_else(|| anyhow!("missing authorization bearer token"))?;
+    let (scheme, token) = authorization
+        .split_once(' ')
+        .ok_or_else(|| anyhow!("invalid authorization bearer token"))?;
+    if !scheme.eq_ignore_ascii_case("bearer")
+        || token.trim().is_empty()
+        || !state.auth.verifies(token.trim())
+    {
+        return Err(anyhow!("invalid authorization bearer token"));
+    }
+
+    Ok(())
 }
 
 fn spend_executor_guidance() -> Value {
@@ -802,6 +1084,7 @@ fn init(body: String, state: &ServerState) -> Result<InitHttpResponse> {
                 .unwrap_or_else(|| "Hubu User".to_string()),
             email: request.email,
         })?;
+    state.auth.select_owner_user(&user.id)?;
 
     Ok(InitHttpResponse {
         user_id: user.pub_id,
@@ -810,7 +1093,7 @@ fn init(body: String, state: &ServerState) -> Result<InitHttpResponse> {
 }
 
 fn current_user(state: &ServerState) -> Result<CurrentUserHttpResponse> {
-    let user = default_user(state)?;
+    let user = authenticated_user(state)?;
     Ok(CurrentUserHttpResponse {
         user_id: user.pub_id,
         display_name: user.display_name,
@@ -820,7 +1103,7 @@ fn current_user(state: &ServerState) -> Result<CurrentUserHttpResponse> {
 
 fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttpResponse> {
     let request: RegisterAgentHttpRequest = serde_json::from_str(&body)?;
-    let user = default_user(state)?;
+    let user = authenticated_user(state)?;
     let (request_shape, envelope) = match request {
         RegisterAgentHttpRequest::Envelope(envelope) => ("envelope", envelope),
         RegisterAgentHttpRequest::Simple(request) => (
@@ -1178,7 +1461,7 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
     let request: AddPolicyHttpRequest = serde_json::from_str(&body)?;
 
     let agent_pub_id = request.agent_id;
-    let user = default_user_context(state)?;
+    let user = authenticated_user_context(state)?;
     let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
     let policy = if let Some(policy_yaml) = request.policy_yaml {
         let mut policy: Policy = serde_yaml::from_str(&policy_yaml)?;
@@ -1258,7 +1541,7 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
 }
 
 fn list_agents(state: &ServerState) -> Result<AgentListHttpResponse> {
-    let user = default_user_context(state)?;
+    let user = authenticated_user_context(state)?;
     let agents = state
         .registration
         .lock()
@@ -1298,7 +1581,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         return Err(anyhow!("budget amount must be positive"));
     }
 
-    let user = default_user_context(state)?;
+    let user = authenticated_user_context(state)?;
     let period = TimePeriod::new(
         parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now),
         parse_optional_datetime(request.ending_before)?,
@@ -1350,7 +1633,7 @@ fn create_budget_series(
         return Err(anyhow!("budget amount must be positive"));
     }
 
-    let user = default_user_context(state)?;
+    let user = authenticated_user_context(state)?;
     let starting_at = parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now);
 
     let response = state
@@ -1393,7 +1676,7 @@ fn create_budget_series(
 }
 
 fn list_budgets(state: &ServerState) -> Result<ListBudgetsHttpResponse> {
-    let user = default_user_context(state)?;
+    let user = authenticated_user_context(state)?;
     reconcile_expired_budget_holds(state)?;
     let budgets = state
         .budgets
@@ -1697,7 +1980,7 @@ fn validate_executor_spend_request(
     }
     reconcile_expired_budget_holds(state)?;
 
-    let user = default_user_context(state)?;
+    let user = authenticated_user_context(state)?;
     let spend_request = SpendHttpRequest {
         agent_id: request.agent_id.clone(),
         account_id: request.account_id.clone(),
@@ -1824,7 +2107,7 @@ fn evaluate_and_reserve_spend(
     }
     reconcile_expired_budget_holds(state)?;
 
-    let user = default_user_context(state)?;
+    let user = authenticated_user_context(state)?;
     let account = resolve_agent_account_for_spend(&request, &user, state)?;
     let account_pub_id = account.pub_id.clone();
     let agent_id = account.agent_id.clone();
@@ -2236,21 +2519,19 @@ fn resolve_agent_id_for_user(
     Ok(agent_id)
 }
 
-fn default_user_context(state: &ServerState) -> Result<UserContext> {
-    let mut users = state
-        .users
-        .lock()
-        .map_err(|_| anyhow!("user manager lock poisoned"))?;
-    users.ensure_default_user()?;
-    Ok(users.default_user_context()?)
+fn authenticated_user_context(state: &ServerState) -> Result<UserContext> {
+    Ok(UserContext::new(state.auth.owner_user_id()?))
 }
 
-fn default_user(state: &ServerState) -> Result<User> {
-    let mut users = state
+fn authenticated_user(state: &ServerState) -> Result<User> {
+    let owner_user_id = state.auth.owner_user_id()?;
+    let users = state
         .users
         .lock()
         .map_err(|_| anyhow!("user manager lock poisoned"))?;
-    Ok(users.ensure_default_user()?)
+    users
+        .user_for_id(&owner_user_id)?
+        .ok_or_else(|| anyhow!("authenticated local API owner is missing"))
 }
 
 fn owner_metadata_for_user_id(user_id: &UserId, state: &ServerState) -> Result<OwnerHttpMetadata> {
@@ -2269,6 +2550,7 @@ fn owner_metadata_for_user_id(user_id: &UserId, state: &ServerState) -> Result<O
 }
 
 fn list_ledger(state: &ServerState) -> Result<LedgerHttpResponse> {
+    let user = authenticated_user_context(state)?;
     let payments = state
         .payments
         .lock()
@@ -2277,6 +2559,7 @@ fn list_ledger(state: &ServerState) -> Result<LedgerHttpResponse> {
         .ledger()
         .list_transactions()?
         .into_iter()
+        .filter(|transaction| transaction.owner_user_id == user.user_id)
         .map(|transaction| ledger_transaction_response(payments.ledger(), transaction, state))
         .collect::<Result<Vec<_>>>()?;
 
@@ -2336,6 +2619,7 @@ fn to_json<T: Serialize>(value: T) -> Value {
 struct HttpRequest {
     method: String,
     path: String,
+    headers: HashMap<String, String>,
     body: String,
 }
 
@@ -2365,20 +2649,30 @@ fn parse_request(raw: &str) -> Result<HttpRequest> {
         .next()
         .unwrap_or_default()
         .to_string();
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect();
 
     Ok(HttpRequest {
         method,
         path,
+        headers,
         body: body.to_string(),
     })
 }
 
 fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
     let body = response.body.to_string();
-    let status_text = if response.status == 200 {
-        "OK"
-    } else {
-        "Bad Request"
+    let status_text = match response.status {
+        200 => "OK",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        _ => "Bad Request",
     };
     write!(
         stream,
@@ -2395,6 +2689,46 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 mod tests {
     use super::*;
 
+    fn public_request(method: &str, path: &str) -> HttpRequest {
+        HttpRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            headers: HashMap::new(),
+            body: String::new(),
+        }
+    }
+
+    fn authenticated_json_request(path: &str, body: Value) -> HttpRequest {
+        let mut headers = HashMap::new();
+        headers.insert("host".to_string(), "127.0.0.1:8787".to_string());
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "authorization".to_string(),
+            format!("Bearer {TEST_AUTH_TOKEN}"),
+        );
+        HttpRequest {
+            method: "POST".to_string(),
+            path: path.to_string(),
+            headers,
+            body: body.to_string(),
+        }
+    }
+
+    fn authenticated_get_request(path: &str) -> HttpRequest {
+        let mut headers = HashMap::new();
+        headers.insert("host".to_string(), "127.0.0.1:8787".to_string());
+        headers.insert(
+            "authorization".to_string(),
+            format!("Bearer {TEST_AUTH_TOKEN}"),
+        );
+        HttpRequest {
+            method: "GET".to_string(),
+            path: path.to_string(),
+            headers,
+            body: String::new(),
+        }
+    }
+
     #[test]
     fn registration_guidance_is_available_for_agents() {
         let path = std::env::temp_dir().join(format!("hubu-api-guidance-{}.sqlite", UserId::new()));
@@ -2404,14 +2738,7 @@ mod tests {
             "/registration/guidance",
             "/.well-known/hubu-agent-registration.json",
         ] {
-            let response = route(
-                HttpRequest {
-                    method: "GET".to_string(),
-                    path: path.to_string(),
-                    body: String::new(),
-                },
-                &state,
-            );
+            let response = route(public_request("GET", path), &state);
 
             assert_eq!(response.status, 200);
             assert_eq!(
@@ -2437,6 +2764,40 @@ mod tests {
                 .any(|field| field == "identity_fingerprint"));
         }
 
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn protected_routes_require_local_bearer_authorization() {
+        let path = std::env::temp_dir().join(format!("hubu-api-auth-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+
+        let response = route(public_request("GET", "/user"), &state);
+
+        assert_eq!(response.status, 401);
+        assert!(response.body["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("missing authorization bearer token"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn protected_routes_reject_browser_origin_requests() {
+        let path = std::env::temp_dir().join(format!("hubu-api-origin-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let mut request = authenticated_get_request("/user");
+        request
+            .headers
+            .insert("origin".to_string(), "https://example.test".to_string());
+
+        let response = route(request, &state);
+
+        assert_eq!(response.status, 401);
+        assert!(response.body["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("browser-origin requests"));
         std::fs::remove_file(path).ok();
     }
 
@@ -2838,14 +3199,7 @@ mod tests {
             "/spend/executor/guidance",
             "/.well-known/hubu-spend-executor.json",
         ] {
-            let response = route(
-                HttpRequest {
-                    method: "GET".to_string(),
-                    path: path.to_string(),
-                    body: String::new(),
-                },
-                &state,
-            );
+            let response = route(public_request("GET", path), &state);
 
             assert_eq!(response.status, 200);
             assert_eq!(response.body["protocol_version"], "hubu-spend-executor-v1");
@@ -3185,17 +3539,15 @@ rules:
         .expect("budget should be created for initialized user");
 
         let response = route(
-            HttpRequest {
-                method: "POST".to_string(),
-                path: "/spend".to_string(),
-                body: json!({
+            authenticated_json_request(
+                "/spend",
+                json!({
                     "agent_id": agent.agent_id,
                     "amount_cents": 2_500,
                     "reason": "over budget purchase",
                     "merchant": "Acme Cafe",
-                })
-                .to_string(),
-            },
+                }),
+            ),
             &state,
         );
 
