@@ -149,6 +149,7 @@ struct ImageProviderConfig {
     api_key: Option<String>,
     endpoint: Option<String>,
     price_cents: i64,
+    timeout_ms: u64,
     output_dir: PathBuf,
     adapter_kind: ImageProviderAdapterKind,
 }
@@ -167,6 +168,7 @@ impl ImageProviderConfig {
             api_key: env::var("HUBU_IMAGE_PROVIDER_API_KEY").ok(),
             endpoint: env::var("HUBU_IMAGE_PROVIDER_ENDPOINT").ok(),
             price_cents: image_provider_price_cents_from_env()?,
+            timeout_ms: image_provider_timeout_ms_from_env()?,
             output_dir: image_output_dir_from_env(),
         })
     }
@@ -236,6 +238,23 @@ fn image_provider_price_cents_from_env() -> Result<i64> {
         }
         Err(_) => Ok(500),
     }
+}
+
+fn image_provider_timeout_ms_from_env() -> Result<u64> {
+    match env::var("HUBU_IMAGE_PROVIDER_TIMEOUT_MS") {
+        Ok(value) => parse_positive_millis_env("HUBU_IMAGE_PROVIDER_TIMEOUT_MS", &value),
+        Err(_) => Ok(30_000),
+    }
+}
+
+fn parse_positive_millis_env(name: &str, value: &str) -> Result<u64> {
+    let millis = value
+        .parse::<u64>()
+        .with_context(|| format!("parse {name} as milliseconds"))?;
+    if millis == 0 {
+        return Err(anyhow!("{name} must be positive"));
+    }
+    Ok(millis)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,7 +363,13 @@ impl ImageProviderAdapter for HttpJsonImageProviderAdapter<'_> {
             .as_deref()
             .filter(|api_key| !api_key.is_empty())
             .ok_or_else(|| anyhow!("http-json image adapter requires an API key"))?;
-        let response = ureq::post(endpoint)
+        let timeout = std::time::Duration::from_millis(self.config.timeout_ms);
+        let response = ureq::AgentBuilder::new()
+            .timeout_connect(timeout)
+            .timeout_read(timeout)
+            .timeout_write(timeout)
+            .build()
+            .post(endpoint)
             .set("Authorization", &format!("Bearer {api_key}"))
             .set("Content-Type", "application/json")
             .set("Accept", "application/json")
@@ -492,6 +517,7 @@ impl ServerState {
                 "image_provider_adapter_supported": state.image_provider.adapter_kind.is_supported(),
                 "image_provider_endpoint_configured": state.image_provider.endpoint.as_ref().is_some_and(|endpoint| !endpoint.is_empty()),
                 "image_provider_price_cents": state.image_provider.price_cents,
+                "image_provider_timeout_ms": state.image_provider.timeout_ms,
                 "image_output_dir": state.image_provider.output_dir.display().to_string(),
             }),
         );
@@ -3258,6 +3284,7 @@ mod tests {
             api_key: Some("server-side-secret".to_string()),
             endpoint: None,
             price_cents: 500,
+            timeout_ms: 30_000,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Demo,
         };
@@ -3288,6 +3315,7 @@ mod tests {
             api_key: Some("server-side-secret".to_string()),
             endpoint: None,
             price_cents: 500,
+            timeout_ms: 30_000,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
         };
@@ -3327,11 +3355,13 @@ mod tests {
             api_key: Some("server-side-secret".to_string()),
             endpoint: Some("https://vendor.example/v1/images".to_string()),
             price_cents: 500,
+            timeout_ms: 30_000,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::HttpJson,
         };
 
         assert!(config.adapter().is_ok());
+        assert_eq!(config.timeout_ms, 30_000);
 
         config.endpoint = None;
         let missing_endpoint = match config.adapter() {
@@ -3371,6 +3401,25 @@ mod tests {
         assert!(missing_api_key
             .to_string()
             .contains("requires HUBU_IMAGE_PROVIDER_API_KEY"));
+    }
+
+    #[test]
+    fn image_provider_timeout_config_must_be_positive_millis() {
+        assert_eq!(
+            parse_positive_millis_env("HUBU_IMAGE_PROVIDER_TIMEOUT_MS", "1500")
+                .expect("positive millis should parse"),
+            1500
+        );
+        let zero = parse_positive_millis_env("HUBU_IMAGE_PROVIDER_TIMEOUT_MS", "0")
+            .expect_err("zero timeout should be rejected");
+        assert!(zero
+            .to_string()
+            .contains("HUBU_IMAGE_PROVIDER_TIMEOUT_MS must be positive"));
+        let invalid = parse_positive_millis_env("HUBU_IMAGE_PROVIDER_TIMEOUT_MS", "soon")
+            .expect_err("non-numeric timeout should be rejected");
+        assert!(invalid
+            .to_string()
+            .contains("parse HUBU_IMAGE_PROVIDER_TIMEOUT_MS as milliseconds"));
     }
 
     #[test]
@@ -3568,6 +3617,7 @@ mod tests {
             api_key: Some("server-side-secret".to_string()),
             endpoint: None,
             price_cents: 500,
+            timeout_ms: 30_000,
             output_dir: std::env::temp_dir(),
             adapter_kind: ImageProviderAdapterKind::Unsupported("unconfigured".to_string()),
         };
