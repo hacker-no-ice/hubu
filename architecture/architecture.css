@@ -56,9 +56,10 @@ a {
 }
 
 .app-header h1 {
-  max-width: 760px;
-  font-size: clamp(28px, 4.5vw, 54px);
+  max-width: none;
+  font-size: 44px;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .kicker,
@@ -328,6 +329,10 @@ a {
     align-items: stretch;
   }
 
+  .app-header h1 {
+    font-size: 34px;
+  }
+
   .app-header nav,
   .legend {
     justify-content: flex-start;
@@ -344,7 +349,7 @@ a {
 
 @media (max-width: 560px) {
   .app-header h1 {
-    font-size: 32px;
+    font-size: 21px;
   }
 
   .architecture-canvas {
@@ -355,5 +360,11 @@ a {
   .details-panel,
   .diagram-region {
     box-shadow: 4px 5px 0 var(--shadow);
+  }
+}
+
+@media (max-width: 360px) {
+  .app-header h1 {
+    font-size: 19px;
   }
 }
