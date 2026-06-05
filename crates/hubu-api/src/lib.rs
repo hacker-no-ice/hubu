@@ -103,8 +103,11 @@ impl ServerState {
         let path = path.as_ref().to_path_buf();
         let mut users = UserManager::open(&path).context("initialize user store")?;
         let default_user = users.ensure_default_user()?;
-        let governance =
+        let mut governance =
             SqliteGovernanceRepository::open(&path).context("initialize governance store")?;
+        governance
+            .expire_overdue_budget_holds(Utc::now())
+            .context("reconcile expired budget holds")?;
         let policy_assignments = governance
             .load_policy_assignments()
             .context("load policy assignments")?;
@@ -137,13 +140,23 @@ impl ServerState {
         let authorizer = SharedSpendAuthorizer {
             spend: Arc::clone(&spend),
         };
-        let payments = PaymentManager::new(
+        let mut payments = PaymentManager::new(
             default_user.id.clone(),
             MockPaymentRail,
             authorizer,
             SqliteLedger::open(&path).context("initialize ledger")?,
         )
         .context("initialize payment manager")?;
+        let payment_attempts = SqlitePaymentAttemptRepository::open(&path)
+            .context("initialize payment attempt store")?;
+        for attempt in payment_attempts
+            .list_payment_attempts()
+            .context("load payment attempts")?
+        {
+            payments
+                .remember_payment_attempt(attempt.request(), attempt.response())
+                .context("hydrate payment idempotency")?;
+        }
 
         Ok(Self {
             users: Mutex::new(users),
@@ -154,10 +167,7 @@ impl ServerState {
             budgets: Mutex::new(budgets),
             policies: Mutex::new(policies),
             governance: Mutex::new(governance),
-            payment_attempts: Mutex::new(
-                SqlitePaymentAttemptRepository::open(&path)
-                    .context("initialize payment attempt store")?,
-            ),
+            payment_attempts: Mutex::new(payment_attempts),
             payments: Mutex::new(payments),
         })
     }

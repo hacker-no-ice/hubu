@@ -37,6 +37,7 @@ pub trait SpendRepository {
 }
 
 pub trait BudgetRepository {
+    fn expire_overdue_budget_holds(&mut self, now: DateTime<Utc>) -> Result<(), StorageError>;
     fn save_budget_with_balance(
         &mut self,
         budget: &Budget,
@@ -327,6 +328,46 @@ impl SpendRepository for SqliteGovernanceRepository {
 }
 
 impl BudgetRepository for SqliteGovernanceRepository {
+    fn expire_overdue_budget_holds(&mut self, now: DateTime<Utc>) -> Result<(), StorageError> {
+        let sqlite_tx = self.conn.transaction()?;
+        let expired_holds = {
+            let mut stmt = sqlite_tx.prepare(
+                "SELECT id, budget_id, amount_cents
+                 FROM budget_holds
+                 WHERE status = 'frozen' AND expires_at <= ?1
+                 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![now.to_rfc3339()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        for (hold_id, budget_id, amount_cents) in expired_holds {
+            sqlite_tx.execute(
+                "UPDATE budget_holds
+                 SET status = 'expired', updated_at = ?2
+                 WHERE id = ?1 AND status = 'frozen'",
+                params![hold_id, now.to_rfc3339()],
+            )?;
+            sqlite_tx.execute(
+                "UPDATE budget_balances
+                 SET frozen_amount_cents = frozen_amount_cents - ?2,
+                     remaining_amount_cents = remaining_amount_cents + ?2,
+                     updated_at = ?3
+                 WHERE budget_id = ?1",
+                params![budget_id, amount_cents, now.to_rfc3339()],
+            )?;
+        }
+
+        sqlite_tx.commit()?;
+        Ok(())
+    }
+
     fn save_budget_with_balance(
         &mut self,
         budget: &Budget,
@@ -617,7 +658,7 @@ fn collect_rows<T>(
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
-    use hubu_common::ids::{SpendAuthTokenId, SpendDecisionId};
+    use hubu_common::ids::{BudgetHoldId, BudgetId, SpendAuthTokenId, SpendDecisionId};
 
     use super::*;
     use crate::policy::{
@@ -664,13 +705,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn persists_policy_assignment_and_spend_records() {
-        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
-        repo.save_policy_assignment(&user_id(), &agent_id(), &policy())
-            .unwrap();
-
-        let decision = SpendDecisionRecord {
+    fn spend_decision() -> SpendDecisionRecord {
+        SpendDecisionRecord {
             id: SpendDecisionId::new(),
             owner_user_id: user_id(),
             request: spend_request(),
@@ -687,7 +723,16 @@ mod tests {
                 }],
             },
             created_at: Utc::now(),
-        };
+        }
+    }
+
+    #[test]
+    fn persists_policy_assignment_and_spend_records() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        repo.save_policy_assignment(&user_id(), &agent_id(), &policy())
+            .unwrap();
+
+        let decision = spend_decision();
         let token = SpendAuthTokenRecord {
             id: SpendAuthTokenId::new(),
             owner_user_id: user_id(),
@@ -704,5 +749,53 @@ mod tests {
         assert_eq!(repo.load_policy_assignments().unwrap().len(), 1);
         assert_eq!(repo.load_spend_decisions().unwrap().len(), 1);
         assert_eq!(repo.load_spend_auth_tokens().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn expire_overdue_budget_holds_returns_frozen_amount_to_remaining() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let decision = spend_decision();
+        repo.save_spend_decision(&decision).unwrap();
+
+        let budget = Budget::new(
+            BudgetId::new(),
+            BudgetScope::User(user_id()),
+            10_000,
+            Currency::Usd,
+            TimePeriod::new(
+                Utc::now() - Duration::hours(1),
+                Some(Utc::now() + Duration::hours(1)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let reserved_balance = BudgetBalance {
+            budget_id: budget.id.clone(),
+            consumed_amount_cents: 0,
+            frozen_amount_cents: 2_500,
+            remaining_amount_cents: 7_500,
+        };
+        let hold = BudgetHold {
+            id: BudgetHoldId::new(),
+            budget_id: budget.id.clone(),
+            spend_decision_id: decision.id,
+            amount_cents: 2_500,
+            currency: Currency::Usd,
+            status: BudgetHoldStatus::Frozen,
+            created_at: Utc::now() - Duration::minutes(10),
+            updated_at: Utc::now() - Duration::minutes(10),
+            expires_at: Utc::now() - Duration::minutes(5),
+        };
+
+        repo.save_budget_with_balance(&budget, &reserved_balance)
+            .unwrap();
+        repo.save_budget_hold(&hold, &reserved_balance).unwrap();
+        repo.expire_overdue_budget_holds(Utc::now()).unwrap();
+
+        let reloaded_hold = repo.load_budget_holds().unwrap().pop().unwrap();
+        let reloaded_balance = repo.load_budget_balances().unwrap().pop().unwrap();
+        assert!(matches!(reloaded_hold.status, BudgetHoldStatus::Expired));
+        assert_eq!(reloaded_balance.frozen_amount_cents, 0);
+        assert_eq!(reloaded_balance.remaining_amount_cents, 10_000);
     }
 }

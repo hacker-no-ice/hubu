@@ -52,6 +52,38 @@ pub struct PaymentAttemptRecord {
     pub created_at: DateTime<Utc>,
 }
 
+impl PaymentAttemptRecord {
+    pub fn request(&self) -> PaymentRequest {
+        PaymentRequest {
+            idempotency_key: self.idempotency_key.clone(),
+            spend_auth_token_id: self.spend_auth_token_id.clone(),
+            owner_user_id: self.owner_user_id.clone(),
+            agent_id: self.agent_id.clone(),
+            amount_cents: self.amount_cents,
+            currency: self.currency,
+            merchant: self.merchant.clone(),
+            task_id: self.task_id.clone(),
+            rail: self.rail,
+            destination: self.destination.clone(),
+            memo: self.memo.clone(),
+        }
+    }
+
+    pub fn response(&self) -> PaymentResponse {
+        PaymentResponse {
+            payment_id: self.payment_id.clone(),
+            owner_user_id: self.owner_user_id.clone(),
+            status: self.status,
+            amount_cents: self.amount_cents,
+            currency: self.currency,
+            ledger_transaction_id: self.ledger_transaction_id.clone(),
+            rail_reference: self.rail_reference.clone(),
+            failure_reason: self.failure_reason.clone(),
+            created_at: self.created_at,
+        }
+    }
+}
+
 pub struct SqlitePaymentAttemptRepository {
     conn: Connection,
 }
@@ -114,7 +146,7 @@ impl PaymentAttemptRepository for SqlitePaymentAttemptRepository {
     ) -> Result<(), PaymentAttemptStorageError> {
         let (destination_type, destination_ref) = destination_parts(&request.destination);
         self.conn.execute(
-            "INSERT INTO payment_attempts
+            "INSERT OR IGNORE INTO payment_attempts
              (payment_id, idempotency_key, spend_auth_token_id, owner_user_id, agent_id,
               amount_cents, currency, merchant, task_id, rail, destination_type, destination_ref,
               memo, status, ledger_transaction_id, rail_reference, failure_reason, created_at)
