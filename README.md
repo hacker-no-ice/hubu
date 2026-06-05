@@ -110,6 +110,31 @@ override or inspect the computed registration envelope.
 See [docs/demo.md](docs/demo.md) for the full walkthrough, expected output,
 CLI installation notes, demo script pacing options, and known limitations.
 
+## MCP Transport
+
+Hubu includes an MCP stdio transport scaffold for agent-facing tool calls. Start
+the local Hubu server first:
+
+```sh
+cargo run --bin hubu-server
+```
+
+Then point an MCP client at:
+
+```sh
+cargo run --bin hubu-mcp-server
+```
+
+Set `HUBU_URL` to target a non-default Hubu server URL. The MCP transport
+forwards to the existing local HTTP API, marks read-only tools as safe for agent
+inspection, and marks human/agent registration, policy creation, and budget
+creation as human-approval-required tools. Agents can submit spend requests
+directly; if policy returns `needs_approval`, the MCP response includes
+`requires_human_approval: true` and no payment is executed.
+
+See [docs/mcp-transport.md](docs/mcp-transport.md) for the current tool and
+approval model.
+
 Start a local Anvil chain:
 
 ```sh
@@ -145,3 +170,5 @@ rule format, validation behavior, and examples.
   evaluation behavior
 - [docs/payment-ledger-flow.md](docs/payment-ledger-flow.md): payment
   orchestration and ledger recording flow
+- [docs/mcp-transport.md](docs/mcp-transport.md): MCP stdio transport scaffold
+  and approval boundaries
