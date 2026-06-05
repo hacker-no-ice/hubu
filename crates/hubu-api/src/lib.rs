@@ -1284,6 +1284,7 @@ fn create_budget_series(
 
 fn list_budgets(state: &ServerState) -> Result<ListBudgetsHttpResponse> {
     let user = default_user_context(state)?;
+    reconcile_expired_budget_holds(state)?;
     let budgets = state
         .budgets
         .lock()
@@ -1498,6 +1499,7 @@ fn evaluate_and_reserve_spend(
     if request.amount_cents <= 0 {
         return Err(anyhow!("spend amount must be positive"));
     }
+    reconcile_expired_budget_holds(state)?;
 
     let user = default_user_context(state)?;
     let account = resolve_agent_account_for_spend(&request, &user, state)?;
@@ -1690,6 +1692,26 @@ fn evaluate_and_reserve_spend(
 enum BudgetHoldUpdate {
     Settled(SettleBudgetResponse),
     Released(ReleaseBudgetResponse),
+}
+
+fn reconcile_expired_budget_holds(state: &ServerState) -> Result<()> {
+    let expired = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .expire_overdue_budget_holds(Utc::now())?;
+    if expired.is_empty() {
+        return Ok(());
+    }
+
+    let mut governance = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?;
+    for response in expired {
+        governance.update_budget_hold(&response.hold, &response.balance)?;
+    }
+    Ok(())
 }
 
 fn active_budget_id_for_user(user_id: &UserId, state: &ServerState) -> Result<BudgetId> {

@@ -69,6 +69,12 @@ pub struct ReleaseBudgetResponse {
 }
 
 #[derive(Debug, Clone)]
+pub struct ExpireBudgetHoldResponse {
+    pub hold: BudgetHold,
+    pub balance: BudgetBalance,
+}
+
+#[derive(Debug, Clone)]
 pub struct BudgetWithBalance {
     pub budget: Budget,
     pub balance: BudgetBalance,
