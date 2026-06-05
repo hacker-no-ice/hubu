@@ -32,6 +32,31 @@ impl SpendManager {
         }
     }
 
+    pub fn from_records(
+        decisions: Vec<SpendDecisionRecord>,
+        tokens: Vec<SpendAuthTokenRecord>,
+    ) -> Self {
+        Self {
+            decisions: decisions
+                .into_iter()
+                .map(|decision| (decision.id.clone(), decision))
+                .collect(),
+            tokens: tokens
+                .into_iter()
+                .map(|token| (token.id.clone(), token))
+                .collect(),
+            token_ttl: DEFAULT_SPEND_AUTH_TOKEN_TTL,
+        }
+    }
+
+    pub fn decision_record(&self, decision_id: &SpendDecisionId) -> Option<SpendDecisionRecord> {
+        self.decisions.get(decision_id).cloned()
+    }
+
+    pub fn auth_token_record(&self, token_id: &SpendAuthTokenId) -> Option<SpendAuthTokenRecord> {
+        self.tokens.get(token_id).cloned()
+    }
+
     pub fn evaluate_spend(
         &mut self,
         user: &UserContext,

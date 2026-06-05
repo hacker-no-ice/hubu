@@ -9,7 +9,7 @@ use crate::spend::model::SpendRequest;
 ///
 /// The engine evaluates all rules and falls back to `default_effect` when no
 /// rule matches.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Policy {
     pub id: String,
     pub version: String,
@@ -22,7 +22,7 @@ pub struct Policy {
 ///
 /// If `when` evaluates to true, `effect` contributes to the final decision and
 /// `reason` appears in the evaluation trace.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Rule {
     pub id: String,
     pub effect: Effect,
@@ -31,7 +31,7 @@ pub struct Rule {
 }
 
 /// The result of evaluating one rule against one spend request.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RuleResult {
     pub rule_id: String,
     pub matched: bool,
@@ -43,7 +43,7 @@ pub struct RuleResult {
 ///
 /// `decision` is the final merged effect. `rule_results` contains every rule,
 /// matched or not, so callers can explain how the decision was reached.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Evaluation {
     pub policy_id: String,
     pub policy_version: String,
