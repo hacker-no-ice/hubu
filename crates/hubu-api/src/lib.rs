@@ -4229,7 +4229,7 @@ mod tests {
             model: "gemini-2.5-flash-image".to_string(),
             merchant: "hubu-model-proxy".to_string(),
             api_key: Some("server-side-secret".to_string()),
-            endpoint: Some("https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent".to_string()),
+            endpoint: Some("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent".to_string()),
             price_cents: 500,
             timeout_ms: 30_000,
             max_retries: 0,

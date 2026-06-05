@@ -88,7 +88,7 @@ configuration like this:
 export HUBU_IMAGE_PROVIDER_ADAPTER=gemini-generate-content
 export HUBU_IMAGE_PROVIDER_NAME=google-gemini
 export HUBU_IMAGE_PROVIDER_MODEL=gemini-2.5-flash-image
-export HUBU_IMAGE_PROVIDER_ENDPOINT=https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent
+export HUBU_IMAGE_PROVIDER_ENDPOINT=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent
 export HUBU_IMAGE_PROVIDER_PRICE_CENTS=500
 export HUBU_IMAGE_PROVIDER_API_KEY=...
 ./scripts/demo.sh
