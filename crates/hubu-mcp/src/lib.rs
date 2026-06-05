@@ -184,6 +184,16 @@ fn tool_definitions() -> Vec<Value> {
                 "merchant": { "type": "string" }
             })),
         ),
+        write_tool(
+            "hubu_generate_image",
+            "Generate an image through Hubu using a spend authorization token.",
+            json_schema(json!({
+                "spend_auth_token_id": { "type": "string" },
+                "prompt": { "type": "string" },
+                "provider": { "type": "string" },
+                "model": { "type": "string" }
+            })),
+        ),
         read_tool(
             "hubu_list_agents",
             "List registered agents for the active Hubu user.",
@@ -285,6 +295,7 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
             let response = post_json(base_url, "/spend/authorize", arguments)?;
             return Ok(tool_result(spend_response_with_approval_hint(response)));
         }
+        "hubu_generate_image" => post_json(base_url, "/model-calls/image", arguments)?,
         "hubu_list_agents" => get_json(base_url, "/agents")?,
         "hubu_list_budgets" => get_json(base_url, "/budgets")?,
         "hubu_list_ledger" => get_json(base_url, "/ledger")?,
@@ -456,6 +467,19 @@ mod tests {
         assert_eq!(tool["annotations"]["x_hubu_human_approval"], "conditional");
         assert_eq!(tool["annotations"]["destructiveHint"], false);
         assert!(tool["inputSchema"]["properties"]["amount_cents"].is_object());
+    }
+
+    #[test]
+    fn generate_image_tool_is_agent_callable() {
+        let tools = tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "hubu_generate_image")
+            .expect("generate image tool should exist");
+
+        assert_eq!(tool["annotations"]["x_hubu_human_approval"], "conditional");
+        assert_eq!(tool["annotations"]["destructiveHint"], false);
+        assert!(tool["inputSchema"]["properties"]["spend_auth_token_id"].is_object());
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
+    str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
     time::Instant,
@@ -460,6 +461,24 @@ struct SpendHttpResponse {
     payment: Option<PaymentHttpResponse>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GenerateImageHttpRequest {
+    spend_auth_token_id: String,
+    prompt: String,
+    provider: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GenerateImageHttpResponse {
+    provider: String,
+    model: String,
+    output_ref: String,
+    spend_auth_token_id: String,
+    payment: PaymentHttpResponse,
+    budget_hold: BudgetHoldHttpResponse,
+}
+
 #[derive(Debug, Serialize)]
 struct BudgetHoldHttpResponse {
     hold_id: String,
@@ -572,6 +591,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("GET", "/budgets") => list_budgets(state).map(to_json),
         ("POST", "/spend/authorize") => authorize_spend(request.body, state).map(to_json),
         ("POST", "/spend") => spend(request.body, state).map(to_json),
+        ("POST", "/model-calls/image") => generate_image(request.body, state).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
         _ => Err(anyhow!("no route for {} {}", request.method, request.path)),
     };
@@ -1689,6 +1709,162 @@ fn evaluate_and_reserve_spend(
     }))
 }
 
+fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttpResponse> {
+    let request: GenerateImageHttpRequest = serde_json::from_str(&body)?;
+    if request.prompt.trim().is_empty() {
+        return Err(anyhow!("image prompt cannot be empty"));
+    }
+
+    let provider = request.provider.unwrap_or_else(|| "hubu-demo".to_string());
+    let model = request.model.unwrap_or_else(|| "demo-image-v1".to_string());
+    let user = default_user_context(state)?;
+    let token_id = SpendAuthTokenId::from_str(&request.spend_auth_token_id)
+        .map_err(|error| anyhow!("invalid spend_auth_token_id: {error}"))?;
+    let (token_record, decision_record) = state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .decision_for_auth_token(&token_id)?;
+
+    if token_record.owner_user_id != user.user_id || decision_record.owner_user_id != user.user_id {
+        return Err(anyhow!("spend authorization is not owned by resolved user"));
+    }
+    if token_record.used_at.is_some() {
+        return Err(anyhow!("spend authorization has already been used"));
+    }
+    if token_record.revoked_at.is_some() {
+        return Err(anyhow!("spend authorization has been revoked"));
+    }
+    if token_record.expires_at <= Utc::now() {
+        return Err(anyhow!("spend authorization has expired"));
+    }
+
+    let authorized_spend = decision_record.request;
+    let account = state
+        .registration
+        .lock()
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?
+        .account_for_agent(&authorized_spend.agent_id)?
+        .ok_or_else(|| anyhow!("authorized agent account was not found"))?;
+    if account.id != authorized_spend.agent_account_id {
+        return Err(anyhow!(
+            "authorized agent account does not match registration"
+        ));
+    }
+    let account_pub_id = account.pub_id;
+    let owner = owner_metadata_for_user_id(&user.user_id, state)?;
+    let frozen_hold = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .get_budget_hold_by_spend_decision(&decision_record.id)
+        .ok_or_else(|| anyhow!("authorized spend has no reserved budget hold"))?;
+
+    let payment_request = PaymentRequest {
+        idempotency_key: format!("image-proxy:{}", token_record.id),
+        spend_auth_token_id: token_record.id.clone(),
+        owner_user_id: user.user_id.clone(),
+        agent_id: authorized_spend.agent_id,
+        agent_account_id: authorized_spend.agent_account_id,
+        amount_cents: authorized_spend.amount_cents,
+        currency: authorized_spend.currency,
+        merchant: authorized_spend.merchant,
+        task_id: authorized_spend.task_id,
+        rail: PaymentRailKind::FiatMock,
+        destination: PaymentDestination::FiatAccount {
+            account_ref: format!("{provider}:{model}"),
+        },
+        memo: Some("Hubu image generation proxy".to_string()),
+    };
+
+    let payment_audit_request = payment_request.clone();
+    let payment = state
+        .payments
+        .lock()
+        .map_err(|_| anyhow!("payment manager lock poisoned"))?
+        .submit_payment(payment_request)?;
+    state
+        .payment_attempts
+        .lock()
+        .map_err(|_| anyhow!("payment attempt store lock poisoned"))?
+        .save_payment_attempt(&payment_audit_request, &payment)?;
+
+    let used_token = state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .auth_token_record(&payment_audit_request.spend_auth_token_id)
+        .ok_or_else(|| anyhow!("used spend auth token was not recorded"))?;
+    state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .update_spend_auth_token(&used_token)?;
+
+    let hold_update = {
+        let mut budgets = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let hold_update = if payment.status == PaymentStatus::Succeeded {
+            BudgetHoldUpdate::Settled(budgets.settle_budget(&frozen_hold.id)?)
+        } else {
+            BudgetHoldUpdate::Released(budgets.release_budget(&frozen_hold.id)?)
+        };
+        let (hold, balance) = match &hold_update {
+            BudgetHoldUpdate::Settled(response) => (&response.hold, &response.balance),
+            BudgetHoldUpdate::Released(response) => (&response.hold, &response.balance),
+        };
+        state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?
+            .update_budget_hold(hold, balance)?;
+        hold_update
+    };
+
+    if payment.status != PaymentStatus::Succeeded {
+        return Err(anyhow!(
+            "image generation proxy payment failed: {}",
+            payment
+                .failure_reason
+                .clone()
+                .unwrap_or_else(|| "unknown payment failure".to_string())
+        ));
+    }
+
+    log_event(
+        "info",
+        "image_model_call_proxied",
+        json!({
+            "provider": provider,
+            "model": model,
+            "spend_auth_token_id": token_record.id.to_string(),
+            "payment_id": payment.payment_id.to_string(),
+            "amount_cents": payment.amount_cents,
+            "currency": payment.currency.to_string(),
+        }),
+    );
+
+    Ok(GenerateImageHttpResponse {
+        provider,
+        model,
+        output_ref: format!("hubu-demo-image://{}", payment.payment_id),
+        spend_auth_token_id: token_record.id.to_string(),
+        payment: PaymentHttpResponse {
+            payment_id: payment.payment_id.to_string(),
+            owner_user_id: owner.pub_id,
+            owner_user_name: owner.display_name,
+            account_id: account_pub_id,
+            status: "succeeded".to_string(),
+            ledger_transaction_id: payment.ledger_transaction_id.map(|id| id.to_string()),
+            rail_reference: payment.rail_reference,
+            failure_reason: None,
+        },
+        budget_hold: budget_hold_response(hold_update),
+    })
+}
+
 enum BudgetHoldUpdate {
     Settled(SettleBudgetResponse),
     Released(ReleaseBudgetResponse),
@@ -2476,6 +2652,106 @@ mod tests {
 
         let ledger = list_ledger(&state).expect("ledger should list");
         assert!(ledger.transactions.is_empty());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn image_proxy_consumes_authorized_spend_and_settles_budget() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-image-proxy-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "logo-design-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should allow the logo budget");
+
+        create_budget(
+            json!({
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should be created for initialized user");
+
+        let authorization = authorize_spend(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 500,
+                "reason": "Generate Project Hubu logo",
+                "merchant": "hubu-model-proxy",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should authorize");
+        let auth_token_id = authorization
+            .auth_token_id
+            .expect("allowed spend should issue a token");
+
+        let generated = generate_image(
+            json!({
+                "spend_auth_token_id": auth_token_id,
+                "prompt": "Create a crisp logo for Project Hubu",
+                "provider": "hubu-demo",
+                "model": "demo-image-v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("image proxy should consume authorization");
+
+        assert_eq!(generated.provider, "hubu-demo");
+        assert_eq!(generated.model, "demo-image-v1");
+        assert!(generated.output_ref.starts_with("hubu-demo-image://"));
+        assert_eq!(generated.payment.status, "succeeded");
+        assert_eq!(generated.payment.owner_user_id, user.user_id);
+        assert!(generated.payment.ledger_transaction_id.is_some());
+        assert_eq!(generated.budget_hold.status, "settled");
+        assert_eq!(generated.budget_hold.consumed_amount_cents, 500);
+        assert_eq!(generated.budget_hold.frozen_amount_cents, 0);
+        assert_eq!(generated.budget_hold.remaining_amount_cents, 0);
+
+        let ledger = list_ledger(&state).expect("ledger should list");
+        assert_eq!(ledger.transactions.len(), 1);
+
+        let reuse_error = generate_image(
+            json!({
+                "spend_auth_token_id": generated.spend_auth_token_id,
+                "prompt": "Try to reuse the authorization",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("used spend auth token should not be reusable");
+        assert!(reuse_error
+            .to_string()
+            .contains("spend authorization has already been used"));
         std::fs::remove_file(path).ok();
     }
 

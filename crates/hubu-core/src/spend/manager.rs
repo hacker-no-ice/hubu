@@ -57,6 +57,23 @@ impl SpendManager {
         self.tokens.get(token_id).cloned()
     }
 
+    pub fn decision_for_auth_token(
+        &self,
+        token_id: &SpendAuthTokenId,
+    ) -> Result<(SpendAuthTokenRecord, SpendDecisionRecord), SpendError> {
+        let token = self
+            .tokens
+            .get(token_id)
+            .cloned()
+            .ok_or(SpendError::UnknownSpendAuthToken)?;
+        let decision = self
+            .decisions
+            .get(&token.spend_decision_id)
+            .cloned()
+            .ok_or(SpendError::MissingSpendDecision)?;
+        Ok((token, decision))
+    }
+
     pub fn evaluate_spend(
         &mut self,
         user: &UserContext,

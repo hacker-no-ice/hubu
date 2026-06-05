@@ -43,6 +43,7 @@ fn run() -> Result<()> {
         "agent" => agent(&base_url, args),
         "budget" => budget(&base_url, args),
         "spend" => spend(&base_url, args),
+        "model-call" => model_call(&base_url, args),
         "ledger" => ledger(&base_url, args),
         "health" => health(&base_url),
         "-h" | "--help" | "help" => {
@@ -655,6 +656,82 @@ fn print_spend_response(response: &Value) -> Result<()> {
     Ok(())
 }
 
+fn model_call(base_url: &str, args: Vec<String>) -> Result<()> {
+    let Some(command) = args.first().cloned() else {
+        print_model_call_help();
+        return Ok(());
+    };
+    let mut rest = args;
+    rest.remove(0);
+
+    match command.as_str() {
+        "image" => model_call_image(base_url, rest),
+        "-h" | "--help" | "help" => {
+            print_model_call_help();
+            Ok(())
+        }
+        _ => bail!("unknown model-call command `{command}`"),
+    }
+}
+
+fn model_call_image(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_model_call_image_help();
+        return Ok(());
+    }
+
+    let spend_auth_token_id = take_required(&mut args, "--spend-auth-token-id")?;
+    let prompt = take_required(&mut args, "--prompt")?;
+    let provider = take_value(&mut args, "--provider");
+    let model = take_value(&mut args, "--model");
+    ensure_no_args(args)?;
+
+    let mut body = json!({
+        "spend_auth_token_id": spend_auth_token_id,
+        "prompt": prompt,
+    });
+    if let Some(provider) = provider {
+        body["provider"] = json!(provider);
+    }
+    if let Some(model) = model {
+        body["model"] = json!(model);
+    }
+
+    let response = post_json(base_url, "/model-calls/image", body)?;
+    println!("Image model call proxied");
+    println!("  provider: {}", string_at(&response, "provider")?);
+    println!("  model: {}", string_at(&response, "model")?);
+    println!("  output_ref: {}", string_at(&response, "output_ref")?);
+    println!(
+        "  spend_auth_token_id: {}",
+        string_at(&response, "spend_auth_token_id")?
+    );
+    if let Some(payment) = response
+        .get("payment")
+        .filter(|payment| payment.is_object())
+    {
+        println!("Payment");
+        println!("  status: {}", string_at(payment, "status")?);
+        println!("  payment_id: {}", string_at(payment, "payment_id")?);
+        if let Some(tx_id) = payment.get("ledger_transaction_id").and_then(Value::as_str) {
+            println!("  ledger_transaction_id: {tx_id}");
+        }
+        if let Some(rail_ref) = payment.get("rail_reference").and_then(Value::as_str) {
+            println!("  rail_reference: {rail_ref}");
+        }
+    }
+    if let Some(hold) = response.get("budget_hold").filter(|hold| hold.is_object()) {
+        println!("Budget hold");
+        println!("  status: {}", string_at(hold, "status")?);
+        println!("  hold_id: {}", string_at(hold, "hold_id")?);
+        println!("  amount: {}", money_at(hold, "amount_cents")?);
+        println!("  consumed: {}", money_at(hold, "consumed_amount_cents")?);
+        println!("  frozen: {}", money_at(hold, "frozen_amount_cents")?);
+        println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
+    }
+    Ok(())
+}
+
 fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
     match args.as_slice() {
         [] => {
@@ -940,6 +1017,7 @@ Commands:
   agent      Read registered agents
   budget     Create and list budgets
   spend      Submit an agent spend request
+  model-call Proxy model calls through Hubu authorization
   ledger     Read ledger transactions
   health     Check the Hubu server
 
@@ -1093,6 +1171,24 @@ fn print_spend_authorize_help() {
 Usage:
   hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
   hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]"
+    );
+}
+
+fn print_model_call_help() {
+    println!(
+        "Proxy model calls through Hubu
+
+Usage:
+  hubu model-call image --spend-auth-token-id ID --prompt TEXT [--provider NAME] [--model NAME]"
+    );
+}
+
+fn print_model_call_image_help() {
+    println!(
+        "Generate an image through Hubu using a spend authorization token
+
+Usage:
+  hubu model-call image --spend-auth-token-id ID --prompt TEXT [--provider NAME] [--model NAME]"
     );
 }
 

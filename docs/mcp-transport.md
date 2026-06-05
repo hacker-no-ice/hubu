@@ -50,6 +50,7 @@ Agents can call directly:
 - `hubu_list_budgets`
 - `hubu_list_ledger`
 - `hubu_authorize_spend`
+- `hubu_generate_image`
 - `hubu_submit_spend`
 
 `hubu_submit_spend` forwards the spend request immediately. If policy returns
@@ -76,6 +77,12 @@ is the handoff point for future Hubu-hosted vendor/model proxy tools that need
 to consume a scoped spend authorization without exposing provider credentials to
 the agent.
 
+`hubu_generate_image` consumes one spend authorization token through
+`POST /model-calls/image`, settles the matching frozen budget hold, records the
+payment in the ledger, and returns image output metadata. The current provider
+is a local `hubu-demo` adapter; real vendor adapters can be added behind the
+same Hubu-hosted boundary without passing API keys to agents.
+
 ## Tool Mapping
 
 | MCP tool | HTTP route | Approval |
@@ -88,6 +95,7 @@ the agent.
 | `hubu_create_budget` | `POST /budgets` | required |
 | `hubu_create_recurring_budget` | `POST /budgets/series` | required |
 | `hubu_authorize_spend` | `POST /spend/authorize` | conditional on policy result |
+| `hubu_generate_image` | `POST /model-calls/image` | conditional on policy result |
 | `hubu_submit_spend` | `POST /spend` | conditional on policy result |
 | `hubu_list_agents` | `GET /agents` | none |
 | `hubu_list_budgets` | `GET /budgets` | none |

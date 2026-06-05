@@ -260,6 +260,42 @@ issues a spend authorization token, and freezes budget, but does not submit
 payment or write a ledger transaction. A later vendor/model proxy can consume
 the token while keeping provider API keys inside Hubu.
 
+### 6b. Generate An Image Through Hubu
+
+```sh
+hubu model-call image \
+  --spend-auth-token-id 1e48e2ec-564e-4519-9db4-d7892012ca78 \
+  --prompt "Create a crisp logo for Project Hubu"
+```
+
+Expected output:
+
+```txt
+Image model call proxied
+  provider: hubu-demo
+  model: demo-image-v1
+  output_ref: hubu-demo-image://dfd9a10f-e80f-4c17-b3ec-944d2114d4b9
+  spend_auth_token_id: 1e48e2ec-564e-4519-9db4-d7892012ca78
+Payment
+  status: succeeded
+  payment_id: dfd9a10f-e80f-4c17-b3ec-944d2114d4b9
+  ledger_transaction_id: 87b1cb7f-0fdf-40c8-b260-343cf4939be9
+  rail_reference: fiat_mock_image-proxy:1e48e2ec-564e-4519-9db4-d7892012ca78
+Budget hold
+  status: settled
+  hold_id: e9ee93b7-dac7-4c23-946f-2a7bc2835c24
+  amount: $5.00
+  consumed: $25.00
+  frozen: $0.00
+  remaining: $50.00
+```
+
+The demo image provider returns a deterministic `hubu-demo-image://...` output
+reference rather than calling an external model vendor. The important boundary
+is already in place: the agent presents a scoped Hubu spend token, Hubu consumes
+it once, settles the budget hold, records the ledger transaction, and keeps
+provider selection/configuration server-side.
+
 ### 7. Submit an Allowed Spend Whose Mock Payment Fails
 
 ```sh
