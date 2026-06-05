@@ -53,6 +53,12 @@ Build the workspace:
 cargo build
 ```
 
+Open the interactive architecture visualizer:
+
+```sh
+open docs/architecture.html
+```
+
 Run the automated local demo:
 
 ```sh
@@ -152,6 +158,8 @@ rule format, validation behavior, and examples.
 
 ## Documentation
 
+- [docs/architecture.html](docs/architecture.html): interactive sketch-style
+  architecture map with drill-down component diagrams and GitHub code links
 - [docs/agent-registration-protocol.md](docs/agent-registration-protocol.md):
   v1 registration envelope, fingerprint fields, server validation, and
   low-friction human review flow
