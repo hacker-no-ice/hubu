@@ -2,7 +2,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, LedgerTransactionId, PaymentId, SpendAuthTokenId, UserId};
+use hubu_common::ids::{
+    AgentAccountId, AgentId, LedgerTransactionId, PaymentId, SpendAuthTokenId, UserId,
+};
 use hubu_common::money::Currency;
 use rusqlite::{params, Connection};
 
@@ -38,6 +40,7 @@ pub struct PaymentAttemptRecord {
     pub spend_auth_token_id: SpendAuthTokenId,
     pub owner_user_id: UserId,
     pub agent_id: AgentId,
+    pub agent_account_id: AgentAccountId,
     pub amount_cents: i64,
     pub currency: Currency,
     pub merchant: Option<String>,
@@ -59,6 +62,7 @@ impl PaymentAttemptRecord {
             spend_auth_token_id: self.spend_auth_token_id.clone(),
             owner_user_id: self.owner_user_id.clone(),
             agent_id: self.agent_id.clone(),
+            agent_account_id: self.agent_account_id.clone(),
             amount_cents: self.amount_cents,
             currency: self.currency,
             merchant: self.merchant.clone(),
@@ -73,6 +77,7 @@ impl PaymentAttemptRecord {
         PaymentResponse {
             payment_id: self.payment_id.clone(),
             owner_user_id: self.owner_user_id.clone(),
+            agent_account_id: self.agent_account_id.clone(),
             status: self.status,
             amount_cents: self.amount_cents,
             currency: self.currency,
@@ -115,6 +120,7 @@ impl SqlitePaymentAttemptRepository {
                 spend_auth_token_id TEXT NOT NULL,
                 owner_user_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
+                agent_account_id TEXT NOT NULL,
                 amount_cents INTEGER NOT NULL,
                 currency TEXT NOT NULL,
                 merchant TEXT,
@@ -147,16 +153,17 @@ impl PaymentAttemptRepository for SqlitePaymentAttemptRepository {
         let (destination_type, destination_ref) = destination_parts(&request.destination);
         self.conn.execute(
             "INSERT OR IGNORE INTO payment_attempts
-             (payment_id, idempotency_key, spend_auth_token_id, owner_user_id, agent_id,
+             (payment_id, idempotency_key, spend_auth_token_id, owner_user_id, agent_id, agent_account_id,
               amount_cents, currency, merchant, task_id, rail, destination_type, destination_ref,
               memo, status, ledger_transaction_id, rail_reference, failure_reason, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 response.payment_id.to_string(),
                 request.idempotency_key,
                 request.spend_auth_token_id.to_string(),
                 request.owner_user_id.to_string(),
                 request.agent_id.to_string(),
+                request.agent_account_id.to_string(),
                 request.amount_cents,
                 request.currency.to_string(),
                 request.merchant,
@@ -180,7 +187,7 @@ impl PaymentAttemptRepository for SqlitePaymentAttemptRepository {
     ) -> Result<Vec<PaymentAttemptRecord>, PaymentAttemptStorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT payment_id, idempotency_key, spend_auth_token_id, owner_user_id, agent_id,
-                    amount_cents, currency, merchant, task_id, rail, destination_type, destination_ref,
+                    agent_account_id, amount_cents, currency, merchant, task_id, rail, destination_type, destination_ref,
                     memo, status, ledger_transaction_id, rail_reference, failure_reason, created_at
              FROM payment_attempts
              ORDER BY created_at ASC, payment_id ASC",
@@ -190,33 +197,35 @@ impl PaymentAttemptRepository for SqlitePaymentAttemptRepository {
             let spend_auth_token_id: String = row.get(2)?;
             let owner_user_id: String = row.get(3)?;
             let agent_id: String = row.get(4)?;
-            let currency: String = row.get(6)?;
-            let rail: String = row.get(9)?;
-            let destination_type: String = row.get(10)?;
-            let destination_ref: String = row.get(11)?;
-            let status: String = row.get(13)?;
-            let ledger_transaction_id: Option<String> = row.get(14)?;
-            let created_at: String = row.get(17)?;
+            let agent_account_id: String = row.get(5)?;
+            let currency: String = row.get(7)?;
+            let rail: String = row.get(10)?;
+            let destination_type: String = row.get(11)?;
+            let destination_ref: String = row.get(12)?;
+            let status: String = row.get(14)?;
+            let ledger_transaction_id: Option<String> = row.get(15)?;
+            let created_at: String = row.get(18)?;
             Ok(PaymentAttemptRecord {
                 payment_id: parse_id(&payment_id)?,
                 idempotency_key: row.get(1)?,
                 spend_auth_token_id: parse_id(&spend_auth_token_id)?,
                 owner_user_id: parse_id(&owner_user_id)?,
                 agent_id: parse_id(&agent_id)?,
-                amount_cents: row.get(5)?,
+                agent_account_id: parse_id(&agent_account_id)?,
+                amount_cents: row.get(6)?,
                 currency: parse_currency(&currency)?,
-                merchant: row.get(7)?,
-                task_id: row.get(8)?,
+                merchant: row.get(8)?,
+                task_id: row.get(9)?,
                 rail: parse_rail(&rail)?,
                 destination: parse_destination(&destination_type, &destination_ref)?,
-                memo: row.get(12)?,
+                memo: row.get(13)?,
                 status: parse_payment_status(&status)?,
                 ledger_transaction_id: ledger_transaction_id
                     .as_deref()
                     .map(parse_id)
                     .transpose()?,
-                rail_reference: row.get(15)?,
-                failure_reason: row.get(16)?,
+                rail_reference: row.get(16)?,
+                failure_reason: row.get(17)?,
                 created_at: parse_timestamp(&created_at)?,
             })
         })?;

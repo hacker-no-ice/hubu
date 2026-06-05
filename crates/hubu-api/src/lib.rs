@@ -14,6 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use hubu_common::{
     ids::{AgentId, BudgetId, SpendAuthTokenId, UserId},
+    models::account::{AccountStatus, AgentAccount},
     models::identity::{
         AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
     },
@@ -256,6 +257,7 @@ impl SpendAuthorizationValidator for SharedSpendAuthorizer {
                 spend_auth_token_id: request.spend_auth_token_id.clone(),
                 owner_user_id: request.owner_user_id.clone(),
                 agent_id: request.agent_id.clone(),
+                agent_account_id: request.agent_account_id.clone(),
                 amount_cents: request.amount_cents,
                 currency: request.currency,
                 merchant: request.merchant.clone(),
@@ -439,7 +441,8 @@ struct BudgetHttpResponse {
 
 #[derive(Debug, Deserialize)]
 struct SpendHttpRequest {
-    agent_id: String,
+    agent_id: Option<String>,
+    account_id: Option<String>,
     amount_cents: i64,
     reason: String,
     merchant: Option<String>,
@@ -447,6 +450,8 @@ struct SpendHttpRequest {
 
 #[derive(Debug, Serialize)]
 struct SpendHttpResponse {
+    account_id: String,
+    agent_id: String,
     decision_id: String,
     decision: String,
     reasons: Vec<String>,
@@ -471,6 +476,7 @@ struct PaymentHttpResponse {
     payment_id: String,
     owner_user_id: String,
     owner_user_name: String,
+    account_id: String,
     status: String,
     ledger_transaction_id: Option<String>,
     rail_reference: Option<String>,
@@ -1295,21 +1301,24 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         return Err(anyhow!("spend amount must be positive"));
     }
 
-    let agent_pub_id = request.agent_id;
     let user = default_user_context(state)?;
+    let account = resolve_agent_account_for_spend(&request, &user, state)?;
+    let account_pub_id = account.pub_id.clone();
+    let agent_id = account.agent_id.clone();
+    let agent_pub_id = registration_agent_pub_id(&agent_id, state)?;
     log_event(
         "info",
         "spend_request_received",
         json!({
             "agent_pub_id": agent_pub_id,
+            "account_pub_id": account_pub_id,
             "user_id": user.user_id.to_string(),
             "amount_cents": request.amount_cents,
             "currency": Currency::Usd.to_string(),
-            "merchant": request.merchant,
-            "reason": request.reason,
+            "merchant": request.merchant.clone(),
+            "reason": request.reason.clone(),
         }),
     );
-    let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
     let policy = state
         .policies
         .lock()
@@ -1323,6 +1332,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         currency: Currency::Usd,
         owner_user_id: user.user_id.clone(),
         agent_id: agent_id.clone(),
+        agent_account_id: account.id.clone(),
         merchant: request.merchant.clone(),
         category: None,
         task_id: Some(request.reason.clone()),
@@ -1413,6 +1423,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
             spend_auth_token_id: token.id,
             owner_user_id: user.user_id.clone(),
             agent_id,
+            agent_account_id: account.id.clone(),
             amount_cents: request.amount_cents,
             currency: Currency::Usd,
             merchant: request.merchant,
@@ -1496,6 +1507,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
                         payment_id: payment.payment_id.to_string(),
                         owner_user_id: owner.pub_id,
                         owner_user_name: owner.display_name,
+                        account_id: account_pub_id.clone(),
                         status: match payment.status {
                             PaymentStatus::Succeeded => "succeeded",
                             PaymentStatus::Failed => "failed",
@@ -1537,6 +1549,8 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     };
 
     Ok(SpendHttpResponse {
+        account_id: account_pub_id,
+        agent_id: agent_pub_id,
         decision_id: evaluation.decision_id.to_string(),
         decision: effect_name(evaluation.evaluation.decision).to_string(),
         reasons: evaluation.evaluation.reasons,
@@ -1564,6 +1578,62 @@ fn active_budget_id_for_user(user_id: &UserId, state: &ServerState) -> Result<Bu
         })
         .map(|budget| budget.budget.id)
         .ok_or_else(|| anyhow!("no active USD budget found for current user"))
+}
+
+fn resolve_agent_account_for_spend(
+    request: &SpendHttpRequest,
+    user: &UserContext,
+    state: &ServerState,
+) -> Result<AgentAccount> {
+    if request.account_id.is_some() == request.agent_id.is_some() {
+        return Err(anyhow!(
+            "spend request must include exactly one of account_id or agent_id"
+        ));
+    }
+
+    let registration = state
+        .registration
+        .lock()
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?;
+
+    let account = if let Some(account_pub_id) = request.account_id.as_deref() {
+        registration
+            .account_for_pub_id(account_pub_id)?
+            .ok_or_else(|| anyhow!("unknown public account id {account_pub_id}"))?
+    } else if let Some(agent_pub_id) = request.agent_id.as_deref() {
+        let agent_id = registration
+            .agent_id_for_pub_id(agent_pub_id)?
+            .ok_or_else(|| anyhow!("unknown public agent id {agent_pub_id}"))?;
+        registration
+            .account_for_agent(&agent_id)?
+            .ok_or_else(|| anyhow!("no account found for agent {agent_pub_id}"))?
+    } else {
+        return Err(anyhow!("spend request must include account_id or agent_id"));
+    };
+
+    if account.owner_user_id != user.user_id {
+        return Err(anyhow!(
+            "account {} is not owned by resolved user",
+            account.pub_id
+        ));
+    }
+
+    if account.account_status != AccountStatus::Active {
+        return Err(anyhow!("account {} is not active", account.pub_id));
+    }
+
+    Ok(account)
+}
+
+fn registration_agent_pub_id(agent_id: &AgentId, state: &ServerState) -> Result<String> {
+    let registration = state
+        .registration
+        .lock()
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?;
+    registration
+        .agent_for_id(agent_id)?
+        .map(|agent| agent.pub_id)
+        .ok_or_else(|| anyhow!("agent index is stale for account owner"))
 }
 
 fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
@@ -2109,6 +2179,114 @@ mod tests {
         assert!(transaction.entries.iter().all(|entry| {
             entry.owner_user_id == user.user_id && entry.owner_user_name == "Alice Example"
         }));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn spend_can_use_registered_account_id_as_financial_anchor() {
+        let path = std::env::temp_dir().join(format!("hubu-api-account-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "account-spend-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 5_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should be added under initialized user");
+
+        create_budget(
+            json!({
+                "amount_cents": 10_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should be created for initialized user");
+
+        let spend = spend(
+            json!({
+                "account_id": agent.account_id,
+                "amount_cents": 2_500,
+                "reason": "account anchored purchase",
+                "merchant": "Acme Cafe",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should be approved and paid from account");
+
+        assert_eq!(spend.account_id, agent.account_id);
+        assert_eq!(spend.agent_id, agent.agent_id);
+        let payment = spend.payment.expect("allowed spend should pay");
+        assert_eq!(payment.account_id, agent.account_id);
+        assert_eq!(payment.owner_user_id, user.user_id);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn spend_rejects_conflicting_account_and_agent_anchors() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-conflicting-anchors-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "conflicting-anchor-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+
+        let error = spend(
+            json!({
+                "account_id": agent.account_id,
+                "agent_id": agent.agent_id,
+                "amount_cents": 2_500,
+                "reason": "ambiguous anchored purchase",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("spend should reject conflicting anchors");
+
+        assert!(error
+            .to_string()
+            .contains("spend request must include exactly one of account_id or agent_id"));
         std::fs::remove_file(path).ok();
     }
 

@@ -530,25 +530,37 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
-    let agent_id = take_required(&mut args, "--agent-id")?;
+    let account_id = take_value(&mut args, "--account-id");
+    let agent_id = take_value(&mut args, "--agent-id");
     let amount = take_required(&mut args, "--amount")?;
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
         take_value(&mut args, "--merchant").unwrap_or_else(|| "demo-merchant".to_string());
     ensure_no_args(args)?;
 
-    let response = post_json(
-        base_url,
-        "/spend",
-        json!({
-            "agent_id": agent_id,
-            "amount_cents": amount_to_cents(&amount)?,
-            "reason": reason,
-            "merchant": merchant,
-        }),
-    )?;
+    if account_id.is_some() == agent_id.is_some() {
+        return Err(anyhow!(
+            "provide exactly one of --account-id or --agent-id for spend"
+        ));
+    }
+
+    let mut body = json!({
+        "amount_cents": amount_to_cents(&amount)?,
+        "reason": reason,
+        "merchant": merchant,
+    });
+    if let Some(account_id) = account_id {
+        body["account_id"] = json!(account_id);
+    }
+    if let Some(agent_id) = agent_id {
+        body["agent_id"] = json!(agent_id);
+    }
+
+    let response = post_json(base_url, "/spend", body)?;
 
     println!("Spend evaluated");
+    println!("  account_id: {}", string_at(&response, "account_id")?);
+    println!("  agent_id: {}", string_at(&response, "agent_id")?);
     println!("  decision: {}", string_at(&response, "decision")?);
     println!("  decision_id: {}", string_at(&response, "decision_id")?);
     if let Some(reasons) = response.get("reasons").and_then(Value::as_array) {
@@ -572,6 +584,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
             string_at(payment, "owner_user_name")?,
             string_at(payment, "owner_user_id")?
         );
+        println!("  account_id: {}", string_at(payment, "account_id")?);
         if let Some(tx_id) = payment.get("ledger_transaction_id").and_then(Value::as_str) {
             println!("  ledger_transaction_id: {tx_id}");
         }
@@ -1020,6 +1033,7 @@ fn print_spend_help() {
         "Submit an agent spend request
 
 Usage:
+  hubu spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
   hubu spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]"
     );
 }

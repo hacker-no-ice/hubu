@@ -261,6 +261,7 @@ fn payment_matches_authorized_spend(
     spend: &SpendRequest,
 ) -> bool {
     payment.agent_id == spend.agent_id
+        && payment.agent_account_id == spend.agent_account_id
         && payment.amount_cents == spend.amount_cents
         && payment.currency == spend.currency
         && payment.merchant == spend.merchant
@@ -301,7 +302,7 @@ impl Default for SpendManager {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use hubu_common::ids::{AgentId, PaymentId, UserId};
+    use hubu_common::ids::{AgentAccountId, AgentId, PaymentId, UserId};
 
     use super::*;
     use crate::policy::condition::{Condition, Field, PolicyValue};
@@ -315,6 +316,7 @@ mod tests {
             currency: Currency::Usd,
             owner_user_id: test_user_id(),
             agent_id: AgentId::new(),
+            agent_account_id: AgentAccountId::new(),
             merchant: Some("Acme Cafe".to_string()),
             category: Some("meals".to_string()),
             task_id: Some("task_123".to_string()),
@@ -416,6 +418,7 @@ mod tests {
                 spend_auth_token_id: token.id.clone(),
                 owner_user_id: request.owner_user_id,
                 agent_id: request.agent_id,
+                agent_account_id: request.agent_account_id,
                 amount_cents: request.amount_cents,
                 currency: request.currency,
                 merchant: request.merchant,
@@ -448,12 +451,44 @@ mod tests {
                 spend_auth_token_id: token.id,
                 owner_user_id: request.owner_user_id,
                 agent_id: request.agent_id,
+                agent_account_id: request.agent_account_id,
                 amount_cents: request.amount_cents + 1,
                 currency: request.currency,
                 merchant: request.merchant,
                 task_id: request.task_id,
             })
             .expect_err("mismatched amount should fail validation");
+
+        assert!(matches!(error, SpendError::PaymentRequestMismatch));
+    }
+
+    #[test]
+    fn rejects_auth_token_when_payment_account_differs_from_authorized_spend() {
+        let mut manager = SpendManager::new();
+        let request = spend_request(2_500);
+        let policy = policy(
+            Effect::NeedsApproval,
+            vec![amount_rule("allow_small_spend", Effect::Allow, 5_000)],
+        );
+        let evaluation = manager
+            .evaluate_spend(&user_context(), request.clone(), &policy)
+            .expect("spend evaluation should succeed");
+        let token = evaluation
+            .auth_token
+            .expect("allow decision should issue auth token");
+
+        let error = manager
+            .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
+                spend_auth_token_id: token.id,
+                owner_user_id: request.owner_user_id,
+                agent_id: request.agent_id,
+                agent_account_id: AgentAccountId::new(),
+                amount_cents: request.amount_cents,
+                currency: request.currency,
+                merchant: request.merchant,
+                task_id: request.task_id,
+            })
+            .expect_err("mismatched account should fail validation");
 
         assert!(matches!(error, SpendError::PaymentRequestMismatch));
     }
@@ -482,6 +517,7 @@ mod tests {
                 spend_auth_token_id: token.id,
                 owner_user_id: request.owner_user_id,
                 agent_id: request.agent_id,
+                agent_account_id: request.agent_account_id,
                 amount_cents: request.amount_cents,
                 currency: request.currency,
                 merchant: request.merchant,

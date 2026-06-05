@@ -169,11 +169,17 @@ step "Register an agent"
 REGISTER_OUTPUT="$(hubu register agent)"
 say "${REGISTER_OUTPUT}"
 AGENT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/^  agent_id:/ { print $2; exit }')"
+ACCOUNT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/^  account_id:/ { print $2; exit }')"
 if [[ -z "${AGENT_ID}" ]]; then
   say "${RED}Could not parse agent_id from registration output.${RESET}" >&2
   exit 1
 fi
+if [[ -z "${ACCOUNT_ID}" ]]; then
+  say "${RED}Could not parse account_id from registration output.${RESET}" >&2
+  exit 1
+fi
 note "captured public agent_id=${AGENT_ID}"
+note "captured public account_id=${ACCOUNT_ID}"
 pause_for_reading
 
 step "Generate and attach a spending policy"
@@ -196,7 +202,7 @@ pause_for_reading
 
 step "Submit an allowed spend request"
 ALLOW_OUTPUT="$(hubu spend \
-  --agent-id "${AGENT_ID}" \
+  --account-id "${ACCOUNT_ID}" \
   --amount 20 \
   --reason "Purchase API credits")"
 show_cli_output "${ALLOW_OUTPUT}"
@@ -204,7 +210,7 @@ pause_for_reading
 
 step "Submit an allowed spend whose mock payment fails"
 FAILED_PAYMENT_OUTPUT="$(hubu spend \
-  --agent-id "${AGENT_ID}" \
+  --account-id "${ACCOUNT_ID}" \
   --amount 15 \
   --reason "Test failed merchant payout" \
   --merchant fail)"
@@ -213,7 +219,7 @@ pause_for_reading
 
 step "Submit an over-limit spend request"
 NEEDS_APPROVAL_OUTPUT="$(hubu spend \
-  --agent-id "${AGENT_ID}" \
+  --account-id "${ACCOUNT_ID}" \
   --amount 120 \
   --reason "Large API credit purchase")"
 show_cli_output "${NEEDS_APPROVAL_OUTPUT}"
@@ -221,7 +227,7 @@ pause_for_reading
 
 step "Submit a denied spend request"
 DENY_OUTPUT="$(hubu spend \
-  --agent-id "${AGENT_ID}" \
+  --account-id "${ACCOUNT_ID}" \
   --amount 20 \
   --reason "Attempt blocked merchant purchase" \
   --merchant blocked-merchant)"

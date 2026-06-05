@@ -658,7 +658,9 @@ fn collect_rows<T>(
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
-    use hubu_common::ids::{BudgetHoldId, BudgetId, SpendAuthTokenId, SpendDecisionId};
+    use hubu_common::ids::{
+        AgentAccountId, BudgetHoldId, BudgetId, SpendAuthTokenId, SpendDecisionId,
+    };
 
     use super::*;
     use crate::policy::{
@@ -699,6 +701,7 @@ mod tests {
             currency: Currency::Usd,
             owner_user_id: user_id(),
             agent_id: agent_id(),
+            agent_account_id: AgentAccountId::new(),
             merchant: Some("Acme".to_string()),
             category: None,
             task_id: Some("task".to_string()),

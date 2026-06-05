@@ -69,6 +69,13 @@ impl RegistrationManager {
         Ok(self.store.account_for_agent(agent_id)?)
     }
 
+    pub fn account_for_pub_id(
+        &self,
+        pub_id: &str,
+    ) -> Result<Option<AgentAccount>, RegistrationError> {
+        Ok(self.store.account_by_pub_id(pub_id)?)
+    }
+
     pub fn agents_for_user(
         &self,
         owner_user_id: &UserId,
@@ -194,6 +201,13 @@ impl RegistrationStore {
         }
     }
 
+    fn account_by_pub_id(&self, pub_id: &str) -> Result<Option<AgentAccount>, StorageError> {
+        match self {
+            RegistrationStore::Memory(store) => store.account_by_pub_id(pub_id),
+            RegistrationStore::Sqlite(store) => store.account_by_pub_id(pub_id),
+        }
+    }
+
     fn agents_for_user(
         &self,
         owner_user_id: &UserId,
@@ -223,6 +237,7 @@ struct MemoryRegistrationStore {
     agent_by_owner_and_fingerprint: HashMap<(UserId, String), AgentId>,
     agent_by_pub_id: HashMap<String, AgentId>,
     account_by_agent: HashMap<AgentId, AgentAccountId>,
+    account_by_pub_id: HashMap<String, AgentAccountId>,
     version_by_agent_and_fingerprint: HashMap<(AgentId, String), AgentVersionId>,
 }
 
@@ -236,6 +251,7 @@ impl MemoryRegistrationStore {
             agent_by_owner_and_fingerprint: HashMap::new(),
             agent_by_pub_id: HashMap::new(),
             account_by_agent: HashMap::new(),
+            account_by_pub_id: HashMap::new(),
             version_by_agent_and_fingerprint: HashMap::new(),
         }
     }
@@ -280,6 +296,14 @@ impl MemoryRegistrationStore {
         Ok(self
             .account_by_agent
             .get(agent_id)
+            .and_then(|id| self.accounts.get(id))
+            .cloned())
+    }
+
+    fn account_by_pub_id(&self, pub_id: &str) -> Result<Option<AgentAccount>, StorageError> {
+        Ok(self
+            .account_by_pub_id
+            .get(pub_id)
             .and_then(|id| self.accounts.get(id))
             .cloned())
     }
@@ -504,6 +528,8 @@ impl MemoryRegistrationStore {
         };
 
         self.account_by_agent.insert(agent.id.clone(), id.clone());
+        self.account_by_pub_id
+            .insert(account.pub_id.clone(), id.clone());
         self.accounts.insert(id, account.clone());
 
         log_event(
@@ -631,6 +657,10 @@ impl SqliteRegistrationStore {
 
     fn account_for_agent(&self, agent_id: &AgentId) -> Result<Option<AgentAccount>, StorageError> {
         query_account_for_agent(&self.conn, agent_id)
+    }
+
+    fn account_by_pub_id(&self, pub_id: &str) -> Result<Option<AgentAccount>, StorageError> {
+        query_account_by_pub_id(&self.conn, pub_id)
     }
 
     fn agents_for_user(
@@ -1012,6 +1042,18 @@ fn query_account_for_agent(
     )
 }
 
+fn query_account_by_pub_id(
+    conn: &impl Queryable,
+    pub_id: &str,
+) -> Result<Option<AgentAccount>, StorageError> {
+    conn.query_account(
+        "SELECT id, pub_id, agent_id, owner_user_id, account_status, created_at, updated_at
+         FROM agent_accounts
+         WHERE pub_id = ?1",
+        &[pub_id.to_string()],
+    )
+}
+
 fn query_agents_for_user(
     conn: &Connection,
     owner_user_id: &UserId,
@@ -1304,6 +1346,10 @@ mod tests {
         assert_eq!(
             manager.agent_id_for_pub_id(&first.agent.pub_id).unwrap(),
             Some(first.agent.id)
+        );
+        assert_eq!(
+            manager.account_for_pub_id(&first.account.pub_id).unwrap(),
+            Some(first.account)
         );
         assert_eq!(
             manager.agent_id_for_pub_id(&second.agent.pub_id).unwrap(),
