@@ -81,7 +81,9 @@ the agent.
 `POST /model-calls/image`, settles the matching frozen budget hold, records the
 payment in the ledger, and returns image output metadata. The current provider
 is a local `hubu-demo` adapter; real vendor adapters can be added behind the
-same Hubu-hosted boundary without passing API keys to agents.
+same Hubu-hosted boundary without passing API keys to agents. Provider name,
+model, and API key are server-side Hubu configuration (`HUBU_IMAGE_PROVIDER_*`);
+agent requests must match the configured provider/model.
 
 ## Tool Mapping
 

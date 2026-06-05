@@ -296,6 +296,12 @@ is already in place: the agent presents a scoped Hubu spend token, Hubu consumes
 it once, settles the budget hold, records the ledger transaction, and keeps
 provider selection/configuration server-side.
 
+The server-side image provider defaults to `hubu-demo` / `demo-image-v1`. For a
+real adapter, configure Hubu with `HUBU_IMAGE_PROVIDER_NAME`,
+`HUBU_IMAGE_PROVIDER_MODEL`, and `HUBU_IMAGE_PROVIDER_API_KEY`; agents may only
+request the configured provider/model, and the API key is not returned in API,
+CLI, MCP, or ledger responses.
+
 ### 7. Submit an Allowed Spend Whose Mock Payment Fails
 
 ```sh

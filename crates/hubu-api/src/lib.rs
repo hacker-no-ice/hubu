@@ -138,6 +138,41 @@ struct ServerState {
     governance: Mutex<SqliteGovernanceRepository>,
     payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
     payments: Mutex<DemoPaymentManager>,
+    image_provider: ImageProviderConfig,
+}
+
+#[derive(Debug, Clone)]
+struct ImageProviderConfig {
+    provider: String,
+    model: String,
+    api_key: Option<String>,
+}
+
+impl ImageProviderConfig {
+    fn from_env() -> Self {
+        Self {
+            provider: env::var("HUBU_IMAGE_PROVIDER_NAME")
+                .unwrap_or_else(|_| "hubu-demo".to_string()),
+            model: env::var("HUBU_IMAGE_PROVIDER_MODEL")
+                .unwrap_or_else(|_| "demo-image-v1".to_string()),
+            api_key: env::var("HUBU_IMAGE_PROVIDER_API_KEY").ok(),
+        }
+    }
+
+    fn resolve(&self, provider: Option<String>, model: Option<String>) -> Result<(String, String)> {
+        let provider = provider.unwrap_or_else(|| self.provider.clone());
+        let model = model.unwrap_or_else(|| self.model.clone());
+        if provider != self.provider || model != self.model {
+            return Err(anyhow!(
+                "requested image provider/model is not configured in Hubu"
+            ));
+        }
+        Ok((provider, model))
+    }
+
+    fn has_api_key(&self) -> bool {
+        self.api_key.as_ref().is_some_and(|key| !key.is_empty())
+    }
 }
 
 impl ServerState {
@@ -225,6 +260,7 @@ impl ServerState {
             governance: Mutex::new(governance),
             payment_attempts: Mutex::new(payment_attempts),
             payments: Mutex::new(payments),
+            image_provider: ImageProviderConfig::from_env(),
         };
         log_event(
             "info",
@@ -233,6 +269,9 @@ impl ServerState {
                 "db_path": db_path,
                 "default_user_id": default_user.id.to_string(),
                 "default_user_pub_id": default_user.pub_id,
+                "image_provider": state.image_provider.provider.clone(),
+                "image_model": state.image_provider.model.clone(),
+                "image_provider_api_key_configured": state.image_provider.has_api_key(),
             }),
         );
         Ok(state)
@@ -1715,8 +1754,9 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
         return Err(anyhow!("image prompt cannot be empty"));
     }
 
-    let provider = request.provider.unwrap_or_else(|| "hubu-demo".to_string());
-    let model = request.model.unwrap_or_else(|| "demo-image-v1".to_string());
+    let (provider, model) = state
+        .image_provider
+        .resolve(request.provider, request.model)?;
     let user = default_user_context(state)?;
     let token_id = SpendAuthTokenId::from_str(&request.spend_auth_token_id)
         .map_err(|error| anyhow!("invalid spend_auth_token_id: {error}"))?;
@@ -1843,6 +1883,7 @@ fn generate_image(body: String, state: &ServerState) -> Result<GenerateImageHttp
             "payment_id": payment.payment_id.to_string(),
             "amount_cents": payment.amount_cents,
             "currency": payment.currency.to_string(),
+            "provider_api_key_configured": state.image_provider.has_api_key(),
         }),
     );
 
@@ -2753,6 +2794,31 @@ mod tests {
             .to_string()
             .contains("spend authorization has already been used"));
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn image_provider_config_rejects_unconfigured_provider_or_model() {
+        let config = ImageProviderConfig {
+            provider: "hubu-demo".to_string(),
+            model: "demo-image-v1".to_string(),
+            api_key: Some("server-side-secret".to_string()),
+        };
+
+        let resolved = config
+            .resolve(None, None)
+            .expect("defaults should resolve to configured provider");
+        assert_eq!(
+            resolved,
+            ("hubu-demo".to_string(), "demo-image-v1".to_string())
+        );
+        assert!(config.has_api_key());
+
+        let error = config
+            .resolve(Some("nano-banana".to_string()), None)
+            .expect_err("agent should not be able to select an unconfigured provider");
+        assert!(error
+            .to_string()
+            .contains("requested image provider/model is not configured in Hubu"));
     }
 
     #[test]
