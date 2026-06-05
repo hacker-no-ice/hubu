@@ -100,6 +100,9 @@ show_cli_output() {
       "  status: settled")
         say "  status: ${BOLD}${GREEN}settled${RESET}"
         ;;
+      "  status: frozen")
+        say "  status: ${BOLD}${CYAN}frozen${RESET}"
+        ;;
       "  status: released")
         say "  status: ${BOLD}${YELLOW}released${RESET}"
         ;;
@@ -208,6 +211,28 @@ ALLOW_OUTPUT="$(hubu spend \
 show_cli_output "${ALLOW_OUTPUT}"
 pause_for_reading
 
+step "Authorize a \$5 logo-generation budget"
+LOGO_AUTH_OUTPUT="$(hubu spend authorize \
+  --account-id "${ACCOUNT_ID}" \
+  --amount 5 \
+  --reason "Generate Project Hubu logo" \
+  --merchant hubu-model-proxy)"
+show_cli_output "${LOGO_AUTH_OUTPUT}"
+LOGO_AUTH_TOKEN_ID="$(printf '%s\n' "${LOGO_AUTH_OUTPUT}" | awk -F': ' '/^  auth_token_id:/ { print $2; exit }')"
+if [[ -z "${LOGO_AUTH_TOKEN_ID}" ]]; then
+  say "${RED}Could not parse auth_token_id from logo spend authorization output.${RESET}" >&2
+  exit 1
+fi
+note "captured spend_auth_token_id=${LOGO_AUTH_TOKEN_ID}"
+pause_for_reading
+
+step "Generate a Project Hubu logo through the Hubu model proxy"
+LOGO_OUTPUT="$(hubu model-call image \
+  --spend-auth-token-id "${LOGO_AUTH_TOKEN_ID}" \
+  --prompt "Create a crisp logo for Project Hubu")"
+show_cli_output "${LOGO_OUTPUT}"
+pause_for_reading
+
 step "Submit an allowed spend whose mock payment fails"
 FAILED_PAYMENT_OUTPUT="$(hubu spend \
   --account-id "${ACCOUNT_ID}" \
@@ -243,4 +268,4 @@ hubu ledger list
 pause_for_reading
 
 say ""
-say "${BOLD}${GREEN}Demo complete.${RESET} ${DIM}Allowed spend settled budget into consumed balance; failed payment released frozen budget; over-limit and denied spends did not execute payment.${RESET}"
+say "${BOLD}${GREEN}Demo complete.${RESET} ${DIM}Allowed spend settled budget into consumed balance; logo generation used a scoped Hubu auth token; failed payment released frozen budget; over-limit and denied spends did not execute payment.${RESET}"
