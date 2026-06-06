@@ -8,9 +8,15 @@
   </head>
   <body>
     <header class="app-header">
-      <div>
-        <p class="kicker">Hubu architecture</p>
-        <h1>Spending control plane for AI agents</h1>
+      <div class="brand-lockup">
+        <div class="logo-mark" aria-label="Hubu">
+          <span class="logo-glyph" aria-hidden="true">户</span>
+          <span class="logo-word" aria-hidden="true">Hubu</span>
+        </div>
+        <div>
+          <p class="kicker">Hubu architecture</p>
+          <h1>Spending control plane for AI agents</h1>
+        </div>
       </div>
       <nav aria-label="Architecture views">
         <button class="icon-button" id="top-view-button" type="button" title="Return to top level">
@@ -38,9 +44,12 @@
           <div class="legend" aria-label="Diagram legend">
             <span><i class="swatch human"></i>Human</span>
             <span><i class="swatch agent"></i>Agent</span>
+            <span><i class="swatch surface"></i>Hubu surface</span>
             <span><i class="swatch core"></i>Core</span>
             <span><i class="swatch wallet"></i>Wallet</span>
             <span><i class="swatch data"></i>Data</span>
+            <span><i class="swatch executor"></i>Executor</span>
+            <span><i class="swatch vendor"></i>Vendor</span>
           </div>
         </div>
         <svg
@@ -51,7 +60,7 @@
           aria-labelledby="diagram-title diagram-summary"
         ></svg>
         <p id="diagram-summary" class="diagram-summary">
-          Click a component to drill into its internal flow. Open code links from the detail panel.
+          Click a component to drill into its internal flow. Hover a box to see its code or doc path.
         </p>
       </section>
 
@@ -66,7 +75,6 @@
           Hubu lets humans fund and govern agent spending while agents submit structured requests
           through deterministic authorization and payment boundaries.
         </p>
-        <div class="code-links" id="code-links"></div>
         <div class="detail-list">
           <h3>Responsibilities</h3>
           <ul id="responsibilities"></ul>
@@ -74,6 +82,7 @@
       </aside>
     </main>
 
+    <div class="path-tooltip" id="path-tooltip" role="status" aria-live="polite"></div>
     <script src="./architecture.js"></script>
   </body>
 </html>
