@@ -5,9 +5,13 @@
   --paper-deep: #eee8d8;
   --human: #f0b45f;
   --agent: #8db4d8;
+  --surface: #86cfc1;
   --core: #a8c686;
   --wallet: #d98989;
   --data: #c7addf;
+  --external: #d8d2c4;
+  --executor: #d8d2c4;
+  --vendor: #fffdf7;
   --line: #2b3340;
   --shadow: rgba(31, 41, 51, 0.14);
 }
@@ -19,6 +23,7 @@
 body {
   margin: 0;
   min-height: 100vh;
+  overflow-x: clip;
   color: var(--ink);
   background:
     linear-gradient(rgba(31, 41, 51, 0.035) 1px, transparent 1px),
@@ -46,6 +51,67 @@ a {
   justify-content: space-between;
   gap: 20px;
   padding: 22px clamp(16px, 4vw, 42px) 14px;
+}
+
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.logo-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  flex: 0 0 auto;
+  border: 3px solid var(--line);
+  background:
+    linear-gradient(135deg, rgba(240, 180, 95, 0.82), rgba(134, 207, 193, 0.72)),
+    #fffdf7;
+  box-shadow: 5px 6px 0 rgba(31, 41, 51, 0.2);
+  transform: rotate(-2deg);
+}
+
+.logo-mark::before,
+.logo-mark::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border: 2px dashed rgba(31, 41, 51, 0.42);
+  transform: rotate(3deg);
+}
+
+.logo-mark::after {
+  inset: 14px;
+  border-style: solid;
+  transform: rotate(-4deg);
+}
+
+.logo-glyph {
+  position: relative;
+  z-index: 1;
+  margin-top: -7px;
+  font-family:
+    "Kaiti SC",
+    "STKaiti",
+    "KaiTi",
+    "BiauKai",
+    serif;
+  font-size: 37px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.logo-word {
+  position: absolute;
+  z-index: 1;
+  bottom: 10px;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
 }
 
 .app-header h1,
@@ -115,6 +181,7 @@ a {
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(290px, 380px);
+  align-items: start;
   gap: 22px;
   padding: 0 clamp(16px, 4vw, 42px) 34px;
 }
@@ -176,6 +243,10 @@ a {
   background: var(--agent);
 }
 
+.swatch.surface {
+  background: var(--surface);
+}
+
 .swatch.core {
   background: var(--core);
 }
@@ -186,6 +257,20 @@ a {
 
 .swatch.data {
   background: var(--data);
+}
+
+.swatch.external {
+  background: var(--external);
+  border-style: dashed;
+}
+
+.swatch.executor {
+  background: var(--executor);
+}
+
+.swatch.vendor {
+  background: var(--vendor);
+  border-radius: 50%;
 }
 
 .architecture-canvas {
@@ -210,7 +295,7 @@ a {
 
 .details-panel {
   padding: 18px;
-  align-self: stretch;
+  align-self: start;
 }
 
 .back-button {
@@ -220,37 +305,6 @@ a {
 .details-panel p {
   color: var(--muted);
   line-height: 1.55;
-}
-
-.code-links {
-  display: grid;
-  gap: 10px;
-  margin: 18px 0 24px;
-}
-
-.code-link {
-  display: grid;
-  gap: 3px;
-  padding: 10px 12px;
-  border: 2px solid var(--line);
-  background: #fffdf7;
-  text-decoration: none;
-  transform: rotate(-0.35deg);
-}
-
-.code-link:nth-child(2n) {
-  transform: rotate(0.35deg);
-}
-
-.code-link strong {
-  font-size: 14px;
-}
-
-.code-link span {
-  color: var(--muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  overflow-wrap: anywhere;
 }
 
 .detail-list h3 {
@@ -282,6 +336,25 @@ a {
   stroke-width: 4.5;
 }
 
+.actor-node .node-fill {
+  stroke-linejoin: round;
+}
+
+.storage-node .node-fill {
+  stroke-linejoin: round;
+}
+
+.storage-cap {
+  stroke: rgba(31, 41, 51, 0.48);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.storage-node:hover .storage-cap,
+.storage-node:focus .storage-cap {
+  stroke-width: 4;
+}
+
 .node text {
   pointer-events: none;
   fill: var(--ink);
@@ -310,6 +383,51 @@ a {
   font-weight: 800;
 }
 
+.arrow-label-back {
+  fill: rgba(255, 253, 247, 0.92);
+  stroke: rgba(31, 41, 51, 0.28);
+  stroke-width: 1.5;
+}
+
+.zone-fill {
+  fill: rgba(216, 210, 196, 0.28);
+  stroke: rgba(31, 41, 51, 0.55);
+  stroke-width: 3;
+  stroke-dasharray: 10 9;
+}
+
+.zone-label {
+  fill: var(--muted);
+  font-size: 18px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.vendor-node .node-fill {
+  stroke-linecap: round;
+}
+
+.path-tooltip {
+  position: fixed;
+  z-index: 10;
+  display: none;
+  max-width: min(420px, calc(100vw - 28px));
+  padding: 8px 10px;
+  border: 2px solid var(--line);
+  color: var(--ink);
+  background: #fffdf7;
+  box-shadow: 3px 4px 0 rgba(31, 41, 51, 0.2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.path-tooltip.is-visible {
+  display: block;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -329,8 +447,12 @@ a {
     align-items: stretch;
   }
 
+  .brand-lockup {
+    align-items: flex-start;
+  }
+
   .app-header h1 {
-    font-size: 34px;
+    font-size: 28px;
   }
 
   .app-header nav,
@@ -348,8 +470,37 @@ a {
 }
 
 @media (max-width: 560px) {
+  .brand-lockup {
+    gap: 10px;
+  }
+
+  .logo-mark {
+    width: 56px;
+    height: 56px;
+    border-width: 2px;
+    box-shadow: 3px 4px 0 rgba(31, 41, 51, 0.2);
+  }
+
+  .logo-mark::before {
+    inset: 6px;
+  }
+
+  .logo-mark::after {
+    inset: 10px;
+  }
+
+  .logo-glyph {
+    margin-top: -6px;
+    font-size: 27px;
+  }
+
+  .logo-word {
+    bottom: 7px;
+    font-size: 9px;
+  }
+
   .app-header h1 {
-    font-size: 21px;
+    font-size: 17px;
   }
 
   .architecture-canvas {
@@ -365,6 +516,6 @@ a {
 
 @media (max-width: 360px) {
   .app-header h1 {
-    font-size: 19px;
+    font-size: 15px;
   }
 }
