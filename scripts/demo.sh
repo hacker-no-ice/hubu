@@ -151,7 +151,7 @@ say "${GREEN}Hubu server is ready.${RESET}"
 pause_for_reading
 
 step "Register the human user"
-INIT_OUTPUT="$(hubu register human --display-name "Alice Example" --email alice@example.com)"
+INIT_OUTPUT="$(hubu register human --username alice-example --display-name "Alice Example" --email alice@example.com)"
 say "${INIT_OUTPUT}"
 USER_ID="$(printf '%s\n' "${INIT_OUTPUT}" | awk -F': ' '/^  user_id:/ { print $2; exit }')"
 if [[ -z "${USER_ID}" ]]; then
@@ -161,12 +161,16 @@ fi
 note "captured public user_id=${USER_ID}"
 pause_for_reading
 
+step "List human users"
+hubu user list
+pause_for_reading
+
 step "Read agent registration guidance"
 hubu protocol agent-registration
 pause_for_reading
 
 step "Register an agent"
-REGISTER_OUTPUT="$(hubu register agent)"
+REGISTER_OUTPUT="$(hubu register agent --owner-user-id "${USER_ID}")"
 say "${REGISTER_OUTPUT}"
 AGENT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/^  agent_id:/ { print $2; exit }')"
 ACCOUNT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/^  account_id:/ { print $2; exit }')"

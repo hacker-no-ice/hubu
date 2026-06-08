@@ -39,6 +39,18 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local label="$1"
+  local haystack="$2"
+  local needle="$3"
+
+  if [[ "${haystack}" == *"${needle}"* ]]; then
+    printf 'expected %s not to contain: %s\n' "${label}" "${needle}" >&2
+    printf '\n%s output:\n%s\n' "${label}" "${haystack}" >&2
+    fail "unexpected output"
+  fi
+}
+
 extract_field() {
   local output="$1"
   local field="$2"
@@ -73,11 +85,18 @@ HUBU_DB_PATH="${DB_PATH}" "${ROOT_DIR}/target/debug/hubu-server" "${FLOW_ADDR}" 
 SERVER_PID="$!"
 wait_for_server
 
-HUMAN_OUTPUT="$(hubu register human --display-name "Alice Example" --email alice@example.com)"
+HUMAN_OUTPUT="$(hubu register human --username alice-example --display-name "Alice Example" --email alice@example.com)"
 assert_contains "human registration" "${HUMAN_OUTPUT}" "Human registered"
+assert_contains "human registration" "${HUMAN_OUTPUT}" "username: alice-example"
 assert_contains "human registration" "${HUMAN_OUTPUT}" "display_name: Alice Example"
 USER_ID="$(extract_field "${HUMAN_OUTPUT}" "user_id")"
 [[ -n "${USER_ID}" ]] || fail "could not parse user_id"
+
+USER_LIST_OUTPUT="$(hubu user list)"
+assert_contains "user list" "${USER_LIST_OUTPUT}" "CURRENT"
+assert_contains "user list" "${USER_LIST_OUTPUT}" "${USER_ID}"
+assert_contains "user list" "${USER_LIST_OUTPUT}" "alice-example"
+assert_contains "user list" "${USER_LIST_OUTPUT}" "*"
 
 GUIDANCE_OUTPUT="$(hubu protocol agent-registration)"
 assert_contains "registration guidance" "${GUIDANCE_OUTPUT}" '"protocol_version": "hubu-agent-registration-v1"'
@@ -97,6 +116,15 @@ assert_contains "agent registration" "${AGENT_OUTPUT}" "Agent registered"
 AGENT_ID="$(extract_field "${AGENT_OUTPUT}" "agent_id")"
 [[ -n "${AGENT_ID}" ]] || fail "could not parse agent_id"
 
+set +e
+DUPLICATE_AGENT_OUTPUT="$(hubu register agent --name core-flow-agent --version ci 2>&1)"
+DUPLICATE_AGENT_STATUS=$?
+set -e
+[[ "${DUPLICATE_AGENT_STATUS}" -ne 0 ]] || fail "duplicate agent registration unexpectedly succeeded"
+assert_contains "duplicate agent registration" "${DUPLICATE_AGENT_OUTPUT}" "agent is already registered for this owner"
+assert_not_contains "duplicate agent registration" "${DUPLICATE_AGENT_OUTPUT}" "Registration review"
+assert_not_contains "duplicate agent registration" "${DUPLICATE_AGENT_OUTPUT}" "identity_fingerprint"
+
 rm -f "${POLICY_FILE}"
 hubu init --policy "${POLICY_FILE}" >/dev/null
 POLICY_OUTPUT="$(hubu policy add --agent-id "${AGENT_ID}" --path "${POLICY_FILE}")"
@@ -106,7 +134,12 @@ assert_contains "policy add" "${POLICY_OUTPUT}" "default_decision: needs_approva
 AGENTS_OUTPUT="$(hubu agent list)"
 assert_contains "agent list" "${AGENTS_OUTPUT}" "${AGENT_ID}"
 assert_contains "agent list" "${AGENTS_OUTPUT}" "core-flow-agent"
-assert_contains "agent list" "${AGENTS_OUTPUT}" "status: active"
+assert_contains "agent list" "${AGENTS_OUTPUT}" "${USER_ID}"
+assert_contains "agent list" "${AGENTS_OUTPUT}" "alice-example"
+assert_contains "agent list" "${AGENTS_OUTPUT}" "active"
+ALL_AGENTS_OUTPUT="$(hubu agent list --all)"
+assert_contains "agent list all" "${ALL_AGENTS_OUTPUT}" "${AGENT_ID}"
+assert_contains "agent list all" "${ALL_AGENTS_OUTPUT}" "core-flow-agent"
 
 BUDGET_OUTPUT="$(hubu budget create --amount 75)"
 assert_contains "budget create" "${BUDGET_OUTPUT}" "Budget created"

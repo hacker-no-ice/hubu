@@ -103,10 +103,18 @@ client read the same token automatically and send it as a local bearer token for
 protected API routes. Use `HUBU_AUTH_TOKEN_FILE` if the server and clients need
 to share a token file at a different path.
 
+Restart `hubu-server` after rebuilding API or storage changes; reinstalling the
+CLI only updates the client binary. To start over with clean local demo state:
+
+```sh
+./scripts/reset-local-state.sh --yes
+```
+
 Then use the CLI from another terminal:
 
 ```sh
-hubu register human --display-name "Alice Example" --email alice@example.com
+hubu register human --username alice-example --display-name "Alice Example" --email alice@example.com
+hubu user list
 hubu protocol agent-registration
 hubu register agent
 hubu init --policy policy.yaml
@@ -118,9 +126,14 @@ hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
 hubu ledger list
 ```
 
-`hubu register agent` uses the guidance-provided vendor/workspace name template
-and the git short SHA as defaults. Pass `--name`, `--version`, or `--dry-run` to
-override or inspect the computed registration envelope.
+`hubu register human` keeps the stable lowercase `username` separate from the
+human-readable `display_name`. `hubu user list` shows all local users and marks
+the current user context. `hubu register agent` binds the agent to that current
+user context and uses the guidance-provided vendor/workspace name template and
+the git short SHA as defaults. `hubu agent list` shows agents for the current
+user by default; pass `--all` for local inspection across users. Pass `--name`,
+`--version`, or `--dry-run` to override or inspect the computed registration
+envelope.
 
 See [docs/demo.md](docs/demo.md) for the full walkthrough, expected output,
 CLI installation notes, demo script pacing options, and known limitations.

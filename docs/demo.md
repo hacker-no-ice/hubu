@@ -43,6 +43,13 @@ current directory. The CLI reads `HUBU_AUTH_TOKEN` or the same token file and
 sends it as a bearer token for protected routes. Set `HUBU_AUTH_TOKEN_FILE` if
 the server and CLI run from different working directories.
 
+Restart `hubu-server` after rebuilding API or storage changes; reinstalling the
+CLI only updates the client binary. To reset local demo data:
+
+```sh
+./scripts/reset-local-state.sh --yes
+```
+
 In another terminal, check that the CLI can reach it:
 
 ```sh
@@ -84,6 +91,7 @@ HUBU_DEMO_STEP_DELAY=2 HUBU_DEMO_READ_DELAY=4 ./scripts/demo.sh
 
 ```sh
 hubu register human \
+  --username alice-example \
   --display-name "Alice Example" \
   --email alice@example.com
 ```
@@ -93,14 +101,21 @@ Expected output:
 ```txt
 Human registered
   user_id: usr_6qqcj94w6pr5
+  username: alice-example
   display_name: Alice Example
 ```
 
 The demo server creates a fallback default user on startup so core workflows can
 run in single-user MVP mode. Calling `hubu register human` explicitly creates a
-new human user from the provided display name and email, then makes that user
-the active default for subsequent agent, policy, spend, payment, and ledger
+new human user from the provided username, display name, and email, then makes
+that user the active default for subsequent policy, spend, payment, and ledger
 operations.
+
+List users when you need to confirm which local user is current:
+
+```sh
+hubu user list
+```
 
 ### 2. Register an Agent
 
@@ -391,11 +406,12 @@ shows the owning human user for both the transaction and its entries.
 
 ```sh
 hubu [--url http://127.0.0.1:8787] init [--policy FILE] [--force]
-hubu [--url http://127.0.0.1:8787] register human [--display-name NAME] [--email EMAIL]
+hubu [--url http://127.0.0.1:8787] register human --username USERNAME --display-name NAME [--email EMAIL]
+hubu [--url http://127.0.0.1:8787] user list
 hubu [--url http://127.0.0.1:8787] protocol agent-registration
 hubu [--url http://127.0.0.1:8787] register agent [--name NAME] [--version VERSION] [--dry-run]
 hubu [--url http://127.0.0.1:8787] policy add --agent-id ID --path FILE
-hubu [--url http://127.0.0.1:8787] agent list
+hubu [--url http://127.0.0.1:8787] agent list [--all]
 hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
 hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
 hubu [--url http://127.0.0.1:8787] budget list

@@ -42,7 +42,8 @@ An agent can also let the CLI infer both fields:
 hubu register agent
 ```
 
-By default, the CLI uses the guidance-provided
+By default, the CLI binds the registration to the current Hubu user context,
+uses the guidance-provided
 `agent_name.default_template` as `agent_name` and the current git short SHA as
 `version_label`, falling back to `dev` when git is not available. In the demo
 guidance, the template is `{vendor}-{workspace}` and the vendor is `codex`, so
@@ -54,10 +55,9 @@ protocol envelope before submitting:
 hubu register agent --dry-run
 ```
 
-The Hubu client resolves the active Hubu user, expands those fields into a
-registration envelope, computes fingerprints, and prints a compact review when
-submitting. Agents and humans can use `--dry-run` to inspect the full envelope
-before submission.
+The Hubu client includes the current owner context in the registration envelope,
+computes fingerprints, and prints a compact review when submitting. Agents and
+humans can use `--dry-run` to inspect the full envelope before submission.
 
 Example review:
 
@@ -78,8 +78,7 @@ cancel before submission. Advanced clients may also expose editable code, model,
 runtime, tool, or permission fields, but those fields should not be required for
 the low-friction path.
 
-The demo CLI keeps the same low-friction command but submits the protocol
-envelope internally:
+The demo CLI keeps the same low-friction defaults for name and version:
 
 ```sh
 hubu register agent
@@ -251,8 +250,7 @@ On registration, the server must:
 
 1. Parse the registration envelope.
 2. Validate `protocol_version`.
-3. Confirm `identity.payload.owner` matches the active Hubu user or an
-   authorized owner.
+3. Resolve `identity.payload.owner.pub_id` to a registered Hubu user.
 4. Canonicalize `identity.payload`.
 5. Recompute `identity.fingerprint`.
 6. Reject the request if the recomputed value does not match.
@@ -331,7 +329,6 @@ The guidance response should be directly actionable:
   "client_filled": {
     "agent_identity.vendor": "codex",
     "agent_name.default_template": "{vendor}-{workspace}",
-    "owner": "active_hubu_user",
     "agent_kind": "codex_agent",
     "runtime.provider": "codex",
     "runtime.environment": "development",
@@ -383,13 +380,14 @@ The guidance response should be directly actionable:
 An agent can follow this response mechanically:
 
 1. Collect only `human_inputs` that it cannot infer safely.
-2. Fill `client_filled` values from the active Hubu session and runtime.
-3. Add optional fields only when confidently known.
-4. Canonicalize and hash `identity_payload`.
-5. Put that fingerprint into `version_payload.identity_fingerprint`.
-6. Canonicalize and hash `version_payload`.
-7. Show the compact `review_fields` summary to the human.
-8. Submit the envelope after confirmation.
+2. Put the current Hubu user context into `identity_payload.owner.pub_id`.
+3. Fill `client_filled` values from the active runtime.
+4. Add optional fields only when confidently known.
+5. Canonicalize and hash `identity_payload`.
+6. Put that fingerprint into `version_payload.identity_fingerprint`.
+7. Canonicalize and hash `version_payload`.
+8. Show the compact `review_fields` summary to the human.
+9. Submit the envelope after confirmation.
 
 For v1, `signature_policy` should be `not_supported`.
 

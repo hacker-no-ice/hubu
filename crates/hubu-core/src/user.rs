@@ -17,12 +17,22 @@ pub enum UserError {
     #[error("default user is missing")]
     MissingDefaultUser,
 
+    #[error("invalid username `{0}`; use 3-32 lowercase letters, digits, or hyphens, starting and ending with a letter or digit")]
+    InvalidUsername(String),
+
+    #[error("username `{0}` is already registered")]
+    UsernameAlreadyRegistered(String),
+
+    #[error("email `{0}` is already registered")]
+    EmailAlreadyRegistered(String),
+
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
 
 #[derive(Debug, Clone)]
 pub struct CreateUserRequest {
+    pub username: Option<String>,
     pub display_name: String,
     pub email: Option<String>,
 }
@@ -49,14 +59,28 @@ impl UserManager {
     }
 
     pub fn create_user(&mut self, request: CreateUserRequest) -> Result<User, UserError> {
+        let username = match request.username {
+            Some(username) => Some(canonical_username(&username)?),
+            None => None,
+        };
+        if let Some(username) = username.as_deref() {
+            if self.store.user_by_username(username)?.is_some() {
+                return Err(UserError::UsernameAlreadyRegistered(username.to_string()));
+            }
+        }
         let identity_key = request
             .email
             .as_ref()
             .map(|email| format!("email:{}", email.trim().to_ascii_lowercase()));
         if let Some(identity_key) = identity_key.as_deref() {
-            if let Some(existing) = self.store.user_by_identity_key(identity_key)? {
-                self.select_default_user(&existing)?;
-                return Ok(existing);
+            if self.store.user_by_identity_key(identity_key)?.is_some() {
+                let email = request
+                    .email
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase();
+                return Err(UserError::EmailAlreadyRegistered(email));
             }
         }
 
@@ -65,6 +89,7 @@ impl UserManager {
         let user = User {
             id: id.clone(),
             pub_id,
+            username,
             display_name: request.display_name,
             email: request.email,
             status: UserStatus::Active,
@@ -92,6 +117,7 @@ impl UserManager {
         let user = User {
             id: id.clone(),
             pub_id,
+            username: Some("hubu-user".to_string()),
             display_name: "Hubu User".to_string(),
             email: None,
             status: UserStatus::Active,
@@ -124,6 +150,10 @@ impl UserManager {
         Ok(self.store.user_by_pub_id(pub_id)?.map(|user| user.id))
     }
 
+    pub fn list_users(&self) -> Result<Vec<User>, UserError> {
+        Ok(self.store.list_users()?)
+    }
+
     pub fn user_for_id(&self, user_id: &UserId) -> Result<Option<User>, UserError> {
         Ok(self.store.user_for_id(user_id)?)
     }
@@ -151,6 +181,21 @@ impl UserManager {
         self.default_user_id = Some(user.id.clone());
         Ok(())
     }
+}
+
+fn canonical_username(username: &str) -> Result<String, UserError> {
+    let username = username.trim();
+    if username.len() < 3
+        || username.len() > 32
+        || username.starts_with('-')
+        || username.ends_with('-')
+        || username
+            .bytes()
+            .any(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && byte != b'-')
+    {
+        return Err(UserError::InvalidUsername(username.to_string()));
+    }
+    Ok(username.to_string())
 }
 
 impl Default for UserManager {
@@ -186,6 +231,20 @@ impl UserStore {
         }
     }
 
+    fn user_by_username(&self, username: &str) -> Result<Option<User>, StorageError> {
+        match self {
+            UserStore::Memory(store) => store.user_by_username(username),
+            UserStore::Sqlite(store) => store.user_by_username(username),
+        }
+    }
+
+    fn list_users(&self) -> Result<Vec<User>, StorageError> {
+        match self {
+            UserStore::Memory(store) => store.list_users(),
+            UserStore::Sqlite(store) => store.list_users(),
+        }
+    }
+
     fn user_by_identity_key(&self, identity_key: &str) -> Result<Option<User>, StorageError> {
         match self {
             UserStore::Memory(store) => store.user_by_identity_key(identity_key),
@@ -211,6 +270,7 @@ impl UserStore {
 struct MemoryUserStore {
     users: HashMap<UserId, User>,
     user_by_pub_id: HashMap<String, UserId>,
+    user_by_username: HashMap<String, UserId>,
     user_by_identity_key: HashMap<String, UserId>,
     selected_default_user_id: Option<UserId>,
 }
@@ -220,6 +280,7 @@ impl MemoryUserStore {
         Self {
             users: HashMap::new(),
             user_by_pub_id: HashMap::new(),
+            user_by_username: HashMap::new(),
             user_by_identity_key: HashMap::new(),
             selected_default_user_id: None,
         }
@@ -228,6 +289,10 @@ impl MemoryUserStore {
     fn insert_user(&mut self, user: &User, identity_key: Option<&str>) -> Result<(), StorageError> {
         self.user_by_pub_id
             .insert(user.pub_id.clone(), user.id.clone());
+        if let Some(username) = &user.username {
+            self.user_by_username
+                .insert(username.clone(), user.id.clone());
+        }
         if let Some(identity_key) = identity_key {
             self.user_by_identity_key
                 .insert(identity_key.to_string(), user.id.clone());
@@ -246,6 +311,20 @@ impl MemoryUserStore {
             .get(pub_id)
             .and_then(|id| self.users.get(id))
             .cloned())
+    }
+
+    fn user_by_username(&self, username: &str) -> Result<Option<User>, StorageError> {
+        Ok(self
+            .user_by_username
+            .get(username)
+            .and_then(|id| self.users.get(id))
+            .cloned())
+    }
+
+    fn list_users(&self) -> Result<Vec<User>, StorageError> {
+        let mut users = self.users.values().cloned().collect::<Vec<_>>();
+        users.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        Ok(users)
     }
 
     fn user_by_identity_key(&self, identity_key: &str) -> Result<Option<User>, StorageError> {
@@ -291,12 +370,13 @@ impl SqliteUserStore {
     fn insert_user(&mut self, user: &User, identity_key: Option<&str>) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO users
-             (id, pub_id, identity_key, display_name, email, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (id, pub_id, identity_key, username, display_name, email, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 user.id.to_string(),
                 user.pub_id,
                 identity_key,
+                user.username.as_deref(),
                 user.display_name,
                 user.email,
                 user_status(&user.status),
@@ -311,7 +391,7 @@ impl SqliteUserStore {
         let user = self
             .conn
             .query_row(
-                "SELECT id, pub_id, display_name, email, status, created_at, updated_at
+                "SELECT id, pub_id, username, display_name, email, status, created_at, updated_at
                  FROM users
                  WHERE id = ?1",
                 params![user_id.to_string()],
@@ -325,7 +405,7 @@ impl SqliteUserStore {
         let user = self
             .conn
             .query_row(
-                "SELECT id, pub_id, display_name, email, status, created_at, updated_at
+                "SELECT id, pub_id, username, display_name, email, status, created_at, updated_at
                  FROM users
                  WHERE pub_id = ?1",
                 params![pub_id],
@@ -335,11 +415,39 @@ impl SqliteUserStore {
         Ok(user)
     }
 
+    fn user_by_username(&self, username: &str) -> Result<Option<User>, StorageError> {
+        let user = self
+            .conn
+            .query_row(
+                "SELECT id, pub_id, username, display_name, email, status, created_at, updated_at
+                 FROM users
+                 WHERE username = ?1",
+                params![username],
+                user_from_row,
+            )
+            .optional()?;
+        Ok(user)
+    }
+
+    fn list_users(&self) -> Result<Vec<User>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, pub_id, username, display_name, email, status, created_at, updated_at
+             FROM users
+             ORDER BY created_at ASC",
+        )?;
+        let rows = statement.query_map([], user_from_row)?;
+        let mut users = Vec::new();
+        for row in rows {
+            users.push(row?);
+        }
+        Ok(users)
+    }
+
     fn user_by_identity_key(&self, identity_key: &str) -> Result<Option<User>, StorageError> {
         let user = self
             .conn
             .query_row(
-                "SELECT id, pub_id, display_name, email, status, created_at, updated_at
+                "SELECT id, pub_id, username, display_name, email, status, created_at, updated_at
                  FROM users
                  WHERE identity_key = ?1",
                 params![identity_key],
@@ -413,12 +521,14 @@ mod tests {
 
         let explicit = manager
             .create_user(CreateUserRequest {
+                username: Some("demo-user".to_string()),
                 display_name: "Demo User".to_string(),
                 email: Some("demo@example.com".to_string()),
             })
             .unwrap();
 
         assert_ne!(fallback.id, explicit.id);
+        assert_eq!(explicit.username.as_deref(), Some("demo-user"));
         assert_eq!(explicit.display_name, "Demo User");
         assert_eq!(explicit.email.as_deref(), Some("demo@example.com"));
         assert_eq!(
@@ -433,12 +543,45 @@ mod tests {
     }
 
     #[test]
+    fn username_must_be_canonical_and_unique() {
+        let mut manager = UserManager::new();
+        let invalid = manager
+            .create_user(CreateUserRequest {
+                username: Some("Alice Example".to_string()),
+                display_name: "Alice".to_string(),
+                email: None,
+            })
+            .unwrap_err();
+        assert!(matches!(invalid, UserError::InvalidUsername(_)));
+
+        manager
+            .create_user(CreateUserRequest {
+                username: Some("alice".to_string()),
+                display_name: "Alice".to_string(),
+                email: None,
+            })
+            .unwrap();
+        let duplicate = manager
+            .create_user(CreateUserRequest {
+                username: Some("alice".to_string()),
+                display_name: "Alice Duplicate".to_string(),
+                email: None,
+            })
+            .unwrap_err();
+        assert_eq!(
+            duplicate,
+            UserError::UsernameAlreadyRegistered("alice".to_string())
+        );
+    }
+
+    #[test]
     fn sqlite_user_is_persisted_and_available_after_restart() {
         let path = std::env::temp_dir().join(format!("hubu-user-{}.sqlite", UserId::new()));
         let explicit = {
             let mut manager = UserManager::open(&path).unwrap();
             manager
                 .create_user(CreateUserRequest {
+                    username: Some("persisted-user".to_string()),
                     display_name: "Persisted User".to_string(),
                     email: Some("persisted@example.com".to_string()),
                 })
@@ -475,25 +618,49 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_explicit_init_new_email_creates_new_user_and_same_email_reuses() {
+    fn sqlite_explicit_init_rejects_duplicate_email() {
         let mut manager = UserManager::in_memory_sqlite().unwrap();
         let default = manager.ensure_default_user().unwrap();
         let first = manager
             .create_user(CreateUserRequest {
+                username: Some("alice".to_string()),
                 display_name: "Alice".to_string(),
                 email: Some("Alice@Example.com".to_string()),
             })
             .unwrap();
-        let second = manager
+        let duplicate = manager
             .create_user(CreateUserRequest {
+                username: Some("alice-again".to_string()),
                 display_name: "Alice Again".to_string(),
                 email: Some("alice@example.com".to_string()),
             })
-            .unwrap();
+            .unwrap_err();
 
         assert_ne!(default.id, first.id);
-        assert_eq!(first.id, second.id);
         assert_eq!(first.display_name, "Alice");
+        assert_eq!(first.username.as_deref(), Some("alice"));
+        assert_eq!(
+            duplicate,
+            UserError::EmailAlreadyRegistered("alice@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn list_users_returns_created_users() {
+        let mut manager = UserManager::new();
+        let default = manager.ensure_default_user().unwrap();
+        let explicit = manager
+            .create_user(CreateUserRequest {
+                username: Some("list-user".to_string()),
+                display_name: "List User".to_string(),
+                email: None,
+            })
+            .unwrap();
+
+        let users = manager.list_users().unwrap();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0], default);
+        assert_eq!(users[1], explicit);
     }
 
     #[test]
@@ -504,6 +671,7 @@ mod tests {
             manager.ensure_default_user().unwrap();
             manager
                 .create_user(CreateUserRequest {
+                    username: Some("selected-user".to_string()),
                     display_name: "Selected User".to_string(),
                     email: Some("selected@example.com".to_string()),
                 })
