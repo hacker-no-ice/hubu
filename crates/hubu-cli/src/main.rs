@@ -41,7 +41,7 @@ fn run() -> Result<()> {
     match command.as_str() {
         "init" => init(args),
         "register" => register(&base_url, args),
-        "registration" => registration(&base_url, args),
+        "protocol" => protocol(&base_url, args),
         "policy" => policy(&base_url, args),
         "agent" => agent(&base_url, args),
         "budget" => budget(&base_url, args),
@@ -82,22 +82,24 @@ fn init(mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn registration(base_url: &str, args: Vec<String>) -> Result<()> {
+fn protocol(base_url: &str, args: Vec<String>) -> Result<()> {
     match args.as_slice() {
         [] => {
-            print_registration_help();
+            print_protocol_help();
             Ok(())
         }
         [command] if command == "help" || command == "-h" || command == "--help" => {
-            print_registration_help();
+            print_protocol_help();
             Ok(())
         }
-        [command] if command == "guidance" => registration_guidance(base_url),
-        _ => bail!("usage: hubu registration guidance"),
+        [protocol_name] if protocol_name == "agent-registration" => {
+            agent_registration_protocol(base_url)
+        }
+        _ => bail!("usage: hubu protocol agent-registration"),
     }
 }
 
-fn registration_guidance(base_url: &str) -> Result<()> {
+fn agent_registration_protocol(base_url: &str) -> Result<()> {
     let response = get_json(base_url, "/registration/guidance")?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
@@ -964,8 +966,7 @@ Usage:
 
 Commands:
   register   Register human users and agents
-  registration
-             Read agent registration protocol guidance
+  protocol   Read Hubu protocol payloads
   policy     Manage spending policies
   init       Generate local Hubu starter files
   agent      Read registered agents
@@ -981,12 +982,12 @@ Run `hubu <command> --help` for command-specific help."
     );
 }
 
-fn print_registration_help() {
+fn print_protocol_help() {
     println!(
-        "Read agent registration protocol guidance
+        "Read Hubu protocol payloads
 
 Usage:
-  hubu registration guidance"
+  hubu protocol agent-registration"
     );
 }
 
