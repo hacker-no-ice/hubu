@@ -107,7 +107,7 @@ Then use the CLI from another terminal:
 
 ```sh
 hubu register human --display-name "Alice Example" --email alice@example.com
-hubu registration guidance
+hubu protocol agent-registration
 hubu register agent
 hubu init --policy policy.yaml
 hubu policy add --agent-id AGENT_ID --path policy.yaml

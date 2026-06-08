@@ -280,14 +280,14 @@ const components = {
     copy:
       "The CLI is the demo-friendly human and agent surface. It prepares registration envelopes, posts JSON to the local API, and prints compact reviews and results.",
     responsibilities: [
-      "Supports init, register, registration guidance, policy, agent, budget, spend, ledger, and health commands.",
+      "Supports init, register, protocol, policy, agent, budget, spend, ledger, and health commands.",
       "Builds canonical registration envelopes and fingerprints from server guidance.",
       "Loads the local Hubu token from env or file and sends it as a bearer header on HTTP JSON requests.",
     ],
     links: [sharedLinks.cli, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
       { id: "commands", label: "Commands", sub: "register/spend/list", x: 90, y: 132, w: 230, h: 92, tone: "human" },
-      { id: "guidance", label: "Guidance fetch", sub: "registration JSON", x: 448, y: 132, w: 220, h: 92, tone: "agent" },
+      { id: "guidance", label: "Protocol fetch", sub: "agent-registration JSON", x: 448, y: 132, w: 220, h: 92, tone: "agent" },
       { id: "fingerprint", label: "Envelope builder", sub: "canonical SHA-256", x: 448, y: 356, w: 220, h: 92, tone: "core" },
       { id: "http", label: "HTTP client", sub: "bearer + JSON", x: 804, y: 244, w: 210, h: 92, tone: "core" },
     ],

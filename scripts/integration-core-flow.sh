@@ -79,7 +79,7 @@ assert_contains "human registration" "${HUMAN_OUTPUT}" "display_name: Alice Exam
 USER_ID="$(extract_field "${HUMAN_OUTPUT}" "user_id")"
 [[ -n "${USER_ID}" ]] || fail "could not parse user_id"
 
-GUIDANCE_OUTPUT="$(hubu registration guidance)"
+GUIDANCE_OUTPUT="$(hubu protocol agent-registration)"
 assert_contains "registration guidance" "${GUIDANCE_OUTPUT}" '"protocol_version": "hubu-agent-registration-v1"'
 assert_contains "registration guidance" "${GUIDANCE_OUTPUT}" '"canonicalization": "canonical_json_v1"'
 assert_contains "registration guidance" "${GUIDANCE_OUTPUT}" '"agent_name"'

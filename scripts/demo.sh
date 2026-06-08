@@ -162,7 +162,7 @@ note "captured public user_id=${USER_ID}"
 pause_for_reading
 
 step "Read agent registration guidance"
-hubu registration guidance
+hubu protocol agent-registration
 pause_for_reading
 
 step "Register an agent"

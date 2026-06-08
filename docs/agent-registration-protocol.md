@@ -292,7 +292,7 @@ structured guidance object.
 Available interfaces:
 
 ```sh
-hubu registration guidance
+hubu protocol agent-registration
 ```
 
 or HTTP:
