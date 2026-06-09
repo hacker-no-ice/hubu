@@ -203,19 +203,22 @@ struct Scenario {
 }
 
 fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> {
-    client.post(
+    let user = client.post(
         "/init",
         json!({
+            "username": "hubu-benchmark",
             "display_name": "Hubu Benchmark User",
             "email": "bench@example.com",
         }),
     )?;
+    let owner_user_id = string_at(&user, "user_id")?.to_string();
 
     let mut agents = Vec::with_capacity(config.agent_count);
     for index in 0..config.agent_count {
         let agent = client.post(
             "/agents/register",
             json!({
+                "owner_user_id": owner_user_id,
                 "name": format!("bench-agent-{index:04}"),
                 "version": "bench-local",
             }),

@@ -118,18 +118,25 @@ fn tool_definitions() -> Vec<Value> {
             "Read compact agent registration guidance.",
             json_schema(json!({})),
         ),
+        read_tool(
+            "hubu_list_users",
+            "List registered human users and public user ids.",
+            json_schema(json!({})),
+        ),
         approval_tool(
             "hubu_register_human",
             "Register or select the active human user. Requires a human click.",
             json_schema(json!({
+                "username": { "type": "string" },
                 "display_name": { "type": "string" },
                 "email": { "type": "string" }
             })),
         ),
         approval_tool(
             "hubu_register_agent",
-            "Register an agent for the active Hubu user. Requires a human click.",
+            "Register an agent for an explicit Hubu user. Requires a human click.",
             json_schema(json!({
+                "owner_user_id": { "type": "string" },
                 "name": { "type": "string" },
                 "version": { "type": "string" }
             })),
@@ -260,6 +267,7 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
     let response = match name {
         "hubu_health" => get_json(base_url, "/health")?,
         "hubu_registration_guidance" => get_json(base_url, "/registration/guidance")?,
+        "hubu_list_users" => get_json(base_url, "/users")?,
         "hubu_register_human" => {
             require_trusted_client_approval(config, name)?;
             post_json(base_url, "/init", arguments)?

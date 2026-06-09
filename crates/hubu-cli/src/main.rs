@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::{DateTime, Local};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -42,6 +43,7 @@ fn run() -> Result<()> {
         "init" => init(args),
         "register" => register(&base_url, args),
         "protocol" => protocol(&base_url, args),
+        "user" => user(&base_url, args),
         "policy" => policy(&base_url, args),
         "agent" => agent(&base_url, args),
         "budget" => budget(&base_url, args),
@@ -130,8 +132,11 @@ fn register_human(base_url: &str, mut args: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
-    let display_name =
-        take_value(&mut args, "--display-name").unwrap_or_else(|| "Hubu User".to_string());
+    let username = take_value(&mut args, "--username").ok_or_else(|| {
+        anyhow!("missing --username; use 3-32 lowercase letters, digits, or hyphens")
+    })?;
+    let display_name = take_value(&mut args, "--display-name")
+        .ok_or_else(|| anyhow!("missing --display-name; provide a human-readable display name"))?;
     let email = take_value(&mut args, "--email");
     ensure_no_args(args)?;
 
@@ -139,6 +144,7 @@ fn register_human(base_url: &str, mut args: Vec<String>) -> Result<()> {
         base_url,
         "/init",
         json!({
+            "username": username,
             "display_name": display_name,
             "email": email,
         }),
@@ -146,8 +152,130 @@ fn register_human(base_url: &str, mut args: Vec<String>) -> Result<()> {
 
     println!("Human registered");
     println!("  user_id: {}", string_at(&response, "user_id")?);
+    println!(
+        "  username: {}",
+        response
+            .get("username")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+    );
     println!("  display_name: {}", string_at(&response, "display_name")?);
     Ok(())
+}
+
+fn user(base_url: &str, args: Vec<String>) -> Result<()> {
+    match args.as_slice() {
+        [] => {
+            print_user_help();
+            Ok(())
+        }
+        [command] if command == "help" || command == "-h" || command == "--help" => {
+            print_user_help();
+            Ok(())
+        }
+        [command] if command == "list" => user_list(base_url),
+        _ => bail!("usage: hubu user list"),
+    }
+}
+
+fn user_list(base_url: &str) -> Result<()> {
+    let response = get_json(base_url, "/users")?;
+    let users = response
+        .get("users")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `users`"))?;
+
+    if users.is_empty() {
+        println!("No human users registered.");
+        return Ok(());
+    }
+
+    let rows = users
+        .iter()
+        .map(|user| {
+            Ok(vec![
+                string_at(user, "user_id")?.to_string(),
+                user.get("username")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+                    .to_string(),
+                string_at(user, "display_name")?.to_string(),
+                user.get("email")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+                    .to_string(),
+                string_at(user, "status")?.to_string(),
+                if user.get("current").and_then(Value::as_bool) == Some(true) {
+                    "*".to_string()
+                } else {
+                    "-".to_string()
+                },
+                local_timestamp(string_at(user, "created_at")?),
+            ])
+        })
+        .collect::<Result<Vec<_>>>()?;
+    print_table(
+        &[
+            "USER ID",
+            "USERNAME",
+            "DISPLAY NAME",
+            "EMAIL",
+            "STATUS",
+            "CURRENT",
+            "CREATED AT",
+        ],
+        &rows,
+    );
+    Ok(())
+}
+
+fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    let widths = headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| {
+            rows.iter()
+                .filter_map(|row| row.get(index))
+                .map(|value| value.len())
+                .max()
+                .unwrap_or(0)
+                .max(header.len())
+        })
+        .collect::<Vec<_>>();
+
+    print_table_row(headers.iter().copied(), &widths);
+    print_table_separator(&widths);
+    for row in rows {
+        print_table_row(row.iter().map(String::as_str), &widths);
+    }
+}
+
+fn print_table_row<'a>(values: impl Iterator<Item = &'a str>, widths: &[usize]) {
+    let values = values.collect::<Vec<_>>();
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            print!("  ");
+        }
+        let value = values.get(index).copied().unwrap_or("");
+        print!("{value:<width$}");
+    }
+    println!();
+}
+
+fn print_table_separator(widths: &[usize]) {
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            print!("  ");
+        }
+        print!("{}", "-".repeat(*width));
+    }
+    println!();
+}
+
+fn local_timestamp(timestamp: &str) -> String {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|timestamp| timestamp.with_timezone(&Local).to_rfc3339())
+        .unwrap_or_else(|_| timestamp.to_string())
 }
 
 fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
@@ -167,9 +295,9 @@ fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
-    print_registration_review(&prepared);
-    let response = post_json(base_url, "/agents/register", prepared.envelope)?;
+    let response = post_json(base_url, "/agents/register", prepared.envelope.clone())?;
 
+    print_registration_review(&prepared);
     println!("Agent registered");
     println!("  agent_id: {}", string_at(&response, "agent_id")?);
     println!("  version_id: {}", string_at(&response, "version_id")?);
@@ -383,22 +511,29 @@ fn add_policy(base_url: &str, mut args: Vec<String>) -> Result<()> {
 }
 
 fn agent(base_url: &str, args: Vec<String>) -> Result<()> {
-    match args.as_slice() {
-        [] => {
+    match args.split_first() {
+        None => {
             print_agent_help();
             Ok(())
         }
-        [command] if command == "help" || command == "-h" || command == "--help" => {
+        Some((command, [])) if command == "help" || command == "-h" || command == "--help" => {
             print_agent_help();
             Ok(())
         }
-        [command] if command == "list" => agent_list(base_url),
-        _ => bail!("usage: hubu agent list"),
+        Some((command, rest)) if command == "list" => agent_list(base_url, rest.to_vec()),
+        _ => bail!("usage: hubu agent list [--all]"),
     }
 }
 
-fn agent_list(base_url: &str) -> Result<()> {
-    let response = get_json(base_url, "/agents")?;
+fn agent_list(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    let include_all = take_flag(&mut args, "--all");
+    ensure_no_args(args)?;
+    let path = if include_all {
+        "/agents?all=true"
+    } else {
+        "/agents"
+    };
+    let response = get_json(base_url, path)?;
     let agents = response
         .get("agents")
         .and_then(Value::as_array)
@@ -409,15 +544,36 @@ fn agent_list(base_url: &str) -> Result<()> {
         return Ok(());
     }
 
-    for agent in agents {
-        println!(
-            "{}  {}  account: {}  status: {}",
-            string_at(agent, "agent_id")?,
-            string_at(agent, "display_name")?,
-            string_at(agent, "account_id")?,
-            string_at(agent, "status")?
-        );
-    }
+    let rows = agents
+        .iter()
+        .map(|agent| {
+            Ok(vec![
+                string_at(agent, "agent_id")?.to_string(),
+                string_at(agent, "display_name")?.to_string(),
+                string_at(agent, "owner_user_id")?.to_string(),
+                agent
+                    .get("owner_username")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+                    .to_string(),
+                string_at(agent, "account_id")?.to_string(),
+                string_at(agent, "status")?.to_string(),
+                local_timestamp(string_at(agent, "created_at")?),
+            ])
+        })
+        .collect::<Result<Vec<_>>>()?;
+    print_table(
+        &[
+            "AGENT ID",
+            "NAME",
+            "OWNER USER ID",
+            "OWNER USERNAME",
+            "ACCOUNT ID",
+            "STATUS",
+            "CREATED AT",
+        ],
+        &rows,
+    );
     Ok(())
 }
 
@@ -967,6 +1123,7 @@ Usage:
 Commands:
   register   Register human users and agents
   protocol   Read Hubu protocol payloads
+  user       List human users
   policy     Manage spending policies
   init       Generate local Hubu starter files
   agent      Read registered agents
@@ -996,7 +1153,7 @@ fn print_register_help() {
         "Register human users and agents
 
 Usage:
-  hubu register human [--display-name NAME] [--email EMAIL]
+  hubu register human --username USERNAME --display-name NAME [--email EMAIL]
   hubu register agent [--name NAME] [--version VERSION] [--dry-run]"
     );
 }
@@ -1006,13 +1163,27 @@ fn print_register_human_help() {
         "Register the active human user
 
 Usage:
-  hubu register human [--display-name NAME] [--email EMAIL]"
+  hubu register human --username USERNAME --display-name NAME [--email EMAIL]
+
+Options:
+  --username USERNAME    Stable handle: 3-32 lowercase letters, digits, or hyphens
+  --display-name NAME    Human-readable display name
+  --email EMAIL          Optional email address"
+    );
+}
+
+fn print_user_help() {
+    println!(
+        "List human users
+
+Usage:
+  hubu user list"
     );
 }
 
 fn print_register_agent_help() {
     println!(
-        "Register an agent for the active human user
+        "Register an agent for the current human user
 
 Usage:
   hubu register agent [--name NAME] [--version VERSION] [--dry-run]
@@ -1064,7 +1235,10 @@ fn print_agent_help() {
         "Read registered agents
 
 Usage:
-  hubu agent list"
+  hubu agent list [--all]
+
+Options:
+  --all  Show agents for all local users instead of only the current user"
     );
 }
 

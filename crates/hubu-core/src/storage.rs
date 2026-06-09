@@ -45,6 +45,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<(), StorageError> {
             id TEXT PRIMARY KEY,
             pub_id TEXT NOT NULL UNIQUE,
             identity_key TEXT UNIQUE,
+            username TEXT UNIQUE,
             display_name TEXT NOT NULL,
             email TEXT,
             status TEXT NOT NULL,
@@ -129,20 +130,49 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<(), StorageError> {
         END;
         ",
     )?;
+    add_column_if_missing(conn, "users", "username", "TEXT")?;
+    conn.execute_batch(
+        "
+        CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique
+        ON users(username)
+        WHERE username IS NOT NULL;
+        ",
+    )?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_type: &str,
+) -> Result<(), StorageError> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
+        [],
+    )?;
     Ok(())
 }
 
 pub(crate) fn user_from_row(row: &Row<'_>) -> Result<User, rusqlite::Error> {
     let id: String = row.get(0)?;
-    let status: String = row.get(4)?;
-    let created_at: String = row.get(5)?;
-    let updated_at: String = row.get(6)?;
+    let status: String = row.get(5)?;
+    let created_at: String = row.get(6)?;
+    let updated_at: String = row.get(7)?;
 
     Ok(User {
         id: parse_id(&id)?,
         pub_id: row.get(1)?,
-        display_name: row.get(2)?,
-        email: row.get(3)?,
+        username: row.get(2)?,
+        display_name: row.get(3)?,
+        email: row.get(4)?,
         status: parse_user_status(&status)?,
         created_at: parse_timestamp(&created_at)?,
         updated_at: parse_timestamp(&updated_at)?,

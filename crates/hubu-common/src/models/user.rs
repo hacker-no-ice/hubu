@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct User {
     pub id: UserId,
     pub pub_id: String,
+    pub username: Option<String>,
     pub display_name: String,
     pub email: Option<String>,
     pub status: UserStatus,
@@ -49,6 +50,7 @@ mod tests {
         let user = User {
             id: user_id(),
             pub_id: "usr_123".to_string(),
+            username: Some("demo-user".to_string()),
             display_name: "Demo User".to_string(),
             email: Some("demo@example.com".to_string()),
             status: UserStatus::Active,

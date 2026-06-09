@@ -84,7 +84,7 @@ const components = {
       "The demo server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, and stitches together registration, policy, budget, spend, payment, executor, and ledger managers.",
     responsibilities: [
       "Keeps health and guidance public while requiring a local bearer token for user setup, agent registration, policies, budgets, spend, and ledger listing.",
-      "Resolves the active owner from the authenticated local token instead of trusting unauthenticated request bodies.",
+      "Uses the local token and current user context for protected workflow authority and agent registration ownership.",
       "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
       "Bridges wallet payment authorization and external executor validation through shared spend state.",
     ],
@@ -113,14 +113,14 @@ const components = {
     copy:
       "Registration keeps the human flow small while agents prepare structured identity and version payloads. The server validates fingerprints before creating or reusing records.",
     responsibilities: [
-      "Publishes compact registration guidance for clients and agents.",
-      "Accepts envelope or simple demo registration requests.",
+      "Publishes compact registration guidance that lets clients build envelopes for the current Hubu user context.",
+      "Accepts envelope or simple demo registration requests and resolves the owner public id before creating records.",
       "Creates idempotent identity, version, and account records, plus a fresh session per registration.",
     ],
     links: [sharedLinks.registration, sharedLinks.registrationModel, sharedLinks.registrationProtocol, sharedLinks.common],
     nodes: [
       { id: "guidance", label: "Guidance", sub: ".well-known JSON", x: 76, y: 70, w: 210, h: 88, tone: "agent" },
-      { id: "human", label: "Human review", sub: "name + version", x: 76, y: 274, w: 210, h: 88, tone: "human" },
+      { id: "human", label: "Human review", sub: "owner + name + version", x: 76, y: 274, w: 210, h: 88, tone: "human" },
       { id: "envelope", label: "Envelope", sub: "identity + version", x: 420, y: 168, w: 218, h: 98, tone: "core" },
       { id: "fingerprints", label: "Fingerprint check", sub: "canonical SHA-256", x: 782, y: 168, w: 230, h: 98, tone: "core" },
       { id: "records", label: "Records", sub: "agent/version/account/session", x: 782, y: 404, w: 250, h: 96, tone: "data" },
@@ -280,8 +280,8 @@ const components = {
     copy:
       "The CLI is the demo-friendly human and agent surface. It prepares registration envelopes, posts JSON to the local API, and prints compact reviews and results.",
     responsibilities: [
-      "Supports init, register, protocol, policy, agent, budget, spend, ledger, and health commands.",
-      "Builds canonical registration envelopes and fingerprints from server guidance.",
+      "Supports init, register, user list with current-user marking, protocol, policy, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
+      "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
       "Loads the local Hubu token from env or file and sends it as a bearer header on HTTP JSON requests.",
     ],
     links: [sharedLinks.cli, sharedLinks.api, sharedLinks.registrationProtocol],
@@ -351,13 +351,13 @@ const components = {
     copy:
       "Humans set the financial boundaries. The CLI and MCP adapter aim to keep review small while making identity, policy, and budget state explicit.",
     responsibilities: [
-      "Registers or selects the active Hubu user.",
-      "Reviews agent name/version and protected setup actions.",
+      "Registers humans with separate username and display name fields.",
+      "Reviews current owner context, agent name/version, and protected setup actions.",
       "Funds governance by creating policies and budgets before agent spending.",
     ],
     links: [sharedLinks.cli, sharedLinks.mcp, sharedLinks.registrationProtocol, sharedLinks.budget],
     nodes: [
-      { id: "user", label: "User", sub: "default owner", x: 90, y: 126, w: 210, h: 92, tone: "human" },
+      { id: "user", label: "User", sub: "username + public id", x: 90, y: 126, w: 210, h: 92, tone: "human" },
       { id: "review", label: "Review", sub: "compact fields", x: 430, y: 126, w: 220, h: 92, tone: "human" },
       { id: "policy", label: "Policy", sub: "rules", x: 800, y: 100, w: 210, h: 92, tone: "core" },
       { id: "budget", label: "Budget", sub: "limits", x: 800, y: 334, w: 210, h: 92, tone: "core" },

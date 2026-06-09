@@ -40,7 +40,7 @@ use hubu_core::{
         engine::validate_policy,
         model::{Effect, Policy, Rule},
     },
-    registration::{RegisterAgentRequest, RegistrationManager},
+    registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
     spend::{
         model::{SpendPaymentValidationRequest, SpendRequest},
         SpendManager,
@@ -534,12 +534,14 @@ struct RegisterAgentHttpResponse {
 #[derive(Debug, Serialize)]
 struct CurrentUserHttpResponse {
     user_id: String,
+    username: Option<String>,
     display_name: String,
     email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct InitHttpRequest {
+    username: Option<String>,
     display_name: Option<String>,
     email: Option<String>,
 }
@@ -547,7 +549,24 @@ struct InitHttpRequest {
 #[derive(Debug, Serialize)]
 struct InitHttpResponse {
     user_id: String,
+    username: Option<String>,
     display_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UserListHttpResponse {
+    users: Vec<UserHttpResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct UserHttpResponse {
+    user_id: String,
+    username: Option<String>,
+    display_name: String,
+    email: Option<String>,
+    status: String,
+    current: bool,
+    created_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -575,6 +594,8 @@ struct AgentHttpResponse {
     agent_id: String,
     display_name: String,
     description: Option<String>,
+    owner_user_id: String,
+    owner_username: Option<String>,
     agent_type: String,
     status: String,
     account_id: String,
@@ -806,8 +827,12 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("GET", "/registration/guidance")
         | ("GET", "/.well-known/hubu-agent-registration.json") => Ok(registration_guidance()),
         ("GET", "/user") => current_user(state).map(to_json),
+        ("GET", "/users") => list_users(state).map(to_json),
         ("POST", "/init") => init(request.body, state).map(to_json),
         ("POST", "/agents/register") => register_agent(request.body, state).map(to_json),
+        ("GET", "/agents") if query_flag(&request, "all") => {
+            list_agents_for_scope(state, true).map(to_json)
+        }
         ("GET", "/agents") => list_agents(state).map(to_json),
         ("POST", "/policies") => add_policy(request.body, state).map(to_json),
         ("POST", "/budgets") => create_budget(request.body, state).map(to_json),
@@ -1015,7 +1040,6 @@ fn registration_guidance() -> Value {
         "client_filled": {
             "agent_identity.vendor": "codex",
             "agent_name.default_template": "{vendor}-{workspace}",
-            "owner": "active_hubu_user",
             "agent_kind": "codex_agent",
             "runtime.provider": "codex",
             "runtime.environment": "development",
@@ -1067,6 +1091,7 @@ fn registration_guidance() -> Value {
 fn init(body: String, state: &ServerState) -> Result<InitHttpResponse> {
     let request: InitHttpRequest = if body.trim().is_empty() {
         InitHttpRequest {
+            username: None,
             display_name: None,
             email: None,
         }
@@ -1079,6 +1104,7 @@ fn init(body: String, state: &ServerState) -> Result<InitHttpResponse> {
         .lock()
         .map_err(|_| anyhow!("user manager lock poisoned"))?
         .create_user(CreateUserRequest {
+            username: request.username,
             display_name: request
                 .display_name
                 .unwrap_or_else(|| "Hubu User".to_string()),
@@ -1088,6 +1114,7 @@ fn init(body: String, state: &ServerState) -> Result<InitHttpResponse> {
 
     Ok(InitHttpResponse {
         user_id: user.pub_id,
+        username: user.username,
         display_name: user.display_name,
     })
 }
@@ -1096,19 +1123,52 @@ fn current_user(state: &ServerState) -> Result<CurrentUserHttpResponse> {
     let user = authenticated_user(state)?;
     Ok(CurrentUserHttpResponse {
         user_id: user.pub_id,
+        username: user.username,
         display_name: user.display_name,
         email: user.email,
     })
 }
 
+fn list_users(state: &ServerState) -> Result<UserListHttpResponse> {
+    let current_user_id = state.auth.owner_user_id()?;
+    let users = state
+        .users
+        .lock()
+        .map_err(|_| anyhow!("user manager lock poisoned"))?
+        .list_users()?
+        .into_iter()
+        .map(|user| user_http_response(user, &current_user_id))
+        .collect();
+    Ok(UserListHttpResponse { users })
+}
+
+fn user_http_response(user: User, current_user_id: &UserId) -> UserHttpResponse {
+    let current = user.id == *current_user_id;
+    UserHttpResponse {
+        user_id: user.pub_id,
+        username: user.username,
+        display_name: user.display_name,
+        email: user.email,
+        status: match user.status {
+            hubu_common::models::UserStatus::Active => "active".to_string(),
+            hubu_common::models::UserStatus::Suspended => "suspended".to_string(),
+        },
+        current,
+        created_at: user.created_at.to_rfc3339(),
+    }
+}
+
 fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttpResponse> {
     let request: RegisterAgentHttpRequest = serde_json::from_str(&body)?;
-    let user = authenticated_user(state)?;
     let (request_shape, envelope) = match request {
         RegisterAgentHttpRequest::Envelope(envelope) => ("envelope", envelope),
         RegisterAgentHttpRequest::Simple(request) => (
             "simple",
-            simple_registration_envelope(&request.name, &request.version, &user.pub_id),
+            simple_registration_envelope(
+                &request.name,
+                &request.version,
+                &authenticated_user(state)?.pub_id,
+            ),
         ),
     };
     log_event(
@@ -1116,12 +1176,12 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         "agent_registration_received",
         json!({
             "request_shape": request_shape,
-            "user_id": user.id.to_string(),
-            "user_pub_id": user.pub_id,
             "protocol_version": envelope.protocol_version,
         }),
     );
+    let user = authenticated_user(state)?;
     let registration_request = registration_request_from_envelope(envelope, &user)?;
+    ensure_agent_not_already_registered(&registration_request, state)?;
 
     let response = state
         .registration
@@ -1153,6 +1213,23 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         account_id: response.account.pub_id,
         session_id: response.session.pub_id,
     })
+}
+
+fn ensure_agent_not_already_registered(
+    request: &RegisterAgentRequest,
+    state: &ServerState,
+) -> Result<()> {
+    let already_registered = state
+        .registration
+        .lock()
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?
+        .agents_for_user(&request.owner_user_id)?
+        .into_iter()
+        .any(|agent| agent.agent.fingerprint == request.identity_fingerprint);
+    if already_registered {
+        return Err(anyhow!("agent is already registered for this owner"));
+    }
+    Ok(())
 }
 
 fn simple_registration_envelope(
@@ -1219,16 +1296,6 @@ fn registration_request_from_envelope(
 
     verify_payload_fingerprint("identity", &envelope.identity)?;
     verify_payload_fingerprint("version", &envelope.version)?;
-    log_event(
-        "info",
-        "agent_registration_fingerprints_verified",
-        json!({
-            "user_id": user.id.to_string(),
-            "user_pub_id": user.pub_id,
-            "identity_fingerprint": envelope.identity.fingerprint,
-            "version_fingerprint": envelope.version.fingerprint,
-        }),
-    );
     validate_required_registration_payloads(&envelope)?;
 
     let identity_fingerprint = envelope.identity.fingerprint;
@@ -1248,11 +1315,25 @@ fn registration_request_from_envelope(
     if owner.get("type").and_then(Value::as_str) != Some("hubu_user") {
         return Err(anyhow!("identity payload owner.type must be `hubu_user`"));
     }
-    if owner.get("pub_id").and_then(Value::as_str) != Some(user.pub_id.as_str()) {
+    let owner_pub_id = owner
+        .get("pub_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("identity payload owner.pub_id must be a string"))?;
+    if owner_pub_id != user.pub_id {
         return Err(anyhow!(
-            "identity payload owner.pub_id does not match active Hubu user"
+            "identity payload owner.pub_id must match the current Hubu user"
         ));
     }
+    log_event(
+        "info",
+        "agent_registration_fingerprints_verified",
+        json!({
+            "user_id": user.id.to_string(),
+            "user_pub_id": user.pub_id,
+            "identity_fingerprint": identity_fingerprint,
+            "version_fingerprint": version_fingerprint,
+        }),
+    );
 
     let agent_name = string_field(&envelope.identity.payload, "agent_name")?;
     let agent_kind = string_field(&envelope.identity.payload, "agent_kind")?;
@@ -1541,38 +1622,79 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
 }
 
 fn list_agents(state: &ServerState) -> Result<AgentListHttpResponse> {
+    list_agents_for_scope(state, false)
+}
+
+fn list_agents_for_scope(state: &ServerState, include_all: bool) -> Result<AgentListHttpResponse> {
     let user = authenticated_user_context(state)?;
+    if include_all {
+        return list_all_agents(state);
+    }
+    let owner = owner_metadata_for_user_id(&user.user_id, state)?;
     let agents = state
         .registration
         .lock()
         .map_err(|_| anyhow!("registration manager lock poisoned"))?
         .agents_for_user(&user.user_id)?
         .into_iter()
-        .map(|agent| AgentHttpResponse {
-            agent_id: agent.agent.pub_id,
-            display_name: agent.agent.display_name,
-            description: agent.agent.description,
-            agent_type: match agent.agent.agent_type {
-                AgentType::InteractiveAgent => "interactive_agent",
-                AgentType::AutonomousAgent => "agent",
-            }
-            .to_string(),
-            status: match agent.agent.agent_status {
-                hubu_common::models::identity::AgentStatus::Active => "active",
-                hubu_common::models::identity::AgentStatus::Suspended => "suspended",
-            }
-            .to_string(),
-            account_id: agent.account.pub_id,
-            account_status: match agent.account.account_status {
-                hubu_common::models::account::AccountStatus::Active => "active",
-                hubu_common::models::account::AccountStatus::Suspended => "suspended",
-            }
-            .to_string(),
-            created_at: agent.agent.created_at.to_rfc3339(),
-        })
+        .map(|agent| agent_http_response(agent, &owner))
         .collect();
 
     Ok(AgentListHttpResponse { agents })
+}
+
+fn list_all_agents(state: &ServerState) -> Result<AgentListHttpResponse> {
+    let users = state
+        .users
+        .lock()
+        .map_err(|_| anyhow!("user manager lock poisoned"))?
+        .list_users()?;
+    let registration = state
+        .registration
+        .lock()
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?;
+    let mut agents = Vec::new();
+    for user in users {
+        let owner = OwnerHttpMetadata {
+            pub_id: user.pub_id,
+            username: user.username,
+            display_name: user.display_name,
+        };
+        agents.extend(
+            registration
+                .agents_for_user(&user.id)?
+                .into_iter()
+                .map(|agent| agent_http_response(agent, &owner)),
+        );
+    }
+    Ok(AgentListHttpResponse { agents })
+}
+
+fn agent_http_response(agent: AgentWithAccount, owner: &OwnerHttpMetadata) -> AgentHttpResponse {
+    AgentHttpResponse {
+        agent_id: agent.agent.pub_id,
+        display_name: agent.agent.display_name,
+        description: agent.agent.description,
+        owner_user_id: owner.pub_id.clone(),
+        owner_username: owner.username.clone(),
+        agent_type: match agent.agent.agent_type {
+            AgentType::InteractiveAgent => "interactive_agent",
+            AgentType::AutonomousAgent => "agent",
+        }
+        .to_string(),
+        status: match agent.agent.agent_status {
+            hubu_common::models::identity::AgentStatus::Active => "active",
+            hubu_common::models::identity::AgentStatus::Suspended => "suspended",
+        }
+        .to_string(),
+        account_id: agent.account.pub_id,
+        account_status: match agent.account.account_status {
+            hubu_common::models::account::AccountStatus::Active => "active",
+            hubu_common::models::account::AccountStatus::Suspended => "suspended",
+        }
+        .to_string(),
+        created_at: agent.agent.created_at.to_rfc3339(),
+    }
 }
 
 fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpResponse> {
@@ -2545,6 +2667,7 @@ fn owner_metadata_for_user_id(user_id: &UserId, state: &ServerState) -> Result<O
 
     Ok(OwnerHttpMetadata {
         pub_id: user.pub_id,
+        username: user.username,
         display_name: user.display_name,
     })
 }
@@ -2619,6 +2742,7 @@ fn to_json<T: Serialize>(value: T) -> Value {
 struct HttpRequest {
     method: String,
     path: String,
+    query: HashMap<String, String>,
     headers: HashMap<String, String>,
     body: String,
 }
@@ -2630,6 +2754,7 @@ struct HttpResponse {
 
 struct OwnerHttpMetadata {
     pub_id: String,
+    username: Option<String>,
     display_name: String,
 }
 
@@ -2642,13 +2767,8 @@ fn parse_request(raw: &str) -> Result<HttpRequest> {
         .next()
         .ok_or_else(|| anyhow!("missing method"))?
         .to_string();
-    let path = request_line
-        .next()
-        .ok_or_else(|| anyhow!("missing path"))?
-        .split('?')
-        .next()
-        .unwrap_or_default()
-        .to_string();
+    let target = request_line.next().ok_or_else(|| anyhow!("missing path"))?;
+    let (path, query) = split_path_and_query(target);
     let headers = head
         .lines()
         .skip(1)
@@ -2661,9 +2781,32 @@ fn parse_request(raw: &str) -> Result<HttpRequest> {
     Ok(HttpRequest {
         method,
         path,
+        query,
         headers,
         body: body.to_string(),
     })
+}
+
+fn split_path_and_query(target: &str) -> (String, HashMap<String, String>) {
+    let Some((path, query_text)) = target.split_once('?') else {
+        return (target.to_string(), HashMap::new());
+    };
+    let query = query_text
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (key.to_string(), value.to_string())
+        })
+        .collect();
+    (path.to_string(), query)
+}
+
+fn query_flag(request: &HttpRequest, name: &str) -> bool {
+    request
+        .query
+        .get(name)
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
 
 fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
@@ -2690,15 +2833,18 @@ mod tests {
     use super::*;
 
     fn public_request(method: &str, path: &str) -> HttpRequest {
+        let (path, query) = split_path_and_query(path);
         HttpRequest {
             method: method.to_string(),
-            path: path.to_string(),
+            path,
+            query,
             headers: HashMap::new(),
             body: String::new(),
         }
     }
 
     fn authenticated_json_request(path: &str, body: Value) -> HttpRequest {
+        let (path, query) = split_path_and_query(path);
         let mut headers = HashMap::new();
         headers.insert("host".to_string(), "127.0.0.1:8787".to_string());
         headers.insert("content-type".to_string(), "application/json".to_string());
@@ -2708,13 +2854,15 @@ mod tests {
         );
         HttpRequest {
             method: "POST".to_string(),
-            path: path.to_string(),
+            path,
+            query,
             headers,
             body: body.to_string(),
         }
     }
 
     fn authenticated_get_request(path: &str) -> HttpRequest {
+        let (path, query) = split_path_and_query(path);
         let mut headers = HashMap::new();
         headers.insert("host".to_string(), "127.0.0.1:8787".to_string());
         headers.insert(
@@ -2723,7 +2871,8 @@ mod tests {
         );
         HttpRequest {
             method: "GET".to_string(),
-            path: path.to_string(),
+            path,
+            query,
             headers,
             body: String::new(),
         }
@@ -2768,6 +2917,102 @@ mod tests {
     }
 
     #[test]
+    fn user_list_returns_registered_human_users() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-user-list-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let alice_response = route(
+            authenticated_json_request(
+                "/init",
+                json!({
+                    "username": "alice-example",
+                    "display_name": "Alice Example",
+                    "email": "alice@example.com",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(alice_response.status, 200);
+        route(
+            authenticated_json_request(
+                "/init",
+                json!({
+                    "username": "bob-example",
+                    "display_name": "Bob Example",
+                    "email": "bob@example.com",
+                }),
+            ),
+            &state,
+        );
+
+        let list_response = route(authenticated_get_request("/users"), &state);
+
+        assert_eq!(list_response.status, 200);
+        let users = list_response.body["users"]
+            .as_array()
+            .expect("users should be an array");
+        assert_eq!(
+            users
+                .iter()
+                .filter(|user| user["current"].as_bool() == Some(true))
+                .count(),
+            1
+        );
+        let alice = users
+            .iter()
+            .find(|user| user["username"] == "alice-example")
+            .expect("alice should be listed");
+        let bob = users
+            .iter()
+            .find(|user| user["username"] == "bob-example")
+            .expect("bob should be listed");
+        assert_eq!(alice["user_id"], alice_response.body["user_id"]);
+        assert_eq!(alice["current"], false);
+        assert_eq!(bob["display_name"], "Bob Example");
+        assert_eq!(bob["current"], true);
+        assert!(bob["created_at"].as_str().is_some());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn duplicate_user_email_returns_helpful_error() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-duplicate-email-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let first = route(
+            authenticated_json_request(
+                "/init",
+                json!({
+                    "username": "alice",
+                    "display_name": "Alice Example",
+                    "email": "alice@example.com",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(first.status, 200);
+
+        let duplicate = route(
+            authenticated_json_request(
+                "/init",
+                json!({
+                    "username": "alice-2",
+                    "display_name": "Alice Duplicate",
+                    "email": "Alice@Example.com",
+                }),
+            ),
+            &state,
+        );
+
+        assert_eq!(duplicate.status, 400);
+        assert!(duplicate.body["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("email `alice@example.com` is already registered"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn protected_routes_require_local_bearer_authorization() {
         let path = std::env::temp_dir().join(format!("hubu-api-auth-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
@@ -2807,6 +3052,7 @@ mod tests {
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
         let user = init(
             json!({
+                "username": "alice-example",
                 "display_name": "Alice Example",
                 "email": "alice@example.com",
             })
@@ -2948,7 +3194,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_envelope_rejects_owner_mismatch() {
+    fn registration_envelope_rejects_non_current_owner_user_id() {
         let path = std::env::temp_dir().join(format!("hubu-api-owner-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
         init(
@@ -2970,7 +3216,133 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("owner.pub_id does not match active Hubu user"));
+            .contains("identity payload owner.pub_id must match the current Hubu user"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn registration_envelope_cannot_select_a_different_existing_user() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-current-owner-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let alice = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create first user");
+        init(
+            json!({
+                "display_name": "Bob Example",
+                "email": "bob@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create and select second user");
+        let envelope = simple_registration_envelope("protocol-agent", "dev", &alice.user_id);
+
+        let error = register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect_err("registration should not be able to choose another user");
+
+        assert!(error
+            .to_string()
+            .contains("identity payload owner.pub_id must match the current Hubu user"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn duplicate_agent_registration_returns_concise_error() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-duplicate-agent-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create user");
+        let envelope = simple_registration_envelope("protocol-agent", "dev", &user.user_id);
+
+        register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect("first registration should succeed");
+        let error = register_agent(
+            serde_json::to_string(&envelope).expect("envelope should serialize"),
+            &state,
+        )
+        .expect_err("duplicate registration should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "agent is already registered for this owner"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn agent_list_defaults_to_current_user_and_all_flag_expands_scope() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-agent-list-scope-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "username": "alice-example",
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create alice");
+        let agent = register_agent(
+            json!({
+                "name": "alice-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("alice agent should register");
+        init(
+            json!({
+                "username": "bob-example",
+                "display_name": "Bob Example",
+                "email": "bob@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create and select bob");
+
+        let current_only = route(authenticated_get_request("/agents"), &state);
+        assert_eq!(current_only.status, 200);
+        assert!(current_only.body["agents"]
+            .as_array()
+            .expect("agents should be an array")
+            .is_empty());
+
+        let all_agents = route(authenticated_get_request("/agents?all=true"), &state);
+        assert_eq!(all_agents.status, 200);
+        let agents = all_agents.body["agents"]
+            .as_array()
+            .expect("agents should be an array");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["agent_id"], agent.agent_id);
+        assert_eq!(agents[0]["owner_username"], "alice-example");
         std::fs::remove_file(path).ok();
     }
 
@@ -3119,7 +3491,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("hubu-api-authorize-spend-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
-        init(
+        let _user = init(
             json!({
                 "display_name": "Alice Example",
                 "email": "alice@example.com",
@@ -3298,7 +3670,7 @@ mod tests {
             UserId::new()
         ));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
-        init(
+        let _user = init(
             json!({
                 "display_name": "Alice Example",
                 "email": "alice@example.com",
@@ -3342,6 +3714,7 @@ mod tests {
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
         let user = init(
             json!({
+                "username": "alice-example",
                 "display_name": "Alice Example",
                 "email": "alice@example.com",
             })
@@ -3364,6 +3737,11 @@ mod tests {
         assert_eq!(agents.agents.len(), 1);
         assert_eq!(agents.agents[0].agent_id, agent.agent_id);
         assert_eq!(agents.agents[0].display_name, "yaml-policy-agent");
+        assert_eq!(agents.agents[0].owner_user_id, user.user_id);
+        assert_eq!(
+            agents.agents[0].owner_username.as_deref(),
+            Some("alice-example")
+        );
 
         let policy = add_policy(
             json!({
@@ -3499,7 +3877,7 @@ rules:
         let path =
             std::env::temp_dir().join(format!("hubu-api-over-budget-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
-        init(
+        let _user = init(
             json!({
                 "display_name": "Alice Example",
                 "email": "alice@example.com",
@@ -3569,9 +3947,9 @@ rules:
     }
 
     #[test]
-    fn initialized_user_remains_registration_owner_after_restart() {
+    fn duplicate_agent_registration_remains_blocked_after_restart() {
         let path = std::env::temp_dir().join(format!("hubu-api-restart-{}.sqlite", UserId::new()));
-        let (user, first_agent_id) = {
+        let _user = {
             let state =
                 ServerState::new_with_db_path(&path).expect("server state should initialize");
             let user = init(
@@ -3594,12 +3972,12 @@ rules:
             )
             .expect("agent should register under initialized user");
             assert_eq!(agent.user_id, user.user_id);
-            (user, agent.agent_id)
+            user
         };
 
         let restarted =
             ServerState::new_with_db_path(&path).expect("server state should reload from storage");
-        let resumed_agent = register_agent(
+        let error = register_agent(
             json!({
                 "name": "settlement-agent",
                 "version": "v1",
@@ -3607,10 +3985,12 @@ rules:
             .to_string(),
             &restarted,
         )
-        .expect("agent should still register under initialized user after restart");
+        .expect_err("duplicate agent registration should remain blocked after restart");
 
-        assert_eq!(resumed_agent.user_id, user.user_id);
-        assert_eq!(resumed_agent.agent_id, first_agent_id);
+        assert_eq!(
+            error.to_string(),
+            "agent is already registered for this owner"
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -3718,7 +4098,7 @@ rules:
         let path =
             std::env::temp_dir().join(format!("hubu-api-{test_name}-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
-        init(
+        let _user = init(
             json!({
                 "display_name": "Alice Example",
                 "email": "alice@example.com",

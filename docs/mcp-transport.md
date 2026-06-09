@@ -55,6 +55,7 @@ Agents can call directly:
 
 - `hubu_health`
 - `hubu_registration_guidance`
+- `hubu_list_users`
 - `hubu_list_agents`
 - `hubu_list_budgets`
 - `hubu_list_ledger`
@@ -92,13 +93,14 @@ the agent.
 | `hubu_health` | `GET /health` | none |
 | `hubu_registration_guidance` | `GET /registration/guidance` | none |
 | `hubu_register_human` | `POST /init` | required |
+| `hubu_list_users` | `GET /users` | none; marks current local user |
 | `hubu_register_agent` | `POST /agents/register` | required |
 | `hubu_add_policy` | `POST /policies` | required |
 | `hubu_create_budget` | `POST /budgets` | required |
 | `hubu_create_recurring_budget` | `POST /budgets/series` | required |
 | `hubu_authorize_spend` | `POST /spend/authorize` | conditional on policy result |
 | `hubu_submit_spend` | `POST /spend` | conditional on policy result |
-| `hubu_list_agents` | `GET /agents` | none |
+| `hubu_list_agents` | `GET /agents` | none; defaults to current user |
 | `hubu_list_budgets` | `GET /budgets` | none |
 | `hubu_list_ledger` | `GET /ledger` | none |
 
