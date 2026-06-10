@@ -1361,14 +1361,13 @@ fn print_budget(budget: &Value) -> Result<()> {
         money_at(budget, "frozen_amount_cents")?,
         money_at(budget, "remaining_amount_cents")?
     );
-    println!(
-        "    period: {} -> {}",
-        string_at(budget, "starting_at")?,
-        budget
-            .get("ending_before")
-            .and_then(Value::as_str)
-            .unwrap_or("open-ended")
-    );
+    let starting_at = local_timestamp(string_at(budget, "starting_at")?);
+    let ending_before = budget
+        .get("ending_before")
+        .and_then(Value::as_str)
+        .map(local_timestamp)
+        .unwrap_or_else(|| "open-ended".to_string());
+    println!("    period: {starting_at} -> {ending_before}");
     Ok(())
 }
 
