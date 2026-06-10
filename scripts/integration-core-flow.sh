@@ -148,7 +148,14 @@ ALL_AGENTS_OUTPUT="$(hubu agent list --all)"
 assert_contains "agent list all" "${ALL_AGENTS_OUTPUT}" "${AGENT_ID}"
 assert_contains "agent list all" "${ALL_AGENTS_OUTPUT}" "core-flow-agent"
 
-BUDGET_OUTPUT="$(hubu budget create --amount 75)"
+CAP_OUTPUT="$(hubu user cap set --amount 75)"
+assert_contains "user cap set" "${CAP_OUTPUT}" "User cap set"
+assert_contains "user cap set" "${CAP_OUTPUT}" 'limit: $75.00'
+assert_contains "user cap set" "${CAP_OUTPUT}" 'remaining: $75.00'
+CAP_ID="$(awk '/cap_id:/ { print $2; exit }' <<< "${CAP_OUTPUT}")"
+[[ "${CAP_ID}" == cap_* ]] || fail "could not parse public cap id"
+
+BUDGET_OUTPUT="$(hubu budget create --agent-id "${AGENT_ID}" --amount 75 --ending-before 2999-01-01T00:00:00Z)"
 assert_contains "budget create" "${BUDGET_OUTPUT}" "Budget created"
 assert_contains "budget create" "${BUDGET_OUTPUT}" 'limit: $75.00'
 assert_contains "budget create" "${BUDGET_OUTPUT}" 'remaining: $75.00'
@@ -161,6 +168,8 @@ assert_contains "allowed spend" "${ALLOW_OUTPUT}" "status: settled"
 assert_contains "allowed spend" "${ALLOW_OUTPUT}" 'consumed: $20.00'
 assert_contains "allowed spend" "${ALLOW_OUTPUT}" 'frozen: $0.00'
 assert_contains "allowed spend" "${ALLOW_OUTPUT}" 'remaining: $55.00'
+assert_contains "allowed spend" "${ALLOW_OUTPUT}" "Cap hold"
+assert_contains "allowed spend" "${ALLOW_OUTPUT}" "cap_id: ${CAP_ID}"
 
 FAILED_OUTPUT="$(hubu spend --agent-id "${AGENT_ID}" --amount 15 --reason "Failed merchant payout" --merchant fail)"
 assert_contains "failed payment spend" "${FAILED_OUTPUT}" "decision: allow"
@@ -202,6 +211,12 @@ assert_contains "budget list" "${BALANCE_OUTPUT}" 'limit: $75.00'
 assert_contains "budget list" "${BALANCE_OUTPUT}" 'consumed: $20.00'
 assert_contains "budget list" "${BALANCE_OUTPUT}" 'frozen: $0.00'
 assert_contains "budget list" "${BALANCE_OUTPUT}" 'remaining: $55.00'
+CAP_BALANCE_OUTPUT="$(hubu user cap show)"
+assert_contains "user cap show" "${CAP_BALANCE_OUTPUT}" "${CAP_ID}"
+assert_contains "user cap show" "${CAP_BALANCE_OUTPUT}" 'limit: $75.00'
+assert_contains "user cap show" "${CAP_BALANCE_OUTPUT}" 'consumed: $20.00'
+assert_contains "user cap show" "${CAP_BALANCE_OUTPUT}" 'frozen: $0.00'
+assert_contains "user cap show" "${CAP_BALANCE_OUTPUT}" 'remaining: $55.00'
 
 AGENT_BUDGET_OUTPUT="$(hubu budget create --agent-id "${AGENT_ID}" --amount 5 --starting-at 2999-01-01T00:00:00Z --ending-before 2999-01-02T00:00:00Z)"
 assert_contains "agent budget create" "${AGENT_BUDGET_OUTPUT}" "Budget created"

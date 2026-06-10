@@ -176,7 +176,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         approval_tool(
             "hubu_create_budget",
-            "Create a user-scoped or agent-scoped budget. Requires a human click.",
+            "Create an agent-scoped budget. Requires a human click.",
             json_schema(json!({
                 "amount_cents": { "type": "integer" },
                 "agent_id": { "type": "string" },
@@ -186,7 +186,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         approval_tool(
             "hubu_create_recurring_budget",
-            "Create a recurring user-scoped or agent-scoped budget series. Requires a human click.",
+            "Create a recurring agent-scoped budget series. Requires a human click.",
             json_schema(json!({
                 "amount_cents": { "type": "integer" },
                 "agent_id": { "type": "string" },
@@ -211,6 +211,29 @@ fn tool_definitions() -> Vec<Value> {
             json_schema(json!({
                 "budget_id": { "type": "string" },
                 "amount_cents": { "type": "integer" }
+            })),
+        ),
+        approval_tool(
+            "hubu_set_user_cap",
+            "Set a global spend cap for the active Hubu user. Requires a human click.",
+            json_schema(json!({
+                "amount_cents": { "type": "integer" },
+                "starting_at": { "type": "string" },
+                "ending_before": { "type": "string" }
+            })),
+        ),
+        approval_tool(
+            "hubu_revoke_user_cap",
+            "Revoke a global spend cap for the active Hubu user. Requires a human click.",
+            json_schema(json!({
+                "cap_id": { "type": "string" }
+            })),
+        ),
+        read_tool(
+            "hubu_show_user_caps",
+            "Show global spend caps for the active Hubu user.",
+            json_schema(json!({
+                "include_all": { "type": "boolean" }
             })),
         ),
         write_tool(
@@ -414,6 +437,25 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
         "hubu_replace_budget" => {
             require_trusted_client_approval(config, name)?;
             post_json(base_url, "/budgets/replace", arguments)?
+        }
+        "hubu_set_user_cap" => {
+            require_trusted_client_approval(config, name)?;
+            post_json(base_url, "/user/cap", arguments)?
+        }
+        "hubu_revoke_user_cap" => {
+            require_trusted_client_approval(config, name)?;
+            post_json(base_url, "/user/cap/revoke", arguments)?
+        }
+        "hubu_show_user_caps" => {
+            if arguments
+                .get("include_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                get_json(base_url, "/user/cap?all=true")?
+            } else {
+                get_json(base_url, "/user/cap")?
+            }
         }
         "hubu_submit_spend" => {
             let response = post_json(base_url, "/spend", arguments)?;

@@ -192,36 +192,28 @@ Expected output:
 agt_8x7k2m4q9v1c  codex-agent  account: aga_c6q3d9m1v8ra  status: active
 ```
 
-### 5. Create a Recurring User Cap
+### 5. Set a User Cap and Create an Agent Budget
 
 ```sh
-hubu budget create-recurring \
-  --amount 75 \
-  --recurrence monthly \
-  --period-count 2
+hubu user cap set --amount 75
+hubu budget create --agent-id agt_8x7k2m4q9v1c --amount 75
 ```
 
 Expected output:
 
 ```txt
-Budget series created
-  budget_id: bgt_6qqcj94w6pr5  scope: user cap (usr_8x7k2m4q9v1c)  status: active
+User cap set
+  cap_id: cap_6qqcj94w6pr5  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
-    period: 2026-06-03T10:19:20.123456-07:00 -> 2026-07-03T10:19:20.123456-07:00
-  budget_id: bgt_8x7k2m4q9v1c  scope: user cap (usr_8x7k2m4q9v1c)  status: active
+    period: 2026-06-03T10:19:20.123456-07:00 -> open-ended
+Budget created
+  budget_id: bgt_8x7k2m4q9v1c  scope: agent (agt_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
-    period: 2026-07-03T10:19:20.123456-07:00 -> 2026-08-03T10:19:20.123456-07:00
+    period: 2026-06-03T10:19:20.123456-07:00 -> open-ended
 ```
 
-Hubu enforces non-overlapping periods for a given cap or budget scope and
-currency. The recurring budget call is atomic: if any generated period would
-overlap an existing cap or budget, none of the periods are created. Without
-`--agent-id`, the CLI creates a cap for the current user. Add
-`--agent-id agt_...` to create a single or recurring agent budget. The product
-model treats the user cap as the outer owner-level spend guardrail and agent
-budgets as narrower limits for a specific agent. Agent budgets cannot exceed an
-overlapping user cap, and user caps cannot be created below an overlapping agent
-budget.
+Hubu uses the budget as the agent's spend allocation and the user cap as the
+global max spend guardrail. An allowed spend reserves against both.
 
 ### 6. Submit an Allowed Spend Request
 
@@ -382,25 +374,26 @@ Spend evaluated
 The policy engine gives `deny` precedence over `allow`, so no payment is
 orchestrated.
 
-### 10. Inspect the Budget Balance
+### 10. Inspect the Budget and Cap Balances
 
 ```sh
 hubu budget list
+hubu user cap show
 ```
 
 Expected output:
 
 ```txt
-  budget_id: bgt_6qqcj94w6pr5  scope: user cap (usr_8x7k2m4q9v1c)  status: active
+  budget_id: bgt_6qqcj94w6pr5  scope: agent (agt_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $20.00  frozen: $0.00  remaining: $55.00
     period: 2026-06-03T10:19:20.123456-07:00 -> 2026-07-03T10:19:20.123456-07:00
-  budget_id: bgt_8x7k2m4q9v1c  scope: user cap (usr_8x7k2m4q9v1c)  status: active
-    limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
-    period: 2026-07-03T10:19:20.123456-07:00 -> 2026-08-03T10:19:20.123456-07:00
+  cap_id: cap_8x7k2m4q9v1c  status: active
+    limit: $75.00  consumed: $20.00  frozen: $0.00  remaining: $55.00
+    period: 2026-06-03T10:19:20.123456-07:00 -> open-ended
 ```
 
-The balance reflects settled spend only. Released holds do not reduce remaining
-budget.
+The budget balance tracks the agent allocation. The cap balance tracks the
+current user's global max spend. Released holds do not reduce remaining amounts.
 
 ### 11. Inspect the Ledger
 
@@ -425,6 +418,9 @@ shows the owning human user for both the transaction and its entries.
 hubu [--url http://127.0.0.1:8787] init [--policy FILE] [--force]
 hubu [--url http://127.0.0.1:8787] register human --username USERNAME --display-name NAME [--email EMAIL]
 hubu [--url http://127.0.0.1:8787] user list
+hubu [--url http://127.0.0.1:8787] user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+hubu [--url http://127.0.0.1:8787] user cap show [--all]
+hubu [--url http://127.0.0.1:8787] user cap revoke --cap-id ID
 hubu [--url http://127.0.0.1:8787] protocol agent-registration
 hubu [--url http://127.0.0.1:8787] register agent [--name NAME] [--version VERSION] [--dry-run]
 hubu [--url http://127.0.0.1:8787] policy new-template [--path FILE] [--force]
@@ -432,8 +428,8 @@ hubu [--url http://127.0.0.1:8787] policy validate --path FILE
 hubu [--url http://127.0.0.1:8787] policy add --path FILE
 hubu [--url http://127.0.0.1:8787] policy list
 hubu [--url http://127.0.0.1:8787] agent list [--all]
-hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
-hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT --agent-id ID [--starting-at RFC3339] [--ending-before RFC3339]
+hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --agent-id ID --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
 hubu [--url http://127.0.0.1:8787] budget revoke --budget-id ID
 hubu [--url http://127.0.0.1:8787] budget replace --budget-id ID --amount AMOUNT
 hubu [--url http://127.0.0.1:8787] budget list [--all]
@@ -454,8 +450,9 @@ after `cargo build`.
 - Local demo state is stored in SQLite at `HUBU_DB_PATH`, defaulting to
   `hubu.sqlite3` in the server working directory. Use
   `./scripts/reset-local-state.sh --yes` to clear it.
-- `hubu budget list` shows active current-user caps and active budgets scoped to
-  agents owned by the current user. Use `--all` to include revoked budgets.
+- `hubu user cap show` shows the current user's global spend caps. `hubu budget
+  list` shows active budgets scoped to agents owned by the current user. Use
+  `--all` to include revoked records.
 - The server uses a minimal local HTTP adapter for demo use, not a production
   web framework.
 - Payments use the existing mock rail only. No real payment provider is called.

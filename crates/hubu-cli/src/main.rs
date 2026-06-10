@@ -505,18 +505,124 @@ fn register_human(base_url: &str, mut args: Vec<String>) -> Result<()> {
 }
 
 fn user(base_url: &str, args: Vec<String>) -> Result<()> {
-    match args.as_slice() {
-        [] => {
+    match args.split_first() {
+        None => {
             print_user_help();
             Ok(())
         }
-        [command] if command == "help" || command == "-h" || command == "--help" => {
+        Some((command, [])) if command == "help" || command == "-h" || command == "--help" => {
             print_user_help();
             Ok(())
         }
-        [command] if command == "list" => user_list(base_url),
-        _ => bail!("usage: hubu user list"),
+        Some((command, [])) if command == "list" => user_list(base_url),
+        Some((command, rest)) if command == "cap" => user_cap(base_url, rest.to_vec()),
+        _ => bail!("usage: hubu user list | hubu user cap set|show|revoke"),
     }
+}
+
+fn user_cap(base_url: &str, args: Vec<String>) -> Result<()> {
+    let Some(command) = args.first().cloned() else {
+        print_user_cap_help();
+        return Ok(());
+    };
+    let mut args = args;
+    args.remove(0);
+
+    match command.as_str() {
+        "set" => user_cap_set(base_url, args),
+        "show" => user_cap_show(base_url, args),
+        "revoke" => user_cap_revoke(base_url, args),
+        "-h" | "--help" | "help" => {
+            print_user_cap_help();
+            Ok(())
+        }
+        _ => bail!("unknown user cap command `{command}`"),
+    }
+}
+
+fn user_cap_set(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_user_cap_set_help();
+        return Ok(());
+    }
+
+    let amount = take_required(&mut args, "--amount")?;
+    let starting_at = take_value(&mut args, "--starting-at");
+    let ending_before = take_value(&mut args, "--ending-before");
+    ensure_no_args(args)?;
+
+    let response = post_json(
+        base_url,
+        "/user/cap",
+        json!({
+            "amount_cents": amount_to_cents(&amount)?,
+            "starting_at": starting_at,
+            "ending_before": ending_before,
+        }),
+    )?;
+
+    println!("User cap set");
+    print_user_cap(
+        response
+            .get("cap")
+            .ok_or_else(|| anyhow!("server response missing `cap`"))?,
+    )?;
+    Ok(())
+}
+
+fn user_cap_show(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_user_cap_show_help();
+        return Ok(());
+    }
+
+    let include_all = take_flag(&mut args, "--all");
+    ensure_no_args(args)?;
+    let path = if include_all {
+        "/user/cap?all=true"
+    } else {
+        "/user/cap"
+    };
+    let response = get_json(base_url, path)?;
+    let caps = response
+        .get("caps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `caps`"))?;
+
+    if caps.is_empty() {
+        println!("No user caps configured.");
+        return Ok(());
+    }
+
+    for cap in caps {
+        print_user_cap(cap)?;
+    }
+    Ok(())
+}
+
+fn user_cap_revoke(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_user_cap_revoke_help();
+        return Ok(());
+    }
+
+    let cap_id = take_required(&mut args, "--cap-id")?;
+    ensure_no_args(args)?;
+    let response = post_json(
+        base_url,
+        "/user/cap/revoke",
+        json!({
+            "cap_id": cap_id,
+        }),
+    )?;
+
+    println!("User cap revoked");
+    print_user_cap(
+        response
+            .get("cap")
+            .ok_or_else(|| anyhow!("server response missing `cap`"))?,
+    )?;
+    Ok(())
 }
 
 fn user_list(base_url: &str) -> Result<()> {
@@ -1079,7 +1185,9 @@ fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
     }
 
     let amount = take_required(&mut args, "--amount")?;
-    let agent_id = take_value(&mut args, "--agent-id");
+    let agent_id = take_required(&mut args, "--agent-id").with_context(|| {
+        "budget create requires --agent-id; use `hubu user cap set` for a user-level max spend cap"
+    })?;
     let starting_at = take_value(&mut args, "--starting-at");
     let ending_before = take_value(&mut args, "--ending-before");
     ensure_no_args(args)?;
@@ -1089,9 +1197,7 @@ fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "starting_at": starting_at,
         "ending_before": ending_before,
     });
-    if let Some(agent_id) = agent_id {
-        body["agent_id"] = json!(agent_id);
-    }
+    body["agent_id"] = json!(agent_id);
 
     let response = post_json(base_url, "/budgets", body)?;
 
@@ -1111,7 +1217,8 @@ fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> 
     }
 
     let amount = take_required(&mut args, "--amount")?;
-    let agent_id = take_value(&mut args, "--agent-id");
+    let agent_id = take_required(&mut args, "--agent-id")
+        .with_context(|| "budget create-recurring requires --agent-id; use `hubu user cap set` for a user-level max spend cap")?;
     let recurrence = take_required(&mut args, "--recurrence")?;
     let period_count = take_required(&mut args, "--period-count")?;
     let starting_at = take_value(&mut args, "--starting-at");
@@ -1123,9 +1230,7 @@ fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> 
         "recurrence": recurrence,
         "period_count": period_count.parse::<usize>()?,
     });
-    if let Some(agent_id) = agent_id {
-        body["agent_id"] = json!(agent_id);
-    }
+    body["agent_id"] = json!(agent_id);
 
     let response = post_json(base_url, "/budgets/series", body)?;
 
@@ -1357,6 +1462,16 @@ fn print_spend_response(response: &Value) -> Result<()> {
         println!("  frozen: {}", money_at(hold, "frozen_amount_cents")?);
         println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
     }
+    if let Some(hold) = response.get("cap_hold").filter(|hold| hold.is_object()) {
+        println!("Cap hold");
+        println!("  status: {}", string_at(hold, "status")?);
+        println!("  hold_id: {}", string_at(hold, "hold_id")?);
+        println!("  cap_id: {}", string_at(hold, "budget_id")?);
+        println!("  amount: {}", money_at(hold, "amount_cents")?);
+        println!("  consumed: {}", money_at(hold, "consumed_amount_cents")?);
+        println!("  frozen: {}", money_at(hold, "frozen_amount_cents")?);
+        println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
+    }
     Ok(())
 }
 
@@ -1417,7 +1532,7 @@ fn print_budget(budget: &Value) -> Result<()> {
     println!(
         "  budget_id: {}  scope: {} ({})  status: {}",
         string_at(budget, "budget_id")?,
-        budget_scope_label(string_at(budget, "scope")?),
+        string_at(budget, "scope")?,
         string_at(budget, "scope_id")?,
         string_at(budget, "status")?
     );
@@ -1438,11 +1553,27 @@ fn print_budget(budget: &Value) -> Result<()> {
     Ok(())
 }
 
-fn budget_scope_label(scope: &str) -> &str {
-    match scope {
-        "user" => "user cap",
-        _ => scope,
-    }
+fn print_user_cap(cap: &Value) -> Result<()> {
+    println!(
+        "  cap_id: {}  status: {}",
+        string_at(cap, "cap_id")?,
+        string_at(cap, "status")?
+    );
+    println!(
+        "    limit: {}  consumed: {}  frozen: {}  remaining: {}",
+        money_at(cap, "amount_limit_cents")?,
+        money_at(cap, "consumed_amount_cents")?,
+        money_at(cap, "frozen_amount_cents")?,
+        money_at(cap, "remaining_amount_cents")?
+    );
+    let starting_at = local_timestamp(string_at(cap, "starting_at")?);
+    let ending_before = cap
+        .get("ending_before")
+        .and_then(Value::as_str)
+        .map(local_timestamp)
+        .unwrap_or_else(|| "open-ended".to_string());
+    println!("    period: {starting_at} -> {ending_before}");
+    Ok(())
 }
 
 fn health(base_url: &str) -> Result<()> {
@@ -1651,11 +1782,11 @@ Usage:
 Commands:
   register   Register human users and agents
   protocol   Read Hubu protocol payloads
-  user       List human users
+  user       List human users and manage user caps
   policy     Manage spending policies
   init       Generate starter files and configure clients
   agent      Read registered agents
-  budget     Create and list user caps and agent budgets
+  budget     Create and list agent budgets
   spend      Test the agent spend path
   ledger     Read ledger transactions
   health     Check the Hubu server
@@ -1668,7 +1799,8 @@ Examples:
   hubu register human --username alice-example --display-name \"Alice Example\"
   hubu register agent --name local-agent --version local-dev
   hubu policy new-template --path policies/policy.yaml
-  hubu budget create-recurring --amount 100 --recurrence daily --period-count 7
+  hubu user cap set --amount 100
+  hubu budget create --agent-id AGENT_ID --amount 25
   hubu spend --help
 
 Run `hubu <command> --help` for command-specific help."
@@ -1719,10 +1851,54 @@ Example:
 
 fn print_user_help() {
     println!(
-        "List human users
+        "Manage human users
 
 Usage:
-  hubu user list"
+  hubu user list
+  hubu user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu user cap show [--all]
+  hubu user cap revoke --cap-id ID"
+    );
+}
+
+fn print_user_cap_help() {
+    println!(
+        "Manage the current user's global spend cap
+
+Usage:
+  hubu user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu user cap show [--all]
+  hubu user cap revoke --cap-id ID"
+    );
+}
+
+fn print_user_cap_set_help() {
+    println!(
+        "Set a global spend cap for the current user
+
+Usage:
+  hubu user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]"
+    );
+}
+
+fn print_user_cap_show_help() {
+    println!(
+        "Show global spend caps for the current user
+
+Usage:
+  hubu user cap show [--all]
+
+Options:
+  --all  Include revoked caps"
+    );
+}
+
+fn print_user_cap_revoke_help() {
+    println!(
+        "Revoke a global spend cap for the current user
+
+Usage:
+  hubu user cap revoke --cap-id ID"
     );
 }
 
@@ -1877,18 +2053,18 @@ Examples:
 
 fn print_budget_help() {
     println!(
-        "Create and list user caps and agent budgets
+        "Create and list agent budgets
 
 Usage:
-  hubu budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
-  hubu budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+  hubu budget create --amount AMOUNT --agent-id ID [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu budget create-recurring --amount AMOUNT --agent-id ID --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
   hubu budget revoke --budget-id ID
   hubu budget replace --budget-id ID --amount AMOUNT
   hubu budget list [--all]
 
 Examples:
-  hubu budget create-recurring --amount 100 --recurrence daily --period-count 7
   hubu budget create --agent-id AGENT_ID --amount 25
+  hubu budget create-recurring --agent-id AGENT_ID --amount 25 --recurrence monthly --period-count 3
   hubu budget replace --budget-id BUDGET_ID --amount 50
   hubu budget revoke --budget-id BUDGET_ID
   hubu budget list"
@@ -1897,32 +2073,30 @@ Examples:
 
 fn print_budget_create_help() {
     println!(
-        "Create a single user cap or agent budget
+        "Create a single agent budget
 
 Usage:
-  hubu budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu budget create --amount AMOUNT --agent-id ID [--starting-at RFC3339] [--ending-before RFC3339]
 
 Options:
-  --agent-id ID  Create an agent budget instead of a cap for the current user
+  --agent-id ID  Agent this budget applies to
 
 Examples:
-  hubu budget create --amount 100
   hubu budget create --agent-id AGENT_ID --amount 25"
     );
 }
 
 fn print_budget_create_recurring_help() {
     println!(
-        "Create a recurring user cap or agent budget series
+        "Create a recurring agent budget series
 
 Usage:
-  hubu budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+  hubu budget create-recurring --amount AMOUNT --agent-id ID --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
 
 Options:
-  --agent-id ID  Create an agent budget series instead of caps for the current user
+  --agent-id ID  Agent this budget series applies to
 
 Examples:
-  hubu budget create-recurring --amount 100 --recurrence daily --period-count 7
   hubu budget create-recurring --agent-id AGENT_ID --amount 25 --recurrence monthly --period-count 3"
     );
 }
