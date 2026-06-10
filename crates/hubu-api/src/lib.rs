@@ -38,6 +38,7 @@ use hubu_core::{
     policy::{
         condition::{Condition, Field, PolicyValue},
         engine::validate_policy,
+        error::PolicyLoadError,
         model::{Effect, Policy, Rule},
     },
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
@@ -1545,7 +1546,8 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
     let user = authenticated_user_context(state)?;
     let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
     let policy = if let Some(policy_yaml) = request.policy_yaml {
-        let mut policy: Policy = serde_yaml::from_str(&policy_yaml)?;
+        let mut policy = Policy::from_yaml_str(&policy_yaml)
+            .map_err(|error| anyhow!("{}", policy_load_error_message(error)))?;
         policy.owner_user_id = user.user_id.clone();
         validate_policy(&policy)?;
         policy
@@ -1619,6 +1621,20 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         policy_version,
         default_decision,
     })
+}
+
+fn policy_load_error_message(error: PolicyLoadError) -> String {
+    match error {
+        PolicyLoadError::ReadFile { path, source } => {
+            format!("failed to read policy file `{path}`: {source}")
+        }
+        PolicyLoadError::ParseYaml { source } => {
+            format!("failed to parse policy yaml: {source}")
+        }
+        PolicyLoadError::Validation { source } => {
+            format!("invalid policy: {source}")
+        }
+    }
 }
 
 fn list_agents(state: &ServerState) -> Result<AgentListHttpResponse> {
@@ -3796,6 +3812,54 @@ rules:
                 .owner_user_id,
             user.user_id
         );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn yaml_policy_add_rejects_unsupported_cumulative_limit_fields() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-policy-unsupported-field-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+        let agent = register_agent(
+            json!({
+                "name": "unsupported-policy-field-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register");
+
+        let error = add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "policy_yaml": r#"
+id: daily_limit_policy
+version: demo-1
+owner_user_id: 00000000-0000-4000-8000-000000000000
+default_effect: needs_approval
+daily_limit_cents: 5000
+rules: []
+"#,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("unsupported cumulative policy field should fail");
+
+        assert!(error.to_string().contains("failed to parse policy yaml"));
+        assert!(error.to_string().contains("daily_limit_cents"));
         std::fs::remove_file(path).ok();
     }
 

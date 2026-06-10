@@ -126,7 +126,9 @@ assert_not_contains "duplicate agent registration" "${DUPLICATE_AGENT_OUTPUT}" "
 assert_not_contains "duplicate agent registration" "${DUPLICATE_AGENT_OUTPUT}" "identity_fingerprint"
 
 rm -f "${POLICY_FILE}"
-hubu init --policy "${POLICY_FILE}" >/dev/null
+hubu policy new-template --path "${POLICY_FILE}" >/dev/null
+POLICY_VALIDATE_OUTPUT="$(hubu policy validate --path "${POLICY_FILE}")"
+assert_contains "policy validate" "${POLICY_VALIDATE_OUTPUT}" "Policy valid"
 POLICY_OUTPUT="$(hubu policy add --agent-id "${AGENT_ID}" --path "${POLICY_FILE}")"
 assert_contains "policy add" "${POLICY_OUTPUT}" "Policy added"
 assert_contains "policy add" "${POLICY_OUTPUT}" "default_decision: needs_approval"

@@ -112,6 +112,29 @@ rules:
     }
 
     #[test]
+    fn loads_policy_without_owner_user_id_for_authoring() {
+        let yaml = r#"
+id: authoring_policy
+version: draft-1
+default_effect: needs_approval
+rules:
+  - id: deny_large_purchase
+    effect: deny
+    reason: Purchase exceeds the $5 single-transaction limit
+    when:
+      op: gt
+      field: amount
+      value:
+        money_cents: 500
+"#;
+
+        let policy = Policy::from_yaml_str(yaml).expect("policy should load without owner_user_id");
+
+        assert_eq!(policy.id, "authoring_policy");
+        assert_eq!(policy.rules.len(), 1);
+    }
+
+    #[test]
     fn rejects_yaml_policy_that_fails_validation() {
         let invalid_yaml = r#"
 id: base_spending_policy
@@ -137,6 +160,49 @@ rules:
                 source: PolicyValidationError::FieldValueMismatch { .. }
             }
         ));
+    }
+
+    #[test]
+    fn rejects_unknown_policy_fields() {
+        let invalid_yaml = r#"
+id: base_spending_policy
+version: 2026-05-22.1
+owner_user_id: 00000000-0000-4000-8000-000000000123
+default_effect: needs_approval
+daily_limit_cents: 1000
+rules: []
+"#;
+
+        let error =
+            Policy::from_yaml_str(invalid_yaml).expect_err("unknown policy field should fail");
+
+        assert!(matches!(error, PolicyLoadError::ParseYaml { .. }));
+        assert!(error.to_string().contains("failed to parse policy yaml"));
+    }
+
+    #[test]
+    fn rejects_unknown_condition_fields() {
+        let invalid_yaml = r#"
+id: base_spending_policy
+version: 2026-05-22.1
+owner_user_id: 00000000-0000-4000-8000-000000000123
+default_effect: needs_approval
+rules:
+  - id: allow_approved_merchants
+    effect: allow
+    reason: approved merchants are allowed
+    when:
+      op: in
+      field: merchant
+      value:
+        string: openai
+"#;
+
+        let error =
+            Policy::from_yaml_str(invalid_yaml).expect_err("unknown condition field should fail");
+
+        assert!(matches!(error, PolicyLoadError::ParseYaml { .. }));
+        assert!(error.to_string().contains("failed to parse policy yaml"));
     }
 
     #[test]
