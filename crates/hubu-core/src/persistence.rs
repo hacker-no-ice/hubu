@@ -537,6 +537,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
                  WHERE budget_id = ?1",
                 params![budget_id, amount_cents, now.to_rfc3339()],
             )?;
+            refresh_persisted_budget_status(&sqlite_tx, &budget_id, now)?;
         }
 
         sqlite_tx.commit()?;
@@ -611,6 +612,11 @@ impl BudgetRepository for SqliteGovernanceRepository {
                 ],
             )?;
             upsert_balance(&sqlite_tx, balance)?;
+            refresh_persisted_budget_status(
+                &sqlite_tx,
+                &hold.budget_id.to_string(),
+                hold.updated_at,
+            )?;
         }
         sqlite_tx.commit()?;
         Ok(())
@@ -639,6 +645,11 @@ impl BudgetRepository for SqliteGovernanceRepository {
                 ],
             )?;
             upsert_balance(&sqlite_tx, balance)?;
+            refresh_persisted_budget_status(
+                &sqlite_tx,
+                &hold.budget_id.to_string(),
+                hold.updated_at,
+            )?;
         }
         sqlite_tx.commit()?;
         Ok(())
@@ -746,6 +757,40 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), rusq
             balance.remaining_amount_cents,
             Utc::now().to_rfc3339(),
         ],
+    )?;
+    Ok(())
+}
+
+fn refresh_persisted_budget_status(
+    conn: &Connection,
+    budget_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), rusqlite::Error> {
+    let now = now.to_rfc3339();
+    conn.execute(
+        "UPDATE budgets
+         SET status = 'exhausted', updated_at = ?2
+         WHERE id = ?1
+           AND status = 'active'
+           AND EXISTS (
+             SELECT 1 FROM budget_balances
+             WHERE budget_id = ?1
+               AND remaining_amount_cents = 0
+               AND frozen_amount_cents = 0
+           )",
+        params![budget_id, now],
+    )?;
+    conn.execute(
+        "UPDATE budgets
+         SET status = 'active', updated_at = ?2
+         WHERE id = ?1
+           AND status = 'exhausted'
+           AND EXISTS (
+             SELECT 1 FROM budget_balances
+             WHERE budget_id = ?1
+               AND remaining_amount_cents > 0
+           )",
+        params![budget_id, now],
     )?;
     Ok(())
 }

@@ -4468,6 +4468,78 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_user_cap_can_be_renewed_without_revoke() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-cap-renew-{}.sqlite", UserId::new()));
+        {
+            let state =
+                ServerState::new_with_db_path(&path).expect("server state should initialize");
+            init(
+                json!({
+                    "display_name": "Alice Example",
+                    "email": "alice@example.com",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("init should create an explicit user");
+            let agent = register_agent(
+                json!({
+                    "name": "cap-renew-agent",
+                    "version": "v1",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("agent should register");
+            add_policy(
+                json!({
+                    "agent_id": agent.agent_id,
+                    "daily_limit_cents": 2_000,
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("policy should be added");
+
+            set_test_user_cap(&state, 1_000);
+            create_test_agent_budget(&state, &agent.agent_id, 2_000);
+            let spend = spend(
+                json!({
+                    "agent_id": agent.agent_id,
+                    "amount_cents": 1_000,
+                    "reason": "exhaust cap",
+                    "merchant": "Acme Cafe",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("spend should exhaust cap");
+            let cap_hold = spend.cap_hold.expect("spend should reserve cap");
+            assert_eq!(cap_hold.status, "settled");
+            assert_eq!(cap_hold.remaining_amount_cents, 0);
+        }
+
+        let restarted =
+            ServerState::new_with_db_path(&path).expect("server state should reload from storage");
+        let caps = list_user_caps(&restarted, true).expect("caps should list");
+        assert_eq!(caps.caps.len(), 1);
+        assert_eq!(caps.caps[0].status, "exhausted");
+
+        let renewed = set_user_cap(
+            json!({
+                "amount_cents": 500,
+            })
+            .to_string(),
+            &restarted,
+        )
+        .expect("exhausted cap should not block renewal");
+        assert_eq!(renewed.cap.status, "active");
+        assert_eq!(renewed.cap.remaining_amount_cents, 500);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn spend_can_use_registered_account_id_as_financial_anchor() {
         let path = std::env::temp_dir().join(format!("hubu-api-account-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");

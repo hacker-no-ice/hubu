@@ -516,7 +516,7 @@ fn user(base_url: &str, args: Vec<String>) -> Result<()> {
         }
         Some((command, [])) if command == "list" => user_list(base_url),
         Some((command, rest)) if command == "cap" => user_cap(base_url, rest.to_vec()),
-        _ => bail!("usage: hubu user list | hubu user cap set|show|revoke"),
+        _ => bail!("usage: hubu user list | hubu user cap set|renew|show|revoke"),
     }
 }
 
@@ -529,7 +529,7 @@ fn user_cap(base_url: &str, args: Vec<String>) -> Result<()> {
     args.remove(0);
 
     match command.as_str() {
-        "set" => user_cap_set(base_url, args),
+        "set" | "renew" => user_cap_set(base_url, args),
         "show" => user_cap_show(base_url, args),
         "revoke" => user_cap_revoke(base_url, args),
         "-h" | "--help" | "help" => {
@@ -1856,6 +1856,7 @@ fn print_user_help() {
 Usage:
   hubu user list
   hubu user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu user cap renew --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
   hubu user cap show [--all]
   hubu user cap revoke --cap-id ID"
     );
@@ -1867,6 +1868,7 @@ fn print_user_cap_help() {
 
 Usage:
   hubu user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu user cap renew --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
   hubu user cap show [--all]
   hubu user cap revoke --cap-id ID"
     );
@@ -1874,10 +1876,11 @@ Usage:
 
 fn print_user_cap_set_help() {
     println!(
-        "Set a global spend cap for the current user
+        "Set or renew a global spend cap for the current user
 
 Usage:
-  hubu user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]"
+  hubu user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu user cap renew --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]"
     );
 }
 
