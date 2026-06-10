@@ -122,7 +122,7 @@ hubu policy validate --path policies/policy.yaml
 hubu policy add --path policies/policy.yaml
 hubu policy list
 hubu agent list
-hubu budget create-recurring --amount 100 --recurrence daily --period-count 1
+hubu user cap set --amount 100
 hubu budget create --agent-id AGENT_ID --amount 25
 hubu budget replace --budget-id BUDGET_ID --amount 50
 hubu spend authorize --agent-id AGENT_ID --amount 5 --reason "Generate Project Hubu logo"

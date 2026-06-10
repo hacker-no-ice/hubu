@@ -21,7 +21,7 @@ pub struct BudgetManager {
     budgets: HashMap<BudgetId, Budget>,
     budget_balances: HashMap<BudgetId, BudgetBalance>,
     budget_holds: HashMap<BudgetHoldId, BudgetHold>,
-    hold_by_spend_decision: HashMap<SpendDecisionId, BudgetHoldId>,
+    hold_ids_by_spend_decision: HashMap<SpendDecisionId, Vec<BudgetHoldId>>,
 
     budget_ids_by_user_id: HashMap<UserId, Vec<BudgetId>>,
     budget_ids_by_agent_id: HashMap<AgentId, Vec<BudgetId>>,
@@ -34,7 +34,7 @@ impl BudgetManager {
             budgets: HashMap::new(),
             budget_balances: HashMap::new(),
             budget_holds: HashMap::new(),
-            hold_by_spend_decision: HashMap::new(),
+            hold_ids_by_spend_decision: HashMap::new(),
             budget_ids_by_user_id: HashMap::new(),
             budget_ids_by_agent_id: HashMap::new(),
             budget_ids_by_task_id: HashMap::new(),
@@ -58,8 +58,10 @@ impl BudgetManager {
         }
         for hold in holds {
             manager
-                .hold_by_spend_decision
-                .insert(hold.spend_decision_id.clone(), hold.id.clone());
+                .hold_ids_by_spend_decision
+                .entry(hold.spend_decision_id.clone())
+                .or_default()
+                .push(hold.id.clone());
             manager.budget_holds.insert(hold.id.clone(), hold);
         }
         manager
@@ -178,8 +180,12 @@ impl BudgetManager {
         }
 
         if self
-            .hold_by_spend_decision
-            .contains_key(&request.spend_decision_id)
+            .hold_ids_by_spend_decision
+            .get(&request.spend_decision_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|hold_id| self.budget_holds.get(hold_id))
+            .any(|hold| hold.budget_id == request.budget_id)
         {
             log_budget_reservation_rejected(&request, "duplicate_spend_decision_hold");
             return Err(BudgetManagerError::DuplicateSpendDecisionHold);
@@ -234,8 +240,10 @@ impl BudgetManager {
             expires_at: request.expires_at,
         };
 
-        self.hold_by_spend_decision
-            .insert(hold.spend_decision_id.clone(), hold.id.clone());
+        self.hold_ids_by_spend_decision
+            .entry(hold.spend_decision_id.clone())
+            .or_default()
+            .push(hold.id.clone());
         self.budget_holds.insert(hold.id.clone(), hold.clone());
 
         log_event(
@@ -494,9 +502,22 @@ impl BudgetManager {
         &self,
         spend_decision_id: &SpendDecisionId,
     ) -> Option<BudgetHold> {
-        self.hold_by_spend_decision
+        self.hold_ids_by_spend_decision
             .get(spend_decision_id)
+            .and_then(|hold_ids| hold_ids.first())
             .and_then(|hold_id| self.get_budget_hold(hold_id))
+    }
+
+    pub fn get_budget_holds_by_spend_decision(
+        &self,
+        spend_decision_id: &SpendDecisionId,
+    ) -> Vec<BudgetHold> {
+        self.hold_ids_by_spend_decision
+            .get(spend_decision_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|hold_id| self.get_budget_hold(hold_id))
+            .collect()
     }
 
     pub fn revoke_budget(

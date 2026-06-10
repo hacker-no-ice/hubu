@@ -32,14 +32,14 @@ const components = {
     copy:
       "Hubu includes the CLI, MCP adapter, local server, governance core, wallet, and ledger. Gongbu is shown outside Hubu because it performs external model calls and other work through the executor contract.",
     responsibilities: [
-      "Humans register, attach user-level policies, create budgets, and review protected actions.",
+      "Humans register, attach user-level policies, set user caps, create agent budgets, and review protected actions.",
       "Agents use Hubu CLI or Hubu MCP surfaces to register and submit structured spend requests.",
       "The CLI and MCP adapter are part of broader Hubu, but they are not the Hubu server.",
       "Local HTTP callers present the Hubu bearer token before protected routes resolve user authority.",
       "Gongbu and other external executors validate, settle, or release authorized spend without Hubu performing the work.",
       "The API coordinates core governance managers, wallet execution, and executor-facing spend state.",
       "Gongbu owns vendor credentials, provider adapters, model calls, artifacts, and execution retries outside Hubu.",
-      "SQLite-backed records preserve users, agents, budgets, policies, payments, and ledger entries.",
+      "SQLite-backed records preserve users, agents, caps, budgets, policies, payments, and ledger entries.",
     ],
     links: [sharedLinks.readme, sharedLinks.api, sharedLinks.cli, sharedLinks.mcp, sharedLinks.spendExecutor, sharedLinks.futureWallet],
     zones: [
@@ -83,7 +83,7 @@ const components = {
     copy:
       "The demo server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, and stitches together registration, policy, budget, spend, payment, executor, and ledger managers.",
     responsibilities: [
-      "Keeps health and guidance public while requiring a local bearer token for user setup, agent registration, policies, budgets, spend, and ledger listing.",
+      "Keeps health and guidance public while requiring a local bearer token for user setup, agent registration, policies, caps, budgets, spend, and ledger listing.",
       "Uses the local token and current user context for protected workflow authority and agent registration ownership.",
       "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
       "Bridges wallet payment authorization and external executor validation through shared spend state.",
@@ -163,27 +163,27 @@ const components = {
     title: "Budget Manager",
     kind: "Component",
     copy:
-      "Budgets are user-scoped or agent-scoped spending limits. Approved spend freezes balance first, then payment success consumes the hold or failure releases it.",
+      "Budgets are execution-scoped allocations for agents today and tasks later. User caps are global max-spend guardrails that reuse the same hold lifecycle, so approved spend freezes one budget hold and one cap hold before payment success settles both or failure releases both.",
     responsibilities: [
-      "Creates single or finite recurring budget periods with overlap checks for user and agent scopes.",
+      "Creates single or finite recurring budget periods for agent scopes, with room for task/project scopes later.",
       "Revokes active budgets and replaces them by preserving history and creating a new forward-looking allowance.",
-      "Indexes budgets by user, agent, and task scope; spend prefers an active agent budget before falling back to the user budget.",
-      "Rejects overlapping hierarchy mismatches, such as an agent budget above the containing user budget.",
-      "Reserves, settles, releases, and expires budget holds for wallet payments and external executors.",
+      "Tracks user caps separately in the API/CLI while reusing the underlying balance and hold machinery.",
+      "Requires spend to fit both an active agent budget and the active user cap.",
+      "Reserves, settles, releases, and expires budget/cap holds for wallet payments and external executors.",
     ],
     links: [sharedLinks.budget, sharedLinks.budgetModel, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
     nodes: [
-      { id: "create", label: "Create budget", sub: "single/series", x: 76, y: 92, w: 206, h: 92, tone: "human" },
+      { id: "create", label: "Create budget/cap", sub: "agent allocation + user max", x: 76, y: 92, w: 206, h: 92, tone: "human" },
       { id: "periods", label: "Periods", sub: "half-open windows", x: 420, y: 92, w: 210, h: 92, tone: "core" },
-      { id: "reserve", label: "Reserve hold", sub: "freeze balance", x: 420, y: 284, w: 210, h: 92, tone: "core" },
+      { id: "reserve", label: "Reserve holds", sub: "budget + cap", x: 420, y: 284, w: 210, h: 92, tone: "core" },
       { id: "payment", label: "Payment result", sub: "success/failure", x: 76, y: 480, w: 206, h: 92, tone: "wallet" },
-      { id: "settle", label: "Settle/release", sub: "consume or restore", x: 420, y: 480, w: 220, h: 92, tone: "core" },
+      { id: "settle", label: "Settle/release", sub: "move both holds", x: 420, y: 480, w: 220, h: 92, tone: "core" },
       { id: "store", label: "Governance store", sub: "balances + holds", x: 780, y: 282, w: 230, h: 96, tone: "data" },
     ],
     edges: [
       ["create", "periods", "expand"],
       ["periods", "store", "persist"],
-      ["reserve", "store", "freeze"],
+      ["reserve", "store", "freeze both"],
       ["payment", "settle", "result"],
       ["settle", "store", "update"],
       ["periods", "reserve", "select active"],
@@ -282,7 +282,7 @@ const components = {
     copy:
       "The CLI is the demo-friendly human and agent surface. It prepares registration envelopes, posts JSON to the local API, and prints compact reviews and results.",
     responsibilities: [
-      "Supports init, register, user list with current-user marking, protocol, policy template/add/list commands, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
+      "Supports init, register, user list and user cap commands, protocol, policy template/add/list commands, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
       "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
       "Loads the local Hubu token from env or file and sends it as a bearer header on HTTP JSON requests.",
     ],
@@ -328,7 +328,7 @@ const components = {
     title: "Agent Spend Path",
     kind: "Flow",
     copy:
-      "Agents never hold private keys. They register as distinct accounts, operate under the current user's policy and user/agent budgets, and submit spend intent for Hubu to authorize.",
+      "Agents never hold private keys. They register as distinct accounts, operate under the current user's policy, agent budget, and user cap, and submit spend intent for Hubu to authorize.",
     responsibilities: [
       "Consumes registration guidance instead of guessing protocol fields from prose.",
       "Submits structured spend requests with amount, reason, merchant, and agent/account identity.",
@@ -351,11 +351,11 @@ const components = {
     title: "Human Owner Flow",
     kind: "Flow",
     copy:
-      "Humans set the financial boundaries. The CLI and MCP adapter aim to keep review small while making identity, policy, and budget state explicit.",
+      "Humans set the financial boundaries. The CLI and MCP adapter aim to keep review small while making identity, policy, cap, and budget state explicit.",
     responsibilities: [
       "Registers humans with separate username and display name fields.",
       "Reviews current owner context, agent name/version, and protected setup actions.",
-      "Funds governance by creating a user-level policy and budgets before agent spending.",
+      "Funds governance by creating a user-level policy, user cap, and agent budget before agent spending.",
     ],
     links: [sharedLinks.cli, sharedLinks.mcp, sharedLinks.registrationProtocol, sharedLinks.budget],
     nodes: [
