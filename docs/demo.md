@@ -218,6 +218,8 @@ recurring budget call is atomic: if any generated period would overlap an
 existing budget, none of the periods are created. Add `--agent-id agt_...` to
 scope a single or recurring budget to one agent; spend uses an active
 agent-scoped budget first and falls back to the current user's active budget.
+Agent budgets cannot exceed an overlapping user budget, and user budgets cannot
+be created below an overlapping agent budget.
 
 ### 6. Submit an Allowed Spend Request
 

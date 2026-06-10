@@ -855,6 +855,32 @@ mod tests {
     }
 
     #[test]
+    fn create_single_budget_rejects_overlap_for_same_agent_scope() {
+        let mut manager = BudgetManager::new();
+        let agent_id = AgentId::new();
+
+        manager
+            .create_single_budget(CreateSingleBudgetRequest {
+                scope: BudgetScope::Agent(agent_id.clone()),
+                amount_limit_cents: 10_000,
+                currency: Currency::Usd,
+                period: period(2026, 6, 1, 2026, 7, 1),
+            })
+            .expect("first agent budget should be created");
+
+        let error = manager
+            .create_single_budget(CreateSingleBudgetRequest {
+                scope: BudgetScope::Agent(agent_id),
+                amount_limit_cents: 10_000,
+                currency: Currency::Usd,
+                period: period(2026, 6, 15, 2026, 7, 15),
+            })
+            .expect_err("overlapping agent budget should be rejected");
+
+        assert!(matches!(error, BudgetManagerError::OverlappingBudgetPeriod));
+    }
+
+    #[test]
     fn create_single_budget_allows_adjacent_half_open_periods() {
         let mut manager = BudgetManager::new();
         let user_id = UserId::new();
