@@ -163,10 +163,10 @@ const components = {
     title: "Budget Manager",
     kind: "Component",
     copy:
-      "Budgets are human-scoped spending limits. Approved spend freezes balance first, then payment success consumes the hold or failure releases it.",
+      "Budgets are user-scoped or agent-scoped spending limits. Approved spend freezes balance first, then payment success consumes the hold or failure releases it.",
     responsibilities: [
-      "Creates single or finite recurring budget periods with overlap checks.",
-      "Indexes budgets by user, agent, and task scope.",
+      "Creates single or finite recurring budget periods with overlap checks for user and agent scopes.",
+      "Indexes budgets by user, agent, and task scope; spend prefers an active agent budget before falling back to the user budget.",
       "Reserves, settles, releases, and expires budget holds for wallet payments and external executors.",
     ],
     links: [sharedLinks.budget, sharedLinks.budgetModel, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
@@ -326,7 +326,7 @@ const components = {
     title: "Agent Spend Path",
     kind: "Flow",
     copy:
-      "Agents never hold private keys. They register as distinct accounts, operate under the current user's policy and budgets, and submit spend intent for Hubu to authorize.",
+      "Agents never hold private keys. They register as distinct accounts, operate under the current user's policy and user/agent budgets, and submit spend intent for Hubu to authorize.",
     responsibilities: [
       "Consumes registration guidance instead of guessing protocol fields from prose.",
       "Submits structured spend requests with amount, reason, merchant, and agent/account identity.",

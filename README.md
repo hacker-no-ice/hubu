@@ -27,7 +27,7 @@ transport adapter.
 - Issues spend authorization tokens for allowed requests
 - Can authorize spend and freeze budget without executing payment, so a future
   Hubu-hosted vendor proxy can consume scoped authorization
-- Creates human-scoped single or recurring budgets and tracks available balance
+- Creates user-scoped or agent-scoped single and recurring budgets
 - Reserves budget before payment, then settles or releases the hold from the payment result
 - Orchestrates mock payments after spend authorization
 - Records successful payments in an immutable double-entry SQLite ledger
@@ -123,6 +123,7 @@ hubu policy add --path policies/policy.yaml
 hubu policy list
 hubu agent list
 hubu budget create-recurring --amount 100 --recurrence daily --period-count 1
+hubu budget create --agent-id AGENT_ID --amount 25
 hubu spend authorize --agent-id AGENT_ID --amount 5 --reason "Generate Project Hubu logo"
 hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
 hubu ledger list

@@ -727,19 +727,21 @@ fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
     }
 
     let amount = take_required(&mut args, "--amount")?;
+    let agent_id = take_value(&mut args, "--agent-id");
     let starting_at = take_value(&mut args, "--starting-at");
     let ending_before = take_value(&mut args, "--ending-before");
     ensure_no_args(args)?;
 
-    let response = post_json(
-        base_url,
-        "/budgets",
-        json!({
-            "amount_cents": amount_to_cents(&amount)?,
-            "starting_at": starting_at,
-            "ending_before": ending_before,
-        }),
-    )?;
+    let mut body = json!({
+        "amount_cents": amount_to_cents(&amount)?,
+        "starting_at": starting_at,
+        "ending_before": ending_before,
+    });
+    if let Some(agent_id) = agent_id {
+        body["agent_id"] = json!(agent_id);
+    }
+
+    let response = post_json(base_url, "/budgets", body)?;
 
     println!("Budget created");
     print_budget(
@@ -757,21 +759,23 @@ fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> 
     }
 
     let amount = take_required(&mut args, "--amount")?;
+    let agent_id = take_value(&mut args, "--agent-id");
     let recurrence = take_required(&mut args, "--recurrence")?;
     let period_count = take_required(&mut args, "--period-count")?;
     let starting_at = take_value(&mut args, "--starting-at");
     ensure_no_args(args)?;
 
-    let response = post_json(
-        base_url,
-        "/budgets/series",
-        json!({
-            "amount_cents": amount_to_cents(&amount)?,
-            "starting_at": starting_at,
-            "recurrence": recurrence,
-            "period_count": period_count.parse::<usize>()?,
-        }),
-    )?;
+    let mut body = json!({
+        "amount_cents": amount_to_cents(&amount)?,
+        "starting_at": starting_at,
+        "recurrence": recurrence,
+        "period_count": period_count.parse::<usize>()?,
+    });
+    if let Some(agent_id) = agent_id {
+        body["agent_id"] = json!(agent_id);
+    }
+
+    let response = post_json(base_url, "/budgets/series", body)?;
 
     println!("Budget series created");
     for budget in response
@@ -994,9 +998,10 @@ fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
 
 fn print_budget(budget: &Value) -> Result<()> {
     println!(
-        "  budget_id: {}  scope: {}  status: {}",
+        "  budget_id: {}  scope: {} ({})  status: {}",
         string_at(budget, "budget_id")?,
         string_at(budget, "scope")?,
+        string_at(budget, "scope_id")?,
         string_at(budget, "status")?
     );
     println!(
@@ -1386,27 +1391,33 @@ fn print_budget_help() {
         "Create and list budgets
 
 Usage:
-  hubu budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
-  hubu budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+  hubu budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
   hubu budget list"
     );
 }
 
 fn print_budget_create_help() {
     println!(
-        "Create a single human-scoped budget
+        "Create a single budget
 
 Usage:
-  hubu budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]"
+  hubu budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
+
+Options:
+  --agent-id ID  Scope this budget to one agent instead of the current user"
     );
 }
 
 fn print_budget_create_recurring_help() {
     println!(
-        "Create a recurring human-scoped budget series
+        "Create a recurring budget series
 
 Usage:
-  hubu budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]"
+  hubu budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+
+Options:
+  --agent-id ID  Scope this budget series to one agent instead of the current user"
     );
 }
 
