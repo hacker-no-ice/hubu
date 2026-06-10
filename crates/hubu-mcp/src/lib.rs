@@ -190,7 +190,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         approval_tool(
             "hubu_set_user_cap",
-            "Set a global spend cap for the active Hubu user. Requires a human click.",
+            "Set or renew a global spend cap for the active Hubu user. Requires a human click.",
             json_schema(json!({
                 "amount_cents": { "type": "integer" },
                 "starting_at": { "type": "string" },

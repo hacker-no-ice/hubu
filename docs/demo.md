@@ -419,6 +419,7 @@ hubu [--url http://127.0.0.1:8787] init [--policy FILE] [--force]
 hubu [--url http://127.0.0.1:8787] register human --username USERNAME --display-name NAME [--email EMAIL]
 hubu [--url http://127.0.0.1:8787] user list
 hubu [--url http://127.0.0.1:8787] user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+hubu [--url http://127.0.0.1:8787] user cap renew --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
 hubu [--url http://127.0.0.1:8787] user cap show [--all]
 hubu [--url http://127.0.0.1:8787] user cap revoke --cap-id ID
 hubu [--url http://127.0.0.1:8787] protocol agent-registration
@@ -446,9 +447,10 @@ after `cargo build`.
 
 - Server state is in memory. Restarting `hubu-server` clears registered agents,
   policies, spend decisions, budgets, payments, and ledger records.
-- `hubu user cap show` shows the current user's global spend caps. `hubu budget
-  list` shows active budgets scoped to agents owned by the current user. Use
-  `--all` to include revoked records.
+- `hubu user cap show` shows the current user's global spend caps. Once a cap is
+  exhausted, `hubu user cap renew --amount AMOUNT` creates the next active cap.
+  `hubu budget list` shows active budgets scoped to agents owned by the current
+  user. Use `--all` to include inactive records.
 - The server uses a minimal local HTTP adapter for demo use, not a production
   web framework.
 - Payments use the existing mock rail only. No real payment provider is called.
