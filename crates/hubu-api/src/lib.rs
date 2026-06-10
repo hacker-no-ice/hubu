@@ -33,7 +33,8 @@ use hubu_core::{
         ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
     },
     persistence::{
-        BudgetRepository, PolicyRepository, SpendRepository, SqliteGovernanceRepository,
+        BudgetRepository, PolicyAssignmentScope, PolicyRepository, SpendRepository,
+        SqliteGovernanceRepository,
     },
     policy::{
         condition::{Condition, Field, PolicyValue},
@@ -144,7 +145,7 @@ struct ServerState {
     registration: Mutex<RegistrationManager>,
     spend: Arc<Mutex<SpendManager>>,
     budgets: Mutex<BudgetManager>,
-    policies: Mutex<HashMap<(UserId, AgentId), Policy>>,
+    policies: Mutex<HashMap<(UserId, PolicyAssignmentScope), Policy>>,
     governance: Mutex<SqliteGovernanceRepository>,
     payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
     payments: Mutex<DemoPaymentManager>,
@@ -191,7 +192,7 @@ impl ServerState {
             .into_iter()
             .map(|assignment| {
                 (
-                    (assignment.owner_user_id, assignment.agent_id),
+                    (assignment.owner_user_id, assignment.scope),
                     assignment.policy,
                 )
             })
@@ -572,17 +573,35 @@ struct UserHttpResponse {
 
 #[derive(Debug, Deserialize)]
 struct AddPolicyHttpRequest {
-    agent_id: String,
+    agent_id: Option<String>,
     daily_limit_cents: Option<i64>,
     policy_yaml: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct AddPolicyHttpResponse {
-    agent_id: String,
+    scope: String,
+    agent_id: Option<String>,
     policy_id: String,
     policy_version: String,
     default_decision: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PolicyListHttpResponse {
+    policies: Vec<PolicyHttpResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct PolicyHttpResponse {
+    scope: String,
+    agent_id: Option<String>,
+    policy_id: String,
+    policy_version: String,
+    default_decision: String,
+    rules: usize,
+    attached_at: String,
+    updated_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -835,6 +854,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             list_agents_for_scope(state, true).map(to_json)
         }
         ("GET", "/agents") => list_agents(state).map(to_json),
+        ("GET", "/policies") => list_policies(state).map(to_json),
         ("POST", "/policies") => add_policy(request.body, state).map(to_json),
         ("POST", "/budgets") => create_budget(request.body, state).map(to_json),
         ("POST", "/budgets/series") => create_budget_series(request.body, state).map(to_json),
@@ -1542,9 +1562,16 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse> {
     let request: AddPolicyHttpRequest = serde_json::from_str(&body)?;
 
-    let agent_pub_id = request.agent_id;
     let user = authenticated_user_context(state)?;
-    let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
+    let (scope, agent_pub_id) = if let Some(agent_pub_id) = request.agent_id {
+        let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
+        (
+            PolicyAssignmentScope::AgentOverride(agent_id),
+            Some(agent_pub_id),
+        )
+    } else {
+        (PolicyAssignmentScope::UserDefault, None)
+    };
     let policy = if let Some(policy_yaml) = request.policy_yaml {
         let mut policy = Policy::from_yaml_str(&policy_yaml)
             .map_err(|error| anyhow!("{}", policy_load_error_message(error)))?;
@@ -1560,7 +1587,10 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         }
 
         Policy {
-            id: format!("demo_policy_{agent_pub_id}"),
+            id: match agent_pub_id.as_deref() {
+                Some(agent_pub_id) => format!("demo_policy_{agent_pub_id}"),
+                None => "demo_policy_default".to_string(),
+            },
             version: "demo-1".to_string(),
             owner_user_id: user.user_id.clone(),
             default_effect: Effect::NeedsApproval,
@@ -1597,18 +1627,19 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         .governance
         .lock()
         .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .save_policy_assignment(&user.user_id, &agent_id, &policy)?;
+        .save_policy_assignment(&user.user_id, &scope, &policy)?;
 
     state
         .policies
         .lock()
         .map_err(|_| anyhow!("policy store lock poisoned"))?
-        .insert((user.user_id, agent_id), policy);
+        .insert((user.user_id, scope.clone()), policy);
 
     log_event(
         "info",
         "policy_added",
         json!({
+            "scope": scope.scope_type(),
             "agent_pub_id": agent_pub_id,
             "policy_id": policy_id,
             "policy_version": policy_version,
@@ -1616,10 +1647,50 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         }),
     );
     Ok(AddPolicyHttpResponse {
+        scope: scope.scope_type().to_string(),
         agent_id: agent_pub_id,
         policy_id,
         policy_version,
         default_decision,
+    })
+}
+
+fn list_policies(state: &ServerState) -> Result<PolicyListHttpResponse> {
+    let user = authenticated_user_context(state)?;
+    let assignments = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .load_policy_assignments()?;
+
+    let policies = assignments
+        .into_iter()
+        .filter(|assignment| assignment.owner_user_id == user.user_id)
+        .map(|assignment| policy_http_response(assignment, state))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(PolicyListHttpResponse { policies })
+}
+
+fn policy_http_response(
+    assignment: hubu_core::persistence::PolicyAssignmentRecord,
+    state: &ServerState,
+) -> Result<PolicyHttpResponse> {
+    let agent_id = match &assignment.scope {
+        PolicyAssignmentScope::UserDefault => None,
+        PolicyAssignmentScope::AgentOverride(agent_id) => {
+            Some(registration_agent_pub_id(agent_id, state)?)
+        }
+    };
+    Ok(PolicyHttpResponse {
+        scope: assignment.scope.scope_type().to_string(),
+        agent_id,
+        policy_id: assignment.policy.id,
+        policy_version: assignment.policy.version,
+        default_decision: effect_name(assignment.policy.default_effect).to_string(),
+        rules: assignment.policy.rules.len(),
+        attached_at: assignment.created_at.to_rfc3339(),
+        updated_at: assignment.updated_at.to_rfc3339(),
     })
 }
 
@@ -2263,13 +2334,8 @@ fn evaluate_and_reserve_spend(
             "reason": request.reason.clone(),
         }),
     );
-    let policy = state
-        .policies
-        .lock()
-        .map_err(|_| anyhow!("policy store lock poisoned"))?
-        .get(&(user.user_id.clone(), agent_id.clone()))
-        .cloned()
-        .ok_or_else(|| anyhow!("no policy found for agent {agent_pub_id}"))?;
+    let policy = policy_for_spend(state, &user.user_id, &agent_id)?
+        .ok_or_else(|| anyhow!("no policy found for current user"))?;
 
     let spend_request = SpendRequest {
         amount_cents: request.amount_cents,
@@ -2431,6 +2497,24 @@ fn evaluate_and_reserve_spend(
         token,
         reservation,
     }))
+}
+
+fn policy_for_spend(
+    state: &ServerState,
+    user_id: &UserId,
+    agent_id: &AgentId,
+) -> Result<Option<Policy>> {
+    let policies = state
+        .policies
+        .lock()
+        .map_err(|_| anyhow!("policy store lock poisoned"))?;
+    Ok(policies
+        .get(&(
+            user_id.clone(),
+            PolicyAssignmentScope::AgentOverride(agent_id.clone()),
+        ))
+        .or_else(|| policies.get(&(user_id.clone(), PolicyAssignmentScope::UserDefault)))
+        .cloned())
 }
 
 enum BudgetHoldUpdate {
@@ -3389,7 +3473,6 @@ mod tests {
 
         add_policy(
             json!({
-                "agent_id": agent.agent_id,
                 "daily_limit_cents": 5_000,
             })
             .to_string(),
@@ -3465,7 +3548,6 @@ mod tests {
 
         add_policy(
             json!({
-                "agent_id": agent.agent_id,
                 "daily_limit_cents": 5_000,
             })
             .to_string(),
@@ -3761,7 +3843,6 @@ mod tests {
 
         let policy = add_policy(
             json!({
-                "agent_id": agent.agent_id,
                 "policy_yaml": r#"
 id: yaml_demo_policy
 version: demo-1
@@ -3782,8 +3863,25 @@ rules:
             &state,
         )
         .expect("yaml policy should be added");
+        assert_eq!(policy.scope, "user_default");
+        assert_eq!(policy.agent_id, None);
         assert_eq!(policy.policy_id, "yaml_demo_policy");
         assert_eq!(policy.policy_version, "demo-1");
+
+        let policies_response = route(authenticated_get_request("/policies"), &state);
+        assert_eq!(policies_response.status, 200);
+        let policies = policies_response.body["policies"]
+            .as_array()
+            .expect("policies should be an array");
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0]["scope"], "user_default");
+        assert_eq!(policies[0]["agent_id"], Value::Null);
+        assert_eq!(policies[0]["policy_id"], "yaml_demo_policy");
+        assert_eq!(policies[0]["policy_version"], "demo-1");
+        assert_eq!(policies[0]["default_decision"], "needs_approval");
+        assert_eq!(policies[0]["rules"], 1);
+        assert!(policies[0]["attached_at"].as_str().is_some());
+        assert!(policies[0]["updated_at"].as_str().is_some());
 
         create_budget(
             json!({

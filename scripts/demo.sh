@@ -190,7 +190,7 @@ step "Generate and attach a spending policy"
 rm -f "${POLICY_FILE}"
 hubu policy new-template --path "${POLICY_FILE}"
 hubu policy validate --path "${POLICY_FILE}"
-hubu policy add --agent-id "${AGENT_ID}" --path "${POLICY_FILE}"
+hubu policy add --path "${POLICY_FILE}"
 pause_for_reading
 
 step "List registered agents"

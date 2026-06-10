@@ -119,7 +119,8 @@ hubu protocol agent-registration
 hubu register agent
 hubu policy new-template --path policies/policy.yaml
 hubu policy validate --path policies/policy.yaml
-hubu policy add --agent-id AGENT_ID --path policies/policy.yaml
+hubu policy add --path policies/policy.yaml
+hubu policy list
 hubu agent list
 hubu budget create-recurring --amount 100 --recurrence daily --period-count 1
 hubu spend authorize --agent-id AGENT_ID --amount 5 --reason "Generate Project Hubu logo"

@@ -32,7 +32,7 @@ const components = {
     copy:
       "Hubu includes the CLI, MCP adapter, local server, governance core, wallet, and ledger. Gongbu is shown outside Hubu because it performs external model calls and other work through the executor contract.",
     responsibilities: [
-      "Humans register, attach policies, create budgets, and review protected actions.",
+      "Humans register, attach user-level policies, create budgets, and review protected actions.",
       "Agents use Hubu CLI or Hubu MCP surfaces to register and submit structured spend requests.",
       "The CLI and MCP adapter are part of broader Hubu, but they are not the Hubu server.",
       "Local HTTP callers present the Hubu bearer token before protected routes resolve user authority.",
@@ -280,7 +280,7 @@ const components = {
     copy:
       "The CLI is the demo-friendly human and agent surface. It prepares registration envelopes, posts JSON to the local API, and prints compact reviews and results.",
     responsibilities: [
-      "Supports init, register, user list with current-user marking, protocol, policy template/add commands, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
+      "Supports init, register, user list with current-user marking, protocol, policy template/add/list commands, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
       "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
       "Loads the local Hubu token from env or file and sends it as a bearer header on HTTP JSON requests.",
     ],
@@ -326,7 +326,7 @@ const components = {
     title: "Agent Spend Path",
     kind: "Flow",
     copy:
-      "Agents never hold private keys. They register as distinct accounts, receive policies and budgets from the human, and submit spend intent for Hubu to authorize.",
+      "Agents never hold private keys. They register as distinct accounts, operate under the current user's policy and budgets, and submit spend intent for Hubu to authorize.",
     responsibilities: [
       "Consumes registration guidance instead of guessing protocol fields from prose.",
       "Submits structured spend requests with amount, reason, merchant, and agent/account identity.",
@@ -335,12 +335,12 @@ const components = {
     links: [sharedLinks.mcp, sharedLinks.cli, sharedLinks.spend, sharedLinks.registrationProtocol],
     nodes: [
       { id: "register", label: "Register", sub: "identity/session", x: 90, y: 110, w: 220, h: 92, tone: "agent" },
-      { id: "policy", label: "Policy attached", sub: "human-authored", x: 436, y: 110, w: 220, h: 92, tone: "human" },
+      { id: "policy", label: "User policy", sub: "human-authored", x: 436, y: 110, w: 220, h: 92, tone: "human" },
       { id: "spend", label: "Spend request", sub: "structured intent", x: 436, y: 336, w: 220, h: 92, tone: "agent" },
       { id: "decision", label: "Decision", sub: "trace + token", x: 806, y: 336, w: 220, h: 92, tone: "core" },
     ],
     edges: [
-      ["register", "policy", "scoped"],
+      ["register", "policy", "inherits"],
       ["policy", "spend", "governs"],
       ["spend", "decision", "evaluate"],
     ],
@@ -353,7 +353,7 @@ const components = {
     responsibilities: [
       "Registers humans with separate username and display name fields.",
       "Reviews current owner context, agent name/version, and protected setup actions.",
-      "Funds governance by creating policies and budgets before agent spending.",
+      "Funds governance by creating a user-level policy and budgets before agent spending.",
     ],
     links: [sharedLinks.cli, sharedLinks.mcp, sharedLinks.registrationProtocol, sharedLinks.budget],
     nodes: [
