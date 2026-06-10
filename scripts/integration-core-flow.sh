@@ -209,6 +209,18 @@ assert_contains "agent budget create" "${AGENT_BUDGET_OUTPUT}" "scope: agent (${
 assert_contains "agent budget create" "${AGENT_BUDGET_OUTPUT}" 'limit: $5.00'
 AGENT_BUDGET_LIST_OUTPUT="$(hubu budget list)"
 assert_contains "agent budget list" "${AGENT_BUDGET_LIST_OUTPUT}" "scope: agent (${AGENT_ID})"
+AGENT_BUDGET_ID="$(awk '/budget_id:/ { print $2; exit }' <<< "${AGENT_BUDGET_OUTPUT}")"
+[[ "${AGENT_BUDGET_ID}" == bgt_* ]] || fail "could not parse public budget id"
+REPLACED_BUDGET_OUTPUT="$(hubu budget replace --budget-id "${AGENT_BUDGET_ID}" --amount 8)"
+assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" "Budget replaced"
+assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" "Revoked budget"
+assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" "Replacement budget"
+assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" 'limit: $8.00'
+REPLACEMENT_BUDGET_ID="$(awk '/budget_id:/ && seen { print $2; exit } /Replacement budget/ { seen=1 }' <<< "${REPLACED_BUDGET_OUTPUT}")"
+[[ "${REPLACEMENT_BUDGET_ID}" == bgt_* ]] || fail "could not parse replacement budget id"
+REVOKED_BUDGET_OUTPUT="$(hubu budget revoke --budget-id "${REPLACEMENT_BUDGET_ID}")"
+assert_contains "budget revoke" "${REVOKED_BUDGET_OUTPUT}" "Budget revoked"
+assert_contains "budget revoke" "${REVOKED_BUDGET_OUTPUT}" "status: revoked"
 
 LEDGER_OUTPUT="$(hubu ledger list)"
 assert_contains "ledger list" "${LEDGER_OUTPUT}" "via fiat_mock"

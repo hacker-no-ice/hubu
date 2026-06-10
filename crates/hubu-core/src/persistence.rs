@@ -489,7 +489,16 @@ impl BudgetRepository for SqliteGovernanceRepository {
         sqlite_tx.execute(
             "INSERT INTO budgets
              (id, scope_type, scope_id, amount_limit_cents, currency, starting_at, ending_before, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET
+                scope_type = excluded.scope_type,
+                scope_id = excluded.scope_id,
+                amount_limit_cents = excluded.amount_limit_cents,
+                currency = excluded.currency,
+                starting_at = excluded.starting_at,
+                ending_before = excluded.ending_before,
+                status = excluded.status,
+                updated_at = excluded.updated_at",
             params![
                 budget.id.to_string(),
                 budget_scope_type(&budget.scope),
