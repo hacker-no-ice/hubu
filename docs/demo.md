@@ -205,17 +205,19 @@ Expected output:
 
 ```txt
 Budget series created
-  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user  status: active
+  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
     period: 2026-06-03T17:19:20.123456+00:00 -> 2026-07-03T17:19:20.123456+00:00
-  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user  status: active
+  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
     period: 2026-07-03T17:19:20.123456+00:00 -> 2026-08-03T17:19:20.123456+00:00
 ```
 
 Hubu enforces non-overlapping periods for a given budget scope and currency. The
 recurring budget call is atomic: if any generated period would overlap an
-existing budget, none of the periods are created.
+existing budget, none of the periods are created. Add `--agent-id agt_...` to
+scope a single or recurring budget to one agent; spend uses an active
+agent-scoped budget first and falls back to the current user's active budget.
 
 ### 6. Submit an Allowed Spend Request
 
@@ -385,10 +387,10 @@ hubu budget list
 Expected output:
 
 ```txt
-  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user  status: active
+  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $20.00  frozen: $0.00  remaining: $55.00
     period: 2026-06-03T17:19:20.123456+00:00 -> 2026-07-03T17:19:20.123456+00:00
-  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user  status: active
+  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
     period: 2026-07-03T17:19:20.123456+00:00 -> 2026-08-03T17:19:20.123456+00:00
 ```
@@ -426,8 +428,8 @@ hubu [--url http://127.0.0.1:8787] policy validate --path FILE
 hubu [--url http://127.0.0.1:8787] policy add --path FILE
 hubu [--url http://127.0.0.1:8787] policy list
 hubu [--url http://127.0.0.1:8787] agent list [--all]
-hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
-hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
+hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
 hubu [--url http://127.0.0.1:8787] budget list
 hubu [--url http://127.0.0.1:8787] spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
 hubu [--url http://127.0.0.1:8787] ledger list
@@ -442,9 +444,8 @@ after `cargo build`.
 
 - Server state is in memory. Restarting `hubu-server` clears registered agents,
   policies, spend decisions, budgets, payments, and ledger records.
-- Agent-scoped budget filtering is not yet implemented. The read CLI currently
-  lists agents, human-scoped budgets, and ledger entries for the token-selected
-  owner.
+- `hubu budget list` shows current-user budgets and budgets scoped to agents
+  owned by the current user.
 - The server uses a minimal local HTTP adapter for demo use, not a production
   web framework.
 - Payments use the existing mock rail only. No real payment provider is called.

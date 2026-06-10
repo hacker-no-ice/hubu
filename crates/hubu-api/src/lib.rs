@@ -626,6 +626,7 @@ struct AgentHttpResponse {
 #[derive(Debug, Deserialize)]
 struct CreateBudgetHttpRequest {
     amount_cents: i64,
+    agent_id: Option<String>,
     starting_at: Option<String>,
     ending_before: Option<String>,
 }
@@ -633,6 +634,7 @@ struct CreateBudgetHttpRequest {
 #[derive(Debug, Deserialize)]
 struct CreateBudgetSeriesHttpRequest {
     amount_cents: i64,
+    agent_id: Option<String>,
     starting_at: Option<String>,
     recurrence: BudgetRecurrenceHttp,
     period_count: usize,
@@ -665,6 +667,7 @@ struct ListBudgetsHttpResponse {
 struct BudgetHttpResponse {
     budget_id: String,
     scope: String,
+    scope_id: String,
     amount_limit_cents: i64,
     currency: String,
     starting_at: String,
@@ -1791,6 +1794,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
     }
 
     let user = authenticated_user_context(state)?;
+    let scope = budget_scope_from_agent_id(request.agent_id.as_deref(), &user, state)?;
     let period = TimePeriod::new(
         parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now),
         parse_optional_datetime(request.ending_before)?,
@@ -1802,7 +1806,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
         .create_single_budget(CreateSingleBudgetRequest {
-            scope: BudgetScope::User(user.user_id.clone()),
+            scope,
             amount_limit_cents: request.amount_cents,
             currency: Currency::Usd,
             period,
@@ -1819,6 +1823,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         json!({
             "budget_id": response.budget.id.to_string(),
             "user_id": user.user_id.to_string(),
+            "scope": budget_scope_name(&response.budget.scope),
             "amount_cents": response.budget.amount_limit_cents,
             "currency": response.budget.currency.to_string(),
             "starting_at": response.budget.period.starting_at.to_rfc3339(),
@@ -1826,10 +1831,13 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         }),
     );
     Ok(CreateBudgetHttpResponse {
-        budget: budget_response(BudgetWithBalance {
-            budget: response.budget,
-            balance: response.balance,
-        }),
+        budget: budget_response(
+            BudgetWithBalance {
+                budget: response.budget,
+                balance: response.balance,
+            },
+            state,
+        )?,
     })
 }
 
@@ -1843,6 +1851,7 @@ fn create_budget_series(
     }
 
     let user = authenticated_user_context(state)?;
+    let scope = budget_scope_from_agent_id(request.agent_id.as_deref(), &user, state)?;
     let starting_at = parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now);
 
     let response = state
@@ -1850,7 +1859,7 @@ fn create_budget_series(
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
         .create_budget_series(CreateBudgetSeriesRequest {
-            scope: BudgetScope::User(user.user_id.clone()),
+            scope,
             amount_limit_cents: request.amount_cents,
             currency: Currency::Usd,
             starting_at,
@@ -1877,24 +1886,47 @@ fn create_budget_series(
         json!({
             "user_id": user.user_id.to_string(),
             "budget_count": response.budgets.len(),
+            "scope": response.budgets.first().map(|budget| budget_scope_name(&budget.budget.scope)),
         }),
     );
     Ok(CreateBudgetSeriesHttpResponse {
-        budgets: response.budgets.into_iter().map(budget_response).collect(),
+        budgets: response
+            .budgets
+            .into_iter()
+            .map(|budget| budget_response(budget, state))
+            .collect::<Result<Vec<_>>>()?,
     })
 }
 
 fn list_budgets(state: &ServerState) -> Result<ListBudgetsHttpResponse> {
     let user = authenticated_user_context(state)?;
     reconcile_expired_budget_holds(state)?;
-    let budgets = state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .get_budgets_by_user_id(&user.user_id)
+    let agent_ids = {
+        let registration = state
+            .registration
+            .lock()
+            .map_err(|_| anyhow!("registration manager lock poisoned"))?;
+        registration
+            .agents_for_user(&user.user_id)?
+            .into_iter()
+            .map(|agent| agent.agent.id)
+            .collect::<Vec<_>>()
+    };
+    let budgets = {
+        let manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let mut budgets = manager.get_budgets_by_user_id(&user.user_id);
+        for agent_id in agent_ids {
+            budgets.extend(manager.get_budgets_by_agent_id(&agent_id));
+        }
+        budgets
+    };
+    let budgets = budgets
         .into_iter()
-        .map(budget_response)
-        .collect();
+        .map(|budget| budget_response(budget, state))
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(ListBudgetsHttpResponse { budgets })
 }
@@ -2391,7 +2423,7 @@ fn evaluate_and_reserve_spend(
     );
     let token = evaluation.auth_token.clone();
     let reservation = if let Some(token) = token.as_ref() {
-        let budget_id = active_budget_id_for_user(&user.user_id, state)?;
+        let budget_id = active_budget_id_for_spend(&user.user_id, &agent_id, state)?;
         let reservation = {
             let mut budgets = state
                 .budgets
@@ -2542,19 +2574,26 @@ fn reconcile_expired_budget_holds(state: &ServerState) -> Result<()> {
     Ok(())
 }
 
-fn active_budget_id_for_user(user_id: &UserId, state: &ServerState) -> Result<BudgetId> {
+fn active_budget_id_for_spend(
+    user_id: &UserId,
+    agent_id: &AgentId,
+    state: &ServerState,
+) -> Result<BudgetId> {
     let now = Utc::now();
-    state
+    let manager = state
         .budgets
         .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .get_budgets_by_user_id(user_id)
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+    manager
+        .get_budgets_by_agent_id(agent_id)
+        .into_iter()
+        .chain(manager.get_budgets_by_user_id(user_id))
         .into_iter()
         .find(|budget| {
             budget.budget.currency == Currency::Usd && budget.budget.period.contains(now)
         })
         .map(|budget| budget.budget.id)
-        .ok_or_else(|| anyhow!("no active USD budget found for current user"))
+        .ok_or_else(|| anyhow!("no active USD budget found for agent or current user"))
 }
 
 fn resolve_agent_account_for_spend(
@@ -2663,10 +2702,12 @@ fn budget_hold_state_response(
     }
 }
 
-fn budget_response(budget: BudgetWithBalance) -> BudgetHttpResponse {
-    BudgetHttpResponse {
+fn budget_response(budget: BudgetWithBalance, state: &ServerState) -> Result<BudgetHttpResponse> {
+    let scope_id = budget_scope_public_id(&budget.budget.scope, state)?;
+    Ok(BudgetHttpResponse {
         budget_id: budget.budget.id.to_string(),
         scope: budget_scope_name(&budget.budget.scope).to_string(),
+        scope_id,
         amount_limit_cents: budget.budget.amount_limit_cents,
         currency: budget.budget.currency.to_string(),
         starting_at: budget.budget.period.starting_at.to_rfc3339(),
@@ -2679,6 +2720,20 @@ fn budget_response(budget: BudgetWithBalance) -> BudgetHttpResponse {
         consumed_amount_cents: budget.balance.consumed_amount_cents,
         frozen_amount_cents: budget.balance.frozen_amount_cents,
         remaining_amount_cents: budget.balance.remaining_amount_cents,
+    })
+}
+
+fn budget_scope_from_agent_id(
+    agent_pub_id: Option<&str>,
+    user: &UserContext,
+    state: &ServerState,
+) -> Result<BudgetScope> {
+    match agent_pub_id {
+        Some(agent_pub_id) => {
+            let agent_id = resolve_agent_id_for_user(agent_pub_id, user, state)?;
+            Ok(BudgetScope::Agent(agent_id))
+        }
+        None => Ok(BudgetScope::User(user.user_id.clone())),
     }
 }
 
@@ -2687,6 +2742,14 @@ fn budget_scope_name(scope: &BudgetScope) -> &'static str {
         BudgetScope::User(_) => "user",
         BudgetScope::Agent(_) => "agent",
         BudgetScope::Task(_) => "task",
+    }
+}
+
+fn budget_scope_public_id(scope: &BudgetScope, state: &ServerState) -> Result<String> {
+    match scope {
+        BudgetScope::User(user_id) => Ok(owner_metadata_for_user_id(user_id, state)?.pub_id),
+        BudgetScope::Agent(agent_id) => registration_agent_pub_id(agent_id, state),
+        BudgetScope::Task(task_id) => Ok(task_id.to_string()),
     }
 }
 
@@ -3519,6 +3582,88 @@ mod tests {
         assert!(transaction.entries.iter().all(|entry| {
             entry.owner_user_id == user.user_id && entry.owner_user_name == "Alice Example"
         }));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn agent_scoped_budget_is_listed_and_preferred_for_spend() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-agent-budget-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let agent = register_agent(
+            json!({
+                "name": "agent-budget-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register under initialized user");
+        let agent_pub_id = agent.agent_id.clone();
+
+        add_policy(
+            json!({
+                "daily_limit_cents": 5_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should be added under initialized user");
+
+        create_budget(
+            json!({
+                "amount_cents": 10_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("user budget should be created");
+        let agent_budget = create_budget(
+            json!({
+                "agent_id": agent_pub_id.clone(),
+                "amount_cents": 3_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent budget should be created");
+        assert_eq!(agent_budget.budget.scope, "agent");
+        assert_eq!(agent_budget.budget.scope_id, agent_pub_id);
+
+        let budgets = list_budgets(&state).expect("budgets should list");
+        assert_eq!(budgets.budgets.len(), 2);
+        assert!(budgets.budgets.iter().any(|budget| budget.scope == "user"));
+        assert!(budgets
+            .budgets
+            .iter()
+            .any(|budget| budget.scope == "agent" && budget.scope_id == agent_pub_id));
+
+        let spend = spend(
+            json!({
+                "agent_id": agent_pub_id.clone(),
+                "amount_cents": 2_500,
+                "reason": "agent scoped budget purchase",
+                "merchant": "Acme Cafe",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend should use agent scoped budget");
+        let budget_hold = spend
+            .budget_hold
+            .expect("allowed spend should reserve budget");
+        assert_eq!(budget_hold.consumed_amount_cents, 2_500);
+        assert_eq!(budget_hold.remaining_amount_cents, 500);
         std::fs::remove_file(path).ok();
     }
 

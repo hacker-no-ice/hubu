@@ -203,6 +203,13 @@ assert_contains "budget list" "${BALANCE_OUTPUT}" 'consumed: $20.00'
 assert_contains "budget list" "${BALANCE_OUTPUT}" 'frozen: $0.00'
 assert_contains "budget list" "${BALANCE_OUTPUT}" 'remaining: $55.00'
 
+AGENT_BUDGET_OUTPUT="$(hubu budget create --agent-id "${AGENT_ID}" --amount 5 --starting-at 2999-01-01T00:00:00Z --ending-before 2999-01-02T00:00:00Z)"
+assert_contains "agent budget create" "${AGENT_BUDGET_OUTPUT}" "Budget created"
+assert_contains "agent budget create" "${AGENT_BUDGET_OUTPUT}" "scope: agent (${AGENT_ID})"
+assert_contains "agent budget create" "${AGENT_BUDGET_OUTPUT}" 'limit: $5.00'
+AGENT_BUDGET_LIST_OUTPUT="$(hubu budget list)"
+assert_contains "agent budget list" "${AGENT_BUDGET_LIST_OUTPUT}" "scope: agent (${AGENT_ID})"
+
 LEDGER_OUTPUT="$(hubu ledger list)"
 assert_contains "ledger list" "${LEDGER_OUTPUT}" "via fiat_mock"
 assert_contains "ledger list" "${LEDGER_OUTPUT}" "owner: Alice Example (${USER_ID})"
