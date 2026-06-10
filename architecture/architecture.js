@@ -166,6 +166,7 @@ const components = {
       "User caps and agent-scoped budgets are spending limits. Approved spend freezes balance first, then payment success consumes the hold or failure releases it.",
     responsibilities: [
       "Creates single or finite recurring cap/budget periods with overlap checks for user, agent, and task scopes.",
+      "Revokes active caps/budgets and replaces them by preserving history and creating a new forward-looking allowance.",
       "Indexes limits by user, agent, and task scope; the user cap is the outer owner guardrail, while agent/task budgets add narrower limits.",
       "Rejects overlapping hierarchy mismatches, such as an agent budget above the containing user cap.",
       "Reserves, settles, releases, and expires budget holds for wallet payments and external executors.",
