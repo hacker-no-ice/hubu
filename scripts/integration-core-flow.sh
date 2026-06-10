@@ -221,6 +221,10 @@ REPLACEMENT_BUDGET_ID="$(awk '/budget_id:/ && seen { print $2; exit } /Replaceme
 REVOKED_BUDGET_OUTPUT="$(hubu budget revoke --budget-id "${REPLACEMENT_BUDGET_ID}")"
 assert_contains "budget revoke" "${REVOKED_BUDGET_OUTPUT}" "Budget revoked"
 assert_contains "budget revoke" "${REVOKED_BUDGET_OUTPUT}" "status: revoked"
+ACTIVE_BUDGET_LIST_OUTPUT="$(hubu budget list)"
+assert_not_contains "active budget list" "${ACTIVE_BUDGET_LIST_OUTPUT}" "status: revoked"
+ALL_BUDGET_LIST_OUTPUT="$(hubu budget list --all)"
+assert_contains "all budget list" "${ALL_BUDGET_LIST_OUTPUT}" "status: revoked"
 
 LEDGER_OUTPUT="$(hubu ledger list)"
 assert_contains "ledger list" "${LEDGER_OUTPUT}" "via fiat_mock"
