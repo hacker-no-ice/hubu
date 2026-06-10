@@ -796,8 +796,14 @@ fn budget_list(base_url: &str, args: Vec<String>) -> Result<()> {
         print_budget_list_help();
         return Ok(());
     }
+    let include_all = take_flag(&mut args, "--all");
     ensure_no_args(args)?;
-    let response = get_json(base_url, "/budgets")?;
+    let path = if include_all {
+        "/budgets?all=true"
+    } else {
+        "/budgets"
+    };
+    let response = get_json(base_url, path)?;
     let budgets = response
         .get("budgets")
         .and_then(Value::as_array)
@@ -1455,7 +1461,7 @@ Usage:
   hubu budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
   hubu budget revoke --budget-id ID
   hubu budget replace --budget-id ID --amount AMOUNT
-  hubu budget list"
+  hubu budget list [--all]"
     );
 }
 
@@ -1488,7 +1494,10 @@ fn print_budget_list_help() {
         "List budgets for the active human user
 
 Usage:
-  hubu budget list"
+  hubu budget list [--all]
+
+Options:
+  --all  Include revoked budgets"
     );
 }
 
