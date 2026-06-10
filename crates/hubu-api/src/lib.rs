@@ -15,7 +15,7 @@ use std::{
 use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Months, Utc};
 use hubu_common::{
     ids::{AgentId, AgentSessionId, BudgetId, PaymentId, SpendAuthTokenId, UserId},
     models::account::{AccountStatus, AgentAccount},
@@ -29,8 +29,9 @@ use hubu_common::{
 use hubu_core::{
     budget::{
         BudgetHold, BudgetHoldStatus, BudgetManager, BudgetManagerError, BudgetRecurrence,
-        BudgetScope, BudgetWithBalance, CreateBudgetSeriesRequest, CreateSingleBudgetRequest,
-        ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
+        BudgetScope, BudgetStatus, BudgetWithBalance, CreateBudgetSeriesRequest,
+        CreateSingleBudgetRequest, ReleaseBudgetResponse, ReserveBudgetRequest,
+        ReserveBudgetResponse, SettleBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyAssignmentScope, PolicyRepository, SpendRepository,
@@ -640,7 +641,7 @@ struct CreateBudgetSeriesHttpRequest {
     period_count: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BudgetRecurrenceHttp {
     Daily,
@@ -1800,6 +1801,13 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         parse_optional_datetime(request.ending_before)?,
     )
     .map_err(|error| anyhow!("invalid budget period: {error:?}"))?;
+    validate_budget_hierarchy(
+        &scope,
+        request.amount_cents,
+        std::slice::from_ref(&period),
+        &user,
+        state,
+    )?;
 
     let response = state
         .budgets
@@ -1853,6 +1861,9 @@ fn create_budget_series(
     let user = authenticated_user_context(state)?;
     let scope = budget_scope_from_agent_id(request.agent_id.as_deref(), &user, state)?;
     let starting_at = parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now);
+    let recurrence = budget_recurrence(request.recurrence);
+    let periods = budget_series_periods(starting_at, recurrence, request.period_count)?;
+    validate_budget_hierarchy(&scope, request.amount_cents, &periods, &user, state)?;
 
     let response = state
         .budgets
@@ -1863,11 +1874,7 @@ fn create_budget_series(
             amount_limit_cents: request.amount_cents,
             currency: Currency::Usd,
             starting_at,
-            recurrence: match request.recurrence {
-                BudgetRecurrenceHttp::Daily => BudgetRecurrence::Daily,
-                BudgetRecurrenceHttp::Monthly => BudgetRecurrence::Monthly,
-                BudgetRecurrenceHttp::Yearly => BudgetRecurrence::Yearly,
-            },
+            recurrence,
             period_count: request.period_count,
         })?;
     {
@@ -2594,6 +2601,140 @@ fn active_budget_id_for_spend(
         })
         .map(|budget| budget.budget.id)
         .ok_or_else(|| anyhow!("no active USD budget found for agent or current user"))
+}
+
+fn validate_budget_hierarchy(
+    scope: &BudgetScope,
+    amount_cents: i64,
+    periods: &[TimePeriod],
+    user: &UserContext,
+    state: &ServerState,
+) -> Result<()> {
+    if periods.is_empty() {
+        return Ok(());
+    }
+
+    let agent_ids = match scope {
+        BudgetScope::User(user_id) if user_id == &user.user_id => {
+            let registration = state
+                .registration
+                .lock()
+                .map_err(|_| anyhow!("registration manager lock poisoned"))?;
+            registration
+                .agents_for_user(&user.user_id)?
+                .into_iter()
+                .map(|agent| agent.agent.id)
+                .collect::<Vec<_>>()
+        }
+        _ => Vec::new(),
+    };
+
+    let budgets = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+
+    match scope {
+        BudgetScope::Agent(_) => {
+            let has_smaller_user_budget = budgets
+                .get_budgets_by_user_id(&user.user_id)
+                .into_iter()
+                .any(|budget| {
+                    is_active_usd_budget(&budget)
+                        && budget_overlaps_any_period(&budget, periods)
+                        && budget.budget.amount_limit_cents < amount_cents
+                });
+            if has_smaller_user_budget {
+                return Err(anyhow!(
+                    "agent budget amount cannot exceed the overlapping user budget"
+                ));
+            }
+        }
+        BudgetScope::User(user_id) if user_id == &user.user_id => {
+            for agent_id in agent_ids {
+                let has_larger_agent_budget = budgets
+                    .get_budgets_by_agent_id(&agent_id)
+                    .into_iter()
+                    .any(|budget| {
+                        is_active_usd_budget(&budget)
+                            && budget_overlaps_any_period(&budget, periods)
+                            && budget.budget.amount_limit_cents > amount_cents
+                    });
+                if has_larger_agent_budget {
+                    return Err(anyhow!(
+                        "user budget amount cannot be lower than an overlapping agent budget"
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn is_active_usd_budget(budget: &BudgetWithBalance) -> bool {
+    budget.budget.currency == Currency::Usd && matches!(budget.budget.status, BudgetStatus::Active)
+}
+
+fn budget_overlaps_any_period(budget: &BudgetWithBalance, periods: &[TimePeriod]) -> bool {
+    periods
+        .iter()
+        .any(|period| periods_overlap(&budget.budget.period, period))
+}
+
+fn periods_overlap(left: &TimePeriod, right: &TimePeriod) -> bool {
+    let left_starts_before_right_ends = right
+        .ending_before
+        .map_or(true, |right_end| left.starting_at < right_end);
+    let right_starts_before_left_ends = left
+        .ending_before
+        .map_or(true, |left_end| right.starting_at < left_end);
+
+    left_starts_before_right_ends && right_starts_before_left_ends
+}
+
+fn budget_recurrence(recurrence: BudgetRecurrenceHttp) -> BudgetRecurrence {
+    match recurrence {
+        BudgetRecurrenceHttp::Daily => BudgetRecurrence::Daily,
+        BudgetRecurrenceHttp::Monthly => BudgetRecurrence::Monthly,
+        BudgetRecurrenceHttp::Yearly => BudgetRecurrence::Yearly,
+    }
+}
+
+fn budget_series_periods(
+    starting_at: DateTime<Utc>,
+    recurrence: BudgetRecurrence,
+    period_count: usize,
+) -> Result<Vec<TimePeriod>> {
+    let mut periods = Vec::with_capacity(period_count);
+    let mut cursor = starting_at;
+    for _ in 0..period_count {
+        let ending_before = next_budget_period_boundary(cursor, recurrence)?;
+        periods.push(
+            TimePeriod::new(cursor, Some(ending_before))
+                .map_err(|error| anyhow!("invalid budget period: {error:?}"))?,
+        );
+        cursor = ending_before;
+    }
+    Ok(periods)
+}
+
+fn next_budget_period_boundary(
+    starting_at: DateTime<Utc>,
+    recurrence: BudgetRecurrence,
+) -> Result<DateTime<Utc>> {
+    match recurrence {
+        BudgetRecurrence::Daily => starting_at
+            .checked_add_signed(Duration::days(1))
+            .ok_or_else(|| anyhow!("invalid recurring budget boundary")),
+        BudgetRecurrence::Monthly => starting_at
+            .checked_add_months(Months::new(1))
+            .ok_or_else(|| anyhow!("invalid recurring budget boundary")),
+        BudgetRecurrence::Yearly => starting_at
+            .checked_add_months(Months::new(12))
+            .ok_or_else(|| anyhow!("invalid recurring budget boundary")),
+    }
 }
 
 fn resolve_agent_account_for_spend(
@@ -3670,6 +3811,108 @@ mod tests {
         assert!(budget_hold.budget_id.starts_with("bgt_"));
         assert_eq!(budget_hold.consumed_amount_cents, 2_500);
         assert_eq!(budget_hold.remaining_amount_cents, 500);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn agent_budget_cannot_exceed_overlapping_user_budget() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-agent-budget-hierarchy-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+        let agent = register_agent(
+            json!({
+                "name": "agent-budget-cap-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register");
+
+        create_budget(
+            json!({
+                "amount_cents": 1_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("user budget should be created");
+
+        let error = create_budget(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 2_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("agent budget should not exceed overlapping user budget");
+
+        assert!(error
+            .to_string()
+            .contains("agent budget amount cannot exceed the overlapping user budget"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn user_budget_cannot_be_lower_than_overlapping_agent_budget() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-user-budget-hierarchy-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+        let agent = register_agent(
+            json!({
+                "name": "user-budget-cap-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register");
+
+        create_budget(
+            json!({
+                "agent_id": agent.agent_id,
+                "amount_cents": 2_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent budget should be created without a user budget");
+
+        let error = create_budget(
+            json!({
+                "amount_cents": 1_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("user budget should not undercut overlapping agent budget");
+
+        assert!(error
+            .to_string()
+            .contains("user budget amount cannot be lower than an overlapping agent budget"));
         std::fs::remove_file(path).ok();
     }
 

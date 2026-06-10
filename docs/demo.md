@@ -219,7 +219,9 @@ overlap an existing cap or budget, none of the periods are created. Without
 `--agent-id`, the CLI creates a cap for the current user. Add
 `--agent-id agt_...` to create a single or recurring agent budget. The product
 model treats the user cap as the outer owner-level spend guardrail and agent
-budgets as narrower limits for a specific agent.
+budgets as narrower limits for a specific agent. Agent budgets cannot exceed an
+overlapping user cap, and user caps cannot be created below an overlapping agent
+budget.
 
 ### 6. Submit an Allowed Spend Request
 

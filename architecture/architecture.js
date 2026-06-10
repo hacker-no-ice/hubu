@@ -167,6 +167,7 @@ const components = {
     responsibilities: [
       "Creates single or finite recurring cap/budget periods with overlap checks for user, agent, and task scopes.",
       "Indexes limits by user, agent, and task scope; the user cap is the outer owner guardrail, while agent/task budgets add narrower limits.",
+      "Rejects overlapping hierarchy mismatches, such as an agent budget above the containing user cap.",
       "Reserves, settles, releases, and expires budget holds for wallet payments and external executors.",
     ],
     links: [sharedLinks.budget, sharedLinks.budgetModel, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
