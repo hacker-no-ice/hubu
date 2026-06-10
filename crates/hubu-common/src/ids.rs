@@ -149,6 +149,7 @@ public_uuid_suffix!(
     AgentVersionId,
     AgentAccountId,
     AgentSessionId,
+    BudgetId,
     UserId,
 );
 

@@ -2656,7 +2656,7 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
     match update {
         BudgetHoldUpdate::Settled(response) => BudgetHoldHttpResponse {
             hold_id: response.hold.id.to_string(),
-            budget_id: response.hold.budget_id.to_string(),
+            budget_id: public_budget_id(&response.hold.budget_id),
             status: "settled".to_string(),
             amount_cents: response.hold.amount_cents,
             consumed_amount_cents: response.balance.consumed_amount_cents,
@@ -2665,7 +2665,7 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
         },
         BudgetHoldUpdate::Released(response) => BudgetHoldHttpResponse {
             hold_id: response.hold.id.to_string(),
-            budget_id: response.hold.budget_id.to_string(),
+            budget_id: public_budget_id(&response.hold.budget_id),
             status: "released".to_string(),
             amount_cents: response.hold.amount_cents,
             consumed_amount_cents: response.balance.consumed_amount_cents,
@@ -2678,7 +2678,7 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
 fn frozen_budget_hold_response(response: ReserveBudgetResponse) -> BudgetHoldHttpResponse {
     BudgetHoldHttpResponse {
         hold_id: response.hold.id.to_string(),
-        budget_id: response.hold.budget_id.to_string(),
+        budget_id: public_budget_id(&response.hold.budget_id),
         status: "frozen".to_string(),
         amount_cents: response.hold.amount_cents,
         consumed_amount_cents: response.balance.consumed_amount_cents,
@@ -2693,7 +2693,7 @@ fn budget_hold_state_response(
 ) -> BudgetHoldHttpResponse {
     BudgetHoldHttpResponse {
         hold_id: hold.id.to_string(),
-        budget_id: hold.budget_id.to_string(),
+        budget_id: public_budget_id(&hold.budget_id),
         status: budget_hold_status_name(&hold.status).to_string(),
         amount_cents: hold.amount_cents,
         consumed_amount_cents: balance.consumed_amount_cents,
@@ -2705,7 +2705,7 @@ fn budget_hold_state_response(
 fn budget_response(budget: BudgetWithBalance, state: &ServerState) -> Result<BudgetHttpResponse> {
     let scope_id = budget_scope_public_id(&budget.budget.scope, state)?;
     Ok(BudgetHttpResponse {
-        budget_id: budget.budget.id.to_string(),
+        budget_id: public_budget_id(&budget.budget.id),
         scope: budget_scope_name(&budget.budget.scope).to_string(),
         scope_id,
         amount_limit_cents: budget.budget.amount_limit_cents,
@@ -2721,6 +2721,10 @@ fn budget_response(budget: BudgetWithBalance, state: &ServerState) -> Result<Bud
         frozen_amount_cents: budget.balance.frozen_amount_cents,
         remaining_amount_cents: budget.balance.remaining_amount_cents,
     })
+}
+
+fn public_budget_id(budget_id: &BudgetId) -> String {
+    format!("bgt_{}", budget_id.public_suffix())
 }
 
 fn budget_scope_from_agent_id(
@@ -3637,6 +3641,7 @@ mod tests {
             &state,
         )
         .expect("agent budget should be created");
+        assert!(agent_budget.budget.budget_id.starts_with("bgt_"));
         assert_eq!(agent_budget.budget.scope, "agent");
         assert_eq!(agent_budget.budget.scope_id, agent_pub_id);
 
@@ -3662,6 +3667,7 @@ mod tests {
         let budget_hold = spend
             .budget_hold
             .expect("allowed spend should reserve budget");
+        assert!(budget_hold.budget_id.starts_with("bgt_"));
         assert_eq!(budget_hold.consumed_amount_cents, 2_500);
         assert_eq!(budget_hold.remaining_amount_cents, 500);
         std::fs::remove_file(path).ok();
