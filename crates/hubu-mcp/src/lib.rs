@@ -143,9 +143,8 @@ fn tool_definitions() -> Vec<Value> {
         ),
         approval_tool(
             "hubu_add_policy",
-            "Attach a spending policy to an agent. Requires a human click.",
+            "Attach a spending policy to the active Hubu user. Requires a human click.",
             json_schema(json!({
-                "agent_id": { "type": "string" },
                 "policy_yaml": { "type": "string" },
                 "daily_limit_cents": { "type": "integer" }
             })),

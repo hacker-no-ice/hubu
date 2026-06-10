@@ -18,7 +18,7 @@ pub trait PolicyRepository {
     fn save_policy_assignment(
         &mut self,
         owner_user_id: &UserId,
-        agent_id: &AgentId,
+        scope: &PolicyAssignmentScope,
         policy: &Policy,
     ) -> Result<(), StorageError>;
 
@@ -61,8 +61,51 @@ pub trait BudgetRepository {
 #[derive(Debug, Clone)]
 pub struct PolicyAssignmentRecord {
     pub owner_user_id: UserId,
-    pub agent_id: AgentId,
+    pub scope: PolicyAssignmentScope,
     pub policy: Policy,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PolicyAssignmentScope {
+    UserDefault,
+    AgentOverride(AgentId),
+}
+
+impl PolicyAssignmentScope {
+    pub fn scope_type(&self) -> &'static str {
+        match self {
+            Self::UserDefault => "user_default",
+            Self::AgentOverride(_) => "agent_override",
+        }
+    }
+
+    pub fn scope_id(&self) -> String {
+        match self {
+            Self::UserDefault => "default".to_string(),
+            Self::AgentOverride(agent_id) => agent_id.to_string(),
+        }
+    }
+
+    fn agent_id(&self) -> Option<String> {
+        match self {
+            Self::UserDefault => None,
+            Self::AgentOverride(agent_id) => Some(agent_id.to_string()),
+        }
+    }
+
+    fn from_parts(scope_type: &str, scope_id: &str) -> Result<Self, StorageError> {
+        match scope_type {
+            "user_default" => Ok(Self::UserDefault),
+            "agent_override" => AgentId::from_str(scope_id)
+                .map(Self::AgentOverride)
+                .map_err(|_| StorageError::InvalidData(format!("invalid agent id `{scope_id}`"))),
+            other => Err(StorageError::InvalidData(format!(
+                "unknown policy assignment scope `{other}`"
+            ))),
+        }
+    }
 }
 
 pub struct SqliteGovernanceRepository {
@@ -91,13 +134,15 @@ impl SqliteGovernanceRepository {
 
             CREATE TABLE IF NOT EXISTS policy_assignments (
                 owner_user_id TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                agent_id TEXT,
                 policy_id TEXT NOT NULL,
                 policy_version TEXT NOT NULL,
                 policy_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                PRIMARY KEY(owner_user_id, agent_id)
+                PRIMARY KEY(owner_user_id, scope_type, scope_id)
             );
 
             CREATE TABLE IF NOT EXISTS spend_decisions (
@@ -168,6 +213,41 @@ impl SqliteGovernanceRepository {
             END;
             ",
         )?;
+        self.migrate_policy_assignment_scope()?;
+        Ok(())
+    }
+
+    fn migrate_policy_assignment_scope(&self) -> Result<(), StorageError> {
+        if table_has_column(&self.conn, "policy_assignments", "scope_type")? {
+            return Ok(());
+        }
+
+        self.conn.execute_batch(
+            "
+            ALTER TABLE policy_assignments RENAME TO policy_assignments_legacy;
+
+            CREATE TABLE policy_assignments (
+                owner_user_id TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                agent_id TEXT,
+                policy_id TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                policy_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(owner_user_id, scope_type, scope_id)
+            );
+
+            INSERT INTO policy_assignments
+                (owner_user_id, scope_type, scope_id, agent_id, policy_id, policy_version, policy_json, created_at, updated_at)
+            SELECT
+                owner_user_id, 'agent_override', agent_id, agent_id, policy_id, policy_version, policy_json, created_at, updated_at
+            FROM policy_assignments_legacy;
+
+            DROP TABLE policy_assignments_legacy;
+            ",
+        )?;
         Ok(())
     }
 }
@@ -176,23 +256,26 @@ impl PolicyRepository for SqliteGovernanceRepository {
     fn save_policy_assignment(
         &mut self,
         owner_user_id: &UserId,
-        agent_id: &AgentId,
+        scope: &PolicyAssignmentScope,
         policy: &Policy,
     ) -> Result<(), StorageError> {
         let now = Utc::now().to_rfc3339();
         let policy_json = serde_json::to_string(policy)?;
         self.conn.execute(
             "INSERT INTO policy_assignments
-             (owner_user_id, agent_id, policy_id, policy_version, policy_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-             ON CONFLICT(owner_user_id, agent_id) DO UPDATE SET
+             (owner_user_id, scope_type, scope_id, agent_id, policy_id, policy_version, policy_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             ON CONFLICT(owner_user_id, scope_type, scope_id) DO UPDATE SET
+                agent_id = excluded.agent_id,
                 policy_id = excluded.policy_id,
                 policy_version = excluded.policy_version,
                 policy_json = excluded.policy_json,
                 updated_at = excluded.updated_at",
             params![
                 owner_user_id.to_string(),
-                agent_id.to_string(),
+                scope.scope_type(),
+                scope.scope_id(),
+                scope.agent_id(),
                 policy.id,
                 policy.version,
                 policy_json,
@@ -204,23 +287,52 @@ impl PolicyRepository for SqliteGovernanceRepository {
 
     fn load_policy_assignments(&self) -> Result<Vec<PolicyAssignmentRecord>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT owner_user_id, agent_id, policy_json FROM policy_assignments
+            "SELECT owner_user_id, scope_type, scope_id, policy_json, created_at, updated_at
+             FROM policy_assignments
              ORDER BY updated_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             let owner_user_id: String = row.get(0)?;
-            let agent_id: String = row.get(1)?;
-            let policy_json: String = row.get(2)?;
+            let scope_type: String = row.get(1)?;
+            let scope_id: String = row.get(2)?;
+            let policy_json: String = row.get(3)?;
+            let created_at: String = row.get(4)?;
+            let updated_at: String = row.get(5)?;
             let policy: Policy = serde_json::from_str(&policy_json)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             Ok(PolicyAssignmentRecord {
                 owner_user_id: parse_id(&owner_user_id)?,
-                agent_id: parse_id(&agent_id)?,
+                scope: PolicyAssignmentScope::from_parts(&scope_type, &scope_id).map_err(
+                    |error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    },
+                )?,
                 policy,
+                created_at: parse_timestamp(&created_at)?,
+                updated_at: parse_timestamp(&updated_at)?,
             })
         })?;
         collect_rows(rows)
     }
+}
+
+fn table_has_column(
+    conn: &Connection,
+    table_name: &str,
+    column_name: &str,
+) -> Result<bool, StorageError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 impl SpendRepository for SqliteGovernanceRepository {
@@ -732,7 +844,7 @@ mod tests {
     #[test]
     fn persists_policy_assignment_and_spend_records() {
         let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
-        repo.save_policy_assignment(&user_id(), &agent_id(), &policy())
+        repo.save_policy_assignment(&user_id(), &PolicyAssignmentScope::UserDefault, &policy())
             .unwrap();
 
         let decision = spend_decision();
@@ -749,7 +861,9 @@ mod tests {
         repo.save_spend_decision(&decision).unwrap();
         repo.save_spend_auth_token(&token).unwrap();
 
-        assert_eq!(repo.load_policy_assignments().unwrap().len(), 1);
+        let assignments = repo.load_policy_assignments().unwrap();
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].scope, PolicyAssignmentScope::UserDefault);
         assert_eq!(repo.load_spend_decisions().unwrap().len(), 1);
         assert_eq!(repo.load_spend_auth_tokens().unwrap().len(), 1);
     }

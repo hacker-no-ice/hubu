@@ -135,8 +135,8 @@ Agent registered
   session_id: ags_2h7rx0cq4p9w
 ```
 
-Copy the public `agent_id` for policy commands and `account_id` for spend
-commands. Internally, Hubu still uses UUID-backed IDs; the CLI and HTTP demo API
+Copy the public `agent_id` for spend commands and `account_id` for direct
+account spend commands. Internally, Hubu still uses UUID-backed IDs; the CLI and HTTP demo API
 use shorter public IDs such as `usr_...`, `agt_...`, and `aga_...`. The suffixes
 will differ for each new user and agent because they are derived from internal
 UUIDs.
@@ -146,9 +146,8 @@ UUIDs.
 ```sh
 hubu policy new-template --path policy.yaml
 hubu policy validate --path policy.yaml
-hubu policy add \
-  --agent-id agt_8x7k2m4q9v1c \
-  --path policy.yaml
+hubu policy add --path policy.yaml
+hubu policy list
 ```
 
 Expected output:
@@ -156,7 +155,7 @@ Expected output:
 ```txt
 Hubu policy template created
   path: policy.yaml
-  next: edit the file, then run hubu policy add --agent-id AGENT_ID --path policy.yaml
+  next: edit the file, then run hubu policy add --path policy.yaml
 Policy valid
   path: policy.yaml
   policy_id: demo_spending_policy
@@ -164,18 +163,22 @@ Policy valid
   default_decision: needs_approval
   rules: 2
 Policy added
-  agent_id: agt_8x7k2m4q9v1c
+  scope: user_default
   policy_id: demo_spending_policy
   policy_version: demo-1
   default_decision: needs_approval
+SCOPE         AGENT ID  POLICY ID             VERSION  DEFAULT         RULES  ATTACHED AT                 UPDATED AT
+------------  --------  --------------------  -------  --------------  -----  --------------------------  --------------------------
+user_default  -         demo_spending_policy  demo-1   needs_approval  2      2026-06-09T14:32:10-07:00  2026-06-09T14:32:10-07:00
 ```
 
 `hubu policy new-template` generates an editable YAML policy file.
 `hubu policy validate --path` checks the file locally before it is attached to
-an agent. Human registration lives under `hubu register human`, while
-`hubu policy add --path` loads the policy file. The server stamps the policy to
-the active human user during add, so authored policy YAML does not need an owner
-id.
+the current human user. Human registration lives under `hubu register human`,
+while `hubu policy add --path` loads the policy file. The server stamps the
+policy to the active human user during add, so authored policy YAML does not
+need an owner id. `hubu policy list` shows which policy is attached and when it
+was attached.
 
 ### 4. List Registered Agents
 
@@ -420,7 +423,8 @@ hubu [--url http://127.0.0.1:8787] protocol agent-registration
 hubu [--url http://127.0.0.1:8787] register agent [--name NAME] [--version VERSION] [--dry-run]
 hubu [--url http://127.0.0.1:8787] policy new-template [--path FILE] [--force]
 hubu [--url http://127.0.0.1:8787] policy validate --path FILE
-hubu [--url http://127.0.0.1:8787] policy add --agent-id ID --path FILE
+hubu [--url http://127.0.0.1:8787] policy add --path FILE
+hubu [--url http://127.0.0.1:8787] policy list
 hubu [--url http://127.0.0.1:8787] agent list [--all]
 hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
 hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]

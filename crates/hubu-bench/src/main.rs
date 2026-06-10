@@ -213,6 +213,13 @@ fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> 
     )?;
     let owner_user_id = string_at(&user, "user_id")?.to_string();
 
+    client.post(
+        "/policies",
+        json!({
+            "daily_limit_cents": config.daily_limit_cents,
+        }),
+    )?;
+
     let mut agents = Vec::with_capacity(config.agent_count);
     for index in 0..config.agent_count {
         let agent = client.post(
@@ -224,14 +231,7 @@ fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> 
             }),
         )?;
         let agent_id = string_at(&agent, "agent_id")?.to_string();
-        client.post(
-            "/policies",
-            json!({
-                "agent_id": agent_id,
-                "daily_limit_cents": config.daily_limit_cents,
-            }),
-        )?;
-        agents.push(string_at(&agent, "agent_id")?.to_string());
+        agents.push(agent_id);
     }
 
     let budget = client.post(
