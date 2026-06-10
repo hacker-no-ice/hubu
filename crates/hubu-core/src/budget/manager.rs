@@ -499,6 +499,35 @@ impl BudgetManager {
             .and_then(|hold_id| self.get_budget_hold(hold_id))
     }
 
+    pub fn revoke_budget(
+        &mut self,
+        budget_id: &BudgetId,
+    ) -> Result<BudgetWithBalance, BudgetManagerError> {
+        let balance = self
+            .budget_balances
+            .get(budget_id)
+            .ok_or(BudgetManagerError::MissingBudgetBalance)?;
+        if balance.frozen_amount_cents > 0 {
+            return Err(BudgetManagerError::BudgetHasFrozenHolds);
+        }
+
+        let budget = self
+            .budgets
+            .get_mut(budget_id)
+            .ok_or(BudgetManagerError::UnknownBudget)?;
+        if !matches!(budget.status, BudgetStatus::Active) {
+            return Err(BudgetManagerError::BudgetNotActive);
+        }
+
+        budget.status = BudgetStatus::Revoked;
+        budget.updated_at = Utc::now();
+
+        Ok(BudgetWithBalance {
+            budget: budget.clone(),
+            balance: balance.clone(),
+        })
+    }
+
     fn create_budget_for_period(
         &mut self,
         scope: BudgetScope,
@@ -588,7 +617,8 @@ impl BudgetManager {
         period: &TimePeriod,
     ) -> bool {
         self.budgets.values().any(|budget| {
-            budget.currency == currency
+            matches!(budget.status, BudgetStatus::Active)
+                && budget.currency == currency
                 && scopes_match(&budget.scope, scope)
                 && periods_overlap(&budget.period, period)
         })
@@ -753,6 +783,73 @@ mod tests {
         assert_eq!(created.balance.frozen_amount_cents, 0);
         assert_eq!(created.balance.remaining_amount_cents, 10_000);
         assert!(manager.get_budget_by_id(&created.budget.id).is_some());
+    }
+
+    #[test]
+    fn revoke_budget_marks_budget_inactive() {
+        let mut manager = BudgetManager::new();
+        let created = create_user_budget(&mut manager, 10_000);
+
+        let revoked = manager
+            .revoke_budget(&created.budget.id)
+            .expect("active budget without holds should revoke");
+
+        assert!(matches!(revoked.budget.status, BudgetStatus::Revoked));
+        assert!(matches!(
+            manager
+                .get_budget_by_id(&created.budget.id)
+                .expect("budget should remain available")
+                .budget
+                .status,
+            BudgetStatus::Revoked
+        ));
+    }
+
+    #[test]
+    fn revoke_budget_rejects_frozen_holds() {
+        let mut manager = BudgetManager::new();
+        let created = create_user_budget(&mut manager, 10_000);
+        manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: created.budget.id.clone(),
+                spend_decision_id: SpendDecisionId::new(),
+                amount_cents: 1_000,
+                currency: Currency::Usd,
+                expires_at: Utc::now() + Duration::minutes(5),
+            })
+            .expect("budget should reserve");
+
+        let error = manager
+            .revoke_budget(&created.budget.id)
+            .expect_err("budget with frozen holds should not revoke");
+
+        assert!(matches!(error, BudgetManagerError::BudgetHasFrozenHolds));
+    }
+
+    #[test]
+    fn revoked_budget_does_not_block_replacement_period() {
+        let mut manager = BudgetManager::new();
+        let user_id = UserId::new();
+        let created = manager
+            .create_single_budget(CreateSingleBudgetRequest {
+                scope: BudgetScope::User(user_id.clone()),
+                amount_limit_cents: 10_000,
+                currency: Currency::Usd,
+                period: period(2026, 6, 1, 2026, 7, 1),
+            })
+            .expect("first budget should be created");
+
+        manager
+            .revoke_budget(&created.budget.id)
+            .expect("budget should revoke");
+        manager
+            .create_single_budget(CreateSingleBudgetRequest {
+                scope: BudgetScope::User(user_id),
+                amount_limit_cents: 20_000,
+                currency: Currency::Usd,
+                period: period(2026, 6, 15, 2026, 7, 1),
+            })
+            .expect("revoked budget should not block overlapping replacement");
     }
 
     #[test]

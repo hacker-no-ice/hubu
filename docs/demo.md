@@ -432,6 +432,8 @@ hubu [--url http://127.0.0.1:8787] policy list
 hubu [--url http://127.0.0.1:8787] agent list [--all]
 hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
 hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+hubu [--url http://127.0.0.1:8787] budget revoke --budget-id ID
+hubu [--url http://127.0.0.1:8787] budget replace --budget-id ID --amount AMOUNT
 hubu [--url http://127.0.0.1:8787] budget list
 hubu [--url http://127.0.0.1:8787] spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
 hubu [--url http://127.0.0.1:8787] ledger list

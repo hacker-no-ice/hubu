@@ -173,6 +173,21 @@ fn tool_definitions() -> Vec<Value> {
                 "starting_at": { "type": "string" }
             })),
         ),
+        approval_tool(
+            "hubu_revoke_budget",
+            "Revoke an active budget. Requires a human click.",
+            json_schema(json!({
+                "budget_id": { "type": "string" }
+            })),
+        ),
+        approval_tool(
+            "hubu_replace_budget",
+            "Replace an active budget with a new forward-looking allowance. Requires a human click.",
+            json_schema(json!({
+                "budget_id": { "type": "string" },
+                "amount_cents": { "type": "integer" }
+            })),
+        ),
         write_tool(
             "hubu_submit_spend",
             "Submit an agent spend request. Human approval is only required when the returned decision is needs_approval.",
@@ -288,6 +303,14 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
         "hubu_create_recurring_budget" => {
             require_trusted_client_approval(config, name)?;
             post_json(base_url, "/budgets/series", arguments)?
+        }
+        "hubu_revoke_budget" => {
+            require_trusted_client_approval(config, name)?;
+            post_json(base_url, "/budgets/revoke", arguments)?
+        }
+        "hubu_replace_budget" => {
+            require_trusted_client_approval(config, name)?;
+            post_json(base_url, "/budgets/replace", arguments)?
         }
         "hubu_submit_spend" => {
             let response = post_json(base_url, "/spend", arguments)?;

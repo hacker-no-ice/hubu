@@ -166,6 +166,7 @@ const components = {
       "Budgets are user-scoped or agent-scoped spending limits. Approved spend freezes balance first, then payment success consumes the hold or failure releases it.",
     responsibilities: [
       "Creates single or finite recurring budget periods with overlap checks for user and agent scopes.",
+      "Revokes active budgets and replaces them by preserving history and creating a new forward-looking allowance.",
       "Indexes budgets by user, agent, and task scope; spend prefers an active agent budget before falling back to the user budget.",
       "Rejects overlapping hierarchy mismatches, such as an agent budget above the containing user budget.",
       "Reserves, settles, releases, and expires budget holds for wallet payments and external executors.",

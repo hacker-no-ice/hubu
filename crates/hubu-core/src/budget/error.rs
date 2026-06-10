@@ -29,6 +29,9 @@ pub enum BudgetManagerError {
     #[error("budget does not have enough remaining balance")]
     InsufficientRemainingBudget,
 
+    #[error("budget has frozen holds")]
+    BudgetHasFrozenHolds,
+
     #[error("spend decision already has a budget hold")]
     DuplicateSpendDecisionHold,
 

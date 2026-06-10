@@ -712,6 +712,8 @@ fn budget(base_url: &str, args: Vec<String>) -> Result<()> {
         "create" => budget_create(base_url, args),
         "create-recurring" => budget_create_recurring(base_url, args),
         "list" => budget_list(base_url, args),
+        "replace" => budget_replace(base_url, args),
+        "revoke" => budget_revoke(base_url, args),
         "-h" | "--help" | "help" => {
             print_budget_help();
             Ok(())
@@ -809,6 +811,65 @@ fn budget_list(base_url: &str, args: Vec<String>) -> Result<()> {
     for budget in budgets {
         print_budget(budget)?;
     }
+    Ok(())
+}
+
+fn budget_revoke(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_budget_revoke_help();
+        return Ok(());
+    }
+
+    let budget_id = take_required(&mut args, "--budget-id")?;
+    ensure_no_args(args)?;
+    let response = post_json(
+        base_url,
+        "/budgets/revoke",
+        json!({
+            "budget_id": budget_id,
+        }),
+    )?;
+
+    println!("Budget revoked");
+    print_budget(
+        response
+            .get("budget")
+            .ok_or_else(|| anyhow!("server response missing `budget`"))?,
+    )?;
+    Ok(())
+}
+
+fn budget_replace(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_budget_replace_help();
+        return Ok(());
+    }
+
+    let budget_id = take_required(&mut args, "--budget-id")?;
+    let amount = take_required(&mut args, "--amount")?;
+    ensure_no_args(args)?;
+    let response = post_json(
+        base_url,
+        "/budgets/replace",
+        json!({
+            "budget_id": budget_id,
+            "amount_cents": amount_to_cents(&amount)?,
+        }),
+    )?;
+
+    println!("Budget replaced");
+    println!("Revoked budget");
+    print_budget(
+        response
+            .get("revoked_budget")
+            .ok_or_else(|| anyhow!("server response missing `revoked_budget`"))?,
+    )?;
+    println!("Replacement budget");
+    print_budget(
+        response
+            .get("budget")
+            .ok_or_else(|| anyhow!("server response missing `budget`"))?,
+    )?;
     Ok(())
 }
 
@@ -1392,6 +1453,8 @@ fn print_budget_help() {
 Usage:
   hubu budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
   hubu budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+  hubu budget revoke --budget-id ID
+  hubu budget replace --budget-id ID --amount AMOUNT
   hubu budget list"
     );
 }
@@ -1426,6 +1489,24 @@ fn print_budget_list_help() {
 
 Usage:
   hubu budget list"
+    );
+}
+
+fn print_budget_revoke_help() {
+    println!(
+        "Revoke an active budget so it cannot reserve future spend
+
+Usage:
+  hubu budget revoke --budget-id ID"
+    );
+}
+
+fn print_budget_replace_help() {
+    println!(
+        "Replace an active budget with a new forward-looking allowance
+
+Usage:
+  hubu budget replace --budget-id ID --amount AMOUNT"
     );
 }
 
