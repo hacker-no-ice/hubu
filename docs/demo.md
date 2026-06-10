@@ -207,10 +207,10 @@ Expected output:
 Budget series created
   budget_id: bgt_6qqcj94w6pr5  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
-    period: 2026-06-03T17:19:20.123456+00:00 -> 2026-07-03T17:19:20.123456+00:00
+    period: 2026-06-03T10:19:20.123456-07:00 -> 2026-07-03T10:19:20.123456-07:00
   budget_id: bgt_8x7k2m4q9v1c  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
-    period: 2026-07-03T17:19:20.123456+00:00 -> 2026-08-03T17:19:20.123456+00:00
+    period: 2026-07-03T10:19:20.123456-07:00 -> 2026-08-03T10:19:20.123456-07:00
 ```
 
 Hubu enforces non-overlapping periods for a given budget scope and currency. The
@@ -391,10 +391,10 @@ Expected output:
 ```txt
   budget_id: bgt_6qqcj94w6pr5  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $20.00  frozen: $0.00  remaining: $55.00
-    period: 2026-06-03T17:19:20.123456+00:00 -> 2026-07-03T17:19:20.123456+00:00
+    period: 2026-06-03T10:19:20.123456-07:00 -> 2026-07-03T10:19:20.123456-07:00
   budget_id: bgt_8x7k2m4q9v1c  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
-    period: 2026-07-03T17:19:20.123456+00:00 -> 2026-08-03T17:19:20.123456+00:00
+    period: 2026-07-03T10:19:20.123456-07:00 -> 2026-08-03T10:19:20.123456-07:00
 ```
 
 The balance reflects settled spend only. Released holds do not reduce remaining
