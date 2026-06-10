@@ -1,0 +1,22 @@
+id: test_policy
+version: v1
+default_effect: needs_approval
+rules:
+  - id: deny_spend_over_one_dollar
+    effect: deny
+    reason: single spend exceeds the $1 limit
+    when:
+      op: gt
+      field: amount
+      value:
+        money_cents: 100
+
+  - id: allow_approved_merchants
+    effect: allow
+    reason: approved merchants are allowed
+    when:
+      op: in
+      field: merchant
+      values:
+        - string: openai
+        - string: google

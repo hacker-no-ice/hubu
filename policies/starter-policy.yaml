@@ -1,0 +1,21 @@
+id: demo_spending_policy
+version: demo-1
+default_effect: needs_approval
+rules:
+  - id: deny_blocked_demo_merchant
+    effect: deny
+    reason: merchant is blocked by the demo policy
+    when:
+      op: eq
+      field: merchant
+      value:
+        string: blocked-merchant
+
+  - id: allow_small_demo_spend
+    effect: allow
+    reason: amount is at or below the configured demo limit of 10000 cents
+    when:
+      op: lte
+      field: amount
+      value:
+        money_cents: 10000

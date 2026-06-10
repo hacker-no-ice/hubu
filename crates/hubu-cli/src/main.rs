@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Local};
+use hubu_core::policy::{Effect, Policy};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -19,6 +20,8 @@ const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
 const FINGERPRINT_PREFIX: &str = "sha256:";
+const DEFAULT_POLICY_TEMPLATE_PATH: &str = "policies/policy.yaml";
+const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../policies/starter-policy.yaml");
 
 fn main() {
     if let Err(error) = run() {
@@ -69,19 +72,7 @@ fn init(mut args: Vec<String>) -> Result<()> {
     let force = take_flag(&mut args, "--force");
     ensure_no_args(args)?;
 
-    let path = Path::new(&policy_path);
-    if path.exists() && !force {
-        bail!("policy file `{policy_path}` already exists; pass --force to overwrite");
-    }
-
-    fs::write(path, default_policy_template())
-        .with_context(|| format!("write default policy template to `{policy_path}`"))?;
-    println!("Hubu policy template created");
-    println!("  path: {policy_path}");
-    println!(
-        "  next: edit the file, then run hubu policy add --agent-id AGENT_ID --path {policy_path}"
-    );
-    Ok(())
+    write_policy_template(&policy_path, force)
 }
 
 fn protocol(base_url: &str, args: Vec<String>) -> Result<()> {
@@ -470,11 +461,81 @@ fn policy(base_url: &str, args: Vec<String>) -> Result<()> {
 
     match command.as_str() {
         "add" => add_policy(base_url, args),
+        "new-template" => new_policy_template(args),
+        "validate" => validate_policy_file(args),
         "-h" | "--help" | "help" => {
             print_policy_help();
             Ok(())
         }
         _ => bail!("unknown policy command `{command}`"),
+    }
+}
+
+fn validate_policy_file(mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_policy_validate_help();
+        return Ok(());
+    }
+
+    let path = take_required(&mut args, "--path")?;
+    ensure_no_args(args)?;
+
+    let policy =
+        Policy::from_yaml_file(&path).with_context(|| format!("validate policy file `{path}`"))?;
+    println!("Policy valid");
+    println!("  path: {path}");
+    println!("  policy_id: {}", policy.id);
+    println!("  policy_version: {}", policy.version);
+    println!(
+        "  default_decision: {}",
+        policy_effect_name(policy.default_effect)
+    );
+    println!("  rules: {}", policy.rules.len());
+    Ok(())
+}
+
+fn new_policy_template(mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_policy_new_template_help();
+        return Ok(());
+    }
+
+    let policy_path =
+        take_value(&mut args, "--path").unwrap_or_else(|| DEFAULT_POLICY_TEMPLATE_PATH.to_string());
+    let force = take_flag(&mut args, "--force");
+    ensure_no_args(args)?;
+
+    write_policy_template(&policy_path, force)
+}
+
+fn write_policy_template(policy_path: &str, force: bool) -> Result<()> {
+    let path = Path::new(policy_path);
+    if path.exists() && !force {
+        bail!("policy file `{policy_path}` already exists; pass --force to overwrite");
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create policy directory `{}`", parent.display()))?;
+    }
+
+    fs::write(path, default_policy_template())
+        .with_context(|| format!("write default policy template to `{policy_path}`"))?;
+    println!("Hubu policy template created");
+    println!("  path: {policy_path}");
+    println!(
+        "  next: edit the file, then run hubu policy add --agent-id AGENT_ID --path {policy_path}"
+    );
+    Ok(())
+}
+
+fn policy_effect_name(effect: Effect) -> &'static str {
+    match effect {
+        Effect::Allow => "allow",
+        Effect::Deny => "deny",
+        Effect::NeedsApproval => "needs_approval",
     }
 }
 
@@ -487,6 +548,7 @@ fn add_policy(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let agent_id = take_required(&mut args, "--agent-id")?;
     let path = take_required(&mut args, "--path")?;
     ensure_no_args(args)?;
+    Policy::from_yaml_file(&path).with_context(|| format!("validate policy file `{path}`"))?;
 
     let body = json!({
         "agent_id": agent_id,
@@ -1087,30 +1149,7 @@ fn amount_to_cents(value: &str) -> Result<i64> {
 }
 
 fn default_policy_template() -> &'static str {
-    r#"id: demo_spending_policy
-version: demo-1
-# The demo server rewrites owner_user_id to the active registered human user.
-owner_user_id: 00000000-0000-4000-8000-000000000000
-default_effect: needs_approval
-rules:
-  - id: deny_blocked_demo_merchant
-    effect: deny
-    reason: merchant is blocked by the demo policy
-    when:
-      op: eq
-      field: merchant
-      value:
-        string: blocked-merchant
-
-  - id: allow_small_demo_spend
-    effect: allow
-    reason: amount is at or below the configured demo limit of 10000 cents
-    when:
-      op: lte
-      field: amount
-      value:
-        money_cents: 10000
-"#
+    DEFAULT_POLICY_TEMPLATE
 }
 
 fn print_help() {
@@ -1200,7 +1239,34 @@ fn print_policy_help() {
         "Manage spending policies
 
 Usage:
+  hubu policy new-template [--path FILE] [--force]
+  hubu policy validate --path FILE
   hubu policy add --agent-id ID --path FILE"
+    );
+}
+
+fn print_policy_new_template_help() {
+    println!(
+        "Create an editable policy template
+
+Usage:
+  hubu policy new-template [--path FILE] [--force]
+
+Options:
+  --path FILE  Policy template path (default: policies/policy.yaml)
+  --force      Overwrite an existing policy file"
+    );
+}
+
+fn print_policy_validate_help() {
+    println!(
+        "Validate a policy file
+
+Usage:
+  hubu policy validate --path FILE
+
+Options:
+  --path FILE  YAML policy file to validate"
     );
 }
 
@@ -1213,7 +1279,7 @@ Usage:
 
 Options:
   --agent-id ID   Public agent ID, such as agt_...
-  --path FILE     YAML policy file generated by `hubu init` or written by hand"
+  --path FILE     YAML policy file generated by `hubu policy new-template` or written by hand"
     );
 }
 
@@ -1226,7 +1292,10 @@ Usage:
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
-  --force         Overwrite an existing policy file"
+  --force         Overwrite an existing policy file
+
+Note:
+  Prefer `hubu policy new-template` for new policy files."
     );
 }
 

@@ -144,7 +144,8 @@ UUIDs.
 ### 3. Generate and Add a Policy
 
 ```sh
-hubu init --policy policy.yaml
+hubu policy new-template --path policy.yaml
+hubu policy validate --path policy.yaml
 hubu policy add \
   --agent-id agt_8x7k2m4q9v1c \
   --path policy.yaml
@@ -156,6 +157,12 @@ Expected output:
 Hubu policy template created
   path: policy.yaml
   next: edit the file, then run hubu policy add --agent-id AGENT_ID --path policy.yaml
+Policy valid
+  path: policy.yaml
+  policy_id: demo_spending_policy
+  policy_version: demo-1
+  default_decision: needs_approval
+  rules: 2
 Policy added
   agent_id: agt_8x7k2m4q9v1c
   policy_id: demo_spending_policy
@@ -163,11 +170,12 @@ Policy added
   default_decision: needs_approval
 ```
 
-`hubu init` now generates starter files for the local workflow. Human
-registration lives under `hubu register human`, while `hubu policy add --path`
-loads a YAML policy file. The demo server stamps the policy to the active human
-user before validation, so the template's placeholder `owner_user_id` does not
-need manual editing for the local demo.
+`hubu policy new-template` generates an editable YAML policy file.
+`hubu policy validate --path` checks the file locally before it is attached to
+an agent. Human registration lives under `hubu register human`, while
+`hubu policy add --path` loads the policy file. The server stamps the policy to
+the active human user during add, so authored policy YAML does not need an owner
+id.
 
 ### 4. List Registered Agents
 
@@ -410,6 +418,8 @@ hubu [--url http://127.0.0.1:8787] register human --username USERNAME --display-
 hubu [--url http://127.0.0.1:8787] user list
 hubu [--url http://127.0.0.1:8787] protocol agent-registration
 hubu [--url http://127.0.0.1:8787] register agent [--name NAME] [--version VERSION] [--dry-run]
+hubu [--url http://127.0.0.1:8787] policy new-template [--path FILE] [--force]
+hubu [--url http://127.0.0.1:8787] policy validate --path FILE
 hubu [--url http://127.0.0.1:8787] policy add --agent-id ID --path FILE
 hubu [--url http://127.0.0.1:8787] agent list [--all]
 hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]

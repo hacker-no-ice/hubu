@@ -280,7 +280,7 @@ const components = {
     copy:
       "The CLI is the demo-friendly human and agent surface. It prepares registration envelopes, posts JSON to the local API, and prints compact reviews and results.",
     responsibilities: [
-      "Supports init, register, user list with current-user marking, protocol, policy, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
+      "Supports init, register, user list with current-user marking, protocol, policy template/add commands, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
       "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
       "Loads the local Hubu token from env or file and sends it as a bearer header on HTTP JSON requests.",
     ],

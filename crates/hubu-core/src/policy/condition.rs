@@ -7,7 +7,7 @@ use crate::policy::error::PolicyValidationError;
 use crate::spend::model::SpendRequest;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Condition {
     All {
         conditions: Vec<Condition>,

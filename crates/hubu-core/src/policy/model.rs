@@ -10,9 +10,11 @@ use crate::spend::model::SpendRequest;
 /// The engine evaluates all rules and falls back to `default_effect` when no
 /// rule matches.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Policy {
     pub id: String,
     pub version: String,
+    #[serde(default = "UserId::new")]
     pub owner_user_id: UserId,
     pub rules: Vec<Rule>,
     pub default_effect: Effect,
@@ -23,6 +25,7 @@ pub struct Policy {
 /// If `when` evaluates to true, `effect` contributes to the final decision and
 /// `reason` appears in the evaluation trace.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Rule {
     pub id: String,
     pub effect: Effect,
