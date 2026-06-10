@@ -165,7 +165,7 @@ Validation returns the matched spend scope and budget hold state:
   "expires_at": "2026-06-05T12:00:00Z",
   "budget_hold": {
     "hold_id": "uuid",
-    "budget_id": "uuid",
+    "budget_id": "bgt_...",
     "status": "frozen",
     "amount_cents": 500,
     "consumed_amount_cents": 0,

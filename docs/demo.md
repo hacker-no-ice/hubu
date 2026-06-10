@@ -205,10 +205,10 @@ Expected output:
 
 ```txt
 Budget series created
-  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user (usr_8x7k2m4q9v1c)  status: active
+  budget_id: bgt_6qqcj94w6pr5  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
     period: 2026-06-03T17:19:20.123456+00:00 -> 2026-07-03T17:19:20.123456+00:00
-  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user (usr_8x7k2m4q9v1c)  status: active
+  budget_id: bgt_8x7k2m4q9v1c  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
     period: 2026-07-03T17:19:20.123456+00:00 -> 2026-08-03T17:19:20.123456+00:00
 ```
@@ -247,7 +247,7 @@ Payment
 Budget hold
   status: settled
   hold_id: e9ee93b7-dac7-4c23-946f-2a7bc2835c24
-  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c
+  budget_id: bgt_6qqcj94w6pr5
   amount: $20.00
   consumed: $20.00
   frozen: $0.00
@@ -281,7 +281,7 @@ Spend evaluated
 Budget hold
   status: frozen
   hold_id: e9ee93b7-dac7-4c23-946f-2a7bc2835c24
-  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c
+  budget_id: bgt_6qqcj94w6pr5
   amount: $5.00
   consumed: $20.00
   frozen: $5.00
@@ -321,7 +321,7 @@ Payment
 Budget hold
   status: released
   hold_id: 098cbd0f-ff3d-4817-a741-1e58158f65df
-  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c
+  budget_id: bgt_6qqcj94w6pr5
   amount: $15.00
   consumed: $20.00
   frozen: $0.00
@@ -387,10 +387,10 @@ hubu budget list
 Expected output:
 
 ```txt
-  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user (usr_8x7k2m4q9v1c)  status: active
+  budget_id: bgt_6qqcj94w6pr5  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $20.00  frozen: $0.00  remaining: $55.00
     period: 2026-06-03T17:19:20.123456+00:00 -> 2026-07-03T17:19:20.123456+00:00
-  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user (usr_8x7k2m4q9v1c)  status: active
+  budget_id: bgt_8x7k2m4q9v1c  scope: user (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
     period: 2026-07-03T17:19:20.123456+00:00 -> 2026-08-03T17:19:20.123456+00:00
 ```
