@@ -886,7 +886,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("POST", "/budgets/series") => create_budget_series(request.body, state).map(to_json),
         ("POST", "/budgets/revoke") => revoke_budget(request.body, state).map(to_json),
         ("POST", "/budgets/replace") => replace_budget(request.body, state).map(to_json),
-        ("GET", "/budgets") => list_budgets(state).map(to_json),
+        ("GET", "/budgets") => list_budgets(state, query_flag(&request, "all")).map(to_json),
         ("POST", "/spend/authorize") => authorize_spend(request.body, state).map(to_json),
         ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
             Ok(spend_executor_guidance())
@@ -1930,12 +1930,13 @@ fn create_budget_series(
     })
 }
 
-fn list_budgets(state: &ServerState) -> Result<ListBudgetsHttpResponse> {
+fn list_budgets(state: &ServerState, include_all: bool) -> Result<ListBudgetsHttpResponse> {
     let user = authenticated_user_context(state)?;
     reconcile_expired_budget_holds(state)?;
     let budgets = budgets_for_user(&user, state)?;
     let budgets = budgets
         .into_iter()
+        .filter(|budget| include_all || matches!(budget.budget.status, BudgetStatus::Active))
         .map(|budget| budget_response(budget, state))
         .collect::<Result<Vec<_>>>()?;
 
@@ -3925,7 +3926,7 @@ mod tests {
         assert_eq!(agent_budget.budget.scope, "agent");
         assert_eq!(agent_budget.budget.scope_id, agent_pub_id);
 
-        let budgets = list_budgets(&state).expect("budgets should list");
+        let budgets = list_budgets(&state, false).expect("budgets should list");
         assert_eq!(budgets.budgets.len(), 2);
         assert!(budgets.budgets.iter().any(|budget| budget.scope == "user"));
         assert!(budgets
@@ -4033,6 +4034,60 @@ mod tests {
         assert_eq!(replaced.budget.status, "active");
         assert_eq!(replaced.budget.amount_limit_cents, 20_000);
         assert_eq!(replaced.budget.remaining_amount_cents, 20_000);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn budget_list_hides_revoked_budgets_unless_all_is_requested() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-budget-list-active-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+
+        let budget = create_budget(
+            json!({
+                "amount_cents": 10_000,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should be created");
+        revoke_budget(
+            json!({
+                "budget_id": budget.budget.budget_id,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("budget should revoke");
+
+        let active_only = route(authenticated_get_request("/budgets"), &state);
+        assert_eq!(active_only.status, 200);
+        assert_eq!(
+            active_only.body["budgets"]
+                .as_array()
+                .expect("budgets should be an array")
+                .len(),
+            0
+        );
+
+        let with_history = route(authenticated_get_request("/budgets?all=true"), &state);
+        assert_eq!(with_history.status, 200);
+        let budgets = with_history.body["budgets"]
+            .as_array()
+            .expect("budgets should be an array");
+        assert_eq!(budgets.len(), 1);
+        assert_eq!(budgets[0]["status"], "revoked");
         std::fs::remove_file(path).ok();
     }
 
@@ -4718,7 +4773,7 @@ rules: []
             .iter()
             .any(|reason| reason == "budget does not have enough remaining balance"));
 
-        let budgets = list_budgets(&state).expect("budgets should list");
+        let budgets = list_budgets(&state, false).expect("budgets should list");
         assert_eq!(budgets.budgets[0].remaining_amount_cents, 1_000);
         assert_eq!(budgets.budgets[0].frozen_amount_cents, 0);
         std::fs::remove_file(path).ok();
@@ -4832,7 +4887,7 @@ rules: []
 
         let restarted =
             ServerState::new_with_db_path(&path).expect("server state should reload from storage");
-        let budgets = list_budgets(&restarted).expect("budgets should reload");
+        let budgets = list_budgets(&restarted, false).expect("budgets should reload");
         assert_eq!(budgets.budgets.len(), 1);
         assert_eq!(budgets.budgets[0].consumed_amount_cents, 2_500);
         assert_eq!(budgets.budgets[0].remaining_amount_cents, 7_500);

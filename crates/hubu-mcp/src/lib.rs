@@ -242,8 +242,10 @@ fn tool_definitions() -> Vec<Value> {
         ),
         read_tool(
             "hubu_list_budgets",
-            "List budgets for the active Hubu user.",
-            json_schema(json!({})),
+            "List active budgets for the active Hubu user.",
+            json_schema(json!({
+                "include_all": { "type": "boolean" }
+            })),
         ),
         read_tool(
             "hubu_list_ledger",
@@ -422,7 +424,17 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
             return Ok(tool_result(spend_response_with_approval_hint(response)));
         }
         "hubu_list_agents" => get_json(base_url, "/agents")?,
-        "hubu_list_budgets" => get_json(base_url, "/budgets")?,
+        "hubu_list_budgets" => {
+            if arguments
+                .get("include_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                get_json(base_url, "/budgets?all=true")?
+            } else {
+                get_json(base_url, "/budgets")?
+            }
+        }
         "hubu_list_ledger" => get_json(base_url, "/ledger")?,
         _ => bail!("unknown Hubu MCP tool `{name}`"),
     };
