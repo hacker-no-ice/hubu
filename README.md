@@ -91,6 +91,25 @@ Install the local CLI so `hubu ...` works from your shell:
 cargo install --path crates/hubu-cli
 ```
 
+To make Hubu available to Codex agents in any project, also install the server
+and MCP adapter:
+
+```sh
+cargo install --path crates/hubu-api
+cargo install --path crates/hubu-mcp
+hubu init codex
+```
+
+`hubu init codex` writes a managed `[mcp_servers.hubu]` block to Codex's
+`config.toml`, creates or reuses a Hubu auth token file, and points Codex at the
+`hubu-mcp-server` executable. It configures Codex to pre-approve Hubu spend
+tool calls, while Hubu policy can still return `needs_approval` without
+executing payment. Restart Codex after running it. Start `hubu-server` with the
+`HUBU_AUTH_TOKEN_FILE` path printed by the command so the server and MCP adapter
+share the same local bearer token. See the
+[MCP cheatsheet](docs/mcp-transport.md#cheatsheet) for the full install, init,
+server-start, restart, and approval-profile flow.
+
 Start the local demo server:
 
 ```sh
@@ -150,7 +169,19 @@ the local Hubu server first:
 cargo run --bin hubu-server
 ```
 
-Then point an MCP client at:
+For Codex, the easiest setup is:
+
+```sh
+hubu init codex
+```
+
+That command configures Codex's `config.toml` so agents in other projects can
+discover Hubu tools through MCP. It also pre-approves Hubu spend tools in Codex
+so normal spend requests flow to Hubu policy without an extra Codex prompt.
+Other MCP clients should use Hubu's tool annotations or the
+`hubu_client_approval_profile` tool to configure the same upfront split:
+auto-approve read/spend tools, prompt before setup/admin tools. For manual MCP
+setup, point the client at:
 
 ```sh
 cargo run --bin hubu-mcp-server
@@ -167,7 +198,7 @@ policy returns `needs_approval`, the MCP response includes
 `requires_human_approval: true` and no payment is executed.
 
 See [docs/mcp-transport.md](docs/mcp-transport.md) for the current tool and
-approval model.
+approval model, including the [setup cheatsheet](docs/mcp-transport.md#cheatsheet).
 
 ## Policy Engine
 

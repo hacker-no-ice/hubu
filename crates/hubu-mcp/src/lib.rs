@@ -12,6 +12,25 @@ const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
 const PROTOCOL_VERSION: &str = "2024-11-05";
+const HUBU_APPROVAL_PROFILE_VERSION: &str = "hubu-mcp-client-approval-v1";
+const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Protected setup/admin tools require a human approval prompt before tools/call. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
+const READ_TOOL_NAMES: &[&str] = &[
+    "hubu_health",
+    "hubu_registration_guidance",
+    "hubu_client_approval_profile",
+    "hubu_list_users",
+    "hubu_list_agents",
+    "hubu_list_budgets",
+    "hubu_list_ledger",
+];
+const SPEND_TOOL_NAMES: &[&str] = &["hubu_authorize_spend", "hubu_submit_spend"];
+const APPROVAL_TOOL_NAMES: &[&str] = &[
+    "hubu_register_human",
+    "hubu_register_agent",
+    "hubu_add_policy",
+    "hubu_create_budget",
+    "hubu_create_recurring_budget",
+];
 
 #[derive(Debug, Clone, Copy)]
 struct McpConfig {
@@ -75,7 +94,8 @@ fn handle_json_rpc(base_url: &str, config: McpConfig, request: Value) -> Option<
             },
             "capabilities": {
                 "tools": {}
-            }
+            },
+            "instructions": HUBU_MCP_INSTRUCTIONS
         })),
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
         "tools/call" => {
@@ -116,6 +136,11 @@ fn tool_definitions() -> Vec<Value> {
         read_tool(
             "hubu_registration_guidance",
             "Read compact agent registration guidance.",
+            json_schema(json!({})),
+        ),
+        read_tool(
+            "hubu_client_approval_profile",
+            "Read Hubu's generic MCP client approval profile for configuring agent harnesses.",
             json_schema(json!({})),
         ),
         read_tool(
@@ -222,15 +247,42 @@ fn json_schema(properties: Value) -> Value {
 }
 
 fn read_tool(name: &str, description: &str, input_schema: Value) -> Value {
-    tool(name, description, input_schema, true, false, "none")
+    tool(
+        name,
+        description,
+        input_schema,
+        true,
+        false,
+        "none",
+        "auto",
+        "none",
+    )
 }
 
 fn write_tool(name: &str, description: &str, input_schema: Value) -> Value {
-    tool(name, description, input_schema, false, false, "conditional")
+    tool(
+        name,
+        description,
+        input_schema,
+        false,
+        false,
+        "conditional",
+        "auto",
+        "hubu_policy_needs_approval",
+    )
 }
 
 fn approval_tool(name: &str, description: &str, input_schema: Value) -> Value {
-    tool(name, description, input_schema, false, true, "required")
+    tool(
+        name,
+        description,
+        input_schema,
+        false,
+        true,
+        "required",
+        "prompt_before_call",
+        "client_human_approval_required",
+    )
 }
 
 fn tool(
@@ -240,6 +292,8 @@ fn tool(
     read_only: bool,
     destructive: bool,
     human_approval: &str,
+    client_approval_mode: &str,
+    runtime_approval: &str,
 ) -> Value {
     json!({
         "name": name,
@@ -250,8 +304,54 @@ fn tool(
             "destructiveHint": destructive,
             "idempotentHint": false,
             "openWorldHint": true,
-            "x_hubu_human_approval": human_approval
+            "x_hubu_human_approval": human_approval,
+            "x_hubu_client_approval_mode": client_approval_mode,
+            "x_hubu_runtime_approval": runtime_approval
         }
+    })
+}
+
+fn approval_profile() -> Value {
+    let auto_approve_tools = READ_TOOL_NAMES
+        .iter()
+        .chain(SPEND_TOOL_NAMES.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    json!({
+        "protocol_version": HUBU_APPROVAL_PROFILE_VERSION,
+        "summary": "Configure agent harnesses to auto-call Hubu read and spend tools, prompt before setup/admin tools, and rely on Hubu policy for needs_approval spend outcomes.",
+        "client_policy": {
+            "auto_approve_tools": auto_approve_tools,
+            "prompt_before_call_tools": APPROVAL_TOOL_NAMES,
+            "hubu_policy_conditional_tools": SPEND_TOOL_NAMES
+        },
+        "response_contract": {
+            "needs_approval_field": "requires_human_approval",
+            "needs_approval_meaning": "Hubu policy required human review and no payment was executed.",
+            "agent_action": "Stop the spend workflow and surface approval_reason plus the structured response to the human."
+        },
+        "annotation_fields": {
+            "client_pre_call": "x_hubu_client_approval_mode",
+            "runtime_policy": "x_hubu_runtime_approval",
+            "legacy_hubu_field": "x_hubu_human_approval"
+        },
+        "tools": [
+            {
+                "names": READ_TOOL_NAMES,
+                "x_hubu_client_approval_mode": "auto",
+                "x_hubu_runtime_approval": "none"
+            },
+            {
+                "names": SPEND_TOOL_NAMES,
+                "x_hubu_client_approval_mode": "auto",
+                "x_hubu_runtime_approval": "hubu_policy_needs_approval"
+            },
+            {
+                "names": APPROVAL_TOOL_NAMES,
+                "x_hubu_client_approval_mode": "prompt_before_call",
+                "x_hubu_runtime_approval": "client_human_approval_required"
+            }
+        ]
     })
 }
 
@@ -268,6 +368,7 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
     let response = match name {
         "hubu_health" => get_json(base_url, "/health")?,
         "hubu_registration_guidance" => get_json(base_url, "/registration/guidance")?,
+        "hubu_client_approval_profile" => approval_profile(),
         "hubu_list_users" => get_json(base_url, "/users")?,
         "hubu_register_human" => {
             require_trusted_client_approval(config, name)?;
@@ -472,6 +573,10 @@ mod tests {
 
         assert_eq!(guidance["annotations"]["readOnlyHint"], true);
         assert_eq!(guidance["annotations"]["x_hubu_human_approval"], "none");
+        assert_eq!(
+            guidance["annotations"]["x_hubu_client_approval_mode"],
+            "auto"
+        );
     }
 
     #[test]
@@ -494,8 +599,76 @@ mod tests {
             .expect("authorize spend tool should exist");
 
         assert_eq!(tool["annotations"]["x_hubu_human_approval"], "conditional");
+        assert_eq!(tool["annotations"]["x_hubu_client_approval_mode"], "auto");
+        assert_eq!(
+            tool["annotations"]["x_hubu_runtime_approval"],
+            "hubu_policy_needs_approval"
+        );
         assert_eq!(tool["annotations"]["destructiveHint"], false);
         assert!(tool["inputSchema"]["properties"]["amount_cents"].is_object());
+    }
+
+    #[test]
+    fn protected_tool_requires_client_prompt_annotation() {
+        let tools = tool_definitions();
+        let protected = tools
+            .iter()
+            .find(|tool| tool["name"] == "hubu_register_agent")
+            .expect("agent registration tool should exist");
+
+        assert_eq!(
+            protected["annotations"]["x_hubu_client_approval_mode"],
+            "prompt_before_call"
+        );
+        assert_eq!(
+            protected["annotations"]["x_hubu_runtime_approval"],
+            "client_human_approval_required"
+        );
+    }
+
+    #[test]
+    fn approval_profile_lists_spend_tools_as_auto_with_hubu_policy_runtime() {
+        let profile = approval_profile();
+
+        assert_eq!(profile["protocol_version"], HUBU_APPROVAL_PROFILE_VERSION);
+        assert!(profile["client_policy"]["auto_approve_tools"]
+            .as_array()
+            .expect("auto tools should be an array")
+            .iter()
+            .any(|tool| tool == "hubu_submit_spend"));
+        assert!(profile["client_policy"]["prompt_before_call_tools"]
+            .as_array()
+            .expect("prompt tools should be an array")
+            .iter()
+            .any(|tool| tool == "hubu_create_budget"));
+        assert_eq!(
+            profile["response_contract"]["needs_approval_field"],
+            "requires_human_approval"
+        );
+    }
+
+    #[test]
+    fn initialize_includes_client_approval_instructions() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize"
+        });
+
+        let response = handle_json_rpc(
+            DEFAULT_BASE_URL,
+            McpConfig {
+                protected_tools_enabled: false,
+            },
+            request,
+        )
+        .expect("initialize should return a response");
+
+        let instructions = response["result"]["instructions"]
+            .as_str()
+            .expect("instructions should be present");
+        assert!(instructions.contains("hubu_submit_spend"));
+        assert!(instructions.contains("Protected setup/admin tools require"));
     }
 
     #[test]
