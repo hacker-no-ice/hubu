@@ -33,7 +33,7 @@ const components = {
       "Hubu includes the CLI, MCP adapter, local server, governance core, wallet, and ledger. Gongbu is shown outside Hubu because it performs external model calls and other work through the executor contract.",
     responsibilities: [
       "Humans register, attach user-level policies, create budgets, and review protected actions.",
-      "Agents use Hubu CLI or Hubu MCP surfaces to register and submit structured spend requests.",
+      "Agents discover Hubu through configured MCP tools, or use the CLI when working inside a Hubu-aware local setup.",
       "The CLI and MCP adapter are part of broader Hubu, but they are not the Hubu server.",
       "Local HTTP callers present the Hubu bearer token before protected routes resolve user authority.",
       "Gongbu and other external executors validate, settle, or release authorized spend without Hubu performing the work.",
@@ -278,15 +278,16 @@ const components = {
     title: "Hubu CLI",
     kind: "Interface",
     copy:
-      "The CLI is the demo-friendly human and agent surface. It prepares registration envelopes, posts JSON to the local API, and prints compact reviews and results.",
+      "The CLI is the demo-friendly human surface and setup helper. It prepares registration envelopes, posts JSON to the local API, configures Codex MCP discovery, and prints compact reviews and results.",
     responsibilities: [
-      "Supports init, register, user list with current-user marking, protocol, policy template/add/list commands, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
+      "Supports init, Codex MCP setup, register, user list with current-user marking, protocol, policy template/add/list commands, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
+      "Writes a managed Codex config block that lets agents in other projects discover Hubu MCP tools without reading the Hubu repo.",
       "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
       "Loads the local Hubu token from env or file and sends it as a bearer header on HTTP JSON requests.",
     ],
     links: [sharedLinks.cli, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
-      { id: "commands", label: "Commands", sub: "register/spend/list", x: 90, y: 132, w: 230, h: 92, tone: "human" },
+      { id: "commands", label: "Commands", sub: "init/register/spend", x: 90, y: 132, w: 230, h: 92, tone: "human" },
       { id: "guidance", label: "Protocol fetch", sub: "agent-registration JSON", x: 448, y: 132, w: 220, h: 92, tone: "agent" },
       { id: "fingerprint", label: "Envelope builder", sub: "canonical SHA-256", x: 448, y: 356, w: 220, h: 92, tone: "core" },
       { id: "http", label: "HTTP client", sub: "bearer + JSON", x: 804, y: 244, w: 210, h: 92, tone: "core" },
@@ -302,9 +303,12 @@ const components = {
     title: "MCP Adapter",
     kind: "Interface",
     copy:
-      "The MCP stdio adapter exposes Hubu as agent tools. Read-only calls are safe to inspect; protected setup tools require trusted client approval.",
+      "The MCP stdio adapter exposes Hubu as agent tools that Codex and other MCP clients can discover after configuration. Read-only calls are safe to inspect; protected setup tools require trusted client approval.",
     responsibilities: [
       "Implements initialize, tools/list, and tools/call over JSON-RPC stdio.",
+      "Can be wired into Codex by `hubu init codex` so agents outside the Hubu repository see Hubu tools at session startup.",
+      "Publishes a generic client approval profile so any harness can auto-approve read/spend tools and prompt before setup/admin tools.",
+      "Uses Codex per-tool approval overrides as one rendering of that profile while leaving Hubu policy responsible for needs_approval outcomes.",
       "Annotates tools with read-only, destructive, idempotent, open-world, and Hubu approval hints.",
       "Loads the local Hubu token, forwards tool calls to the HTTP API, and marks needs_approval spend responses for the agent client.",
     ],

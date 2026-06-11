@@ -5,7 +5,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::{Shutdown, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -14,6 +14,7 @@ use chrono::{DateTime, Local};
 use hubu_core::policy::{Effect, Policy};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
@@ -22,6 +23,11 @@ const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
 const FINGERPRINT_PREFIX: &str = "sha256:";
 const DEFAULT_POLICY_TEMPLATE_PATH: &str = "policies/policy.yaml";
 const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../policies/starter-policy.yaml");
+const CODEX_HOME_ENV: &str = "CODEX_HOME";
+const HUBU_HOME_ENV: &str = "HUBU_HOME";
+const HUBU_MCP_SERVER_ENV: &str = "HUBU_MCP_SERVER";
+const HUBU_CODEX_MCP_BEGIN: &str = "# >>> hubu managed codex mcp";
+const HUBU_CODEX_MCP_END: &str = "# <<< hubu managed codex mcp";
 
 fn main() {
     if let Err(error) = run() {
@@ -43,7 +49,7 @@ fn run() -> Result<()> {
     args.remove(0);
 
     match command.as_str() {
-        "init" => init(args),
+        "init" => init(&base_url, args),
         "register" => register(&base_url, args),
         "protocol" => protocol(&base_url, args),
         "user" => user(&base_url, args),
@@ -61,7 +67,12 @@ fn run() -> Result<()> {
     }
 }
 
-fn init(mut args: Vec<String>) -> Result<()> {
+fn init(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if args.first().map(String::as_str) == Some("codex") {
+        args.remove(0);
+        return init_codex(base_url, args);
+    }
+
     if take_help(&mut args) {
         print_init_help();
         return Ok(());
@@ -73,6 +84,345 @@ fn init(mut args: Vec<String>) -> Result<()> {
     ensure_no_args(args)?;
 
     write_policy_template(&policy_path, force)
+}
+
+fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_init_codex_help();
+        return Ok(());
+    }
+
+    let config_path = take_value(&mut args, "--config")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_codex_config_path);
+    let mcp_server = take_value(&mut args, "--mcp-server")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_mcp_server_path);
+    let token_file = take_value(&mut args, "--token-file")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_codex_token_file_path);
+    let force = take_flag(&mut args, "--force");
+    let dry_run = take_flag(&mut args, "--dry-run");
+    let trust_client_approval = take_flag(&mut args, "--trust-client-approval");
+    ensure_no_args(args)?;
+
+    let mcp_server = absolute_existing_file(&mcp_server)
+        .with_context(|| format!("resolve hubu-mcp-server path `{}`", mcp_server.display()))?;
+
+    let token_file = if dry_run {
+        absolute_path(&token_file)?
+    } else {
+        ensure_auth_token_file(&token_file)
+            .with_context(|| format!("prepare Hubu auth token file `{}`", token_file.display()))?
+    };
+    let block = codex_mcp_config_block(&mcp_server, base_url, &token_file, trust_client_approval);
+
+    if dry_run {
+        println!("{block}");
+        return Ok(());
+    }
+
+    write_codex_mcp_config(&config_path, &block, force)
+        .with_context(|| format!("update Codex config `{}`", config_path.display()))?;
+
+    println!("Codex MCP configured for Hubu");
+    println!("  config: {}", config_path.display());
+    println!("  mcp_server: {}", mcp_server.display());
+    println!("  hubu_url: {base_url}");
+    println!("  token_file: {}", token_file.display());
+    println!("  next: restart Codex, then use /mcp or ask Codex to list Hubu tools");
+    println!(
+        "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={}",
+        token_file.display()
+    );
+    println!(
+        "  spend_tools: Codex pre-approves Hubu spend tool calls; Hubu still returns needs_approval without payment when policy requires review"
+    );
+    if trust_client_approval {
+        println!("  approval_tools: enabled because --trust-client-approval was set");
+    } else {
+        println!("  approval_tools: disabled; use the CLI for setup, policy, and budget changes");
+    }
+    Ok(())
+}
+
+fn default_codex_config_path() -> PathBuf {
+    codex_home().join("config.toml")
+}
+
+fn codex_home() -> PathBuf {
+    env::var_os(CODEX_HOME_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".codex"))
+}
+
+fn default_codex_token_file_path() -> PathBuf {
+    if let Ok(path) = env::var(AUTH_TOKEN_FILE_ENV) {
+        return PathBuf::from(path);
+    }
+
+    let local_token_file = PathBuf::from(DEFAULT_AUTH_TOKEN_FILE);
+    if local_token_file.exists() {
+        return local_token_file;
+    }
+
+    hubu_home().join(DEFAULT_AUTH_TOKEN_FILE)
+}
+
+fn hubu_home() -> PathBuf {
+    env::var_os(HUBU_HOME_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".hubu"))
+}
+
+fn home_dir() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn default_mcp_server_path() -> PathBuf {
+    if let Ok(path) = env::var(HUBU_MCP_SERVER_ENV) {
+        return PathBuf::from(path);
+    }
+
+    if let Ok(current_exe) = env::current_exe() {
+        let sibling = current_exe.with_file_name(mcp_server_bin_name());
+        if sibling.exists() {
+            return sibling;
+        }
+    }
+
+    find_on_path(mcp_server_bin_name()).unwrap_or_else(|| PathBuf::from(mcp_server_bin_name()))
+}
+
+fn mcp_server_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "hubu-mcp-server.exe"
+    } else {
+        "hubu-mcp-server"
+    }
+}
+
+fn find_on_path(bin_name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join(bin_name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn absolute_existing_file(path: &Path) -> Result<PathBuf> {
+    let path = absolute_path(path)?;
+    if !path.is_file() {
+        bail!(
+            "`{}` is not a file; build or install hubu-mcp-server, or pass --mcp-server PATH",
+            path.display()
+        );
+    }
+    fs::canonicalize(&path).with_context(|| format!("canonicalize `{}`", path.display()))
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(env::current_dir()?.join(path))
+    }
+}
+
+fn ensure_auth_token_file(path: &Path) -> Result<PathBuf> {
+    let path = absolute_path(path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create token directory `{}`", parent.display()))?;
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(contents) if !contents.trim().is_empty() => {
+            return fs::canonicalize(&path)
+                .with_context(|| format!("canonicalize token file `{}`", path.display()));
+        }
+        Ok(_) => bail!("Hubu auth token file `{}` is empty", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("read `{}`", path.display())),
+    }
+
+    let token = env::var(AUTH_TOKEN_ENV)
+        .map(|value| value.trim().to_string())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(generate_local_auth_token);
+    fs::write(&path, format!("{token}\n"))
+        .with_context(|| format!("write token file `{}`", path.display()))?;
+    restrict_token_permissions(&path)?;
+    fs::canonicalize(&path).with_context(|| format!("canonicalize token file `{}`", path.display()))
+}
+
+fn generate_local_auth_token() -> String {
+    format!("hubu_{}", Uuid::new_v4().simple())
+}
+
+#[cfg(unix)]
+fn restrict_token_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_token_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn write_codex_mcp_config(config_path: &Path, block: &str, force: bool) -> Result<()> {
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create Codex config directory `{}`", parent.display()))?;
+    }
+    let existing = match fs::read_to_string(config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read `{}`", config_path.display()))
+        }
+    };
+    let updated = upsert_managed_codex_mcp_block(&existing, block, force)?;
+    fs::write(config_path, updated)
+        .with_context(|| format!("write Codex config `{}`", config_path.display()))
+}
+
+fn codex_mcp_config_block(
+    mcp_server: &Path,
+    base_url: &str,
+    token_file: &Path,
+    trust_client_approval: bool,
+) -> String {
+    let mut block = format!(
+        "{HUBU_CODEX_MCP_BEGIN}\n\
+         [mcp_servers.hubu]\n\
+         command = \"{}\"\n\
+         startup_timeout_sec = 10\n\
+         tool_timeout_sec = 60\n\n\
+         [mcp_servers.hubu.env]\n\
+         HUBU_URL = \"{}\"\n\
+         {AUTH_TOKEN_FILE_ENV} = \"{}\"\n",
+        toml_basic_string(&mcp_server.display().to_string()),
+        toml_basic_string(base_url),
+        toml_basic_string(&token_file.display().to_string())
+    );
+    if trust_client_approval {
+        let _ = writeln!(block, "HUBU_MCP_TRUST_CLIENT_APPROVAL = \"1\"");
+    }
+    block.push_str(
+        "\n[mcp_servers.hubu.tools.hubu_authorize_spend]\n\
+         approval_mode = \"approve\"\n\n\
+         [mcp_servers.hubu.tools.hubu_submit_spend]\n\
+         approval_mode = \"approve\"\n",
+    );
+    let _ = writeln!(block, "{HUBU_CODEX_MCP_END}");
+    block
+}
+
+fn upsert_managed_codex_mcp_block(existing: &str, block: &str, force: bool) -> Result<String> {
+    let lines = existing.lines().collect::<Vec<_>>();
+    if let Some(start) = lines
+        .iter()
+        .position(|line| line.trim() == HUBU_CODEX_MCP_BEGIN)
+    {
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find_map(|(index, line)| (line.trim() == HUBU_CODEX_MCP_END).then_some(index))
+            .ok_or_else(|| {
+                anyhow!("Codex config has a Hubu managed block without an end marker")
+            })?;
+        let mut updated = Vec::new();
+        updated.extend(lines[..start].iter().copied());
+        updated.extend(block.trim_end_matches('\n').lines());
+        updated.extend(lines[end + 1..].iter().copied());
+        return Ok(join_config_lines(&updated));
+    }
+
+    let existing = if contains_hubu_mcp_table(existing) {
+        if !force {
+            bail!(
+                "Codex config already contains an unmanaged [mcp_servers.hubu] table; pass --force to replace it"
+            );
+        }
+        remove_hubu_mcp_tables(existing)
+    } else {
+        existing.to_string()
+    };
+
+    let mut updated = existing.trim_end().to_string();
+    if !updated.is_empty() {
+        updated.push_str("\n\n");
+    }
+    updated.push_str(block.trim_end_matches('\n'));
+    updated.push('\n');
+    Ok(updated)
+}
+
+fn join_config_lines(lines: &[&str]) -> String {
+    let mut value = lines.join("\n");
+    value.push('\n');
+    value
+}
+
+fn contains_hubu_mcp_table(config: &str) -> bool {
+    config
+        .lines()
+        .filter_map(toml_table_name)
+        .any(is_hubu_mcp_table)
+}
+
+fn remove_hubu_mcp_tables(config: &str) -> String {
+    let mut kept = Vec::new();
+    let mut skipping = false;
+    for line in config.lines() {
+        if let Some(table) = toml_table_name(line) {
+            skipping = is_hubu_mcp_table(table);
+        }
+        if !skipping {
+            kept.push(line);
+        }
+    }
+    join_config_lines(&kept)
+}
+
+fn toml_table_name(line: &str) -> Option<&str> {
+    let trimmed = line
+        .split_once('#')
+        .map(|(before_comment, _)| before_comment)
+        .unwrap_or(line)
+        .trim();
+    if trimmed.starts_with("[[") || !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return None;
+    }
+    Some(trimmed.trim_start_matches('[').trim_end_matches(']').trim())
+}
+
+fn is_hubu_mcp_table(table: &str) -> bool {
+    table == "mcp_servers.hubu" || table.starts_with("mcp_servers.hubu.")
+}
+
+fn toml_basic_string(value: &str) -> String {
+    let mut escaped = String::new();
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn protocol(base_url: &str, args: Vec<String>) -> Result<()> {
@@ -1230,7 +1580,7 @@ Commands:
   protocol   Read Hubu protocol payloads
   user       List human users
   policy     Manage spending policies
-  init       Generate local Hubu starter files
+  init       Generate starter files and configure clients
   agent      Read registered agents
   budget     Create and list budgets
   spend      Submit an agent spend request
@@ -1360,17 +1710,41 @@ Usage:
 
 fn print_init_help() {
     println!(
-        "Generate local Hubu starter files
+        "Generate local Hubu starter files and client config
 
 Usage:
   hubu init [--policy FILE] [--force]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
   --force         Overwrite an existing policy file
 
 Note:
-  Prefer `hubu policy new-template` for new policy files."
+  Prefer `hubu policy new-template` for new policy files.
+  Use `hubu init codex` to expose Hubu MCP tools to Codex across projects."
+    );
+}
+
+fn print_init_codex_help() {
+    println!(
+        "Configure Codex to discover Hubu MCP tools
+
+Usage:
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--force] [--dry-run] [--trust-client-approval]
+
+Options:
+  --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
+  --mcp-server FILE         hubu-mcp-server executable (default: sibling of hubu, then PATH)
+  --token-file FILE         Hubu auth token file (default: $HUBU_AUTH_TOKEN_FILE, ./hubu.auth-token, or ~/.hubu/hubu.auth-token)
+  --force                  Replace an existing unmanaged [mcp_servers.hubu] config block
+  --dry-run                Print the managed Codex config block without writing files
+  --trust-client-approval  Enable MCP setup/admin tools when the Codex client prompts for destructive tool approval
+
+Notes:
+  Hubu spend tools are pre-approved in Codex; Hubu policy still controls needs_approval outcomes.
+  Keep --trust-client-approval off for normal agent spend workflows.
+  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE shown by this command."
     );
 }
 
@@ -1459,4 +1833,95 @@ fn print_ledger_help() {
 Usage:
   hubu ledger list"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_mcp_block_escapes_toml_strings() {
+        let block = codex_mcp_config_block(
+            Path::new("/tmp/hubu \"dev\"/hubu-mcp-server"),
+            "http://127.0.0.1:8787",
+            Path::new("/tmp/hubu\\token"),
+            false,
+        );
+
+        assert!(block.contains(HUBU_CODEX_MCP_BEGIN));
+        assert!(block.contains("command = \"/tmp/hubu \\\"dev\\\"/hubu-mcp-server\""));
+        assert!(block.contains("HUBU_AUTH_TOKEN_FILE = \"/tmp/hubu\\\\token\""));
+        assert!(block.contains("[mcp_servers.hubu.tools.hubu_authorize_spend]"));
+        assert!(block.contains("[mcp_servers.hubu.tools.hubu_submit_spend]"));
+        assert!(block.contains("approval_mode = \"approve\""));
+        assert!(!block.contains("HUBU_MCP_TRUST_CLIENT_APPROVAL"));
+        assert!(block.contains(HUBU_CODEX_MCP_END));
+    }
+
+    #[test]
+    fn codex_mcp_block_can_enable_trusted_client_approval() {
+        let block = codex_mcp_config_block(
+            Path::new("/tmp/hubu-mcp-server"),
+            "http://127.0.0.1:8787",
+            Path::new("/tmp/hubu.auth-token"),
+            true,
+        );
+
+        assert!(block.contains("HUBU_MCP_TRUST_CLIENT_APPROVAL = \"1\""));
+        let env_index = block.find("[mcp_servers.hubu.env]").unwrap();
+        let trust_index = block.find("HUBU_MCP_TRUST_CLIENT_APPROVAL").unwrap();
+        let tool_index = block
+            .find("[mcp_servers.hubu.tools.hubu_authorize_spend]")
+            .unwrap();
+        assert!(env_index < trust_index);
+        assert!(trust_index < tool_index);
+    }
+
+    #[test]
+    fn upsert_managed_block_appends_without_touching_existing_config() {
+        let existing = "model = \"gpt-5.5\"\n";
+        let block = "# >>> hubu managed codex mcp\n[mcp_servers.hubu]\ncommand = \"/tmp/hubu-mcp-server\"\n# <<< hubu managed codex mcp\n";
+
+        let updated = upsert_managed_codex_mcp_block(existing, block, false).unwrap();
+
+        assert!(updated.starts_with(existing));
+        assert!(updated.contains("[mcp_servers.hubu]"));
+        assert!(updated.ends_with('\n'));
+    }
+
+    #[test]
+    fn upsert_managed_block_replaces_prior_managed_block() {
+        let existing = "model = \"gpt-5.5\"\n\n# >>> hubu managed codex mcp\n[mcp_servers.hubu]\ncommand = \"old\"\n# <<< hubu managed codex mcp\n\nsandbox_mode = \"workspace-write\"\n";
+        let block = "# >>> hubu managed codex mcp\n[mcp_servers.hubu]\ncommand = \"new\"\n# <<< hubu managed codex mcp\n";
+
+        let updated = upsert_managed_codex_mcp_block(existing, block, false).unwrap();
+
+        assert!(updated.contains("command = \"new\""));
+        assert!(!updated.contains("command = \"old\""));
+        assert!(updated.contains("sandbox_mode = \"workspace-write\""));
+    }
+
+    #[test]
+    fn upsert_rejects_unmanaged_hubu_config_without_force() {
+        let existing = "[mcp_servers.hubu]\ncommand = \"custom\"\n";
+        let block = "# >>> hubu managed codex mcp\n[mcp_servers.hubu]\ncommand = \"new\"\n# <<< hubu managed codex mcp\n";
+
+        let error = upsert_managed_codex_mcp_block(existing, block, false).unwrap_err();
+
+        assert!(error.to_string().contains("unmanaged [mcp_servers.hubu]"));
+    }
+
+    #[test]
+    fn upsert_force_replaces_unmanaged_hubu_tables_only() {
+        let existing = "[mcp_servers.other]\ncommand = \"keep\"\n\n[mcp_servers.hubu] # old Hubu config\ncommand = \"old\"\n\n[mcp_servers.hubu.env]\nHUBU_URL = \"old\"\n\n[features]\nhooks = true\n";
+        let block = "# >>> hubu managed codex mcp\n[mcp_servers.hubu]\ncommand = \"new\"\n# <<< hubu managed codex mcp\n";
+
+        let updated = upsert_managed_codex_mcp_block(existing, block, true).unwrap();
+
+        assert!(updated.contains("[mcp_servers.other]"));
+        assert!(updated.contains("[features]"));
+        assert!(updated.contains("command = \"new\""));
+        assert!(!updated.contains("command = \"old\""));
+        assert!(!updated.contains("HUBU_URL = \"old\""));
+    }
 }
