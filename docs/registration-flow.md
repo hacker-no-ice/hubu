@@ -11,8 +11,10 @@ See [Agent Registration Protocol](agent-registration-protocol.md) for the v1
 client/server protocol, fingerprint payloads, canonicalization rules, and
 low-friction human review flow.
 
-The prototype keeps all records in memory with `HashMap` indexes. The shape is
-intended to move cleanly to storage later.
+The local demo server persists registration records in the shared SQLite
+database selected by `HUBU_DB_PATH`, defaulting to `hubu.sqlite3` in the server
+working directory. The core registration manager also keeps an in-memory store
+for unit tests and embedded experiments.
 
 Each record has an internal UUID-backed `id` and an external `pub_id`.
 Internally, Hubu uses the UUID as the stable unique identifier. Public API and

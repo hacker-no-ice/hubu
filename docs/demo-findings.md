@@ -17,14 +17,14 @@ here rather than folded into behavior changes.
 - The demo API now owns an in-process budget manager. Human-scoped budgets are
   reserved before payment; successful payments settle the hold into consumed
   balance, while failed payments release the hold back to available balance.
-- Registration, spend decisions, auth tokens, policies, and payments are all
-  process-local in this demo path. Budget state and the SQLite ledger are also
-  in memory.
+- The demo path now persists users, registration records, policies, spend
+  decisions, auth tokens, budgets, payment attempts, and ledger entries in the
+  local SQLite database.
 
 ## Improvement Opportunities
 
-- Add persistent demo storage once the project is ready for repeatable demos
-  across server restarts.
+- Add migration and backup guidance if the demo SQLite store becomes more than
+  local throwaway state.
 - Add first-class API DTOs near the core domain models if the HTTP surface grows
   beyond demo usage.
 - Add agent-scoped budget and ledger reads once the API exposes enough account
