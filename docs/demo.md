@@ -432,6 +432,9 @@ hubu [--url http://127.0.0.1:8787] budget create --amount AMOUNT [--agent-id ID]
 hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
 hubu [--url http://127.0.0.1:8787] budget list
 hubu [--url http://127.0.0.1:8787] spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+hubu [--url http://127.0.0.1:8787] spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+hubu [--url http://127.0.0.1:8787] spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+hubu [--url http://127.0.0.1:8787] spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
 hubu [--url http://127.0.0.1:8787] ledger list
 hubu [--url http://127.0.0.1:8787] health
 ```
@@ -442,8 +445,9 @@ after `cargo build`.
 
 ## Known Limitations
 
-- Server state is in memory. Restarting `hubu-server` clears registered agents,
-  policies, spend decisions, budgets, payments, and ledger records.
+- Local demo state is stored in SQLite at `HUBU_DB_PATH`, defaulting to
+  `hubu.sqlite3` in the server working directory. Use
+  `./scripts/reset-local-state.sh --yes` to clear it.
 - `hubu budget list` shows current-user budgets and budgets scoped to agents
   owned by the current user.
 - The server uses a minimal local HTTP adapter for demo use, not a production

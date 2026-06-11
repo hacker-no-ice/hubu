@@ -14,11 +14,11 @@ By default, this writes `policies/policy.yaml`. You can choose a different path:
 hubu policy new-template --path policies/openai-allowlist.yaml
 ```
 
-Then attach the policy to an agent:
+Then attach the policy to the current human user:
 
 ```sh
 hubu policy validate --path policies/openai-allowlist.yaml
-hubu policy add --agent-id AGENT_ID --path policies/openai-allowlist.yaml
+hubu policy add --path policies/openai-allowlist.yaml
 ```
 
 Policies are for single-request guardrails such as merchant allowlists,

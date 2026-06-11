@@ -48,8 +48,8 @@ webhooks, settlement IDs, on-chain transaction hashes, and retry metadata.
 `PaymentManager` depends on `SpendAuthorizationValidator` rather than directly
 depending on `hubu-core::SpendManager`.
 
-That keeps wallet/payment orchestration decoupled from the current in-memory
-spend implementation. A future adapter can validate that:
+That keeps wallet/payment orchestration decoupled from the spend manager and
+storage implementation. A future adapter can validate that:
 
 - the token exists
 - the token is not expired, used, or revoked
@@ -78,9 +78,11 @@ entries are inserted.
 
 ## First-Milestone Limitations
 
-- Failed rail attempts return a failed payment response but do not yet persist a
-  failed-payment journal row.
-- Payment records are idempotent in memory; the durable system of record in this
-  slice is the SQLite ledger for successful money movement.
+- Failed rail attempts return a failed payment response and are persisted in the
+  local payment-attempt table, but Hubu does not yet expose a separate failed
+  payment journal view.
+- Payment responses are cached in memory for idempotency during a process run
+  and hydrated from SQLite payment-attempt records on restart. Successful money
+  movement is also recorded in the SQLite ledger.
 - Real rail adapters still need rail-specific confirmation and reconciliation
   flows.
