@@ -249,7 +249,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "hubu_authorize_spend",
-            "Authorize an agent spend request and reserve budget without executing payment.",
+            "Authorize an agent spend request and reserve cap/budget balance without executing payment.",
             json_schema(json!({
                 "agent_id": { "type": "string" },
                 "account_id": { "type": "string" },

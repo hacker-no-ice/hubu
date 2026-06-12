@@ -1,8 +1,8 @@
 # Hubu Local Demo
 
 This demo runs Hubu locally and exercises the onboarding, registration, policy,
-budget creation, spend evaluation, mock payment orchestration, budget hold, and
-ledger recording flow through the `hubu` CLI.
+cap/budget creation, spend evaluation, mock payment orchestration, cap/budget
+hold lifecycle, and ledger recording flow through the `hubu` CLI.
 
 ## Setup
 
@@ -248,11 +248,20 @@ Budget hold
   consumed: $20.00
   frozen: $0.00
   remaining: $55.00
+Cap hold
+  status: settled
+  hold_id: 7a0cc7cb-2480-4ef0-99a7-5d970872490e
+  cap_id: cap_8x7k2m4q9v1c
+  amount: $20.00
+  consumed: $20.00
+  frozen: $0.00
+  remaining: $55.00
 ```
 
 The owner shown on the payment is the initialized human user. The agent spends
 under authority delegated by that user. Allowed spend reserves the active budget
-before payment; successful payment settles the hold into consumed balance.
+and active user cap before payment; successful payment settles both holds into
+consumed balance.
 
 ### 6a. Authorize Spend Without Executing Payment
 
@@ -282,12 +291,20 @@ Budget hold
   consumed: $20.00
   frozen: $5.00
   remaining: $50.00
+Cap hold
+  status: frozen
+  hold_id: 7a0cc7cb-2480-4ef0-99a7-5d970872490e
+  cap_id: cap_8x7k2m4q9v1c
+  amount: $5.00
+  consumed: $20.00
+  frozen: $5.00
+  remaining: $50.00
 ```
 
 This is the first slice of the logo-generation demo path: Hubu evaluates policy,
-issues a spend authorization token, and freezes budget, but does not submit
-payment or write a ledger transaction. A later vendor/model proxy can consume
-the token while keeping provider API keys inside Hubu.
+issues a spend authorization token, and freezes cap and budget balance, but does
+not submit payment or write a ledger transaction. A later vendor/model proxy can
+consume the token while keeping provider API keys inside Hubu.
 
 ### 7. Submit an Allowed Spend Whose Mock Payment Fails
 
@@ -322,10 +339,18 @@ Budget hold
   consumed: $20.00
   frozen: $0.00
   remaining: $55.00
+Cap hold
+  status: released
+  hold_id: 7a0cc7cb-2480-4ef0-99a7-5d970872490e
+  cap_id: cap_8x7k2m4q9v1c
+  amount: $15.00
+  consumed: $20.00
+  frozen: $0.00
+  remaining: $55.00
 ```
 
-Failed mock payments release the frozen amount back to the active budget. Only
-successful payments become ledger transactions.
+Failed mock payments release the frozen amount back to the active budget and
+active cap. Only successful payments become ledger transactions.
 
 ### 8. Submit an Over-Limit Spend Request
 

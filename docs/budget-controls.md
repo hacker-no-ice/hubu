@@ -28,7 +28,7 @@ Human operators can create a user cap for all spend owned by the current user,
 or an agent budget for one registered agent:
 
 ```sh
-hubu budget create-recurring --amount 100 --recurrence daily --period-count 7
+hubu user cap set --amount 100
 hubu budget create --agent-id AGENT_ID --amount 25
 ```
 
@@ -49,20 +49,20 @@ Allowed spend follows this intended path:
 ```txt
 policy allow
   -> check active user cap
-  -> check any narrower agent/task budget
-  -> reserve allowed balance into frozen hold state
+  -> check active agent/task budget
+  -> reserve cap balance and budget balance into frozen hold state
   -> issue spend authorization or execute payment
-  -> settle hold on success, release hold on failure
+  -> settle both holds on success, release both holds on failure
 ```
 
 `hubu spend authorize` stops after policy and budget reservation. It returns a
-scoped spend authorization token and freezes budget without executing payment or
-writing a ledger transaction.
+scoped spend authorization token and freezes cap and budget balances without
+executing payment or writing a ledger transaction.
 
 `hubu spend` continues into the wallet rail. In the current local server, that
-rail is mocked. Successful payment settles the hold into consumed budget and
-records a ledger transaction; failed payment releases the hold back to
-remaining budget.
+rail is mocked. Successful payment settles the cap hold and budget hold into
+consumed balance and records a ledger transaction; failed payment releases both
+holds back to remaining balance.
 
 Hubu does not execute payment when:
 
@@ -77,23 +77,24 @@ Hubu does not execute payment when:
 Use the CLI to create and inspect user caps and agent budgets:
 
 ```sh
-hubu budget create --amount 50
-hubu budget create-recurring --amount 100 --recurrence monthly --period-count 3
+hubu user cap set --amount 50
+hubu user cap show
+hubu budget create --agent-id AGENT_ID --amount 25
+hubu budget create-recurring --agent-id AGENT_ID --amount 25 --recurrence monthly --period-count 3
 hubu budget list
 ```
 
-Without `--agent-id`, `hubu budget create` and `hubu budget create-recurring`
-create a user cap. With `--agent-id`, they create an agent budget. `hubu budget
-list` shows each cap or budget's scope, status, limit, consumed balance, frozen
-balance, remaining balance, and period. Pair it with `hubu ledger list` to
-compare settled payment movement against consumed balance.
+`hubu user cap set` creates or renews the current user's cap. `hubu budget
+create` and `hubu budget create-recurring` require `--agent-id` and create agent
+budgets. `hubu user cap show` and `hubu budget list` show status, limit,
+consumed balance, frozen balance, remaining balance, and period. Pair them with
+`hubu ledger list` to compare settled payment movement against consumed balance.
 
 ## Current Limits
 
-The current local API persists budgets in SQLite and uses a mock payment rail.
-There is not yet a durable human approval queue for `needs_approval` decisions,
-task-scoped budget creation is not exposed through the CLI, and the local spend
-response still reports one budget hold. A follow-up implementation should make
-the user cap an always-on aggregate guardrail when agent/task budgets are also
-configured. The budget manager already enforces the reserve, settle, release,
-and overlap invariants used by the local server and MCP tools.
+The current local API persists budgets and caps in SQLite and uses a mock
+payment rail. There is not yet a durable human approval queue for
+`needs_approval` decisions, and task-scoped budget creation is not exposed
+through the CLI. The local spend response reports both `budget_hold` and
+`cap_hold`; the budget manager enforces the reserve, settle, release, and
+overlap invariants used by the local server and MCP tools.

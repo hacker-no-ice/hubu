@@ -25,9 +25,9 @@ Hubu is responsible for:
 - agent and owner identity
 - policy evaluation
 - spend authorization tokens
-- budget holds
+- cap and budget holds
 - token validation against authorized scope
-- budget settlement or release
+- cap/budget settlement or release
 - audit events for spend state transitions
 
 Executors are responsible for:
@@ -37,7 +37,7 @@ Executors are responsible for:
 - validating Hubu spend authorization before irreversible work
 - calling vendors or tools
 - storing or returning work artifacts
-- settling or releasing the Hubu budget hold
+- settling or releasing the Hubu cap/budget holds
 
 Hubu must not require model prompts, vendor API keys, provider-specific payloads,
 or execution artifacts in this protocol.
@@ -76,8 +76,8 @@ GET /.well-known/hubu-spend-executor.json
    }
    ```
 
-   Hubu evaluates policy, issues a `spend_auth_token_id`, and freezes budget in
-   a `budget_hold`.
+   Hubu evaluates policy, issues a `spend_auth_token_id`, and freezes the agent
+   budget and user cap in `budget_hold` and `cap_hold`.
 
 2. The agent sends the work request and `spend_auth_token_id` to an executor.
    The executor keeps vendor-specific secrets server-side.
@@ -101,8 +101,8 @@ GET /.well-known/hubu-spend-executor.json
    ```
 
    Hubu accepts only if the token is unexpired, unused, unrevoked, matches the
-   authorized agent/account, amount, merchant, and task, and has a frozen budget
-   hold.
+   authorized agent/account, amount, merchant, and task, and has frozen budget
+   and cap holds.
 
 4. The executor performs work with its own credentials.
 
@@ -112,7 +112,7 @@ GET /.well-known/hubu-spend-executor.json
    POST /spend/executor/settle
    ```
 
-   Hubu marks the auth token used and consumes the frozen budget hold.
+   Hubu marks the auth token used and consumes the frozen budget and cap holds.
 
 6. If work will not be performed and no irreversible billable work happened, the
    executor releases:
@@ -121,8 +121,8 @@ GET /.well-known/hubu-spend-executor.json
    POST /spend/executor/release
    ```
 
-   Hubu returns the frozen amount to remaining budget. Future validation of the
-   same token rejects the non-frozen hold.
+   Hubu returns the frozen amount to remaining budget and cap balances. Future
+   validation of the same token rejects the non-frozen holds.
 
 ## Request Fields
 
@@ -150,7 +150,7 @@ Fields:
 
 ## Response Fields
 
-Validation returns the matched spend scope and budget hold state:
+Validation returns the matched spend scope plus budget and cap hold state:
 
 ```json
 {
@@ -166,6 +166,15 @@ Validation returns the matched spend scope and budget hold state:
   "budget_hold": {
     "hold_id": "uuid",
     "budget_id": "bgt_...",
+    "status": "frozen",
+    "amount_cents": 500,
+    "consumed_amount_cents": 0,
+    "frozen_amount_cents": 500,
+    "remaining_amount_cents": 0
+  },
+  "cap_hold": {
+    "hold_id": "uuid",
+    "budget_id": "cap_...",
     "status": "frozen",
     "amount_cents": 500,
     "consumed_amount_cents": 0,
@@ -194,5 +203,5 @@ vendor.
 - Executors must settle after irreversible billable work succeeds.
 - Executors must release only when no irreversible billable work happened.
 - Executors must not reuse a token after settlement or release.
-- Hubu rejects validation when the budget hold is no longer frozen.
+- Hubu rejects validation when either hold is no longer frozen.
 - Hubu never stores executor vendor secrets through this contract.

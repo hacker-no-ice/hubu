@@ -112,8 +112,8 @@ Step-load runs should increase `HUBU_BENCH_RPS` gradually while watching
 
 The selected run stayed internally consistent under light load: every spend was
 allowed, every auth token led to one successful mock payment, every payment
-settled one budget hold, every successful payment wrote one ledger transaction,
-and the budget ended with no frozen balance.
+settled a budget hold and cap hold, every successful payment wrote one ledger
+transaction, and the budget and cap ended with no frozen balance.
 
 This does not yet prove retry safety or saturation behavior. The current run
 does not include duplicate idempotency keys, mixed policy decisions, concurrent
