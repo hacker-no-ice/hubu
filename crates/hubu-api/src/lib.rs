@@ -67,7 +67,7 @@ const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
 const TEST_AUTH_TOKEN: &str = "test-local-auth-token";
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-type DemoPaymentManager = PaymentManager<MockPaymentRail, SharedSpendAuthorizer>;
+type LocalPaymentManager = PaymentManager<MockPaymentRail, SharedSpendAuthorizer>;
 
 pub fn run_server_from_env() -> Result<()> {
     let bind_addr = env::args()
@@ -86,8 +86,8 @@ pub fn run_server(bind_addr: &str) -> Result<()> {
             "bind_addr": bind_addr,
         }),
     );
-    let listener = TcpListener::bind(bind_addr)
-        .with_context(|| format!("bind Hubu demo server to {bind_addr}"))?;
+    let listener =
+        TcpListener::bind(bind_addr).with_context(|| format!("bind Hubu server to {bind_addr}"))?;
     let state = ServerState::new()?;
 
     log_event(
@@ -148,7 +148,7 @@ struct ServerState {
     policies: Mutex<HashMap<(UserId, PolicyAssignmentScope), Policy>>,
     governance: Mutex<SqliteGovernanceRepository>,
     payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
-    payments: Mutex<DemoPaymentManager>,
+    payments: Mutex<LocalPaymentManager>,
 }
 
 impl ServerState {
@@ -1298,7 +1298,7 @@ fn simple_registration_envelope(
         },
         review: Some(RegistrationReview {
             display_name: Some(agent_name.to_string()),
-            description: Some("Registered through the Hubu demo CLI".to_string()),
+            description: Some("Registered through the Hubu CLI".to_string()),
         }),
         signature: None,
     }
@@ -1591,31 +1591,31 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
 
         Policy {
             id: match agent_pub_id.as_deref() {
-                Some(agent_pub_id) => format!("demo_policy_{agent_pub_id}"),
-                None => "demo_policy_default".to_string(),
+                Some(agent_pub_id) => format!("starter_policy_{agent_pub_id}"),
+                None => "starter_policy_default".to_string(),
             },
-            version: "demo-1".to_string(),
+            version: "starter-1".to_string(),
             owner_user_id: user.user_id.clone(),
             default_effect: Effect::NeedsApproval,
             rules: vec![
                 Rule {
-                    id: "deny_blocked_demo_merchant".to_string(),
+                    id: "deny_blocked_merchant".to_string(),
                     effect: Effect::Deny,
                     when: Condition::Eq {
                         field: Field::Merchant,
                         value: PolicyValue::String("blocked-merchant".to_string()),
                     },
-                    reason: "merchant is blocked by the demo policy".to_string(),
+                    reason: "merchant is blocked by the starter policy".to_string(),
                 },
                 Rule {
-                    id: "allow_within_demo_limit".to_string(),
+                    id: "allow_within_starter_limit".to_string(),
                     effect: Effect::Allow,
                     when: Condition::Lte {
                         field: Field::Amount,
                         value: PolicyValue::MoneyCents(daily_limit_cents),
                     },
                     reason: format!(
-                        "amount is at or below the configured demo limit of {} cents",
+                        "amount is within the configured single-spend limit of {} cents",
                         daily_limit_cents
                     ),
                 },
@@ -1976,9 +1976,9 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
             task_id: Some(authorization.reason),
             rail: PaymentRailKind::FiatMock,
             destination: PaymentDestination::FiatAccount {
-                account_ref: "demo-merchant-account".to_string(),
+                account_ref: "local-merchant-account".to_string(),
             },
-            memo: Some("Hubu demo payment".to_string()),
+            memo: Some("Hubu mock payment".to_string()),
         };
 
         let payment_audit_request = payment_request.clone();

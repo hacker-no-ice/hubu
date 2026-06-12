@@ -45,7 +45,7 @@ hubu register agent
 By default, the CLI binds the registration to the current Hubu user context,
 uses the guidance-provided
 `agent_name.default_template` as `agent_name` and the current git short SHA as
-`version_label`, falling back to `dev` when git is not available. In the demo
+`version_label`, falling back to `dev` when git is not available. In the current
 guidance, the template is `{vendor}-{workspace}` and the vendor is `codex`, so
 the default name in this repository is `codex-hubu`. Other agents can publish
 their own vendor/runtime identity through guidance. To inspect the computed
@@ -78,7 +78,7 @@ cancel before submission. Advanced clients may also expose editable code, model,
 runtime, tool, or permission fields, but those fields should not be required for
 the low-friction path.
 
-The demo CLI keeps the same low-friction defaults for name and version:
+The CLI keeps the same low-friction defaults for name and version:
 
 ```sh
 hubu register agent

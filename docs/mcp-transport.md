@@ -69,6 +69,9 @@ Approval behavior:
   prompt.
 - Setup/admin tools such as registration, policy changes, and budget creation
   should prompt before the tool call.
+- For human-initiated setup/admin work, operators can either run the equivalent
+  `hubu` CLI command themselves or ask an agent to invoke the protected MCP tool
+  after the client shows a human approval prompt.
 - If a spend response includes `requires_human_approval: true`, Hubu did not
   execute payment; the harness should show the response to the human.
 
@@ -91,6 +94,15 @@ required.
 Restart Codex after running the command. Start `hubu-server` with the
 `HUBU_AUTH_TOKEN_FILE` path printed by the command so the server and MCP adapter
 share the same bearer token.
+
+After Codex can discover Hubu tools, human-initiated actions have two paths:
+run `hubu` CLI commands directly, or ask the agent to perform the same
+setup/admin work through MCP with a human approval prompt. The second path
+requires a trusted client configuration:
+
+```sh
+hubu init codex --trust-client-approval
+```
 
 For a custom Codex config or prebuilt MCP server path:
 
@@ -163,6 +175,12 @@ Agents can call directly:
 - `hubu_authorize_spend`
 - `hubu_submit_spend`
 
+These spend tools are the normal product path for operational spend: the agent
+initiates the request, the client does not add an extra pre-call approval, and
+Hubu decides through policy and budget controls. The CLI can call the same
+server routes for local testing, but manual spend submission is not the intended
+day-to-day workflow.
+
 `hubu_submit_spend` forwards the spend request immediately. If policy returns
 `allow`, the existing Hubu server reserves budget, submits mock payment, settles
 or releases the hold, and records successful payment in the ledger. If policy
@@ -176,7 +194,7 @@ payment is executed and the MCP response includes:
 }
 ```
 
-This first scaffold exposes the approval boundary but does not yet implement a
+The current adapter exposes the approval boundary but does not yet implement a
 durable approval queue or a follow-up endpoint that resumes payment after a
 human approves a `needs_approval` spend decision.
 

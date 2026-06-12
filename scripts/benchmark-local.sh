@@ -146,7 +146,7 @@ The benchmark verifies that allowed spend decisions receive auth tokens, success
 
 ## Top Things To Address
 
-1. Replace the blocking one-connection-at-a-time demo server with a concurrent HTTP runtime.
+1. Replace the blocking one-connection-at-a-time local server with a concurrent HTTP runtime.
 2. Move shared state from coarse \`Mutex\` guards to storage and synchronization boundaries that match the domain invariants, especially spend tokens, budget holds, and ledger writes.
 3. Add idempotency and duplicate-request tests for \`/spend\` so client retries cannot double-reserve or double-settle budget.
 4. Add first-class telemetry: structured request logs, latency histograms, error counters, and budget/ledger consistency gauges.

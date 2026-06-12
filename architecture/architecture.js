@@ -13,7 +13,7 @@ const sharedLinks = {
   spend: ["Spend manager", "crates/hubu-core/src/spend/manager.rs"],
   spendModel: ["Spend model", "crates/hubu-core/src/spend/model.rs"],
   spendExecutor: ["Spend executor contract", "docs/spend-executor-contract.md"],
-  futureWallet: ["Future execution modes", "docs/future-wallet-and-credit-use-cases.md"],
+  futureWallet: ["Future execution modes", "docs/notes/future-wallet-and-credit-use-cases.md"],
   budget: ["Budget manager", "crates/hubu-core/src/budget/manager.rs"],
   budgetModel: ["Budget model", "crates/hubu-core/src/budget/model.rs"],
   payment: ["Payment manager", "crates/hubu-wallet/src/payment.rs"],
@@ -50,7 +50,7 @@ const components = {
     nodes: [
       { id: "human", label: "Human owner", sub: "funds + policy", x: 48, y: 82, w: 190, h: 94, tone: "human" },
       { id: "agent", label: "AI agent", sub: "spend requests", x: 48, y: 330, w: 190, h: 94, tone: "agent" },
-      { id: "cli", label: "Hubu CLI", sub: "demo commands", x: 334, y: 82, w: 184, h: 88, tone: "surface" },
+      { id: "cli", label: "Hubu CLI", sub: "developer commands", x: 334, y: 82, w: 184, h: 88, tone: "surface" },
       { id: "mcp", label: "MCP adapter", sub: "agent tools", x: 334, y: 330, w: 184, h: 88, tone: "surface" },
       { id: "auth", label: "Local auth", sub: "bearer token", x: 620, y: 92, w: 190, h: 88, tone: "core" },
       { id: "api", label: "Local HTTP API", sub: "orchestrator", x: 620, y: 278, w: 190, h: 112, tone: "core" },
@@ -81,7 +81,7 @@ const components = {
     title: "Local HTTP API",
     kind: "Component",
     copy:
-      "The demo server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, and stitches together registration, policy, budget, spend, payment, executor, and ledger managers.",
+      "The local server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, and stitches together registration, policy, budget, spend, payment, executor, and ledger managers.",
     responsibilities: [
       "Keeps health and guidance public while requiring a local bearer token for user setup, agent registration, policies, budgets, spend, and ledger listing.",
       "Uses the local token and current user context for protected workflow authority and agent registration ownership.",
@@ -114,7 +114,7 @@ const components = {
       "Registration keeps the human flow small while agents prepare structured identity and version payloads. The server validates fingerprints before creating or reusing records.",
     responsibilities: [
       "Publishes compact registration guidance that lets clients build envelopes for the current Hubu user context.",
-      "Accepts envelope or simple demo registration requests and resolves the owner public id before creating records.",
+      "Accepts registration envelopes or simple local registration requests and resolves the owner public id before creating records.",
       "Creates idempotent identity, version, and account records, plus a fresh session per registration.",
     ],
     links: [sharedLinks.registration, sharedLinks.registrationModel, sharedLinks.registrationProtocol, sharedLinks.common],
@@ -163,10 +163,10 @@ const components = {
     title: "Budget Manager",
     kind: "Component",
     copy:
-      "Budgets are user-scoped or agent-scoped spending limits. Approved spend freezes balance first, then payment success consumes the hold or failure releases it.",
+      "User caps and agent-scoped budgets are spending limits. Approved spend freezes balance first, then payment success consumes the hold or failure releases it.",
     responsibilities: [
-      "Creates single or finite recurring budget periods with overlap checks for user and agent scopes.",
-      "Indexes budgets by user, agent, and task scope; spend prefers an active agent budget before falling back to the user budget.",
+      "Creates single or finite recurring cap/budget periods with overlap checks for user, agent, and task scopes.",
+      "Indexes limits by user, agent, and task scope; the user cap is the outer owner guardrail, while agent/task budgets add narrower limits.",
       "Reserves, settles, releases, and expires budget holds for wallet payments and external executors.",
     ],
     links: [sharedLinks.budget, sharedLinks.budgetModel, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
@@ -278,7 +278,7 @@ const components = {
     title: "Hubu CLI",
     kind: "Interface",
     copy:
-      "The CLI is the demo-friendly human surface and setup helper. It prepares registration envelopes, posts JSON to the local API, configures Codex MCP discovery, and prints compact reviews and results.",
+      "The CLI is the human developer surface and setup helper. It prepares registration envelopes, posts JSON to the local API, configures Codex MCP discovery, and prints compact reviews and results.",
     responsibilities: [
       "Supports init, Codex MCP setup, register, user list with current-user marking, protocol, policy template/add/list commands, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
       "Writes a managed Codex config block that lets agents in other projects discover Hubu MCP tools without reading the Hubu repo.",

@@ -11,7 +11,7 @@ See [Agent Registration Protocol](agent-registration-protocol.md) for the v1
 client/server protocol, fingerprint payloads, canonicalization rules, and
 low-friction human review flow.
 
-The local demo server persists registration records in the shared SQLite
+The local server persists registration records in the shared SQLite
 database selected by `HUBU_DB_PATH`, defaulting to `hubu.sqlite3` in the server
 working directory. The core registration manager also keeps an in-memory store
 for unit tests and embedded experiments.

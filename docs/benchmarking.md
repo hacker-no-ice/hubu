@@ -121,7 +121,7 @@ budget exhaustion, or server restarts during load.
 
 ## Top Things To Address
 
-1. Replace the blocking one-connection-at-a-time demo server with a concurrent
+1. Replace the blocking one-connection-at-a-time local server with a concurrent
    HTTP runtime.
 2. Move shared state from coarse `Mutex` guards to storage and synchronization
    boundaries that match the domain invariants, especially spend tokens, budget

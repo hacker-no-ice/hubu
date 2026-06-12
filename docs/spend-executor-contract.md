@@ -13,9 +13,9 @@ Hubu controls spend; executors do work.
 Gongbu can implement this contract for model calls, image generation, or other
 vendor-backed work. Other services can implement the same contract without
 Hubu knowing their vendor APIs, credentials, retries, or artifact formats.
-See `docs/gongbu-carry-forward.md` for the Hubu image-proxy PR ideas that
+See `docs/notes/gongbu-carry-forward.md` for the Hubu image-proxy PR ideas that
 should carry into a future Gongbu implementation.
-See `docs/future-wallet-and-credit-use-cases.md` for the related future
+See `docs/notes/future-wallet-and-credit-use-cases.md` for the related future
 Hubu Wallet and credit-pool modeling discussion.
 
 ## Boundary
