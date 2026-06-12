@@ -199,7 +199,7 @@ impl Config {
 #[derive(Debug)]
 struct Scenario {
     agents: Vec<String>,
-    budget_id: String,
+    budget_ids: Vec<String>,
 }
 
 fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> {
@@ -221,6 +221,7 @@ fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> 
     )?;
 
     let mut agents = Vec::with_capacity(config.agent_count);
+    let mut budget_ids = Vec::with_capacity(config.agent_count);
     for index in 0..config.agent_count {
         let agent = client.post(
             "/agents/register",
@@ -231,25 +232,35 @@ fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> 
             }),
         )?;
         let agent_id = string_at(&agent, "agent_id")?.to_string();
+        let budget = client.post(
+            "/budgets",
+            json!({
+                "agent_id": agent_id,
+                "amount_cents": config.budget_cents,
+                "starting_at": null,
+                "ending_before": null,
+            }),
+        )?;
+        let budget_id = budget
+            .get("budget")
+            .and_then(|budget| budget.get("budget_id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("budget response missing budget.budget_id"))?
+            .to_string();
         agents.push(agent_id);
+        budget_ids.push(budget_id);
     }
 
-    let budget = client.post(
-        "/budgets",
+    client.post(
+        "/user/cap",
         json!({
-            "amount_cents": config.budget_cents,
+            "amount_cents": config.budget_cents.saturating_mul(config.agent_count as i64),
             "starting_at": null,
             "ending_before": null,
         }),
     )?;
-    let budget_id = budget
-        .get("budget")
-        .and_then(|budget| budget.get("budget_id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("budget response missing budget.budget_id"))?
-        .to_string();
 
-    Ok(Scenario { agents, budget_id })
+    Ok(Scenario { agents, budget_ids })
 }
 
 fn run_benchmark(client: &HubuClient, scenario: &Scenario, config: &Config) -> Result<BenchReport> {
@@ -453,7 +464,7 @@ impl BenchReport {
             .and_then(Value::as_array)
             .map(Vec::len)
             .unwrap_or_default();
-        let budget_totals = budget_totals(&budgets, &scenario.budget_id);
+        let budget_totals = budget_totals(&budgets, &scenario.budget_ids);
         let (budget_consumed_cents, budget_frozen_cents, budget_remaining_cents) =
             budget_totals.unwrap_or_default();
 
@@ -496,8 +507,8 @@ impl BenchReport {
         }
         if budget_totals.is_none() {
             correctness_notes.push(format!(
-                "created budget {} was not found in the budget list",
-                scenario.budget_id
+                "one or more created budgets were not found in the budget list: {}",
+                scenario.budget_ids.join(", ")
             ));
         }
         let expected_consumed = payments_succeeded as i64 * config.amount_cents;
@@ -576,7 +587,7 @@ fn print_report(config: &Config, scenario: &Scenario, report: &BenchReport) {
     println!("  workers: {}", config.workers);
     println!("  amount_cents: {}", config.amount_cents);
     println!("  budget_cents: {}", config.budget_cents);
-    println!("  budget_id: {}", scenario.budget_id);
+    println!("  budget_ids: {}", scenario.budget_ids.join(", "));
     println!("performance");
     println!("  requests: {}", report.total);
     println!("  elapsed_seconds: {:.3}", report.elapsed.as_secs_f64());
@@ -640,22 +651,33 @@ fn count_hold_status(results: &[RequestResult], status: &str) -> usize {
         .count()
 }
 
-fn budget_totals(value: &Value, budget_id: &str) -> Option<(i64, i64, i64)> {
-    value
+fn budget_totals(value: &Value, budget_ids: &[String]) -> Option<(i64, i64, i64)> {
+    let budgets = value
         .get("budgets")
         .and_then(Value::as_array)
-        .and_then(|budgets| {
-            budgets
-                .iter()
-                .find(|budget| budget.get("budget_id").and_then(Value::as_str) == Some(budget_id))
+        .filter(|budgets| {
+            budget_ids.iter().all(|budget_id| {
+                budgets.iter().any(|budget| {
+                    budget.get("budget_id").and_then(Value::as_str) == Some(budget_id.as_str())
+                })
+            })
+        })?;
+
+    let totals = budgets
+        .iter()
+        .filter(|budget| {
+            budget_ids.iter().any(|budget_id| {
+                budget.get("budget_id").and_then(Value::as_str) == Some(budget_id.as_str())
+            })
         })
-        .map(|budget| {
+        .fold((0, 0, 0), |totals, budget| {
             (
-                integer_at_or_zero(budget, "consumed_amount_cents"),
-                integer_at_or_zero(budget, "frozen_amount_cents"),
-                integer_at_or_zero(budget, "remaining_amount_cents"),
+                totals.0 + integer_at_or_zero(budget, "consumed_amount_cents"),
+                totals.1 + integer_at_or_zero(budget, "frozen_amount_cents"),
+                totals.2 + integer_at_or_zero(budget, "remaining_amount_cents"),
             )
-        })
+        });
+    Some(totals)
 }
 
 fn integer_at_or_zero(value: &Value, key: &str) -> i64 {
@@ -851,7 +873,7 @@ impl fmt::Display for HelpText {
         )?;
         writeln!(
             f,
-            "  --budget-cents N             user budget [default: 2x planned spend]"
+            "  --budget-cents N             per-agent budget [default: 2x planned spend]"
         )?;
         writeln!(
             f,
@@ -898,7 +920,7 @@ mod tests {
         });
 
         assert_eq!(
-            budget_totals(&budgets, "created-budget"),
+            budget_totals(&budgets, &[String::from("created-budget")]),
             Some((8000, 0, 8000))
         );
     }
@@ -916,6 +938,46 @@ mod tests {
             ]
         });
 
-        assert_eq!(budget_totals(&budgets, "created-budget"), None);
+        assert_eq!(
+            budget_totals(&budgets, &[String::from("created-budget")]),
+            None
+        );
+    }
+
+    #[test]
+    fn budget_totals_sums_created_budgets_by_id() {
+        let budgets = json!({
+            "budgets": [
+                {
+                    "budget_id": "created-budget-1",
+                    "consumed_amount_cents": 300,
+                    "frozen_amount_cents": 0,
+                    "remaining_amount_cents": 700,
+                },
+                {
+                    "budget_id": "other-budget",
+                    "consumed_amount_cents": 999,
+                    "frozen_amount_cents": 10,
+                    "remaining_amount_cents": 1,
+                },
+                {
+                    "budget_id": "created-budget-2",
+                    "consumed_amount_cents": 400,
+                    "frozen_amount_cents": 0,
+                    "remaining_amount_cents": 600,
+                }
+            ]
+        });
+
+        assert_eq!(
+            budget_totals(
+                &budgets,
+                &[
+                    String::from("created-budget-1"),
+                    String::from("created-budget-2")
+                ]
+            ),
+            Some((700, 0, 1300))
+        );
     }
 }

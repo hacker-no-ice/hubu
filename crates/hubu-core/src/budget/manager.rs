@@ -21,7 +21,7 @@ pub struct BudgetManager {
     budgets: HashMap<BudgetId, Budget>,
     budget_balances: HashMap<BudgetId, BudgetBalance>,
     budget_holds: HashMap<BudgetHoldId, BudgetHold>,
-    hold_by_spend_decision: HashMap<SpendDecisionId, BudgetHoldId>,
+    hold_ids_by_spend_decision: HashMap<SpendDecisionId, Vec<BudgetHoldId>>,
 
     budget_ids_by_user_id: HashMap<UserId, Vec<BudgetId>>,
     budget_ids_by_agent_id: HashMap<AgentId, Vec<BudgetId>>,
@@ -34,7 +34,7 @@ impl BudgetManager {
             budgets: HashMap::new(),
             budget_balances: HashMap::new(),
             budget_holds: HashMap::new(),
-            hold_by_spend_decision: HashMap::new(),
+            hold_ids_by_spend_decision: HashMap::new(),
             budget_ids_by_user_id: HashMap::new(),
             budget_ids_by_agent_id: HashMap::new(),
             budget_ids_by_task_id: HashMap::new(),
@@ -58,8 +58,10 @@ impl BudgetManager {
         }
         for hold in holds {
             manager
-                .hold_by_spend_decision
-                .insert(hold.spend_decision_id.clone(), hold.id.clone());
+                .hold_ids_by_spend_decision
+                .entry(hold.spend_decision_id.clone())
+                .or_default()
+                .push(hold.id.clone());
             manager.budget_holds.insert(hold.id.clone(), hold);
         }
         manager
@@ -178,8 +180,12 @@ impl BudgetManager {
         }
 
         if self
-            .hold_by_spend_decision
-            .contains_key(&request.spend_decision_id)
+            .hold_ids_by_spend_decision
+            .get(&request.spend_decision_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|hold_id| self.budget_holds.get(hold_id))
+            .any(|hold| hold.budget_id == request.budget_id)
         {
             log_budget_reservation_rejected(&request, "duplicate_spend_decision_hold");
             return Err(BudgetManagerError::DuplicateSpendDecisionHold);
@@ -234,8 +240,10 @@ impl BudgetManager {
             expires_at: request.expires_at,
         };
 
-        self.hold_by_spend_decision
-            .insert(hold.spend_decision_id.clone(), hold.id.clone());
+        self.hold_ids_by_spend_decision
+            .entry(hold.spend_decision_id.clone())
+            .or_default()
+            .push(hold.id.clone());
         self.budget_holds.insert(hold.id.clone(), hold.clone());
 
         log_event(
@@ -310,6 +318,7 @@ impl BudgetManager {
         hold.settle()?;
         balance.frozen_amount_cents -= hold.amount_cents;
         balance.consumed_amount_cents += hold.amount_cents;
+        refresh_budget_status(&mut self.budgets, &hold.budget_id, balance, hold.updated_at);
 
         log_event(
             "info",
@@ -366,6 +375,7 @@ impl BudgetManager {
         hold.release()?;
         balance.frozen_amount_cents -= hold.amount_cents;
         balance.remaining_amount_cents += hold.amount_cents;
+        refresh_budget_status(&mut self.budgets, &hold.budget_id, balance, hold.updated_at);
 
         log_event(
             "info",
@@ -433,6 +443,7 @@ impl BudgetManager {
             hold.updated_at = now;
             balance.frozen_amount_cents -= hold.amount_cents;
             balance.remaining_amount_cents += hold.amount_cents;
+            refresh_budget_status(&mut self.budgets, &hold.budget_id, balance, now);
 
             log_event(
                 "info",
@@ -494,9 +505,51 @@ impl BudgetManager {
         &self,
         spend_decision_id: &SpendDecisionId,
     ) -> Option<BudgetHold> {
-        self.hold_by_spend_decision
+        self.hold_ids_by_spend_decision
             .get(spend_decision_id)
+            .and_then(|hold_ids| hold_ids.first())
             .and_then(|hold_id| self.get_budget_hold(hold_id))
+    }
+
+    pub fn get_budget_holds_by_spend_decision(
+        &self,
+        spend_decision_id: &SpendDecisionId,
+    ) -> Vec<BudgetHold> {
+        self.hold_ids_by_spend_decision
+            .get(spend_decision_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|hold_id| self.get_budget_hold(hold_id))
+            .collect()
+    }
+
+    pub fn revoke_budget(
+        &mut self,
+        budget_id: &BudgetId,
+    ) -> Result<BudgetWithBalance, BudgetManagerError> {
+        let balance = self
+            .budget_balances
+            .get(budget_id)
+            .ok_or(BudgetManagerError::MissingBudgetBalance)?;
+        if balance.frozen_amount_cents > 0 {
+            return Err(BudgetManagerError::BudgetHasFrozenHolds);
+        }
+
+        let budget = self
+            .budgets
+            .get_mut(budget_id)
+            .ok_or(BudgetManagerError::UnknownBudget)?;
+        if !matches!(budget.status, BudgetStatus::Active) {
+            return Err(BudgetManagerError::BudgetNotActive);
+        }
+
+        budget.status = BudgetStatus::Revoked;
+        budget.updated_at = Utc::now();
+
+        Ok(BudgetWithBalance {
+            budget: budget.clone(),
+            balance: balance.clone(),
+        })
     }
 
     fn create_budget_for_period(
@@ -588,7 +641,8 @@ impl BudgetManager {
         period: &TimePeriod,
     ) -> bool {
         self.budgets.values().any(|budget| {
-            budget.currency == currency
+            matches!(budget.status, BudgetStatus::Active)
+                && budget.currency == currency
                 && scopes_match(&budget.scope, scope)
                 && periods_overlap(&budget.period, period)
         })
@@ -664,6 +718,30 @@ fn budget_with_balance(
         budget: budgets.get(budget_id)?.clone(),
         balance: budget_balances.get(budget_id)?.clone(),
     })
+}
+
+fn refresh_budget_status(
+    budgets: &mut HashMap<BudgetId, Budget>,
+    budget_id: &BudgetId,
+    balance: &BudgetBalance,
+    now: DateTime<Utc>,
+) {
+    let Some(budget) = budgets.get_mut(budget_id) else {
+        return;
+    };
+    match &budget.status {
+        BudgetStatus::Active
+            if balance.remaining_amount_cents == 0 && balance.frozen_amount_cents == 0 =>
+        {
+            budget.status = BudgetStatus::Exhausted;
+            budget.updated_at = now;
+        }
+        BudgetStatus::Exhausted if balance.remaining_amount_cents > 0 => {
+            budget.status = BudgetStatus::Active;
+            budget.updated_at = now;
+        }
+        _ => {}
+    }
 }
 
 fn next_period_boundary(
@@ -753,6 +831,73 @@ mod tests {
         assert_eq!(created.balance.frozen_amount_cents, 0);
         assert_eq!(created.balance.remaining_amount_cents, 10_000);
         assert!(manager.get_budget_by_id(&created.budget.id).is_some());
+    }
+
+    #[test]
+    fn revoke_budget_marks_budget_inactive() {
+        let mut manager = BudgetManager::new();
+        let created = create_user_budget(&mut manager, 10_000);
+
+        let revoked = manager
+            .revoke_budget(&created.budget.id)
+            .expect("active budget without holds should revoke");
+
+        assert!(matches!(revoked.budget.status, BudgetStatus::Revoked));
+        assert!(matches!(
+            manager
+                .get_budget_by_id(&created.budget.id)
+                .expect("budget should remain available")
+                .budget
+                .status,
+            BudgetStatus::Revoked
+        ));
+    }
+
+    #[test]
+    fn revoke_budget_rejects_frozen_holds() {
+        let mut manager = BudgetManager::new();
+        let created = create_user_budget(&mut manager, 10_000);
+        manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: created.budget.id.clone(),
+                spend_decision_id: SpendDecisionId::new(),
+                amount_cents: 1_000,
+                currency: Currency::Usd,
+                expires_at: Utc::now() + Duration::minutes(5),
+            })
+            .expect("budget should reserve");
+
+        let error = manager
+            .revoke_budget(&created.budget.id)
+            .expect_err("budget with frozen holds should not revoke");
+
+        assert!(matches!(error, BudgetManagerError::BudgetHasFrozenHolds));
+    }
+
+    #[test]
+    fn revoked_budget_does_not_block_replacement_period() {
+        let mut manager = BudgetManager::new();
+        let user_id = UserId::new();
+        let created = manager
+            .create_single_budget(CreateSingleBudgetRequest {
+                scope: BudgetScope::User(user_id.clone()),
+                amount_limit_cents: 10_000,
+                currency: Currency::Usd,
+                period: period(2026, 6, 1, 2026, 7, 1),
+            })
+            .expect("first budget should be created");
+
+        manager
+            .revoke_budget(&created.budget.id)
+            .expect("budget should revoke");
+        manager
+            .create_single_budget(CreateSingleBudgetRequest {
+                scope: BudgetScope::User(user_id),
+                amount_limit_cents: 20_000,
+                currency: Currency::Usd,
+                period: period(2026, 6, 15, 2026, 7, 1),
+            })
+            .expect("revoked budget should not block overlapping replacement");
     }
 
     #[test]
@@ -850,6 +995,32 @@ mod tests {
                 period: period(2026, 6, 15, 2026, 7, 15),
             })
             .expect_err("overlapping budget should be rejected");
+
+        assert!(matches!(error, BudgetManagerError::OverlappingBudgetPeriod));
+    }
+
+    #[test]
+    fn create_single_budget_rejects_overlap_for_same_agent_scope() {
+        let mut manager = BudgetManager::new();
+        let agent_id = AgentId::new();
+
+        manager
+            .create_single_budget(CreateSingleBudgetRequest {
+                scope: BudgetScope::Agent(agent_id.clone()),
+                amount_limit_cents: 10_000,
+                currency: Currency::Usd,
+                period: period(2026, 6, 1, 2026, 7, 1),
+            })
+            .expect("first agent budget should be created");
+
+        let error = manager
+            .create_single_budget(CreateSingleBudgetRequest {
+                scope: BudgetScope::Agent(agent_id),
+                amount_limit_cents: 10_000,
+                currency: Currency::Usd,
+                period: period(2026, 6, 15, 2026, 7, 15),
+            })
+            .expect_err("overlapping agent budget should be rejected");
 
         assert!(matches!(error, BudgetManagerError::OverlappingBudgetPeriod));
     }
@@ -1002,6 +1173,102 @@ mod tests {
         assert_eq!(response.balance.frozen_amount_cents, 0);
         assert_eq!(response.balance.consumed_amount_cents, 3_000);
         assert_eq!(response.balance.remaining_amount_cents, 7_000);
+    }
+
+    #[test]
+    fn fully_reserved_budget_is_not_exhausted_until_hold_settles() {
+        let mut manager = BudgetManager::new();
+        let created = create_user_budget(&mut manager, 1_000);
+        let budget_id = created.budget.id.clone();
+        let reservation = manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: budget_id.clone(),
+                spend_decision_id: SpendDecisionId::new(),
+                amount_cents: 1_000,
+                currency: Currency::Usd,
+                expires_at: Utc::now() + Duration::minutes(5),
+            })
+            .expect("budget should be reserved");
+
+        let reserved = manager
+            .get_budget_by_id(&budget_id)
+            .expect("budget should exist");
+        assert!(matches!(reserved.budget.status, BudgetStatus::Active));
+        assert_eq!(reserved.balance.remaining_amount_cents, 0);
+        assert_eq!(reserved.balance.frozen_amount_cents, 1_000);
+
+        manager
+            .settle_budget(&reservation.hold.id)
+            .expect("hold should settle");
+        let settled = manager
+            .get_budget_by_id(&budget_id)
+            .expect("budget should exist");
+        assert!(matches!(settled.budget.status, BudgetStatus::Exhausted));
+        assert_eq!(settled.balance.remaining_amount_cents, 0);
+        assert_eq!(settled.balance.frozen_amount_cents, 0);
+    }
+
+    #[test]
+    fn released_full_reservation_restores_active_budget() {
+        let mut manager = BudgetManager::new();
+        let created = create_user_budget(&mut manager, 1_000);
+        let budget_id = created.budget.id.clone();
+        let reservation = manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: budget_id.clone(),
+                spend_decision_id: SpendDecisionId::new(),
+                amount_cents: 1_000,
+                currency: Currency::Usd,
+                expires_at: Utc::now() + Duration::minutes(5),
+            })
+            .expect("budget should be reserved");
+
+        manager
+            .release_budget(&reservation.hold.id)
+            .expect("hold should release");
+        let released = manager
+            .get_budget_by_id(&budget_id)
+            .expect("budget should exist");
+        assert!(matches!(released.budget.status, BudgetStatus::Active));
+        assert_eq!(released.balance.remaining_amount_cents, 1_000);
+        assert_eq!(released.balance.frozen_amount_cents, 0);
+    }
+
+    #[test]
+    fn exhausted_budget_does_not_block_new_overlapping_budget() {
+        let mut manager = BudgetManager::new();
+        let user_id = UserId::new();
+        let created = manager
+            .create_single_budget(CreateSingleBudgetRequest {
+                scope: BudgetScope::User(user_id.clone()),
+                amount_limit_cents: 1_000,
+                currency: Currency::Usd,
+                period: active_period(),
+            })
+            .expect("budget should be created");
+        let reservation = manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: created.budget.id.clone(),
+                spend_decision_id: SpendDecisionId::new(),
+                amount_cents: 1_000,
+                currency: Currency::Usd,
+                expires_at: Utc::now() + Duration::minutes(5),
+            })
+            .expect("budget should be reserved");
+        manager
+            .settle_budget(&reservation.hold.id)
+            .expect("hold should settle");
+
+        let renewed = manager
+            .create_single_budget(CreateSingleBudgetRequest {
+                scope: BudgetScope::User(user_id),
+                amount_limit_cents: 2_000,
+                currency: Currency::Usd,
+                period: active_period(),
+            })
+            .expect("exhausted budget should not block renewal");
+
+        assert_eq!(renewed.balance.remaining_amount_cents, 2_000);
     }
 
     #[test]

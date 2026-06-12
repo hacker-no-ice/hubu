@@ -27,10 +27,11 @@ and MCP transport adapter.
 - Registers agents with stable identity, version, account, and session records
 - Evaluates spend requests through deterministic policy rules
 - Issues spend authorization tokens for allowed requests
-- Can authorize spend and freeze budget without executing payment, so a future
-  Hubu-hosted vendor proxy can consume scoped authorization
+- Can authorize spend and freeze cap/budget capacity without executing payment,
+  so a future Hubu-hosted vendor proxy can consume scoped authorization
 - Creates user caps and agent-scoped single or recurring budgets
-- Reserves budget before payment, then settles or releases the hold from the payment result
+- Reserves cap/budget capacity before payment, then settles or releases both
+  holds from the payment result
 - Orchestrates mock payments after spend authorization
 - Records successful payments in an immutable double-entry SQLite ledger
 - Exposes a local `hubu-server`, human-facing `hubu` CLI, and MCP tools that
@@ -65,7 +66,7 @@ hubu-server
 ```
 
 In another terminal from the same working directory, set up a human, register an
-agent, attach policy, and create user caps or agent budgets:
+agent, attach policy, set a user cap, and create an agent budget:
 
 ```sh
 hubu health
@@ -82,8 +83,9 @@ hubu policy validate --path policies/starter.yaml
 hubu policy add --path policies/starter.yaml
 hubu policy list
 
-hubu budget create-recurring --amount 100 --recurrence daily --period-count 7
+hubu user cap set --amount 100
 hubu budget create --agent-id AGENT_ID --amount 25
+hubu user cap show
 hubu budget list
 ```
 
@@ -97,6 +99,7 @@ To smoke-test the agent-initiated spend path from the CLI:
 ```sh
 hubu spend authorize --agent-id AGENT_ID --amount 5 --reason "Reserve model API credits"
 hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
+hubu user cap show
 hubu budget list
 hubu ledger list
 ```
@@ -135,9 +138,10 @@ Run the scripted local walkthrough when you want a repeatable end-to-end trace:
 ./scripts/demo.sh
 ```
 
-The script starts Hubu locally, registers a human and agent, adds a policy,
-creates a recurring budget, submits allowed, failed-payment, approval-required,
-and denied spend requests, then prints the resulting budget balance and ledger.
+The script starts Hubu locally, registers a human and agent, adds a policy, sets
+a user cap, creates an agent budget, submits allowed, failed-payment,
+approval-required, and denied spend requests, then prints the resulting cap,
+budget, and ledger state.
 
 Run the conservative local benchmark:
 
@@ -179,8 +183,8 @@ cargo install --path crates/hubu-cli
 ```
 
 The CLI is the convenient human developer surface for Hubu. Use it to create
-starter policy files, register humans and agents, attach policies, create user
-caps or agent budgets, test agent-initiated spend paths, inspect ledger
+starter policy files, register humans and agents, attach policies, set user
+caps, create agent budgets, test agent-initiated spend paths, inspect ledger
 entries, and run client setup helpers such as Codex MCP configuration:
 
 ```sh
@@ -203,7 +207,7 @@ commands yourself or ask an agent to do the work behind a human approval prompt.
 Use the CLI for the default low-friction path. Use
 `hubu init codex --trust-client-approval` only when the Codex client is trusted
 to prompt before protected tools such as registration, policy changes, and
-budget creation.
+cap/budget creation.
 
 `hubu spend authorize` and `hubu spend` exist in the CLI for local testing and
 debugging of the agent spend path. In product usage, those requests should
@@ -226,7 +230,7 @@ hubu init codex
 
 Agents can discover Hubu tools, inspect read-only state, and submit spend
 requests without holding wallet credentials. Setup/admin actions such as
-registration, policy changes, and budget creation remain human-gated: humans
+registration, policy changes, and cap/budget creation remain human-gated: humans
 can run them directly with the CLI, or ask an agent to invoke protected MCP
 tools after the client shows a human approval prompt. If policy returns
 `needs_approval`, the MCP response reports that no payment was executed.
@@ -255,14 +259,15 @@ user, not a fallback used only when an agent budget is missing. Agent budgets
 can add narrower limits for a specific agent; the user cap is the outer limit
 that keeps one user's aggregate spend below the configured amount.
 
-Allowed spend reserves cap/budget capacity before payment or authorization.
-Successful payment settles the hold into consumed balance; failed payment or
-unused authorization releases the hold. If the active cap or applicable budget
-is exhausted, or policy returns `deny` / `needs_approval`, Hubu does not execute
-payment.
+Allowed spend reserves both cap and budget capacity before payment or
+authorization. Successful payment settles both holds into consumed balance;
+failed payment or unused authorization releases both holds. If the active cap or
+applicable budget is exhausted, or policy returns `deny` / `needs_approval`,
+Hubu does not execute payment.
 
 See [docs/budget-controls.md](docs/budget-controls.md) for scope selection,
-period overlap rules, hold lifecycle, recurring budgets, and CLI examples.
+period overlap rules, hold lifecycle, cap renewal, recurring budgets, and CLI
+examples.
 
 ## Documentation
 

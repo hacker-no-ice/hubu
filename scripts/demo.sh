@@ -197,11 +197,10 @@ step "List registered agents"
 hubu agent list
 pause_for_reading
 
-step "Create a recurring user cap"
-BUDGET_OUTPUT="$(hubu budget create-recurring \
-  --amount 75 \
-  --recurrence monthly \
-  --period-count 2)"
+step "Set a user cap and create an agent budget"
+CAP_OUTPUT="$(hubu user cap set --amount 75)"
+say "${CAP_OUTPUT}"
+BUDGET_OUTPUT="$(hubu budget create --agent-id "${AGENT_ID}" --amount 75)"
 say "${BUDGET_OUTPUT}"
 pause_for_reading
 

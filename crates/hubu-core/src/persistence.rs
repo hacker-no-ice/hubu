@@ -48,10 +48,18 @@ pub trait BudgetRepository {
         hold: &BudgetHold,
         balance: &BudgetBalance,
     ) -> Result<(), StorageError>;
+    fn save_budget_holds(
+        &mut self,
+        holds: &[(&BudgetHold, &BudgetBalance)],
+    ) -> Result<(), StorageError>;
     fn update_budget_hold(
         &mut self,
         hold: &BudgetHold,
         balance: &BudgetBalance,
+    ) -> Result<(), StorageError>;
+    fn update_budget_holds(
+        &mut self,
+        holds: &[(&BudgetHold, &BudgetBalance)],
     ) -> Result<(), StorageError>;
     fn load_budgets(&self) -> Result<Vec<Budget>, StorageError>;
     fn load_budget_balances(&self) -> Result<Vec<BudgetBalance>, StorageError>;
@@ -189,7 +197,7 @@ impl SqliteGovernanceRepository {
             CREATE TABLE IF NOT EXISTS budget_holds (
                 id TEXT PRIMARY KEY,
                 budget_id TEXT NOT NULL,
-                spend_decision_id TEXT NOT NULL UNIQUE,
+                spend_decision_id TEXT NOT NULL,
                 amount_cents INTEGER NOT NULL,
                 currency TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -214,6 +222,7 @@ impl SqliteGovernanceRepository {
             ",
         )?;
         self.migrate_policy_assignment_scope()?;
+        self.migrate_budget_holds_allow_multiple_per_decision()?;
         Ok(())
     }
 
@@ -246,6 +255,60 @@ impl SqliteGovernanceRepository {
             FROM policy_assignments_legacy;
 
             DROP TABLE policy_assignments_legacy;
+            ",
+        )?;
+        Ok(())
+    }
+
+    fn migrate_budget_holds_allow_multiple_per_decision(&self) -> Result<(), StorageError> {
+        let mut stmt = self.conn.prepare("PRAGMA index_list(budget_holds)")?;
+        let indexes = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
+        })?;
+        let mut has_unique_spend_decision_index = false;
+        for index in indexes {
+            let (index_name, unique) = index?;
+            if !unique {
+                continue;
+            }
+            let mut index_stmt = self
+                .conn
+                .prepare(&format!("PRAGMA index_info({index_name})"))?;
+            let columns = index_stmt.query_map([], |row| row.get::<_, String>(2))?;
+            let columns = columns.collect::<Result<Vec<_>, _>>()?;
+            if columns == ["spend_decision_id"] {
+                has_unique_spend_decision_index = true;
+                break;
+            }
+        }
+        if !has_unique_spend_decision_index {
+            return Ok(());
+        }
+
+        self.conn.execute_batch(
+            "
+            ALTER TABLE budget_holds RENAME TO budget_holds_legacy;
+
+            CREATE TABLE budget_holds (
+                id TEXT PRIMARY KEY,
+                budget_id TEXT NOT NULL,
+                spend_decision_id TEXT NOT NULL,
+                amount_cents INTEGER NOT NULL,
+                currency TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(budget_id) REFERENCES budgets(id),
+                FOREIGN KEY(spend_decision_id) REFERENCES spend_decisions(id)
+            );
+
+            INSERT INTO budget_holds
+                (id, budget_id, spend_decision_id, amount_cents, currency, status, created_at, updated_at, expires_at)
+            SELECT id, budget_id, spend_decision_id, amount_cents, currency, status, created_at, updated_at, expires_at
+            FROM budget_holds_legacy;
+
+            DROP TABLE budget_holds_legacy;
             ",
         )?;
         Ok(())
@@ -474,6 +537,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
                  WHERE budget_id = ?1",
                 params![budget_id, amount_cents, now.to_rfc3339()],
             )?;
+            refresh_persisted_budget_status(&sqlite_tx, &budget_id, now)?;
         }
 
         sqlite_tx.commit()?;
@@ -489,7 +553,16 @@ impl BudgetRepository for SqliteGovernanceRepository {
         sqlite_tx.execute(
             "INSERT INTO budgets
              (id, scope_type, scope_id, amount_limit_cents, currency, starting_at, ending_before, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET
+                scope_type = excluded.scope_type,
+                scope_id = excluded.scope_id,
+                amount_limit_cents = excluded.amount_limit_cents,
+                currency = excluded.currency,
+                starting_at = excluded.starting_at,
+                ending_before = excluded.ending_before,
+                status = excluded.status,
+                updated_at = excluded.updated_at",
             params![
                 budget.id.to_string(),
                 budget_scope_type(&budget.scope),
@@ -513,24 +586,38 @@ impl BudgetRepository for SqliteGovernanceRepository {
         hold: &BudgetHold,
         balance: &BudgetBalance,
     ) -> Result<(), StorageError> {
+        self.save_budget_holds(&[(hold, balance)])
+    }
+
+    fn save_budget_holds(
+        &mut self,
+        holds: &[(&BudgetHold, &BudgetBalance)],
+    ) -> Result<(), StorageError> {
         let sqlite_tx = self.conn.transaction()?;
-        sqlite_tx.execute(
-            "INSERT INTO budget_holds
-             (id, budget_id, spend_decision_id, amount_cents, currency, status, created_at, updated_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                hold.id.to_string(),
-                hold.budget_id.to_string(),
-                hold.spend_decision_id.to_string(),
-                hold.amount_cents,
-                hold.currency.to_string(),
-                budget_hold_status(&hold.status),
-                hold.created_at.to_rfc3339(),
-                hold.updated_at.to_rfc3339(),
-                hold.expires_at.to_rfc3339(),
-            ],
-        )?;
-        upsert_balance(&sqlite_tx, balance)?;
+        for (hold, balance) in holds {
+            sqlite_tx.execute(
+                "INSERT INTO budget_holds
+                 (id, budget_id, spend_decision_id, amount_cents, currency, status, created_at, updated_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    hold.id.to_string(),
+                    hold.budget_id.to_string(),
+                    hold.spend_decision_id.to_string(),
+                    hold.amount_cents,
+                    hold.currency.to_string(),
+                    budget_hold_status(&hold.status),
+                    hold.created_at.to_rfc3339(),
+                    hold.updated_at.to_rfc3339(),
+                    hold.expires_at.to_rfc3339(),
+                ],
+            )?;
+            upsert_balance(&sqlite_tx, balance)?;
+            refresh_persisted_budget_status(
+                &sqlite_tx,
+                &hold.budget_id.to_string(),
+                hold.updated_at,
+            )?;
+        }
         sqlite_tx.commit()?;
         Ok(())
     }
@@ -540,16 +627,30 @@ impl BudgetRepository for SqliteGovernanceRepository {
         hold: &BudgetHold,
         balance: &BudgetBalance,
     ) -> Result<(), StorageError> {
+        self.update_budget_holds(&[(hold, balance)])
+    }
+
+    fn update_budget_holds(
+        &mut self,
+        holds: &[(&BudgetHold, &BudgetBalance)],
+    ) -> Result<(), StorageError> {
         let sqlite_tx = self.conn.transaction()?;
-        sqlite_tx.execute(
-            "UPDATE budget_holds SET status = ?2, updated_at = ?3 WHERE id = ?1",
-            params![
-                hold.id.to_string(),
-                budget_hold_status(&hold.status),
-                hold.updated_at.to_rfc3339(),
-            ],
-        )?;
-        upsert_balance(&sqlite_tx, balance)?;
+        for (hold, balance) in holds {
+            sqlite_tx.execute(
+                "UPDATE budget_holds SET status = ?2, updated_at = ?3 WHERE id = ?1",
+                params![
+                    hold.id.to_string(),
+                    budget_hold_status(&hold.status),
+                    hold.updated_at.to_rfc3339(),
+                ],
+            )?;
+            upsert_balance(&sqlite_tx, balance)?;
+            refresh_persisted_budget_status(
+                &sqlite_tx,
+                &hold.budget_id.to_string(),
+                hold.updated_at,
+            )?;
+        }
         sqlite_tx.commit()?;
         Ok(())
     }
@@ -656,6 +757,40 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), rusq
             balance.remaining_amount_cents,
             Utc::now().to_rfc3339(),
         ],
+    )?;
+    Ok(())
+}
+
+fn refresh_persisted_budget_status(
+    conn: &Connection,
+    budget_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), rusqlite::Error> {
+    let now = now.to_rfc3339();
+    conn.execute(
+        "UPDATE budgets
+         SET status = 'exhausted', updated_at = ?2
+         WHERE id = ?1
+           AND status = 'active'
+           AND EXISTS (
+             SELECT 1 FROM budget_balances
+             WHERE budget_id = ?1
+               AND remaining_amount_cents = 0
+               AND frozen_amount_cents = 0
+           )",
+        params![budget_id, now],
+    )?;
+    conn.execute(
+        "UPDATE budgets
+         SET status = 'active', updated_at = ?2
+         WHERE id = ?1
+           AND status = 'exhausted'
+           AND EXISTS (
+             SELECT 1 FROM budget_balances
+             WHERE budget_id = ?1
+               AND remaining_amount_cents > 0
+           )",
+        params![budget_id, now],
     )?;
     Ok(())
 }
