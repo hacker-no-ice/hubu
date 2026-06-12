@@ -51,12 +51,15 @@ and MCP transport adapter.
 
 ## Quick Start
 
-Test and install the local binaries:
+### 1. Set Up the Project and Binaries
+
+From a local checkout, verify the workspace and install the local binaries:
 
 ```sh
 cargo test --workspace
 cargo install --path crates/hubu-cli
 cargo install --path crates/hubu-api
+cargo install --path crates/hubu-mcp
 ```
 
 Start the local Hubu server:
@@ -65,8 +68,11 @@ Start the local Hubu server:
 hubu-server
 ```
 
-In another terminal from the same working directory, set up a human, register an
-agent, attach policy, set a user cap, and create an agent budget:
+### 2. Human Admin Setup
+
+In another terminal from the same working directory, run the human/admin setup:
+create the human account, register the agent, attach policy, set the user cap,
+and create an agent budget.
 
 ```sh
 hubu health
@@ -94,6 +100,17 @@ Replace `AGENT_ID` with the public agent id printed by `hubu register agent` or
 merchant, and defaults everything else to `needs_approval`; edit the YAML before
 `hubu policy add` for your local rules.
 
+For human-initiated setup and administration, you can either run the CLI
+commands yourself or ask an agent to do the work behind a human approval prompt.
+
+### 3. Agent Spend Path
+
+In normal use, agents call `hubu_authorize_spend` or `hubu_submit_spend`
+through MCP. Humans can run the CLI spend commands to verify policy, budget
+holds, settlement, and ledger behavior, but manually submitting operational
+spend defeats the purpose of letting pre-approved agent spend tools flow
+through Hubu's policy and budget controls.
+
 To smoke-test the agent-initiated spend path from the CLI:
 
 ```sh
@@ -104,27 +121,25 @@ hubu budget list
 hubu ledger list
 ```
 
-In normal use, agents call `hubu_authorize_spend` or `hubu_submit_spend`
-through MCP. Humans can run the CLI spend commands to verify policy, budget
-holds, settlement, and ledger behavior, but manually submitting operational
-spend defeats the purpose of letting pre-approved agent spend tools flow
-through Hubu's policy and budget controls.
-
-## Codex Agent Quick Start
-
 Codex is one supported MCP harness, not a Hubu requirement. To make Hubu tools
-discoverable to Codex agents, also install the MCP adapter:
+discoverable to Codex agents, initialize the Codex MCP config:
 
 ```sh
-cargo install --path crates/hubu-mcp
 hubu init codex --token-file ~/.hubu/hubu.auth-token
 HUBU_AUTH_TOKEN_FILE=~/.hubu/hubu.auth-token hubu-server
 ```
 
-Restart Codex after `hubu init codex`. Codex should then be able to discover
-Hubu MCP tools and call spend tools without holding wallet credentials. For
-other MCP clients, use Hubu's tool annotations or
-`hubu_client_approval_profile`; see [docs/mcp-transport.md](docs/mcp-transport.md).
+If the server from step 1 is already running with a different token file,
+restart it with the same `HUBU_AUTH_TOKEN_FILE` before restarting Codex. Codex
+should then be able to discover Hubu MCP tools and call spend tools without
+holding wallet credentials. For other MCP clients, use Hubu's tool annotations
+or `hubu_client_approval_profile`; see
+[docs/mcp-transport.md](docs/mcp-transport.md).
+
+## Local Developer Tools
+
+Hubu also includes local tools for understanding, exercising, and measuring the
+system independently of any specific agent harness.
 
 Open the interactive architecture visualizer:
 
@@ -185,37 +200,19 @@ cargo install --path crates/hubu-cli
 The CLI is the convenient human developer surface for Hubu. Use it to create
 starter policy files, register humans and agents, attach policies, set user
 caps, create agent budgets, test agent-initiated spend paths, inspect ledger
-entries, and run client setup helpers such as Codex MCP configuration:
+entries, and run client setup helpers. Command help is the best reference for
+options and examples:
 
 ```sh
 hubu --help
 hubu init --help
 hubu register --help
+hubu user --help
 hubu policy --help
 hubu budget --help
 hubu spend --help
+hubu ledger --help
 ```
-
-`hubu init codex` writes a managed `[mcp_servers.hubu]` block to Codex's
-`config.toml`, creates or reuses a Hubu auth token file, and points Codex at the
-`hubu-mcp-server` executable. It configures Codex to pre-approve Hubu spend
-tool calls, while Hubu policy can still return `needs_approval` without
-executing payment.
-
-For human-initiated setup and administration, you can either run the CLI
-commands yourself or ask an agent to do the work behind a human approval prompt.
-Use the CLI for the default low-friction path. Use
-`hubu init codex --trust-client-approval` only when the Codex client is trusted
-to prompt before protected tools such as registration, policy changes, and
-cap/budget creation.
-
-`hubu spend authorize` and `hubu spend` exist in the CLI for local testing and
-debugging of the agent spend path. In product usage, those requests should
-normally originate from agents through MCP so the agent can act autonomously
-while Hubu still enforces policy, caps/budgets, and audit trails.
-
-See [docs/demo.md](docs/demo.md) for the scripted local walkthrough, expected
-output, CLI reference, script pacing options, and current local limitations.
 
 ## MCP Transport
 
