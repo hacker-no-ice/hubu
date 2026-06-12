@@ -1,19 +1,19 @@
-id: demo_spending_policy
-version: demo-1
+id: starter_spending_policy
+version: starter-1
 default_effect: needs_approval
 rules:
-  - id: deny_blocked_demo_merchant
+  - id: deny_blocked_merchant
     effect: deny
-    reason: merchant is blocked by the demo policy
+    reason: merchant is blocked by the starter policy
     when:
       op: eq
       field: merchant
       value:
         string: blocked-merchant
 
-  - id: allow_small_demo_spend
+  - id: allow_small_spend
     effect: allow
-    reason: amount is at or below the configured demo limit of 10000 cents
+    reason: amount is within the starter single-spend limit of 10000 cents
     when:
       op: lte
       field: amount

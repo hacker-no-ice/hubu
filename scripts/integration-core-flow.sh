@@ -136,7 +136,7 @@ assert_contains "policy add" "${POLICY_OUTPUT}" "default_decision: needs_approva
 POLICY_LIST_OUTPUT="$(hubu policy list)"
 assert_contains "policy list" "${POLICY_LIST_OUTPUT}" "SCOPE"
 assert_contains "policy list" "${POLICY_LIST_OUTPUT}" "user_default"
-assert_contains "policy list" "${POLICY_LIST_OUTPUT}" "demo_spending_policy"
+assert_contains "policy list" "${POLICY_LIST_OUTPUT}" "starter_spending_policy"
 
 AGENTS_OUTPUT="$(hubu agent list)"
 assert_contains "agent list" "${AGENTS_OUTPUT}" "${AGENT_ID}"
@@ -191,7 +191,7 @@ fi
 
 DENY_OUTPUT="$(hubu spend --agent-id "${AGENT_ID}" --amount 20 --reason "Blocked merchant purchase" --merchant blocked-merchant)"
 assert_contains "denied spend" "${DENY_OUTPUT}" "decision: deny"
-assert_contains "denied spend" "${DENY_OUTPUT}" "merchant is blocked by the demo policy"
+assert_contains "denied spend" "${DENY_OUTPUT}" "merchant is blocked by the starter policy"
 if [[ "${DENY_OUTPUT}" == *"Payment"* ]]; then
   printf '%s\n' "${DENY_OUTPUT}" >&2
   fail "denied spend should not create a payment"

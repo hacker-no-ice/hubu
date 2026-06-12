@@ -1177,7 +1177,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let amount = take_required(&mut args, "--amount")?;
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
-        take_value(&mut args, "--merchant").unwrap_or_else(|| "demo-merchant".to_string());
+        take_value(&mut args, "--merchant").unwrap_or_else(|| "local-merchant".to_string());
     ensure_no_args(args)?;
 
     if account_id.is_some() == agent_id.is_some() {
@@ -1213,7 +1213,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let amount = take_required(&mut args, "--amount")?;
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
-        take_value(&mut args, "--merchant").unwrap_or_else(|| "demo-merchant".to_string());
+        take_value(&mut args, "--merchant").unwrap_or_else(|| "local-merchant".to_string());
     ensure_no_args(args)?;
 
     if account_id.is_some() == agent_id.is_some() {
@@ -1350,7 +1350,7 @@ fn print_budget(budget: &Value) -> Result<()> {
     println!(
         "  budget_id: {}  scope: {} ({})  status: {}",
         string_at(budget, "budget_id")?,
-        string_at(budget, "scope")?,
+        budget_scope_label(string_at(budget, "scope")?),
         string_at(budget, "scope_id")?,
         string_at(budget, "status")?
     );
@@ -1370,6 +1370,13 @@ fn print_budget(budget: &Value) -> Result<()> {
             .unwrap_or("open-ended")
     );
     Ok(())
+}
+
+fn budget_scope_label(scope: &str) -> &str {
+    match scope {
+        "user" => "user cap",
+        _ => scope,
+    }
 }
 
 fn health(base_url: &str) -> Result<()> {
@@ -1570,7 +1577,7 @@ fn default_policy_template() -> &'static str {
 
 fn print_help() {
     println!(
-        "Hubu demo CLI
+        "Hubu CLI
 
 Usage:
   hubu [--url URL] <command>
@@ -1582,13 +1589,21 @@ Commands:
   policy     Manage spending policies
   init       Generate starter files and configure clients
   agent      Read registered agents
-  budget     Create and list budgets
-  spend      Submit an agent spend request
+  budget     Create and list user caps and agent budgets
+  spend      Test the agent spend path
   ledger     Read ledger transactions
   health     Check the Hubu server
 
 Global options:
   --url URL   Hubu server URL (default: http://127.0.0.1:8787)
+
+Examples:
+  hubu init codex --token-file ~/.hubu/hubu.auth-token
+  hubu register human --username alice-example --display-name \"Alice Example\"
+  hubu register agent --name local-agent --version local-dev
+  hubu policy new-template --path policies/policy.yaml
+  hubu budget create-recurring --amount 100 --recurrence daily --period-count 7
+  hubu spend --help
 
 Run `hubu <command> --help` for command-specific help."
     );
@@ -1609,7 +1624,13 @@ fn print_register_help() {
 
 Usage:
   hubu register human --username USERNAME --display-name NAME [--email EMAIL]
-  hubu register agent [--name NAME] [--version VERSION] [--dry-run]"
+  hubu register agent [--name NAME] [--version VERSION] [--dry-run]
+
+Examples:
+  hubu register human --username alice-example --display-name \"Alice Example\" --email alice@example.com
+  hubu register agent
+  hubu register agent --name local-agent --version local-dev
+  hubu register agent --dry-run"
     );
 }
 
@@ -1623,7 +1644,10 @@ Usage:
 Options:
   --username USERNAME    Stable handle: 3-32 lowercase letters, digits, or hyphens
   --display-name NAME    Human-readable display name
-  --email EMAIL          Optional email address"
+  --email EMAIL          Optional email address
+
+Example:
+  hubu register human --username alice-example --display-name \"Alice Example\" --email alice@example.com"
     );
 }
 
@@ -1646,7 +1670,12 @@ Usage:
 Options:
   --name NAME      Agent name (default: guidance vendor/workspace template)
   --version VALUE  Version label (default: current git short SHA, or dev)
-  --dry-run        Print the computed registration envelope without submitting it"
+  --dry-run        Print the computed registration envelope without submitting it
+
+Examples:
+  hubu register agent
+  hubu register agent --name local-agent --version local-dev
+  hubu register agent --dry-run"
     );
 }
 
@@ -1658,6 +1687,12 @@ Usage:
   hubu policy new-template [--path FILE] [--force]
   hubu policy validate --path FILE
   hubu policy add --path FILE
+  hubu policy list
+
+Examples:
+  hubu policy new-template --path policies/policy.yaml
+  hubu policy validate --path policies/policy.yaml
+  hubu policy add --path policies/policy.yaml
   hubu policy list"
     );
 }
@@ -1722,7 +1757,11 @@ Options:
 
 Note:
   Prefer `hubu policy new-template` for new policy files.
-  Use `hubu init codex` to expose Hubu MCP tools to Codex across projects."
+  Use `hubu init codex` to expose Hubu MCP tools to Codex across projects.
+
+Examples:
+  hubu init --policy policies/policy.yaml
+  hubu init codex --token-file ~/.hubu/hubu.auth-token"
     );
 }
 
@@ -1744,7 +1783,13 @@ Options:
 Notes:
   Hubu spend tools are pre-approved in Codex; Hubu policy still controls needs_approval outcomes.
   Keep --trust-client-approval off for normal agent spend workflows.
-  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE shown by this command."
+  Use --trust-client-approval only when you want to ask Codex to perform setup/admin actions behind a human approval prompt.
+  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE shown by this command.
+
+Examples:
+  hubu init codex --token-file ~/.hubu/hubu.auth-token
+  hubu init codex --trust-client-approval
+  hubu init codex --dry-run"
     );
 }
 
@@ -1756,63 +1801,90 @@ Usage:
   hubu agent list [--all]
 
 Options:
-  --all  Show agents for all local users instead of only the current user"
+  --all  Show agents for all local users instead of only the current user
+
+Examples:
+  hubu agent list
+  hubu agent list --all"
     );
 }
 
 fn print_budget_help() {
     println!(
-        "Create and list budgets
+        "Create and list user caps and agent budgets
 
 Usage:
   hubu budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
   hubu budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
+  hubu budget list
+
+Examples:
+  hubu budget create-recurring --amount 100 --recurrence daily --period-count 7
+  hubu budget create --agent-id AGENT_ID --amount 25
   hubu budget list"
     );
 }
 
 fn print_budget_create_help() {
     println!(
-        "Create a single budget
+        "Create a single user cap or agent budget
 
 Usage:
   hubu budget create --amount AMOUNT [--agent-id ID] [--starting-at RFC3339] [--ending-before RFC3339]
 
 Options:
-  --agent-id ID  Scope this budget to one agent instead of the current user"
+  --agent-id ID  Create an agent budget instead of a cap for the current user
+
+Examples:
+  hubu budget create --amount 100
+  hubu budget create --agent-id AGENT_ID --amount 25"
     );
 }
 
 fn print_budget_create_recurring_help() {
     println!(
-        "Create a recurring budget series
+        "Create a recurring user cap or agent budget series
 
 Usage:
   hubu budget create-recurring --amount AMOUNT [--agent-id ID] --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
 
 Options:
-  --agent-id ID  Scope this budget series to one agent instead of the current user"
+  --agent-id ID  Create an agent budget series instead of caps for the current user
+
+Examples:
+  hubu budget create-recurring --amount 100 --recurrence daily --period-count 7
+  hubu budget create-recurring --agent-id AGENT_ID --amount 25 --recurrence monthly --period-count 3"
     );
 }
 
 fn print_budget_list_help() {
     println!(
-        "List budgets for the active human user
+        "List caps and budgets for the active human user
 
 Usage:
+  hubu budget list
+
+Example:
   hubu budget list"
     );
 }
 
 fn print_spend_help() {
     println!(
-        "Submit an agent spend request
+        "Test an agent spend request
 
 Usage:
   hubu spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
   hubu spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
   hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]"
+  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+
+Note:
+  CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
+
+Examples:
+  hubu spend authorize --agent-id AGENT_ID --amount 5 --reason \"Reserve model API credits\"
+  hubu spend --agent-id AGENT_ID --amount 20 --reason \"Purchase API credits\""
     );
 }
 
@@ -1822,7 +1894,10 @@ fn print_spend_authorize_help() {
 
 Usage:
   hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]"
+  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+
+Example:
+  hubu spend authorize --agent-id AGENT_ID --amount 5 --reason \"Reserve model API credits\""
     );
 }
 
@@ -1831,6 +1906,9 @@ fn print_ledger_help() {
         "Read ledger transactions
 
 Usage:
+  hubu ledger list
+
+Example:
   hubu ledger list"
     );
 }

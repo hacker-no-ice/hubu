@@ -158,18 +158,18 @@ Hubu policy template created
   next: edit the file, then run hubu policy add --path policy.yaml
 Policy valid
   path: policy.yaml
-  policy_id: demo_spending_policy
-  policy_version: demo-1
+  policy_id: starter_spending_policy
+  policy_version: starter-1
   default_decision: needs_approval
   rules: 2
 Policy added
   scope: user_default
-  policy_id: demo_spending_policy
-  policy_version: demo-1
+  policy_id: starter_spending_policy
+  policy_version: starter-1
   default_decision: needs_approval
 SCOPE         AGENT ID  POLICY ID             VERSION  DEFAULT         RULES  ATTACHED AT                 UPDATED AT
 ------------  --------  --------------------  -------  --------------  -----  --------------------------  --------------------------
-user_default  -         demo_spending_policy  demo-1   needs_approval  2      2026-06-09T14:32:10-07:00  2026-06-09T14:32:10-07:00
+user_default  -         starter_spending_policy  starter-1   needs_approval  2      2026-06-09T14:32:10-07:00  2026-06-09T14:32:10-07:00
 ```
 
 `hubu policy new-template` generates an editable YAML policy file.
@@ -192,7 +192,7 @@ Expected output:
 agt_8x7k2m4q9v1c  codex-agent  account: aga_c6q3d9m1v8ra  status: active
 ```
 
-### 5. Create a Recurring Budget
+### 5. Create a Recurring User Cap
 
 ```sh
 hubu budget create-recurring \
@@ -205,19 +205,21 @@ Expected output:
 
 ```txt
 Budget series created
-  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user (usr_8x7k2m4q9v1c)  status: active
+  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user cap (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
     period: 2026-06-03T17:19:20.123456+00:00 -> 2026-07-03T17:19:20.123456+00:00
-  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user (usr_8x7k2m4q9v1c)  status: active
+  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user cap (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
     period: 2026-07-03T17:19:20.123456+00:00 -> 2026-08-03T17:19:20.123456+00:00
 ```
 
-Hubu enforces non-overlapping periods for a given budget scope and currency. The
-recurring budget call is atomic: if any generated period would overlap an
-existing budget, none of the periods are created. Add `--agent-id agt_...` to
-scope a single or recurring budget to one agent; spend uses an active
-agent-scoped budget first and falls back to the current user's active budget.
+Hubu enforces non-overlapping periods for a given cap or budget scope and
+currency. The recurring budget call is atomic: if any generated period would
+overlap an existing cap or budget, none of the periods are created. Without
+`--agent-id`, the CLI creates a cap for the current user. Add
+`--agent-id agt_...` to create a single or recurring agent budget. The product
+model treats the user cap as the outer owner-level spend guardrail and agent
+budgets as narrower limits for a specific agent.
 
 ### 6. Submit an Allowed Spend Request
 
@@ -236,7 +238,7 @@ Spend evaluated
   agent_id: agt_8x7k2m4q9v1c
   decision: allow
   decision_id: 7da692a8-d5a7-4028-b5db-fc8b0de79d10
-  reason: amount is at or below the configured demo limit of 10000 cents
+  reason: amount is within the starter single-spend limit of 10000 cents
 Payment
   status: succeeded
   payment_id: dfd9a10f-e80f-4c17-b3ec-944d2114d4b9
@@ -277,7 +279,7 @@ Spend evaluated
   decision: allow
   decision_id: 7da692a8-d5a7-4028-b5db-fc8b0de79d10
   auth_token_id: 1e48e2ec-564e-4519-9db4-d7892012ca78
-  reason: amount is at or below the configured demo limit of 10000 cents
+  reason: amount is within the starter single-spend limit of 10000 cents
 Budget hold
   status: frozen
   hold_id: e9ee93b7-dac7-4c23-946f-2a7bc2835c24
@@ -311,7 +313,7 @@ Spend evaluated
   agent_id: agt_8x7k2m4q9v1c
   decision: allow
   decision_id: 9ed7d2a1-782f-45d3-9262-a69f7e610d7d
-  reason: amount is at or below the configured demo limit of 10000 cents
+  reason: amount is within the starter single-spend limit of 10000 cents
 Payment
   status: failed
   payment_id: 11f94960-2b30-429b-8d2f-0069eac928b5
@@ -371,8 +373,8 @@ Spend evaluated
   agent_id: agt_8x7k2m4q9v1c
   decision: deny
   decision_id: 6f8625e8-426f-40f1-91ff-bef0efb9600b
-  reason: merchant is blocked by the demo policy
-  reason: amount is at or below the configured demo limit of 10000 cents
+  reason: merchant is blocked by the starter policy
+  reason: amount is within the starter single-spend limit of 10000 cents
 ```
 
 The policy engine gives `deny` precedence over `allow`, so no payment is
@@ -387,10 +389,10 @@ hubu budget list
 Expected output:
 
 ```txt
-  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user (usr_8x7k2m4q9v1c)  status: active
+  budget_id: 5d9f43de-cbb6-4b1c-a84d-a9e9bd8c929c  scope: user cap (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $20.00  frozen: $0.00  remaining: $55.00
     period: 2026-06-03T17:19:20.123456+00:00 -> 2026-07-03T17:19:20.123456+00:00
-  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user (usr_8x7k2m4q9v1c)  status: active
+  budget_id: b59200c3-a63f-4bcf-a753-bf08e6d16b6c  scope: user cap (usr_8x7k2m4q9v1c)  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
     period: 2026-07-03T17:19:20.123456+00:00 -> 2026-08-03T17:19:20.123456+00:00
 ```
@@ -448,8 +450,8 @@ after `cargo build`.
 - Local demo state is stored in SQLite at `HUBU_DB_PATH`, defaulting to
   `hubu.sqlite3` in the server working directory. Use
   `./scripts/reset-local-state.sh --yes` to clear it.
-- `hubu budget list` shows current-user budgets and budgets scoped to agents
-  owned by the current user.
+- `hubu budget list` shows current-user caps and agent budgets owned by the
+  current user.
 - The server uses a minimal local HTTP adapter for demo use, not a production
   web framework.
 - Payments use the existing mock rail only. No real payment provider is called.

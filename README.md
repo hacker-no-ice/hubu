@@ -13,12 +13,14 @@ private keys.
 
 Humans fund a shared wallet and define spending policies. Agents register as
 separate accounts and submit structured spend requests. Hubu validates each
-request through deterministic policies and budget controls before executing a
-mock payment and recording successful money movement in an audit ledger.
+request through deterministic policies and budget controls before executing
+payment through the configured rail and recording successful money movement in
+an audit ledger. The current local rail is intentionally mocked, but the policy,
+budget, authorization, and ledger boundaries are built for real spend control.
 
 This repository contains the Rust workspace for Hubu's policy engine, wallet
-logic, shared models, local demo HTTP API, demo CLI, benchmark tool, and MCP
-transport adapter.
+logic, shared models, local HTTP server, human developer CLI, benchmark tool,
+and MCP transport adapter.
 
 ## What Hubu Does Today
 
@@ -27,33 +29,99 @@ transport adapter.
 - Issues spend authorization tokens for allowed requests
 - Can authorize spend and freeze budget without executing payment, so a future
   Hubu-hosted vendor proxy can consume scoped authorization
-- Creates user-scoped or agent-scoped single and recurring budgets
+- Creates user caps and agent-scoped single or recurring budgets
 - Reserves budget before payment, then settles or releases the hold from the payment result
 - Orchestrates mock payments after spend authorization
 - Records successful payments in an immutable double-entry SQLite ledger
-- Exposes a local `hubu-server` and `hubu` CLI for live demos
+- Exposes a local `hubu-server`, human-facing `hubu` CLI, and MCP tools that
+  agents can discover through configured MCP clients
+- Protects local write APIs with a bearer token and separates agent-callable
+  spend tools from human-gated setup, policy, and budget changes
 
 ## Crates
 
 - `hubu-common`: shared agent identity, ownership, and session/account models
 - `hubu-core`: registration, policy, and spend authorization logic
 - `hubu-wallet`: payment orchestration, mock rails, and ledger recording
-- `hubu-api`: local demo HTTP API and `hubu-server` binary
-- `hubu-cli`: demo-friendly `hubu` CLI binary
+- `hubu-api`: local HTTP API and `hubu-server` binary
+- `hubu-cli`: human developer `hubu` CLI binary
 - `hubu-bench`: local benchmark tool for spend approval throughput and correctness
 - `hubu-mcp`: MCP stdio transport adapter and `hubu-mcp-server` binary
 
 ## Quick Start
 
+Test and install the local binaries:
+
 ```sh
 cargo test --workspace
+cargo install --path crates/hubu-cli
+cargo install --path crates/hubu-api
 ```
 
-Build the workspace:
+Start the local Hubu server:
 
 ```sh
-cargo build
+hubu-server
 ```
+
+In another terminal from the same working directory, set up a human, register an
+agent, attach policy, and create user caps or agent budgets:
+
+```sh
+hubu health
+
+hubu register human --username alice-example --display-name "Alice Example" --email alice@example.com
+hubu user list
+
+hubu protocol agent-registration
+hubu register agent --name local-agent --version local-dev
+hubu agent list
+
+hubu policy new-template --path policies/starter.yaml
+hubu policy validate --path policies/starter.yaml
+hubu policy add --path policies/starter.yaml
+hubu policy list
+
+hubu budget create-recurring --amount 100 --recurrence daily --period-count 7
+hubu budget create --agent-id AGENT_ID --amount 25
+hubu budget list
+```
+
+Replace `AGENT_ID` with the public agent id printed by `hubu register agent` or
+`hubu agent list`. The starter policy allows small spend, denies a blocked
+merchant, and defaults everything else to `needs_approval`; edit the YAML before
+`hubu policy add` for your local rules.
+
+To smoke-test the agent-initiated spend path from the CLI:
+
+```sh
+hubu spend authorize --agent-id AGENT_ID --amount 5 --reason "Reserve model API credits"
+hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
+hubu budget list
+hubu ledger list
+```
+
+In normal use, agents call `hubu_authorize_spend` or `hubu_submit_spend`
+through MCP. Humans can run the CLI spend commands to verify policy, budget
+holds, settlement, and ledger behavior, but manually submitting operational
+spend defeats the purpose of letting pre-approved agent spend tools flow
+through Hubu's policy and budget controls.
+
+## Codex Agent Quick Start
+
+Codex is one supported MCP harness, not a Hubu requirement. To make Hubu tools
+discoverable to Codex agents, also install the MCP adapter:
+
+```sh
+cargo install --path crates/hubu-mcp
+hubu init codex --token-file ~/.hubu/hubu.auth-token
+HUBU_AUTH_TOKEN_FILE=~/.hubu/hubu.auth-token hubu-server
+```
+
+Restart Codex after `hubu init codex`. Codex should then be able to discover
+Hubu MCP tools and call spend tools without holding wallet credentials. For
+other MCP clients, use Hubu's tool annotations or
+`hubu_client_approval_profile`; see [docs/mcp-transport.md](docs/mcp-transport.md).
 
 Open the interactive architecture visualizer:
 
@@ -61,15 +129,15 @@ Open the interactive architecture visualizer:
 open architecture/index.html
 ```
 
-Run the automated local demo:
+Run the scripted local walkthrough when you want a repeatable end-to-end trace:
 
 ```sh
 ./scripts/demo.sh
 ```
 
-The demo starts Hubu locally, registers an agent, adds a policy, creates a
-recurring budget, submits allowed, failed-payment, approval-required, and denied
-spend requests, then prints the resulting budget balance and ledger.
+The script starts Hubu locally, registers a human and agent, adds a policy,
+creates a recurring budget, submits allowed, failed-payment, approval-required,
+and denied spend requests, then prints the resulting budget balance and ledger.
 
 Run the conservative local benchmark:
 
@@ -83,7 +151,26 @@ a report under `target/hubu-bench/`. See
 [docs/benchmarking.md](docs/benchmarking.md) for options and the current MVP
 results.
 
-## CLI Demo
+## Local HTTP Server
+
+`hubu-server` owns the local API, SQLite-backed state, policy and budget
+managers, wallet orchestration, and ledger writes. By default it listens on
+`http://127.0.0.1:8787`.
+
+On startup the server reads `HUBU_AUTH_TOKEN`, or creates/reads
+`hubu.auth-token` in the current directory. The CLI, MCP adapter, and benchmark
+client read the same token automatically and send it as a local bearer token for
+protected API routes. Use `HUBU_AUTH_TOKEN_FILE` when the server and clients
+need to share a token file at a different path.
+
+Restart `hubu-server` after rebuilding API or storage changes; reinstalling the
+CLI only updates the client binary. To start over with clean local state:
+
+```sh
+./scripts/reset-local-state.sh --yes
+```
+
+## CLI
 
 Install the local CLI so `hubu ...` works from your shell:
 
@@ -91,114 +178,61 @@ Install the local CLI so `hubu ...` works from your shell:
 cargo install --path crates/hubu-cli
 ```
 
-To make Hubu available to Codex agents in any project, also install the server
-and MCP adapter:
+The CLI is the convenient human developer surface for Hubu. Use it to create
+starter policy files, register humans and agents, attach policies, create user
+caps or agent budgets, test agent-initiated spend paths, inspect ledger
+entries, and run client setup helpers such as Codex MCP configuration:
 
 ```sh
-cargo install --path crates/hubu-api
-cargo install --path crates/hubu-mcp
-hubu init codex
+hubu --help
+hubu init --help
+hubu register --help
+hubu policy --help
+hubu budget --help
+hubu spend --help
 ```
 
 `hubu init codex` writes a managed `[mcp_servers.hubu]` block to Codex's
 `config.toml`, creates or reuses a Hubu auth token file, and points Codex at the
 `hubu-mcp-server` executable. It configures Codex to pre-approve Hubu spend
 tool calls, while Hubu policy can still return `needs_approval` without
-executing payment. Restart Codex after running it. Start `hubu-server` with the
-`HUBU_AUTH_TOKEN_FILE` path printed by the command so the server and MCP adapter
-share the same local bearer token. See the
-[MCP cheatsheet](docs/mcp-transport.md#cheatsheet) for the full install, init,
-server-start, restart, and approval-profile flow.
+executing payment.
 
-Start the local demo server:
+For human-initiated setup and administration, you can either run the CLI
+commands yourself or ask an agent to do the work behind a human approval prompt.
+Use the CLI for the default low-friction path. Use
+`hubu init codex --trust-client-approval` only when the Codex client is trusted
+to prompt before protected tools such as registration, policy changes, and
+budget creation.
 
-```sh
-cargo run --bin hubu-server
-```
+`hubu spend authorize` and `hubu spend` exist in the CLI for local testing and
+debugging of the agent spend path. In product usage, those requests should
+normally originate from agents through MCP so the agent can act autonomously
+while Hubu still enforces policy, caps/budgets, and audit trails.
 
-On startup the server reads `HUBU_AUTH_TOKEN`, or creates/reads
-`hubu.auth-token` in the current directory. The CLI, MCP adapter, and benchmark
-client read the same token automatically and send it as a local bearer token for
-protected API routes. Use `HUBU_AUTH_TOKEN_FILE` if the server and clients need
-to share a token file at a different path.
-
-Restart `hubu-server` after rebuilding API or storage changes; reinstalling the
-CLI only updates the client binary. To start over with clean local demo state:
-
-```sh
-./scripts/reset-local-state.sh --yes
-```
-
-Then use the CLI from another terminal:
-
-```sh
-hubu register human --username alice-example --display-name "Alice Example" --email alice@example.com
-hubu user list
-hubu protocol agent-registration
-hubu register agent
-hubu policy new-template --path policies/policy.yaml
-hubu policy validate --path policies/policy.yaml
-hubu policy add --path policies/policy.yaml
-hubu policy list
-hubu agent list
-hubu budget create-recurring --amount 100 --recurrence daily --period-count 1
-hubu budget create --agent-id AGENT_ID --amount 25
-hubu spend authorize --agent-id AGENT_ID --amount 5 --reason "Generate Project Hubu logo"
-hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
-hubu ledger list
-```
-
-`hubu register human` keeps the stable lowercase `username` separate from the
-human-readable `display_name`. `hubu user list` shows all local users and marks
-the current user context. `hubu register agent` binds the agent to that current
-user context and uses the guidance-provided vendor/workspace name template and
-the git short SHA as defaults. `hubu agent list` shows agents for the current
-user by default; pass `--all` for local inspection across users. Pass `--name`,
-`--version`, or `--dry-run` to override or inspect the computed registration
-envelope.
-
-See [docs/demo.md](docs/demo.md) for the full walkthrough, expected output,
-CLI installation notes, demo script pacing options, and known limitations.
+See [docs/demo.md](docs/demo.md) for the scripted local walkthrough, expected
+output, CLI reference, script pacing options, and current local limitations.
 
 ## MCP Transport
 
-Hubu includes an MCP stdio transport scaffold for agent-facing tool calls. Start
-the local Hubu server first:
-
-```sh
-cargo run --bin hubu-server
-```
-
-For Codex, the easiest setup is:
+Hubu exposes agent-facing tools through a thin MCP stdio adapter over the local
+HTTP API. Any MCP-compatible harness can launch `hubu-mcp-server`, inspect the
+tool annotations, and apply Hubu's approval profile. Codex users can generate
+that setup with:
 
 ```sh
 hubu init codex
 ```
 
-That command configures Codex's `config.toml` so agents in other projects can
-discover Hubu tools through MCP. It also pre-approves Hubu spend tools in Codex
-so normal spend requests flow to Hubu policy without an extra Codex prompt.
-Other MCP clients should use Hubu's tool annotations or the
-`hubu_client_approval_profile` tool to configure the same upfront split:
-auto-approve read/spend tools, prompt before setup/admin tools. For manual MCP
-setup, point the client at:
+Agents can discover Hubu tools, inspect read-only state, and submit spend
+requests without holding wallet credentials. Setup/admin actions such as
+registration, policy changes, and budget creation remain human-gated: humans
+can run them directly with the CLI, or ask an agent to invoke protected MCP
+tools after the client shows a human approval prompt. If policy returns
+`needs_approval`, the MCP response reports that no payment was executed.
 
-```sh
-cargo run --bin hubu-mcp-server
-```
-
-Set `HUBU_URL` to target a non-default Hubu server URL. The MCP transport
-forwards to the existing local HTTP API with the Hubu bearer token, marks
-read-only tools as safe for agent inspection, and marks human/agent
-registration, policy creation, and budget creation as human-approval-required
-tools. Protected write tools are disabled unless the MCP process is started with
-`HUBU_MCP_TRUST_CLIENT_APPROVAL=1` behind a trusted client that prompts the
-human before destructive calls. Agents can submit spend requests directly; if
-policy returns `needs_approval`, the MCP response includes
-`requires_human_approval: true` and no payment is executed.
-
-See [docs/mcp-transport.md](docs/mcp-transport.md) for the current tool and
-approval model, including the [setup cheatsheet](docs/mcp-transport.md#cheatsheet).
+See [docs/mcp-transport.md](docs/mcp-transport.md) for install details,
+approval profiles, manual MCP setup, and the current tool map.
 
 ## Policy Engine
 
@@ -213,23 +247,44 @@ deny > needs_approval > allow > policy default
 See [docs/policy-engine.md](docs/policy-engine.md) for the evaluation strategy,
 rule format, validation behavior, and examples.
 
+## Budget Controls
+
+Budgets are hard spending limits for an agent or task over a time period. A
+user cap is the owner-level guardrail for total spend owned by the current
+user, not a fallback used only when an agent budget is missing. Agent budgets
+can add narrower limits for a specific agent; the user cap is the outer limit
+that keeps one user's aggregate spend below the configured amount.
+
+Allowed spend reserves cap/budget capacity before payment or authorization.
+Successful payment settles the hold into consumed balance; failed payment or
+unused authorization releases the hold. If the active cap or applicable budget
+is exhausted, or policy returns `deny` / `needs_approval`, Hubu does not execute
+payment.
+
+See [docs/budget-controls.md](docs/budget-controls.md) for scope selection,
+period overlap rules, hold lifecycle, recurring budgets, and CLI examples.
+
 ## Documentation
 
+- [docs/README.md](docs/README.md): docs index separating durable technical
+  docs from working notes
 - [architecture/index.html](architecture/index.html): interactive sketch-style
   architecture map with drill-down component diagrams and GitHub code links
 - [docs/agent-registration-protocol.md](docs/agent-registration-protocol.md):
   v1 registration envelope, fingerprint fields, server validation, and
   low-friction human review flow
-- [docs/demo.md](docs/demo.md): local server and CLI demo walkthrough
-- [docs/demo-findings.md](docs/demo-findings.md): findings and improvement
-  opportunities from the demo implementation
+- [docs/demo.md](docs/demo.md): scripted local walkthrough and CLI reference
 - [docs/benchmarking.md](docs/benchmarking.md): local spend benchmark usage and
   the latest MVP performance, scalability, and reliability report
 - [docs/registration-flow.md](docs/registration-flow.md): agent registration
   model and flow
 - [docs/policy-engine.md](docs/policy-engine.md): policy rule format and
   evaluation behavior
+- [docs/budget-controls.md](docs/budget-controls.md): user caps, cap/budget
+  scopes, recurring periods, hold lifecycle, and spend enforcement
 - [docs/payment-ledger-flow.md](docs/payment-ledger-flow.md): payment
   orchestration and ledger recording flow
-- [docs/mcp-transport.md](docs/mcp-transport.md): MCP stdio transport scaffold
+- [docs/mcp-transport.md](docs/mcp-transport.md): MCP stdio transport adapter
   and approval boundaries
+- [docs/notes/](docs/notes/): non-normative planning, improvement, and handoff
+  notes
