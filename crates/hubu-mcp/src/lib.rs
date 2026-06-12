@@ -239,24 +239,22 @@ fn tool_definitions() -> Vec<Value> {
         write_tool(
             "hubu_submit_spend",
             "Submit an agent spend request. Human approval is only required when the returned decision is needs_approval.",
-            json_schema(json!({
-                "agent_id": { "type": "string" },
+            json_schema_required(json!({
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" }
-            })),
+            }), &["account_id", "amount_cents", "reason"]),
         ),
         write_tool(
             "hubu_authorize_spend",
             "Authorize an agent spend request and reserve cap/budget balance without executing payment.",
-            json_schema(json!({
-                "agent_id": { "type": "string" },
+            json_schema_required(json!({
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" }
-            })),
+            }), &["account_id", "amount_cents", "reason"]),
         ),
         read_tool(
             "hubu_list_agents",
@@ -284,6 +282,12 @@ fn json_schema(properties: Value) -> Value {
         "properties": properties,
         "additionalProperties": false
     })
+}
+
+fn json_schema_required(properties: Value, required: &[&str]) -> Value {
+    let mut schema = json_schema(properties);
+    schema["required"] = json!(required);
+    schema
 }
 
 fn read_tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -683,6 +687,28 @@ mod tests {
         );
         assert_eq!(tool["annotations"]["destructiveHint"], false);
         assert!(tool["inputSchema"]["properties"]["amount_cents"].is_object());
+    }
+
+    #[test]
+    fn spend_tool_schemas_require_account_id_only() {
+        let tools = tool_definitions();
+
+        for tool_name in ["hubu_submit_spend", "hubu_authorize_spend"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == tool_name)
+                .expect("spend tool should exist");
+            let properties = &tool["inputSchema"]["properties"];
+            let required = tool["inputSchema"]["required"]
+                .as_array()
+                .expect("spend tool required fields should be an array");
+
+            assert!(properties["account_id"].is_object());
+            assert!(properties.get("agent_id").is_none());
+            assert!(required.iter().any(|field| field == "account_id"));
+            assert!(required.iter().any(|field| field == "amount_cents"));
+            assert!(required.iter().any(|field| field == "reason"));
+        }
     }
 
     #[test]
