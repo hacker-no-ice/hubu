@@ -114,8 +114,8 @@ through Hubu's policy and budget controls.
 To smoke-test the agent-initiated spend path from the CLI:
 
 ```sh
-hubu spend authorize --agent-id AGENT_ID --amount 5 --reason "Reserve model API credits"
-hubu spend --agent-id AGENT_ID --amount 20 --reason "Purchase API credits"
+hubu spend authorize --account-id ACCOUNT_ID --amount 5 --reason "Reserve model API credits"
+hubu spend --account-id ACCOUNT_ID --amount 20 --reason "Purchase API credits"
 hubu user cap show
 hubu budget list
 hubu ledger list

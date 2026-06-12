@@ -1346,29 +1346,19 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
 
     let account_id = take_value(&mut args, "--account-id");
     let agent_id = take_value(&mut args, "--agent-id");
+    let account_id = require_spend_account_id("hubu spend", account_id, agent_id)?;
     let amount = take_required(&mut args, "--amount")?;
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
         take_value(&mut args, "--merchant").unwrap_or_else(|| "local-merchant".to_string());
     ensure_no_args(args)?;
 
-    if account_id.is_some() == agent_id.is_some() {
-        return Err(anyhow!(
-            "provide exactly one of --account-id or --agent-id for spend"
-        ));
-    }
-
     let mut body = json!({
         "amount_cents": amount_to_cents(&amount)?,
         "reason": reason,
         "merchant": merchant,
     });
-    if let Some(account_id) = account_id {
-        body["account_id"] = json!(account_id);
-    }
-    if let Some(agent_id) = agent_id {
-        body["agent_id"] = json!(agent_id);
-    }
+    body["account_id"] = json!(account_id);
 
     let response = post_json(base_url, "/spend", body)?;
     print_spend_response(&response)
@@ -1382,32 +1372,35 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
 
     let account_id = take_value(&mut args, "--account-id");
     let agent_id = take_value(&mut args, "--agent-id");
+    let account_id = require_spend_account_id("hubu spend authorize", account_id, agent_id)?;
     let amount = take_required(&mut args, "--amount")?;
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
         take_value(&mut args, "--merchant").unwrap_or_else(|| "local-merchant".to_string());
     ensure_no_args(args)?;
 
-    if account_id.is_some() == agent_id.is_some() {
-        return Err(anyhow!(
-            "provide exactly one of --account-id or --agent-id for spend"
-        ));
-    }
-
     let mut body = json!({
         "amount_cents": amount_to_cents(&amount)?,
         "reason": reason,
         "merchant": merchant,
     });
-    if let Some(account_id) = account_id {
-        body["account_id"] = json!(account_id);
-    }
-    if let Some(agent_id) = agent_id {
-        body["agent_id"] = json!(agent_id);
-    }
+    body["account_id"] = json!(account_id);
 
     let response = post_json(base_url, "/spend/authorize", body)?;
     print_spend_response(&response)
+}
+
+fn require_spend_account_id(
+    command: &str,
+    account_id: Option<String>,
+    agent_id: Option<String>,
+) -> Result<String> {
+    if agent_id.is_some() {
+        return Err(anyhow!(
+            "{command} no longer accepts --agent-id; provide --account-id with the agent account id"
+        ));
+    }
+    account_id.ok_or_else(|| anyhow!("{command} requires --account-id with the agent account id"))
 }
 
 fn print_spend_response(response: &Value) -> Result<()> {
@@ -2144,16 +2137,14 @@ fn print_spend_help() {
 
 Usage:
   hubu spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
   hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
 
 Note:
-  CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
+  Spend commands require the agent account id because the account is the spending source. CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
 
 Examples:
-  hubu spend authorize --agent-id AGENT_ID --amount 5 --reason \"Reserve model API credits\"
-  hubu spend --agent-id AGENT_ID --amount 20 --reason \"Purchase API credits\""
+  hubu spend authorize --account-id ACCOUNT_ID --amount 5 --reason \"Reserve model API credits\"
+  hubu spend --account-id ACCOUNT_ID --amount 20 --reason \"Purchase API credits\""
     );
 }
 
@@ -2163,10 +2154,9 @@ fn print_spend_authorize_help() {
 
 Usage:
   hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
 
 Example:
-  hubu spend authorize --agent-id AGENT_ID --amount 5 --reason \"Reserve model API credits\""
+  hubu spend authorize --account-id ACCOUNT_ID --amount 5 --reason \"Reserve model API credits\""
     );
 }
 

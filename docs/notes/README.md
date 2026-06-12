@@ -11,3 +11,5 @@ protocol, architecture, and operator documentation.
   from the earlier image-proxy exploration
 - [future-wallet-and-credit-use-cases.md](future-wallet-and-credit-use-cases.md):
   future wallet and credit-pool modeling ideas
+- [multi-currency-account-budgets.md](multi-currency-account-budgets.md):
+  future account, budget, and policy shape for multi-currency spend

@@ -1075,11 +1075,8 @@ fn spend_executor_guidance() -> Value {
         "validate_request": {
             "required": [
                 "spend_auth_token_id",
+                "account_id",
                 "amount_cents"
-            ],
-            "one_of": [
-                "agent_id",
-                "account_id"
             ],
             "optional": [
                 "merchant",
@@ -1088,7 +1085,7 @@ fn spend_executor_guidance() -> Value {
             "currency": "USD in v1"
         },
         "scope_rules": [
-            "amount_cents, merchant, task_id, and account/agent must match the original authorized spend",
+            "account_id, amount_cents, merchant, and task_id must match the original authorized spend",
             "the spend auth token must be unexpired, unused, and unrevoked",
             "the associated budget hold must still be frozen before executor work starts",
             "Hubu does not accept vendor API keys or model/provider payloads in this protocol"
@@ -3073,9 +3070,9 @@ fn resolve_agent_account_for_spend(
     user: &UserContext,
     state: &ServerState,
 ) -> Result<AgentAccount> {
-    if request.account_id.is_some() == request.agent_id.is_some() {
+    if request.agent_id.is_some() {
         return Err(anyhow!(
-            "spend request must include exactly one of account_id or agent_id"
+            "spend request must include account_id; agent_id is no longer accepted for spend"
         ));
     }
 
@@ -3084,20 +3081,13 @@ fn resolve_agent_account_for_spend(
         .lock()
         .map_err(|_| anyhow!("registration manager lock poisoned"))?;
 
-    let account = if let Some(account_pub_id) = request.account_id.as_deref() {
-        registration
-            .account_for_pub_id(account_pub_id)?
-            .ok_or_else(|| anyhow!("unknown public account id {account_pub_id}"))?
-    } else if let Some(agent_pub_id) = request.agent_id.as_deref() {
-        let agent_id = registration
-            .agent_id_for_pub_id(agent_pub_id)?
-            .ok_or_else(|| anyhow!("unknown public agent id {agent_pub_id}"))?;
-        registration
-            .account_for_agent(&agent_id)?
-            .ok_or_else(|| anyhow!("no account found for agent {agent_pub_id}"))?
-    } else {
-        return Err(anyhow!("spend request must include account_id or agent_id"));
-    };
+    let account_pub_id = request
+        .account_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("spend request must include account_id"))?;
+    let account = registration
+        .account_for_pub_id(account_pub_id)?
+        .ok_or_else(|| anyhow!("unknown public account id {account_pub_id}"))?;
 
     if account.owner_user_id != user.user_id {
         return Err(anyhow!(
@@ -4109,7 +4099,7 @@ mod tests {
 
         let spend = spend(
             json!({
-                "agent_id": agent.agent_id,
+                "account_id": agent.account_id,
                 "amount_cents": 2_500,
                 "reason": "test purchase",
                 "merchant": "Acme Cafe",
@@ -4198,7 +4188,7 @@ mod tests {
 
         let spend = spend(
             json!({
-                "agent_id": agent_pub_id.clone(),
+                "account_id": agent.account_id,
                 "amount_cents": 2_500,
                 "reason": "agent scoped budget purchase",
                 "merchant": "Acme Cafe",
@@ -4506,7 +4496,7 @@ mod tests {
             create_test_agent_budget(&state, &agent.agent_id, 2_000);
             let spend = spend(
                 json!({
-                    "agent_id": agent.agent_id,
+                    "account_id": agent.account_id,
                     "amount_cents": 1_000,
                     "reason": "exhaust cap",
                     "merchant": "Acme Cafe",
@@ -4635,7 +4625,7 @@ mod tests {
 
         let authorization = authorize_spend(
             json!({
-                "agent_id": agent.agent_id,
+                "account_id": agent.account_id,
                 "amount_cents": 500,
                 "reason": "Generate Project Hubu logo",
                 "merchant": "hubu-model-proxy",
@@ -4688,11 +4678,17 @@ mod tests {
                 .expect("executor role list should be an array")
                 .iter()
                 .any(|item| item == "hold vendor credentials outside Hubu"));
+            assert!(response.body["validate_request"]["required"]
+                .as_array()
+                .expect("required fields should be an array")
+                .iter()
+                .any(|item| item == "account_id"));
+            assert!(response.body["validate_request"].get("one_of").is_none());
             assert!(response.body["scope_rules"]
                 .as_array()
                 .expect("scope rules should be an array")
                 .iter()
-                .any(|item| item == "Hubu does not accept vendor API keys or model/provider payloads in this protocol"));
+                .any(|item| item == "account_id, amount_cents, merchant, and task_id must match the original authorized spend"));
         }
 
         std::fs::remove_file(path).ok();
@@ -4707,7 +4703,7 @@ mod tests {
             .expect("authorization should issue a token");
         let request = json!({
             "spend_auth_token_id": token,
-            "agent_id": agent.agent_id,
+            "account_id": agent.account_id,
             "amount_cents": 500,
             "merchant": "gongbu.image",
             "task_id": "hubu-logo-demo",
@@ -4745,7 +4741,7 @@ mod tests {
             .expect("authorization should issue a token");
         let request = json!({
             "spend_auth_token_id": token,
-            "agent_id": agent.agent_id,
+            "account_id": agent.account_id,
             "amount_cents": 500,
             "merchant": "gongbu.image",
             "task_id": "hubu-logo-demo",
@@ -4767,11 +4763,9 @@ mod tests {
     }
 
     #[test]
-    fn spend_rejects_conflicting_account_and_agent_anchors() {
-        let path = std::env::temp_dir().join(format!(
-            "hubu-api-conflicting-anchors-{}.sqlite",
-            UserId::new()
-        ));
+    fn spend_rejects_agent_id_anchor() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-agent-anchor-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
         let _user = init(
             json!({
@@ -4795,19 +4789,18 @@ mod tests {
 
         let error = spend(
             json!({
-                "account_id": agent.account_id,
                 "agent_id": agent.agent_id,
                 "amount_cents": 2_500,
-                "reason": "ambiguous anchored purchase",
+                "reason": "agent anchored purchase",
             })
             .to_string(),
             &state,
         )
-        .expect_err("spend should reject conflicting anchors");
+        .expect_err("spend should reject agent id anchor");
 
-        assert!(error
-            .to_string()
-            .contains("spend request must include exactly one of account_id or agent_id"));
+        assert!(error.to_string().contains(
+            "spend request must include account_id; agent_id is no longer accepted for spend"
+        ));
         std::fs::remove_file(path).ok();
     }
 
@@ -4893,7 +4886,7 @@ rules:
 
         let spend = spend(
             json!({
-                "agent_id": agents.agents[0].agent_id,
+                "account_id": agents.agents[0].account_id,
                 "amount_cents": 2_500,
                 "reason": "yaml-backed policy spend",
             })
@@ -4999,7 +4992,7 @@ rules: []
 
         let spend = spend(
             json!({
-                "agent_id": agent.agent_id,
+                "account_id": agent.account_id,
                 "amount_cents": 1_500,
                 "reason": "failed test purchase",
                 "merchant": "fail",
@@ -5069,7 +5062,7 @@ rules: []
             authenticated_json_request(
                 "/spend",
                 json!({
-                    "agent_id": agent.agent_id,
+                    "account_id": agent.account_id,
                     "amount_cents": 2_500,
                     "reason": "over budget purchase",
                     "merchant": "Acme Cafe",
@@ -5149,7 +5142,7 @@ rules: []
             "hubu-api-governance-restart-{}.sqlite",
             UserId::new()
         ));
-        let (user_id, agent_id) = {
+        let (user_id, account_id) = {
             let state =
                 ServerState::new_with_db_path(&path).expect("server state should initialize");
             let user = init(
@@ -5183,7 +5176,7 @@ rules: []
             create_test_agent_budget(&state, &agent.agent_id, 10_000);
             spend(
                 json!({
-                    "agent_id": agent.agent_id,
+                    "account_id": agent.account_id,
                     "amount_cents": 2_500,
                     "reason": "restart audit purchase",
                     "merchant": "Acme Cafe",
@@ -5192,7 +5185,7 @@ rules: []
                 &state,
             )
             .expect("spend should be approved and paid");
-            (user.user_id, agent.agent_id)
+            (user.user_id, agent.account_id)
         };
 
         let restarted =
@@ -5217,7 +5210,7 @@ rules: []
 
         let resumed_spend = spend(
             json!({
-                "agent_id": agent_id,
+                "account_id": account_id,
                 "amount_cents": 1_000,
                 "reason": "post-restart policy spend",
                 "merchant": "Acme Cafe",
@@ -5276,7 +5269,7 @@ rules: []
 
         let authorization = authorize_spend(
             json!({
-                "agent_id": agent.agent_id,
+                "account_id": agent.account_id,
                 "amount_cents": 500,
                 "reason": "hubu-logo-demo",
                 "merchant": "gongbu.image",

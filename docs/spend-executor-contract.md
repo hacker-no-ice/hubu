@@ -131,8 +131,7 @@ Executor validate, settle, and release currently share one request shape:
 ```json
 {
   "spend_auth_token_id": "uuid",
-  "agent_id": "agt_...",
-  "account_id": null,
+  "account_id": "aga_...",
   "amount_cents": 500,
   "merchant": "gongbu.image",
   "task_id": "hubu-logo-demo"
@@ -142,8 +141,9 @@ Executor validate, settle, and release currently share one request shape:
 Fields:
 
 - `spend_auth_token_id`: required Hubu spend authorization token.
+- `account_id`: required public agent account id. The account is the spend
+  source; Hubu derives and validates the owning agent identity from it.
 - `amount_cents`: required minor-unit amount. Currency is USD in v1.
-- `agent_id` or `account_id`: exactly one is required.
 - `merchant`: optional, but must match the authorization when present there.
 - `task_id`: optional executor task scope. In the current Hubu demo API this
   matches the `/spend/authorize` `reason` field.
