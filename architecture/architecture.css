@@ -384,7 +384,7 @@ a {
 }
 
 .arrow-label-back {
-  fill: rgba(255, 253, 247, 0.92);
+  fill: #fffdf7;
   stroke: rgba(31, 41, 51, 0.28);
   stroke-width: 1.5;
 }
