@@ -135,8 +135,8 @@ Agent registered
   session_id: ags_2h7rx0cq4p9w
 ```
 
-Copy the public `agent_id` for spend commands and `account_id` for direct
-account spend commands. Internally, Hubu still uses UUID-backed IDs; the CLI and HTTP demo API
+Copy the public `agent_id` for budgets and `account_id` for spend commands.
+Internally, Hubu still uses UUID-backed IDs; the CLI and HTTP demo API
 use shorter public IDs such as `usr_...`, `agt_...`, and `aga_...`. The suffixes
 will differ for each new user and agent because they are derived from internal
 UUIDs.
@@ -460,9 +460,7 @@ hubu [--url http://127.0.0.1:8787] budget revoke --budget-id ID
 hubu [--url http://127.0.0.1:8787] budget replace --budget-id ID --amount AMOUNT
 hubu [--url http://127.0.0.1:8787] budget list [--all]
 hubu [--url http://127.0.0.1:8787] spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-hubu [--url http://127.0.0.1:8787] spend --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
 hubu [--url http://127.0.0.1:8787] spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-hubu [--url http://127.0.0.1:8787] spend authorize --agent-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
 hubu [--url http://127.0.0.1:8787] ledger list
 hubu [--url http://127.0.0.1:8787] health
 ```

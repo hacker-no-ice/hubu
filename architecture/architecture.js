@@ -359,7 +359,7 @@ const components = {
       "Agents never hold private keys. They register as distinct accounts, operate under the current user's policy, agent budget, and user cap, and submit spend intent for Hubu to authorize.",
     responsibilities: [
       "Consumes registration guidance instead of guessing protocol fields from prose.",
-      "Submits structured spend requests with amount, reason, merchant, and agent/account identity.",
+      "Submits structured spend requests with amount, reason, merchant, and agent account identity.",
       "Receives allow, needs_approval, or deny decisions with traceable reasons.",
     ],
     links: [sharedLinks.mcp, sharedLinks.cli, sharedLinks.spend, sharedLinks.registrationProtocol],
