@@ -126,6 +126,11 @@ Hubu MCP tools and call spend tools without holding wallet credentials. For
 other MCP clients, use Hubu's tool annotations or
 `hubu_client_approval_profile`; see [docs/mcp-transport.md](docs/mcp-transport.md).
 
+## Local Developer Tools
+
+Hubu also includes local tools for understanding, exercising, and measuring the
+system independently of any specific agent harness.
+
 Open the interactive architecture visualizer:
 
 ```sh
