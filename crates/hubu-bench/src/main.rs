@@ -198,7 +198,7 @@ impl Config {
 
 #[derive(Debug)]
 struct Scenario {
-    agents: Vec<String>,
+    account_ids: Vec<String>,
     budget_ids: Vec<String>,
 }
 
@@ -220,7 +220,7 @@ fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> 
         }),
     )?;
 
-    let mut agents = Vec::with_capacity(config.agent_count);
+    let mut account_ids = Vec::with_capacity(config.agent_count);
     let mut budget_ids = Vec::with_capacity(config.agent_count);
     for index in 0..config.agent_count {
         let agent = client.post(
@@ -232,6 +232,7 @@ fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> 
             }),
         )?;
         let agent_id = string_at(&agent, "agent_id")?.to_string();
+        let account_id = string_at(&agent, "account_id")?.to_string();
         let budget = client.post(
             "/budgets",
             json!({
@@ -247,7 +248,7 @@ fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> 
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("budget response missing budget.budget_id"))?
             .to_string();
-        agents.push(agent_id);
+        account_ids.push(account_id);
         budget_ids.push(budget_id);
     }
 
@@ -260,7 +261,10 @@ fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> 
         }),
     )?;
 
-    Ok(Scenario { agents, budget_ids })
+    Ok(Scenario {
+        account_ids,
+        budget_ids,
+    })
 }
 
 fn run_benchmark(client: &HubuClient, scenario: &Scenario, config: &Config) -> Result<BenchReport> {
@@ -317,7 +321,7 @@ fn submit_spend(
     config: &Config,
     index: u64,
 ) -> RequestResult {
-    let agent_index = index as usize % scenario.agents.len();
+    let agent_index = index as usize % scenario.account_ids.len();
     let merchant = if config
         .fail_every
         .map(|value| value > 0 && index > 0 && index % value == 0)
@@ -330,12 +334,12 @@ fn submit_spend(
     let started = Instant::now();
     let response = client.post(
         "/spend",
-        json!({
-            "agent_id": scenario.agents[agent_index],
-            "amount_cents": config.amount_cents,
-            "reason": format!("bench-spend-{index}"),
-            "merchant": merchant,
-        }),
+        spend_request_body(
+            &scenario.account_ids[agent_index],
+            config.amount_cents,
+            index,
+            merchant,
+        ),
     );
     let latency = started.elapsed();
 
@@ -355,6 +359,15 @@ fn submit_spend(
             error: Some(error.to_string()),
         },
     }
+}
+
+fn spend_request_body(account_id: &str, amount_cents: i64, index: u64, merchant: &str) -> Value {
+    json!({
+        "account_id": account_id,
+        "amount_cents": amount_cents,
+        "reason": format!("bench-spend-{index}"),
+        "merchant": merchant,
+    })
 }
 
 #[derive(Debug)]
@@ -587,6 +600,7 @@ fn print_report(config: &Config, scenario: &Scenario, report: &BenchReport) {
     println!("  workers: {}", config.workers);
     println!("  amount_cents: {}", config.amount_cents);
     println!("  budget_cents: {}", config.budget_cents);
+    println!("  account_ids: {}", scenario.account_ids.join(", "));
     println!("  budget_ids: {}", scenario.budget_ids.join(", "));
     println!("performance");
     println!("  requests: {}", report.total);
@@ -979,5 +993,16 @@ mod tests {
             ),
             Some((700, 0, 1300))
         );
+    }
+
+    #[test]
+    fn spend_request_body_uses_account_id_anchor() {
+        let body = spend_request_body("acct_bench", 250, 7, "bench-merchant");
+
+        assert_eq!(body["account_id"], "acct_bench");
+        assert!(body.get("agent_id").is_none());
+        assert_eq!(body["amount_cents"], 250);
+        assert_eq!(body["reason"], "bench-spend-7");
+        assert_eq!(body["merchant"], "bench-merchant");
     }
 }
