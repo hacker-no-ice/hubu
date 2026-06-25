@@ -19,8 +19,8 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
   contract for scoped spend authorization, validation, settlement, and release
 - [mcp-transport.md](mcp-transport.md): MCP adapter setup, approval boundaries,
   and tool mapping
-- [benchmarking.md](benchmarking.md): local benchmark usage and current MVP
-  performance notes
+- [benchmarking.md](benchmarking.md): local benchmark usage, current migration
+  status, and historical MVP performance notes
 - [demo.md](demo.md): scripted local walkthrough and CLI reference
 
 ## Working Notes

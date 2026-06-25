@@ -158,17 +158,20 @@ a user cap, creates an agent budget, submits allowed, failed-payment,
 approval-required, and denied spend requests, then prints the resulting cap,
 budget, and ledger state.
 
-Run the conservative local benchmark:
+The conservative local benchmark needs a small client migration before it is
+runnable again: `hubu-bench` still posts legacy `agent_id` spend requests, while
+the current server, CLI, and MCP spend surfaces require `account_id` as the
+spend source.
 
 ```sh
 ./scripts/benchmark-local.sh
 ```
 
-The benchmark starts an isolated local server, simulates multiple agents owned
-by one user submitting paced spend requests, samples server CPU/RSS, and writes
-a report under `target/hubu-bench/`. See
+After that migration, the benchmark starts an isolated local server, simulates
+multiple agents owned by one user submitting paced spend requests, samples
+server CPU/RSS, and writes a report under `target/hubu-bench/`. See
 [docs/benchmarking.md](docs/benchmarking.md) for options and the current MVP
-results.
+status.
 
 ## Local HTTP Server
 
@@ -276,8 +279,8 @@ examples.
   v1 registration envelope, fingerprint fields, server validation, and
   low-friction human review flow
 - [docs/demo.md](docs/demo.md): scripted local walkthrough and CLI reference
-- [docs/benchmarking.md](docs/benchmarking.md): local spend benchmark usage and
-  the latest MVP performance, scalability, and reliability report
+- [docs/benchmarking.md](docs/benchmarking.md): local spend benchmark usage,
+  current migration status, and historical MVP performance report
 - [docs/registration-flow.md](docs/registration-flow.md): agent registration
   model and flow
 - [docs/policy-engine.md](docs/policy-engine.md): policy rule format and

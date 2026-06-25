@@ -3,14 +3,22 @@
 `hubu-bench` simulates multiple agents owned by one user submitting spend
 approval requests to a local Hubu server at a fixed request rate.
 
+Status: the benchmark client still needs to be migrated from the legacy
+`agent_id` spend request shape to the current `account_id` spend request shape.
+The current API, CLI, and MCP spend surfaces require `account_id` because the
+agent account is the spend source. Until `hubu-bench` is updated to retain and
+submit account IDs, `./scripts/benchmark-local.sh` is expected to fail during
+the spend phase with a server-side request-shape error.
+
 The benchmark covers the local MVP HTTP path:
 
 1. Create or select the local user.
 2. Register `N` agents.
 3. Attach a policy to each agent.
-4. Create an owner-scoped budget large enough for the run.
-5. Submit paced `POST /spend` requests at `Y` requests/sec.
-6. Report throughput, latency, response correctness, budget consistency, and
+4. Create one agent budget per registered agent.
+5. Create a user cap large enough for the run.
+6. Submit paced `POST /spend` requests at `Y` requests/sec.
+7. Report throughput, latency, response correctness, budget consistency, and
    ledger consistency.
 
 ## Quick Run
@@ -19,9 +27,10 @@ The benchmark covers the local MVP HTTP path:
 ./scripts/benchmark-local.sh
 ```
 
-The script builds `hubu-server` and `hubu-bench`, starts an isolated local
-server on `127.0.0.1:8790`, samples server CPU/RSS once per second with `ps`,
-and writes artifacts under `target/hubu-bench/`.
+After the benchmark client is migrated to `account_id`, the script builds
+`hubu-server` and `hubu-bench`, starts an isolated local server on
+`127.0.0.1:8790`, samples server CPU/RSS once per second with `ps`, and writes
+artifacts under `target/hubu-bench/`.
 The server creates/reads the local Hubu bearer token, and `hubu-bench` reads
 `HUBU_AUTH_TOKEN` or `HUBU_AUTH_TOKEN_FILE`/`hubu.auth-token` before calling
 protected routes.
@@ -60,9 +69,9 @@ The benchmark fails when any selected guardrail is violated. It verifies:
 - consumed budget equals successful payment spend
 - no budget remains frozen after the run
 
-## MVP Report
+## Historical MVP Report
 
-Latest collected run:
+Latest collected run before the spend API moved to `account_id`:
 
 - Date: 2026-06-03 local run
 - Scenario: one local server, one owner user, 4 agents, 8 target spend approval
