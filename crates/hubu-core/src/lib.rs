@@ -1,3 +1,4 @@
+pub mod app;
 pub mod budget;
 pub mod persistence;
 pub mod policy;

@@ -27,11 +27,15 @@ use hubu_common::{
     time::TimePeriod,
 };
 use hubu_core::{
+    app::{
+        ApprovedSpendAuthorization, AuthorizeSpendRequest, BudgetHoldUpdate,
+        FailedPaymentHoldPolicy, RejectedSpendAuthorization, SpendApprovalError,
+        SpendApprovalService, SpendAuthorizationOutcome, SpendPaymentSpec,
+    },
     budget::{
-        BudgetHold, BudgetHoldStatus, BudgetManager, BudgetManagerError, BudgetRecurrence,
-        BudgetScope, BudgetStatus, BudgetWithBalance, CreateBudgetSeriesRequest,
-        CreateSingleBudgetRequest, ReleaseBudgetResponse, ReserveBudgetRequest,
-        ReserveBudgetResponse, SettleBudgetResponse,
+        BudgetHold, BudgetHoldStatus, BudgetManager, BudgetRecurrence, BudgetScope, BudgetStatus,
+        BudgetWithBalance, CreateBudgetSeriesRequest, CreateSingleBudgetRequest,
+        ReserveBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyAssignmentScope, PolicyRepository, SpendRepository,
@@ -44,10 +48,7 @@ use hubu_core::{
         model::{Effect, Policy, Rule},
     },
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
-    spend::{
-        model::{SpendPaymentValidationRequest, SpendRequest},
-        SpendManager,
-    },
+    spend::{model::SpendPaymentValidationRequest, SpendManager},
     telemetry::{configure_file_logging, log_event},
     user::{CreateUserRequest, UserManager},
 };
@@ -2199,18 +2200,21 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
         SpendAuthorization::Authorized(authorization) => authorization,
         SpendAuthorization::Response(response) => return Ok(response),
     };
+    let auth_token_id = authorization.approval.auth_token_id();
 
     Ok(SpendHttpResponse {
         account_id: authorization.account_pub_id,
         agent_id: authorization.agent_pub_id,
-        decision_id: authorization.evaluation.decision_id.to_string(),
-        decision: effect_name(authorization.evaluation.evaluation.decision).to_string(),
-        reasons: authorization.evaluation.evaluation.reasons,
-        auth_token_id: authorization.auth_token_id,
-        budget_hold: authorization
-            .budget_reservation
-            .map(frozen_budget_hold_response),
-        cap_hold: authorization.cap_reservation.map(frozen_cap_hold_response),
+        decision_id: authorization.approval.evaluation.decision_id.to_string(),
+        decision: effect_name(authorization.approval.evaluation.evaluation.decision).to_string(),
+        reasons: authorization.approval.evaluation.evaluation.reasons,
+        auth_token_id: Some(auth_token_id),
+        budget_hold: Some(frozen_budget_hold_response(
+            authorization.approval.budget_reservation,
+        )),
+        cap_hold: Some(frozen_cap_hold_response(
+            authorization.approval.cap_reservation,
+        )),
         payment: None,
     })
 }
@@ -2221,178 +2225,32 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         SpendAuthorization::Authorized(authorization) => authorization,
         SpendAuthorization::Response(response) => return Ok(response),
     };
-    let owner = owner_metadata_for_user_id(&authorization.user.user_id, state)?;
-    let (budget_hold, cap_hold, payment) = if let Some(token) = authorization.token {
-        let budget_reservation = authorization
-            .budget_reservation
-            .ok_or_else(|| anyhow!("allowed spend did not reserve budget"))?;
-        let cap_reservation = authorization
-            .cap_reservation
-            .ok_or_else(|| anyhow!("allowed spend did not reserve cap"))?;
-        let payment_request = PaymentRequest {
-            idempotency_key: format!(
-                "{}:{}",
-                authorization.evaluation.decision_id, authorization.reason
-            ),
-            spend_auth_token_id: token.id,
-            owner_user_id: authorization.user.user_id.clone(),
-            agent_id: authorization.agent_id,
-            agent_account_id: authorization.account.id.clone(),
-            amount_cents: authorization.amount_cents,
-            currency: Currency::Usd,
-            merchant: authorization.merchant,
-            task_id: Some(authorization.reason),
-            rail: PaymentRailKind::FiatMock,
-            destination: PaymentDestination::FiatAccount {
-                account_ref: "local-merchant-account".to_string(),
-            },
-            memo: Some("Hubu mock payment".to_string()),
-        };
-
-        let payment_audit_request = payment_request.clone();
-        let payment_result = state
-            .payments
-            .lock()
-            .map_err(|_| anyhow!("payment manager lock poisoned"))?
-            .submit_payment(payment_request);
-
-        match payment_result {
-            Ok(payment) => {
-                state
-                    .payment_attempts
-                    .lock()
-                    .map_err(|_| anyhow!("payment attempt store lock poisoned"))?
-                    .save_payment_attempt(&payment_audit_request, &payment)?;
-
-                if payment.status == PaymentStatus::Succeeded {
-                    let used_token = state
-                        .spend
-                        .lock()
-                        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-                        .auth_token_record(&payment_audit_request.spend_auth_token_id)
-                        .ok_or_else(|| anyhow!("used spend auth token was not recorded"))?;
-                    state
-                        .governance
-                        .lock()
-                        .map_err(|_| anyhow!("governance store lock poisoned"))?
-                        .update_spend_auth_token(&used_token)?;
-                }
-
-                let (budget_update, cap_update) = {
-                    let mut budgets = state
-                        .budgets
-                        .lock()
-                        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-                    let updates = if payment.status == PaymentStatus::Succeeded {
-                        (
-                            BudgetHoldUpdate::Settled(
-                                budgets.settle_budget(&budget_reservation.hold.id)?,
-                            ),
-                            BudgetHoldUpdate::Settled(
-                                budgets.settle_budget(&cap_reservation.hold.id)?,
-                            ),
-                        )
-                    } else {
-                        (
-                            BudgetHoldUpdate::Released(
-                                budgets.release_budget(&budget_reservation.hold.id)?,
-                            ),
-                            BudgetHoldUpdate::Released(
-                                budgets.release_budget(&cap_reservation.hold.id)?,
-                            ),
-                        )
-                    };
-                    let (budget_hold, budget_balance) = hold_update_parts(&updates.0);
-                    let (cap_hold, cap_balance) = hold_update_parts(&updates.1);
-                    state
-                        .governance
-                        .lock()
-                        .map_err(|_| anyhow!("governance store lock poisoned"))?
-                        .update_budget_holds(&[
-                            (budget_hold, budget_balance),
-                            (cap_hold, cap_balance),
-                        ])?;
-                    updates
-                };
-
-                log_event(
-                    "info",
-                    "payment_submitted_for_spend",
-                    json!({
-                        "decision_id": authorization.evaluation.decision_id.to_string(),
-                        "payment_id": payment.payment_id.to_string(),
-                        "payment_status": match payment.status {
-                            PaymentStatus::Succeeded => "succeeded",
-                            PaymentStatus::Failed => "failed",
-                        },
-                        "ledger_transaction_id": payment.ledger_transaction_id.as_ref().map(ToString::to_string),
-                        "rail_reference": payment.rail_reference,
-                        "failure_reason": payment.failure_reason,
-                    }),
-                );
-                (
-                    Some(budget_hold_response(budget_update)),
-                    Some(cap_hold_response(cap_update)),
-                    Some(PaymentHttpResponse {
-                        payment_id: payment.payment_id.to_string(),
-                        owner_user_id: owner.pub_id,
-                        owner_user_name: owner.display_name,
-                        account_id: authorization.account_pub_id.clone(),
-                        status: match payment.status {
-                            PaymentStatus::Succeeded => "succeeded",
-                            PaymentStatus::Failed => "failed",
-                        }
-                        .to_string(),
-                        ledger_transaction_id: payment
-                            .ledger_transaction_id
-                            .map(|id| id.to_string()),
-                        rail_reference: payment.rail_reference,
-                        failure_reason: payment.failure_reason,
-                    }),
-                )
-            }
-            Err(error) => {
-                let (budget_release, cap_release) = {
-                    let mut budgets = state
-                        .budgets
-                        .lock()
-                        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-                    (
-                        budgets.release_budget(&budget_reservation.hold.id)?,
-                        budgets.release_budget(&cap_reservation.hold.id)?,
-                    )
-                };
-                state
-                    .governance
-                    .lock()
-                    .map_err(|_| anyhow!("governance store lock poisoned"))?
-                    .update_budget_holds(&[
-                        (&budget_release.hold, &budget_release.balance),
-                        (&cap_release.hold, &cap_release.balance),
-                    ])?;
-                log_event(
-                    "warn",
-                    "payment_failed_budget_released",
-                    json!({
-                        "decision_id": authorization.evaluation.decision_id.to_string(),
-                        "hold_id": budget_reservation.hold.id.to_string(),
-                        "error": error.to_string(),
-                    }),
-                );
-                return Err(error.into());
-            }
-        }
-    } else {
-        (None, None, None)
-    };
+    let owner = owner_metadata_for_user_id(&authorization.approval.user.user_id, state)?;
+    let settlement = submit_authorized_payment(&authorization.approval, state)?;
+    let budget_hold = Some(budget_hold_response(settlement.budget_update));
+    let cap_hold = Some(cap_hold_response(settlement.cap_update));
+    let payment = Some(PaymentHttpResponse {
+        payment_id: settlement.payment.payment_id.to_string(),
+        owner_user_id: owner.pub_id,
+        owner_user_name: owner.display_name,
+        account_id: authorization.account_pub_id.clone(),
+        status: payment_status_name(settlement.payment.status).to_string(),
+        ledger_transaction_id: settlement
+            .payment
+            .ledger_transaction_id
+            .map(|id| id.to_string()),
+        rail_reference: settlement.payment.rail_reference,
+        failure_reason: settlement.payment.failure_reason,
+    });
+    let auth_token_id = authorization.approval.auth_token_id();
 
     Ok(SpendHttpResponse {
         account_id: authorization.account_pub_id,
         agent_id: authorization.agent_pub_id,
-        decision_id: authorization.evaluation.decision_id.to_string(),
-        decision: effect_name(authorization.evaluation.evaluation.decision).to_string(),
-        reasons: authorization.evaluation.evaluation.reasons,
-        auth_token_id: authorization.auth_token_id,
+        decision_id: authorization.approval.evaluation.decision_id.to_string(),
+        decision: effect_name(authorization.approval.evaluation.evaluation.decision).to_string(),
+        reasons: authorization.approval.evaluation.evaluation.reasons,
+        auth_token_id: Some(auth_token_id),
         budget_hold,
         cap_hold,
         payment,
@@ -2669,19 +2527,9 @@ fn executor_spend_response_with_hold(
 }
 
 struct AuthorizedSpend {
-    user: UserContext,
-    account: AgentAccount,
     account_pub_id: String,
-    agent_id: AgentId,
     agent_pub_id: String,
-    amount_cents: i64,
-    merchant: Option<String>,
-    reason: String,
-    evaluation: hubu_core::spend::SpendEvaluationResponse,
-    auth_token_id: Option<String>,
-    token: Option<hubu_core::spend::IssuedSpendAuthToken>,
-    budget_reservation: Option<ReserveBudgetResponse>,
-    cap_reservation: Option<ReserveBudgetResponse>,
+    approval: ApprovedSpendAuthorization,
 }
 
 enum SpendAuthorization {
@@ -2693,9 +2541,6 @@ fn evaluate_and_reserve_spend(
     request: SpendHttpRequest,
     state: &ServerState,
 ) -> Result<SpendAuthorization> {
-    if request.amount_cents <= 0 {
-        return Err(anyhow!("spend amount must be positive"));
-    }
     reconcile_expired_budget_holds(state)?;
 
     let user = authenticated_user_context(state)?;
@@ -2719,223 +2564,159 @@ fn evaluate_and_reserve_spend(
     let policy = policy_for_spend(state, &user.user_id, &agent_id)?
         .ok_or_else(|| anyhow!("no policy found for current user"))?;
 
-    let spend_request = SpendRequest {
-        amount_cents: request.amount_cents,
-        currency: Currency::Usd,
-        owner_user_id: user.user_id.clone(),
-        agent_id: agent_id.clone(),
-        agent_account_id: account.id.clone(),
-        merchant: request.merchant.clone(),
-        category: None,
-        task_id: Some(request.reason.clone()),
-    };
-
-    let (evaluation, token_record) = {
-        let mut spend = state
+    let outcome = {
+        let mut spend_manager = state
             .spend
             .lock()
             .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-        let evaluation = spend.evaluate_spend(&user, spend_request.clone(), &policy)?;
-        let decision_record = spend
-            .decision_record(&evaluation.decision_id)
-            .ok_or_else(|| anyhow!("spend decision was not recorded"))?;
-        let token_record = evaluation
-            .auth_token
-            .as_ref()
-            .and_then(|token| spend.auth_token_record(&token.id));
-        drop(spend);
-
+        let mut budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
         let mut governance = state
             .governance
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        governance.save_spend_decision(&decision_record)?;
-        (evaluation, token_record)
+        SpendApprovalService.authorize(
+            AuthorizeSpendRequest {
+                user: user.clone(),
+                agent_id: agent_id.clone(),
+                agent_account_id: account.id,
+                amount_cents: request.amount_cents,
+                currency: Currency::Usd,
+                merchant: request.merchant.clone(),
+                task_id: Some(request.reason.clone()),
+            },
+            &policy,
+            &mut spend_manager,
+            &mut budget_manager,
+            &mut *governance,
+        )?
     };
 
-    let auth_token_id = evaluation
-        .auth_token
-        .as_ref()
-        .map(|token| token.id.to_string());
+    match outcome {
+        SpendAuthorizationOutcome::Approved(approval) => {
+            log_spend_policy_evaluated(
+                &agent_pub_id,
+                &agent_id,
+                &approval.user.user_id,
+                &approval.evaluation,
+                true,
+            );
+            Ok(SpendAuthorization::Authorized(AuthorizedSpend {
+                account_pub_id,
+                agent_pub_id,
+                approval,
+            }))
+        }
+        SpendAuthorizationOutcome::Rejected(rejection) => {
+            log_spend_policy_evaluated(
+                &agent_pub_id,
+                &agent_id,
+                &rejection.user.user_id,
+                &rejection.evaluation,
+                false,
+            );
+            Ok(SpendAuthorization::Response(spend_rejection_response(
+                rejection,
+                account_pub_id,
+                agent_pub_id,
+            )))
+        }
+    }
+}
+
+fn log_spend_policy_evaluated(
+    agent_pub_id: &str,
+    agent_id: &AgentId,
+    user_id: &UserId,
+    evaluation: &hubu_core::spend::SpendEvaluationResponse,
+    auth_token_returned: bool,
+) {
     log_event(
         "info",
         "spend_policy_evaluated",
         json!({
             "agent_pub_id": agent_pub_id,
             "agent_id": agent_id.to_string(),
-            "user_id": user.user_id.to_string(),
+            "user_id": user_id.to_string(),
             "decision_id": evaluation.decision_id.to_string(),
             "decision": effect_name(evaluation.evaluation.decision),
             "policy_id": evaluation.evaluation.policy_id,
             "policy_version": evaluation.evaluation.policy_version,
-            "auth_token_issued": auth_token_id.is_some(),
+            "auth_token_issued": evaluation.auth_token.is_some(),
+            "auth_token_returned": auth_token_returned,
         }),
     );
-    let token = evaluation.auth_token.clone();
-    let (budget_reservation, cap_reservation) = if let Some(token) = token.as_ref() {
-        let budget_id = active_budget_id_for_spend(&agent_id, state)?;
-        let cap_id = active_user_cap_id_for_spend(&user.user_id, state)?;
-        let (budget_reservation, cap_reservation) = {
-            let mut budgets = state
-                .budgets
-                .lock()
-                .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-            let budget_reservation = match budgets.reserve_budget(ReserveBudgetRequest {
-                budget_id: budget_id.clone(),
-                spend_decision_id: evaluation.decision_id.clone(),
-                amount_cents: request.amount_cents,
-                currency: Currency::Usd,
-                expires_at: token.expires_at,
-            }) {
-                Ok(reservation) => reservation,
-                Err(BudgetManagerError::InsufficientRemainingBudget) => {
-                    log_event(
-                        "warn",
-                        "spend_budget_denied",
-                        json!({
-                            "agent_pub_id": agent_pub_id,
-                            "agent_id": agent_id.to_string(),
-                            "account_pub_id": account_pub_id,
-                            "user_id": user.user_id.to_string(),
-                            "decision_id": evaluation.decision_id.to_string(),
-                            "budget_id": budget_id.to_string(),
-                            "amount_cents": request.amount_cents,
-                            "reason": "insufficient_remaining_budget",
-                        }),
-                    );
-                    return Ok(SpendAuthorization::Response(SpendHttpResponse {
-                        account_id: account_pub_id,
-                        agent_id: agent_pub_id,
-                        decision_id: evaluation.decision_id.to_string(),
-                        decision: "deny".to_string(),
-                        reasons: vec!["budget does not have enough remaining balance".to_string()],
-                        auth_token_id: None,
-                        budget_hold: None,
-                        cap_hold: None,
-                        payment: None,
-                    }));
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let cap_reservation = match budgets.reserve_budget(ReserveBudgetRequest {
-                budget_id: cap_id.clone(),
-                spend_decision_id: evaluation.decision_id.clone(),
-                amount_cents: request.amount_cents,
-                currency: Currency::Usd,
-                expires_at: token.expires_at,
-            }) {
-                Ok(reservation) => reservation,
-                Err(BudgetManagerError::InsufficientRemainingBudget) => {
-                    let release = budgets.release_budget(&budget_reservation.hold.id)?;
-                    log_event(
-                        "warn",
-                        "spend_cap_denied",
-                        json!({
-                            "agent_pub_id": agent_pub_id,
-                            "agent_id": agent_id.to_string(),
-                            "account_pub_id": account_pub_id,
-                            "user_id": user.user_id.to_string(),
-                            "decision_id": evaluation.decision_id.to_string(),
-                            "cap_id": cap_id.to_string(),
-                            "amount_cents": request.amount_cents,
-                            "released_budget_hold_id": release.hold.id.to_string(),
-                            "reason": "insufficient_remaining_cap",
-                        }),
-                    );
-                    return Ok(SpendAuthorization::Response(SpendHttpResponse {
-                        account_id: account_pub_id,
-                        agent_id: agent_pub_id,
-                        decision_id: evaluation.decision_id.to_string(),
-                        decision: "deny".to_string(),
-                        reasons: vec!["user cap does not have enough remaining balance".to_string()],
-                        auth_token_id: None,
-                        budget_hold: None,
-                        cap_hold: None,
-                        payment: None,
-                    }));
-                }
-                Err(error) => {
-                    budgets.release_budget(&budget_reservation.hold.id)?;
-                    return Err(error.into());
-                }
-            };
-            (budget_reservation, cap_reservation)
-        };
-        if let Some(token_record) = &token_record {
-            if let Err(error) = state
-                .governance
-                .lock()
-                .map_err(|_| anyhow!("governance store lock poisoned"))?
-                .save_spend_auth_token(token_record)
-            {
-                let (budget_release, cap_release) = {
-                    let mut budgets = state
-                        .budgets
-                        .lock()
-                        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-                    (
-                        budgets.release_budget(&budget_reservation.hold.id)?,
-                        budgets.release_budget(&cap_reservation.hold.id)?,
-                    )
-                };
-                log_event(
-                    "warn",
-                    "spend_budget_reservation_released",
-                    json!({
-                        "decision_id": evaluation.decision_id.to_string(),
-                        "hold_id": budget_release.hold.id.to_string(),
-                        "cap_hold_id": cap_release.hold.id.to_string(),
-                        "remaining_amount_cents": budget_release.balance.remaining_amount_cents,
-                        "error": error.to_string(),
-                    }),
-                );
-                return Err(error.into());
-            }
-        }
-        state
-            .governance
-            .lock()
-            .map_err(|_| anyhow!("governance store lock poisoned"))?
-            .save_budget_holds(&[
-                (&budget_reservation.hold, &budget_reservation.balance),
-                (&cap_reservation.hold, &cap_reservation.balance),
-            ])?;
-        log_event(
-            "info",
-            "budget_reserved_for_spend",
-            json!({
-                "budget_id": budget_reservation.hold.budget_id.to_string(),
-                "hold_id": budget_reservation.hold.id.to_string(),
-                "cap_id": cap_reservation.hold.budget_id.to_string(),
-                "cap_hold_id": cap_reservation.hold.id.to_string(),
-                "decision_id": evaluation.decision_id.to_string(),
-                "amount_cents": budget_reservation.hold.amount_cents,
-                "remaining_amount_cents": budget_reservation.balance.remaining_amount_cents,
-                "frozen_amount_cents": budget_reservation.balance.frozen_amount_cents,
-                "cap_remaining_amount_cents": cap_reservation.balance.remaining_amount_cents,
-                "cap_frozen_amount_cents": cap_reservation.balance.frozen_amount_cents,
-            }),
-        );
-        (Some(budget_reservation), Some(cap_reservation))
-    } else {
-        (None, None)
-    };
+}
 
-    Ok(SpendAuthorization::Authorized(AuthorizedSpend {
-        user,
-        account,
-        account_pub_id,
-        agent_id,
-        agent_pub_id,
-        amount_cents: request.amount_cents,
-        merchant: request.merchant,
-        reason: request.reason,
-        evaluation,
-        auth_token_id,
-        token,
-        budget_reservation,
-        cap_reservation,
-    }))
+fn spend_rejection_response(
+    rejection: RejectedSpendAuthorization,
+    account_pub_id: String,
+    agent_pub_id: String,
+) -> SpendHttpResponse {
+    SpendHttpResponse {
+        account_id: account_pub_id,
+        agent_id: agent_pub_id,
+        decision_id: rejection.evaluation.decision_id.to_string(),
+        decision: effect_name(rejection.decision).to_string(),
+        reasons: rejection.reasons,
+        auth_token_id: None,
+        budget_hold: None,
+        cap_hold: None,
+        payment: None,
+    }
+}
+
+fn submit_authorized_payment(
+    authorization: &ApprovedSpendAuthorization,
+    state: &ServerState,
+) -> Result<hubu_core::app::SpendPaymentSettlement> {
+    let spend = Arc::clone(&state.spend);
+    let mut payment_manager = state
+        .payments
+        .lock()
+        .map_err(|_| anyhow!("payment manager lock poisoned"))?;
+    let mut payment_attempts = state
+        .payment_attempts
+        .lock()
+        .map_err(|_| anyhow!("payment attempt store lock poisoned"))?;
+    let mut budget_manager = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+    let mut governance = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?;
+
+    Ok(SpendApprovalService.submit_payment(
+        authorization,
+        SpendPaymentSpec {
+            idempotency_key: format!(
+                "{}:{}",
+                authorization.evaluation.decision_id,
+                authorization.task_id.as_deref().unwrap_or_default()
+            ),
+            rail: PaymentRailKind::FiatMock,
+            destination: PaymentDestination::FiatAccount {
+                account_ref: "local-merchant-account".to_string(),
+            },
+            memo: Some("Hubu mock payment".to_string()),
+            failed_payment_hold_policy: FailedPaymentHoldPolicy::Release,
+        },
+        &mut payment_manager,
+        &mut *payment_attempts,
+        &mut budget_manager,
+        &mut *governance,
+        move |token_id| {
+            spend
+                .lock()
+                .map_err(|_| SpendApprovalError::UsedSpendAuthTokenMissing)?
+                .auth_token_record(token_id)
+                .ok_or(SpendApprovalError::UsedSpendAuthTokenMissing)
+        },
+    )?)
 }
 
 fn policy_for_spend(
@@ -2956,20 +2737,6 @@ fn policy_for_spend(
         .cloned())
 }
 
-enum BudgetHoldUpdate {
-    Settled(SettleBudgetResponse),
-    Released(ReleaseBudgetResponse),
-}
-
-fn hold_update_parts(
-    update: &BudgetHoldUpdate,
-) -> (&BudgetHold, &hubu_core::budget::BudgetBalance) {
-    match update {
-        BudgetHoldUpdate::Settled(response) => (&response.hold, &response.balance),
-        BudgetHoldUpdate::Released(response) => (&response.hold, &response.balance),
-    }
-}
-
 fn reconcile_expired_budget_holds(state: &ServerState) -> Result<()> {
     let expired = state
         .budgets
@@ -2988,38 +2755,6 @@ fn reconcile_expired_budget_holds(state: &ServerState) -> Result<()> {
         governance.update_budget_hold(&response.hold, &response.balance)?;
     }
     Ok(())
-}
-
-fn active_budget_id_for_spend(agent_id: &AgentId, state: &ServerState) -> Result<BudgetId> {
-    let now = Utc::now();
-    let manager = state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-    manager
-        .get_budgets_by_agent_id(agent_id)
-        .into_iter()
-        .find(|budget| is_active_usd_budget(budget) && budget.budget.period.contains(now))
-        .map(|budget| budget.budget.id)
-        .ok_or_else(|| anyhow!("no active USD budget found for agent"))
-}
-
-fn active_user_cap_id_for_spend(user_id: &UserId, state: &ServerState) -> Result<BudgetId> {
-    let now = Utc::now();
-    let manager = state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-    manager
-        .get_budgets_by_user_id(user_id)
-        .into_iter()
-        .find(|cap| is_active_usd_budget(cap) && cap.budget.period.contains(now))
-        .map(|cap| cap.budget.id)
-        .ok_or_else(|| anyhow!("no active USD user cap found"))
-}
-
-fn is_active_usd_budget(budget: &BudgetWithBalance) -> bool {
-    budget.budget.currency == Currency::Usd && matches!(budget.budget.status, BudgetStatus::Active)
 }
 
 fn budget_recurrence(recurrence: BudgetRecurrenceHttp) -> BudgetRecurrence {
@@ -3134,6 +2869,7 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
             frozen_amount_cents: response.balance.frozen_amount_cents,
             remaining_amount_cents: response.balance.remaining_amount_cents,
         },
+        BudgetHoldUpdate::Frozen(response) => frozen_budget_hold_response(response),
     }
 }
 
@@ -3145,6 +2881,7 @@ fn cap_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
         BudgetHoldUpdate::Released(response) => {
             cap_hold_state_response(response.hold, response.balance)
         }
+        BudgetHoldUpdate::Frozen(response) => frozen_cap_hold_response(response),
     }
 }
 
@@ -3418,6 +3155,13 @@ fn effect_name(effect: Effect) -> &'static str {
         Effect::Allow => "allow",
         Effect::Deny => "deny",
         Effect::NeedsApproval => "needs_approval",
+    }
+}
+
+fn payment_status_name(status: PaymentStatus) -> &'static str {
+    match status {
+        PaymentStatus::Succeeded => "succeeded",
+        PaymentStatus::Failed => "failed",
     }
 }
 
