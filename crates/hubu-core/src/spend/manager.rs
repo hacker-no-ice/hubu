@@ -86,6 +86,17 @@ impl SpendManager {
         self.executor_claims.get(claim_id).cloned()
     }
 
+    pub fn apply_persisted_executor_finalization(
+        &mut self,
+        claim: SpendExecutorClaimRecord,
+        token: SpendAuthTokenRecord,
+    ) {
+        self.claim_id_by_token
+            .insert(token.id.clone(), claim.id.clone());
+        self.tokens.insert(token.id.clone(), token);
+        self.executor_claims.insert(claim.id.clone(), claim);
+    }
+
     pub fn evaluate_spend(
         &mut self,
         user: &UserContext,
@@ -367,51 +378,6 @@ impl SpendManager {
             return Err(SpendError::UsedSpendAuthToken);
         }
         Ok(claim.clone())
-    }
-
-    pub fn settle_executor_claim(
-        &mut self,
-        request: &SpendExecutorClaimValidationRequest,
-        settlement_id: PaymentId,
-    ) -> Result<(SpendExecutorClaimRecord, SpendAuthTokenRecord), SpendError> {
-        let claim = self.validate_executor_claim(request)?;
-        let finalized_at = Utc::now();
-        let token = self
-            .tokens
-            .get_mut(&claim.spend_auth_token_id)
-            .ok_or(SpendError::UnknownSpendAuthToken)?;
-        token.used_at = Some(finalized_at);
-        token.used_by_payment_id = Some(settlement_id.clone());
-        let token = token.clone();
-        let stored_claim = self
-            .executor_claims
-            .get_mut(&claim.id)
-            .ok_or(SpendError::UnknownExecutorClaim)?;
-        stored_claim.status = SpendExecutorClaimStatus::Settled;
-        stored_claim.finalized_at = Some(finalized_at);
-        stored_claim.settlement_id = Some(settlement_id);
-        Ok((stored_claim.clone(), token))
-    }
-
-    pub fn release_executor_claim(
-        &mut self,
-        request: &SpendExecutorClaimValidationRequest,
-    ) -> Result<(SpendExecutorClaimRecord, SpendAuthTokenRecord), SpendError> {
-        let claim = self.validate_executor_claim(request)?;
-        let finalized_at = Utc::now();
-        let token = self
-            .tokens
-            .get_mut(&claim.spend_auth_token_id)
-            .ok_or(SpendError::UnknownSpendAuthToken)?;
-        token.revoked_at = Some(finalized_at);
-        let token = token.clone();
-        let stored_claim = self
-            .executor_claims
-            .get_mut(&claim.id)
-            .ok_or(SpendError::UnknownExecutorClaim)?;
-        stored_claim.status = SpendExecutorClaimStatus::Released;
-        stored_claim.finalized_at = Some(finalized_at);
-        Ok((stored_claim.clone(), token))
     }
 
     fn validate_claimed_authorization_scope(

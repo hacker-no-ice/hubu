@@ -59,6 +59,16 @@ impl BudgetManager {
         manager
     }
 
+    pub fn apply_persisted_finalization(&mut self, hold: BudgetHold, balance: BudgetBalance) {
+        let budget_id = hold.budget_id.clone();
+        let updated_at = hold.updated_at;
+        self.budget_holds.insert(hold.id.clone(), hold);
+        self.budget_balances.insert(budget_id.clone(), balance);
+        if let Some(balance) = self.budget_balances.get(&budget_id) {
+            refresh_budget_status(&mut self.budgets, &budget_id, balance, updated_at);
+        }
+    }
+
     /// Create one budget and initialize its cached balance.
     ///
     /// An agent may only have one budget for a currency at any point in time.
