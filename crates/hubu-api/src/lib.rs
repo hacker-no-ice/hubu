@@ -17,7 +17,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Months, Utc};
 use hubu_common::{
-    ids::{AgentId, AgentSessionId, BudgetId, PaymentId, SpendAuthTokenId, UserId},
+    ids::{
+        AgentId, AgentSessionId, BudgetId, PaymentId, SpendAuthTokenId, SpendingTargetId, UserId,
+    },
     models::account::{AccountStatus, AgentAccount},
     models::identity::{
         AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
@@ -33,13 +35,13 @@ use hubu_core::{
         SpendApprovalService, SpendAuthorizationOutcome, SpendPaymentSpec,
     },
     budget::{
-        BudgetHold, BudgetHoldStatus, BudgetManager, BudgetRecurrence, BudgetScope, BudgetStatus,
+        BudgetHold, BudgetHoldStatus, BudgetManager, BudgetRecurrence, BudgetStatus,
         BudgetWithBalance, CreateBudgetSeriesRequest, CreateSingleBudgetRequest,
         ReserveBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyAssignmentScope, PolicyRepository, SpendRepository,
-        SqliteGovernanceRepository,
+        SpendingTargetRepository, SqliteGovernanceRepository,
     },
     policy::{
         condition::{Condition, Field, PolicyValue},
@@ -49,6 +51,10 @@ use hubu_core::{
     },
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
     spend::{model::SpendPaymentValidationRequest, SpendManager},
+    spending_target::{
+        periods_overlap, CreateSpendingTargetRequest, SpendingTarget, SpendingTargetManager,
+        SpendingTargetStatus,
+    },
     telemetry::{configure_file_logging, log_event},
     user::{CreateUserRequest, UserManager},
 };
@@ -147,6 +153,7 @@ struct ServerState {
     registration: Mutex<RegistrationManager>,
     spend: Arc<Mutex<SpendManager>>,
     budgets: Mutex<BudgetManager>,
+    spending_targets: Mutex<SpendingTargetManager>,
     policies: Mutex<HashMap<(UserId, PolicyAssignmentScope), Policy>>,
     governance: Mutex<SqliteGovernanceRepository>,
     payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
@@ -216,6 +223,11 @@ impl ServerState {
                 .load_budget_holds()
                 .context("load budget holds")?,
         );
+        let spending_targets = SpendingTargetManager::from_records(
+            governance
+                .load_spending_targets()
+                .context("load spending targets")?,
+        );
         let authorizer = SharedSpendAuthorizer {
             spend: Arc::clone(&spend),
         };
@@ -245,6 +257,7 @@ impl ServerState {
             ),
             spend,
             budgets: Mutex::new(budgets),
+            spending_targets: Mutex::new(spending_targets),
             policies: Mutex::new(policies),
             governance: Mutex::new(governance),
             payment_attempts: Mutex::new(payment_attempts),
@@ -654,15 +667,15 @@ struct ReplaceBudgetHttpRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct SetUserCapHttpRequest {
+struct SetSpendingTargetHttpRequest {
     amount_cents: i64,
     starting_at: Option<String>,
     ending_before: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct UserCapIdHttpRequest {
-    cap_id: String,
+struct SpendingTargetIdHttpRequest {
+    target_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -676,11 +689,13 @@ enum BudgetRecurrenceHttp {
 #[derive(Debug, Serialize)]
 struct CreateBudgetHttpResponse {
     budget: BudgetHttpResponse,
+    spending_target_warnings: Vec<SpendingTargetWarningHttpResponse>,
 }
 
 #[derive(Debug, Serialize)]
 struct CreateBudgetSeriesHttpResponse {
     budgets: Vec<BudgetHttpResponse>,
+    spending_target_warnings: Vec<SpendingTargetWarningHttpResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -692,6 +707,7 @@ struct RevokeBudgetHttpResponse {
 struct ReplaceBudgetHttpResponse {
     revoked_budget: BudgetHttpResponse,
     budget: BudgetHttpResponse,
+    spending_target_warnings: Vec<SpendingTargetWarningHttpResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -700,25 +716,24 @@ struct ListBudgetsHttpResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct SetUserCapHttpResponse {
-    cap: UserCapHttpResponse,
+struct SetSpendingTargetHttpResponse {
+    target: SpendingTargetHttpResponse,
 }
 
 #[derive(Debug, Serialize)]
-struct ListUserCapsHttpResponse {
-    caps: Vec<UserCapHttpResponse>,
+struct ListSpendingTargetsHttpResponse {
+    targets: Vec<SpendingTargetHttpResponse>,
 }
 
 #[derive(Debug, Serialize)]
-struct RevokeUserCapHttpResponse {
-    cap: UserCapHttpResponse,
+struct RevokeSpendingTargetHttpResponse {
+    target: SpendingTargetHttpResponse,
 }
 
 #[derive(Debug, Serialize)]
 struct BudgetHttpResponse {
     budget_id: String,
-    scope: String,
-    scope_id: String,
+    agent_id: String,
     amount_limit_cents: i64,
     currency: String,
     starting_at: String,
@@ -730,16 +745,25 @@ struct BudgetHttpResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct UserCapHttpResponse {
-    cap_id: String,
-    amount_limit_cents: i64,
+struct SpendingTargetHttpResponse {
+    target_id: String,
+    target_amount_cents: i64,
+    allocated_amount_cents: i64,
+    exceeded_by_cents: i64,
+    is_exceeded: bool,
     currency: String,
     starting_at: String,
     ending_before: Option<String>,
     status: String,
-    consumed_amount_cents: i64,
-    frozen_amount_cents: i64,
-    remaining_amount_cents: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct SpendingTargetWarningHttpResponse {
+    target_id: String,
+    target_amount_cents: i64,
+    allocated_amount_cents: i64,
+    exceeded_by_cents: i64,
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -760,7 +784,6 @@ struct SpendHttpResponse {
     reasons: Vec<String>,
     auth_token_id: Option<String>,
     budget_hold: Option<BudgetHoldHttpResponse>,
-    cap_hold: Option<BudgetHoldHttpResponse>,
     payment: Option<PaymentHttpResponse>,
 }
 
@@ -786,7 +809,6 @@ struct ExecutorSpendHttpResponse {
     task_id: Option<String>,
     expires_at: String,
     budget_hold: BudgetHoldHttpResponse,
-    cap_hold: Option<BudgetHoldHttpResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -918,9 +940,13 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("GET", "/user") => current_user(state).map(to_json),
         ("GET", "/users") => list_users(state).map(to_json),
         ("POST", "/init") => init(request.body, state).map(to_json),
-        ("POST", "/user/cap") => set_user_cap(request.body, state).map(to_json),
-        ("GET", "/user/cap") => list_user_caps(state, query_flag(&request, "all")).map(to_json),
-        ("POST", "/user/cap/revoke") => revoke_user_cap(request.body, state).map(to_json),
+        ("POST", "/user/spending-target") => set_spending_target(request.body, state).map(to_json),
+        ("GET", "/user/spending-target") => {
+            list_spending_targets(state, query_flag(&request, "all")).map(to_json)
+        }
+        ("POST", "/user/spending-target/revoke") => {
+            revoke_spending_target(request.body, state).map(to_json)
+        }
         ("POST", "/agents/register") => register_agent(request.body, state).map(to_json),
         ("GET", "/agents") if query_flag(&request, "all") => {
             list_agents_for_scope(state, true).map(to_json)
@@ -1047,7 +1073,7 @@ fn spend_executor_guidance() -> Value {
             "hubu": [
                 "register agents and owners",
                 "evaluate policy",
-                "reserve budget holds",
+                "reserve one agent-budget hold per spend decision",
                 "validate executor spend authorization",
                 "settle or release reserved budget"
             ],
@@ -1862,7 +1888,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
     }
 
     let user = authenticated_user_context(state)?;
-    let scope = agent_budget_scope_from_agent_id(request.agent_id.as_deref(), &user, state)?;
+    let agent_id = required_budget_agent_id(request.agent_id.as_deref(), &user, state)?;
     let period = TimePeriod::new(
         parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now),
         parse_optional_datetime(request.ending_before)?,
@@ -1873,7 +1899,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
         .create_single_budget(CreateSingleBudgetRequest {
-            scope,
+            agent_id: agent_id.clone(),
             amount_limit_cents: request.amount_cents,
             currency: Currency::Usd,
             period,
@@ -1890,21 +1916,26 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         json!({
             "budget_id": response.budget.id.to_string(),
             "user_id": user.user_id.to_string(),
-            "scope": budget_scope_name(&response.budget.scope),
+            "agent_id": agent_id.to_string(),
             "amount_cents": response.budget.amount_limit_cents,
             "currency": response.budget.currency.to_string(),
             "starting_at": response.budget.period.starting_at.to_rfc3339(),
             "ending_before": response.budget.period.ending_before.map(|value| value.to_rfc3339()),
         }),
     );
+    let budget = BudgetWithBalance {
+        budget: response.budget,
+        balance: response.balance,
+    };
+    let spending_target_warnings = spending_target_warnings_for_periods(
+        &user,
+        std::slice::from_ref(&budget.budget.period),
+        budget.budget.currency,
+        state,
+    )?;
     Ok(CreateBudgetHttpResponse {
-        budget: budget_response(
-            BudgetWithBalance {
-                budget: response.budget,
-                balance: response.balance,
-            },
-            state,
-        )?,
+        budget: budget_response(budget, state)?,
+        spending_target_warnings,
     })
 }
 
@@ -1918,7 +1949,7 @@ fn create_budget_series(
     }
 
     let user = authenticated_user_context(state)?;
-    let scope = agent_budget_scope_from_agent_id(request.agent_id.as_deref(), &user, state)?;
+    let agent_id = required_budget_agent_id(request.agent_id.as_deref(), &user, state)?;
     let starting_at = parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now);
     let recurrence = budget_recurrence(request.recurrence);
     budget_series_periods(starting_at, recurrence, request.period_count)?;
@@ -1928,7 +1959,7 @@ fn create_budget_series(
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
         .create_budget_series(CreateBudgetSeriesRequest {
-            scope,
+            agent_id: agent_id.clone(),
             amount_limit_cents: request.amount_cents,
             currency: Currency::Usd,
             starting_at,
@@ -1951,22 +1982,30 @@ fn create_budget_series(
         json!({
             "user_id": user.user_id.to_string(),
             "budget_count": response.budgets.len(),
-            "scope": response.budgets.first().map(|budget| budget_scope_name(&budget.budget.scope)),
+            "agent_id": agent_id.to_string(),
         }),
     );
+    let periods = response
+        .budgets
+        .iter()
+        .map(|budget| budget.budget.period.clone())
+        .collect::<Vec<_>>();
+    let spending_target_warnings =
+        spending_target_warnings_for_periods(&user, &periods, Currency::Usd, state)?;
     Ok(CreateBudgetSeriesHttpResponse {
         budgets: response
             .budgets
             .into_iter()
             .map(|budget| budget_response(budget, state))
             .collect::<Result<Vec<_>>>()?,
+        spending_target_warnings,
     })
 }
 
-fn set_user_cap(body: String, state: &ServerState) -> Result<SetUserCapHttpResponse> {
-    let request: SetUserCapHttpRequest = serde_json::from_str(&body)?;
+fn set_spending_target(body: String, state: &ServerState) -> Result<SetSpendingTargetHttpResponse> {
+    let request: SetSpendingTargetHttpRequest = serde_json::from_str(&body)?;
     if request.amount_cents <= 0 {
-        return Err(anyhow!("cap amount must be positive"));
+        return Err(anyhow!("spending target amount must be positive"));
     }
 
     let user = authenticated_user_context(state)?;
@@ -1974,14 +2013,14 @@ fn set_user_cap(body: String, state: &ServerState) -> Result<SetUserCapHttpRespo
         parse_optional_datetime(request.starting_at)?.unwrap_or_else(Utc::now),
         parse_optional_datetime(request.ending_before)?,
     )
-    .map_err(|error| anyhow!("invalid cap period: {error:?}"))?;
+    .map_err(|error| anyhow!("invalid spending target period: {error:?}"))?;
     let response = state
-        .budgets
+        .spending_targets
         .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .create_single_budget(CreateSingleBudgetRequest {
-            scope: BudgetScope::User(user.user_id.clone()),
-            amount_limit_cents: request.amount_cents,
+        .map_err(|_| anyhow!("spending target manager lock poisoned"))?
+        .create_target(CreateSpendingTargetRequest {
+            owner_user_id: user.user_id.clone(),
+            target_amount_cents: request.amount_cents,
             currency: Currency::Usd,
             period,
         })?;
@@ -1989,52 +2028,63 @@ fn set_user_cap(body: String, state: &ServerState) -> Result<SetUserCapHttpRespo
         .governance
         .lock()
         .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .save_budget_with_balance(&response.budget, &response.balance)?;
+        .save_spending_target(&response)?;
 
-    Ok(SetUserCapHttpResponse {
-        cap: user_cap_response(BudgetWithBalance {
-            budget: response.budget,
-            balance: response.balance,
-        })?,
+    Ok(SetSpendingTargetHttpResponse {
+        target: spending_target_response(response, state)?,
     })
 }
 
-fn list_user_caps(state: &ServerState, include_all: bool) -> Result<ListUserCapsHttpResponse> {
+fn list_spending_targets(
+    state: &ServerState,
+    include_all: bool,
+) -> Result<ListSpendingTargetsHttpResponse> {
     let user = authenticated_user_context(state)?;
-    reconcile_expired_budget_holds(state)?;
-    let manager = state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-    let caps = manager
-        .get_budgets_by_user_id(&user.user_id)
+    let targets = {
+        let manager = state
+            .spending_targets
+            .lock()
+            .map_err(|_| anyhow!("spending target manager lock poisoned"))?;
+        manager.get_targets_by_user_id(&user.user_id)
+    };
+    let targets = targets
         .into_iter()
-        .filter(|cap| include_all || matches!(cap.budget.status, BudgetStatus::Active))
-        .map(user_cap_response)
+        .filter(|target| {
+            include_all
+                || (target.status == SpendingTargetStatus::Active
+                    && target
+                        .period
+                        .ending_before
+                        .is_none_or(|ending_before| ending_before > Utc::now()))
+        })
+        .map(|target| spending_target_response(target, state))
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(ListUserCapsHttpResponse { caps })
+    Ok(ListSpendingTargetsHttpResponse { targets })
 }
 
-fn revoke_user_cap(body: String, state: &ServerState) -> Result<RevokeUserCapHttpResponse> {
-    let request: UserCapIdHttpRequest = serde_json::from_str(&body)?;
+fn revoke_spending_target(
+    body: String,
+    state: &ServerState,
+) -> Result<RevokeSpendingTargetHttpResponse> {
+    let request: SpendingTargetIdHttpRequest = serde_json::from_str(&body)?;
     let user = authenticated_user_context(state)?;
-    let cap_id = resolve_user_cap_id(&request.cap_id, &user, state)?;
+    let target_id = resolve_spending_target_id(&request.target_id, &user, state)?;
     let revoked = {
-        let mut budgets = state
-            .budgets
+        let mut targets = state
+            .spending_targets
             .lock()
-            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        budgets.revoke_budget(&cap_id)?
+            .map_err(|_| anyhow!("spending target manager lock poisoned"))?;
+        targets.revoke_target(&target_id)?
     };
     state
         .governance
         .lock()
         .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .save_budget_with_balance(&revoked.budget, &revoked.balance)?;
+        .save_spending_target(&revoked)?;
 
-    Ok(RevokeUserCapHttpResponse {
-        cap: user_cap_response(revoked)?,
+    Ok(RevokeSpendingTargetHttpResponse {
+        target: spending_target_response(revoked, state)?,
     })
 }
 
@@ -2086,21 +2136,21 @@ fn resolve_budget_id_for_user(
         .ok_or_else(|| anyhow!("unknown budget id {budget_pub_id}"))
 }
 
-fn resolve_user_cap_id(
-    cap_pub_id: &str,
+fn resolve_spending_target_id(
+    target_pub_id: &str,
     user: &UserContext,
     state: &ServerState,
-) -> Result<BudgetId> {
+) -> Result<SpendingTargetId> {
     let manager = state
-        .budgets
+        .spending_targets
         .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        .map_err(|_| anyhow!("spending target manager lock poisoned"))?;
     manager
-        .get_budgets_by_user_id(&user.user_id)
+        .get_targets_by_user_id(&user.user_id)
         .into_iter()
-        .find(|cap| public_cap_id(&cap.budget.id) == cap_pub_id)
-        .map(|cap| cap.budget.id)
-        .ok_or_else(|| anyhow!("unknown cap id {cap_pub_id}"))
+        .find(|target| public_spending_target_id(&target.id) == target_pub_id)
+        .map(|target| target.id)
+        .ok_or_else(|| anyhow!("unknown spending target id {target_pub_id}"))
 }
 
 fn revoke_budget(body: String, state: &ServerState) -> Result<RevokeBudgetHttpResponse> {
@@ -2166,7 +2216,7 @@ fn replace_budget(body: String, state: &ServerState) -> Result<ReplaceBudgetHttp
             .map_err(|_| anyhow!("budget manager lock poisoned"))?;
         let revoked = budgets.revoke_budget(&budget_id)?;
         let created = budgets.create_single_budget(CreateSingleBudgetRequest {
-            scope: original.budget.scope,
+            agent_id: original.budget.agent_id,
             amount_limit_cents: request.amount_cents,
             currency: original.budget.currency,
             period: replacement_period,
@@ -2188,9 +2238,16 @@ fn replace_budget(body: String, state: &ServerState) -> Result<ReplaceBudgetHttp
         governance.save_budget_with_balance(&created.budget, &created.balance)?;
     }
 
+    let spending_target_warnings = spending_target_warnings_for_periods(
+        &user,
+        std::slice::from_ref(&created.budget.period),
+        created.budget.currency,
+        state,
+    )?;
     Ok(ReplaceBudgetHttpResponse {
         revoked_budget: budget_response(revoked, state)?,
         budget: budget_response(created, state)?,
+        spending_target_warnings,
     })
 }
 
@@ -2212,9 +2269,6 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
         budget_hold: Some(frozen_budget_hold_response(
             authorization.approval.budget_reservation,
         )),
-        cap_hold: Some(frozen_cap_hold_response(
-            authorization.approval.cap_reservation,
-        )),
         payment: None,
     })
 }
@@ -2228,7 +2282,6 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let owner = owner_metadata_for_user_id(&authorization.approval.user.user_id, state)?;
     let settlement = submit_authorized_payment(&authorization.approval, state)?;
     let budget_hold = Some(budget_hold_response(settlement.budget_update));
-    let cap_hold = Some(cap_hold_response(settlement.cap_update));
     let payment = Some(PaymentHttpResponse {
         payment_id: settlement.payment.payment_id.to_string(),
         owner_user_id: owner.pub_id,
@@ -2252,7 +2305,6 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         reasons: authorization.approval.evaluation.evaluation.reasons,
         auth_token_id: Some(auth_token_id),
         budget_hold,
-        cap_hold,
         payment,
     })
 }
@@ -2287,24 +2339,18 @@ fn settle_executor_spend(
         .map_err(|_| anyhow!("governance store lock poisoned"))?
         .update_spend_auth_token(&used_token)?;
 
-    let (settlement, cap_settlement) = {
+    let settlement = {
         let mut budgets = state
             .budgets
             .lock()
             .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        (
-            budgets.settle_budget(&validated.budget_hold.id)?,
-            budgets.settle_budget(&validated.cap_hold.id)?,
-        )
+        budgets.settle_budget(&validated.budget_hold.id)?
     };
     state
         .governance
         .lock()
         .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .update_budget_holds(&[
-            (&settlement.hold, &settlement.balance),
-            (&cap_settlement.hold, &cap_settlement.balance),
-        ])?;
+        .update_budget_hold(&settlement.hold, &settlement.balance)?;
 
     log_event(
         "info",
@@ -2322,12 +2368,7 @@ fn settle_executor_spend(
 
     Ok(ExecutorSpendSettlementHttpResponse {
         settlement_id: settlement_id.to_string(),
-        spend: executor_spend_response_with_hold(
-            &validated,
-            settlement.hold,
-            settlement.balance,
-            Some((cap_settlement.hold, cap_settlement.balance)),
-        ),
+        spend: executor_spend_response_with_hold(&validated, settlement.hold, settlement.balance),
     })
 }
 
@@ -2335,24 +2376,18 @@ fn release_executor_spend(body: String, state: &ServerState) -> Result<ExecutorS
     let request: ExecutorSpendHttpRequest = serde_json::from_str(&body)?;
     let validated = validate_executor_spend_request(request, state)?;
 
-    let (release, cap_release) = {
+    let release = {
         let mut budgets = state
             .budgets
             .lock()
             .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        (
-            budgets.release_budget(&validated.budget_hold.id)?,
-            budgets.release_budget(&validated.cap_hold.id)?,
-        )
+        budgets.release_budget(&validated.budget_hold.id)?
     };
     state
         .governance
         .lock()
         .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .update_budget_holds(&[
-            (&release.hold, &release.balance),
-            (&cap_release.hold, &cap_release.balance),
-        ])?;
+        .update_budget_hold(&release.hold, &release.balance)?;
 
     log_event(
         "info",
@@ -2371,7 +2406,6 @@ fn release_executor_spend(body: String, state: &ServerState) -> Result<ExecutorS
         &validated,
         release.hold,
         release.balance,
-        Some((cap_release.hold, cap_release.balance)),
     ))
 }
 
@@ -2383,8 +2417,6 @@ struct ValidatedExecutorSpend {
     validation: hubu_core::spend::ValidatedSpendAuthorization,
     budget_hold: BudgetHold,
     budget_balance: hubu_core::budget::BudgetBalance,
-    cap_hold: BudgetHold,
-    cap_balance: hubu_core::budget::BudgetBalance,
 }
 
 fn validate_executor_spend_request(
@@ -2420,7 +2452,7 @@ fn validate_executor_spend_request(
         .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
             spend_auth_token_id: token_id.clone(),
             owner_user_id: user.user_id,
-            agent_id,
+            agent_id: agent_id.clone(),
             agent_account_id: account.id,
             amount_cents: request.amount_cents,
             currency: Currency::Usd,
@@ -2428,43 +2460,29 @@ fn validate_executor_spend_request(
             task_id: request.task_id.clone(),
         })?;
 
-    let (budget_hold, budget_balance, cap_hold, cap_balance) = {
+    let (budget_hold, budget_balance) = {
         let budgets = state
             .budgets
             .lock()
             .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        let holds = budgets.get_budget_holds_by_spend_decision(&validation.spend_decision_id);
-        let budget_hold = holds
-            .iter()
-            .find(|hold| {
-                budgets
-                    .get_budget_by_id(&hold.budget_id)
-                    .is_some_and(|budget| matches!(budget.budget.scope, BudgetScope::Agent(_)))
-            })
-            .cloned()
+        let budget_hold = budgets
+            .get_budget_hold_by_spend_decision(&validation.spend_decision_id)
             .ok_or_else(|| anyhow!("spend authorization does not have a budget hold"))?;
-        let cap_hold = holds
-            .iter()
-            .find(|hold| {
-                budgets
-                    .get_budget_by_id(&hold.budget_id)
-                    .is_some_and(|budget| matches!(budget.budget.scope, BudgetScope::User(_)))
-            })
-            .cloned()
-            .ok_or_else(|| anyhow!("spend authorization does not have a cap hold"))?;
+        if !budgets
+            .get_budget_by_id(&budget_hold.budget_id)
+            .is_some_and(|budget| budget.budget.agent_id == agent_id)
+        {
+            return Err(anyhow!(
+                "spend authorization hold does not belong to the authorized agent"
+            ));
+        }
         if !matches!(budget_hold.status, BudgetHoldStatus::Frozen) {
             return Err(anyhow!("spend authorization budget hold is not frozen"));
-        }
-        if !matches!(cap_hold.status, BudgetHoldStatus::Frozen) {
-            return Err(anyhow!("spend authorization cap hold is not frozen"));
         }
         let budget_balance = budgets
             .get_budget_balance(&budget_hold.budget_id)
             .ok_or_else(|| anyhow!("spend authorization budget balance is missing"))?;
-        let cap_balance = budgets
-            .get_budget_balance(&cap_hold.budget_id)
-            .ok_or_else(|| anyhow!("spend authorization cap balance is missing"))?;
-        (budget_hold, budget_balance, cap_hold, cap_balance)
+        (budget_hold, budget_balance)
     };
 
     log_event(
@@ -2474,7 +2492,6 @@ fn validate_executor_spend_request(
             "spend_auth_token_id": token_id.to_string(),
             "decision_id": validation.spend_decision_id.to_string(),
             "hold_id": budget_hold.id.to_string(),
-            "cap_hold_id": cap_hold.id.to_string(),
             "account_pub_id": account_pub_id,
             "agent_pub_id": agent_pub_id,
             "amount_cents": request.amount_cents,
@@ -2491,8 +2508,6 @@ fn validate_executor_spend_request(
         validation,
         budget_hold,
         budget_balance,
-        cap_hold,
-        cap_balance,
     })
 }
 
@@ -2501,7 +2516,6 @@ fn executor_spend_response(validated: &ValidatedExecutorSpend) -> ExecutorSpendH
         validated,
         validated.budget_hold.clone(),
         validated.budget_balance.clone(),
-        Some((validated.cap_hold.clone(), validated.cap_balance.clone())),
     )
 }
 
@@ -2509,7 +2523,6 @@ fn executor_spend_response_with_hold(
     validated: &ValidatedExecutorSpend,
     hold: BudgetHold,
     balance: hubu_core::budget::BudgetBalance,
-    cap: Option<(BudgetHold, hubu_core::budget::BudgetBalance)>,
 ) -> ExecutorSpendHttpResponse {
     ExecutorSpendHttpResponse {
         spend_auth_token_id: validated.token_id.to_string(),
@@ -2522,7 +2535,6 @@ fn executor_spend_response_with_hold(
         task_id: validated.request.task_id.clone(),
         expires_at: validated.validation.expires_at.to_rfc3339(),
         budget_hold: budget_hold_state_response(hold, balance),
-        cap_hold: cap.map(|(hold, balance)| cap_hold_state_response(hold, balance)),
     }
 }
 
@@ -2663,7 +2675,6 @@ fn spend_rejection_response(
         reasons: rejection.reasons,
         auth_token_id: None,
         budget_hold: None,
-        cap_hold: None,
         payment: None,
     }
 }
@@ -2873,18 +2884,6 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
     }
 }
 
-fn cap_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
-    match update {
-        BudgetHoldUpdate::Settled(response) => {
-            cap_hold_state_response(response.hold, response.balance)
-        }
-        BudgetHoldUpdate::Released(response) => {
-            cap_hold_state_response(response.hold, response.balance)
-        }
-        BudgetHoldUpdate::Frozen(response) => frozen_cap_hold_response(response),
-    }
-}
-
 fn frozen_budget_hold_response(response: ReserveBudgetResponse) -> BudgetHoldHttpResponse {
     BudgetHoldHttpResponse {
         hold_id: response.hold.id.to_string(),
@@ -2895,10 +2894,6 @@ fn frozen_budget_hold_response(response: ReserveBudgetResponse) -> BudgetHoldHtt
         frozen_amount_cents: response.balance.frozen_amount_cents,
         remaining_amount_cents: response.balance.remaining_amount_cents,
     }
-}
-
-fn frozen_cap_hold_response(response: ReserveBudgetResponse) -> BudgetHoldHttpResponse {
-    cap_hold_state_response(response.hold, response.balance)
 }
 
 fn budget_hold_state_response(
@@ -2916,27 +2911,10 @@ fn budget_hold_state_response(
     }
 }
 
-fn cap_hold_state_response(
-    hold: BudgetHold,
-    balance: hubu_core::budget::BudgetBalance,
-) -> BudgetHoldHttpResponse {
-    BudgetHoldHttpResponse {
-        hold_id: hold.id.to_string(),
-        budget_id: public_cap_id(&hold.budget_id),
-        status: budget_hold_status_name(&hold.status).to_string(),
-        amount_cents: hold.amount_cents,
-        consumed_amount_cents: balance.consumed_amount_cents,
-        frozen_amount_cents: balance.frozen_amount_cents,
-        remaining_amount_cents: balance.remaining_amount_cents,
-    }
-}
-
 fn budget_response(budget: BudgetWithBalance, state: &ServerState) -> Result<BudgetHttpResponse> {
-    let scope_id = budget_scope_public_id(&budget.budget.scope, state)?;
     Ok(BudgetHttpResponse {
         budget_id: public_budget_id(&budget.budget.id),
-        scope: budget_scope_name(&budget.budget.scope).to_string(),
-        scope_id,
+        agent_id: registration_agent_pub_id(&budget.budget.agent_id, state)?,
         amount_limit_cents: budget.budget.amount_limit_cents,
         currency: budget.budget.currency.to_string(),
         starting_at: budget.budget.period.starting_at.to_rfc3339(),
@@ -2952,64 +2930,146 @@ fn budget_response(budget: BudgetWithBalance, state: &ServerState) -> Result<Bud
     })
 }
 
-fn user_cap_response(cap: BudgetWithBalance) -> Result<UserCapHttpResponse> {
-    if !matches!(cap.budget.scope, BudgetScope::User(_)) {
-        return Err(anyhow!("budget is not a user cap"));
-    }
-    Ok(UserCapHttpResponse {
-        cap_id: public_cap_id(&cap.budget.id),
-        amount_limit_cents: cap.budget.amount_limit_cents,
-        currency: cap.budget.currency.to_string(),
-        starting_at: cap.budget.period.starting_at.to_rfc3339(),
-        ending_before: cap
-            .budget
+fn spending_target_response(
+    target: SpendingTarget,
+    state: &ServerState,
+) -> Result<SpendingTargetHttpResponse> {
+    let allocated_amount_cents = max_concurrent_allocated_amount(
+        &budgets_for_user_id(&target.owner_user_id, state)?,
+        &target,
+    );
+    let exceeded_by_cents = (allocated_amount_cents - target.target_amount_cents).max(0);
+    Ok(SpendingTargetHttpResponse {
+        target_id: public_spending_target_id(&target.id),
+        target_amount_cents: target.target_amount_cents,
+        allocated_amount_cents,
+        exceeded_by_cents,
+        is_exceeded: exceeded_by_cents > 0,
+        currency: target.currency.to_string(),
+        starting_at: target.period.starting_at.to_rfc3339(),
+        ending_before: target
             .period
             .ending_before
             .map(|ending_before| ending_before.to_rfc3339()),
-        status: budget_status_name(cap.budget.status).to_string(),
-        consumed_amount_cents: cap.balance.consumed_amount_cents,
-        frozen_amount_cents: cap.balance.frozen_amount_cents,
-        remaining_amount_cents: cap.balance.remaining_amount_cents,
+        status: spending_target_status_name(&target).to_string(),
     })
+}
+
+fn spending_target_warnings_for_periods(
+    user: &UserContext,
+    periods: &[TimePeriod],
+    currency: Currency,
+    state: &ServerState,
+) -> Result<Vec<SpendingTargetWarningHttpResponse>> {
+    let targets = {
+        let manager = state
+            .spending_targets
+            .lock()
+            .map_err(|_| anyhow!("spending target manager lock poisoned"))?;
+        manager.get_targets_by_user_id(&user.user_id)
+    };
+    let budgets = budgets_for_user(user, state)?;
+    Ok(targets
+        .into_iter()
+        .filter(|target| {
+            target.status == SpendingTargetStatus::Active
+                && target.currency == currency
+                && periods
+                    .iter()
+                    .any(|period| periods_overlap(&target.period, period))
+        })
+        .filter_map(|target| {
+            let allocated_amount_cents = max_concurrent_allocated_amount(&budgets, &target);
+            let exceeded_by_cents =
+                (allocated_amount_cents - target.target_amount_cents).max(0);
+            (exceeded_by_cents > 0).then(|| SpendingTargetWarningHttpResponse {
+                target_id: public_spending_target_id(&target.id),
+                target_amount_cents: target.target_amount_cents,
+                allocated_amount_cents,
+                exceeded_by_cents,
+                message: format!(
+                    "agent budget allocations exceed the advisory spending target by {exceeded_by_cents} cents; budget creation was not blocked"
+                ),
+            })
+        })
+        .collect())
+}
+
+fn budgets_for_user_id(user_id: &UserId, state: &ServerState) -> Result<Vec<BudgetWithBalance>> {
+    budgets_for_user(&UserContext::new(user_id.clone()), state)
+}
+
+fn max_concurrent_allocated_amount(budgets: &[BudgetWithBalance], target: &SpendingTarget) -> i64 {
+    let mut changes = BTreeMap::<DateTime<Utc>, i64>::new();
+    for budget in budgets.iter().filter(|budget| {
+        budget.budget.currency == target.currency
+            && !matches!(budget.budget.status, BudgetStatus::Revoked)
+            && periods_overlap(&budget.budget.period, &target.period)
+    }) {
+        let starting_at = budget
+            .budget
+            .period
+            .starting_at
+            .max(target.period.starting_at);
+        let ending_before = match (
+            budget.budget.period.ending_before,
+            target.period.ending_before,
+        ) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        };
+        if ending_before.is_some_and(|ending_before| ending_before <= starting_at) {
+            continue;
+        }
+        *changes.entry(starting_at).or_default() += budget.budget.amount_limit_cents;
+        if let Some(ending_before) = ending_before {
+            *changes.entry(ending_before).or_default() -= budget.budget.amount_limit_cents;
+        }
+    }
+
+    let mut allocated = 0_i64;
+    let mut maximum = 0_i64;
+    for change in changes.values() {
+        allocated += change;
+        maximum = maximum.max(allocated);
+    }
+    maximum
+}
+
+fn spending_target_status_name(target: &SpendingTarget) -> &'static str {
+    if target.status == SpendingTargetStatus::Revoked {
+        "revoked"
+    } else if target
+        .period
+        .ending_before
+        .is_some_and(|ending_before| ending_before <= Utc::now())
+    {
+        "expired"
+    } else if target.period.starting_at > Utc::now() {
+        "scheduled"
+    } else {
+        "active"
+    }
 }
 
 fn public_budget_id(budget_id: &BudgetId) -> String {
     format!("bgt_{}", budget_id.public_suffix())
 }
 
-fn public_cap_id(budget_id: &BudgetId) -> String {
-    format!("cap_{}", budget_id.public_suffix())
+fn public_spending_target_id(target_id: &SpendingTargetId) -> String {
+    format!("tgt_{}", target_id.public_suffix())
 }
 
-fn agent_budget_scope_from_agent_id(
+fn required_budget_agent_id(
     agent_pub_id: Option<&str>,
     user: &UserContext,
     state: &ServerState,
-) -> Result<BudgetScope> {
+) -> Result<AgentId> {
     match agent_pub_id {
-        Some(agent_pub_id) => {
-            let agent_id = resolve_agent_id_for_user(agent_pub_id, user, state)?;
-            Ok(BudgetScope::Agent(agent_id))
-        }
-        None => Err(anyhow!(
-            "budget create requires --agent-id; use `hubu user cap set` for a user-level max spend cap"
-        )),
-    }
-}
-
-fn budget_scope_name(scope: &BudgetScope) -> &'static str {
-    match scope {
-        BudgetScope::User(_) => "user",
-        BudgetScope::Agent(_) => "agent",
-        BudgetScope::Task(_) => "task",
-    }
-}
-
-fn budget_scope_public_id(scope: &BudgetScope, state: &ServerState) -> Result<String> {
-    match scope {
-        BudgetScope::User(user_id) => Ok(owner_metadata_for_user_id(user_id, state)?.pub_id),
-        BudgetScope::Agent(agent_id) => registration_agent_pub_id(agent_id, state),
-        BudgetScope::Task(task_id) => Ok(task_id.to_string()),
+        Some(agent_pub_id) => resolve_agent_id_for_user(agent_pub_id, user, state),
+        None => Err(anyhow!("budget create requires --agent-id")),
     }
 }
 
@@ -3308,16 +3368,19 @@ mod tests {
         }
     }
 
-    fn set_test_user_cap(state: &ServerState, amount_cents: i64) -> UserCapHttpResponse {
-        set_user_cap(
+    fn set_test_spending_target(
+        state: &ServerState,
+        amount_cents: i64,
+    ) -> SpendingTargetHttpResponse {
+        set_spending_target(
             json!({
                 "amount_cents": amount_cents,
             })
             .to_string(),
             state,
         )
-        .expect("user cap should be set")
-        .cap
+        .expect("spending target should be set")
+        .target
     }
 
     fn create_test_agent_budget(
@@ -3838,7 +3901,6 @@ mod tests {
         )
         .expect("policy should be added under initialized user");
 
-        set_test_user_cap(&state, 10_000);
         create_test_agent_budget(&state, &agent.agent_id, 10_000);
 
         let spend = spend(
@@ -3875,7 +3937,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_scoped_budget_is_listed_and_preferred_for_spend() {
+    fn agent_budget_is_listed_and_used_for_spend() {
         let path =
             std::env::temp_dir().join(format!("hubu-api-agent-budget-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
@@ -3909,7 +3971,6 @@ mod tests {
         )
         .expect("policy should be added under initialized user");
 
-        set_test_user_cap(&state, 10_000);
         let agent_budget = create_budget(
             json!({
                 "agent_id": agent_pub_id.clone(),
@@ -3920,27 +3981,26 @@ mod tests {
         )
         .expect("agent budget should be created");
         assert!(agent_budget.budget.budget_id.starts_with("bgt_"));
-        assert_eq!(agent_budget.budget.scope, "agent");
-        assert_eq!(agent_budget.budget.scope_id, agent_pub_id);
+        assert_eq!(agent_budget.budget.agent_id, agent_pub_id);
 
         let budgets = list_budgets(&state, false).expect("budgets should list");
         assert_eq!(budgets.budgets.len(), 1);
         assert!(budgets
             .budgets
             .iter()
-            .any(|budget| budget.scope == "agent" && budget.scope_id == agent_pub_id));
+            .any(|budget| budget.agent_id == agent_pub_id));
 
         let spend = spend(
             json!({
                 "account_id": agent.account_id,
                 "amount_cents": 2_500,
-                "reason": "agent scoped budget purchase",
+                "reason": "agent budget purchase",
                 "merchant": "Acme Cafe",
             })
             .to_string(),
             &state,
         )
-        .expect("spend should use agent scoped budget");
+        .expect("spend should use the agent budget");
         let budget_hold = spend
             .budget_hold
             .expect("allowed spend should reserve budget");
@@ -4118,7 +4178,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_budget_can_exceed_user_cap_because_cap_is_enforced_at_spend_time() {
+    fn budget_creation_warns_when_advisory_spending_target_is_exceeded() {
         let path = std::env::temp_dir().join(format!(
             "hubu-api-agent-budget-hierarchy-{}.sqlite",
             UserId::new()
@@ -4135,7 +4195,7 @@ mod tests {
         .expect("init should create an explicit user");
         let agent = register_agent(
             json!({
-                "name": "agent-budget-cap-agent",
+                "name": "target-warning-agent",
                 "version": "v1",
             })
             .to_string(),
@@ -4143,7 +4203,7 @@ mod tests {
         )
         .expect("agent should register");
 
-        set_test_user_cap(&state, 1_000);
+        let target = set_test_spending_target(&state, 1_000);
 
         let budget = create_budget(
             json!({
@@ -4153,14 +4213,20 @@ mod tests {
             .to_string(),
             &state,
         )
-        .expect("agent budget can exceed user cap");
+        .expect("advisory target should not block budget creation");
 
         assert_eq!(budget.budget.amount_limit_cents, 2_000);
+        assert_eq!(budget.spending_target_warnings.len(), 1);
+        let warning = &budget.spending_target_warnings[0];
+        assert_eq!(warning.target_id, target.target_id);
+        assert_eq!(warning.target_amount_cents, 1_000);
+        assert_eq!(warning.allocated_amount_cents, 2_000);
+        assert_eq!(warning.exceeded_by_cents, 1_000);
         std::fs::remove_file(path).ok();
     }
 
     #[test]
-    fn user_cap_can_be_lower_than_agent_budget() {
+    fn spending_target_reports_existing_agent_budget_allocations() {
         let path = std::env::temp_dir().join(format!(
             "hubu-api-user-budget-hierarchy-{}.sqlite",
             UserId::new()
@@ -4177,7 +4243,7 @@ mod tests {
         .expect("init should create an explicit user");
         let agent = register_agent(
             json!({
-                "name": "user-budget-cap-agent",
+                "name": "existing-budget-target-agent",
                 "version": "v1",
             })
             .to_string(),
@@ -4193,18 +4259,88 @@ mod tests {
             .to_string(),
             &state,
         )
-        .expect("agent budget should be created without a user budget");
+        .expect("agent budget should be created without a spending target");
 
-        let cap = set_test_user_cap(&state, 1_000);
+        let target = set_test_spending_target(&state, 1_000);
 
-        assert_eq!(cap.amount_limit_cents, 1_000);
+        assert_eq!(target.target_amount_cents, 1_000);
+        assert_eq!(target.allocated_amount_cents, 2_000);
+        assert_eq!(target.exceeded_by_cents, 1_000);
+        assert!(target.is_exceeded);
         std::fs::remove_file(path).ok();
     }
 
     #[test]
-    fn exhausted_user_cap_can_be_renewed_without_revoke() {
-        let path =
-            std::env::temp_dir().join(format!("hubu-api-cap-renew-{}.sqlite", UserId::new()));
+    fn spending_target_uses_maximum_concurrent_not_cumulative_allocations() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-concurrent-target-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+        let first_agent = register_agent(
+            json!({
+                "name": "first-adjacent-budget-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("first agent should register");
+        let second_agent = register_agent(
+            json!({
+                "name": "second-adjacent-budget-agent",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("second agent should register");
+        let boundary = Utc::now() + Duration::hours(1);
+        create_budget(
+            json!({
+                "agent_id": first_agent.agent_id,
+                "amount_cents": 2_000,
+                "ending_before": boundary.to_rfc3339(),
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("first budget should create");
+        create_budget(
+            json!({
+                "agent_id": second_agent.agent_id,
+                "amount_cents": 2_000,
+                "starting_at": boundary.to_rfc3339(),
+                "ending_before": (boundary + Duration::hours(1)).to_rfc3339(),
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("adjacent budget should create");
+
+        let target = set_test_spending_target(&state, 2_500);
+
+        assert_eq!(target.allocated_amount_cents, 2_000);
+        assert_eq!(target.exceeded_by_cents, 0);
+        assert!(!target.is_exceeded);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn spending_target_is_advisory_and_survives_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-spending-target-restart-{}.sqlite",
+            UserId::new()
+        ));
         {
             let state =
                 ServerState::new_with_db_path(&path).expect("server state should initialize");
@@ -4219,7 +4355,7 @@ mod tests {
             .expect("init should create an explicit user");
             let agent = register_agent(
                 json!({
-                    "name": "cap-renew-agent",
+                    "name": "advisory-target-agent",
                     "version": "v1",
                 })
                 .to_string(),
@@ -4236,40 +4372,37 @@ mod tests {
             )
             .expect("policy should be added");
 
-            set_test_user_cap(&state, 1_000);
+            set_test_spending_target(&state, 1_000);
             create_test_agent_budget(&state, &agent.agent_id, 2_000);
             let spend = spend(
                 json!({
                     "account_id": agent.account_id,
-                    "amount_cents": 1_000,
-                    "reason": "exhaust cap",
+                    "amount_cents": 1_500,
+                    "reason": "spend above advisory target",
                     "merchant": "Acme Cafe",
                 })
                 .to_string(),
                 &state,
             )
-            .expect("spend should exhaust cap");
-            let cap_hold = spend.cap_hold.expect("spend should reserve cap");
-            assert_eq!(cap_hold.status, "settled");
-            assert_eq!(cap_hold.remaining_amount_cents, 0);
+            .expect("spending target should not block spend");
+            assert_eq!(spend.decision, "allow");
+            assert_eq!(
+                spend
+                    .budget_hold
+                    .expect("spend should settle its agent budget")
+                    .consumed_amount_cents,
+                1_500
+            );
         }
 
         let restarted =
             ServerState::new_with_db_path(&path).expect("server state should reload from storage");
-        let caps = list_user_caps(&restarted, true).expect("caps should list");
-        assert_eq!(caps.caps.len(), 1);
-        assert_eq!(caps.caps[0].status, "exhausted");
-
-        let renewed = set_user_cap(
-            json!({
-                "amount_cents": 500,
-            })
-            .to_string(),
-            &restarted,
-        )
-        .expect("exhausted cap should not block renewal");
-        assert_eq!(renewed.cap.status, "active");
-        assert_eq!(renewed.cap.remaining_amount_cents, 500);
+        let targets =
+            list_spending_targets(&restarted, true).expect("spending targets should list");
+        assert_eq!(targets.targets.len(), 1);
+        assert_eq!(targets.targets[0].status, "active");
+        assert_eq!(targets.targets[0].allocated_amount_cents, 2_000);
+        assert_eq!(targets.targets[0].exceeded_by_cents, 1_000);
         std::fs::remove_file(path).ok();
     }
 
@@ -4306,7 +4439,6 @@ mod tests {
         )
         .expect("policy should be added under initialized user");
 
-        set_test_user_cap(&state, 10_000);
         create_test_agent_budget(&state, &agent.agent_id, 10_000);
 
         let spend = spend(
@@ -4364,7 +4496,6 @@ mod tests {
         )
         .expect("policy should allow the logo budget");
 
-        set_test_user_cap(&state, 500);
         create_test_agent_budget(&state, &agent.agent_id, 500);
 
         let authorization = authorize_spend(
@@ -4625,7 +4756,6 @@ rules:
         assert!(policies[0]["attached_at"].as_str().is_some());
         assert!(policies[0]["updated_at"].as_str().is_some());
 
-        set_test_user_cap(&state, 10_000);
         create_test_agent_budget(&state, &agents.agents[0].agent_id, 10_000);
 
         let spend = spend(
@@ -4731,7 +4861,6 @@ rules: []
         )
         .expect("policy should be added under initialized user");
 
-        set_test_user_cap(&state, 10_000);
         create_test_agent_budget(&state, &agent.agent_id, 10_000);
 
         let spend = spend(
@@ -4799,7 +4928,6 @@ rules: []
         )
         .expect("policy should allow the attempted spend");
 
-        set_test_user_cap(&state, 10_000);
         create_test_agent_budget(&state, &agent.agent_id, 1_000);
 
         let response = route(
@@ -4916,7 +5044,6 @@ rules: []
                 &state,
             )
             .expect("policy should be added");
-            set_test_user_cap(&state, 10_000);
             create_test_agent_budget(&state, &agent.agent_id, 10_000);
             spend(
                 json!({
@@ -5008,7 +5135,6 @@ rules: []
         )
         .expect("policy should allow executor spend");
 
-        set_test_user_cap(&state, 500);
         create_test_agent_budget(&state, &agent.agent_id, 500);
 
         let authorization = authorize_spend(

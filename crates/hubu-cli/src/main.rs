@@ -515,34 +515,36 @@ fn user(base_url: &str, args: Vec<String>) -> Result<()> {
             Ok(())
         }
         Some((command, [])) if command == "list" => user_list(base_url),
-        Some((command, rest)) if command == "cap" => user_cap(base_url, rest.to_vec()),
-        _ => bail!("usage: hubu user list | hubu user cap set|renew|show|revoke"),
+        Some((command, rest)) if command == "spending-target" => {
+            user_spending_target(base_url, rest.to_vec())
+        }
+        _ => bail!("usage: hubu user list | hubu user spending-target set|show|revoke"),
     }
 }
 
-fn user_cap(base_url: &str, args: Vec<String>) -> Result<()> {
+fn user_spending_target(base_url: &str, args: Vec<String>) -> Result<()> {
     let Some(command) = args.first().cloned() else {
-        print_user_cap_help();
+        print_user_spending_target_help();
         return Ok(());
     };
     let mut args = args;
     args.remove(0);
 
     match command.as_str() {
-        "set" | "renew" => user_cap_set(base_url, args),
-        "show" => user_cap_show(base_url, args),
-        "revoke" => user_cap_revoke(base_url, args),
+        "set" => user_spending_target_set(base_url, args),
+        "show" => user_spending_target_show(base_url, args),
+        "revoke" => user_spending_target_revoke(base_url, args),
         "-h" | "--help" | "help" => {
-            print_user_cap_help();
+            print_user_spending_target_help();
             Ok(())
         }
-        _ => bail!("unknown user cap command `{command}`"),
+        _ => bail!("unknown user spending-target command `{command}`"),
     }
 }
 
-fn user_cap_set(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn user_spending_target_set(base_url: &str, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
-        print_user_cap_set_help();
+        print_user_spending_target_set_help();
         return Ok(());
     }
 
@@ -553,7 +555,7 @@ fn user_cap_set(base_url: &str, mut args: Vec<String>) -> Result<()> {
 
     let response = post_json(
         base_url,
-        "/user/cap",
+        "/user/spending-target",
         json!({
             "amount_cents": amount_to_cents(&amount)?,
             "starting_at": starting_at,
@@ -561,66 +563,66 @@ fn user_cap_set(base_url: &str, mut args: Vec<String>) -> Result<()> {
         }),
     )?;
 
-    println!("User cap set");
-    print_user_cap(
+    println!("Spending target set (advisory)");
+    print_spending_target(
         response
-            .get("cap")
-            .ok_or_else(|| anyhow!("server response missing `cap`"))?,
+            .get("target")
+            .ok_or_else(|| anyhow!("server response missing `target`"))?,
     )?;
     Ok(())
 }
 
-fn user_cap_show(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn user_spending_target_show(base_url: &str, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
-        print_user_cap_show_help();
+        print_user_spending_target_show_help();
         return Ok(());
     }
 
     let include_all = take_flag(&mut args, "--all");
     ensure_no_args(args)?;
     let path = if include_all {
-        "/user/cap?all=true"
+        "/user/spending-target?all=true"
     } else {
-        "/user/cap"
+        "/user/spending-target"
     };
     let response = get_json(base_url, path)?;
-    let caps = response
-        .get("caps")
+    let targets = response
+        .get("targets")
         .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("server response missing `caps`"))?;
+        .ok_or_else(|| anyhow!("server response missing `targets`"))?;
 
-    if caps.is_empty() {
-        println!("No user caps configured.");
+    if targets.is_empty() {
+        println!("No spending targets configured.");
         return Ok(());
     }
 
-    for cap in caps {
-        print_user_cap(cap)?;
+    for target in targets {
+        print_spending_target(target)?;
     }
     Ok(())
 }
 
-fn user_cap_revoke(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn user_spending_target_revoke(base_url: &str, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
-        print_user_cap_revoke_help();
+        print_user_spending_target_revoke_help();
         return Ok(());
     }
 
-    let cap_id = take_required(&mut args, "--cap-id")?;
+    let target_id = take_required(&mut args, "--target-id")?;
     ensure_no_args(args)?;
     let response = post_json(
         base_url,
-        "/user/cap/revoke",
+        "/user/spending-target/revoke",
         json!({
-            "cap_id": cap_id,
+            "target_id": target_id,
         }),
     )?;
 
-    println!("User cap revoked");
-    print_user_cap(
+    println!("Spending target revoked");
+    print_spending_target(
         response
-            .get("cap")
-            .ok_or_else(|| anyhow!("server response missing `cap`"))?,
+            .get("target")
+            .ok_or_else(|| anyhow!("server response missing `target`"))?,
     )?;
     Ok(())
 }
@@ -1185,9 +1187,8 @@ fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
     }
 
     let amount = take_required(&mut args, "--amount")?;
-    let agent_id = take_required(&mut args, "--agent-id").with_context(|| {
-        "budget create requires --agent-id; use `hubu user cap set` for a user-level max spend cap"
-    })?;
+    let agent_id = take_required(&mut args, "--agent-id")
+        .with_context(|| "budget create requires --agent-id")?;
     let starting_at = take_value(&mut args, "--starting-at");
     let ending_before = take_value(&mut args, "--ending-before");
     ensure_no_args(args)?;
@@ -1207,6 +1208,7 @@ fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
             .get("budget")
             .ok_or_else(|| anyhow!("server response missing `budget`"))?,
     )?;
+    print_spending_target_warnings(&response)?;
     Ok(())
 }
 
@@ -1218,7 +1220,7 @@ fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> 
 
     let amount = take_required(&mut args, "--amount")?;
     let agent_id = take_required(&mut args, "--agent-id")
-        .with_context(|| "budget create-recurring requires --agent-id; use `hubu user cap set` for a user-level max spend cap")?;
+        .with_context(|| "budget create-recurring requires --agent-id")?;
     let recurrence = take_required(&mut args, "--recurrence")?;
     let period_count = take_required(&mut args, "--period-count")?;
     let starting_at = take_value(&mut args, "--starting-at");
@@ -1242,6 +1244,7 @@ fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> 
     {
         print_budget(budget)?;
     }
+    print_spending_target_warnings(&response)?;
     Ok(())
 }
 
@@ -1331,6 +1334,7 @@ fn budget_replace(base_url: &str, mut args: Vec<String>) -> Result<()> {
             .get("budget")
             .ok_or_else(|| anyhow!("server response missing `budget`"))?,
     )?;
+    print_spending_target_warnings(&response)?;
     Ok(())
 }
 
@@ -1455,16 +1459,6 @@ fn print_spend_response(response: &Value) -> Result<()> {
         println!("  frozen: {}", money_at(hold, "frozen_amount_cents")?);
         println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
     }
-    if let Some(hold) = response.get("cap_hold").filter(|hold| hold.is_object()) {
-        println!("Cap hold");
-        println!("  status: {}", string_at(hold, "status")?);
-        println!("  hold_id: {}", string_at(hold, "hold_id")?);
-        println!("  cap_id: {}", string_at(hold, "budget_id")?);
-        println!("  amount: {}", money_at(hold, "amount_cents")?);
-        println!("  consumed: {}", money_at(hold, "consumed_amount_cents")?);
-        println!("  frozen: {}", money_at(hold, "frozen_amount_cents")?);
-        println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
-    }
     Ok(())
 }
 
@@ -1523,10 +1517,9 @@ fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
 
 fn print_budget(budget: &Value) -> Result<()> {
     println!(
-        "  budget_id: {}  scope: {} ({})  status: {}",
+        "  budget_id: {}  agent_id: {}  status: {}",
         string_at(budget, "budget_id")?,
-        string_at(budget, "scope")?,
-        string_at(budget, "scope_id")?,
+        string_at(budget, "agent_id")?,
         string_at(budget, "status")?
     );
     println!(
@@ -1546,26 +1539,45 @@ fn print_budget(budget: &Value) -> Result<()> {
     Ok(())
 }
 
-fn print_user_cap(cap: &Value) -> Result<()> {
+fn print_spending_target(target: &Value) -> Result<()> {
     println!(
-        "  cap_id: {}  status: {}",
-        string_at(cap, "cap_id")?,
-        string_at(cap, "status")?
+        "  target_id: {}  status: {}",
+        string_at(target, "target_id")?,
+        string_at(target, "status")?
     );
     println!(
-        "    limit: {}  consumed: {}  frozen: {}  remaining: {}",
-        money_at(cap, "amount_limit_cents")?,
-        money_at(cap, "consumed_amount_cents")?,
-        money_at(cap, "frozen_amount_cents")?,
-        money_at(cap, "remaining_amount_cents")?
+        "    target: {}  allocated: {}  exceeded by: {}",
+        money_at(target, "target_amount_cents")?,
+        money_at(target, "allocated_amount_cents")?,
+        money_at(target, "exceeded_by_cents")?
     );
-    let starting_at = local_timestamp(string_at(cap, "starting_at")?);
-    let ending_before = cap
+    let starting_at = local_timestamp(string_at(target, "starting_at")?);
+    let ending_before = target
         .get("ending_before")
         .and_then(Value::as_str)
         .map(local_timestamp)
         .unwrap_or_else(|| "open-ended".to_string());
     println!("    period: {starting_at} -> {ending_before}");
+    println!("    enforcement: advisory only");
+    Ok(())
+}
+
+fn print_spending_target_warnings(response: &Value) -> Result<()> {
+    let warnings = response
+        .get("spending_target_warnings")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `spending_target_warnings`"))?;
+    for warning in warnings {
+        println!("Spending target warning (advisory)");
+        println!("  target_id: {}", string_at(warning, "target_id")?);
+        println!(
+            "  target: {}  allocated: {}  exceeded by: {}",
+            money_at(warning, "target_amount_cents")?,
+            money_at(warning, "allocated_amount_cents")?,
+            money_at(warning, "exceeded_by_cents")?
+        );
+        println!("  {}", string_at(warning, "message")?);
+    }
     Ok(())
 }
 
@@ -1775,7 +1787,7 @@ Usage:
 Commands:
   register   Register human users and agents
   protocol   Read Hubu protocol payloads
-  user       List human users and manage user caps
+  user       List human users and manage advisory spending targets
   policy     Manage spending policies
   init       Generate starter files and configure clients
   agent      Read registered agents
@@ -1792,7 +1804,7 @@ Examples:
   hubu register human --username alice-example --display-name \"Alice Example\"
   hubu register agent --name local-agent --version local-dev
   hubu policy new-template --path policies/policy.yaml
-  hubu user cap set --amount 100
+  hubu user spending-target set --amount 100
   hubu budget create --agent-id AGENT_ID --amount 25
   hubu spend --help
 
@@ -1848,53 +1860,52 @@ fn print_user_help() {
 
 Usage:
   hubu user list
-  hubu user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
-  hubu user cap renew --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
-  hubu user cap show [--all]
-  hubu user cap revoke --cap-id ID"
+  hubu user spending-target set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu user spending-target show [--all]
+  hubu user spending-target revoke --target-id ID"
     );
 }
 
-fn print_user_cap_help() {
+fn print_user_spending_target_help() {
     println!(
-        "Manage the current user's global spend cap
+        "Manage the current user's advisory spending target
 
 Usage:
-  hubu user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
-  hubu user cap renew --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
-  hubu user cap show [--all]
-  hubu user cap revoke --cap-id ID"
+  hubu user spending-target set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu user spending-target show [--all]
+  hubu user spending-target revoke --target-id ID
+
+Spending targets warn when concurrent agent budget allocations exceed the target. They never block budget creation or spend."
     );
 }
 
-fn print_user_cap_set_help() {
+fn print_user_spending_target_set_help() {
     println!(
-        "Set or renew a global spend cap for the current user
+        "Set an advisory spending target for the current user
 
 Usage:
-  hubu user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
-  hubu user cap renew --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]"
+  hubu user spending-target set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]"
     );
 }
 
-fn print_user_cap_show_help() {
+fn print_user_spending_target_show_help() {
     println!(
-        "Show global spend caps for the current user
+        "Show advisory spending targets for the current user
 
 Usage:
-  hubu user cap show [--all]
+  hubu user spending-target show [--all]
 
 Options:
-  --all  Include revoked caps"
+  --all  Include expired and revoked targets"
     );
 }
 
-fn print_user_cap_revoke_help() {
+fn print_user_spending_target_revoke_help() {
     println!(
-        "Revoke a global spend cap for the current user
+        "Revoke an advisory spending target for the current user
 
 Usage:
-  hubu user cap revoke --cap-id ID"
+  hubu user spending-target revoke --target-id ID"
     );
 }
 
@@ -2099,7 +2110,7 @@ Examples:
 
 fn print_budget_list_help() {
     println!(
-        "List caps and budgets for the active human user
+        "List agent budgets for the active human user
 
 Usage:
   hubu budget list [--all]

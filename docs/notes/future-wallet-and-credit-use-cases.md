@@ -128,7 +128,7 @@ Future credit records may include:
 
 - `CreditReservation`
   - pool
-  - agent/task
+  - agent or explicit pool member
   - reserved units
   - expiration
   - status: frozen, consumed, released, expired
@@ -160,4 +160,3 @@ External executors perform work.
 Hubu Wallet moves money only when the requested action is actually a payment.
 Credit pools track prepaid non-cash entitlements separately from money movement.
 ```
-

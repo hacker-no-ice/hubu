@@ -1,8 +1,9 @@
 # Hubu Local Demo
 
-This demo runs Hubu locally and exercises the onboarding, registration, policy,
-cap/budget creation, spend evaluation, mock payment orchestration, cap/budget
-hold lifecycle, and ledger recording flow through the `hubu` CLI.
+This demo runs Hubu locally and exercises onboarding, registration, policy,
+advisory spending targets, agent-budget creation, spend evaluation, mock payment
+orchestration, the budget-hold lifecycle, and ledger recording through the
+`hubu` CLI.
 
 ## Setup
 
@@ -192,28 +193,34 @@ Expected output:
 agt_8x7k2m4q9v1c  codex-agent  account: aga_c6q3d9m1v8ra  status: active
 ```
 
-### 5. Set a User Cap and Create an Agent Budget
+### 5. Set an Advisory Spending Target and Create an Agent Budget
 
 ```sh
-hubu user cap set --amount 75
+hubu user spending-target set --amount 50
 hubu budget create --agent-id agt_8x7k2m4q9v1c --amount 75
 ```
 
 Expected output:
 
 ```txt
-User cap set
-  cap_id: cap_6qqcj94w6pr5  status: active
-    limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
+Spending target set (advisory)
+  target_id: tgt_6qqcj94w6pr5  status: active
+    target: $50.00  allocated: $0.00  exceeded by: $0.00
     period: 2026-06-03T10:19:20.123456-07:00 -> open-ended
+    enforcement: advisory only
 Budget created
-  budget_id: bgt_8x7k2m4q9v1c  scope: agent (agt_8x7k2m4q9v1c)  status: active
+  budget_id: bgt_8x7k2m4q9v1c  agent_id: agt_8x7k2m4q9v1c  status: active
     limit: $75.00  consumed: $0.00  frozen: $0.00  remaining: $75.00
     period: 2026-06-03T10:19:20.123456-07:00 -> open-ended
+Spending target warning (advisory)
+  target_id: tgt_6qqcj94w6pr5
+  target: $50.00  allocated: $75.00  exceeded by: $25.00
+  agent budget allocations exceed the advisory spending target by 2500 cents; budget creation was not blocked
 ```
 
-Hubu uses the budget as the agent's spend allocation and the user cap as the
-global max spend guardrail. An allowed spend reserves against both.
+Hubu uses the budget as the agent's hard spending allocation. The target is an
+advisory comparison across concurrent agent budget allocations, so exceeding it
+produces a warning without blocking the $75 budget.
 
 ### 6. Submit an Allowed Spend Request
 
@@ -248,20 +255,12 @@ Budget hold
   consumed: $20.00
   frozen: $0.00
   remaining: $55.00
-Cap hold
-  status: settled
-  hold_id: 7a0cc7cb-2480-4ef0-99a7-5d970872490e
-  cap_id: cap_8x7k2m4q9v1c
-  amount: $20.00
-  consumed: $20.00
-  frozen: $0.00
-  remaining: $55.00
 ```
 
 The owner shown on the payment is the initialized human user. The agent spends
-under authority delegated by that user. Allowed spend reserves the active budget
-and active user cap before payment; successful payment settles both holds into
-consumed balance.
+under authority delegated by that user. Allowed spend reserves the active agent
+budget before payment; successful payment settles that hold into consumed
+balance.
 
 ### 6a. Authorize Spend Without Executing Payment
 
@@ -291,18 +290,10 @@ Budget hold
   consumed: $20.00
   frozen: $5.00
   remaining: $50.00
-Cap hold
-  status: frozen
-  hold_id: 7a0cc7cb-2480-4ef0-99a7-5d970872490e
-  cap_id: cap_8x7k2m4q9v1c
-  amount: $5.00
-  consumed: $20.00
-  frozen: $5.00
-  remaining: $50.00
 ```
 
 This is the first slice of the logo-generation demo path: Hubu evaluates policy,
-issues a spend authorization token, and freezes cap and budget balance, but does
+issues a spend authorization token and freezes the agent budget, but does
 not submit payment or write a ledger transaction. A later vendor/model proxy can
 consume the token while keeping provider API keys inside Hubu.
 
@@ -339,18 +330,10 @@ Budget hold
   consumed: $20.00
   frozen: $0.00
   remaining: $55.00
-Cap hold
-  status: released
-  hold_id: 7a0cc7cb-2480-4ef0-99a7-5d970872490e
-  cap_id: cap_8x7k2m4q9v1c
-  amount: $15.00
-  consumed: $20.00
-  frozen: $0.00
-  remaining: $55.00
 ```
 
-Failed mock payments release the frozen amount back to the active budget and
-active cap. Only successful payments become ledger transactions.
+Failed mock payments release the frozen amount back to the active agent budget.
+Only successful payments become ledger transactions.
 
 ### 8. Submit an Over-Limit Spend Request
 
@@ -399,26 +382,28 @@ Spend evaluated
 The policy engine gives `deny` precedence over `allow`, so no payment is
 orchestrated.
 
-### 10. Inspect the Budget and Cap Balances
+### 10. Inspect the Budget and Spending Target
 
 ```sh
 hubu budget list
-hubu user cap show
+hubu user spending-target show
 ```
 
 Expected output:
 
 ```txt
-  budget_id: bgt_6qqcj94w6pr5  scope: agent (agt_8x7k2m4q9v1c)  status: active
+  budget_id: bgt_6qqcj94w6pr5  agent_id: agt_8x7k2m4q9v1c  status: active
     limit: $75.00  consumed: $20.00  frozen: $0.00  remaining: $55.00
     period: 2026-06-03T10:19:20.123456-07:00 -> 2026-07-03T10:19:20.123456-07:00
-  cap_id: cap_8x7k2m4q9v1c  status: active
-    limit: $75.00  consumed: $20.00  frozen: $0.00  remaining: $55.00
+  target_id: tgt_8x7k2m4q9v1c  status: active
+    target: $50.00  allocated: $75.00  exceeded by: $25.00
     period: 2026-06-03T10:19:20.123456-07:00 -> open-ended
+    enforcement: advisory only
 ```
 
-The budget balance tracks the agent allocation. The cap balance tracks the
-current user's global max spend. Released holds do not reduce remaining amounts.
+The budget balance tracks reserved and consumed agent spend. The spending target
+compares the user's concurrent agent allocations without tracking a balance or
+participating in spend authorization.
 
 ### 11. Inspect the Ledger
 
@@ -443,10 +428,9 @@ shows the owning human user for both the transaction and its entries.
 hubu [--url http://127.0.0.1:8787] init [--policy FILE] [--force]
 hubu [--url http://127.0.0.1:8787] register human --username USERNAME --display-name NAME [--email EMAIL]
 hubu [--url http://127.0.0.1:8787] user list
-hubu [--url http://127.0.0.1:8787] user cap set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
-hubu [--url http://127.0.0.1:8787] user cap renew --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
-hubu [--url http://127.0.0.1:8787] user cap show [--all]
-hubu [--url http://127.0.0.1:8787] user cap revoke --cap-id ID
+hubu [--url http://127.0.0.1:8787] user spending-target set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+hubu [--url http://127.0.0.1:8787] user spending-target show [--all]
+hubu [--url http://127.0.0.1:8787] user spending-target revoke --target-id ID
 hubu [--url http://127.0.0.1:8787] protocol agent-registration
 hubu [--url http://127.0.0.1:8787] register agent [--name NAME] [--version VERSION] [--dry-run]
 hubu [--url http://127.0.0.1:8787] policy new-template [--path FILE] [--force]
@@ -474,10 +458,10 @@ after `cargo build`.
 - Local demo state is stored in SQLite at `HUBU_DB_PATH`, defaulting to
   `hubu.sqlite3` in the server working directory. Use
   `./scripts/reset-local-state.sh --yes` to clear it.
-- `hubu user cap show` shows the current user's global spend caps. Once a cap is
-  exhausted, `hubu user cap renew --amount AMOUNT` creates the next active cap.
-  `hubu budget list` shows active budgets scoped to agents owned by the current
-  user. Use `--all` to include inactive records.
+- `hubu user spending-target show` shows the current user's advisory target and
+  maximum concurrent agent budget allocation. `hubu budget list` shows active
+  budgets owned by agents belonging to the current user. Use `--all` to include
+  inactive records.
 - The server uses a minimal local HTTP adapter for demo use, not a production
   web framework.
 - Payments use the existing mock rail only. No real payment provider is called.

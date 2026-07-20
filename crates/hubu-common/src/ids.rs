@@ -106,18 +106,24 @@ impl BudgetId {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct UserId(Uuid);
+pub struct SpendingTargetId(Uuid);
 
-impl UserId {
+impl SpendingTargetId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct TaskId(Uuid);
+impl Default for SpendingTargetId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-impl TaskId {
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct UserId(Uuid);
+
+impl UserId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
@@ -150,6 +156,7 @@ public_uuid_suffix!(
     AgentAccountId,
     AgentSessionId,
     BudgetId,
+    SpendingTargetId,
     UserId,
 );
 
@@ -183,13 +190,13 @@ display_uuid_id!(
     AgentAccountId,
     AgentSessionId,
     BudgetId,
+    SpendingTargetId,
     SpendDecisionId,
     SpendAuthTokenId,
     PaymentId,
     LedgerAccountId,
     LedgerTransactionId,
     LedgerEntryId,
-    TaskId,
     UserId,
     BudgetHoldId,
 );
@@ -214,13 +221,13 @@ parse_uuid_id!(
     AgentAccountId,
     AgentSessionId,
     BudgetId,
+    SpendingTargetId,
     SpendDecisionId,
     SpendAuthTokenId,
     PaymentId,
     LedgerAccountId,
     LedgerTransactionId,
     LedgerEntryId,
-    TaskId,
     UserId,
     BudgetHoldId,
 );

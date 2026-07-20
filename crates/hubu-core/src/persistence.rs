@@ -7,11 +7,10 @@ use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
 use rusqlite::{params, Connection};
 
-use crate::budget::{
-    Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetScope, BudgetStatus,
-};
+use crate::budget::{Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetStatus};
 use crate::policy::Policy;
 use crate::spend::{SpendAuthTokenRecord, SpendDecisionRecord};
+use crate::spending_target::{SpendingTarget, SpendingTargetStatus};
 use crate::storage::StorageError;
 
 pub trait PolicyRepository {
@@ -48,22 +47,19 @@ pub trait BudgetRepository {
         hold: &BudgetHold,
         balance: &BudgetBalance,
     ) -> Result<(), StorageError>;
-    fn save_budget_holds(
-        &mut self,
-        holds: &[(&BudgetHold, &BudgetBalance)],
-    ) -> Result<(), StorageError>;
     fn update_budget_hold(
         &mut self,
         hold: &BudgetHold,
         balance: &BudgetBalance,
     ) -> Result<(), StorageError>;
-    fn update_budget_holds(
-        &mut self,
-        holds: &[(&BudgetHold, &BudgetBalance)],
-    ) -> Result<(), StorageError>;
     fn load_budgets(&self) -> Result<Vec<Budget>, StorageError>;
     fn load_budget_balances(&self) -> Result<Vec<BudgetBalance>, StorageError>;
     fn load_budget_holds(&self) -> Result<Vec<BudgetHold>, StorageError>;
+}
+
+pub trait SpendingTargetRepository {
+    fn save_spending_target(&mut self, target: &SpendingTarget) -> Result<(), StorageError>;
+    fn load_spending_targets(&self) -> Result<Vec<SpendingTarget>, StorageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +181,18 @@ impl SqliteGovernanceRepository {
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS spending_targets (
+                id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                target_amount_cents INTEGER NOT NULL,
+                currency TEXT NOT NULL,
+                starting_at TEXT NOT NULL,
+                ending_before TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS budget_balances (
                 budget_id TEXT PRIMARY KEY,
                 consumed_amount_cents INTEGER NOT NULL,
@@ -222,7 +230,8 @@ impl SqliteGovernanceRepository {
             ",
         )?;
         self.migrate_policy_assignment_scope()?;
-        self.migrate_budget_holds_allow_multiple_per_decision()?;
+        self.migrate_user_caps_to_spending_targets()?;
+        self.enforce_one_budget_hold_per_spend_decision()?;
         Ok(())
     }
 
@@ -260,56 +269,43 @@ impl SqliteGovernanceRepository {
         Ok(())
     }
 
-    fn migrate_budget_holds_allow_multiple_per_decision(&self) -> Result<(), StorageError> {
-        let mut stmt = self.conn.prepare("PRAGMA index_list(budget_holds)")?;
-        let indexes = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
-        })?;
-        let mut has_unique_spend_decision_index = false;
-        for index in indexes {
-            let (index_name, unique) = index?;
-            if !unique {
-                continue;
-            }
-            let mut index_stmt = self
-                .conn
-                .prepare(&format!("PRAGMA index_info({index_name})"))?;
-            let columns = index_stmt.query_map([], |row| row.get::<_, String>(2))?;
-            let columns = columns.collect::<Result<Vec<_>, _>>()?;
-            if columns == ["spend_decision_id"] {
-                has_unique_spend_decision_index = true;
-                break;
-            }
-        }
-        if !has_unique_spend_decision_index {
-            return Ok(());
-        }
-
+    fn migrate_user_caps_to_spending_targets(&self) -> Result<(), StorageError> {
         self.conn.execute_batch(
             "
-            ALTER TABLE budget_holds RENAME TO budget_holds_legacy;
+            INSERT OR IGNORE INTO spending_targets
+                (id, owner_user_id, target_amount_cents, currency, starting_at,
+                 ending_before, status, created_at, updated_at)
+            SELECT
+                id,
+                scope_id,
+                amount_limit_cents,
+                currency,
+                starting_at,
+                ending_before,
+                CASE WHEN status = 'revoked' THEN 'revoked' ELSE 'active' END,
+                created_at,
+                updated_at
+            FROM budgets
+            WHERE scope_type = 'user';
 
-            CREATE TABLE budget_holds (
-                id TEXT PRIMARY KEY,
-                budget_id TEXT NOT NULL,
-                spend_decision_id TEXT NOT NULL,
-                amount_cents INTEGER NOT NULL,
-                currency TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                FOREIGN KEY(budget_id) REFERENCES budgets(id),
-                FOREIGN KEY(spend_decision_id) REFERENCES spend_decisions(id)
-            );
+            DELETE FROM budget_holds
+            WHERE budget_id IN (SELECT id FROM budgets WHERE scope_type = 'user');
 
-            INSERT INTO budget_holds
-                (id, budget_id, spend_decision_id, amount_cents, currency, status, created_at, updated_at, expires_at)
-            SELECT id, budget_id, spend_decision_id, amount_cents, currency, status, created_at, updated_at, expires_at
-            FROM budget_holds_legacy;
+            DELETE FROM budget_balances
+            WHERE budget_id IN (SELECT id FROM budgets WHERE scope_type = 'user');
 
-            DROP TABLE budget_holds_legacy;
+            DELETE FROM budgets
+            WHERE scope_type = 'user';
             ",
+        )?;
+        Ok(())
+    }
+
+    fn enforce_one_budget_hold_per_spend_decision(&self) -> Result<(), StorageError> {
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS budget_holds_one_per_spend_decision
+             ON budget_holds(spend_decision_id)",
+            [],
         )?;
         Ok(())
     }
@@ -549,6 +545,8 @@ impl BudgetRepository for SqliteGovernanceRepository {
         budget: &Budget,
         balance: &BudgetBalance,
     ) -> Result<(), StorageError> {
+        // Keep the legacy scope columns as a storage-compatibility seam, but the
+        // MVP domain accepts and writes only agent-owned budgets.
         let sqlite_tx = self.conn.transaction()?;
         sqlite_tx.execute(
             "INSERT INTO budgets
@@ -565,8 +563,8 @@ impl BudgetRepository for SqliteGovernanceRepository {
                 updated_at = excluded.updated_at",
             params![
                 budget.id.to_string(),
-                budget_scope_type(&budget.scope),
-                budget_scope_id(&budget.scope),
+                "agent",
+                budget.agent_id.to_string(),
                 budget.amount_limit_cents,
                 budget.currency.to_string(),
                 budget.period.starting_at.to_rfc3339(),
@@ -586,38 +584,25 @@ impl BudgetRepository for SqliteGovernanceRepository {
         hold: &BudgetHold,
         balance: &BudgetBalance,
     ) -> Result<(), StorageError> {
-        self.save_budget_holds(&[(hold, balance)])
-    }
-
-    fn save_budget_holds(
-        &mut self,
-        holds: &[(&BudgetHold, &BudgetBalance)],
-    ) -> Result<(), StorageError> {
         let sqlite_tx = self.conn.transaction()?;
-        for (hold, balance) in holds {
-            sqlite_tx.execute(
-                "INSERT INTO budget_holds
-                 (id, budget_id, spend_decision_id, amount_cents, currency, status, created_at, updated_at, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    hold.id.to_string(),
-                    hold.budget_id.to_string(),
-                    hold.spend_decision_id.to_string(),
-                    hold.amount_cents,
-                    hold.currency.to_string(),
-                    budget_hold_status(&hold.status),
-                    hold.created_at.to_rfc3339(),
-                    hold.updated_at.to_rfc3339(),
-                    hold.expires_at.to_rfc3339(),
-                ],
-            )?;
-            upsert_balance(&sqlite_tx, balance)?;
-            refresh_persisted_budget_status(
-                &sqlite_tx,
-                &hold.budget_id.to_string(),
-                hold.updated_at,
-            )?;
-        }
+        sqlite_tx.execute(
+            "INSERT INTO budget_holds
+             (id, budget_id, spend_decision_id, amount_cents, currency, status, created_at, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                hold.id.to_string(),
+                hold.budget_id.to_string(),
+                hold.spend_decision_id.to_string(),
+                hold.amount_cents,
+                hold.currency.to_string(),
+                budget_hold_status(&hold.status),
+                hold.created_at.to_rfc3339(),
+                hold.updated_at.to_rfc3339(),
+                hold.expires_at.to_rfc3339(),
+            ],
+        )?;
+        upsert_balance(&sqlite_tx, balance)?;
+        refresh_persisted_budget_status(&sqlite_tx, &hold.budget_id.to_string(), hold.updated_at)?;
         sqlite_tx.commit()?;
         Ok(())
     }
@@ -627,30 +612,17 @@ impl BudgetRepository for SqliteGovernanceRepository {
         hold: &BudgetHold,
         balance: &BudgetBalance,
     ) -> Result<(), StorageError> {
-        self.update_budget_holds(&[(hold, balance)])
-    }
-
-    fn update_budget_holds(
-        &mut self,
-        holds: &[(&BudgetHold, &BudgetBalance)],
-    ) -> Result<(), StorageError> {
         let sqlite_tx = self.conn.transaction()?;
-        for (hold, balance) in holds {
-            sqlite_tx.execute(
-                "UPDATE budget_holds SET status = ?2, updated_at = ?3 WHERE id = ?1",
-                params![
-                    hold.id.to_string(),
-                    budget_hold_status(&hold.status),
-                    hold.updated_at.to_rfc3339(),
-                ],
-            )?;
-            upsert_balance(&sqlite_tx, balance)?;
-            refresh_persisted_budget_status(
-                &sqlite_tx,
-                &hold.budget_id.to_string(),
-                hold.updated_at,
-            )?;
-        }
+        sqlite_tx.execute(
+            "UPDATE budget_holds SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                hold.id.to_string(),
+                budget_hold_status(&hold.status),
+                hold.updated_at.to_rfc3339(),
+            ],
+        )?;
+        upsert_balance(&sqlite_tx, balance)?;
+        refresh_persisted_budget_status(&sqlite_tx, &hold.budget_id.to_string(), hold.updated_at)?;
         sqlite_tx.commit()?;
         Ok(())
     }
@@ -674,7 +646,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
             let updated_at: String = row.get(9)?;
             Ok(Budget {
                 id: parse_id(&id)?,
-                scope: parse_budget_scope(&scope_type, &scope_id)?,
+                agent_id: parse_budget_agent_id(&scope_type, &scope_id)?,
                 amount_limit_cents: row.get(3)?,
                 currency: parse_currency(&currency)?,
                 period: TimePeriod::new(
@@ -740,6 +712,74 @@ impl BudgetRepository for SqliteGovernanceRepository {
     }
 }
 
+impl SpendingTargetRepository for SqliteGovernanceRepository {
+    fn save_spending_target(&mut self, target: &SpendingTarget) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO spending_targets
+             (id, owner_user_id, target_amount_cents, currency, starting_at,
+              ending_before, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                owner_user_id = excluded.owner_user_id,
+                target_amount_cents = excluded.target_amount_cents,
+                currency = excluded.currency,
+                starting_at = excluded.starting_at,
+                ending_before = excluded.ending_before,
+                status = excluded.status,
+                updated_at = excluded.updated_at",
+            params![
+                target.id.to_string(),
+                target.owner_user_id.to_string(),
+                target.target_amount_cents,
+                target.currency.to_string(),
+                target.period.starting_at.to_rfc3339(),
+                target
+                    .period
+                    .ending_before
+                    .map(|timestamp| timestamp.to_rfc3339()),
+                spending_target_status(target.status),
+                target.created_at.to_rfc3339(),
+                target.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn load_spending_targets(&self) -> Result<Vec<SpendingTarget>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, owner_user_id, target_amount_cents, currency, starting_at,
+                    ending_before, status, created_at, updated_at
+             FROM spending_targets
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let owner_user_id: String = row.get(1)?;
+            let currency: String = row.get(3)?;
+            let starting_at: String = row.get(4)?;
+            let ending_before: Option<String> = row.get(5)?;
+            let status: String = row.get(6)?;
+            let created_at: String = row.get(7)?;
+            let updated_at: String = row.get(8)?;
+            Ok(SpendingTarget {
+                id: parse_id(&id)?,
+                owner_user_id: parse_id(&owner_user_id)?,
+                target_amount_cents: row.get(2)?,
+                currency: parse_currency(&currency)?,
+                period: TimePeriod::new(
+                    parse_timestamp(&starting_at)?,
+                    parse_optional_timestamp(ending_before)?,
+                )
+                .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                status: parse_spending_target_status(&status)?,
+                created_at: parse_timestamp(&created_at)?,
+                updated_at: parse_timestamp(&updated_at)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+}
+
 fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO budget_balances
@@ -795,22 +835,6 @@ fn refresh_persisted_budget_status(
     Ok(())
 }
 
-fn budget_scope_type(scope: &BudgetScope) -> &'static str {
-    match scope {
-        BudgetScope::User(_) => "user",
-        BudgetScope::Agent(_) => "agent",
-        BudgetScope::Task(_) => "task",
-    }
-}
-
-fn budget_scope_id(scope: &BudgetScope) -> String {
-    match scope {
-        BudgetScope::User(id) => id.to_string(),
-        BudgetScope::Agent(id) => id.to_string(),
-        BudgetScope::Task(id) => id.to_string(),
-    }
-}
-
 fn budget_status(status: &BudgetStatus) -> &'static str {
     match status {
         BudgetStatus::Active => "active",
@@ -829,11 +853,16 @@ fn budget_hold_status(status: &BudgetHoldStatus) -> &'static str {
     }
 }
 
-fn parse_budget_scope(scope_type: &str, scope_id: &str) -> Result<BudgetScope, rusqlite::Error> {
+fn spending_target_status(status: SpendingTargetStatus) -> &'static str {
+    match status {
+        SpendingTargetStatus::Active => "active",
+        SpendingTargetStatus::Revoked => "revoked",
+    }
+}
+
+fn parse_budget_agent_id(scope_type: &str, scope_id: &str) -> Result<AgentId, rusqlite::Error> {
     match scope_type {
-        "user" => Ok(BudgetScope::User(parse_id(scope_id)?)),
-        "agent" => Ok(BudgetScope::Agent(parse_id(scope_id)?)),
-        "task" => Ok(BudgetScope::Task(parse_id(scope_id)?)),
+        "agent" => parse_id(scope_id),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -854,6 +883,14 @@ fn parse_budget_hold_status(value: &str) -> Result<BudgetHoldStatus, rusqlite::E
         "settled" => Ok(BudgetHoldStatus::Settled),
         "released" => Ok(BudgetHoldStatus::Released),
         "expired" => Ok(BudgetHoldStatus::Expired),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn parse_spending_target_status(value: &str) -> Result<SpendingTargetStatus, rusqlite::Error> {
+    match value {
+        "active" => Ok(SpendingTargetStatus::Active),
+        "revoked" => Ok(SpendingTargetStatus::Revoked),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -906,7 +943,7 @@ fn collect_rows<T>(
 mod tests {
     use chrono::Duration;
     use hubu_common::ids::{
-        AgentAccountId, BudgetHoldId, BudgetId, SpendAuthTokenId, SpendDecisionId,
+        AgentAccountId, BudgetHoldId, BudgetId, SpendAuthTokenId, SpendDecisionId, SpendingTargetId,
     };
 
     use super::*;
@@ -1011,7 +1048,7 @@ mod tests {
 
         let budget = Budget::new(
             BudgetId::new(),
-            BudgetScope::User(user_id()),
+            AgentId::new(),
             10_000,
             Currency::Usd,
             TimePeriod::new(
@@ -1049,5 +1086,137 @@ mod tests {
         assert!(matches!(reloaded_hold.status, BudgetHoldStatus::Expired));
         assert_eq!(reloaded_balance.frozen_amount_cents, 0);
         assert_eq!(reloaded_balance.remaining_amount_cents, 10_000);
+    }
+
+    #[test]
+    fn persists_spending_targets_separately_from_budgets() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let now = Utc::now();
+        let target = SpendingTarget {
+            id: SpendingTargetId::new(),
+            owner_user_id: user_id(),
+            target_amount_cents: 25_000,
+            currency: Currency::Usd,
+            period: TimePeriod::new(now, Some(now + Duration::days(30))).unwrap(),
+            status: SpendingTargetStatus::Active,
+            created_at: now,
+            updated_at: now,
+        };
+
+        repo.save_spending_target(&target).unwrap();
+
+        let targets = repo.load_spending_targets().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, target.id);
+        assert_eq!(targets[0].target_amount_cents, 25_000);
+        assert!(repo.load_budgets().unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrates_legacy_user_cap_budget_to_advisory_spending_target() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-governance-target-migration-{}.sqlite",
+            UserId::new()
+        ));
+        SqliteGovernanceRepository::open(&path).unwrap();
+        let legacy_cap_id = BudgetId::new();
+        let agent_budget_id = BudgetId::new();
+        let spend_decision_id = SpendDecisionId::new();
+        let cap_hold_id = BudgetHoldId::new();
+        let agent_hold_id = BudgetHoldId::new();
+        let now = Utc::now();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("DROP INDEX budget_holds_one_per_spend_decision", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO spend_decisions
+                 (id, owner_user_id, request_json, evaluation_json, created_at)
+                 VALUES (?1, ?2, '{}', '{}', ?3)",
+                params![
+                    spend_decision_id.to_string(),
+                    user_id().to_string(),
+                    now.to_rfc3339(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO budgets
+                 (id, scope_type, scope_id, amount_limit_cents, currency, starting_at,
+                  ending_before, status, created_at, updated_at)
+                 VALUES (?1, 'user', ?2, 10000, 'usd', ?3, NULL, 'active', ?3, ?3)",
+                params![
+                    legacy_cap_id.to_string(),
+                    user_id().to_string(),
+                    now.to_rfc3339(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO budgets
+                 (id, scope_type, scope_id, amount_limit_cents, currency, starting_at,
+                  ending_before, status, created_at, updated_at)
+                 VALUES (?1, 'agent', ?2, 10000, 'usd', ?3, NULL, 'active', ?3, ?3)",
+                params![
+                    agent_budget_id.to_string(),
+                    agent_id().to_string(),
+                    now.to_rfc3339(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO budget_balances
+                 (budget_id, consumed_amount_cents, frozen_amount_cents,
+                  remaining_amount_cents, updated_at)
+                 VALUES (?1, 0, 500, 9500, ?2)",
+                params![legacy_cap_id.to_string(), now.to_rfc3339()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO budget_balances
+                 (budget_id, consumed_amount_cents, frozen_amount_cents,
+                  remaining_amount_cents, updated_at)
+                 VALUES (?1, 0, 500, 9500, ?2)",
+                params![agent_budget_id.to_string(), now.to_rfc3339()],
+            )
+            .unwrap();
+            for (hold_id, budget_id) in [
+                (&cap_hold_id, &legacy_cap_id),
+                (&agent_hold_id, &agent_budget_id),
+            ] {
+                conn.execute(
+                    "INSERT INTO budget_holds
+                     (id, budget_id, spend_decision_id, amount_cents, currency,
+                      status, created_at, updated_at, expires_at)
+                     VALUES (?1, ?2, ?3, 500, 'usd', 'frozen', ?4, ?4, ?5)",
+                    params![
+                        hold_id.to_string(),
+                        budget_id.to_string(),
+                        spend_decision_id.to_string(),
+                        now.to_rfc3339(),
+                        (now + Duration::hours(1)).to_rfc3339(),
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let targets = repo.load_spending_targets().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id.to_string(), legacy_cap_id.to_string());
+        assert_eq!(targets[0].target_amount_cents, 10_000);
+        assert_eq!(targets[0].status, SpendingTargetStatus::Active);
+        let budgets = repo.load_budgets().unwrap();
+        assert_eq!(budgets.len(), 1);
+        assert_eq!(budgets[0].id, agent_budget_id);
+        let balances = repo.load_budget_balances().unwrap();
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances[0].budget_id, agent_budget_id);
+        let holds = repo.load_budget_holds().unwrap();
+        assert_eq!(holds.len(), 1);
+        assert_eq!(holds[0].id, agent_hold_id);
+        assert_eq!(holds[0].budget_id, agent_budget_id);
+        std::fs::remove_file(path).ok();
     }
 }

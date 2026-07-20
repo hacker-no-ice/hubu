@@ -1,100 +1,120 @@
 # Budget Controls
 
-Hubu budgets are hard spending limits for agent-controlled spend. A user cap is
-the owner-level guardrail for total spend owned by the current user, not a
-fallback that applies only when an agent budget is absent. Agent and task
-budgets can narrow that cap to a specific actor or work boundary. These controls
-sit after policy evaluation and before payment execution: policy decides
-whether a request may proceed, then cap and budget controls decide whether
-enough scoped balance can be reserved.
+Hubu agent budgets are hard spending limits. A user spending target is a
+separate advisory signal: it helps a human compare aggregate agent allocations
+with a preferred amount, but it never blocks budget creation or spend.
 
-## Core Model
+These controls sit after policy evaluation and before payment execution.
+Policy decides whether a request may proceed. If policy allows it, Hubu checks
+the active budget for the spending agent and reserves that budget before issuing
+an authorization or submitting payment.
 
-A cap or budget has:
+## Agent Budget Model
 
-- a scope: user cap, agent, or task
+An agent budget has:
+
+- exactly one owning agent
 - an immutable limit in cents and currency
-- a time period with optional end
+- a time period with an optional end
 - a lifecycle status such as active, exhausted, expired, or revoked
 - a balance split into consumed, frozen, and remaining amounts
 
-A budget hold is created when Hubu reserves funds for an allowed spend decision.
-The hold starts as `frozen`, then becomes `settled` after successful payment or
-`released` when payment fails, authorization is unused, or the hold is canceled.
+A budget hold is created when Hubu reserves funds for an allowed spend
+decision. The hold starts as `frozen`, becomes `settled` after successful
+payment, or becomes `released` when payment fails, the authorization is unused,
+or the hold is canceled.
 
-## Cap And Budget Selection
+Every spend decision may have at most one budget hold and requires an active USD
+budget belonging to the spending agent. A spend may still carry `task_id` as
+audit and executor metadata, but that metadata does not select or own a budget.
 
-Human operators can create a user cap for all spend owned by the current user,
-or an agent budget for one registered agent:
+An agent may only have one budget for a currency at any instant. Single budgets
+and recurring series reject overlapping periods for the same agent and
+currency. Recurring periods use half-open boundaries, so the end of one period
+is the start of the next.
+
+## Advisory Spending Targets
+
+Humans can optionally set a user spending target:
 
 ```sh
-hubu user cap set --amount 100
-hubu budget create --agent-id AGENT_ID --amount 25
+hubu user spending-target set --amount 100
+hubu user spending-target show
 ```
 
-When an agent submits spend, the user cap is the outer owner-level guardrail.
-An agent budget, when present, adds a narrower agent-level guardrail; it does
-not replace or bypass the user's cap. Task-scoped budgets exist in the core
-model for future project/workflow boundaries.
+A spending target has an owner, amount, currency, period, and lifecycle status.
+It is persisted separately from budgets and does not have consumed, frozen, or
+remaining balances.
 
-A cap or budget scope may only have one limit for a currency at any instant.
-Single budgets and recurring series reject overlapping periods for the same
-scope and currency. Recurring periods use half-open boundaries, so the end of
-one period is the start of the next.
+When a budget is created, replaced, or created as part of a recurring series,
+Hubu finds spending targets whose periods overlap the new budget periods. For
+each target, it calculates the maximum concurrent sum of overlapping,
+non-revoked agent budget limits. If that allocation exceeds the target, the API
+returns a structured `spending_target_warnings` entry and the CLI prints it.
+The budget is still created.
+
+For example, a $50 target followed by a $75 agent budget produces a $25
+advisory warning. Two adjacent $50 budget periods count as a maximum concurrent
+allocation of $50, not $100.
+
+Legacy user-cap records are migrated into spending targets when the governance
+database opens. Legacy cap holds are removed; existing agent-budget holds remain
+available for executor settlement or release.
 
 ## Spend Flow
 
-Allowed spend follows this intended path:
+Allowed spend follows this path:
 
 ```txt
 policy allow
-  -> check active user cap
-  -> check active agent/task budget
-  -> reserve cap balance and budget balance into frozen hold state
+  -> find the active agent budget
+  -> reserve budget balance into one frozen hold
   -> issue spend authorization or execute payment
-  -> settle both holds on success, release both holds on failure
+  -> settle the hold on success, release it on failure
 ```
 
 `hubu spend authorize` stops after policy and budget reservation. It returns a
-scoped spend authorization token and freezes cap and budget balances without
-executing payment or writing a ledger transaction.
+scoped spend authorization token and freezes the agent budget without executing
+payment or writing a ledger transaction.
 
 `hubu spend` continues into the wallet rail. In the current local server, that
-rail is mocked. Successful payment settles the cap hold and budget hold into
-consumed balance and records a ledger transaction; failed payment releases both
-holds back to remaining balance.
+rail is mocked. Successful payment settles the budget hold into consumed
+balance and records a ledger transaction; failed payment releases the hold back
+to remaining balance.
 
 Hubu does not execute payment when:
 
 - policy returns `deny`
 - policy returns `needs_approval`
-- no active cap applies
-- the active cap or applicable budget has insufficient remaining balance
-- the cap or budget is inactive, expired, or in the wrong currency
+- no active agent budget applies
+- the active agent budget has insufficient remaining balance
+- the budget is inactive, expired, or in the wrong currency
+
+The spending target is intentionally absent from this list because it is never
+an authorization condition.
 
 ## CLI Inspection
 
-Use the CLI to create and inspect user caps and agent budgets:
+Use the CLI to create and inspect spending targets and agent budgets:
 
 ```sh
-hubu user cap set --amount 50
-hubu user cap show
+hubu user spending-target set --amount 50
+hubu user spending-target show
 hubu budget create --agent-id AGENT_ID --amount 25
 hubu budget create-recurring --agent-id AGENT_ID --amount 25 --recurrence monthly --period-count 3
 hubu budget list
 ```
 
-`hubu user cap set` creates or renews the current user's cap. `hubu budget
-create` and `hubu budget create-recurring` require `--agent-id` and create agent
-budgets. `hubu user cap show` and `hubu budget list` show status, limit,
-consumed balance, frozen balance, remaining balance, and period. Pair them with
-`hubu ledger list` to compare settled payment movement against consumed balance.
+`hubu user spending-target show` reports the target amount, maximum concurrent
+allocation, exceeded amount, period, and the fact that enforcement is advisory.
+`hubu budget list` reports budget status, limit, consumed balance, frozen
+balance, remaining balance, and period. Pair it with `hubu ledger list` to
+compare settled payment movement against consumed budget balance.
 
 ## Current Limits
 
-The current local API persists budgets and caps in SQLite and uses a mock
-payment rail. There is not yet a durable human approval queue for
-`needs_approval` decisions, and task-scoped budget creation is not exposed
-through the CLI. The local spend response reports both `budget_hold` and
-`cap_hold`; the budget manager enforces the reserve, settle, release, and
-overlap invariants used by the local server and MCP tools.
+The current local API persists spending targets, budgets, and holds in SQLite
+and uses a mock payment rail. There is not yet a durable human approval queue
+for `needs_approval`. Shared budgets are intentionally outside the MVP. If a
+real shared-allocation use case emerges, Hubu can add an explicit budget-pool
+model with agent membership instead of overloading spend task metadata.
