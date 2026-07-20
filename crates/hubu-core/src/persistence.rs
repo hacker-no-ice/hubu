@@ -2,10 +2,10 @@ use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, UserId};
+use hubu_common::ids::{AgentId, PaymentId, SpendExecutorClaimId, UserId};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::budget::{Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetStatus};
 use crate::policy::Policy;
@@ -36,10 +36,6 @@ pub trait SpendRepository {
     fn load_spend_decisions(&self) -> Result<Vec<SpendDecisionRecord>, StorageError>;
     fn load_spend_auth_tokens(&self) -> Result<Vec<SpendAuthTokenRecord>, StorageError>;
     fn save_executor_claim(
-        &mut self,
-        record: &SpendExecutorClaimRecord,
-    ) -> Result<(), StorageError>;
-    fn update_executor_claim(
         &mut self,
         record: &SpendExecutorClaimRecord,
     ) -> Result<(), StorageError>;
@@ -127,6 +123,20 @@ pub struct SqliteGovernanceRepository {
     conn: Connection,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExecutorFinalizationResult {
+    pub claim: SpendExecutorClaimRecord,
+    pub token: SpendAuthTokenRecord,
+    pub hold: BudgetHold,
+    pub balance: BudgetBalance,
+    pub idempotent_replay: bool,
+}
+
+enum ExecutorFinalizationAction {
+    Settle(PaymentId),
+    Release,
+}
+
 impl SqliteGovernanceRepository {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::from_connection(Connection::open(path)?)
@@ -178,6 +188,272 @@ impl SqliteGovernanceRepository {
         refresh_persisted_budget_status(&sqlite_tx, &hold.budget_id.to_string(), hold.updated_at)?;
         sqlite_tx.commit()?;
         Ok(())
+    }
+
+    pub fn settle_executor_claim_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        executor_execution_id: &str,
+        proposed_settlement_id: PaymentId,
+        settlement_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        self.finalize_executor_claim_transactionally(
+            claim_id,
+            owner_user_id,
+            executor_execution_id,
+            ExecutorFinalizationAction::Settle(proposed_settlement_id),
+            settlement_started_at,
+        )
+    }
+
+    pub fn release_executor_claim_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        executor_execution_id: &str,
+        finalization_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        self.finalize_executor_claim_transactionally(
+            claim_id,
+            owner_user_id,
+            executor_execution_id,
+            ExecutorFinalizationAction::Release,
+            finalization_started_at,
+        )
+    }
+
+    fn finalize_executor_claim_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        executor_execution_id: &str,
+        action: ExecutorFinalizationAction,
+        finalization_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        let sqlite_tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut claim = load_executor_claim_by_id(&sqlite_tx, claim_id)?
+            .ok_or_else(|| StorageError::InvalidData("unknown executor claim".to_string()))?;
+        if &claim.owner_user_id != owner_user_id {
+            return Err(StorageError::InvalidData(
+                "executor claim owner does not match".to_string(),
+            ));
+        }
+        if claim.executor_execution_id != executor_execution_id {
+            return Err(StorageError::InvalidData(
+                "executor claim execution id does not match".to_string(),
+            ));
+        }
+
+        let mut token = load_spend_auth_token_by_id(&sqlite_tx, &claim.spend_auth_token_id)?
+            .ok_or_else(|| {
+                StorageError::InvalidData("executor claim token is missing".to_string())
+            })?;
+        let mut hold = load_budget_hold_by_claim_id(&sqlite_tx, claim_id)?.ok_or_else(|| {
+            StorageError::InvalidData("executor claim budget hold is missing".to_string())
+        })?;
+        let mut balance =
+            load_budget_balance_by_id(&sqlite_tx, &hold.budget_id)?.ok_or_else(|| {
+                StorageError::InvalidData("executor claim budget balance is missing".to_string())
+            })?;
+
+        let replay_is_consistent = match (&action, &claim.status) {
+            (ExecutorFinalizationAction::Settle(_), SpendExecutorClaimStatus::Settled) => {
+                let settlement_id = claim.settlement_id.as_ref().ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "settled executor claim has no settlement id".to_string(),
+                    )
+                })?;
+                token.used_by_payment_id.as_ref() == Some(settlement_id)
+                    && token.used_at.is_some()
+                    && token.revoked_at.is_none()
+                    && matches!(hold.status, BudgetHoldStatus::Settled)
+                    && hold.executor_claim_id.as_ref() == Some(claim_id)
+            }
+            (ExecutorFinalizationAction::Release, SpendExecutorClaimStatus::Released) => {
+                token.revoked_at.is_some()
+                    && token.used_at.is_none()
+                    && token.used_by_payment_id.is_none()
+                    && matches!(hold.status, BudgetHoldStatus::Released)
+                    && hold.executor_claim_id.as_ref() == Some(claim_id)
+            }
+            (ExecutorFinalizationAction::Settle(_), SpendExecutorClaimStatus::Released) => {
+                return Err(StorageError::InvalidData(
+                    "executor claim has already been released".to_string(),
+                ));
+            }
+            (ExecutorFinalizationAction::Release, SpendExecutorClaimStatus::Settled) => {
+                return Err(StorageError::InvalidData(
+                    "executor claim has already been settled".to_string(),
+                ));
+            }
+            (_, SpendExecutorClaimStatus::Claimed) => false,
+        };
+        if replay_is_consistent {
+            sqlite_tx.commit()?;
+            return Ok(ExecutorFinalizationResult {
+                claim,
+                token,
+                hold,
+                balance,
+                idempotent_replay: true,
+            });
+        }
+        if !matches!(claim.status, SpendExecutorClaimStatus::Claimed) {
+            return Err(StorageError::InvalidData(
+                "finalized executor claim has inconsistent persisted state".to_string(),
+            ));
+        }
+        if claim.expires_at <= finalization_started_at {
+            return Err(StorageError::InvalidData(
+                "executor claim expired and requires reconciliation".to_string(),
+            ));
+        }
+        if token.owner_user_id != claim.owner_user_id {
+            return Err(StorageError::InvalidData(
+                "executor claim token owner does not match".to_string(),
+            ));
+        }
+        if token.used_at.is_some() || token.used_by_payment_id.is_some() {
+            return Err(StorageError::InvalidData(
+                "executor claim token has already been used".to_string(),
+            ));
+        }
+        if token.revoked_at.is_some() {
+            return Err(StorageError::InvalidData(
+                "executor claim token has been revoked".to_string(),
+            ));
+        }
+        if !matches!(hold.status, BudgetHoldStatus::Claimed)
+            || hold.executor_claim_id.as_ref() != Some(claim_id)
+            || hold.spend_decision_id != token.spend_decision_id
+        {
+            return Err(StorageError::InvalidData(
+                "executor claim budget hold is not exclusively claimed".to_string(),
+            ));
+        }
+        if balance.frozen_amount_cents < hold.amount_cents {
+            return Err(StorageError::InvalidData(
+                "executor claim budget balance is inconsistent".to_string(),
+            ));
+        }
+
+        let finalized_at = finalization_started_at.to_rfc3339();
+        let (terminal_status, settlement_id, transition_name) = match &action {
+            ExecutorFinalizationAction::Settle(settlement_id) => {
+                ("settled", Some(settlement_id.to_string()), "settlement")
+            }
+            ExecutorFinalizationAction::Release => ("released", None, "release"),
+        };
+        let token_rows = match &action {
+            ExecutorFinalizationAction::Settle(settlement_id) => sqlite_tx.execute(
+                "UPDATE spend_auth_tokens
+                 SET used_at = ?2, used_by_payment_id = ?3
+                 WHERE id = ?1 AND used_at IS NULL AND revoked_at IS NULL",
+                params![
+                    claim.spend_auth_token_id.to_string(),
+                    finalized_at,
+                    settlement_id.to_string(),
+                ],
+            )?,
+            ExecutorFinalizationAction::Release => sqlite_tx.execute(
+                "UPDATE spend_auth_tokens
+                 SET revoked_at = ?2
+                 WHERE id = ?1 AND used_at IS NULL AND revoked_at IS NULL",
+                params![claim.spend_auth_token_id.to_string(), finalized_at],
+            )?,
+        };
+        require_one_updated_row(
+            token_rows,
+            &format!("executor claim token changed during {transition_name}"),
+        )?;
+        require_one_updated_row(
+            sqlite_tx.execute(
+                "UPDATE spend_executor_claims
+                 SET status = ?2, finalized_at = ?3, settlement_id = ?4
+                 WHERE id = ?1 AND status = 'claimed'",
+                params![
+                    claim.id.to_string(),
+                    terminal_status,
+                    finalized_at,
+                    settlement_id,
+                ],
+            )?,
+            &format!("executor claim changed during {transition_name}"),
+        )?;
+        require_one_updated_row(
+            sqlite_tx.execute(
+                "UPDATE budget_holds
+                 SET status = ?2, updated_at = ?3
+                 WHERE id = ?1 AND status = 'claimed' AND executor_claim_id = ?4",
+                params![
+                    hold.id.to_string(),
+                    terminal_status,
+                    finalized_at,
+                    claim.id.to_string(),
+                ],
+            )?,
+            &format!("executor claim budget hold changed during {transition_name}"),
+        )?;
+        let balance_rows = match &action {
+            ExecutorFinalizationAction::Settle(_) => sqlite_tx.execute(
+                "UPDATE budget_balances
+                 SET frozen_amount_cents = frozen_amount_cents - ?2,
+                     consumed_amount_cents = consumed_amount_cents + ?2,
+                     updated_at = ?3
+                 WHERE budget_id = ?1 AND frozen_amount_cents >= ?2",
+                params![hold.budget_id.to_string(), hold.amount_cents, finalized_at],
+            )?,
+            ExecutorFinalizationAction::Release => sqlite_tx.execute(
+                "UPDATE budget_balances
+                 SET frozen_amount_cents = frozen_amount_cents - ?2,
+                     remaining_amount_cents = remaining_amount_cents + ?2,
+                     updated_at = ?3
+                 WHERE budget_id = ?1 AND frozen_amount_cents >= ?2",
+                params![hold.budget_id.to_string(), hold.amount_cents, finalized_at],
+            )?,
+        };
+        require_one_updated_row(
+            balance_rows,
+            &format!("executor claim budget balance changed during {transition_name}"),
+        )?;
+        refresh_persisted_budget_status(
+            &sqlite_tx,
+            &hold.budget_id.to_string(),
+            finalization_started_at,
+        )?;
+
+        claim.finalized_at = Some(finalization_started_at);
+        hold.updated_at = finalization_started_at;
+        balance.frozen_amount_cents -= hold.amount_cents;
+        match action {
+            ExecutorFinalizationAction::Settle(settlement_id) => {
+                token.used_at = Some(finalization_started_at);
+                token.used_by_payment_id = Some(settlement_id.clone());
+                claim.status = SpendExecutorClaimStatus::Settled;
+                claim.settlement_id = Some(settlement_id);
+                hold.status = BudgetHoldStatus::Settled;
+                balance.consumed_amount_cents += hold.amount_cents;
+            }
+            ExecutorFinalizationAction::Release => {
+                token.revoked_at = Some(finalization_started_at);
+                claim.status = SpendExecutorClaimStatus::Released;
+                claim.settlement_id = None;
+                hold.status = BudgetHoldStatus::Released;
+                balance.remaining_amount_cents += hold.amount_cents;
+            }
+        }
+
+        sqlite_tx.commit()?;
+        Ok(ExecutorFinalizationResult {
+            claim,
+            token,
+            hold,
+            balance,
+            idempotent_replay: false,
+        })
     }
 
     fn from_connection(conn: Connection) -> Result<Self, StorageError> {
@@ -390,6 +666,11 @@ impl SqliteGovernanceRepository {
                 [],
             )?;
         }
+        self.conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS budget_holds_executor_claim_unique
+             ON budget_holds(executor_claim_id)
+             WHERE executor_claim_id IS NOT NULL;",
+        )?;
         Ok(())
     }
 
@@ -573,25 +854,7 @@ impl SpendRepository for SqliteGovernanceRepository {
              FROM spend_auth_tokens
              ORDER BY expires_at ASC",
         )?;
-        let rows = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let owner_user_id: String = row.get(1)?;
-            let spend_decision_id: String = row.get(2)?;
-            let expires_at: String = row.get(3)?;
-            let used_at: Option<String> = row.get(5)?;
-            let used_by_payment_id: Option<String> = row.get(6)?;
-            let revoked_at: Option<String> = row.get(7)?;
-            Ok(SpendAuthTokenRecord {
-                id: parse_id(&id)?,
-                owner_user_id: parse_id(&owner_user_id)?,
-                spend_decision_id: parse_id(&spend_decision_id)?,
-                expires_at: parse_timestamp(&expires_at)?,
-                claim_ttl_seconds: row.get(4)?,
-                used_at: parse_optional_timestamp(used_at)?,
-                used_by_payment_id: parse_optional_id(used_by_payment_id)?,
-                revoked_at: parse_optional_timestamp(revoked_at)?,
-            })
-        })?;
+        let rows = stmt.query_map([], spend_auth_token_from_row)?;
         collect_rows(rows)
     }
 
@@ -621,24 +884,6 @@ impl SpendRepository for SqliteGovernanceRepository {
         Ok(())
     }
 
-    fn update_executor_claim(
-        &mut self,
-        record: &SpendExecutorClaimRecord,
-    ) -> Result<(), StorageError> {
-        self.conn.execute(
-            "UPDATE spend_executor_claims
-             SET status = ?2, finalized_at = ?3, settlement_id = ?4
-             WHERE id = ?1",
-            params![
-                record.id.to_string(),
-                executor_claim_status(&record.status),
-                record.finalized_at.map(|timestamp| timestamp.to_rfc3339()),
-                record.settlement_id.as_ref().map(ToString::to_string),
-            ],
-        )?;
-        Ok(())
-    }
-
     fn load_executor_claims(&self) -> Result<Vec<SpendExecutorClaimRecord>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, spend_auth_token_id, owner_user_id, executor_execution_id,
@@ -646,28 +891,7 @@ impl SpendRepository for SqliteGovernanceRepository {
              FROM spend_executor_claims
              ORDER BY claimed_at ASC",
         )?;
-        let rows = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let token_id: String = row.get(1)?;
-            let owner_user_id: String = row.get(2)?;
-            let status: String = row.get(5)?;
-            let claimed_at: String = row.get(6)?;
-            let expires_at: String = row.get(7)?;
-            let finalized_at: Option<String> = row.get(8)?;
-            let settlement_id: Option<String> = row.get(9)?;
-            Ok(SpendExecutorClaimRecord {
-                id: parse_id(&id)?,
-                spend_auth_token_id: parse_id(&token_id)?,
-                owner_user_id: parse_id(&owner_user_id)?,
-                executor_execution_id: row.get(3)?,
-                workload_profile: row.get(4)?,
-                status: parse_executor_claim_status(&status)?,
-                claimed_at: parse_timestamp(&claimed_at)?,
-                expires_at: parse_timestamp(&expires_at)?,
-                finalized_at: parse_optional_timestamp(finalized_at)?,
-                settlement_id: parse_optional_id(settlement_id)?,
-            })
-        })?;
+        let rows = stmt.query_map([], executor_claim_from_row)?;
         collect_rows(rows)
     }
 }
@@ -848,15 +1072,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
              FROM budget_balances
              ORDER BY budget_id ASC",
         )?;
-        let rows = stmt.query_map([], |row| {
-            let budget_id: String = row.get(0)?;
-            Ok(BudgetBalance {
-                budget_id: parse_id(&budget_id)?,
-                consumed_amount_cents: row.get(1)?,
-                frozen_amount_cents: row.get(2)?,
-                remaining_amount_cents: row.get(3)?,
-            })
-        })?;
+        let rows = stmt.query_map([], budget_balance_from_row)?;
         collect_rows(rows)
     }
 
@@ -867,29 +1083,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
              FROM budget_holds
              ORDER BY created_at ASC",
         )?;
-        let rows = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let budget_id: String = row.get(1)?;
-            let spend_decision_id: String = row.get(2)?;
-            let currency: String = row.get(4)?;
-            let status: String = row.get(5)?;
-            let executor_claim_id: Option<String> = row.get(6)?;
-            let created_at: String = row.get(7)?;
-            let updated_at: String = row.get(8)?;
-            let expires_at: String = row.get(9)?;
-            Ok(BudgetHold {
-                id: parse_id(&id)?,
-                budget_id: parse_id(&budget_id)?,
-                spend_decision_id: parse_id(&spend_decision_id)?,
-                amount_cents: row.get(3)?,
-                currency: parse_currency(&currency)?,
-                status: parse_budget_hold_status(&status)?,
-                executor_claim_id: parse_optional_id(executor_claim_id)?,
-                created_at: parse_timestamp(&created_at)?,
-                updated_at: parse_timestamp(&updated_at)?,
-                expires_at: parse_timestamp(&expires_at)?,
-            })
-        })?;
+        let rows = stmt.query_map([], budget_hold_from_row)?;
         collect_rows(rows)
     }
 }
@@ -959,6 +1153,158 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
             })
         })?;
         collect_rows(rows)
+    }
+}
+
+fn load_executor_claim_by_id(
+    conn: &Connection,
+    claim_id: &SpendExecutorClaimId,
+) -> Result<Option<SpendExecutorClaimRecord>, StorageError> {
+    conn.query_row(
+        "SELECT id, spend_auth_token_id, owner_user_id, executor_execution_id,
+                workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id
+         FROM spend_executor_claims
+         WHERE id = ?1",
+        params![claim_id.to_string()],
+        executor_claim_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn load_spend_auth_token_by_id(
+    conn: &Connection,
+    token_id: &hubu_common::ids::SpendAuthTokenId,
+) -> Result<Option<SpendAuthTokenRecord>, StorageError> {
+    conn.query_row(
+        "SELECT id, owner_user_id, spend_decision_id, expires_at, claim_ttl_seconds,
+                used_at, used_by_payment_id, revoked_at
+         FROM spend_auth_tokens
+         WHERE id = ?1",
+        params![token_id.to_string()],
+        spend_auth_token_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn load_budget_hold_by_claim_id(
+    conn: &Connection,
+    claim_id: &SpendExecutorClaimId,
+) -> Result<Option<BudgetHold>, StorageError> {
+    conn.query_row(
+        "SELECT id, budget_id, spend_decision_id, amount_cents, currency, status,
+                executor_claim_id, created_at, updated_at, expires_at
+         FROM budget_holds
+         WHERE executor_claim_id = ?1",
+        params![claim_id.to_string()],
+        budget_hold_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn load_budget_balance_by_id(
+    conn: &Connection,
+    budget_id: &hubu_common::ids::BudgetId,
+) -> Result<Option<BudgetBalance>, StorageError> {
+    conn.query_row(
+        "SELECT budget_id, consumed_amount_cents, frozen_amount_cents, remaining_amount_cents
+         FROM budget_balances
+         WHERE budget_id = ?1",
+        params![budget_id.to_string()],
+        budget_balance_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn executor_claim_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<SpendExecutorClaimRecord, rusqlite::Error> {
+    let id: String = row.get(0)?;
+    let token_id: String = row.get(1)?;
+    let owner_user_id: String = row.get(2)?;
+    let status: String = row.get(5)?;
+    let claimed_at: String = row.get(6)?;
+    let expires_at: String = row.get(7)?;
+    let finalized_at: Option<String> = row.get(8)?;
+    let settlement_id: Option<String> = row.get(9)?;
+    Ok(SpendExecutorClaimRecord {
+        id: parse_id(&id)?,
+        spend_auth_token_id: parse_id(&token_id)?,
+        owner_user_id: parse_id(&owner_user_id)?,
+        executor_execution_id: row.get(3)?,
+        workload_profile: row.get(4)?,
+        status: parse_executor_claim_status(&status)?,
+        claimed_at: parse_timestamp(&claimed_at)?,
+        expires_at: parse_timestamp(&expires_at)?,
+        finalized_at: parse_optional_timestamp(finalized_at)?,
+        settlement_id: parse_optional_id(settlement_id)?,
+    })
+}
+
+fn spend_auth_token_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<SpendAuthTokenRecord, rusqlite::Error> {
+    let id: String = row.get(0)?;
+    let owner_user_id: String = row.get(1)?;
+    let spend_decision_id: String = row.get(2)?;
+    let expires_at: String = row.get(3)?;
+    let used_at: Option<String> = row.get(5)?;
+    let used_by_payment_id: Option<String> = row.get(6)?;
+    let revoked_at: Option<String> = row.get(7)?;
+    Ok(SpendAuthTokenRecord {
+        id: parse_id(&id)?,
+        owner_user_id: parse_id(&owner_user_id)?,
+        spend_decision_id: parse_id(&spend_decision_id)?,
+        expires_at: parse_timestamp(&expires_at)?,
+        claim_ttl_seconds: row.get(4)?,
+        used_at: parse_optional_timestamp(used_at)?,
+        used_by_payment_id: parse_optional_id(used_by_payment_id)?,
+        revoked_at: parse_optional_timestamp(revoked_at)?,
+    })
+}
+
+fn budget_hold_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetHold, rusqlite::Error> {
+    let id: String = row.get(0)?;
+    let budget_id: String = row.get(1)?;
+    let spend_decision_id: String = row.get(2)?;
+    let currency: String = row.get(4)?;
+    let status: String = row.get(5)?;
+    let executor_claim_id: Option<String> = row.get(6)?;
+    let created_at: String = row.get(7)?;
+    let updated_at: String = row.get(8)?;
+    let expires_at: String = row.get(9)?;
+    Ok(BudgetHold {
+        id: parse_id(&id)?,
+        budget_id: parse_id(&budget_id)?,
+        spend_decision_id: parse_id(&spend_decision_id)?,
+        amount_cents: row.get(3)?,
+        currency: parse_currency(&currency)?,
+        status: parse_budget_hold_status(&status)?,
+        executor_claim_id: parse_optional_id(executor_claim_id)?,
+        created_at: parse_timestamp(&created_at)?,
+        updated_at: parse_timestamp(&updated_at)?,
+        expires_at: parse_timestamp(&expires_at)?,
+    })
+}
+
+fn budget_balance_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetBalance, rusqlite::Error> {
+    let budget_id: String = row.get(0)?;
+    Ok(BudgetBalance {
+        budget_id: parse_id(&budget_id)?,
+        consumed_amount_cents: row.get(1)?,
+        frozen_amount_cents: row.get(2)?,
+        remaining_amount_cents: row.get(3)?,
+    })
+}
+
+fn require_one_updated_row(rows: usize, message: &str) -> Result<(), StorageError> {
+    if rows == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidData(message.to_string()))
     }
 }
 
@@ -1214,6 +1560,265 @@ mod tests {
             },
             created_at: Utc::now(),
         }
+    }
+
+    fn persist_claimed_executor_spend(
+        repo: &mut SqliteGovernanceRepository,
+        claim_expires_at: DateTime<Utc>,
+    ) -> (SpendExecutorClaimRecord, SpendAuthTokenRecord, BudgetHold) {
+        let decision = spend_decision();
+        let token = SpendAuthTokenRecord {
+            id: SpendAuthTokenId::new(),
+            owner_user_id: user_id(),
+            spend_decision_id: decision.id.clone(),
+            expires_at: Utc::now() + Duration::minutes(5),
+            claim_ttl_seconds: 900,
+            used_at: None,
+            used_by_payment_id: None,
+            revoked_at: None,
+        };
+        let claim = SpendExecutorClaimRecord {
+            id: SpendExecutorClaimId::new(),
+            spend_auth_token_id: token.id.clone(),
+            owner_user_id: user_id(),
+            executor_execution_id: "gongbu-job-transactional".to_string(),
+            workload_profile: "default".to_string(),
+            status: SpendExecutorClaimStatus::Claimed,
+            claimed_at: Utc::now(),
+            expires_at: claim_expires_at,
+            finalized_at: None,
+            settlement_id: None,
+        };
+        let budget = Budget::new(
+            BudgetId::new(),
+            agent_id(),
+            10_000,
+            Currency::Usd,
+            TimePeriod::new(
+                Utc::now() - Duration::hours(1),
+                Some(Utc::now() + Duration::hours(1)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let balance = BudgetBalance {
+            budget_id: budget.id.clone(),
+            consumed_amount_cents: 0,
+            frozen_amount_cents: 2_500,
+            remaining_amount_cents: 7_500,
+        };
+        let hold = BudgetHold {
+            id: BudgetHoldId::new(),
+            budget_id: budget.id.clone(),
+            spend_decision_id: decision.id.clone(),
+            amount_cents: 2_500,
+            currency: Currency::Usd,
+            status: BudgetHoldStatus::Claimed,
+            executor_claim_id: Some(claim.id.clone()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            expires_at: claim_expires_at,
+        };
+
+        repo.save_spend_decision(&decision).unwrap();
+        repo.save_spend_auth_token(&token).unwrap();
+        repo.save_executor_claim(&claim).unwrap();
+        repo.save_budget_with_balance(&budget, &balance).unwrap();
+        repo.save_budget_hold(&hold, &balance).unwrap();
+        (claim, token, hold)
+    }
+
+    #[test]
+    fn executor_settlement_is_atomic_and_idempotent() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let settlement_started_at = Utc::now();
+        let (claim, _, _) = persist_claimed_executor_spend(
+            &mut repo,
+            settlement_started_at + Duration::minutes(15),
+        );
+        let first_settlement_id = PaymentId::new();
+
+        let wrong_execution_error = repo
+            .settle_executor_claim_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                "different-executor-job",
+                PaymentId::new(),
+                settlement_started_at,
+            )
+            .unwrap_err();
+        assert!(wrong_execution_error
+            .to_string()
+            .contains("execution id does not match"));
+
+        let first = repo
+            .settle_executor_claim_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                &claim.executor_execution_id,
+                first_settlement_id.clone(),
+                settlement_started_at,
+            )
+            .unwrap();
+        assert!(!first.idempotent_replay);
+        assert_eq!(first.claim.settlement_id, Some(first_settlement_id.clone()));
+        assert_eq!(
+            first.token.used_by_payment_id,
+            Some(first_settlement_id.clone())
+        );
+        assert!(matches!(
+            first.claim.status,
+            SpendExecutorClaimStatus::Settled
+        ));
+        assert!(matches!(first.hold.status, BudgetHoldStatus::Settled));
+        assert_eq!(first.balance.consumed_amount_cents, 2_500);
+        assert_eq!(first.balance.frozen_amount_cents, 0);
+        assert_eq!(first.balance.remaining_amount_cents, 7_500);
+
+        let replay = repo
+            .settle_executor_claim_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                &claim.executor_execution_id,
+                PaymentId::new(),
+                settlement_started_at + Duration::seconds(1),
+            )
+            .unwrap();
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.claim.settlement_id, Some(first_settlement_id));
+        assert_eq!(replay.balance.consumed_amount_cents, 2_500);
+        assert_eq!(replay.balance.frozen_amount_cents, 0);
+    }
+
+    #[test]
+    fn executor_settlement_rolls_back_every_record_on_write_failure() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let settlement_started_at = Utc::now();
+        let (claim, token, hold) = persist_claimed_executor_spend(
+            &mut repo,
+            settlement_started_at + Duration::minutes(15),
+        );
+        repo.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_executor_hold_settlement
+                 BEFORE UPDATE OF status ON budget_holds
+                 WHEN NEW.status = 'settled'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected settlement failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = repo
+            .settle_executor_claim_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                &claim.executor_execution_id,
+                PaymentId::new(),
+                settlement_started_at,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("injected settlement failure"));
+
+        let reloaded_claim = load_executor_claim_by_id(&repo.conn, &claim.id)
+            .unwrap()
+            .unwrap();
+        let reloaded_token = load_spend_auth_token_by_id(&repo.conn, &token.id)
+            .unwrap()
+            .unwrap();
+        let reloaded_hold = load_budget_hold_by_claim_id(&repo.conn, &claim.id)
+            .unwrap()
+            .unwrap();
+        let reloaded_balance = load_budget_balance_by_id(&repo.conn, &hold.budget_id)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            reloaded_claim.status,
+            SpendExecutorClaimStatus::Claimed
+        ));
+        assert_eq!(reloaded_claim.settlement_id, None);
+        assert_eq!(reloaded_token.used_at, None);
+        assert_eq!(reloaded_token.used_by_payment_id, None);
+        assert!(matches!(reloaded_hold.status, BudgetHoldStatus::Claimed));
+        assert_eq!(reloaded_balance.consumed_amount_cents, 0);
+        assert_eq!(reloaded_balance.frozen_amount_cents, 2_500);
+    }
+
+    #[test]
+    fn executor_settlement_uses_one_start_time_for_claim_expiry() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let settlement_started_at = Utc::now();
+        let (claim, token, _) = persist_claimed_executor_spend(&mut repo, settlement_started_at);
+
+        let error = repo
+            .settle_executor_claim_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                &claim.executor_execution_id,
+                PaymentId::new(),
+                settlement_started_at,
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("expired and requires reconciliation"));
+        assert_eq!(
+            load_spend_auth_token_by_id(&repo.conn, &token.id)
+                .unwrap()
+                .unwrap()
+                .used_at,
+            None
+        );
+    }
+
+    #[test]
+    fn executor_release_is_atomic_idempotent_and_blocks_settlement() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let finalization_started_at = Utc::now();
+        let (claim, _, _) = persist_claimed_executor_spend(
+            &mut repo,
+            finalization_started_at + Duration::minutes(15),
+        );
+
+        let released = repo
+            .release_executor_claim_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                &claim.executor_execution_id,
+                finalization_started_at,
+            )
+            .unwrap();
+        assert!(!released.idempotent_replay);
+        assert!(matches!(
+            released.claim.status,
+            SpendExecutorClaimStatus::Released
+        ));
+        assert!(released.token.revoked_at.is_some());
+        assert!(matches!(released.hold.status, BudgetHoldStatus::Released));
+        assert_eq!(released.balance.frozen_amount_cents, 0);
+        assert_eq!(released.balance.remaining_amount_cents, 10_000);
+
+        let replay = repo
+            .release_executor_claim_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                &claim.executor_execution_id,
+                finalization_started_at + Duration::seconds(1),
+            )
+            .unwrap();
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.balance.remaining_amount_cents, 10_000);
+
+        let settle_error = repo
+            .settle_executor_claim_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                &claim.executor_execution_id,
+                PaymentId::new(),
+                finalization_started_at + Duration::seconds(1),
+            )
+            .unwrap_err();
+        assert!(settle_error.to_string().contains("already been released"));
     }
 
     #[test]
