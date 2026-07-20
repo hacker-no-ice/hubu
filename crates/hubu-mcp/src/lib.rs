@@ -176,7 +176,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         approval_tool(
             "hubu_create_budget",
-            "Create an agent-scoped budget. Requires a human click.",
+            "Create a budget owned by one agent. Requires a human click.",
             json_schema(json!({
                 "amount_cents": { "type": "integer" },
                 "agent_id": { "type": "string" },
@@ -186,7 +186,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         approval_tool(
             "hubu_create_recurring_budget",
-            "Create a recurring agent-scoped budget series. Requires a human click.",
+            "Create a recurring budget series owned by one agent. Requires a human click.",
             json_schema(json!({
                 "amount_cents": { "type": "integer" },
                 "agent_id": { "type": "string" },
@@ -214,8 +214,8 @@ fn tool_definitions() -> Vec<Value> {
             })),
         ),
         approval_tool(
-            "hubu_set_user_cap",
-            "Set or renew a global spend cap for the active Hubu user. Requires a human click.",
+            "hubu_set_spending_target",
+            "Set an advisory spending target for the active Hubu user. Requires a human click.",
             json_schema(json!({
                 "amount_cents": { "type": "integer" },
                 "starting_at": { "type": "string" },
@@ -223,15 +223,15 @@ fn tool_definitions() -> Vec<Value> {
             })),
         ),
         approval_tool(
-            "hubu_revoke_user_cap",
-            "Revoke a global spend cap for the active Hubu user. Requires a human click.",
+            "hubu_revoke_spending_target",
+            "Revoke an advisory spending target for the active Hubu user. Requires a human click.",
             json_schema(json!({
-                "cap_id": { "type": "string" }
+                "target_id": { "type": "string" }
             })),
         ),
         read_tool(
-            "hubu_show_user_caps",
-            "Show global spend caps for the active Hubu user.",
+            "hubu_show_spending_targets",
+            "Show advisory spending targets and current agent budget allocations for the active Hubu user.",
             json_schema(json!({
                 "include_all": { "type": "boolean" }
             })),
@@ -248,7 +248,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "hubu_authorize_spend",
-            "Authorize an agent spend request and reserve cap/budget balance without executing payment.",
+            "Authorize an agent spend request and reserve its agent budget without executing payment.",
             json_schema_required(json!({
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
@@ -442,23 +442,23 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
             require_trusted_client_approval(config, name)?;
             post_json(base_url, "/budgets/replace", arguments)?
         }
-        "hubu_set_user_cap" => {
+        "hubu_set_spending_target" => {
             require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/user/cap", arguments)?
+            post_json(base_url, "/user/spending-target", arguments)?
         }
-        "hubu_revoke_user_cap" => {
+        "hubu_revoke_spending_target" => {
             require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/user/cap/revoke", arguments)?
+            post_json(base_url, "/user/spending-target/revoke", arguments)?
         }
-        "hubu_show_user_caps" => {
+        "hubu_show_spending_targets" => {
             if arguments
                 .get("include_all")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
-                get_json(base_url, "/user/cap?all=true")?
+                get_json(base_url, "/user/spending-target?all=true")?
             } else {
-                get_json(base_url, "/user/cap")?
+                get_json(base_url, "/user/spending-target")?
             }
         }
         "hubu_submit_spend" => {

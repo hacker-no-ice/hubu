@@ -1,17 +1,17 @@
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId, TaskId, UserId};
+use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
 
-/// Spending limit for a user, agent, or task over a time period.
+/// Spending limit for one agent over a time period.
 ///
-/// Budgets define the maximum amount that may be reserved or consumed for a
-/// scope. The current balance can be tracked separately in [`BudgetBalance`] so
+/// Budgets define the maximum amount that may be reserved or consumed for an
+/// agent. The current balance can be tracked separately in [`BudgetBalance`] so
 /// the limit remains immutable while usage changes over time.
 #[derive(Debug, Clone)]
 pub struct Budget {
     pub id: BudgetId,
-    pub scope: BudgetScope,
+    pub agent_id: AgentId,
     pub amount_limit_cents: i64,
     pub currency: Currency,
     pub period: TimePeriod,
@@ -28,7 +28,7 @@ pub enum BudgetError {
 impl Budget {
     pub fn new(
         id: BudgetId,
-        scope: BudgetScope,
+        agent_id: AgentId,
         amount_limit_cents: i64,
         currency: Currency,
         period: TimePeriod,
@@ -41,7 +41,7 @@ impl Budget {
 
         Ok(Self {
             id,
-            scope,
+            agent_id,
             amount_limit_cents,
             currency,
             period,
@@ -50,17 +50,6 @@ impl Budget {
             updated_at: created_at,
         })
     }
-}
-
-/// Entity or work boundary governed by a budget.
-#[derive(Debug, Clone)]
-pub enum BudgetScope {
-    /// A top-level budget for all spend owned by one user.
-    User(UserId), // todo, we should eventually align with first class user/org data record, which has not been defined yet
-    /// A budget for all spend initiated by one agent.
-    Agent(AgentId),
-    /// A budget for spend attributed to one task or project.
-    Task(TaskId),
 }
 
 /// Current lifecycle state of a budget.

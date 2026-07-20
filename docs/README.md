@@ -11,8 +11,8 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
   runtime flow
 - [policy-engine.md](policy-engine.md): policy rule format, validation, and
   deterministic evaluation behavior
-- [budget-controls.md](budget-controls.md): user caps, cap/budget scopes,
-  recurring periods, hold lifecycle, and spend enforcement
+- [budget-controls.md](budget-controls.md): advisory spending targets,
+  agent-owned budgets, recurring periods, hold lifecycle, and spend enforcement
 - [payment-ledger-flow.md](payment-ledger-flow.md): payment orchestration and
   ledger recording flow
 - [spend-executor-contract.md](spend-executor-contract.md): external executor

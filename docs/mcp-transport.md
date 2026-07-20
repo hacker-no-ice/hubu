@@ -67,7 +67,7 @@ Approval behavior:
 
 - Read tools and spend tools should be callable without a pre-call approval
   prompt.
-- Setup/admin tools such as registration, policy changes, and cap/budget creation
+- Setup/admin tools such as registration, policy changes, spending targets, and budget creation
   should prompt before the tool call.
 - For human-initiated setup/admin work, operators can either run the equivalent
   `hubu` CLI command themselves or ask an agent to invoke the protected MCP tool
@@ -112,7 +112,7 @@ hubu init codex --config ~/.codex/config.toml --mcp-server /path/to/hubu-mcp-ser
 
 Leave `--trust-client-approval` off for normal agent spend workflows. Add it
 only when the Codex client is trusted to prompt a human before invoking
-destructive MCP tools such as registration, policy changes, or cap/budget creation.
+destructive MCP tools such as registration, policy changes, spending targets, or budget creation.
 
 ## Manual MCP Setup
 
@@ -132,7 +132,7 @@ Then configure the harness from Hubu's MCP metadata:
   layer. If Hubu returns `requires_human_approval: true`, no payment was
   executed and the harness should surface the response to the human.
 - Prompt before setup/admin tools such as registration, policy changes, and
-  cap/budget creation.
+  spending-target or budget creation.
 
 The MCP server reads `HUBU_URL` and defaults to `http://127.0.0.1:8787`.
 Protected write tools are disabled unless the MCP process is started with
@@ -152,8 +152,8 @@ Human approval is required for:
 - `hubu_register_human`
 - `hubu_register_agent`
 - `hubu_add_policy`
-- `hubu_set_user_cap`
-- `hubu_revoke_user_cap`
+- `hubu_set_spending_target`
+- `hubu_revoke_spending_target`
 - `hubu_create_budget`
 - `hubu_create_recurring_budget`
 - `hubu_revoke_budget`
@@ -174,7 +174,7 @@ Agents can call directly:
 - `hubu_client_approval_profile`
 - `hubu_list_users`
 - `hubu_list_agents`
-- `hubu_show_user_caps`
+- `hubu_show_spending_targets`
 - `hubu_list_budgets`
 - `hubu_list_ledger`
 - `hubu_authorize_spend`
@@ -187,8 +187,8 @@ server routes for local testing, but manual spend submission is not the intended
 day-to-day workflow.
 
 `hubu_submit_spend` forwards the spend request immediately. If policy returns
-`allow`, the existing Hubu server reserves cap and budget balance, submits mock
-payment, settles or releases both holds, and records successful payment in the ledger. If policy
+`allow`, the existing Hubu server reserves the agent budget, submits mock
+payment, settles or releases the hold, and records successful payment in the ledger. If policy
 returns `deny`, no payment is executed. If policy returns `needs_approval`, no
 payment is executed and the MCP response includes:
 
@@ -205,7 +205,7 @@ human approves a `needs_approval` spend decision.
 
 `hubu_authorize_spend` uses the same policy and budget checks as
 `hubu_submit_spend`, but stops after issuing a spend authorization token and
-freezing cap and budget balance. It does not submit payment or write a ledger transaction. This
+freezing the agent budget. It does not submit payment or write a ledger transaction. This
 is the handoff point for future Hubu-hosted vendor/model proxy tools that need
 to consume a scoped spend authorization without exposing provider credentials to
 the agent.
@@ -221,9 +221,9 @@ the agent.
 | `hubu_list_users` | `GET /users` | none; marks current local user |
 | `hubu_register_agent` | `POST /agents/register` | required |
 | `hubu_add_policy` | `POST /policies` | required |
-| `hubu_set_user_cap` | `POST /user/cap` | required |
-| `hubu_revoke_user_cap` | `POST /user/cap/revoke` | required |
-| `hubu_show_user_caps` | `GET /user/cap` | none |
+| `hubu_set_spending_target` | `POST /user/spending-target` | required |
+| `hubu_revoke_spending_target` | `POST /user/spending-target/revoke` | required |
+| `hubu_show_spending_targets` | `GET /user/spending-target` | none |
 | `hubu_create_budget` | `POST /budgets` | required |
 | `hubu_create_recurring_budget` | `POST /budgets/series` | required |
 | `hubu_revoke_budget` | `POST /budgets/revoke` | required |

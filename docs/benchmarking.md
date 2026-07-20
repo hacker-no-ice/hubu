@@ -8,7 +8,7 @@ The benchmark covers the local MVP HTTP path:
 1. Create or select the local user.
 2. Register `N` agents.
 3. Attach a policy to each agent.
-4. Create an owner-scoped budget large enough for the run.
+4. Create one budget per registered agent.
 5. Submit paced `POST /spend` requests at `Y` requests/sec.
 6. Report throughput, latency, response correctness, budget consistency, and
    ledger consistency.
@@ -112,8 +112,8 @@ Step-load runs should increase `HUBU_BENCH_RPS` gradually while watching
 
 The selected run stayed internally consistent under light load: every spend was
 allowed, every auth token led to one successful mock payment, every payment
-settled a budget hold and cap hold, every successful payment wrote one ledger
-transaction, and the budget and cap ended with no frozen balance.
+settled one agent-budget hold, every successful payment wrote one ledger
+transaction, and all agent budgets ended with no frozen balance.
 
 This does not yet prove retry safety or saturation behavior. The current run
 does not include duplicate idempotency keys, mixed policy decisions, concurrent

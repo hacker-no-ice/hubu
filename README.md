@@ -27,11 +27,12 @@ and MCP transport adapter.
 - Registers agents with stable identity, version, account, and session records
 - Evaluates spend requests through deterministic policy rules
 - Issues spend authorization tokens for allowed requests
-- Can authorize spend and freeze cap/budget capacity without executing payment,
+- Can authorize spend and freeze agent-budget capacity without executing payment,
   so a future Hubu-hosted vendor proxy can consume scoped authorization
-- Creates user caps and agent-scoped single or recurring budgets
-- Reserves cap/budget capacity before payment, then settles or releases both
-  holds from the payment result
+- Creates advisory user spending targets and single or recurring budgets owned by one agent
+- Warns when concurrent agent budget allocations exceed a user's spending target
+- Reserves one agent-budget hold before payment, then settles or releases it
+  from the payment result
 - Orchestrates mock payments after spend authorization
 - Records successful payments in an immutable double-entry SQLite ledger
 - Exposes a local `hubu-server`, human-facing `hubu` CLI, and MCP tools that
@@ -71,7 +72,8 @@ hubu-server
 ### 2. Human Admin Setup
 
 In another terminal from the same working directory, run the human/admin setup:
-create the human account, register the agent, attach policy, set the user cap,
+create the human account, register the agent, attach policy, set an optional
+advisory spending target,
 and create an agent budget.
 
 ```sh
@@ -89,9 +91,9 @@ hubu policy validate --path policies/starter.yaml
 hubu policy add --path policies/starter.yaml
 hubu policy list
 
-hubu user cap set --amount 100
+hubu user spending-target set --amount 100
 hubu budget create --agent-id AGENT_ID --amount 25
-hubu user cap show
+hubu user spending-target show
 hubu budget list
 ```
 
@@ -116,7 +118,7 @@ To smoke-test the agent-initiated spend path from the CLI:
 ```sh
 hubu spend authorize --account-id ACCOUNT_ID --amount 5 --reason "Reserve model API credits"
 hubu spend --account-id ACCOUNT_ID --amount 20 --reason "Purchase API credits"
-hubu user cap show
+hubu user spending-target show
 hubu budget list
 hubu ledger list
 ```
@@ -154,9 +156,9 @@ Run the scripted local walkthrough when you want a repeatable end-to-end trace:
 ```
 
 The script starts Hubu locally, registers a human and agent, adds a policy, sets
-a user cap, creates an agent budget, submits allowed, failed-payment,
-approval-required, and denied spend requests, then prints the resulting cap,
-budget, and ledger state.
+an advisory spending target, creates an agent budget, submits allowed,
+failed-payment, approval-required, and denied spend requests, then prints the
+resulting target, budget, and ledger state.
 
 Run the conservative local benchmark:
 
@@ -198,8 +200,8 @@ cargo install --path crates/hubu-cli
 ```
 
 The CLI is the convenient human developer surface for Hubu. Use it to create
-starter policy files, register humans and agents, attach policies, set user
-caps, create agent budgets, test agent-initiated spend paths, inspect ledger
+starter policy files, register humans and agents, attach policies, set advisory
+spending targets, create agent budgets, test agent-initiated spend paths, inspect ledger
 entries, and run client setup helpers. Command help is the best reference for
 options and examples:
 
@@ -227,7 +229,7 @@ hubu init codex
 
 Agents can discover Hubu tools, inspect read-only state, and submit spend
 requests without holding wallet credentials. Setup/admin actions such as
-registration, policy changes, and cap/budget creation remain human-gated: humans
+registration, policy changes, spending targets, and budget creation remain human-gated: humans
 can run them directly with the CLI, or ask an agent to invoke protected MCP
 tools after the client shows a human approval prompt. If policy returns
 `needs_approval`, the MCP response reports that no payment was executed.
@@ -250,21 +252,21 @@ rule format, validation behavior, and examples.
 
 ## Budget Controls
 
-Budgets are hard spending limits for an agent or task over a time period. A
-user cap is the owner-level guardrail for total spend owned by the current
-user, not a fallback used only when an agent budget is missing. Agent budgets
-can add narrower limits for a specific agent; the user cap is the outer limit
-that keeps one user's aggregate spend below the configured amount.
+Each budget is a hard spending limit for exactly one agent over a time period. Every
+allowed agent spend reserves exactly one active agent budget before payment or
+authorization. Successful payment settles that hold into consumed balance;
+failed payment or unused authorization releases it. If the applicable budget is
+exhausted, or policy returns `deny` / `needs_approval`, Hubu does not execute
+payment.
 
-Allowed spend reserves both cap and budget capacity before payment or
-authorization. Successful payment settles both holds into consumed balance;
-failed payment or unused authorization releases both holds. If the active cap or
-applicable budget is exhausted, or policy returns `deny` / `needs_approval`,
-Hubu does not execute payment.
+A user spending target is advisory. Hubu compares it with the maximum
+concurrent allocation of overlapping agent budgets and returns a warning when
+the allocations exceed the target. The warning does not block budget creation
+or spend, and the target never creates a hold.
 
-See [docs/budget-controls.md](docs/budget-controls.md) for scope selection,
-period overlap rules, hold lifecycle, cap renewal, recurring budgets, and CLI
-examples.
+See [docs/budget-controls.md](docs/budget-controls.md) for spending-target
+advisories, agent ownership, period overlap rules, recurring budgets,
+the hold lifecycle, and CLI examples.
 
 ## Documentation
 
@@ -282,8 +284,8 @@ examples.
   model and flow
 - [docs/policy-engine.md](docs/policy-engine.md): policy rule format and
   evaluation behavior
-- [docs/budget-controls.md](docs/budget-controls.md): user caps, cap/budget
-  scopes, recurring periods, hold lifecycle, and spend enforcement
+- [docs/budget-controls.md](docs/budget-controls.md): advisory spending targets,
+  agent-owned budgets, recurring periods, hold lifecycle, and spend enforcement
 - [docs/payment-ledger-flow.md](docs/payment-ledger-flow.md): payment
   orchestration and ledger recording flow
 - [docs/mcp-transport.md](docs/mcp-transport.md): MCP stdio transport adapter

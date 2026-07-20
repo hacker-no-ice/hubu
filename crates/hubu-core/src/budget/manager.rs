@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Months, Utc};
-use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId, TaskId, UserId};
+use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
 use serde_json::json;
@@ -12,20 +12,16 @@ use crate::budget::dto::{
     ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
 };
 use crate::budget::error::BudgetManagerError;
-use crate::budget::model::{
-    Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetScope, BudgetStatus,
-};
+use crate::budget::model::{Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetStatus};
 use crate::telemetry::log_event;
 
 pub struct BudgetManager {
     budgets: HashMap<BudgetId, Budget>,
     budget_balances: HashMap<BudgetId, BudgetBalance>,
     budget_holds: HashMap<BudgetHoldId, BudgetHold>,
-    hold_ids_by_spend_decision: HashMap<SpendDecisionId, Vec<BudgetHoldId>>,
+    hold_id_by_spend_decision: HashMap<SpendDecisionId, BudgetHoldId>,
 
-    budget_ids_by_user_id: HashMap<UserId, Vec<BudgetId>>,
     budget_ids_by_agent_id: HashMap<AgentId, Vec<BudgetId>>,
-    budget_ids_by_task_id: HashMap<TaskId, Vec<BudgetId>>,
 }
 
 impl BudgetManager {
@@ -34,10 +30,8 @@ impl BudgetManager {
             budgets: HashMap::new(),
             budget_balances: HashMap::new(),
             budget_holds: HashMap::new(),
-            hold_ids_by_spend_decision: HashMap::new(),
-            budget_ids_by_user_id: HashMap::new(),
+            hold_id_by_spend_decision: HashMap::new(),
             budget_ids_by_agent_id: HashMap::new(),
-            budget_ids_by_task_id: HashMap::new(),
         }
     }
 
@@ -58,10 +52,8 @@ impl BudgetManager {
         }
         for hold in holds {
             manager
-                .hold_ids_by_spend_decision
-                .entry(hold.spend_decision_id.clone())
-                .or_default()
-                .push(hold.id.clone());
+                .hold_id_by_spend_decision
+                .insert(hold.spend_decision_id.clone(), hold.id.clone());
             manager.budget_holds.insert(hold.id.clone(), hold);
         }
         manager
@@ -69,15 +61,15 @@ impl BudgetManager {
 
     /// Create one budget and initialize its cached balance.
     ///
-    /// A scope may only have one budget for a currency at any point in time.
+    /// An agent may only have one budget for a currency at any point in time.
     /// Creation rejects periods that overlap an existing budget with the same
-    /// scope and currency.
+    /// agent and currency.
     pub fn create_single_budget(
         &mut self,
         request: CreateSingleBudgetRequest,
     ) -> Result<CreateSingleBudgetResponse, BudgetManagerError> {
         self.create_budget_for_period(
-            request.scope,
+            request.agent_id,
             request.amount_limit_cents,
             request.currency,
             request.period,
@@ -89,7 +81,7 @@ impl BudgetManager {
     /// Each generated budget has its own balance. Consecutive periods use
     /// half-open boundaries, so the end of one period is the start of the next.
     /// The series is rejected if any generated period overlaps an existing
-    /// budget with the same scope and currency.
+    /// budget for the same agent and currency.
     pub fn create_budget_series(
         &mut self,
         request: CreateBudgetSeriesRequest,
@@ -100,7 +92,7 @@ impl BudgetManager {
                 "budget_series_create_rejected",
                 json!({
                     "reason": "empty_budget_series",
-                    "scope": budget_scope_name(&request.scope),
+                    "agent_id": request.agent_id.to_string(),
                     "amount_limit_cents": request.amount_limit_cents,
                     "currency": request.currency.to_string(),
                 }),
@@ -121,14 +113,14 @@ impl BudgetManager {
 
         if periods
             .iter()
-            .any(|period| self.has_overlapping_budget(&request.scope, request.currency, period))
+            .any(|period| self.has_overlapping_budget(&request.agent_id, request.currency, period))
         {
             log_event(
                 "warn",
                 "budget_series_create_rejected",
                 json!({
                     "reason": "overlapping_budget_period",
-                    "scope": budget_scope_name(&request.scope),
+                    "agent_id": request.agent_id.to_string(),
                     "amount_limit_cents": request.amount_limit_cents,
                     "currency": request.currency.to_string(),
                     "period_count": request.period_count,
@@ -140,7 +132,7 @@ impl BudgetManager {
         let mut budgets = Vec::with_capacity(request.period_count);
         for period in periods {
             let budget_with_balance = build_budget_for_period(
-                request.scope.clone(),
+                request.agent_id.clone(),
                 request.amount_limit_cents,
                 request.currency,
                 period,
@@ -156,7 +148,7 @@ impl BudgetManager {
             "info",
             "budget_series_created",
             json!({
-                "scope": budget_scope_name(&request.scope),
+                "agent_id": request.agent_id.to_string(),
                 "amount_limit_cents": request.amount_limit_cents,
                 "currency": request.currency.to_string(),
                 "period_count": budgets.len(),
@@ -180,12 +172,8 @@ impl BudgetManager {
         }
 
         if self
-            .hold_ids_by_spend_decision
-            .get(&request.spend_decision_id)
-            .into_iter()
-            .flatten()
-            .filter_map(|hold_id| self.budget_holds.get(hold_id))
-            .any(|hold| hold.budget_id == request.budget_id)
+            .hold_id_by_spend_decision
+            .contains_key(&request.spend_decision_id)
         {
             log_budget_reservation_rejected(&request, "duplicate_spend_decision_hold");
             return Err(BudgetManagerError::DuplicateSpendDecisionHold);
@@ -240,10 +228,8 @@ impl BudgetManager {
             expires_at: request.expires_at,
         };
 
-        self.hold_ids_by_spend_decision
-            .entry(hold.spend_decision_id.clone())
-            .or_default()
-            .push(hold.id.clone());
+        self.hold_id_by_spend_decision
+            .insert(hold.spend_decision_id.clone(), hold.id.clone());
         self.budget_holds.insert(hold.id.clone(), hold.clone());
 
         log_event(
@@ -472,23 +458,9 @@ impl BudgetManager {
         budget_with_balance(&self.budgets, &self.budget_balances, budget_id)
     }
 
-    pub fn get_budgets_by_user_id(&self, user_id: &UserId) -> Vec<BudgetWithBalance> {
-        self.budget_ids_by_user_id
-            .get(user_id)
-            .map(|budget_ids| self.budgets_with_balances(budget_ids))
-            .unwrap_or_default()
-    }
-
     pub fn get_budgets_by_agent_id(&self, agent_id: &AgentId) -> Vec<BudgetWithBalance> {
         self.budget_ids_by_agent_id
             .get(agent_id)
-            .map(|budget_ids| self.budgets_with_balances(budget_ids))
-            .unwrap_or_default()
-    }
-
-    pub fn get_budgets_by_task_id(&self, task_id: &TaskId) -> Vec<BudgetWithBalance> {
-        self.budget_ids_by_task_id
-            .get(task_id)
             .map(|budget_ids| self.budgets_with_balances(budget_ids))
             .unwrap_or_default()
     }
@@ -505,22 +477,9 @@ impl BudgetManager {
         &self,
         spend_decision_id: &SpendDecisionId,
     ) -> Option<BudgetHold> {
-        self.hold_ids_by_spend_decision
+        self.hold_id_by_spend_decision
             .get(spend_decision_id)
-            .and_then(|hold_ids| hold_ids.first())
             .and_then(|hold_id| self.get_budget_hold(hold_id))
-    }
-
-    pub fn get_budget_holds_by_spend_decision(
-        &self,
-        spend_decision_id: &SpendDecisionId,
-    ) -> Vec<BudgetHold> {
-        self.hold_ids_by_spend_decision
-            .get(spend_decision_id)
-            .into_iter()
-            .flatten()
-            .filter_map(|hold_id| self.get_budget_hold(hold_id))
-            .collect()
     }
 
     pub fn revoke_budget(
@@ -554,18 +513,18 @@ impl BudgetManager {
 
     fn create_budget_for_period(
         &mut self,
-        scope: BudgetScope,
+        agent_id: AgentId,
         amount_limit_cents: i64,
         currency: Currency,
         period: TimePeriod,
     ) -> Result<CreateSingleBudgetResponse, BudgetManagerError> {
-        if self.has_overlapping_budget(&scope, currency, &period) {
+        if self.has_overlapping_budget(&agent_id, currency, &period) {
             log_event(
                 "warn",
                 "budget_create_rejected",
                 json!({
                     "reason": "overlapping_budget_period",
-                    "scope": budget_scope_name(&scope),
+                    "agent_id": agent_id.to_string(),
                     "currency": currency.to_string(),
                     "starting_at": period.starting_at.to_rfc3339(),
                     "ending_before": period.ending_before.map(|value| value.to_rfc3339()),
@@ -575,7 +534,7 @@ impl BudgetManager {
         }
 
         let budget_with_balance =
-            build_budget_for_period(scope, amount_limit_cents, currency, period)?;
+            build_budget_for_period(agent_id, amount_limit_cents, currency, period)?;
         self.insert_budget(&budget_with_balance);
 
         log_event(
@@ -583,7 +542,7 @@ impl BudgetManager {
             "budget_created",
             json!({
                 "budget_id": budget_with_balance.budget.id.to_string(),
-                "scope": budget_scope_name(&budget_with_balance.budget.scope),
+                "agent_id": budget_with_balance.budget.agent_id.to_string(),
                 "amount_limit_cents": budget_with_balance.budget.amount_limit_cents,
                 "currency": budget_with_balance.budget.currency.to_string(),
                 "starting_at": budget_with_balance.budget.period.starting_at.to_rfc3339(),
@@ -615,35 +574,22 @@ impl BudgetManager {
     }
 
     fn index_budget(&mut self, budget: &Budget) {
-        match &budget.scope {
-            BudgetScope::User(user_id) => self
-                .budget_ids_by_user_id
-                .entry(user_id.clone())
-                .or_default()
-                .push(budget.id.clone()),
-            BudgetScope::Agent(agent_id) => self
-                .budget_ids_by_agent_id
-                .entry(agent_id.clone())
-                .or_default()
-                .push(budget.id.clone()),
-            BudgetScope::Task(task_id) => self
-                .budget_ids_by_task_id
-                .entry(task_id.clone())
-                .or_default()
-                .push(budget.id.clone()),
-        }
+        self.budget_ids_by_agent_id
+            .entry(budget.agent_id.clone())
+            .or_default()
+            .push(budget.id.clone());
     }
 
     fn has_overlapping_budget(
         &self,
-        scope: &BudgetScope,
+        agent_id: &AgentId,
         currency: Currency,
         period: &TimePeriod,
     ) -> bool {
         self.budgets.values().any(|budget| {
             matches!(budget.status, BudgetStatus::Active)
                 && budget.currency == currency
-                && scopes_match(&budget.scope, scope)
+                && budget.agent_id == *agent_id
                 && periods_overlap(&budget.period, period)
         })
     }
@@ -664,23 +610,6 @@ fn log_budget_reservation_rejected(request: &ReserveBudgetRequest, reason: &str)
     );
 }
 
-fn budget_scope_name(scope: &BudgetScope) -> &'static str {
-    match scope {
-        BudgetScope::User(_) => "user",
-        BudgetScope::Agent(_) => "agent",
-        BudgetScope::Task(_) => "task",
-    }
-}
-
-fn scopes_match(left: &BudgetScope, right: &BudgetScope) -> bool {
-    match (left, right) {
-        (BudgetScope::User(left), BudgetScope::User(right)) => left == right,
-        (BudgetScope::Agent(left), BudgetScope::Agent(right)) => left == right,
-        (BudgetScope::Task(left), BudgetScope::Task(right)) => left == right,
-        _ => false,
-    }
-}
-
 fn periods_overlap(left: &TimePeriod, right: &TimePeriod) -> bool {
     let left_starts_before_right_ends = right
         .ending_before
@@ -693,12 +622,18 @@ fn periods_overlap(left: &TimePeriod, right: &TimePeriod) -> bool {
 }
 
 fn build_budget_for_period(
-    scope: BudgetScope,
+    agent_id: AgentId,
     amount_limit_cents: i64,
     currency: Currency,
     period: TimePeriod,
 ) -> Result<BudgetWithBalance, BudgetManagerError> {
-    let budget = Budget::new(BudgetId::new(), scope, amount_limit_cents, currency, period)?;
+    let budget = Budget::new(
+        BudgetId::new(),
+        agent_id,
+        amount_limit_cents,
+        currency,
+        period,
+    )?;
     let balance = BudgetBalance {
         budget_id: budget.id.clone(),
         consumed_amount_cents: 0,
@@ -804,10 +739,10 @@ mod tests {
         .unwrap()
     }
 
-    fn create_user_budget(manager: &mut BudgetManager, amount_cents: i64) -> BudgetWithBalance {
+    fn create_agent_budget(manager: &mut BudgetManager, amount_cents: i64) -> BudgetWithBalance {
         let response = manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(UserId::new()),
+                agent_id: AgentId::new(),
                 amount_limit_cents: amount_cents,
                 currency: Currency::Usd,
                 period: active_period(),
@@ -824,7 +759,7 @@ mod tests {
     fn create_single_budget_initializes_balance() {
         let mut manager = BudgetManager::new();
 
-        let created = create_user_budget(&mut manager, 10_000);
+        let created = create_agent_budget(&mut manager, 10_000);
 
         assert_eq!(created.balance.budget_id, created.budget.id);
         assert_eq!(created.balance.consumed_amount_cents, 0);
@@ -836,7 +771,7 @@ mod tests {
     #[test]
     fn revoke_budget_marks_budget_inactive() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 10_000);
+        let created = create_agent_budget(&mut manager, 10_000);
 
         let revoked = manager
             .revoke_budget(&created.budget.id)
@@ -856,7 +791,7 @@ mod tests {
     #[test]
     fn revoke_budget_rejects_frozen_holds() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 10_000);
+        let created = create_agent_budget(&mut manager, 10_000);
         manager
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
@@ -877,10 +812,10 @@ mod tests {
     #[test]
     fn revoked_budget_does_not_block_replacement_period() {
         let mut manager = BudgetManager::new();
-        let user_id = UserId::new();
+        let agent_id = AgentId::new();
         let created = manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id.clone()),
+                agent_id: agent_id.clone(),
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: period(2026, 6, 1, 2026, 7, 1),
@@ -892,7 +827,7 @@ mod tests {
             .expect("budget should revoke");
         manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id),
+                agent_id: agent_id,
                 amount_limit_cents: 20_000,
                 currency: Currency::Usd,
                 period: period(2026, 6, 15, 2026, 7, 1),
@@ -906,7 +841,7 @@ mod tests {
 
         let response = manager
             .create_budget_series(CreateBudgetSeriesRequest {
-                scope: BudgetScope::User(UserId::new()),
+                agent_id: AgentId::new(),
                 amount_limit_cents: 25_000,
                 currency: Currency::Usd,
                 starting_at: timestamp(),
@@ -927,11 +862,11 @@ mod tests {
     #[test]
     fn create_budget_series_rejects_overlap_without_partial_creation() {
         let mut manager = BudgetManager::new();
-        let user_id = UserId::new();
+        let agent_id = AgentId::new();
 
         manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id.clone()),
+                agent_id: agent_id.clone(),
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: period(2026, 7, 15, 2026, 8, 15),
@@ -940,7 +875,7 @@ mod tests {
 
         let error = manager
             .create_budget_series(CreateBudgetSeriesRequest {
-                scope: BudgetScope::User(user_id.clone()),
+                agent_id: agent_id.clone(),
                 amount_limit_cents: 25_000,
                 currency: Currency::Usd,
                 starting_at: timestamp(),
@@ -950,17 +885,17 @@ mod tests {
             .expect_err("series should be rejected before creating any budget");
 
         assert!(matches!(error, BudgetManagerError::OverlappingBudgetPeriod));
-        assert_eq!(manager.get_budgets_by_user_id(&user_id).len(), 1);
+        assert_eq!(manager.get_budgets_by_agent_id(&agent_id).len(), 1);
     }
 
     #[test]
     fn create_budget_series_rejects_invalid_budget_without_partial_creation() {
         let mut manager = BudgetManager::new();
-        let user_id = UserId::new();
+        let agent_id = AgentId::new();
 
         let error = manager
             .create_budget_series(CreateBudgetSeriesRequest {
-                scope: BudgetScope::User(user_id.clone()),
+                agent_id: agent_id.clone(),
                 amount_limit_cents: 0,
                 currency: Currency::Usd,
                 starting_at: timestamp(),
@@ -970,17 +905,17 @@ mod tests {
             .expect_err("invalid series should be rejected before creating any budget");
 
         assert!(matches!(error, BudgetManagerError::InvalidBudget(_)));
-        assert!(manager.get_budgets_by_user_id(&user_id).is_empty());
+        assert!(manager.get_budgets_by_agent_id(&agent_id).is_empty());
     }
 
     #[test]
-    fn create_single_budget_rejects_overlap_for_same_scope_and_currency() {
+    fn create_single_budget_rejects_overlap_for_same_agent_and_currency() {
         let mut manager = BudgetManager::new();
-        let user_id = UserId::new();
+        let agent_id = AgentId::new();
 
         manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id.clone()),
+                agent_id: agent_id.clone(),
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: period(2026, 6, 1, 2026, 7, 1),
@@ -989,7 +924,7 @@ mod tests {
 
         let error = manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id),
+                agent_id: agent_id,
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: period(2026, 6, 15, 2026, 7, 15),
@@ -1000,39 +935,13 @@ mod tests {
     }
 
     #[test]
-    fn create_single_budget_rejects_overlap_for_same_agent_scope() {
+    fn create_single_budget_allows_adjacent_half_open_periods() {
         let mut manager = BudgetManager::new();
         let agent_id = AgentId::new();
 
         manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::Agent(agent_id.clone()),
-                amount_limit_cents: 10_000,
-                currency: Currency::Usd,
-                period: period(2026, 6, 1, 2026, 7, 1),
-            })
-            .expect("first agent budget should be created");
-
-        let error = manager
-            .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::Agent(agent_id),
-                amount_limit_cents: 10_000,
-                currency: Currency::Usd,
-                period: period(2026, 6, 15, 2026, 7, 15),
-            })
-            .expect_err("overlapping agent budget should be rejected");
-
-        assert!(matches!(error, BudgetManagerError::OverlappingBudgetPeriod));
-    }
-
-    #[test]
-    fn create_single_budget_allows_adjacent_half_open_periods() {
-        let mut manager = BudgetManager::new();
-        let user_id = UserId::new();
-
-        manager
-            .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id.clone()),
+                agent_id: agent_id.clone(),
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: period(2026, 6, 1, 2026, 7, 1),
@@ -1041,7 +950,7 @@ mod tests {
 
         manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id),
+                agent_id: agent_id,
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: period(2026, 7, 1, 2026, 8, 1),
@@ -1052,13 +961,13 @@ mod tests {
     #[test]
     fn create_single_budget_rejects_overlap_with_open_ended_period() {
         let mut manager = BudgetManager::new();
-        let user_id = UserId::new();
+        let agent_id = AgentId::new();
         let open_ended_period =
             TimePeriod::new(Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap(), None).unwrap();
 
         manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id.clone()),
+                agent_id: agent_id.clone(),
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: open_ended_period,
@@ -1067,7 +976,7 @@ mod tests {
 
         let error = manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id),
+                agent_id: agent_id,
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: period(2026, 7, 1, 2026, 8, 1),
@@ -1080,7 +989,7 @@ mod tests {
     #[test]
     fn reserve_budget_freezes_amount_and_reduces_remaining() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 10_000);
+        let created = create_agent_budget(&mut manager, 10_000);
 
         let response = manager
             .reserve_budget(ReserveBudgetRequest {
@@ -1101,7 +1010,7 @@ mod tests {
     #[test]
     fn reserve_budget_rejects_duplicate_spend_decision() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 10_000);
+        let created = create_agent_budget(&mut manager, 10_000);
         let spend_decision_id = SpendDecisionId::new();
 
         manager
@@ -1133,7 +1042,7 @@ mod tests {
     #[test]
     fn reserve_budget_rejects_overspend() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 10_000);
+        let created = create_agent_budget(&mut manager, 10_000);
 
         let error = manager
             .reserve_budget(ReserveBudgetRequest {
@@ -1154,7 +1063,7 @@ mod tests {
     #[test]
     fn settle_budget_moves_frozen_amount_to_consumed() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 10_000);
+        let created = create_agent_budget(&mut manager, 10_000);
         let reservation = manager
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id,
@@ -1178,7 +1087,7 @@ mod tests {
     #[test]
     fn fully_reserved_budget_is_not_exhausted_until_hold_settles() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 1_000);
+        let created = create_agent_budget(&mut manager, 1_000);
         let budget_id = created.budget.id.clone();
         let reservation = manager
             .reserve_budget(ReserveBudgetRequest {
@@ -1211,7 +1120,7 @@ mod tests {
     #[test]
     fn released_full_reservation_restores_active_budget() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 1_000);
+        let created = create_agent_budget(&mut manager, 1_000);
         let budget_id = created.budget.id.clone();
         let reservation = manager
             .reserve_budget(ReserveBudgetRequest {
@@ -1237,10 +1146,10 @@ mod tests {
     #[test]
     fn exhausted_budget_does_not_block_new_overlapping_budget() {
         let mut manager = BudgetManager::new();
-        let user_id = UserId::new();
+        let agent_id = AgentId::new();
         let created = manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id.clone()),
+                agent_id: agent_id.clone(),
                 amount_limit_cents: 1_000,
                 currency: Currency::Usd,
                 period: active_period(),
@@ -1261,7 +1170,7 @@ mod tests {
 
         let renewed = manager
             .create_single_budget(CreateSingleBudgetRequest {
-                scope: BudgetScope::User(user_id),
+                agent_id: agent_id,
                 amount_limit_cents: 2_000,
                 currency: Currency::Usd,
                 period: active_period(),
@@ -1274,7 +1183,7 @@ mod tests {
     #[test]
     fn settle_budget_rejects_expired_hold_without_consuming_balance() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 10_000);
+        let created = create_agent_budget(&mut manager, 10_000);
         let reservation = manager
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
@@ -1306,7 +1215,7 @@ mod tests {
     #[test]
     fn release_budget_moves_frozen_amount_to_remaining() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 10_000);
+        let created = create_agent_budget(&mut manager, 10_000);
         let reservation = manager
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id,
@@ -1330,7 +1239,7 @@ mod tests {
     #[test]
     fn expire_overdue_budget_holds_returns_frozen_amount_to_remaining() {
         let mut manager = BudgetManager::new();
-        let created = create_user_budget(&mut manager, 10_000);
+        let created = create_agent_budget(&mut manager, 10_000);
         let reservation = manager
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),

@@ -4,6 +4,7 @@ pub mod persistence;
 pub mod policy;
 pub mod registration;
 pub mod spend;
+pub mod spending_target;
 pub mod storage;
 pub mod telemetry;
 pub mod user;

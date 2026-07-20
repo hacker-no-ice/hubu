@@ -252,15 +252,6 @@ fn setup_scenario(client: &mut HubuClient, config: &Config) -> Result<Scenario> 
         budget_ids.push(budget_id);
     }
 
-    client.post(
-        "/user/cap",
-        json!({
-            "amount_cents": config.budget_cents.saturating_mul(config.agent_count as i64),
-            "starting_at": null,
-            "ending_before": null,
-        }),
-    )?;
-
     Ok(Scenario {
         account_ids,
         budget_ids,

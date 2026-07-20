@@ -35,10 +35,10 @@ agent: agt_writer
     budget: 300 EUR / month
 ```
 
-The likely future scope is account-scoped budgets, for example:
+The likely future ownership field is an account ID, for example:
 
 ```text
-BudgetScope::AgentAccount(account_id)
+Budget.agent_account_id = account_id
 ```
 
 This is a little more precise than `AgentCurrency(agent_id, currency)` because
@@ -87,15 +87,15 @@ future API shape, mismatches should be rejected before policy or budget checks.
 1. Add account currency to registration/account records.
 2. Include request currency in MCP, CLI, HTTP, and executor guidance once more
    than USD is supported.
-3. Add account-scoped budget creation and lookup.
-4. Keep existing agent-scoped budgets as the USD-only default until an explicit
+3. Add account-owned budget creation and lookup.
+4. Keep existing agent-owned budgets as the USD-only default until an explicit
    migration maps them to the agent's primary account.
 5. Add policy examples for currency-aware limits.
 
 ## Open Questions
 
-- Should user caps remain per-currency, or should Hubu add an optional
-  reporting-currency cap with explicit FX rules?
+- Should advisory user spending targets remain per-currency, or should Hubu add
+  an optional reporting-currency target with explicit FX rules?
 - Should account-scoped policy overrides exist in v1 multi-currency, or are
   user/agent policies with account conditions enough?
 - How should ledger views group balances when one agent owns accounts in

@@ -197,9 +197,9 @@ step "List registered agents"
 hubu agent list
 pause_for_reading
 
-step "Set a user cap and create an agent budget"
-CAP_OUTPUT="$(hubu user cap set --amount 75)"
-say "${CAP_OUTPUT}"
+step "Set an advisory spending target and create an agent budget"
+TARGET_OUTPUT="$(hubu user spending-target set --amount 50)"
+say "${TARGET_OUTPUT}"
 BUDGET_OUTPUT="$(hubu budget create --agent-id "${AGENT_ID}" --amount 75)"
 say "${BUDGET_OUTPUT}"
 pause_for_reading
@@ -238,8 +238,9 @@ DENY_OUTPUT="$(hubu spend \
 show_cli_output "${DENY_OUTPUT}"
 pause_for_reading
 
-step "Inspect the budget balance"
+step "Inspect the budget balance and advisory spending target"
 hubu budget list
+hubu user spending-target show
 pause_for_reading
 
 step "Inspect the ledger"

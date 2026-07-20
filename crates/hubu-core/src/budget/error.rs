@@ -47,7 +47,7 @@ pub enum BudgetManagerError {
     #[error("budget recurrence could not produce the next period boundary")]
     InvalidRecurrenceBoundary,
 
-    #[error("budget period overlaps an existing budget for the same scope and currency")]
+    #[error("budget period overlaps an existing budget for the same agent and currency")]
     OverlappingBudgetPeriod,
 }
 

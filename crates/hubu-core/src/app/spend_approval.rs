@@ -1,6 +1,6 @@
 use chrono::Utc;
 use hubu_common::{
-    ids::{AgentAccountId, AgentId, BudgetId, SpendAuthTokenId, UserId},
+    ids::{AgentAccountId, AgentId, BudgetId, SpendAuthTokenId},
     models::UserContext,
     money::Currency,
 };
@@ -58,7 +58,6 @@ pub struct ApprovedSpendAuthorization {
     pub evaluation: SpendEvaluationResponse,
     pub token: IssuedSpendAuthToken,
     pub budget_reservation: ReserveBudgetResponse,
-    pub cap_reservation: ReserveBudgetResponse,
 }
 
 impl ApprovedSpendAuthorization {
@@ -103,7 +102,6 @@ pub enum FailedPaymentHoldPolicy {
 pub struct SpendPaymentSettlement {
     pub payment: PaymentResponse,
     pub budget_update: BudgetHoldUpdate,
-    pub cap_update: BudgetHoldUpdate,
 }
 
 #[derive(Debug, Clone)]
@@ -147,9 +145,6 @@ pub enum SpendApprovalError {
 
     #[error("no active USD budget found for agent")]
     MissingActiveBudget,
-
-    #[error("no active USD user cap found")]
-    MissingActiveUserCap,
 
     #[error(transparent)]
     Spend(#[from] crate::spend::SpendError),
@@ -225,38 +220,7 @@ impl SpendApprovalService {
             .auth_token
             .clone()
             .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
-        let cap_id = active_user_cap_id_for_spend(budget_manager, &request.user.user_id)?;
         let budget_id = active_budget_id_for_spend(budget_manager, &request.agent_id)?;
-
-        let cap_reservation = match budget_manager.reserve_budget(ReserveBudgetRequest {
-            budget_id: cap_id.clone(),
-            spend_decision_id: evaluation.decision_id.clone(),
-            amount_cents: request.amount_cents,
-            currency: request.currency,
-            expires_at: token.expires_at,
-        }) {
-            Ok(reservation) => reservation,
-            Err(BudgetManagerError::InsufficientRemainingBudget) => {
-                log_event(
-                    "warn",
-                    "spend_cap_denied",
-                    json!({
-                        "agent_id": request.agent_id.to_string(),
-                        "user_id": request.user.user_id.to_string(),
-                        "decision_id": evaluation.decision_id.to_string(),
-                        "cap_id": cap_id.to_string(),
-                        "amount_cents": request.amount_cents,
-                        "reason": "insufficient_remaining_cap",
-                    }),
-                );
-                return Ok(SpendAuthorizationOutcome::Rejected(budget_rejection(
-                    request,
-                    evaluation,
-                    "user cap does not have enough remaining balance",
-                )));
-            }
-            Err(error) => return Err(error.into()),
-        };
 
         let budget_reservation = match budget_manager.reserve_budget(ReserveBudgetRequest {
             budget_id: budget_id.clone(),
@@ -267,7 +231,6 @@ impl SpendApprovalService {
         }) {
             Ok(reservation) => reservation,
             Err(BudgetManagerError::InsufficientRemainingBudget) => {
-                let release = budget_manager.release_budget(&cap_reservation.hold.id)?;
                 log_event(
                     "warn",
                     "spend_budget_denied",
@@ -277,7 +240,6 @@ impl SpendApprovalService {
                         "decision_id": evaluation.decision_id.to_string(),
                         "budget_id": budget_id.to_string(),
                         "amount_cents": request.amount_cents,
-                        "released_cap_hold_id": release.hold.id.to_string(),
                         "reason": "insufficient_remaining_budget",
                     }),
                 );
@@ -287,35 +249,26 @@ impl SpendApprovalService {
                     "budget does not have enough remaining balance",
                 )));
             }
-            Err(error) => {
-                budget_manager.release_budget(&cap_reservation.hold.id)?;
-                return Err(error.into());
-            }
+            Err(error) => return Err(error.into()),
         };
 
         if let Some(token_record) = &token_record {
             if let Err(error) = governance.save_spend_auth_token(token_record) {
                 let budget_release = budget_manager.release_budget(&budget_reservation.hold.id)?;
-                let cap_release = budget_manager.release_budget(&cap_reservation.hold.id)?;
                 log_event(
                     "warn",
                     "spend_budget_reservation_released",
                     json!({
                         "decision_id": evaluation.decision_id.to_string(),
                         "hold_id": budget_release.hold.id.to_string(),
-                        "cap_hold_id": cap_release.hold.id.to_string(),
                         "remaining_amount_cents": budget_release.balance.remaining_amount_cents,
-                        "cap_remaining_amount_cents": cap_release.balance.remaining_amount_cents,
                         "error": error.to_string(),
                     }),
                 );
                 return Err(error.into());
             }
         }
-        governance.save_budget_holds(&[
-            (&budget_reservation.hold, &budget_reservation.balance),
-            (&cap_reservation.hold, &cap_reservation.balance),
-        ])?;
+        governance.save_budget_hold(&budget_reservation.hold, &budget_reservation.balance)?;
 
         log_event(
             "info",
@@ -323,14 +276,10 @@ impl SpendApprovalService {
             json!({
                 "budget_id": budget_reservation.hold.budget_id.to_string(),
                 "hold_id": budget_reservation.hold.id.to_string(),
-                "cap_id": cap_reservation.hold.budget_id.to_string(),
-                "cap_hold_id": cap_reservation.hold.id.to_string(),
                 "decision_id": evaluation.decision_id.to_string(),
                 "amount_cents": budget_reservation.hold.amount_cents,
                 "remaining_amount_cents": budget_reservation.balance.remaining_amount_cents,
                 "frozen_amount_cents": budget_reservation.balance.frozen_amount_cents,
-                "cap_remaining_amount_cents": cap_reservation.balance.remaining_amount_cents,
-                "cap_frozen_amount_cents": cap_reservation.balance.frozen_amount_cents,
             }),
         );
 
@@ -346,7 +295,6 @@ impl SpendApprovalService {
                 evaluation,
                 token,
                 budget_reservation,
-                cap_reservation,
             },
         ))
     }
@@ -388,22 +336,15 @@ impl SpendApprovalService {
         let payment = match payment_manager.submit_payment(payment_request) {
             Ok(payment) => payment,
             Err(error) => {
-                let (budget_release, cap_release) = release_authorized_holds(
-                    budget_manager,
-                    &authorization.budget_reservation,
-                    &authorization.cap_reservation,
-                )?;
-                governance.update_budget_holds(&[
-                    (&budget_release.hold, &budget_release.balance),
-                    (&cap_release.hold, &cap_release.balance),
-                ])?;
+                let budget_release =
+                    release_authorized_hold(budget_manager, &authorization.budget_reservation)?;
+                governance.update_budget_hold(&budget_release.hold, &budget_release.balance)?;
                 log_event(
                     "warn",
                     "payment_failed_budget_released",
                     json!({
                         "decision_id": authorization.evaluation.decision_id.to_string(),
                         "hold_id": budget_release.hold.id.to_string(),
-                        "cap_hold_id": cap_release.hold.id.to_string(),
                         "error": error.to_string(),
                     }),
                 );
@@ -418,40 +359,19 @@ impl SpendApprovalService {
             governance.update_spend_auth_token(&used_token)?;
         }
 
-        let (budget_update, cap_update) = if payment.status == PaymentStatus::Succeeded {
+        let budget_update = if payment.status == PaymentStatus::Succeeded {
             let budget_settlement =
                 budget_manager.settle_budget(&authorization.budget_reservation.hold.id)?;
-            let cap_settlement =
-                budget_manager.settle_budget(&authorization.cap_reservation.hold.id)?;
-            (
-                BudgetHoldUpdate::Settled(budget_settlement),
-                BudgetHoldUpdate::Settled(cap_settlement),
-            )
+            BudgetHoldUpdate::Settled(budget_settlement)
         } else if payment_spec.failed_payment_hold_policy == FailedPaymentHoldPolicy::Release {
-            let (budget_release, cap_release) = release_authorized_holds(
-                budget_manager,
-                &authorization.budget_reservation,
-                &authorization.cap_reservation,
-            )?;
-            (
-                BudgetHoldUpdate::Released(budget_release),
-                BudgetHoldUpdate::Released(cap_release),
-            )
+            let budget_release =
+                release_authorized_hold(budget_manager, &authorization.budget_reservation)?;
+            BudgetHoldUpdate::Released(budget_release)
         } else {
-            (
-                BudgetHoldUpdate::Frozen(authorization.budget_reservation.clone()),
-                BudgetHoldUpdate::Frozen(authorization.cap_reservation.clone()),
-            )
+            BudgetHoldUpdate::Frozen(authorization.budget_reservation.clone())
         };
-        let mut persisted_updates = Vec::new();
         if let Some(update) = budget_update.persisted_hold_and_balance() {
-            persisted_updates.push(update);
-        }
-        if let Some(update) = cap_update.persisted_hold_and_balance() {
-            persisted_updates.push(update);
-        }
-        if !persisted_updates.is_empty() {
-            governance.update_budget_holds(&persisted_updates)?;
+            governance.update_budget_hold(update.0, update.1)?;
         }
 
         log_event(
@@ -470,7 +390,6 @@ impl SpendApprovalService {
         Ok(SpendPaymentSettlement {
             payment,
             budget_update,
-            cap_update,
         })
     }
 }
@@ -494,15 +413,11 @@ fn budget_rejection(
     }
 }
 
-fn release_authorized_holds(
+fn release_authorized_hold(
     budget_manager: &mut BudgetManager,
     budget_reservation: &ReserveBudgetResponse,
-    cap_reservation: &ReserveBudgetResponse,
-) -> Result<(ReleaseBudgetResponse, ReleaseBudgetResponse), BudgetManagerError> {
-    Ok((
-        budget_manager.release_budget(&budget_reservation.hold.id)?,
-        budget_manager.release_budget(&cap_reservation.hold.id)?,
-    ))
+) -> Result<ReleaseBudgetResponse, BudgetManagerError> {
+    budget_manager.release_budget(&budget_reservation.hold.id)
 }
 
 fn active_budget_id_for_spend(
@@ -516,19 +431,6 @@ fn active_budget_id_for_spend(
         .find(|budget| is_active_usd_budget(budget) && budget.budget.period.contains(now))
         .map(|budget| budget.budget.id)
         .ok_or(SpendApprovalError::MissingActiveBudget)
-}
-
-fn active_user_cap_id_for_spend(
-    budget_manager: &BudgetManager,
-    user_id: &UserId,
-) -> Result<BudgetId, SpendApprovalError> {
-    let now = Utc::now();
-    budget_manager
-        .get_budgets_by_user_id(user_id)
-        .into_iter()
-        .find(|cap| is_active_usd_budget(cap) && cap.budget.period.contains(now))
-        .map(|cap| cap.budget.id)
-        .ok_or(SpendApprovalError::MissingActiveUserCap)
 }
 
 fn is_active_usd_budget(budget: &BudgetWithBalance) -> bool {
@@ -547,6 +449,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::Duration;
+    use hubu_common::ids::UserId;
     use hubu_common::time::TimePeriod;
     use hubu_wallet::{
         MockPaymentRail, PaymentAttemptRecord, SqliteLedger, ValidatedSpendAuthorization,
@@ -554,7 +457,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        budget::{BudgetScope, CreateSingleBudgetRequest},
+        budget::CreateSingleBudgetRequest,
         persistence::SqliteGovernanceRepository,
         policy::{
             condition::{Condition, Field, PolicyValue},
@@ -669,7 +572,7 @@ mod tests {
     }
 
     impl ServiceHarness {
-        fn new(cap_cents: i64, budget_cents: i64) -> Self {
+        fn new(budget_cents: i64) -> Self {
             let service = SpendApprovalService;
             let spend_manager = Arc::new(Mutex::new(SpendManager::new()));
             let user = UserContext::new(UserId::new());
@@ -684,20 +587,9 @@ mod tests {
             )
             .expect("period should be valid");
 
-            let cap = budget_manager
-                .create_single_budget(CreateSingleBudgetRequest {
-                    scope: BudgetScope::User(user.user_id.clone()),
-                    amount_limit_cents: cap_cents,
-                    currency: Currency::Usd,
-                    period: period.clone(),
-                })
-                .expect("cap should create");
-            governance
-                .save_budget_with_balance(&cap.budget, &cap.balance)
-                .expect("cap should persist");
             let budget = budget_manager
                 .create_single_budget(CreateSingleBudgetRequest {
-                    scope: BudgetScope::Agent(agent_id.clone()),
+                    agent_id: agent_id.clone(),
                     amount_limit_cents: budget_cents,
                     currency: Currency::Usd,
                     period,
@@ -820,8 +712,8 @@ mod tests {
     }
 
     #[test]
-    fn authorizes_and_persists_token_and_holds_without_http() {
-        let mut harness = ServiceHarness::new(1_000, 1_000);
+    fn authorizes_and_persists_token_and_hold_without_http() {
+        let mut harness = ServiceHarness::new(1_000);
 
         let authorization = match harness.authorize(500, "Acme Cafe") {
             SpendAuthorizationOutcome::Approved(authorization) => authorization,
@@ -833,10 +725,6 @@ mod tests {
         assert_eq!(authorization.amount_cents, 500);
         assert_eq!(
             authorization.budget_reservation.balance.frozen_amount_cents,
-            500
-        );
-        assert_eq!(
-            authorization.cap_reservation.balance.frozen_amount_cents,
             500
         );
         assert_eq!(
@@ -853,13 +741,13 @@ mod tests {
                 .load_budget_holds()
                 .expect("holds should load")
                 .len(),
-            2
+            1
         );
     }
 
     #[test]
-    fn payment_success_marks_token_used_and_settles_holds_without_http() {
-        let mut harness = ServiceHarness::new(1_000, 1_000);
+    fn payment_success_marks_token_used_and_settles_hold_without_http() {
+        let mut harness = ServiceHarness::new(1_000);
         let authorization = match harness.authorize(500, "Acme Cafe") {
             SpendAuthorizationOutcome::Approved(authorization) => authorization,
             SpendAuthorizationOutcome::Rejected(rejection) => {
@@ -872,10 +760,6 @@ mod tests {
         assert_eq!(settlement.payment.status, PaymentStatus::Succeeded);
         assert!(matches!(
             settlement.budget_update,
-            BudgetHoldUpdate::Settled(_)
-        ));
-        assert!(matches!(
-            settlement.cap_update,
             BudgetHoldUpdate::Settled(_)
         ));
         let used_token = harness
@@ -903,8 +787,8 @@ mod tests {
     }
 
     #[test]
-    fn payment_failure_releases_reserved_holds_without_http() {
-        let mut harness = ServiceHarness::new(1_000, 1_000);
+    fn payment_failure_releases_reserved_hold_without_http() {
+        let mut harness = ServiceHarness::new(1_000);
         let authorization = match harness.authorize(500, "fail") {
             SpendAuthorizationOutcome::Approved(authorization) => authorization,
             SpendAuthorizationOutcome::Rejected(rejection) => {
@@ -919,10 +803,6 @@ mod tests {
             settlement.budget_update,
             BudgetHoldUpdate::Released(_)
         ));
-        assert!(matches!(
-            settlement.cap_update,
-            BudgetHoldUpdate::Released(_)
-        ));
         let holds = harness
             .governance
             .load_budget_holds()
@@ -933,8 +813,8 @@ mod tests {
     }
 
     #[test]
-    fn payment_failure_can_keep_holds_frozen_for_retry_without_http() {
-        let mut harness = ServiceHarness::new(1_000, 1_000);
+    fn payment_failure_can_keep_hold_frozen_for_retry_without_http() {
+        let mut harness = ServiceHarness::new(1_000);
         let authorization = match harness.authorize(500, "fail") {
             SpendAuthorizationOutcome::Approved(authorization) => authorization,
             SpendAuthorizationOutcome::Rejected(rejection) => {
@@ -952,7 +832,6 @@ mod tests {
             settlement.budget_update,
             BudgetHoldUpdate::Frozen(_)
         ));
-        assert!(matches!(settlement.cap_update, BudgetHoldUpdate::Frozen(_)));
         let holds = harness
             .governance
             .load_budget_holds()
@@ -971,7 +850,7 @@ mod tests {
 
     #[test]
     fn insufficient_budget_returns_structured_rejection_without_holds() {
-        let mut harness = ServiceHarness::new(1_000, 400);
+        let mut harness = ServiceHarness::new(400);
 
         let rejection = match harness.authorize(500, "Acme Cafe") {
             SpendAuthorizationOutcome::Approved(_) => panic!("expected budget rejection"),
