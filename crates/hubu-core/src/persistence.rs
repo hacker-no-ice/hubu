@@ -9,7 +9,9 @@ use rusqlite::{params, Connection};
 
 use crate::budget::{Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetStatus};
 use crate::policy::Policy;
-use crate::spend::{SpendAuthTokenRecord, SpendDecisionRecord};
+use crate::spend::{
+    SpendAuthTokenRecord, SpendDecisionRecord, SpendExecutorClaimRecord, SpendExecutorClaimStatus,
+};
 use crate::spending_target::{SpendingTarget, SpendingTargetStatus};
 use crate::storage::StorageError;
 
@@ -33,6 +35,15 @@ pub trait SpendRepository {
     ) -> Result<(), StorageError>;
     fn load_spend_decisions(&self) -> Result<Vec<SpendDecisionRecord>, StorageError>;
     fn load_spend_auth_tokens(&self) -> Result<Vec<SpendAuthTokenRecord>, StorageError>;
+    fn save_executor_claim(
+        &mut self,
+        record: &SpendExecutorClaimRecord,
+    ) -> Result<(), StorageError>;
+    fn update_executor_claim(
+        &mut self,
+        record: &SpendExecutorClaimRecord,
+    ) -> Result<(), StorageError>;
+    fn load_executor_claims(&self) -> Result<Vec<SpendExecutorClaimRecord>, StorageError>;
 }
 
 pub trait BudgetRepository {
@@ -125,6 +136,50 @@ impl SqliteGovernanceRepository {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
+    pub fn save_executor_claim_with_budget_hold(
+        &mut self,
+        claim: &SpendExecutorClaimRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+    ) -> Result<(), StorageError> {
+        let sqlite_tx = self.conn.transaction()?;
+        sqlite_tx.execute(
+            "INSERT INTO spend_executor_claims
+             (id, spend_auth_token_id, owner_user_id, executor_execution_id, workload_profile,
+              status, claimed_at, expires_at, finalized_at, settlement_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                claim.id.to_string(),
+                claim.spend_auth_token_id.to_string(),
+                claim.owner_user_id.to_string(),
+                claim.executor_execution_id,
+                claim.workload_profile,
+                executor_claim_status(&claim.status),
+                claim.claimed_at.to_rfc3339(),
+                claim.expires_at.to_rfc3339(),
+                claim.finalized_at.map(|timestamp| timestamp.to_rfc3339()),
+                claim.settlement_id.as_ref().map(ToString::to_string),
+            ],
+        )?;
+        sqlite_tx.execute(
+            "UPDATE budget_holds
+             SET status = ?2, executor_claim_id = ?3, updated_at = ?4, expires_at = ?5
+             WHERE id = ?1",
+            params![
+                hold.id.to_string(),
+                budget_hold_status(&hold.status),
+                hold.executor_claim_id.as_ref().map(ToString::to_string),
+                hold.updated_at.to_rfc3339(),
+                hold.expires_at.to_rfc3339(),
+            ],
+        )?;
+        upsert_balance(&sqlite_tx, balance)?;
+        refresh_persisted_budget_status(&sqlite_tx, &hold.budget_id.to_string(), hold.updated_at)?;
+        sqlite_tx.commit()?;
+        Ok(())
+    }
+
     fn from_connection(conn: Connection) -> Result<Self, StorageError> {
         let repository = Self { conn };
         repository.init()?;
@@ -162,10 +217,25 @@ impl SqliteGovernanceRepository {
                 owner_user_id TEXT NOT NULL,
                 spend_decision_id TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
+                claim_ttl_seconds INTEGER NOT NULL DEFAULT 900,
                 used_at TEXT,
                 used_by_payment_id TEXT,
                 revoked_at TEXT,
                 FOREIGN KEY(spend_decision_id) REFERENCES spend_decisions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS spend_executor_claims (
+                id TEXT PRIMARY KEY,
+                spend_auth_token_id TEXT NOT NULL UNIQUE,
+                owner_user_id TEXT NOT NULL,
+                executor_execution_id TEXT NOT NULL,
+                workload_profile TEXT NOT NULL,
+                status TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                finalized_at TEXT,
+                settlement_id TEXT,
+                FOREIGN KEY(spend_auth_token_id) REFERENCES spend_auth_tokens(id)
             );
 
             CREATE TABLE IF NOT EXISTS budgets (
@@ -209,6 +279,7 @@ impl SqliteGovernanceRepository {
                 amount_cents INTEGER NOT NULL,
                 currency TEXT NOT NULL,
                 status TEXT NOT NULL,
+                executor_claim_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
@@ -231,6 +302,8 @@ impl SqliteGovernanceRepository {
         )?;
         self.migrate_policy_assignment_scope()?;
         self.migrate_user_caps_to_spending_targets()?;
+        self.migrate_executor_claim_budget_holds()?;
+        self.migrate_spend_auth_token_claim_ttl()?;
         self.enforce_one_budget_hold_per_spend_decision()?;
         Ok(())
     }
@@ -307,6 +380,27 @@ impl SqliteGovernanceRepository {
              ON budget_holds(spend_decision_id)",
             [],
         )?;
+        Ok(())
+    }
+
+    fn migrate_executor_claim_budget_holds(&self) -> Result<(), StorageError> {
+        if !table_has_column(&self.conn, "budget_holds", "executor_claim_id")? {
+            self.conn.execute(
+                "ALTER TABLE budget_holds ADD COLUMN executor_claim_id TEXT",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn migrate_spend_auth_token_claim_ttl(&self) -> Result<(), StorageError> {
+        if !table_has_column(&self.conn, "spend_auth_tokens", "claim_ttl_seconds")? {
+            self.conn.execute(
+                "ALTER TABLE spend_auth_tokens
+                 ADD COLUMN claim_ttl_seconds INTEGER NOT NULL DEFAULT 900",
+                [],
+            )?;
+        }
         Ok(())
     }
 }
@@ -414,13 +508,15 @@ impl SpendRepository for SqliteGovernanceRepository {
     fn save_spend_auth_token(&mut self, record: &SpendAuthTokenRecord) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO spend_auth_tokens
-             (id, owner_user_id, spend_decision_id, expires_at, used_at, used_by_payment_id, revoked_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (id, owner_user_id, spend_decision_id, expires_at, claim_ttl_seconds,
+              used_at, used_by_payment_id, revoked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 record.id.to_string(),
                 record.owner_user_id.to_string(),
                 record.spend_decision_id.to_string(),
                 record.expires_at.to_rfc3339(),
+                record.claim_ttl_seconds,
                 record.used_at.map(|timestamp| timestamp.to_rfc3339()),
                 record.used_by_payment_id.as_ref().map(ToString::to_string),
                 record.revoked_at.map(|timestamp| timestamp.to_rfc3339()),
@@ -472,7 +568,8 @@ impl SpendRepository for SqliteGovernanceRepository {
 
     fn load_spend_auth_tokens(&self) -> Result<Vec<SpendAuthTokenRecord>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, owner_user_id, spend_decision_id, expires_at, used_at, used_by_payment_id, revoked_at
+            "SELECT id, owner_user_id, spend_decision_id, expires_at, claim_ttl_seconds,
+                    used_at, used_by_payment_id, revoked_at
              FROM spend_auth_tokens
              ORDER BY expires_at ASC",
         )?;
@@ -481,17 +578,94 @@ impl SpendRepository for SqliteGovernanceRepository {
             let owner_user_id: String = row.get(1)?;
             let spend_decision_id: String = row.get(2)?;
             let expires_at: String = row.get(3)?;
-            let used_at: Option<String> = row.get(4)?;
-            let used_by_payment_id: Option<String> = row.get(5)?;
-            let revoked_at: Option<String> = row.get(6)?;
+            let used_at: Option<String> = row.get(5)?;
+            let used_by_payment_id: Option<String> = row.get(6)?;
+            let revoked_at: Option<String> = row.get(7)?;
             Ok(SpendAuthTokenRecord {
                 id: parse_id(&id)?,
                 owner_user_id: parse_id(&owner_user_id)?,
                 spend_decision_id: parse_id(&spend_decision_id)?,
                 expires_at: parse_timestamp(&expires_at)?,
+                claim_ttl_seconds: row.get(4)?,
                 used_at: parse_optional_timestamp(used_at)?,
                 used_by_payment_id: parse_optional_id(used_by_payment_id)?,
                 revoked_at: parse_optional_timestamp(revoked_at)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    fn save_executor_claim(
+        &mut self,
+        record: &SpendExecutorClaimRecord,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO spend_executor_claims
+             (id, spend_auth_token_id, owner_user_id, executor_execution_id, workload_profile,
+              status, claimed_at, expires_at, finalized_at, settlement_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                record.id.to_string(),
+                record.spend_auth_token_id.to_string(),
+                record.owner_user_id.to_string(),
+                record.executor_execution_id,
+                record.workload_profile,
+                executor_claim_status(&record.status),
+                record.claimed_at.to_rfc3339(),
+                record.expires_at.to_rfc3339(),
+                record.finalized_at.map(|timestamp| timestamp.to_rfc3339()),
+                record.settlement_id.as_ref().map(ToString::to_string),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn update_executor_claim(
+        &mut self,
+        record: &SpendExecutorClaimRecord,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            "UPDATE spend_executor_claims
+             SET status = ?2, finalized_at = ?3, settlement_id = ?4
+             WHERE id = ?1",
+            params![
+                record.id.to_string(),
+                executor_claim_status(&record.status),
+                record.finalized_at.map(|timestamp| timestamp.to_rfc3339()),
+                record.settlement_id.as_ref().map(ToString::to_string),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn load_executor_claims(&self) -> Result<Vec<SpendExecutorClaimRecord>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, spend_auth_token_id, owner_user_id, executor_execution_id,
+                    workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id
+             FROM spend_executor_claims
+             ORDER BY claimed_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let token_id: String = row.get(1)?;
+            let owner_user_id: String = row.get(2)?;
+            let status: String = row.get(5)?;
+            let claimed_at: String = row.get(6)?;
+            let expires_at: String = row.get(7)?;
+            let finalized_at: Option<String> = row.get(8)?;
+            let settlement_id: Option<String> = row.get(9)?;
+            Ok(SpendExecutorClaimRecord {
+                id: parse_id(&id)?,
+                spend_auth_token_id: parse_id(&token_id)?,
+                owner_user_id: parse_id(&owner_user_id)?,
+                executor_execution_id: row.get(3)?,
+                workload_profile: row.get(4)?,
+                status: parse_executor_claim_status(&status)?,
+                claimed_at: parse_timestamp(&claimed_at)?,
+                expires_at: parse_timestamp(&expires_at)?,
+                finalized_at: parse_optional_timestamp(finalized_at)?,
+                settlement_id: parse_optional_id(settlement_id)?,
             })
         })?;
         collect_rows(rows)
@@ -587,8 +761,9 @@ impl BudgetRepository for SqliteGovernanceRepository {
         let sqlite_tx = self.conn.transaction()?;
         sqlite_tx.execute(
             "INSERT INTO budget_holds
-             (id, budget_id, spend_decision_id, amount_cents, currency, status, created_at, updated_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (id, budget_id, spend_decision_id, amount_cents, currency, status, executor_claim_id,
+              created_at, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 hold.id.to_string(),
                 hold.budget_id.to_string(),
@@ -596,6 +771,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
                 hold.amount_cents,
                 hold.currency.to_string(),
                 budget_hold_status(&hold.status),
+                hold.executor_claim_id.as_ref().map(ToString::to_string),
                 hold.created_at.to_rfc3339(),
                 hold.updated_at.to_rfc3339(),
                 hold.expires_at.to_rfc3339(),
@@ -614,11 +790,15 @@ impl BudgetRepository for SqliteGovernanceRepository {
     ) -> Result<(), StorageError> {
         let sqlite_tx = self.conn.transaction()?;
         sqlite_tx.execute(
-            "UPDATE budget_holds SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            "UPDATE budget_holds
+             SET status = ?2, executor_claim_id = ?3, updated_at = ?4, expires_at = ?5
+             WHERE id = ?1",
             params![
                 hold.id.to_string(),
                 budget_hold_status(&hold.status),
+                hold.executor_claim_id.as_ref().map(ToString::to_string),
                 hold.updated_at.to_rfc3339(),
+                hold.expires_at.to_rfc3339(),
             ],
         )?;
         upsert_balance(&sqlite_tx, balance)?;
@@ -683,7 +863,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
     fn load_budget_holds(&self) -> Result<Vec<BudgetHold>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, budget_id, spend_decision_id, amount_cents, currency, status,
-                    created_at, updated_at, expires_at
+                    executor_claim_id, created_at, updated_at, expires_at
              FROM budget_holds
              ORDER BY created_at ASC",
         )?;
@@ -693,9 +873,10 @@ impl BudgetRepository for SqliteGovernanceRepository {
             let spend_decision_id: String = row.get(2)?;
             let currency: String = row.get(4)?;
             let status: String = row.get(5)?;
-            let created_at: String = row.get(6)?;
-            let updated_at: String = row.get(7)?;
-            let expires_at: String = row.get(8)?;
+            let executor_claim_id: Option<String> = row.get(6)?;
+            let created_at: String = row.get(7)?;
+            let updated_at: String = row.get(8)?;
+            let expires_at: String = row.get(9)?;
             Ok(BudgetHold {
                 id: parse_id(&id)?,
                 budget_id: parse_id(&budget_id)?,
@@ -703,6 +884,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
                 amount_cents: row.get(3)?,
                 currency: parse_currency(&currency)?,
                 status: parse_budget_hold_status(&status)?,
+                executor_claim_id: parse_optional_id(executor_claim_id)?,
                 created_at: parse_timestamp(&created_at)?,
                 updated_at: parse_timestamp(&updated_at)?,
                 expires_at: parse_timestamp(&expires_at)?,
@@ -847,9 +1029,18 @@ fn budget_status(status: &BudgetStatus) -> &'static str {
 fn budget_hold_status(status: &BudgetHoldStatus) -> &'static str {
     match status {
         BudgetHoldStatus::Frozen => "frozen",
+        BudgetHoldStatus::Claimed => "claimed",
         BudgetHoldStatus::Settled => "settled",
         BudgetHoldStatus::Released => "released",
         BudgetHoldStatus::Expired => "expired",
+    }
+}
+
+fn executor_claim_status(status: &SpendExecutorClaimStatus) -> &'static str {
+    match status {
+        SpendExecutorClaimStatus::Claimed => "claimed",
+        SpendExecutorClaimStatus::Settled => "settled",
+        SpendExecutorClaimStatus::Released => "released",
     }
 }
 
@@ -880,9 +1071,19 @@ fn parse_budget_status(value: &str) -> Result<BudgetStatus, rusqlite::Error> {
 fn parse_budget_hold_status(value: &str) -> Result<BudgetHoldStatus, rusqlite::Error> {
     match value {
         "frozen" => Ok(BudgetHoldStatus::Frozen),
+        "claimed" => Ok(BudgetHoldStatus::Claimed),
         "settled" => Ok(BudgetHoldStatus::Settled),
         "released" => Ok(BudgetHoldStatus::Released),
         "expired" => Ok(BudgetHoldStatus::Expired),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn parse_executor_claim_status(value: &str) -> Result<SpendExecutorClaimStatus, rusqlite::Error> {
+    match value {
+        "claimed" => Ok(SpendExecutorClaimStatus::Claimed),
+        "settled" => Ok(SpendExecutorClaimStatus::Settled),
+        "released" => Ok(SpendExecutorClaimStatus::Released),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -943,7 +1144,8 @@ fn collect_rows<T>(
 mod tests {
     use chrono::Duration;
     use hubu_common::ids::{
-        AgentAccountId, BudgetHoldId, BudgetId, SpendAuthTokenId, SpendDecisionId, SpendingTargetId,
+        AgentAccountId, BudgetHoldId, BudgetId, SpendAuthTokenId, SpendDecisionId,
+        SpendExecutorClaimId, SpendingTargetId,
     };
 
     use super::*;
@@ -989,6 +1191,7 @@ mod tests {
             merchant: Some("Acme".to_string()),
             category: None,
             task_id: Some("task".to_string()),
+            workload_profile: "default".to_string(),
         }
     }
 
@@ -1025,6 +1228,7 @@ mod tests {
             owner_user_id: user_id(),
             spend_decision_id: decision.id.clone(),
             expires_at: Utc::now() + Duration::minutes(5),
+            claim_ttl_seconds: 900,
             used_at: None,
             used_by_payment_id: None,
             revoked_at: None,
@@ -1032,12 +1236,29 @@ mod tests {
 
         repo.save_spend_decision(&decision).unwrap();
         repo.save_spend_auth_token(&token).unwrap();
+        let claim = SpendExecutorClaimRecord {
+            id: SpendExecutorClaimId::new(),
+            spend_auth_token_id: token.id.clone(),
+            owner_user_id: user_id(),
+            executor_execution_id: "gongbu-job-123".to_string(),
+            workload_profile: "default".to_string(),
+            status: SpendExecutorClaimStatus::Claimed,
+            claimed_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(15),
+            finalized_at: None,
+            settlement_id: None,
+        };
+        repo.save_executor_claim(&claim).unwrap();
 
         let assignments = repo.load_policy_assignments().unwrap();
         assert_eq!(assignments.len(), 1);
         assert_eq!(assignments[0].scope, PolicyAssignmentScope::UserDefault);
         assert_eq!(repo.load_spend_decisions().unwrap().len(), 1);
         assert_eq!(repo.load_spend_auth_tokens().unwrap().len(), 1);
+        let claims = repo.load_executor_claims().unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].id, claim.id);
+        assert_eq!(claims[0].executor_execution_id, "gongbu-job-123");
     }
 
     #[test]
@@ -1071,6 +1292,7 @@ mod tests {
             amount_cents: 2_500,
             currency: Currency::Usd,
             status: BudgetHoldStatus::Frozen,
+            executor_claim_id: None,
             created_at: Utc::now() - Duration::minutes(10),
             updated_at: Utc::now() - Duration::minutes(10),
             expires_at: Utc::now() - Duration::minutes(5),

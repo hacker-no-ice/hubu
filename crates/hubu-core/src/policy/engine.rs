@@ -116,6 +116,7 @@ mod tests {
             merchant: Some("Acme Cafe".to_string()),
             category: category.map(str::to_string),
             task_id: None,
+            workload_profile: "default".to_string(),
         }
     }
 

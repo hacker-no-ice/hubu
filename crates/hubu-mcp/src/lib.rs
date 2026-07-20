@@ -243,7 +243,8 @@ fn tool_definitions() -> Vec<Value> {
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
-                "merchant": { "type": "string" }
+                "merchant": { "type": "string" },
+                "workload_profile": { "type": "string" }
             }), &["account_id", "amount_cents", "reason"]),
         ),
         write_tool(
@@ -253,7 +254,8 @@ fn tool_definitions() -> Vec<Value> {
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
-                "merchant": { "type": "string" }
+                "merchant": { "type": "string" },
+                "workload_profile": { "type": "string" }
             }), &["account_id", "amount_cents", "reason"]),
         ),
         read_tool(

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use chrono::Utc;
-use hubu_common::ids::{PaymentId, SpendAuthTokenId, SpendDecisionId};
+use chrono::{Duration, Utc};
+use hubu_common::ids::{PaymentId, SpendAuthTokenId, SpendDecisionId, SpendExecutorClaimId};
 use hubu_common::models::UserContext;
 use serde_json::json;
 
@@ -10,17 +10,19 @@ use crate::policy::model::{Effect, Policy};
 use crate::spend::error::SpendError;
 use crate::spend::model::{
     IssuedSpendAuthToken, SpendAuthTokenRecord, SpendDecisionRecord, SpendEvaluationResponse,
-    SpendPaymentValidationRequest, SpendRequest, ValidatedSpendAuthorization,
+    SpendExecutorClaimRecord, SpendExecutorClaimRequest, SpendExecutorClaimStatus,
+    SpendExecutorClaimValidationRequest, SpendPaymentValidationRequest, SpendRequest,
+    SpendTimingConfig, ValidatedSpendAuthorization,
 };
 use crate::telemetry::log_event;
-
-const DEFAULT_SPEND_AUTH_TOKEN_TTL: chrono::Duration = chrono::Duration::minutes(5);
 
 /// Spend manager owns in-memory state for spend decisions and issued auth tokens.
 pub struct SpendManager {
     decisions: HashMap<SpendDecisionId, SpendDecisionRecord>,
     tokens: HashMap<SpendAuthTokenId, SpendAuthTokenRecord>,
-    token_ttl: chrono::Duration,
+    executor_claims: HashMap<SpendExecutorClaimId, SpendExecutorClaimRecord>,
+    claim_id_by_token: HashMap<SpendAuthTokenId, SpendExecutorClaimId>,
+    timing: SpendTimingConfig,
 }
 
 impl SpendManager {
@@ -28,7 +30,9 @@ impl SpendManager {
         Self {
             decisions: HashMap::new(),
             tokens: HashMap::new(),
-            token_ttl: DEFAULT_SPEND_AUTH_TOKEN_TTL,
+            executor_claims: HashMap::new(),
+            claim_id_by_token: HashMap::new(),
+            timing: SpendTimingConfig::default(),
         }
     }
 
@@ -36,6 +40,19 @@ impl SpendManager {
         decisions: Vec<SpendDecisionRecord>,
         tokens: Vec<SpendAuthTokenRecord>,
     ) -> Self {
+        Self::from_records_with_claims(decisions, tokens, Vec::new(), SpendTimingConfig::default())
+    }
+
+    pub fn from_records_with_claims(
+        decisions: Vec<SpendDecisionRecord>,
+        tokens: Vec<SpendAuthTokenRecord>,
+        executor_claims: Vec<SpendExecutorClaimRecord>,
+        timing: SpendTimingConfig,
+    ) -> Self {
+        let claim_id_by_token = executor_claims
+            .iter()
+            .map(|claim| (claim.spend_auth_token_id.clone(), claim.id.clone()))
+            .collect();
         Self {
             decisions: decisions
                 .into_iter()
@@ -45,7 +62,12 @@ impl SpendManager {
                 .into_iter()
                 .map(|token| (token.id.clone(), token))
                 .collect(),
-            token_ttl: DEFAULT_SPEND_AUTH_TOKEN_TTL,
+            executor_claims: executor_claims
+                .into_iter()
+                .map(|claim| (claim.id.clone(), claim))
+                .collect(),
+            claim_id_by_token,
+            timing,
         }
     }
 
@@ -55,6 +77,13 @@ impl SpendManager {
 
     pub fn auth_token_record(&self, token_id: &SpendAuthTokenId) -> Option<SpendAuthTokenRecord> {
         self.tokens.get(token_id).cloned()
+    }
+
+    pub fn executor_claim_record(
+        &self,
+        claim_id: &SpendExecutorClaimId,
+    ) -> Option<SpendExecutorClaimRecord> {
+        self.executor_claims.get(claim_id).cloned()
     }
 
     pub fn evaluate_spend(
@@ -79,6 +108,12 @@ impl SpendManager {
             return Err(SpendError::UserScopeMismatch);
         }
 
+        let timing = self
+            .timing
+            .profile(&request.workload_profile)
+            .ok_or_else(|| SpendError::UnknownWorkloadProfile(request.workload_profile.clone()))?;
+        let authorization_ttl = Duration::seconds(timing.authorization_ttl_seconds);
+        let claim_ttl_seconds = timing.claim_ttl_seconds;
         let evaluation = engine::evaluate_policy(&request, policy)?;
         let decision_id = SpendDecisionId::new();
         let decision_record = SpendDecisionRecord {
@@ -92,12 +127,13 @@ impl SpendManager {
 
         let auth_token = if evaluation.decision == Effect::Allow {
             let spend_auth_id = SpendAuthTokenId::new();
-            let expires_at = Utc::now() + self.token_ttl;
+            let expires_at = Utc::now() + authorization_ttl;
             let spend_auth_record = SpendAuthTokenRecord {
                 id: spend_auth_id.clone(),
                 owner_user_id: user.user_id.clone(),
                 spend_decision_id: decision_id.clone(),
                 expires_at,
+                claim_ttl_seconds,
                 used_at: None,
                 used_by_payment_id: None,
                 revoked_at: None,
@@ -160,6 +196,14 @@ impl SpendManager {
             return Err(SpendError::UsedSpendAuthToken);
         }
 
+        if self
+            .claim_id_by_token
+            .contains_key(&request.spend_auth_token_id)
+        {
+            log_auth_validation_rejected(request, "spend_auth_token_already_claimed");
+            return Err(SpendError::SpendAuthTokenAlreadyClaimed);
+        }
+
         if token.expires_at <= Utc::now() {
             log_auth_validation_rejected(request, "expired_spend_auth_token");
             return Err(SpendError::ExpiredSpendAuthToken);
@@ -208,11 +252,189 @@ impl SpendManager {
         })
     }
 
+    pub fn claim_auth_token(
+        &mut self,
+        request: SpendExecutorClaimRequest,
+    ) -> Result<(SpendExecutorClaimRecord, ValidatedSpendAuthorization), SpendError> {
+        let executor_execution_id = request.executor_execution_id.trim();
+        if executor_execution_id.is_empty() {
+            return Err(SpendError::EmptyExecutorExecutionId);
+        }
+
+        if let Some(claim_id) = self
+            .claim_id_by_token
+            .get(&request.authorization.spend_auth_token_id)
+        {
+            let claim = self
+                .executor_claims
+                .get(claim_id)
+                .cloned()
+                .ok_or(SpendError::UnknownExecutorClaim)?;
+            if claim.executor_execution_id != executor_execution_id {
+                return Err(SpendError::SpendAuthTokenAlreadyClaimed);
+            }
+            if !matches!(claim.status, SpendExecutorClaimStatus::Claimed) {
+                return Err(SpendError::FinalizedExecutorClaim);
+            }
+            if claim.expires_at <= Utc::now() {
+                return Err(SpendError::ExpiredExecutorClaim);
+            }
+            let validation = self.validate_claimed_authorization_scope(&request.authorization)?;
+            return Ok((claim, validation));
+        }
+
+        let validation = self.validate_auth_token_for_payment(&request.authorization)?;
+        let decision = self
+            .decisions
+            .get(&validation.spend_decision_id)
+            .ok_or(SpendError::MissingSpendDecision)?;
+        let workload_profile = decision.request.workload_profile.clone();
+        let claim_ttl_seconds = self
+            .tokens
+            .get(&request.authorization.spend_auth_token_id)
+            .ok_or(SpendError::UnknownSpendAuthToken)?
+            .claim_ttl_seconds;
+        let claimed_at = Utc::now();
+        let claim = SpendExecutorClaimRecord {
+            id: SpendExecutorClaimId::new(),
+            spend_auth_token_id: request.authorization.spend_auth_token_id.clone(),
+            owner_user_id: request.authorization.owner_user_id,
+            executor_execution_id: executor_execution_id.to_string(),
+            workload_profile,
+            status: SpendExecutorClaimStatus::Claimed,
+            claimed_at,
+            expires_at: claimed_at + Duration::seconds(claim_ttl_seconds),
+            finalized_at: None,
+            settlement_id: None,
+        };
+        self.claim_id_by_token
+            .insert(claim.spend_auth_token_id.clone(), claim.id.clone());
+        self.executor_claims.insert(claim.id.clone(), claim.clone());
+
+        Ok((claim, validation))
+    }
+
+    pub fn validate_executor_claim(
+        &self,
+        request: &SpendExecutorClaimValidationRequest,
+    ) -> Result<SpendExecutorClaimRecord, SpendError> {
+        let claim = self
+            .executor_claims
+            .get(&request.claim_id)
+            .ok_or(SpendError::UnknownExecutorClaim)?;
+        if claim.owner_user_id != request.owner_user_id {
+            return Err(SpendError::UserScopeMismatch);
+        }
+        if claim.executor_execution_id != request.executor_execution_id {
+            return Err(SpendError::ExecutorClaimExecutionMismatch);
+        }
+        if !matches!(claim.status, SpendExecutorClaimStatus::Claimed) {
+            return Err(SpendError::FinalizedExecutorClaim);
+        }
+        if claim.expires_at <= Utc::now() {
+            return Err(SpendError::ExpiredExecutorClaim);
+        }
+        let token = self
+            .tokens
+            .get(&claim.spend_auth_token_id)
+            .ok_or(SpendError::UnknownSpendAuthToken)?;
+        if token.revoked_at.is_some() {
+            return Err(SpendError::RevokedSpendAuthToken);
+        }
+        if token.used_at.is_some() {
+            return Err(SpendError::UsedSpendAuthToken);
+        }
+        Ok(claim.clone())
+    }
+
+    pub fn settle_executor_claim(
+        &mut self,
+        request: &SpendExecutorClaimValidationRequest,
+        settlement_id: PaymentId,
+    ) -> Result<(SpendExecutorClaimRecord, SpendAuthTokenRecord), SpendError> {
+        let claim = self.validate_executor_claim(request)?;
+        let finalized_at = Utc::now();
+        let token = self
+            .tokens
+            .get_mut(&claim.spend_auth_token_id)
+            .ok_or(SpendError::UnknownSpendAuthToken)?;
+        token.used_at = Some(finalized_at);
+        token.used_by_payment_id = Some(settlement_id.clone());
+        let token = token.clone();
+        let stored_claim = self
+            .executor_claims
+            .get_mut(&claim.id)
+            .ok_or(SpendError::UnknownExecutorClaim)?;
+        stored_claim.status = SpendExecutorClaimStatus::Settled;
+        stored_claim.finalized_at = Some(finalized_at);
+        stored_claim.settlement_id = Some(settlement_id);
+        Ok((stored_claim.clone(), token))
+    }
+
+    pub fn release_executor_claim(
+        &mut self,
+        request: &SpendExecutorClaimValidationRequest,
+    ) -> Result<(SpendExecutorClaimRecord, SpendAuthTokenRecord), SpendError> {
+        let claim = self.validate_executor_claim(request)?;
+        let finalized_at = Utc::now();
+        let token = self
+            .tokens
+            .get_mut(&claim.spend_auth_token_id)
+            .ok_or(SpendError::UnknownSpendAuthToken)?;
+        token.revoked_at = Some(finalized_at);
+        let token = token.clone();
+        let stored_claim = self
+            .executor_claims
+            .get_mut(&claim.id)
+            .ok_or(SpendError::UnknownExecutorClaim)?;
+        stored_claim.status = SpendExecutorClaimStatus::Released;
+        stored_claim.finalized_at = Some(finalized_at);
+        Ok((stored_claim.clone(), token))
+    }
+
+    fn validate_claimed_authorization_scope(
+        &self,
+        request: &SpendPaymentValidationRequest,
+    ) -> Result<ValidatedSpendAuthorization, SpendError> {
+        let token = self
+            .tokens
+            .get(&request.spend_auth_token_id)
+            .ok_or(SpendError::UnknownSpendAuthToken)?;
+        if token.revoked_at.is_some() {
+            return Err(SpendError::RevokedSpendAuthToken);
+        }
+        if token.used_at.is_some() {
+            return Err(SpendError::UsedSpendAuthToken);
+        }
+        let decision = self
+            .decisions
+            .get(&token.spend_decision_id)
+            .ok_or(SpendError::MissingSpendDecision)?;
+        if decision.evaluation.decision != Effect::Allow {
+            return Err(SpendError::SpendDecisionNotAllowed);
+        }
+        if request.owner_user_id != decision.owner_user_id {
+            return Err(SpendError::UserScopeMismatch);
+        }
+        if !payment_matches_authorized_spend(request, &decision.request) {
+            return Err(SpendError::PaymentRequestMismatch);
+        }
+        Ok(ValidatedSpendAuthorization {
+            spend_auth_token_id: token.id.clone(),
+            owner_user_id: token.owner_user_id.clone(),
+            spend_decision_id: token.spend_decision_id.clone(),
+            expires_at: token.expires_at,
+        })
+    }
+
     pub fn mark_auth_token_used(
         &mut self,
         token_id: &SpendAuthTokenId,
         payment_id: PaymentId,
     ) -> Result<(), SpendError> {
+        if self.claim_id_by_token.contains_key(token_id) {
+            return Err(SpendError::SpendAuthTokenAlreadyClaimed);
+        }
         let token = self.tokens.get_mut(token_id).ok_or_else(|| {
             log_event(
                 "warn",
@@ -320,6 +542,7 @@ mod tests {
             merchant: Some("Acme Cafe".to_string()),
             category: Some("meals".to_string()),
             task_id: Some("task_123".to_string()),
+            workload_profile: "default".to_string(),
         }
     }
 
@@ -582,5 +805,106 @@ mod tests {
 
         assert!(matches!(error, SpendError::UserScopeMismatch));
         assert_eq!(manager.decisions.len(), 0);
+    }
+
+    #[test]
+    fn executor_claim_uses_profile_lease_and_survives_authorization_expiry() {
+        let timing = SpendTimingConfig {
+            default_profile: "image".to_string(),
+            profiles: HashMap::from([(
+                "image".to_string(),
+                crate::spend::SpendTimingProfile {
+                    authorization_ttl_seconds: 60,
+                    claim_ttl_seconds: 600,
+                },
+            )]),
+        };
+        let mut manager =
+            SpendManager::from_records_with_claims(Vec::new(), Vec::new(), Vec::new(), timing);
+        let mut spend = spend_request(2_500);
+        spend.workload_profile = "image".to_string();
+        let evaluation = manager
+            .evaluate_spend(
+                &user_context(),
+                spend.clone(),
+                &policy(Effect::Allow, Vec::new()),
+            )
+            .expect("spend should authorize");
+        let token = evaluation.auth_token.expect("allow should issue token");
+        let authorization = SpendPaymentValidationRequest {
+            spend_auth_token_id: token.id.clone(),
+            owner_user_id: spend.owner_user_id.clone(),
+            agent_id: spend.agent_id.clone(),
+            agent_account_id: spend.agent_account_id.clone(),
+            amount_cents: spend.amount_cents,
+            currency: spend.currency,
+            merchant: spend.merchant.clone(),
+            task_id: spend.task_id.clone(),
+        };
+        let (claim, _) = manager
+            .claim_auth_token(SpendExecutorClaimRequest {
+                authorization,
+                executor_execution_id: "gongbu-image-123".to_string(),
+            })
+            .expect("executor should claim token");
+
+        assert_eq!(claim.workload_profile, "image");
+        assert!(claim.expires_at > token.expires_at);
+        manager
+            .tokens
+            .get_mut(&token.id)
+            .expect("token should remain stored")
+            .expires_at = Utc::now() - Duration::seconds(1);
+
+        manager
+            .validate_executor_claim(&SpendExecutorClaimValidationRequest {
+                claim_id: claim.id,
+                owner_user_id: spend.owner_user_id,
+                executor_execution_id: "gongbu-image-123".to_string(),
+            })
+            .expect("active claim should outlive original authorization");
+    }
+
+    #[test]
+    fn executor_claim_is_idempotent_for_same_execution_and_exclusive_for_others() {
+        let mut manager = SpendManager::new();
+        let spend = spend_request(2_500);
+        let evaluation = manager
+            .evaluate_spend(
+                &user_context(),
+                spend.clone(),
+                &policy(Effect::Allow, Vec::new()),
+            )
+            .expect("spend should authorize");
+        let token = evaluation.auth_token.expect("allow should issue token");
+        let authorization = SpendPaymentValidationRequest {
+            spend_auth_token_id: token.id,
+            owner_user_id: spend.owner_user_id,
+            agent_id: spend.agent_id,
+            agent_account_id: spend.agent_account_id,
+            amount_cents: spend.amount_cents,
+            currency: spend.currency,
+            merchant: spend.merchant,
+            task_id: spend.task_id,
+        };
+        let request = SpendExecutorClaimRequest {
+            authorization: authorization.clone(),
+            executor_execution_id: "gongbu-job-1".to_string(),
+        };
+        let (first, _) = manager
+            .claim_auth_token(request.clone())
+            .expect("first claim should succeed");
+        let (retry, _) = manager
+            .claim_auth_token(request)
+            .expect("same execution should receive the existing claim");
+        assert_eq!(first.id, retry.id);
+
+        let error = manager
+            .claim_auth_token(SpendExecutorClaimRequest {
+                authorization,
+                executor_execution_id: "gongbu-job-2".to_string(),
+            })
+            .expect_err("another execution must not claim the token");
+        assert!(matches!(error, SpendError::SpendAuthTokenAlreadyClaimed));
     }
 }

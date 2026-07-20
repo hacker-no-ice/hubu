@@ -23,4 +23,18 @@ pub enum SpendError {
     PaymentRequestMismatch,
     #[error("request is outside the resolved user context")]
     UserScopeMismatch,
+    #[error("unknown workload profile `{0}`")]
+    UnknownWorkloadProfile(String),
+    #[error("executor execution id cannot be empty")]
+    EmptyExecutorExecutionId,
+    #[error("spend auth token has already been claimed by another execution")]
+    SpendAuthTokenAlreadyClaimed,
+    #[error("unknown executor spend claim")]
+    UnknownExecutorClaim,
+    #[error("executor spend claim belongs to another execution")]
+    ExecutorClaimExecutionMismatch,
+    #[error("executor spend claim is expired and requires reconciliation")]
+    ExpiredExecutorClaim,
+    #[error("executor spend claim is already finalized")]
+    FinalizedExecutorClaim,
 }

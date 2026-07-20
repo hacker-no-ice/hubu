@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Months, Utc};
-use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId};
+use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId, SpendExecutorClaimId};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
 use serde_json::json;
@@ -223,6 +223,7 @@ impl BudgetManager {
             amount_cents: request.amount_cents,
             currency: request.currency,
             status: BudgetHoldStatus::Frozen,
+            executor_claim_id: None,
             created_at: now,
             updated_at: now,
             expires_at: request.expires_at,
@@ -250,6 +251,29 @@ impl BudgetManager {
         Ok(ReserveBudgetResponse {
             hold,
             balance: balance.clone(),
+        })
+    }
+
+    /// Bind a frozen hold to one executor claim and extend its execution lease.
+    pub fn claim_budget(
+        &mut self,
+        hold_id: &BudgetHoldId,
+        claim_id: SpendExecutorClaimId,
+        expires_at: DateTime<Utc>,
+    ) -> Result<ReserveBudgetResponse, BudgetManagerError> {
+        let hold = self
+            .budget_holds
+            .get_mut(hold_id)
+            .ok_or(BudgetManagerError::UnknownBudgetHold)?;
+        hold.claim(claim_id, expires_at)?;
+        let balance = self
+            .budget_balances
+            .get(&hold.budget_id)
+            .cloned()
+            .ok_or(BudgetManagerError::MissingBudgetBalance)?;
+        Ok(ReserveBudgetResponse {
+            hold: hold.clone(),
+            balance,
         })
     }
 
@@ -1005,6 +1029,45 @@ mod tests {
         assert_eq!(response.balance.frozen_amount_cents, 3_000);
         assert_eq!(response.balance.remaining_amount_cents, 7_000);
         assert_eq!(response.balance.consumed_amount_cents, 0);
+    }
+
+    #[test]
+    fn claimed_budget_hold_uses_claim_lease_and_does_not_auto_release() {
+        let mut manager = BudgetManager::new();
+        let created = create_agent_budget(&mut manager, 10_000);
+        let authorization_expires_at = Utc::now() + Duration::minutes(5);
+        let reservation = manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: created.budget.id,
+                spend_decision_id: SpendDecisionId::new(),
+                amount_cents: 3_000,
+                currency: Currency::Usd,
+                expires_at: authorization_expires_at,
+            })
+            .expect("budget should reserve");
+        let claim_id = SpendExecutorClaimId::new();
+        let claim_expires_at = Utc::now() + Duration::minutes(30);
+
+        let claimed = manager
+            .claim_budget(&reservation.hold.id, claim_id.clone(), claim_expires_at)
+            .expect("hold should enter claimed state");
+        assert!(matches!(claimed.hold.status, BudgetHoldStatus::Claimed));
+        assert_eq!(claimed.hold.executor_claim_id, Some(claim_id));
+        assert_eq!(claimed.hold.expires_at, claim_expires_at);
+
+        let expired = manager
+            .expire_overdue_budget_holds(authorization_expires_at + Duration::seconds(1))
+            .expect("expiry reconciliation should succeed");
+        assert!(expired.is_empty());
+        assert!(matches!(
+            manager
+                .get_budget_hold(&reservation.hold.id)
+                .expect("claimed hold should remain"),
+            BudgetHold {
+                status: BudgetHoldStatus::Claimed,
+                ..
+            }
+        ));
     }
 
     #[test]
