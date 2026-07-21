@@ -136,7 +136,9 @@ guidance.
    }
    ```
 
-   Hubu marks the claim settled and token used, then consumes the claimed hold.
+   Hubu marks the claim settled and token used and consumes the claimed hold in
+   one SQLite write transaction. An identical retry returns the original
+   `settlement_id` without consuming the budget twice.
 
 6. If no irreversible billable work occurred, the executor releases using the
    same finalize request shape:
@@ -145,8 +147,9 @@ guidance.
    POST /spend/executor/release
    ```
 
-   Hubu marks the claim released and token revoked, then returns the held amount
-   to the remaining budget.
+   Hubu atomically marks the claim released and token revoked while returning
+   the held amount to the remaining budget. An identical release retry returns
+   the stored terminal state without returning the budget twice.
 
 ## Claim Response
 
@@ -184,6 +187,24 @@ guidance.
 `spend.expires_at` is the original authorization deadline;
 `claim_expires_at` is the separate execution lease.
 
+## Transactional Finalization
+
+Hubu captures one `settlement_started_at` value after parsing and authenticating
+the request. Settle and release each obtain an immediate SQLite write lock,
+check the claim against that timestamp, and atomically update:
+
+- the executor claim to `settled` with a stable `settlement_id`, or `released`
+- the spend authorization token to `used`, or `revoked`
+- the claimed budget hold to `settled`, or `released`
+- the budget balance from frozen to consumed, or back to remaining
+
+This removes the internal race where token and claim state could commit before
+the hold and balance. It also serializes settle against release so the first
+terminal transaction wins. If any update fails, SQLite rolls all four changes
+back. A claim that was active when the transaction began can complete even if
+wall-clock time passes its lease during the transaction; a claim at or past
+expiry when the transaction begins is rejected for reconciliation.
+
 ## Expired Claims
 
 Hubu does not automatically release a claimed hold when its lease expires. The
@@ -198,5 +219,6 @@ settle/release requests reject it as requiring reconciliation.
 - Executors must use one stable execution ID for claim and finalization.
 - Executors must settle after irreversible billable work succeeds.
 - Executors must release only when no irreversible billable work occurred.
-- Executors must not reuse a claim or token after finalization.
+- Executors may retry the same settle request after an ambiguous response; they
+  must not use a finalized claim for different work.
 - Hubu never stores executor vendor secrets through this contract.

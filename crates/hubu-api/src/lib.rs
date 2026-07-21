@@ -40,8 +40,8 @@ use hubu_core::{
         ReserveBudgetResponse,
     },
     persistence::{
-        BudgetRepository, PolicyAssignmentScope, PolicyRepository, SpendRepository,
-        SpendingTargetRepository, SqliteGovernanceRepository,
+        BudgetRepository, ExecutorFinalizationResult, PolicyAssignmentScope, PolicyRepository,
+        SpendRepository, SpendingTargetRepository, SqliteGovernanceRepository,
     },
     policy::{
         condition::{Condition, Field, PolicyValue},
@@ -51,9 +51,9 @@ use hubu_core::{
     },
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
     spend::{
-        SpendExecutorClaimRecord, SpendExecutorClaimRequest, SpendExecutorClaimStatus,
-        SpendExecutorClaimValidationRequest, SpendManager, SpendPaymentValidationRequest,
-        SpendTimingConfig,
+        SpendAuthTokenRecord, SpendExecutorClaimRecord, SpendExecutorClaimRequest,
+        SpendExecutorClaimStatus, SpendExecutorClaimValidationRequest, SpendManager,
+        SpendPaymentValidationRequest, SpendTimingConfig,
     },
     spending_target::{
         periods_overlap, CreateSpendingTargetRequest, SpendingTarget, SpendingTargetManager,
@@ -1192,8 +1192,11 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
         "settlement_rules": [
             "settle only after the executor has performed irreversible billable work",
             "release only before irreversible billable work has occurred",
-            "settlement marks the claim settled and spend auth token used, then consumes the claimed budget hold",
-            "release marks the claim released and token revoked, then returns the reserved amount",
+            "settlement atomically marks the claim settled and token used while consuming the claimed budget hold",
+            "an identical settlement retry returns the original settlement_id without consuming budget twice",
+            "claim expiry is evaluated once when the settlement transaction starts",
+            "release atomically marks the claim released and token revoked while returning the reserved amount",
+            "settle and release serialize so the first terminal finalization wins",
             "expired claims keep their holds claimed for reconciliation instead of automatically releasing"
         ],
         "merchant_examples": [
@@ -2492,50 +2495,45 @@ fn settle_executor_spend(
     let request: ExecutorSpendFinalizeHttpRequest = serde_json::from_str(&body)?;
     let user = authenticated_user_context(state)?;
     let claim_request = executor_claim_validation_request(request, user.user_id)?;
-    let claim = state
+    let settlement_started_at = Utc::now();
+    let settlement = {
+        state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?
+            .settle_executor_claim_transactionally(
+                &claim_request.claim_id,
+                &claim_request.owner_user_id,
+                &claim_request.executor_execution_id,
+                PaymentId::new(),
+                settlement_started_at,
+            )?
+    };
+    state
         .spend
         .lock()
         .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .validate_executor_claim(&claim_request)?;
-    let validated = executor_spend_for_claim(&claim, state)?;
-    let settlement_id = PaymentId::new();
-
-    let (settled_claim, used_token) = {
-        let mut spend = state
-            .spend
-            .lock()
-            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-        spend.settle_executor_claim(&claim_request, settlement_id.clone())?
-    };
-    {
-        let mut governance = state
-            .governance
-            .lock()
-            .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        governance.update_spend_auth_token(&used_token)?;
-        governance.update_executor_claim(&settled_claim)?;
-    }
-
-    let settlement = {
-        let mut budgets = state
-            .budgets
-            .lock()
-            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        budgets.settle_budget(&validated.budget_hold.id)?
-    };
+        .apply_persisted_executor_finalization(settlement.claim.clone(), settlement.token.clone());
     state
-        .governance
+        .budgets
         .lock()
-        .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .update_budget_hold(&settlement.hold, &settlement.balance)?;
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .apply_persisted_finalization(settlement.hold.clone(), settlement.balance.clone());
+    let validated = executor_spend_for_finalization(&settlement, state)?;
+    let settlement_id = settlement
+        .claim
+        .settlement_id
+        .clone()
+        .ok_or_else(|| anyhow!("settled executor claim is missing settlement id"))?;
 
     log_event(
         "info",
         "executor_spend_settled",
         json!({
             "settlement_id": settlement_id.to_string(),
-            "claim_id": settled_claim.id.to_string(),
-            "executor_execution_id": settled_claim.executor_execution_id,
+            "claim_id": settlement.claim.id.to_string(),
+            "executor_execution_id": settlement.claim.executor_execution_id,
+            "idempotent_replay": settlement.idempotent_replay,
             "spend_auth_token_id": validated.token_id.to_string(),
             "decision_id": validated.validation.spend_decision_id.to_string(),
             "hold_id": settlement.hold.id.to_string(),
@@ -2547,9 +2545,9 @@ fn settle_executor_spend(
 
     Ok(ExecutorSpendSettlementHttpResponse {
         settlement_id: settlement_id.to_string(),
-        claim_id: settled_claim.id.to_string(),
-        executor_execution_id: settled_claim.executor_execution_id,
-        status: executor_claim_status_name(&settled_claim.status).to_string(),
+        claim_id: settlement.claim.id.to_string(),
+        executor_execution_id: settlement.claim.executor_execution_id,
+        status: executor_claim_status_name(&settlement.claim.status).to_string(),
         spend: executor_spend_response_with_hold(&validated, settlement.hold, settlement.balance),
     })
 }
@@ -2561,46 +2559,39 @@ fn release_executor_spend(
     let request: ExecutorSpendFinalizeHttpRequest = serde_json::from_str(&body)?;
     let user = authenticated_user_context(state)?;
     let claim_request = executor_claim_validation_request(request, user.user_id)?;
-    let claim = state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .validate_executor_claim(&claim_request)?;
-    let validated = executor_spend_for_claim(&claim, state)?;
-    let (released_claim, revoked_token) = state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .release_executor_claim(&claim_request)?;
-    {
-        let mut governance = state
+    let finalization_started_at = Utc::now();
+    let release = {
+        state
             .governance
             .lock()
-            .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        governance.update_spend_auth_token(&revoked_token)?;
-        governance.update_executor_claim(&released_claim)?;
-    }
-
-    let release = {
-        let mut budgets = state
-            .budgets
-            .lock()
-            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        budgets.release_budget(&validated.budget_hold.id)?
+            .map_err(|_| anyhow!("governance store lock poisoned"))?
+            .release_executor_claim_transactionally(
+                &claim_request.claim_id,
+                &claim_request.owner_user_id,
+                &claim_request.executor_execution_id,
+                finalization_started_at,
+            )?
     };
     state
-        .governance
+        .spend
         .lock()
-        .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .update_budget_hold(&release.hold, &release.balance)?;
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .apply_persisted_executor_finalization(release.claim.clone(), release.token.clone());
+    state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .apply_persisted_finalization(release.hold.clone(), release.balance.clone());
+    let validated = executor_spend_for_finalization(&release, state)?;
 
     log_event(
         "info",
         "executor_spend_released",
         json!({
             "spend_auth_token_id": validated.token_id.to_string(),
-            "claim_id": released_claim.id.to_string(),
-            "executor_execution_id": released_claim.executor_execution_id,
+            "claim_id": release.claim.id.to_string(),
+            "executor_execution_id": release.claim.executor_execution_id,
+            "idempotent_replay": release.idempotent_replay,
             "decision_id": validated.validation.spend_decision_id.to_string(),
             "hold_id": release.hold.id.to_string(),
             "amount_cents": release.hold.amount_cents,
@@ -2610,7 +2601,7 @@ fn release_executor_spend(
     );
 
     let spend = executor_spend_response_with_hold(&validated, release.hold, release.balance);
-    Ok(executor_claim_response(&released_claim, spend))
+    Ok(executor_claim_response(&release.claim, spend))
 }
 
 struct ValidatedExecutorSpend {
@@ -2772,26 +2763,42 @@ fn executor_claim_validation_request(
     })
 }
 
-fn executor_spend_for_claim(
-    claim: &SpendExecutorClaimRecord,
+fn executor_spend_for_finalization(
+    finalization: &ExecutorFinalizationResult,
     state: &ServerState,
 ) -> Result<ValidatedExecutorSpend> {
-    let (token, decision) = {
-        let spend = state
-            .spend
-            .lock()
-            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-        let token = spend
-            .auth_token_record(&claim.spend_auth_token_id)
-            .ok_or_else(|| anyhow!("executor claim spend auth token is missing"))?;
-        let decision = spend
-            .decision_record(&token.spend_decision_id)
-            .ok_or_else(|| anyhow!("executor claim spend decision is missing"))?;
-        (token, decision)
-    };
-    if decision.owner_user_id != claim.owner_user_id {
+    executor_spend_from_persisted_records(
+        &finalization.claim,
+        finalization.token.clone(),
+        finalization.hold.clone(),
+        finalization.balance.clone(),
+        state,
+    )
+}
+
+fn executor_spend_from_persisted_records(
+    claim: &SpendExecutorClaimRecord,
+    token: SpendAuthTokenRecord,
+    budget_hold: BudgetHold,
+    budget_balance: hubu_core::budget::BudgetBalance,
+    state: &ServerState,
+) -> Result<ValidatedExecutorSpend> {
+    let decision = state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .decision_record(&token.spend_decision_id)
+        .ok_or_else(|| anyhow!("executor claim spend decision is missing"))?;
+    if decision.owner_user_id != claim.owner_user_id || token.owner_user_id != claim.owner_user_id {
         return Err(anyhow!(
             "executor claim owner does not match spend decision"
+        ));
+    }
+    if budget_hold.spend_decision_id != decision.id
+        || budget_hold.executor_claim_id.as_ref() != Some(&claim.id)
+    {
+        return Err(anyhow!(
+            "executor claim budget hold does not match persisted spend state"
         ));
     }
 
@@ -2813,27 +2820,6 @@ fn executor_spend_for_claim(
             "executor claim account does not match spend decision"
         ));
     }
-
-    let (budget_hold, budget_balance) = {
-        let budgets = state
-            .budgets
-            .lock()
-            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        let hold = budgets
-            .get_budget_hold_by_spend_decision(&decision.id)
-            .ok_or_else(|| anyhow!("executor claim budget hold is missing"))?;
-        if !matches!(hold.status, BudgetHoldStatus::Claimed)
-            || hold.executor_claim_id.as_ref() != Some(&claim.id)
-        {
-            return Err(anyhow!(
-                "executor claim budget hold is not claimed by this execution"
-            ));
-        }
-        let balance = budgets
-            .get_budget_balance(&hold.budget_id)
-            .ok_or_else(|| anyhow!("executor claim budget balance is missing"))?;
-        (hold, balance)
-    };
 
     Ok(ValidatedExecutorSpend {
         request: ExecutorSpendHttpRequest {
@@ -4997,6 +4983,13 @@ mod tests {
         assert_eq!(settlement.spend.budget_hold.frozen_amount_cents, 0);
         assert_eq!(settlement.spend.budget_hold.remaining_amount_cents, 0);
 
+        let replay = settle_executor_spend(finalize.to_string(), &state)
+            .expect("identical executor settlement should replay");
+        assert_eq!(replay.settlement_id, settlement.settlement_id);
+        assert_eq!(replay.status, "settled");
+        assert_eq!(replay.spend.budget_hold.consumed_amount_cents, 500);
+        assert_eq!(replay.spend.budget_hold.frozen_amount_cents, 0);
+
         let validate_request = json!({
             "spend_auth_token_id": token,
             "account_id": agent.account_id,
@@ -5041,6 +5034,12 @@ mod tests {
         assert_eq!(release.spend.budget_hold.consumed_amount_cents, 0);
         assert_eq!(release.spend.budget_hold.frozen_amount_cents, 0);
         assert_eq!(release.spend.budget_hold.remaining_amount_cents, 500);
+
+        let replay = release_executor_spend(release_request.to_string(), &state)
+            .expect("identical executor release should replay");
+        assert_eq!(replay.status, "released");
+        assert_eq!(replay.spend.budget_hold.frozen_amount_cents, 0);
+        assert_eq!(replay.spend.budget_hold.remaining_amount_cents, 500);
 
         let validate_request = json!({
             "spend_auth_token_id": token,
