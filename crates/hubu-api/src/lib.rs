@@ -2401,8 +2401,8 @@ fn claim_executor_spend(
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
-    let validated = validate_executor_spend_request(request.spend, state)?;
-    let (claim, claimed_hold) = {
+    let resolved = resolve_executor_spend_request(request.spend, state)?;
+    let (claim, claim_validation, claimed_hold) = {
         let mut spend = state
             .spend
             .lock()
@@ -2411,22 +2411,52 @@ fn claim_executor_spend(
             .budgets
             .lock()
             .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let authorization = resolved.payment_validation_request();
+        let (prevalidated, existing_claim) = spend.validate_auth_token_for_executor_claim(
+            &authorization,
+            &request.executor_execution_id,
+        )?;
+        let budget_hold = budgets
+            .get_budget_hold_by_spend_decision(&prevalidated.spend_decision_id)
+            .ok_or_else(|| anyhow!("spend authorization does not have a budget hold"))?;
+        match existing_claim.as_ref() {
+            None if matches!(budget_hold.status, BudgetHoldStatus::Frozen) => {}
+            Some(existing)
+                if matches!(budget_hold.status, BudgetHoldStatus::Claimed)
+                    && budget_hold.executor_claim_id.as_ref() == Some(&existing.id) => {}
+            None => return Err(anyhow!("spend authorization budget hold is not frozen")),
+            Some(_) => {
+                return Err(anyhow!(
+                    "spend authorization budget hold does not match the existing claim"
+                ));
+            }
+        }
+        if !budgets
+            .get_budget_by_id(&budget_hold.budget_id)
+            .is_some_and(|budget| budget.budget.agent_id == resolved.agent_id)
+        {
+            return Err(anyhow!(
+                "spend authorization hold does not belong to the authorized agent"
+            ));
+        }
         let (claim, claim_validation) = spend.claim_auth_token(SpendExecutorClaimRequest {
-            authorization: validated.payment_validation_request(),
+            authorization,
             executor_execution_id: request.executor_execution_id,
         })?;
-        if claim_validation.spend_decision_id != validated.validation.spend_decision_id {
+        if claim_validation.spend_decision_id != prevalidated.spend_decision_id {
             return Err(anyhow!(
                 "executor claim resolved a different spend decision"
             ));
         }
-        let claimed_hold = budgets.claim_budget(
-            &validated.budget_hold.id,
-            claim.id.clone(),
-            claim.expires_at,
-        )?;
-        (claim, claimed_hold)
+        let claimed_hold =
+            budgets.claim_budget(&budget_hold.id, claim.id.clone(), claim.expires_at)?;
+        (claim, claim_validation, claimed_hold)
     };
+    let validated = resolved.into_validated(
+        claim_validation,
+        claimed_hold.hold.clone(),
+        claimed_hold.balance.clone(),
+    );
 
     {
         let mut governance = state
@@ -2440,8 +2470,7 @@ fn claim_executor_spend(
         )?;
     }
 
-    let spend =
-        executor_spend_response_with_hold(&validated, claimed_hold.hold, claimed_hold.balance);
+    let spend = executor_spend_response(&validated);
     log_event(
         "info",
         "executor_spend_claimed",
@@ -2592,12 +2621,19 @@ struct ValidatedExecutorSpend {
     validation: hubu_core::spend::ValidatedSpendAuthorization,
     budget_hold: BudgetHold,
     budget_balance: hubu_core::budget::BudgetBalance,
+}
+
+struct ResolvedExecutorSpend {
+    request: ExecutorSpendHttpRequest,
+    account_pub_id: String,
+    agent_pub_id: String,
+    token_id: SpendAuthTokenId,
     owner_user_id: UserId,
     agent_id: AgentId,
     agent_account_id: hubu_common::ids::AgentAccountId,
 }
 
-impl ValidatedExecutorSpend {
+impl ResolvedExecutorSpend {
     fn payment_validation_request(&self) -> SpendPaymentValidationRequest {
         SpendPaymentValidationRequest {
             spend_auth_token_id: self.token_id.clone(),
@@ -2610,12 +2646,29 @@ impl ValidatedExecutorSpend {
             task_id: self.request.task_id.clone(),
         }
     }
+
+    fn into_validated(
+        self,
+        validation: hubu_core::spend::ValidatedSpendAuthorization,
+        budget_hold: BudgetHold,
+        budget_balance: hubu_core::budget::BudgetBalance,
+    ) -> ValidatedExecutorSpend {
+        ValidatedExecutorSpend {
+            request: self.request,
+            account_pub_id: self.account_pub_id,
+            agent_pub_id: self.agent_pub_id,
+            token_id: self.token_id,
+            validation,
+            budget_hold,
+            budget_balance,
+        }
+    }
 }
 
-fn validate_executor_spend_request(
+fn resolve_executor_spend_request(
     request: ExecutorSpendHttpRequest,
     state: &ServerState,
-) -> Result<ValidatedExecutorSpend> {
+) -> Result<ResolvedExecutorSpend> {
     if request.amount_cents <= 0 {
         return Err(anyhow!("executor spend amount must be positive"));
     }
@@ -2639,20 +2692,28 @@ fn validate_executor_spend_request(
         .parse()
         .with_context(|| "parse spend_auth_token_id")?;
 
+    Ok(ResolvedExecutorSpend {
+        request,
+        account_pub_id,
+        agent_pub_id,
+        token_id,
+        owner_user_id: user.user_id,
+        agent_id,
+        agent_account_id: account.id,
+    })
+}
+
+fn validate_executor_spend_request(
+    request: ExecutorSpendHttpRequest,
+    state: &ServerState,
+) -> Result<ValidatedExecutorSpend> {
+    let resolved = resolve_executor_spend_request(request, state)?;
+
     let validation = state
         .spend
         .lock()
         .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .validate_auth_token_for_payment(&SpendPaymentValidationRequest {
-            spend_auth_token_id: token_id.clone(),
-            owner_user_id: user.user_id.clone(),
-            agent_id: agent_id.clone(),
-            agent_account_id: account.id.clone(),
-            amount_cents: request.amount_cents,
-            currency: Currency::Usd,
-            merchant: request.merchant.clone(),
-            task_id: request.task_id.clone(),
-        })?;
+        .validate_auth_token_for_payment(&resolved.payment_validation_request())?;
 
     let (budget_hold, budget_balance) = {
         let budgets = state
@@ -2664,7 +2725,7 @@ fn validate_executor_spend_request(
             .ok_or_else(|| anyhow!("spend authorization does not have a budget hold"))?;
         if !budgets
             .get_budget_by_id(&budget_hold.budget_id)
-            .is_some_and(|budget| budget.budget.agent_id == agent_id)
+            .is_some_and(|budget| budget.budget.agent_id == resolved.agent_id)
         {
             return Err(anyhow!(
                 "spend authorization hold does not belong to the authorized agent"
@@ -2683,29 +2744,18 @@ fn validate_executor_spend_request(
         "info",
         "executor_spend_validated",
         json!({
-            "spend_auth_token_id": token_id.to_string(),
+            "spend_auth_token_id": resolved.token_id.to_string(),
             "decision_id": validation.spend_decision_id.to_string(),
             "hold_id": budget_hold.id.to_string(),
-            "account_pub_id": account_pub_id,
-            "agent_pub_id": agent_pub_id,
-            "amount_cents": request.amount_cents,
-            "merchant": request.merchant.clone(),
-            "task_id": request.task_id.clone(),
+            "account_pub_id": resolved.account_pub_id,
+            "agent_pub_id": resolved.agent_pub_id,
+            "amount_cents": resolved.request.amount_cents,
+            "merchant": resolved.request.merchant.clone(),
+            "task_id": resolved.request.task_id.clone(),
         }),
     );
 
-    Ok(ValidatedExecutorSpend {
-        request,
-        account_pub_id,
-        agent_pub_id,
-        token_id,
-        validation,
-        budget_hold,
-        budget_balance,
-        owner_user_id: user.user_id,
-        agent_id,
-        agent_account_id: account.id,
-    })
+    Ok(resolved.into_validated(validation, budget_hold, budget_balance))
 }
 
 fn executor_claim_validation_request(
@@ -2805,9 +2855,6 @@ fn executor_spend_for_claim(
         },
         budget_hold,
         budget_balance,
-        owner_user_id: claim.owner_user_id.clone(),
-        agent_id: decision.request.agent_id,
-        agent_account_id: decision.request.agent_account_id,
     })
 }
 
@@ -4931,6 +4978,12 @@ mod tests {
         assert_eq!(claim.spend.task_id.as_deref(), Some("hubu-logo-demo"));
         assert_eq!(claim.status, "claimed");
         assert_eq!(claim.spend.budget_hold.status, "claimed");
+
+        let retry = claim_executor_spend(request.to_string(), &state)
+            .expect("same executor execution should recover its existing claim");
+        assert_eq!(retry.claim_id, claim.claim_id);
+        assert_eq!(retry.status, "claimed");
+        assert_eq!(retry.spend.budget_hold.status, "claimed");
 
         let finalize = json!({
             "claim_id": claim.claim_id,

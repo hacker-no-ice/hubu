@@ -256,34 +256,15 @@ impl SpendManager {
         &mut self,
         request: SpendExecutorClaimRequest,
     ) -> Result<(SpendExecutorClaimRecord, ValidatedSpendAuthorization), SpendError> {
-        let executor_execution_id = request.executor_execution_id.trim();
-        if executor_execution_id.is_empty() {
-            return Err(SpendError::EmptyExecutorExecutionId);
-        }
-
-        if let Some(claim_id) = self
-            .claim_id_by_token
-            .get(&request.authorization.spend_auth_token_id)
-        {
-            let claim = self
-                .executor_claims
-                .get(claim_id)
-                .cloned()
-                .ok_or(SpendError::UnknownExecutorClaim)?;
-            if claim.executor_execution_id != executor_execution_id {
-                return Err(SpendError::SpendAuthTokenAlreadyClaimed);
-            }
-            if !matches!(claim.status, SpendExecutorClaimStatus::Claimed) {
-                return Err(SpendError::FinalizedExecutorClaim);
-            }
-            if claim.expires_at <= Utc::now() {
-                return Err(SpendError::ExpiredExecutorClaim);
-            }
-            let validation = self.validate_claimed_authorization_scope(&request.authorization)?;
+        let (validation, existing_claim) = self.validate_auth_token_for_executor_claim(
+            &request.authorization,
+            &request.executor_execution_id,
+        )?;
+        if let Some(claim) = existing_claim {
             return Ok((claim, validation));
         }
 
-        let validation = self.validate_auth_token_for_payment(&request.authorization)?;
+        let executor_execution_id = request.executor_execution_id.trim();
         let decision = self
             .decisions
             .get(&validation.spend_decision_id)
@@ -312,6 +293,47 @@ impl SpendManager {
         self.executor_claims.insert(claim.id.clone(), claim.clone());
 
         Ok((claim, validation))
+    }
+
+    pub fn validate_auth_token_for_executor_claim(
+        &self,
+        authorization: &SpendPaymentValidationRequest,
+        executor_execution_id: &str,
+    ) -> Result<
+        (
+            ValidatedSpendAuthorization,
+            Option<SpendExecutorClaimRecord>,
+        ),
+        SpendError,
+    > {
+        let executor_execution_id = executor_execution_id.trim();
+        if executor_execution_id.is_empty() {
+            return Err(SpendError::EmptyExecutorExecutionId);
+        }
+
+        if let Some(claim_id) = self
+            .claim_id_by_token
+            .get(&authorization.spend_auth_token_id)
+        {
+            let claim = self
+                .executor_claims
+                .get(claim_id)
+                .cloned()
+                .ok_or(SpendError::UnknownExecutorClaim)?;
+            if claim.executor_execution_id != executor_execution_id {
+                return Err(SpendError::SpendAuthTokenAlreadyClaimed);
+            }
+            if !matches!(claim.status, SpendExecutorClaimStatus::Claimed) {
+                return Err(SpendError::FinalizedExecutorClaim);
+            }
+            if claim.expires_at <= Utc::now() {
+                return Err(SpendError::ExpiredExecutorClaim);
+            }
+            let validation = self.validate_claimed_authorization_scope(authorization)?;
+            return Ok((validation, Some(claim)));
+        }
+
+        Ok((self.validate_auth_token_for_payment(authorization)?, None))
     }
 
     pub fn validate_executor_claim(
