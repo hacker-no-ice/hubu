@@ -38,6 +38,7 @@ pub struct AuthorizeSpendRequest {
     pub currency: Currency,
     pub merchant: Option<String>,
     pub task_id: Option<String>,
+    pub workload_profile: String,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +56,7 @@ pub struct ApprovedSpendAuthorization {
     pub currency: Currency,
     pub merchant: Option<String>,
     pub task_id: Option<String>,
+    pub workload_profile: String,
     pub evaluation: SpendEvaluationResponse,
     pub token: IssuedSpendAuthToken,
     pub budget_reservation: ReserveBudgetResponse,
@@ -75,6 +77,7 @@ pub struct RejectedSpendAuthorization {
     pub currency: Currency,
     pub merchant: Option<String>,
     pub task_id: Option<String>,
+    pub workload_profile: String,
     pub evaluation: SpendEvaluationResponse,
     pub decision: Effect,
     pub reasons: Vec<String>,
@@ -187,6 +190,7 @@ impl SpendApprovalService {
             merchant: request.merchant.clone(),
             category: None,
             task_id: request.task_id.clone(),
+            workload_profile: request.workload_profile.clone(),
         };
         let evaluation = spend_manager.evaluate_spend(&request.user, spend_request, policy)?;
         let decision_record = spend_manager
@@ -209,6 +213,7 @@ impl SpendApprovalService {
                     currency: request.currency,
                     merchant: request.merchant,
                     task_id: request.task_id,
+                    workload_profile: request.workload_profile,
                     decision: evaluation.evaluation.decision,
                     reasons: evaluation.evaluation.reasons.clone(),
                     evaluation,
@@ -292,6 +297,7 @@ impl SpendApprovalService {
                 currency: request.currency,
                 merchant: request.merchant,
                 task_id: request.task_id,
+                workload_profile: request.workload_profile,
                 evaluation,
                 token,
                 budget_reservation,
@@ -407,6 +413,7 @@ fn budget_rejection(
         currency: request.currency,
         merchant: request.merchant,
         task_id: request.task_id,
+        workload_profile: request.workload_profile,
         evaluation,
         decision: Effect::Deny,
         reasons: vec![reason.to_string()],
@@ -639,6 +646,7 @@ mod tests {
                         currency: Currency::Usd,
                         merchant: Some(merchant.to_string()),
                         task_id: Some("task-123".to_string()),
+                        workload_profile: "default".to_string(),
                     },
                     &self.policy,
                     &mut spend_manager,

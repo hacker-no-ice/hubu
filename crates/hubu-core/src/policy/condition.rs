@@ -333,6 +333,7 @@ mod tests {
             merchant: Some("Acme Cafe".to_string()),
             category: Some("meals".to_string()),
             task_id: None,
+            workload_profile: "default".to_string(),
         }
     }
 

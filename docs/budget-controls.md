@@ -69,13 +69,20 @@ Allowed spend follows this path:
 policy allow
   -> find the active agent budget
   -> reserve budget balance into one frozen hold
-  -> issue spend authorization or execute payment
+  -> issue spend authorization, claim for executor work, or execute payment
   -> settle the hold on success, release it on failure
 ```
 
 `hubu spend authorize` stops after policy and budget reservation. It returns a
 scoped spend authorization token and freezes the agent budget without executing
 payment or writing a ledger transaction.
+
+External executors must turn that frozen authorization into an exclusive
+`claimed` hold before irreversible work. Claiming assigns a separate execution
+lease based on the authorization's workload profile. The original authorization
+may expire while the claim remains active. Expired claimed holds are not
+automatically returned because vendor work may already have completed; they
+remain frozen for reconciliation.
 
 `hubu spend` continues into the wallet rail. In the current local server, that
 rail is mocked. Successful payment settles the budget hold into consumed

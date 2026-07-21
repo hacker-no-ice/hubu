@@ -1355,12 +1355,14 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
         take_value(&mut args, "--merchant").unwrap_or_else(|| "local-merchant".to_string());
+    let workload_profile = take_value(&mut args, "--workload-profile");
     ensure_no_args(args)?;
 
     let mut body = json!({
         "amount_cents": amount_to_cents(&amount)?,
         "reason": reason,
         "merchant": merchant,
+        "workload_profile": workload_profile,
     });
     body["account_id"] = json!(account_id);
 
@@ -1381,12 +1383,14 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
         take_value(&mut args, "--merchant").unwrap_or_else(|| "local-merchant".to_string());
+    let workload_profile = take_value(&mut args, "--workload-profile");
     ensure_no_args(args)?;
 
     let mut body = json!({
         "amount_cents": amount_to_cents(&amount)?,
         "reason": reason,
         "merchant": merchant,
+        "workload_profile": workload_profile,
     });
     body["account_id"] = json!(account_id);
 
@@ -1415,6 +1419,16 @@ fn print_spend_response(response: &Value) -> Result<()> {
     println!("  decision_id: {}", string_at(response, "decision_id")?);
     if let Some(token_id) = response.get("auth_token_id").and_then(Value::as_str) {
         println!("  auth_token_id: {token_id}");
+    }
+    println!(
+        "  workload_profile: {}",
+        string_at(response, "workload_profile")?
+    );
+    if let Some(expires_at) = response
+        .get("authorization_expires_at")
+        .and_then(Value::as_str)
+    {
+        println!("  authorization_expires_at: {expires_at}");
     }
     if let Some(reasons) = response.get("reasons").and_then(Value::as_array) {
         for reason in reasons {
@@ -2147,8 +2161,8 @@ fn print_spend_help() {
         "Test an agent spend request
 
 Usage:
-  hubu spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+  hubu spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
+  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
 
 Note:
   Spend commands require the agent account id because the account is the spending source. CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
@@ -2164,7 +2178,7 @@ fn print_spend_authorize_help() {
         "Authorize spend and reserve budget without executing payment
 
 Usage:
-  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
 
 Example:
   hubu spend authorize --account-id ACCOUNT_ID --amount 5 --reason \"Reserve model API credits\""

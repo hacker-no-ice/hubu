@@ -61,6 +61,21 @@ impl SpendAuthTokenId {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct SpendExecutorClaimId(Uuid);
+
+impl SpendExecutorClaimId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for SpendExecutorClaimId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct PaymentId(Uuid);
 
 impl PaymentId {
@@ -193,6 +208,7 @@ display_uuid_id!(
     SpendingTargetId,
     SpendDecisionId,
     SpendAuthTokenId,
+    SpendExecutorClaimId,
     PaymentId,
     LedgerAccountId,
     LedgerTransactionId,
@@ -224,6 +240,7 @@ parse_uuid_id!(
     SpendingTargetId,
     SpendDecisionId,
     SpendAuthTokenId,
+    SpendExecutorClaimId,
     PaymentId,
     LedgerAccountId,
     LedgerTransactionId,

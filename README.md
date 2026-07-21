@@ -28,11 +28,13 @@ and MCP transport adapter.
 - Evaluates spend requests through deterministic policy rules
 - Issues spend authorization tokens for allowed requests
 - Can authorize spend and freeze agent-budget capacity without executing payment,
-  so a future Hubu-hosted vendor proxy can consume scoped authorization
+  then give an external executor an exclusive, workload-timed claim before vendor work
 - Creates advisory user spending targets and single or recurring budgets owned by one agent
 - Warns when concurrent agent budget allocations exceed a user's spending target
 - Reserves one agent-budget hold before payment, then settles or releases it
   from the payment result
+- Persists executor claims, extends claimed holds beyond the original authorization
+  deadline, and keeps expired claims frozen for reconciliation
 - Orchestrates mock payments after spend authorization
 - Records successful payments in an immutable double-entry SQLite ledger
 - Exposes a local `hubu-server`, human-facing `hubu` CLI, and MCP tools that
@@ -258,6 +260,11 @@ authorization. Successful payment settles that hold into consumed balance;
 failed payment or unused authorization releases it. If the applicable budget is
 exhausted, or policy returns `deny` / `needs_approval`, Hubu does not execute
 payment.
+
+External executor work moves the hold from `frozen` to `claimed` with a separate
+workload-profile lease. See
+[docs/spend-executor-contract.md](docs/spend-executor-contract.md) for claim,
+settle, release, and timing configuration.
 
 A user spending target is advisory. Hubu compares it with the maximum
 concurrent allocation of overlapping agent budgets and returns a warning when

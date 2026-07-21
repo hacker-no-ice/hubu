@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId};
+use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId, SpendExecutorClaimId};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
 
@@ -91,6 +91,7 @@ pub struct BudgetHold {
     pub amount_cents: i64,
     pub currency: Currency,
     pub status: BudgetHoldStatus,
+    pub executor_claim_id: Option<SpendExecutorClaimId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -98,14 +99,35 @@ pub struct BudgetHold {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BudgetHoldError {
+    CannotClaimNonFrozenHold,
     CannotSettleNonFrozenHold,
     CannotReleaseNonFrozenHold,
 }
 
 impl BudgetHold {
-    pub fn settle(&mut self) -> Result<(), BudgetHoldError> {
+    pub fn claim(
+        &mut self,
+        claim_id: SpendExecutorClaimId,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), BudgetHoldError> {
         match &self.status {
             BudgetHoldStatus::Frozen => {
+                self.status = BudgetHoldStatus::Claimed;
+                self.executor_claim_id = Some(claim_id);
+                self.expires_at = expires_at;
+                self.updated_at = Utc::now();
+                Ok(())
+            }
+            BudgetHoldStatus::Claimed if self.executor_claim_id.as_ref() == Some(&claim_id) => {
+                Ok(())
+            }
+            _ => Err(BudgetHoldError::CannotClaimNonFrozenHold),
+        }
+    }
+
+    pub fn settle(&mut self) -> Result<(), BudgetHoldError> {
+        match &self.status {
+            BudgetHoldStatus::Frozen | BudgetHoldStatus::Claimed => {
                 self.status = BudgetHoldStatus::Settled;
                 self.updated_at = Utc::now();
                 Ok(())
@@ -116,7 +138,7 @@ impl BudgetHold {
 
     pub fn release(&mut self) -> Result<(), BudgetHoldError> {
         match &self.status {
-            BudgetHoldStatus::Frozen => {
+            BudgetHoldStatus::Frozen | BudgetHoldStatus::Claimed => {
                 self.status = BudgetHoldStatus::Released;
                 self.updated_at = Utc::now();
                 Ok(())
@@ -131,6 +153,8 @@ impl BudgetHold {
 pub enum BudgetHoldStatus {
     /// Amount is reserved and unavailable for other spend.
     Frozen,
+    /// An executor has exclusively claimed the hold for billable work.
+    Claimed,
     /// Payment settled and the amount moved into consumed usage.
     Settled,
     /// Hold was cancelled or unused and the amount returned to the budget.
