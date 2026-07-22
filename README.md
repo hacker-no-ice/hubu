@@ -36,13 +36,14 @@ and MCP transport adapter.
 - Reserves one agent-budget hold before payment, then settles or releases it
   from the payment result
 - Persists executor claims, extends claimed holds beyond the original authorization
-  deadline, and keeps expired claims frozen for reconciliation
+  deadline, keeps expired claims frozen, and exposes claim lookup plus
+  human-gated billed/not-billed reconciliation with durable evidence
 - Orchestrates mock payments after spend authorization
 - Records successful payments in an immutable double-entry SQLite ledger
 - Exposes a local `hubu-server`, human-facing `hubu` CLI, and MCP tools that
   agents can discover through configured MCP clients
 - Protects local write APIs with a bearer token and separates agent-callable
-  spend tools from human-gated setup, policy, and budget changes
+  spend tools from human-gated setup, policy, budget, and reconciliation changes
 
 ## Crates
 
@@ -268,9 +269,11 @@ exhausted, or policy returns `deny` / `needs_approval`, Hubu does not execute
 payment.
 
 External executor work moves the hold from `frozen` to `claimed` with a separate
-workload-profile lease. See
+workload-profile lease. Expired claims remain frozen until a human reviews
+provider billing and explicitly settles or releases them; operators can use
+`hubu spend claim` and `hubu spend reconcile`. See
 [docs/spend-executor-contract.md](docs/spend-executor-contract.md) for claim,
-settle, release, and timing configuration.
+settle, release, reconciliation, and timing configuration.
 
 A user spending target is advisory. Hubu compares it with the maximum
 concurrent allocation of overlapping agent budgets and returns a warning when

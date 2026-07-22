@@ -36,14 +36,14 @@ const components = {
     copy:
       "Hubu includes the CLI, MCP adapter, local server, governance core, wallet, and ledger. Gongbu is shown outside Hubu because it performs external model calls and other work through the executor contract.",
     responsibilities: [
-      "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, and review protected actions.",
+      "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, review protected actions, and reconcile uncertain expired claims.",
       "Agents discover Hubu through configured MCP tools, while humans use the CLI for setup and administration.",
       "The CLI and MCP adapter are part of broader Hubu, but they are not the Hubu server.",
       "Local HTTP callers reach the API with the Hubu bearer token before protected routes resolve user authority.",
-      "Gongbu and other external executors exclusively claim, then settle or release authorized spend without Hubu performing the work.",
+      "Gongbu and other external executors exclusively claim, then settle or release active authorized spend without Hubu performing the work; expired uncertainty returns to a human decision.",
       "The API handles local HTTP concerns and delegates spend approval/payment orchestration to core app services.",
       "Gongbu owns vendor credentials, provider adapters, model calls, artifacts, and execution retries outside Hubu.",
-      "SQLite-backed records preserve users, agents, advisory spending targets, budgets, policies, executor claims, payments, and ledger entries.",
+      "SQLite-backed records preserve users, agents, advisory spending targets, budgets, policies, executor claims, reconciliation evidence, payments, and ledger entries.",
     ],
     links: [sharedLinks.readme, sharedLinks.api, sharedLinks.cli, sharedLinks.mcp, sharedLinks.spendExecutor, sharedLinks.futureWallet],
     zones: [
@@ -66,7 +66,7 @@ const components = {
       { id: "ledger", label: "SQLite ledger", sub: "double-entry audit", x: 900, y: 626, w: 202, h: 88, tone: "data" },
     ],
     edges: [
-      ["human", "cli", "cmd"],
+      ["human", "cli", "cmd/reconcile"],
       ["agent", "mcp", "tools"],
       ["cli", "api", "token", { labelDx: -12, labelDy: -26, labelT: 0.42 }],
       ["mcp", "api", "token", { labelDx: -14, labelDy: 34, labelT: 0.42 }],
@@ -87,13 +87,13 @@ const components = {
     copy:
       "The local server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, resolves public IDs, and leaves spend approval/payment state transitions to the core app service.",
     responsibilities: [
-      "Keeps health and guidance public while requiring a local bearer token for user setup, agent registration, policies, spending targets, budgets, spend, and ledger listing.",
+      "Keeps health and guidance public while requiring a local bearer token for user setup, agent registration, policies, spending targets, budgets, spend, claim lookup/reconciliation, and ledger listing.",
       "Uses the local token and current user context for protected workflow authority and agent registration ownership.",
       "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
       "Delegates authorize, reserve one agent budget, persist the token/hold, payment, and settle/release to `hubu-core::app` so the spend path is testable without HTTP.",
       "Bridges wallet payment authorization and durable external executor claims through shared spend and budget state.",
       "Uses one immutable platform operation key as the agent-scoped workflow identity across authorization, claim, and finalization.",
-      "Uses SQLite as the finalization authority so claim, token, hold, and balance commit atomically, settle serializes against release, and identical retries return stored state.",
+      "Uses SQLite as the finalization authority so claim, token, hold, and balance commit atomically, settle serializes against release, and identical executor or human reconciliation retries return stored state.",
     ],
     links: [sharedLinks.api, sharedLinks.appSpend, sharedLinks.spendExecutor, sharedLinks.persistence, sharedLinks.telemetry],
     nodes: [
@@ -214,7 +214,7 @@ const components = {
     title: "Budgets & Spending Targets",
     kind: "Component",
     copy:
-      "Agent budgets are hard execution-scoped allocations; user spending targets are separate advisory records. Budget creation warns when concurrent allocations exceed an overlapping target, while spend reserves exactly one agent-budget hold for payment or executor completion.",
+      "Agent budgets are hard execution-scoped allocations; user spending targets are separate advisory records. Spend reserves exactly one agent-budget hold for payment or executor completion, and expired executor uncertainty remains frozen until a human reconciles vendor billing.",
     responsibilities: [
       "Creates single or finite recurring budget periods owned by exactly one agent.",
       "Revokes active budgets and replaces them by preserving history and creating a new forward-looking allowance.",
@@ -223,6 +223,7 @@ const components = {
       "Keys authorization, claim, and finalization by agent and platform operation key while returning stored state for identical retries.",
       "Reserves one hold per decision, moves executor work from frozen to exclusively claimed, and extends it to the workload claim lease.",
       "Enforces unique agent-scoped operation ownership and finalizes claim, token, hold, and budget balance in one immediate SQLite transaction while leaving expired claims frozen for reconciliation.",
+      "Lists expired claims for the owning user and records the provider reference, evidence, outcome, actor, and timestamp from a human-gated settle or release.",
       "Current settlement consumes or returns the authorized hold amount; future executor settlement may reconcile actual usage when it differs.",
       "A future shared allocation would be an explicit budget pool with agent membership, not a task-scoped branch in the MVP budget model.",
     ],
@@ -237,6 +238,7 @@ const components = {
       { id: "executor", label: "Executor claim", sub: "same operation + lease", x: 76, y: 548, w: 238, h: 92, tone: "executor", path: "docs/spend-executor-contract.md" },
       { id: "settle", label: "Settle/release", sub: "idempotent settlement", x: 420, y: 480, w: 238, h: 92, tone: "core" },
       { id: "store", label: "Governance store", sub: "atomic SQLite write", x: 780, y: 282, w: 230, h: 96, tone: "data" },
+      { id: "reconcile", label: "Human reconciliation", sub: "provider ref + evidence", x: 780, y: 500, w: 230, h: 96, tone: "human", path: "docs/spend-executor-contract.md" },
     ],
     edges: [
       ["create", "periods", "expand"],
@@ -248,6 +250,9 @@ const components = {
       ["payment", "settle", "payment", { labelDx: 18, labelDy: -18, labelT: 0.56 }],
       ["reserve", "executor", "claim lease", { labelDx: -30, labelDy: 18, labelT: 0.62 }],
       ["executor", "settle", "finalize", { labelDx: 8, labelDy: 24, labelT: 0.56 }],
+      ["executor", "reconcile", "lease expires", { labelDx: 10, labelDy: 24, labelT: 0.58 }],
+      ["reconcile", "settle", "billed / not billed", { labelDx: 0, labelDy: -20, labelT: 0.48 }],
+      ["reconcile", "store", "audit evidence"],
       ["settle", "store", "one transaction"],
       ["periods", "reserve", "active limits"],
     ],

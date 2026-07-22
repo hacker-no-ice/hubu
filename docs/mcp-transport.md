@@ -158,6 +158,8 @@ Human approval is required for:
 - `hubu_create_recurring_budget`
 - `hubu_revoke_budget`
 - `hubu_replace_budget`
+- `hubu_reconcile_vendor_billed_claim`
+- `hubu_reconcile_vendor_did_not_bill_claim`
 
 These tools are marked with `x_hubu_human_approval: "required"` and
 `destructiveHint: true`. The scaffold does not accept approval as a tool
@@ -177,6 +179,8 @@ Agents can call directly:
 - `hubu_show_spending_targets`
 - `hubu_list_budgets`
 - `hubu_list_ledger`
+- `hubu_get_executor_claim`
+- `hubu_list_claims_requiring_reconciliation`
 - `hubu_authorize_spend`
 - `hubu_submit_spend`
 
@@ -242,6 +246,10 @@ idempotency boundary.
 | `hubu_list_agents` | `GET /agents` | none; defaults to current user |
 | `hubu_list_budgets` | `GET /budgets` | none |
 | `hubu_list_ledger` | `GET /ledger` | none |
+| `hubu_get_executor_claim` | `GET /spend/executor/claim?claim_id=...` | none |
+| `hubu_list_claims_requiring_reconciliation` | `GET /spend/executor/reconciliation` | none |
+| `hubu_reconcile_vendor_billed_claim` | `POST /spend/executor/settle` | required |
+| `hubu_reconcile_vendor_did_not_bill_claim` | `POST /spend/executor/release` | required |
 
 All non-public HTTP routes behind these tools require the Hubu bearer token.
 Public HTTP routes are limited to health and protocol guidance.

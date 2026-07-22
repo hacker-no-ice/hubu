@@ -18,7 +18,8 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Months, Utc};
 use hubu_common::{
     ids::{
-        AgentId, AgentSessionId, BudgetId, PaymentId, SpendAuthTokenId, SpendingTargetId, UserId,
+        AgentId, AgentSessionId, BudgetId, PaymentId, SpendAuthTokenId, SpendExecutorClaimId,
+        SpendingTargetId, UserId,
     },
     models::account::{AccountStatus, AgentAccount},
     models::identity::{
@@ -174,6 +175,13 @@ impl ServerState {
     }
 
     fn new_with_db_path(path: impl AsRef<Path>) -> Result<Self> {
+        Self::new_with_db_path_and_spend_timing(path, load_spend_timing_config()?)
+    }
+
+    fn new_with_db_path_and_spend_timing(
+        path: impl AsRef<Path>,
+        spend_timing: SpendTimingConfig,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let db_path = path.display().to_string();
         log_event(
@@ -197,7 +205,6 @@ impl ServerState {
         );
         let mut governance =
             SqliteGovernanceRepository::open(&path).context("initialize governance store")?;
-        let spend_timing = load_spend_timing_config()?;
         governance
             .expire_overdue_budget_holds(Utc::now())
             .context("reconcile expired budget holds")?;
@@ -841,10 +848,26 @@ struct ExecutorSpendClaimHttpRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ExecutorSpendFinalizationHttpRequest {
+    Executor(ExecutorSpendFinalizeHttpRequest),
+    Reconciliation(ExecutorClaimReconciliationHttpRequest),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExecutorSpendFinalizeHttpRequest {
     #[serde(alias = "executor_execution_id")]
     operation_key: String,
     agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutorClaimReconciliationHttpRequest {
+    claim_id: String,
+    provider_reference: String,
+    evidence: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -870,7 +893,20 @@ struct ExecutorSpendClaimHttpResponse {
     status: String,
     claimed_at: String,
     claim_expires_at: String,
+    finalized_at: Option<String>,
+    settlement_id: Option<String>,
+    reconciliation_required: bool,
+    reconciliation_outcome: Option<String>,
+    provider_reference: Option<String>,
+    evidence: Option<String>,
+    reconciled_at: Option<String>,
+    reconciled_by_user_id: Option<String>,
     spend: ExecutorSpendHttpResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutorClaimsHttpResponse {
+    claims: Vec<ExecutorSpendClaimHttpResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1032,12 +1068,15 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             validate_executor_spend(request.body, state).map(to_json)
         }
         ("POST", "/spend/executor/claim") => claim_executor_spend(request.body, state).map(to_json),
-        ("POST", "/spend/executor/settle") => {
-            settle_executor_spend(request.body, state).map(to_json)
+        ("GET", "/spend/executor/claim") => {
+            get_executor_claim(request.query.get("claim_id").map(String::as_str), state)
+                .map(to_json)
         }
-        ("POST", "/spend/executor/release") => {
-            release_executor_spend(request.body, state).map(to_json)
+        ("GET", "/spend/executor/reconciliation") => {
+            list_executor_claims_requiring_reconciliation(state).map(to_json)
         }
+        ("POST", "/spend/executor/settle") => finalize_executor_spend(request.body, state, true),
+        ("POST", "/spend/executor/release") => finalize_executor_spend(request.body, state, false),
         ("POST", "/spend") => spend(request.body, state).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
         _ => Err(anyhow!("no route for {} {}", request.method, request.path)),
@@ -1163,9 +1202,13 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "GET /.well-known/hubu-spend-executor.json"
             ],
             "claim": "POST /spend/executor/claim",
+            "claim_status": "GET /spend/executor/claim?claim_id=CLAIM_ID",
             "validate": "POST /spend/executor/validate",
             "settle": "POST /spend/executor/settle",
-            "release": "POST /spend/executor/release"
+            "release": "POST /spend/executor/release",
+            "reconciliation_queue": "GET /spend/executor/reconciliation",
+            "reconcile_vendor_billed": "POST /spend/executor/settle",
+            "reconcile_vendor_did_not_bill": "POST /spend/executor/release"
         },
         "operation_key_policy": {
             "responsibility": "agent platform or orchestrator, not the autonomous model",
@@ -1221,6 +1264,18 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "operation_key"
             ]
         },
+        "reconciliation_request": {
+            "required": [
+                "claim_id",
+                "provider_reference",
+                "evidence"
+            ],
+            "routes": {
+                "vendor_billed": "POST /spend/executor/settle",
+                "vendor_did_not_bill": "POST /spend/executor/release"
+            },
+            "human_gate": "The CLI is the direct human surface; MCP reconciliation tools require a trusted client approval prompt before invocation."
+        },
         "timing": &state.spend_timing,
         "scope_rules": [
             "operation_key is platform-assigned, immutable, and scoped to the authorized agent; authorization retries must use the same spend scope",
@@ -1241,7 +1296,11 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "claim expiry is evaluated once when the settlement transaction starts",
             "release atomically marks the claim released and token revoked while returning the reserved amount",
             "settle and release serialize so the first terminal finalization wins",
-            "expired claims keep their holds claimed for reconciliation instead of automatically releasing"
+            "expired claims keep their holds claimed for reconciliation instead of automatically releasing",
+            "claim status lookup reports reconciliation_required once a claimed lease expires",
+            "only expired claimed leases enter the reconciliation queue",
+            "a human-confirmed vendor_billed resolution settles the hold; vendor_did_not_bill releases it",
+            "each reconciliation stores the provider reference, evidence, resolving user, outcome, and timestamp"
         ],
         "merchant_examples": [
             "gongbu.image",
@@ -2556,14 +2615,193 @@ fn claim_executor_spend(
             "workload_profile": claim.workload_profile,
         }),
     );
-    Ok(executor_claim_response(&claim, spend))
+    executor_claim_response(&claim, spend, state)
 }
 
+fn get_executor_claim(
+    claim_id: Option<&str>,
+    state: &ServerState,
+) -> Result<ExecutorSpendClaimHttpResponse> {
+    let claim_id = claim_id
+        .ok_or_else(|| anyhow!("claim status lookup requires claim_id"))?
+        .parse::<SpendExecutorClaimId>()
+        .with_context(|| "parse executor spend claim_id")?;
+    let user = authenticated_user_context(state)?;
+    let claim = state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .executor_claim_record(&claim_id)
+        .filter(|claim| claim.owner_user_id == user.user_id)
+        .ok_or_else(|| anyhow!("unknown executor spend claim"))?;
+    executor_claim_http_response(&claim, state)
+}
+
+fn list_executor_claims_requiring_reconciliation(
+    state: &ServerState,
+) -> Result<ExecutorClaimsHttpResponse> {
+    let user = authenticated_user_context(state)?;
+    let now = Utc::now();
+    let claims = {
+        state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?
+            .executor_claim_records_for_owner(&user.user_id)
+    };
+    let claims = claims
+        .into_iter()
+        .filter(|claim| {
+            matches!(claim.status, SpendExecutorClaimStatus::Claimed) && claim.expires_at <= now
+        })
+        .map(|claim| executor_claim_http_response(&claim, state))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ExecutorClaimsHttpResponse { claims })
+}
+
+fn finalize_executor_spend(
+    body: String,
+    state: &ServerState,
+    vendor_billed: bool,
+) -> Result<Value> {
+    match serde_json::from_str::<ExecutorSpendFinalizationHttpRequest>(&body)? {
+        ExecutorSpendFinalizationHttpRequest::Executor(request) if vendor_billed => {
+            settle_executor_spend_request(request, state).map(to_json)
+        }
+        ExecutorSpendFinalizationHttpRequest::Executor(request) => {
+            release_executor_spend_request(request, state).map(to_json)
+        }
+        ExecutorSpendFinalizationHttpRequest::Reconciliation(request) => {
+            reconcile_executor_claim(request, state, vendor_billed).map(to_json)
+        }
+    }
+}
+
+fn reconcile_executor_claim(
+    request: ExecutorClaimReconciliationHttpRequest,
+    state: &ServerState,
+    vendor_billed: bool,
+) -> Result<ExecutorSpendClaimHttpResponse> {
+    let user = authenticated_user_context(state)?;
+    let claim_id = request
+        .claim_id
+        .parse::<SpendExecutorClaimId>()
+        .with_context(|| "parse executor spend claim_id")?;
+    let reconciliation_started_at = Utc::now();
+    let finalization = {
+        let mut governance = state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        if vendor_billed {
+            governance.reconcile_executor_claim_as_billed_transactionally(
+                &claim_id,
+                &user.user_id,
+                &request.provider_reference,
+                &request.evidence,
+                PaymentId::new(),
+                reconciliation_started_at,
+            )?
+        } else {
+            governance.reconcile_executor_claim_as_not_billed_transactionally(
+                &claim_id,
+                &user.user_id,
+                &request.provider_reference,
+                &request.evidence,
+                reconciliation_started_at,
+            )?
+        }
+    };
+    apply_executor_finalization_to_memory(&finalization, state)?;
+    let validated = executor_spend_for_finalization(&finalization, state)?;
+    let outcome = if vendor_billed {
+        "vendor_billed"
+    } else {
+        "vendor_did_not_bill"
+    };
+
+    log_event(
+        "info",
+        "executor_claim_reconciled",
+        json!({
+            "claim_id": finalization.claim.id.to_string(),
+            "outcome": outcome,
+            "provider_reference": finalization.claim.provider_reference,
+            "reconciled_by_user_id": user.user_id.to_string(),
+            "idempotent_replay": finalization.idempotent_replay,
+            "hold_id": finalization.hold.id.to_string(),
+            "amount_cents": finalization.hold.amount_cents,
+        }),
+    );
+
+    let spend = executor_spend_response_with_hold(
+        &validated,
+        finalization.hold.clone(),
+        finalization.balance.clone(),
+    );
+    executor_claim_response(&finalization.claim, spend, state)
+}
+
+fn apply_executor_finalization_to_memory(
+    finalization: &ExecutorFinalizationResult,
+    state: &ServerState,
+) -> Result<()> {
+    state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .apply_persisted_executor_finalization(
+            finalization.claim.clone(),
+            finalization.token.clone(),
+        );
+    state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?
+        .apply_persisted_finalization(finalization.hold.clone(), finalization.balance.clone());
+    Ok(())
+}
+
+fn executor_claim_http_response(
+    claim: &SpendExecutorClaimRecord,
+    state: &ServerState,
+) -> Result<ExecutorSpendClaimHttpResponse> {
+    let token = state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .auth_token_record(&claim.spend_auth_token_id)
+        .ok_or_else(|| anyhow!("executor claim token is missing"))?;
+    let (hold, balance) = {
+        let budgets = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let hold = budgets
+            .get_budget_hold_by_spend_decision(&token.spend_decision_id)
+            .ok_or_else(|| anyhow!("executor claim budget hold is missing"))?;
+        let balance = budgets
+            .get_budget_balance(&hold.budget_id)
+            .ok_or_else(|| anyhow!("executor claim budget balance is missing"))?;
+        (hold, balance)
+    };
+    let validated = executor_spend_from_persisted_records(claim, token, hold, balance, state)?;
+    executor_claim_response(claim, executor_spend_response(&validated), state)
+}
+
+#[cfg(test)]
 fn settle_executor_spend(
     body: String,
     state: &ServerState,
 ) -> Result<ExecutorSpendSettlementHttpResponse> {
     let request: ExecutorSpendFinalizeHttpRequest = serde_json::from_str(&body)?;
+    settle_executor_spend_request(request, state)
+}
+
+fn settle_executor_spend_request(
+    request: ExecutorSpendFinalizeHttpRequest,
+    state: &ServerState,
+) -> Result<ExecutorSpendSettlementHttpResponse> {
     let user = authenticated_user_context(state)?;
     let claim_request = executor_claim_validation_request(request, &user, state)?;
     let settlement_started_at = Utc::now();
@@ -2580,16 +2818,7 @@ fn settle_executor_spend(
                 settlement_started_at,
             )?
     };
-    state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .apply_persisted_executor_finalization(settlement.claim.clone(), settlement.token.clone());
-    state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .apply_persisted_finalization(settlement.hold.clone(), settlement.balance.clone());
+    apply_executor_finalization_to_memory(&settlement, state)?;
     let validated = executor_spend_for_finalization(&settlement, state)?;
     let settlement_id = settlement
         .claim
@@ -2623,11 +2852,19 @@ fn settle_executor_spend(
     })
 }
 
+#[cfg(test)]
 fn release_executor_spend(
     body: String,
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let request: ExecutorSpendFinalizeHttpRequest = serde_json::from_str(&body)?;
+    release_executor_spend_request(request, state)
+}
+
+fn release_executor_spend_request(
+    request: ExecutorSpendFinalizeHttpRequest,
+    state: &ServerState,
+) -> Result<ExecutorSpendClaimHttpResponse> {
     let user = authenticated_user_context(state)?;
     let claim_request = executor_claim_validation_request(request, &user, state)?;
     let finalization_started_at = Utc::now();
@@ -2643,16 +2880,7 @@ fn release_executor_spend(
                 finalization_started_at,
             )?
     };
-    state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .apply_persisted_executor_finalization(release.claim.clone(), release.token.clone());
-    state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .apply_persisted_finalization(release.hold.clone(), release.balance.clone());
+    apply_executor_finalization_to_memory(&release, state)?;
     let validated = executor_spend_for_finalization(&release, state)?;
 
     log_event(
@@ -2672,7 +2900,7 @@ fn release_executor_spend(
     );
 
     let spend = executor_spend_response_with_hold(&validated, release.hold, release.balance);
-    Ok(executor_claim_response(&release.claim, spend))
+    executor_claim_response(&release.claim, spend, state)
 }
 
 struct ValidatedExecutorSpend {
@@ -2936,16 +3164,42 @@ fn executor_spend_from_persisted_records(
 fn executor_claim_response(
     claim: &SpendExecutorClaimRecord,
     spend: ExecutorSpendHttpResponse,
-) -> ExecutorSpendClaimHttpResponse {
-    ExecutorSpendClaimHttpResponse {
+    state: &ServerState,
+) -> Result<ExecutorSpendClaimHttpResponse> {
+    let reconciled_by_user_id = claim
+        .reconciled_by_user_id
+        .as_ref()
+        .map(|user_id| owner_metadata_for_user_id(user_id, state).map(|owner| owner.pub_id))
+        .transpose()?;
+    let reconciliation_outcome = if claim.reconciled_at.is_some() {
+        Some(match claim.status {
+            SpendExecutorClaimStatus::Settled => "vendor_billed".to_string(),
+            SpendExecutorClaimStatus::Released => "vendor_did_not_bill".to_string(),
+            SpendExecutorClaimStatus::Claimed => {
+                return Err(anyhow!("reconciled executor claim is not finalized"));
+            }
+        })
+    } else {
+        None
+    };
+    Ok(ExecutorSpendClaimHttpResponse {
         operation_key: claim.operation_key.clone(),
         claim_id: claim.id.to_string(),
         workload_profile: claim.workload_profile.clone(),
         status: executor_claim_status_name(&claim.status).to_string(),
         claimed_at: claim.claimed_at.to_rfc3339(),
         claim_expires_at: claim.expires_at.to_rfc3339(),
+        finalized_at: claim.finalized_at.map(|timestamp| timestamp.to_rfc3339()),
+        settlement_id: claim.settlement_id.as_ref().map(ToString::to_string),
+        reconciliation_required: matches!(claim.status, SpendExecutorClaimStatus::Claimed)
+            && claim.expires_at <= Utc::now(),
+        reconciliation_outcome,
+        provider_reference: claim.provider_reference.clone(),
+        evidence: claim.reconciliation_evidence.clone(),
+        reconciled_at: claim.reconciled_at.map(|timestamp| timestamp.to_rfc3339()),
+        reconciled_by_user_id,
         spend,
-    }
+    })
 }
 
 fn executor_claim_status_name(status: &SpendExecutorClaimStatus) -> &'static str {
@@ -5078,6 +5332,19 @@ mod tests {
                 .expect("scope rules should be an array")
                 .iter()
                 .any(|item| item == "account_id, amount_cents, merchant, and task_id must match the original authorized spend"));
+            assert_eq!(
+                response.body["routes"]["reconciliation_queue"],
+                "GET /spend/executor/reconciliation"
+            );
+            assert_eq!(
+                response.body["routes"]["reconcile_vendor_billed"],
+                "POST /spend/executor/settle"
+            );
+            assert!(response.body["reconciliation_request"]["required"]
+                .as_array()
+                .expect("reconciliation fields should be an array")
+                .iter()
+                .any(|item| item == "evidence"));
         }
 
         std::fs::remove_file(path).ok();
@@ -5384,6 +5651,120 @@ mod tests {
         assert!(retry_error
             .to_string()
             .contains("spend auth token has been revoked"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn expired_claim_lookup_queue_and_human_reconciliation_restore_budget_usability() {
+        let mut timing = SpendTimingConfig::default();
+        timing
+            .profiles
+            .get_mut("default")
+            .expect("default timing profile should exist")
+            .claim_ttl_seconds = 1;
+        let (path, state, agent, authorization) =
+            setup_executor_authorization_with_timing("executor-reconciliation", timing);
+        let claim = claim_executor_spend(
+            json!({
+                "spend_auth_token_id": authorization
+                    .auth_token_id
+                    .expect("authorization should issue a token"),
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "merchant": "gongbu.image",
+                "task_id": "hubu-logo-demo",
+                "operation_key": "executor-reconciliation-operation",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("executor should claim authorization");
+
+        let active = get_executor_claim(Some(&claim.claim_id), &state)
+            .expect("active claim status should be readable");
+        assert!(!active.reconciliation_required);
+        let mixed_mode_error = finalize_executor_spend(
+            json!({
+                "claim_id": claim.claim_id,
+                "operation_key": "executor-reconciliation-operation",
+                "agent_id": agent.agent_id,
+                "provider_reference": "must-not-mix",
+                "evidence": "must-not-mix",
+            })
+            .to_string(),
+            &state,
+            true,
+        )
+        .expect_err("executor and reconciliation request fields must not be mixed");
+        assert!(mixed_mode_error
+            .to_string()
+            .contains("did not match any variant"));
+        assert!(list_executor_claims_requiring_reconciliation(&state)
+            .unwrap()
+            .claims
+            .is_empty());
+
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+        let normal_error = finalize_executor_spend(
+            json!({
+                "operation_key": "executor-reconciliation-operation",
+                "agent_id": agent.agent_id,
+            })
+            .to_string(),
+            &state,
+            true,
+        )
+        .expect_err("normal settlement should reject an expired claim");
+        assert!(normal_error
+            .to_string()
+            .contains("expired and requires reconciliation"));
+
+        let queue = list_executor_claims_requiring_reconciliation(&state)
+            .expect("reconciliation queue should list");
+        assert_eq!(queue.claims.len(), 1);
+        assert_eq!(queue.claims[0].claim_id, claim.claim_id);
+        assert!(queue.claims[0].reconciliation_required);
+        assert_eq!(queue.claims[0].spend.budget_hold.frozen_amount_cents, 500);
+
+        let reconciled = finalize_executor_spend(
+            json!({
+                "claim_id": claim.claim_id,
+                "provider_reference": "openai-request-abc123",
+                "evidence": "Provider usage export shows a completed billed request.",
+            })
+            .to_string(),
+            &state,
+            true,
+        )
+        .expect("human-confirmed billed claim should settle");
+        assert_eq!(reconciled["status"], "settled");
+        assert_eq!(
+            reconciled["reconciliation_outcome"].as_str(),
+            Some("vendor_billed")
+        );
+        assert_eq!(
+            reconciled["provider_reference"].as_str(),
+            Some("openai-request-abc123")
+        );
+        assert!(reconciled["reconciled_by_user_id"].is_string());
+        assert_eq!(reconciled["spend"]["budget_hold"]["frozen_amount_cents"], 0);
+        assert_eq!(
+            reconciled["spend"]["budget_hold"]["consumed_amount_cents"],
+            500
+        );
+        assert!(list_executor_claims_requiring_reconciliation(&state)
+            .unwrap()
+            .claims
+            .is_empty());
+
+        let status = get_executor_claim(Some(&claim.claim_id), &state)
+            .expect("reconciled claim status should remain readable");
+        assert_eq!(
+            status.reconciliation_outcome.as_deref(),
+            reconciled["reconciliation_outcome"].as_str()
+        );
+        assert_eq!(status.evidence.as_deref(), reconciled["evidence"].as_str());
         std::fs::remove_file(path).ok();
     }
 
@@ -5993,9 +6374,22 @@ rules: []
         RegisterAgentHttpResponse,
         SpendHttpResponse,
     ) {
+        setup_executor_authorization_with_timing(test_name, SpendTimingConfig::default())
+    }
+
+    fn setup_executor_authorization_with_timing(
+        test_name: &str,
+        timing: SpendTimingConfig,
+    ) -> (
+        std::path::PathBuf,
+        ServerState,
+        RegisterAgentHttpResponse,
+        SpendHttpResponse,
+    ) {
         let path =
             std::env::temp_dir().join(format!("hubu-api-{test_name}-{}.sqlite", UserId::new()));
-        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let state = ServerState::new_with_db_path_and_spend_timing(&path, timing)
+            .expect("server state should initialize");
         let _user = init(
             json!({
                 "display_name": "Alice Example",

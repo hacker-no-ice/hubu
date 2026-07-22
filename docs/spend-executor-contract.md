@@ -28,8 +28,10 @@ same workflow. Two agents owned by the same user may use the same operation
 key; one agent may not reuse an operation key for different work.
 V2's separate
 `executor_execution_id` is no longer part of the public contract.
-`POST /spend/executor/validate` remains available for scope inspection, but
-validation alone does not authorize irreversible work.
+V3 also keeps the exclusive, durable execution claim introduced in V2 and adds
+owner-scoped claim lookup plus human-gated reconciliation for expired,
+uncertain claims. `POST /spend/executor/validate` remains available for scope
+inspection, but validation alone does not authorize irreversible work.
 
 ## Boundary
 
@@ -42,6 +44,7 @@ Hubu is responsible for:
 - exclusive executor claims and claim leases
 - budget settlement or release
 - audit events for spend state transitions
+- durable provider references and evidence for human reconciliation decisions
 
 Agent platforms or orchestrators are responsible for:
 
@@ -211,6 +214,14 @@ guidance.
   "status": "claimed",
   "claimed_at": "2026-07-20T12:04:00Z",
   "claim_expires_at": "2026-07-20T13:04:00Z",
+  "finalized_at": null,
+  "settlement_id": null,
+  "reconciliation_required": false,
+  "reconciliation_outcome": null,
+  "provider_reference": null,
+  "evidence": null,
+  "reconciled_at": null,
+  "reconciled_by_user_id": null,
   "spend": {
     "operation_key": "codex:tool-call:01JABC123",
     "spend_auth_token_id": "uuid",
@@ -238,6 +249,16 @@ guidance.
 `spend.expires_at` is the original authorization deadline;
 `claim_expires_at` is the separate execution lease.
 
+The authenticated owner can inspect any claim, including terminal claims:
+
+```http
+GET /spend/executor/claim?claim_id=CLAIM_ID
+```
+
+The response includes `reconciliation_required`, terminal settlement details,
+and any stored reconciliation outcome, provider reference, evidence, resolving
+user, and timestamp.
+
 ## Transactional Finalization
 
 Hubu captures one `settlement_started_at` value after parsing and authenticating
@@ -261,8 +282,64 @@ expiry when the transaction begins is rejected for reconciliation.
 Hubu does not automatically release a claimed hold when its lease expires. The
 vendor may have completed work while the executor failed before settlement, so
 automatic release could make billed work disappear from governed consumption.
-An expired claim remains frozen for a future reconciliation workflow and normal
-settle/release requests reject it as requiring reconciliation.
+An expired claim remains frozen and normal settle/release requests reject it as
+requiring reconciliation. The authenticated owner can list only their expired,
+still-claimed work:
+
+```http
+GET /spend/executor/reconciliation
+```
+
+After checking provider billing, a human chooses one terminal outcome. If the
+vendor billed, the human settles the hold:
+
+```http
+POST /spend/executor/settle
+```
+
+```json
+{
+  "claim_id": "00000000-0000-4000-8000-000000000456",
+  "provider_reference": "vendor-request-abc123",
+  "evidence": "Provider usage export confirms the completed billed request."
+}
+```
+
+If the vendor did not bill, the human releases the hold with the same request
+shape:
+
+```http
+POST /spend/executor/release
+```
+
+The existing settle/release endpoints therefore accept one of two exclusive
+request shapes: the normal executor shape with `agent_id` plus the immutable
+`operation_key`, or the human reconciliation shape with `claim_id`,
+`provider_reference`, and `evidence`. Mixing the shapes is rejected. The
+reconciliation shape requires non-empty evidence fields, accepts only an
+expired claim owned by the active user, and atomically updates the claim, token,
+hold, and budget balance. A matching retry returns the stored outcome; a retry
+with different evidence is rejected. Reconciliation records the outcome,
+provider reference, evidence, resolving user, and timestamp. Evidence must not
+contain vendor credentials or sensitive provider payloads.
+
+The CLI is the direct operator surface:
+
+```sh
+hubu spend claim --claim-id CLAIM_ID
+hubu spend reconcile list
+hubu spend reconcile billed --claim-id CLAIM_ID \
+  --provider-reference VENDOR_REFERENCE \
+  --evidence "Provider usage export confirms billing"
+hubu spend reconcile not-billed --claim-id CLAIM_ID \
+  --provider-reference VENDOR_REFERENCE \
+  --evidence "Provider billing search found no charge"
+```
+
+MCP exposes the same lookup and queue as read-only tools. Its billed and
+not-billed resolution tools are protected administrative tools: Hubu advertises
+`prompt_before_call`, and the MCP adapter refuses them unless it is configured
+to trust a client-side human approval gate.
 
 ## Safety Rules
 
@@ -274,4 +351,6 @@ settle/release requests reject it as requiring reconciliation.
 - Agents and executors may retry any stage after an ambiguous response; Hubu
   returns stored workflow state for the same operation key and rejects changed
   spend scope.
+- Executors must not resolve expired claims. A human must review provider
+  billing and choose the reconciliation outcome.
 - Hubu never stores executor vendor secrets through this contract.

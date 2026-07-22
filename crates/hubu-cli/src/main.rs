@@ -1347,6 +1347,14 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         args.remove(0);
         return spend_authorize(base_url, args);
     }
+    if args.first().map(String::as_str) == Some("claim") {
+        args.remove(0);
+        return spend_claim_status(base_url, args);
+    }
+    if args.first().map(String::as_str) == Some("reconcile") {
+        args.remove(0);
+        return spend_reconcile(base_url, args);
+    }
 
     let account_id = take_value(&mut args, "--account-id");
     let agent_id = take_value(&mut args, "--agent-id");
@@ -1400,6 +1408,130 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
 
     let response = post_json(base_url, "/spend/authorize", body)?;
     print_spend_response(&response)
+}
+
+fn spend_claim_status(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    let claim_id = take_required(&mut args, "--claim-id")?;
+    ensure_no_args(args)?;
+    let response = get_json(
+        base_url,
+        &format!("/spend/executor/claim?claim_id={claim_id}"),
+    )?;
+    print_executor_claim(&response)
+}
+
+fn spend_reconcile(base_url: &str, args: Vec<String>) -> Result<()> {
+    let Some(command) = args.first().cloned() else {
+        print_spend_reconcile_help();
+        return Ok(());
+    };
+    let mut args = args;
+    args.remove(0);
+    match command.as_str() {
+        "list" => spend_reconcile_list(base_url, args),
+        "billed" => spend_reconcile_resolve(base_url, args, true),
+        "not-billed" => spend_reconcile_resolve(base_url, args, false),
+        "-h" | "--help" | "help" => {
+            print_spend_reconcile_help();
+            Ok(())
+        }
+        _ => bail!("unknown spend reconcile command `{command}`"),
+    }
+}
+
+fn spend_reconcile_list(base_url: &str, args: Vec<String>) -> Result<()> {
+    ensure_no_args(args)?;
+    let response = get_json(base_url, "/spend/executor/reconciliation")?;
+    let claims = response
+        .get("claims")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `claims`"))?;
+    if claims.is_empty() {
+        println!("No executor claims require reconciliation.");
+        return Ok(());
+    }
+    for claim in claims {
+        print_executor_claim(claim)?;
+    }
+    Ok(())
+}
+
+fn spend_reconcile_resolve(
+    base_url: &str,
+    mut args: Vec<String>,
+    vendor_billed: bool,
+) -> Result<()> {
+    let claim_id = take_required(&mut args, "--claim-id")?;
+    let provider_reference = take_required(&mut args, "--provider-reference")?;
+    let evidence = take_required(&mut args, "--evidence")?;
+    ensure_no_args(args)?;
+    let action = if vendor_billed { "settle" } else { "release" };
+    let response = post_json(
+        base_url,
+        &format!("/spend/executor/{action}"),
+        json!({
+            "claim_id": claim_id,
+            "provider_reference": provider_reference,
+            "evidence": evidence,
+        }),
+    )?;
+    println!(
+        "Claim reconciled: {}",
+        if vendor_billed {
+            "vendor billed; hold settled"
+        } else {
+            "vendor did not bill; hold released"
+        }
+    );
+    print_executor_claim(&response)
+}
+
+fn print_executor_claim(claim: &Value) -> Result<()> {
+    println!("Executor claim");
+    println!("  claim_id: {}", string_at(claim, "claim_id")?);
+    println!("  status: {}", string_at(claim, "status")?);
+    println!(
+        "  reconciliation_required: {}",
+        claim
+            .get("reconciliation_required")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow!("server response missing `reconciliation_required`"))?
+    );
+    println!("  operation_key: {}", string_at(claim, "operation_key")?);
+    println!(
+        "  claim_expires_at: {}",
+        string_at(claim, "claim_expires_at")?
+    );
+    for field in [
+        "settlement_id",
+        "reconciliation_outcome",
+        "provider_reference",
+        "evidence",
+        "reconciled_at",
+        "reconciled_by_user_id",
+    ] {
+        if let Some(value) = claim.get(field).and_then(Value::as_str) {
+            println!("  {field}: {value}");
+        }
+    }
+    let spend = claim
+        .get("spend")
+        .ok_or_else(|| anyhow!("server response missing `spend`"))?;
+    println!("  account_id: {}", string_at(spend, "account_id")?);
+    println!("  agent_id: {}", string_at(spend, "agent_id")?);
+    println!("  amount: {}", money_at(spend, "amount_cents")?);
+    if let Some(merchant) = spend.get("merchant").and_then(Value::as_str) {
+        println!("  merchant: {merchant}");
+    }
+    let hold = spend
+        .get("budget_hold")
+        .ok_or_else(|| anyhow!("server response missing `budget_hold`"))?;
+    println!("  hold_status: {}", string_at(hold, "status")?);
+    println!(
+        "  frozen_amount: {}",
+        money_at(hold, "frozen_amount_cents")?
+    );
+    Ok(())
 }
 
 fn require_spend_account_id(
@@ -1811,7 +1943,7 @@ Commands:
   init       Generate starter files and configure clients
   agent      Read registered agents
   budget     Create and list agent budgets
-  spend      Test the agent spend path
+  spend      Test spend and reconcile uncertain executor claims
   ledger     Read ledger transactions
   health     Check the Hubu server
 
@@ -2168,6 +2300,10 @@ fn print_spend_help() {
 Usage:
   hubu spend --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
   hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
+  hubu spend claim --claim-id ID
+  hubu spend reconcile list
+  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT
+  hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
 
 Note:
   Spend commands require the agent account id because the account is the spending source. CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
@@ -2191,6 +2327,19 @@ Note:
 
 Example:
   hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --reason \"Reserve model API credits\""
+    );
+}
+
+fn print_spend_reconcile_help() {
+    println!(
+        "Resolve expired executor claims after a human reviews vendor billing
+
+Usage:
+  hubu spend reconcile list
+  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT
+  hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
+
+The provider reference and evidence are stored with the atomic settlement or release. Do not include vendor credentials or sensitive payloads."
     );
 }
 
