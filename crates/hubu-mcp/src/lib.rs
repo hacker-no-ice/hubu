@@ -7,13 +7,17 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
+mod operation_key_adapter;
+
+use operation_key_adapter::{OperationKeyAdapter, OPERATION_METADATA_KEY, PLATFORM_NAMESPACE_ENV};
+
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const HUBU_APPROVAL_PROFILE_VERSION: &str = "hubu-mcp-client-approval-v1";
-const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Spend calls currently require the client harness to supply a stable, namespaced operation_key; Hubu MCP does not yet derive it from trusted platform metadata, and the model should not invent one. Hubu stores workflow state under that key for authorization, claim, finalization, and retries. Protected setup/admin tools require a human approval prompt before tools/call. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
+const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. The trusted client harness must attach one stable logical operation id at params._meta[\"io.hubu/operation\"].id; Hubu MCP derives and injects operation_key outside model-controlled arguments. Reuse that metadata id for retries. Protected setup/admin tools require a human approval prompt before tools/call. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
 const READ_TOOL_NAMES: &[&str] = &[
     "hubu_health",
     "hubu_registration_guidance",
@@ -32,28 +36,38 @@ const APPROVAL_TOOL_NAMES: &[&str] = &[
     "hubu_create_recurring_budget",
 ];
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct McpConfig {
     protected_tools_enabled: bool,
+    operation_key_adapter: OperationKeyAdapter,
+}
+
+impl McpConfig {
+    fn from_env() -> Result<Self> {
+        Ok(Self {
+            protected_tools_enabled: env_flag("HUBU_MCP_TRUST_CLIENT_APPROVAL"),
+            operation_key_adapter: OperationKeyAdapter::from_env()?,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_tests() -> Self {
+        Self {
+            protected_tools_enabled: false,
+            operation_key_adapter: OperationKeyAdapter::configured("test-platform")
+                .expect("test adapter namespace should be valid"),
+        }
+    }
 }
 
 pub fn run_stdio_from_env() -> Result<()> {
     let base_url = env::var("HUBU_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-    let config = McpConfig {
-        protected_tools_enabled: env_flag("HUBU_MCP_TRUST_CLIENT_APPROVAL"),
-    };
+    let config = McpConfig::from_env()?;
     run_stdio_with_config(&base_url, config, io::stdin().lock(), io::stdout().lock())
 }
 
 pub fn run_stdio(base_url: &str, input: impl BufRead, mut output: impl Write) -> Result<()> {
-    run_stdio_with_config(
-        base_url,
-        McpConfig {
-            protected_tools_enabled: false,
-        },
-        input,
-        &mut output,
-    )
+    run_stdio_with_config(base_url, McpConfig::from_env()?, input, &mut output)
 }
 
 fn run_stdio_with_config(
@@ -68,7 +82,7 @@ fn run_stdio_with_config(
             continue;
         }
         let request: Value = serde_json::from_str(&line)?;
-        if let Some(response) = handle_json_rpc(base_url, config, request) {
+        if let Some(response) = handle_json_rpc(base_url, &config, request) {
             writeln!(output, "{}", serde_json::to_string(&response)?)?;
             output.flush()?;
         }
@@ -82,7 +96,7 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn handle_json_rpc(base_url: &str, config: McpConfig, request: Value) -> Option<Value> {
+fn handle_json_rpc(base_url: &str, config: &McpConfig, request: Value) -> Option<Value> {
     let id = request.get("id").cloned();
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let result = match method {
@@ -238,27 +252,25 @@ fn tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "hubu_submit_spend",
-            "Submit an agent spend request using a stable operation key supplied by the agent platform. Human approval is only required when the returned decision is needs_approval.",
+            "Submit an agent spend request. Hubu MCP injects the operation key from trusted platform metadata; the model must not supply it. Human approval is only required when the returned decision is needs_approval.",
             json_schema_required(json!({
-                "operation_key": { "type": "string", "description": "Stable, namespaced platform operation id; until a trusted adapter is available, the client harness must supply and reuse it for retries" },
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "workload_profile": { "type": "string" }
-            }), &["operation_key", "account_id", "amount_cents", "reason"]),
+            }), &["account_id", "amount_cents", "reason"]),
         ),
         write_tool(
             "hubu_authorize_spend",
-            "Authorize an agent spend request using a stable operation key supplied by the agent platform.",
+            "Authorize an agent spend request. Hubu MCP injects the operation key from trusted platform metadata; the model must not supply it.",
             json_schema_required(json!({
-                "operation_key": { "type": "string", "description": "Stable, namespaced platform operation id supplied by the client harness and reused throughout the workflow" },
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "workload_profile": { "type": "string" }
-            }), &["operation_key", "account_id", "amount_cents", "reason"]),
+            }), &["account_id", "amount_cents", "reason"]),
         ),
         read_tool(
             "hubu_list_agents",
@@ -301,6 +313,7 @@ fn read_tool(name: &str, description: &str, input_schema: Value) -> Value {
         input_schema,
         true,
         false,
+        false,
         "none",
         "auto",
         "none",
@@ -308,16 +321,24 @@ fn read_tool(name: &str, description: &str, input_schema: Value) -> Value {
 }
 
 fn write_tool(name: &str, description: &str, input_schema: Value) -> Value {
-    tool(
+    let mut definition = tool(
         name,
         description,
         input_schema,
         false,
         false,
+        true,
         "conditional",
         "auto",
         "hubu_policy_needs_approval",
-    )
+    );
+    definition["annotations"]["x_hubu_operation_metadata"] = json!({
+        "key": OPERATION_METADATA_KEY,
+        "id_field": "id",
+        "namespace_env": PLATFORM_NAMESPACE_ENV,
+        "model_controlled": false
+    });
+    definition
 }
 
 fn approval_tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -327,6 +348,7 @@ fn approval_tool(name: &str, description: &str, input_schema: Value) -> Value {
         input_schema,
         false,
         true,
+        false,
         "required",
         "prompt_before_call",
         "client_human_approval_required",
@@ -339,6 +361,7 @@ fn tool(
     input_schema: Value,
     read_only: bool,
     destructive: bool,
+    idempotent: bool,
     human_approval: &str,
     client_approval_mode: &str,
     runtime_approval: &str,
@@ -350,7 +373,7 @@ fn tool(
         "annotations": {
             "readOnlyHint": read_only,
             "destructiveHint": destructive,
-            "idempotentHint": false,
+            "idempotentHint": idempotent,
             "openWorldHint": true,
             "x_hubu_human_approval": human_approval,
             "x_hubu_client_approval_mode": client_approval_mode,
@@ -378,6 +401,13 @@ fn approval_profile() -> Value {
             "needs_approval_meaning": "Hubu policy required human review and no payment was executed.",
             "agent_action": "Stop the spend workflow and surface approval_reason plus the structured response to the human."
         },
+        "operation_key_adapter": {
+            "metadata_key": OPERATION_METADATA_KEY,
+            "operation_id_field": "id",
+            "platform_namespace_env": PLATFORM_NAMESPACE_ENV,
+            "tool_argument_exposed": false,
+            "retry_rule": "Reuse the same trusted metadata id for every attempt of one logical spend operation."
+        },
         "annotation_fields": {
             "client_pre_call": "x_hubu_client_approval_mode",
             "runtime_policy": "x_hubu_runtime_approval",
@@ -403,7 +433,7 @@ fn approval_profile() -> Value {
     })
 }
 
-fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> {
+fn call_tool(base_url: &str, config: &McpConfig, params: Value) -> Result<Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -466,10 +496,12 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
             }
         }
         "hubu_submit_spend" => {
+            let arguments = config.operation_key_adapter.inject(&params, arguments)?;
             let response = post_json(base_url, "/spend", arguments)?;
             return Ok(tool_result(spend_response_with_approval_hint(response)));
         }
         "hubu_authorize_spend" => {
+            let arguments = config.operation_key_adapter.inject(&params, arguments)?;
             let response = post_json(base_url, "/spend/authorize", arguments)?;
             return Ok(tool_result(spend_response_with_approval_hint(response)));
         }
@@ -492,7 +524,7 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
     Ok(tool_result(response))
 }
 
-fn require_trusted_client_approval(config: McpConfig, tool_name: &str) -> Result<()> {
+fn require_trusted_client_approval(config: &McpConfig, tool_name: &str) -> Result<()> {
     if config.protected_tools_enabled {
         Ok(())
     } else {
@@ -631,7 +663,36 @@ fn parse_http_response(raw: &str) -> Result<(u16, &str)> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+    };
+
     use super::*;
+
+    fn one_shot_json_server(response: Value) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            stream.read_to_string(&mut request).unwrap();
+            sender.send(request).unwrap();
+
+            let body = response.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        (format!("http://{address}"), receiver)
+    }
 
     #[test]
     fn protected_tools_are_marked_for_human_approval() {
@@ -676,6 +737,37 @@ mod tests {
     }
 
     #[test]
+    fn spend_call_injects_trusted_operation_key_before_http_forwarding() {
+        let (base_url, request) = one_shot_json_server(json!({
+            "decision": "allow",
+            "operation_key": "test-platform:tool-call:01JABC"
+        }));
+        let params = json!({
+            "name": "hubu_authorize_spend",
+            "arguments": {
+                "account_id": "agent-1",
+                "amount_cents": 500,
+                "reason": "model call"
+            },
+            "_meta": {
+                OPERATION_METADATA_KEY: {
+                    "id": "tool-call:01JABC"
+                }
+            }
+        });
+
+        let response = call_tool(&base_url, &McpConfig::for_tests(), params).unwrap();
+        let request = request.recv().unwrap();
+
+        assert_eq!(
+            response["structuredContent"]["operation_key"],
+            "test-platform:tool-call:01JABC"
+        );
+        assert!(request.starts_with("POST /spend/authorize HTTP/1.1"));
+        assert!(request.contains("\"operation_key\":\"test-platform:tool-call:01JABC\""));
+    }
+
+    #[test]
     fn authorize_spend_tool_is_agent_callable() {
         let tools = tool_definitions();
         let tool = tools
@@ -694,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn spend_tool_schemas_require_operation_key_and_account_id() {
+    fn spend_tool_schemas_hide_operation_key_and_require_account_id() {
         let tools = tool_definitions();
 
         for tool_name in ["hubu_submit_spend", "hubu_authorize_spend"] {
@@ -708,13 +800,18 @@ mod tests {
                 .expect("spend tool required fields should be an array");
 
             assert!(properties["account_id"].is_object());
-            assert!(properties["operation_key"].is_object());
+            assert!(properties.get("operation_key").is_none());
             assert!(properties.get("job_id").is_none());
             assert!(properties.get("agent_id").is_none());
             assert!(required.iter().any(|field| field == "account_id"));
-            assert!(required.iter().any(|field| field == "operation_key"));
+            assert!(!required.iter().any(|field| field == "operation_key"));
             assert!(required.iter().any(|field| field == "amount_cents"));
             assert!(required.iter().any(|field| field == "reason"));
+            assert_eq!(tool["annotations"]["idempotentHint"], true);
+            assert_eq!(
+                tool["annotations"]["x_hubu_operation_metadata"]["key"],
+                OPERATION_METADATA_KEY
+            );
         }
     }
 
@@ -765,19 +862,14 @@ mod tests {
             "method": "initialize"
         });
 
-        let response = handle_json_rpc(
-            DEFAULT_BASE_URL,
-            McpConfig {
-                protected_tools_enabled: false,
-            },
-            request,
-        )
-        .expect("initialize should return a response");
+        let response = handle_json_rpc(DEFAULT_BASE_URL, &McpConfig::for_tests(), request)
+            .expect("initialize should return a response");
 
         let instructions = response["result"]["instructions"]
             .as_str()
             .expect("instructions should be present");
         assert!(instructions.contains("hubu_submit_spend"));
+        assert!(instructions.contains(OPERATION_METADATA_KEY));
         assert!(instructions.contains("Protected setup/admin tools require"));
     }
 
@@ -797,8 +889,9 @@ mod tests {
     #[test]
     fn protected_tool_rejects_without_trusted_client_gate() {
         let error = require_trusted_client_approval(
-            McpConfig {
+            &McpConfig {
                 protected_tools_enabled: false,
+                operation_key_adapter: OperationKeyAdapter::configured("test-platform").unwrap(),
             },
             "hubu_create_budget",
         )

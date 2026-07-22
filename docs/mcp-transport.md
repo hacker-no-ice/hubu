@@ -119,7 +119,7 @@ destructive MCP tools such as registration, policy changes, spending targets, or
 For other MCP clients, configure the client to launch:
 
 ```sh
-cargo run --bin hubu-mcp-server
+HUBU_MCP_PLATFORM_NAMESPACE=my-platform cargo run --bin hubu-mcp-server
 ```
 
 Then configure the harness from Hubu's MCP metadata:
@@ -135,6 +135,9 @@ Then configure the harness from Hubu's MCP metadata:
   spending-target or budget creation.
 
 The MCP server reads `HUBU_URL` and defaults to `http://127.0.0.1:8787`.
+It also reads `HUBU_MCP_PLATFORM_NAMESPACE`; `hubu init codex` sets this to
+`codex`, while manually configured clients must choose their own stable
+namespace.
 Protected write tools are disabled unless the MCP process is started with
 `HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. Only set that variable when the MCP client
 is trusted to show a human approval prompt before invoking destructive tools.
@@ -213,11 +216,39 @@ the client platform or orchestrator, not invented by the model. Hubu durably
 stores workflow state under that key; identical retries recover the original
 workflow and changed scope is rejected.
 
-The current MCP transport exposes `operation_key` as an explicit tool argument
-and forwards it unchanged. It does not yet derive the key from trusted platform
-invocation metadata. Until a platform adapter is added, the client harness must
-inject and retain a stable key; model-generated keys are not a reliable
-idempotency boundary.
+The MCP transport does not expose `operation_key` as a tool argument. A trusted
+client harness must attach one stable logical-operation id outside the model's
+arguments:
+
+```json
+{
+  "name": "hubu_authorize_spend",
+  "arguments": {
+    "account_id": "agent_...",
+    "amount_cents": 500,
+    "reason": "Reserve model API credits"
+  },
+  "_meta": {
+    "io.hubu/operation": {
+      "id": "tool-call:01JABC123"
+    }
+  }
+}
+```
+
+With `HUBU_MCP_PLATFORM_NAMESPACE=codex`, the adapter injects
+`operation_key=codex:tool-call:01JABC123` into the HTTP request. It derives the
+same key for every retry carrying the same metadata id. It rejects missing or
+malformed metadata and rejects any `operation_key` supplied through model
+arguments. The adapter deliberately does not use mutable spend fields, the MCP
+JSON-RPC request id, a thread id, or tracing metadata as workflow identity.
+
+This establishes the server-side adapter contract, but each MCP client still
+has to provide a stable per-operation metadata id. `hubu init codex` configures
+the namespace; it cannot manufacture an id that the Codex client does not put
+on the request. Until a Codex release or an outer harness injects
+`io.hubu/operation`, Hubu MCP spend calls from that client fail closed. Read and
+protected setup tools are unaffected.
 
 ## Tool Mapping
 

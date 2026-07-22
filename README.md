@@ -127,9 +127,12 @@ hubu budget list
 hubu ledger list
 ```
 
-The agent platform supplies a stable, namespaced operation key. Hubu stores the
-authoritative workflow state under `(agent_id, operation_key)`, so replaying
-authorization, claim, or finalization recovers the same result.
+The agent platform supplies a stable logical operation id. For MCP spend tools,
+the trusted harness puts that id in request metadata and the Hubu MCP adapter
+injects the namespaced `operation_key` outside model-controlled arguments. Hubu
+stores the authoritative workflow state under `(agent_id, operation_key)`, so
+replaying authorization, claim, or finalization recovers the same result. HTTP
+and CLI callers continue to supply the operation key explicitly.
 
 Codex is one supported MCP harness, not a Hubu requirement. To make Hubu tools
 discoverable to Codex agents, initialize the Codex MCP config:
@@ -141,8 +144,10 @@ HUBU_AUTH_TOKEN_FILE=~/.hubu/hubu.auth-token hubu-server
 
 If the server from step 1 is already running with a different token file,
 restart it with the same `HUBU_AUTH_TOKEN_FILE` before restarting Codex. Codex
-should then be able to discover Hubu MCP tools and call spend tools without
-holding wallet credentials. For other MCP clients, use Hubu's tool annotations
+should then be able to discover Hubu MCP tools without holding wallet
+credentials. Spend calls additionally require the client to attach Hubu's
+trusted logical-operation metadata; they fail closed when the client does not
+provide it. For other MCP clients, use Hubu's tool annotations
 or `hubu_client_approval_profile`; see
 [docs/mcp-transport.md](docs/mcp-transport.md).
 
@@ -236,7 +241,8 @@ hubu init codex
 ```
 
 Agents can discover Hubu tools, inspect read-only state, and submit spend
-requests without holding wallet credentials. Setup/admin actions such as
+requests without holding wallet credentials when the harness supplies trusted
+operation metadata. Setup/admin actions such as
 registration, policy changes, spending targets, and budget creation remain human-gated: humans
 can run them directly with the CLI, or ask an agent to invoke protected MCP
 tools after the client shows a human approval prompt. If policy returns

@@ -45,8 +45,8 @@ Hubu is responsible for:
 
 Agent platforms or orchestrators are responsible for:
 
-- supplying one stable, namespaced `operation_key` for each logical operation
-- reusing that key for every authorization retry
+- supplying one stable platform operation id for each logical operation
+- reusing that id for every authorization retry
 - keeping operation identity outside the language model's conversational memory
 
 Executors are responsible for:
@@ -99,10 +99,13 @@ a retry loop, or ask the model to invent or remember it. A reusable skill can
 teach the protocol, but enforcement belongs in the platform adapter or SDK and
 Hubu's database constraints.
 
-The current Hubu MCP transport accepts this key as an explicit input but does
-not yet derive it from trusted platform invocation metadata. That adapter is a
-separate integration layer; this contract defines the server-side invariant it
-must satisfy.
+The Hubu MCP transport enforces this boundary with a trusted metadata adapter.
+The model-visible spend schemas do not contain `operation_key`. Instead, the
+client puts a stable id in `params._meta["io.hubu/operation"].id`, and the
+adapter prefixes it with `HUBU_MCP_PLATFORM_NAMESPACE` before forwarding the
+HTTP request. Identical metadata maps deterministically to the same key, and
+missing, malformed, or model-supplied keys fail closed. Direct HTTP and CLI
+callers still supply the final namespaced key themselves.
 
 Hubu rejects unknown profiles and non-positive durations during startup or
 authorization. The effective timing configuration is published in executor

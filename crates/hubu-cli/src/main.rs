@@ -26,6 +26,7 @@ const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../policies/starter-po
 const CODEX_HOME_ENV: &str = "CODEX_HOME";
 const HUBU_HOME_ENV: &str = "HUBU_HOME";
 const HUBU_MCP_SERVER_ENV: &str = "HUBU_MCP_SERVER";
+const HUBU_MCP_PLATFORM_NAMESPACE_ENV: &str = "HUBU_MCP_PLATFORM_NAMESPACE";
 const HUBU_CODEX_MCP_BEGIN: &str = "# >>> hubu managed codex mcp";
 const HUBU_CODEX_MCP_END: &str = "# <<< hubu managed codex mcp";
 
@@ -308,7 +309,8 @@ fn codex_mcp_config_block(
          tool_timeout_sec = 60\n\n\
          [mcp_servers.hubu.env]\n\
          HUBU_URL = \"{}\"\n\
-         {AUTH_TOKEN_FILE_ENV} = \"{}\"\n",
+         {AUTH_TOKEN_FILE_ENV} = \"{}\"\n\
+         {HUBU_MCP_PLATFORM_NAMESPACE_ENV} = \"codex\"\n",
         toml_basic_string(&mcp_server.display().to_string()),
         toml_basic_string(base_url),
         toml_basic_string(&token_file.display().to_string())
@@ -2222,6 +2224,7 @@ mod tests {
         assert!(block.contains(HUBU_CODEX_MCP_BEGIN));
         assert!(block.contains("command = \"/tmp/hubu \\\"dev\\\"/hubu-mcp-server\""));
         assert!(block.contains("HUBU_AUTH_TOKEN_FILE = \"/tmp/hubu\\\\token\""));
+        assert!(block.contains("HUBU_MCP_PLATFORM_NAMESPACE = \"codex\""));
         assert!(block.contains("[mcp_servers.hubu.tools.hubu_authorize_spend]"));
         assert!(block.contains("[mcp_servers.hubu.tools.hubu_submit_spend]"));
         assert!(block.contains("approval_mode = \"approve\""));
