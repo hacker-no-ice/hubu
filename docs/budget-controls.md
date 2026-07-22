@@ -97,6 +97,13 @@ reconciliation capability in addition to the normal API bearer token. See the
 [spend executor contract](spend-executor-contract.md#expired-claims) for routes,
 CLI commands, and the human-gated MCP workflow.
 
+Executor settlement includes actual vendor cost, provider request ID, a compact
+price/model snapshot, and an artifact reference. Hubu persists the authorized
+maximum with that receipt, consumes only the reported actual cost, and returns
+the unused remainder to the budget in the same transaction. Receipt cost cannot
+be negative or exceed the claimed hold, and a finalized receipt is immutable
+across retries.
+
 `hubu spend` continues into the wallet rail. In the current local server, that
 rail is mocked. Successful payment settles the budget hold into consumed
 balance and records a ledger transaction; failed payment releases the hold back
@@ -129,7 +136,9 @@ hubu budget list
 allocation, exceeded amount, period, and the fact that enforcement is advisory.
 `hubu budget list` reports budget status, limit, consumed balance, frozen
 balance, remaining balance, and period. Pair it with `hubu ledger list` to
-compare settled payment movement against consumed budget balance.
+compare settled payment movement against consumed budget balance. Executor
+settlement receipts are stored in the governance database rather than the
+payment ledger because they reconcile vendor work, not a Hubu-executed payment.
 
 ## Current Limits
 

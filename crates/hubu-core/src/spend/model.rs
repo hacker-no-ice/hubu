@@ -173,6 +173,36 @@ pub struct SpendExecutorClaimRecord {
     pub reconciled_by_user_id: Option<UserId>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SpendExecutorPriceModelSnapshot {
+    pub provider: String,
+    pub model: String,
+    pub unit_price_cents: i64,
+    pub pricing_unit: String,
+    pub currency: Currency,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SpendExecutorSettlementReceipt {
+    pub actual_vendor_cost_cents: i64,
+    pub provider_request_id: String,
+    pub price_model_snapshot: SpendExecutorPriceModelSnapshot,
+    pub artifact_reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedSpendExecutorSettlementReceipt {
+    pub claim_id: SpendExecutorClaimId,
+    pub settlement_id: PaymentId,
+    pub authorized_max_cents: i64,
+    pub released_amount_cents: i64,
+    pub currency: Currency,
+    pub receipt: SpendExecutorSettlementReceipt,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SpendExecutorClaimRequest {
     pub authorization: SpendPaymentValidationRequest,

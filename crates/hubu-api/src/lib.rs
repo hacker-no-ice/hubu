@@ -34,8 +34,8 @@ use hubu_core::{
         ApprovedSpendAuthorization, AuthorizeSpendRequest, BudgetHoldUpdate,
         ClaimExecutorSpendRequest, ExecutorClaimReconciliationOutcome, ExecutorClaimService,
         ExecutorClaimState, FailedPaymentHoldPolicy, FinalizeExecutorClaimRequest,
-        ReconcileExecutorClaimRequest, RejectedSpendAuthorization, SpendApprovalError,
-        SpendApprovalService, SpendAuthorizationOutcome, SpendPaymentSpec,
+        ReconcileExecutorClaimRequest, RejectedSpendAuthorization, SettleExecutorClaimRequest,
+        SpendApprovalError, SpendApprovalService, SpendAuthorizationOutcome, SpendPaymentSpec,
     },
     budget::{
         BudgetHold, BudgetHoldStatus, BudgetManager, BudgetRecurrence, BudgetStatus,
@@ -54,8 +54,9 @@ use hubu_core::{
     },
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
     spend::{
-        SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendManager,
-        SpendPaymentValidationRequest, SpendTimingConfig,
+        SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendExecutorPriceModelSnapshot,
+        SpendExecutorSettlementReceipt, SpendManager, SpendPaymentValidationRequest,
+        SpendTimingConfig,
     },
     spending_target::{
         periods_overlap, CreateSpendingTargetRequest, SpendingTarget, SpendingTargetManager,
@@ -951,6 +952,7 @@ struct ExecutorSpendFinalizeHttpRequest {
     #[serde(alias = "executor_execution_id")]
     operation_key: String,
     agent_id: String,
+    receipt: Option<SpendExecutorSettlementReceipt>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -959,6 +961,7 @@ struct ExecutorClaimReconciliationHttpRequest {
     claim_id: String,
     provider_reference: String,
     evidence: String,
+    receipt: Option<SpendExecutorSettlementReceipt>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1006,7 +1009,20 @@ struct ExecutorSpendSettlementHttpResponse {
     settlement_id: String,
     claim_id: String,
     status: String,
+    receipt: ExecutorSpendSettlementReceiptHttpResponse,
     spend: ExecutorSpendHttpResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutorSpendSettlementReceiptHttpResponse {
+    authorized_max_cents: i64,
+    actual_vendor_cost_cents: i64,
+    released_amount_cents: i64,
+    currency: String,
+    provider_request_id: String,
+    price_model_snapshot: SpendExecutorPriceModelSnapshot,
+    artifact_reference: String,
+    created_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1286,14 +1302,14 @@ fn authenticate_reconciliation_capability(
 
 fn spend_executor_guidance(state: &ServerState) -> Value {
     json!({
-        "protocol_version": "hubu-spend-executor-v3",
+        "protocol_version": "hubu-spend-executor-v4",
         "role_boundary": {
             "hubu": [
                 "register agents and owners",
                 "evaluate policy",
                 "reserve one agent-budget hold per spend decision",
                 "exclusively claim executor spend authorization",
-                "settle or release reserved budget"
+                "settle actual vendor cost and release unused authorization, or release the full reserved budget"
             ],
             "executor": [
                 "hold vendor credentials outside Hubu",
@@ -1307,7 +1323,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "agent sends the operation_key, spend_auth_token_id, and matching scope to an executor",
             "executor calls POST /spend/executor/claim with the same operation_key before irreversible work",
             "executor performs work with its own credentials",
-            "executor finalizes by agent_id and operation_key with settle after successful irreversible work or release before work is performed"
+            "executor finalizes by agent_id and operation_key with a provider receipt after successful irreversible work or releases before work is performed"
         ],
         "routes": {
             "guidance": [
@@ -1369,9 +1385,19 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "merchant",
                 "task_id"
             ],
-            "currency": "USD in v3"
+            "currency": "usd in v4"
         },
-        "finalize_request": {
+        "settle_request": {
+            "required": [
+                "agent_id",
+                "operation_key",
+                "receipt.actual_vendor_cost_cents",
+                "receipt.provider_request_id",
+                "receipt.price_model_snapshot",
+                "receipt.artifact_reference"
+            ]
+        },
+        "release_request": {
             "required": [
                 "agent_id",
                 "operation_key"
@@ -1382,6 +1408,12 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "claim_id",
                 "provider_reference",
                 "evidence"
+            ],
+            "vendor_billed_required": [
+                "receipt.actual_vendor_cost_cents",
+                "receipt.provider_request_id",
+                "receipt.price_model_snapshot",
+                "receipt.artifact_reference"
             ],
             "routes": {
                 "vendor_billed": "POST /spend/executor/settle",
@@ -1408,8 +1440,9 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
         "settlement_rules": [
             "settle only after the executor has performed irreversible billable work",
             "release only before irreversible billable work has occurred",
-            "settlement atomically marks the claim settled and token used while consuming the claimed budget hold",
-            "an identical settlement retry returns the original settlement_id without consuming budget twice",
+            "settlement atomically persists the immutable provider receipt, marks the claim settled and token used, consumes actual vendor cost, and releases the authorization remainder",
+            "the actual vendor cost must be non-negative and cannot exceed the authorized maximum",
+            "an identical settlement retry returns the original settlement_id and receipt without consuming budget twice; a changed receipt is rejected",
             "finalization resolves by agent_id and operation_key, so a caller can recover the result even if it lost the claim response",
             "claim expiry is evaluated once when the settlement transaction starts",
             "release atomically marks the claim released and token revoked while returning the reserved amount",
@@ -2777,6 +2810,7 @@ fn reconcile_executor_claim(
                 provider_reference: request.provider_reference,
                 evidence: request.evidence,
                 outcome,
+                receipt: request.receipt,
             },
             Utc::now(),
             &mut spend_manager,
@@ -2813,7 +2847,17 @@ fn settle_executor_spend_request(
     state: &ServerState,
 ) -> Result<ExecutorSpendSettlementHttpResponse> {
     let user = authenticated_user_context(state)?;
-    let claim_request = executor_claim_validation_request(request, &user, state)?;
+    let receipt = request
+        .receipt
+        .clone()
+        .ok_or_else(|| anyhow!("billed executor settlement requires a provider receipt"))?;
+    let finalization_request = executor_claim_validation_request(request, &user, state)?;
+    let claim_request = SettleExecutorClaimRequest {
+        owner_user_id: finalization_request.owner_user_id,
+        agent_id: finalization_request.agent_id,
+        operation_key: finalization_request.operation_key,
+        receipt,
+    };
     let claim_state = {
         let mut spend_manager = state
             .spend
@@ -2841,12 +2885,26 @@ fn settle_executor_spend_request(
         .settlement_id
         .clone()
         .ok_or_else(|| anyhow!("settled executor claim is missing settlement id"))?;
+    let receipt = claim_state
+        .settlement_receipt
+        .as_ref()
+        .ok_or_else(|| anyhow!("settled executor claim is missing provider receipt"))?;
 
     Ok(ExecutorSpendSettlementHttpResponse {
         operation_key: claim_state.claim.operation_key.clone(),
         settlement_id: settlement_id.to_string(),
         claim_id: claim_state.claim.id.to_string(),
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
+        receipt: ExecutorSpendSettlementReceiptHttpResponse {
+            authorized_max_cents: receipt.authorized_max_cents,
+            actual_vendor_cost_cents: receipt.receipt.actual_vendor_cost_cents,
+            released_amount_cents: receipt.released_amount_cents,
+            currency: receipt.currency.to_string(),
+            provider_request_id: receipt.receipt.provider_request_id.clone(),
+            price_model_snapshot: receipt.receipt.price_model_snapshot.clone(),
+            artifact_reference: receipt.receipt.artifact_reference.clone(),
+            created_at: receipt.created_at.to_rfc3339(),
+        },
         spend: executor_spend_response(&validated),
     })
 }
@@ -2864,6 +2922,11 @@ fn release_executor_spend_request(
     request: ExecutorSpendFinalizeHttpRequest,
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
+    if request.receipt.is_some() {
+        return Err(anyhow!(
+            "unbilled executor release cannot include a provider receipt"
+        ));
+    }
     let user = authenticated_user_context(state)?;
     let claim_request = executor_claim_validation_request(request, &user, state)?;
     let claim_state = {
@@ -3987,6 +4050,21 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settlement_receipt_json(actual_vendor_cost_cents: i64) -> Value {
+        json!({
+            "actual_vendor_cost_cents": actual_vendor_cost_cents,
+            "provider_request_id": "provider-request-123",
+            "price_model_snapshot": {
+                "provider": "example-image-provider",
+                "model": "image-model-v1",
+                "unit_price_cents": actual_vendor_cost_cents,
+                "pricing_unit": "image",
+                "currency": "usd",
+            },
+            "artifact_reference": "artifact://hubu-logo.png",
+        })
+    }
 
     fn public_request(method: &str, path: &str) -> HttpRequest {
         let (path, query) = split_path_and_query(path);
@@ -5236,7 +5314,7 @@ mod tests {
             let response = route(public_request("GET", path), &state);
 
             assert_eq!(response.status, 200);
-            assert_eq!(response.body["protocol_version"], "hubu-spend-executor-v3");
+            assert_eq!(response.body["protocol_version"], "hubu-spend-executor-v4");
             assert!(response.body["role_boundary"]["hubu"]
                 .as_array()
                 .expect("hubu role list should be an array")
@@ -5263,9 +5341,14 @@ mod tests {
                 .iter()
                 .any(|item| item == "operation_key"));
             assert_eq!(
-                response.body["finalize_request"]["required"],
+                response.body["release_request"]["required"],
                 json!(["agent_id", "operation_key"])
             );
+            assert!(response.body["settle_request"]["required"]
+                .as_array()
+                .expect("settlement fields should be an array")
+                .iter()
+                .any(|item| item == "receipt.actual_vendor_cost_cents"));
             assert_eq!(
                 response.body["operation_key_policy"]["namespace"],
                 json!(["agent_id", "operation_key"])
@@ -5377,20 +5460,24 @@ mod tests {
         let finalize = json!({
             "agent_id": agent.agent_id,
             "operation_key": claim.operation_key,
+            "receipt": settlement_receipt_json(400),
         });
         let settlement = settle_executor_spend(finalize.to_string(), &state)
             .expect("executor spend should settle");
         assert_eq!(settlement.status, "settled");
         assert_eq!(settlement.spend.budget_hold.status, "settled");
-        assert_eq!(settlement.spend.budget_hold.consumed_amount_cents, 500);
+        assert_eq!(settlement.spend.budget_hold.consumed_amount_cents, 400);
         assert_eq!(settlement.spend.budget_hold.frozen_amount_cents, 0);
-        assert_eq!(settlement.spend.budget_hold.remaining_amount_cents, 0);
+        assert_eq!(settlement.spend.budget_hold.remaining_amount_cents, 100);
+        assert_eq!(settlement.receipt.authorized_max_cents, 500);
+        assert_eq!(settlement.receipt.actual_vendor_cost_cents, 400);
+        assert_eq!(settlement.receipt.released_amount_cents, 100);
 
         let replay = settle_executor_spend(finalize.to_string(), &state)
             .expect("identical executor settlement should replay");
         assert_eq!(replay.settlement_id, settlement.settlement_id);
         assert_eq!(replay.status, "settled");
-        assert_eq!(replay.spend.budget_hold.consumed_amount_cents, 500);
+        assert_eq!(replay.spend.budget_hold.consumed_amount_cents, 400);
         assert_eq!(replay.spend.budget_hold.frozen_amount_cents, 0);
 
         let claim_replay = claim_executor_spend(request.to_string(), &state)
@@ -5534,6 +5621,7 @@ mod tests {
             json!({
                 "agent_id": first_agent.agent_id,
                 "operation_key": first_authorization.operation_key,
+                "receipt": settlement_receipt_json(400),
             })
             .to_string(),
             &state,
@@ -5658,6 +5746,7 @@ mod tests {
             json!({
                 "operation_key": "executor-reconciliation-operation",
                 "agent_id": agent.agent_id,
+                "receipt": settlement_receipt_json(400),
             })
             .to_string(),
             &state,
@@ -5680,6 +5769,7 @@ mod tests {
             "claim_id": claim.claim_id,
             "provider_reference": "openai-request-abc123",
             "evidence": "Provider usage export shows a completed billed request.",
+            "receipt": settlement_receipt_json(400),
         });
         let missing_capability = route(
             authenticated_json_request("/spend/executor/settle", reconciliation_body.clone()),
@@ -5724,7 +5814,11 @@ mod tests {
         assert_eq!(reconciled["spend"]["budget_hold"]["frozen_amount_cents"], 0);
         assert_eq!(
             reconciled["spend"]["budget_hold"]["consumed_amount_cents"],
-            500
+            400
+        );
+        assert_eq!(
+            reconciled["spend"]["budget_hold"]["remaining_amount_cents"],
+            100
         );
         assert!(list_executor_claims_requiring_reconciliation(&state)
             .unwrap()
@@ -5792,6 +5886,7 @@ mod tests {
             json!({
                 "agent_id": agent.agent_id,
                 "operation_key": claim.operation_key,
+                "receipt": settlement_receipt_json(400),
             })
             .to_string(),
             &restarted,

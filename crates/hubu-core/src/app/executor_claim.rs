@@ -9,9 +9,10 @@ use crate::{
     },
     persistence::{ExecutorClaimRepository, ExecutorFinalizationResult},
     spend::{
-        SpendAuthTokenRecord, SpendDecisionRecord, SpendExecutorClaimRecord,
-        SpendExecutorClaimRequest, SpendExecutorClaimStatus, SpendManager,
-        SpendPaymentValidationRequest, ValidatedSpendAuthorization,
+        PersistedSpendExecutorSettlementReceipt, SpendAuthTokenRecord, SpendDecisionRecord,
+        SpendExecutorClaimRecord, SpendExecutorClaimRequest, SpendExecutorClaimStatus,
+        SpendExecutorSettlementReceipt, SpendManager, SpendPaymentValidationRequest,
+        ValidatedSpendAuthorization,
     },
     storage::StorageError,
     telemetry::log_event,
@@ -38,6 +39,14 @@ pub struct FinalizeExecutorClaimRequest {
     pub operation_key: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SettleExecutorClaimRequest {
+    pub owner_user_id: UserId,
+    pub agent_id: AgentId,
+    pub operation_key: String,
+    pub receipt: SpendExecutorSettlementReceipt,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutorClaimReconciliationOutcome {
     VendorBilled,
@@ -60,6 +69,7 @@ pub struct ReconcileExecutorClaimRequest {
     pub provider_reference: String,
     pub evidence: String,
     pub outcome: ExecutorClaimReconciliationOutcome,
+    pub receipt: Option<SpendExecutorSettlementReceipt>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +80,7 @@ pub struct ExecutorClaimState {
     pub authorization: ValidatedSpendAuthorization,
     pub budget_hold: BudgetHold,
     pub budget_balance: BudgetBalance,
+    pub settlement_receipt: Option<PersistedSpendExecutorSettlementReceipt>,
     pub idempotent_replay: bool,
 }
 
@@ -119,6 +130,12 @@ pub enum ExecutorClaimServiceError {
 
     #[error("settled executor claim is missing settlement id")]
     MissingSettlementId,
+
+    #[error("billed executor settlement is missing a provider receipt")]
+    MissingSettlementReceipt,
+
+    #[error("unbilled executor release cannot include a provider receipt")]
+    UnexpectedSettlementReceipt,
 
     #[error("provider reference cannot be empty")]
     EmptyProviderReference,
@@ -203,6 +220,7 @@ impl ExecutorClaimService {
             authorization,
             claimed_hold.hold,
             claimed_hold.balance,
+            None,
             idempotent_replay,
             spend_manager,
         )?;
@@ -254,7 +272,7 @@ impl ExecutorClaimService {
 
     pub fn settle<R>(
         &self,
-        request: FinalizeExecutorClaimRequest,
+        request: SettleExecutorClaimRequest,
         started_at: DateTime<Utc>,
         spend_manager: &mut SpendManager,
         budget_manager: &mut BudgetManager,
@@ -268,6 +286,7 @@ impl ExecutorClaimService {
             &request.agent_id,
             &request.operation_key,
             PaymentId::new(),
+            request.receipt,
             started_at,
         )?;
         let state = apply_finalization(finalization, spend_manager, budget_manager)?;
@@ -276,6 +295,10 @@ impl ExecutorClaimService {
             .settlement_id
             .as_ref()
             .ok_or(ExecutorClaimServiceError::MissingSettlementId)?;
+        let receipt = state
+            .settlement_receipt
+            .as_ref()
+            .ok_or(ExecutorClaimServiceError::MissingSettlementReceipt)?;
         log_event(
             "info",
             "executor_spend_settled",
@@ -287,7 +310,11 @@ impl ExecutorClaimService {
                 "spend_auth_token_id": state.token.id.to_string(),
                 "decision_id": state.decision.id.to_string(),
                 "hold_id": state.budget_hold.id.to_string(),
-                "amount_cents": state.budget_hold.amount_cents,
+                "authorized_max_cents": receipt.authorized_max_cents,
+                "actual_vendor_cost_cents": receipt.receipt.actual_vendor_cost_cents,
+                "released_amount_cents": receipt.released_amount_cents,
+                "provider_request_id": receipt.receipt.provider_request_id,
+                "artifact_reference": receipt.receipt.artifact_reference,
                 "merchant": state.decision.request.merchant,
                 "task_id": state.decision.request.task_id,
             }),
@@ -352,23 +379,32 @@ impl ExecutorClaimService {
         }
 
         let finalization = match request.outcome {
-            ExecutorClaimReconciliationOutcome::VendorBilled => repository
-                .reconcile_executor_claim_as_billed_transactionally(
+            ExecutorClaimReconciliationOutcome::VendorBilled => {
+                let receipt = request
+                    .receipt
+                    .ok_or(ExecutorClaimServiceError::MissingSettlementReceipt)?;
+                repository.reconcile_executor_claim_as_billed_transactionally(
                     &request.claim_id,
                     &request.owner_user_id,
                     provider_reference,
                     evidence,
                     PaymentId::new(),
+                    receipt,
                     started_at,
-                )?,
-            ExecutorClaimReconciliationOutcome::VendorDidNotBill => repository
-                .reconcile_executor_claim_as_not_billed_transactionally(
+                )?
+            }
+            ExecutorClaimReconciliationOutcome::VendorDidNotBill => {
+                if request.receipt.is_some() {
+                    return Err(ExecutorClaimServiceError::UnexpectedSettlementReceipt);
+                }
+                repository.reconcile_executor_claim_as_not_billed_transactionally(
                     &request.claim_id,
                     &request.owner_user_id,
                     provider_reference,
                     evidence,
                     started_at,
-                )?,
+                )?
+            }
         };
         let state = apply_finalization(finalization, spend_manager, budget_manager)?;
         log_event(
@@ -409,6 +445,7 @@ fn apply_finalization(
         },
         finalization.hold,
         finalization.balance,
+        finalization.receipt,
         finalization.idempotent_replay,
         spend_manager,
     )
@@ -439,6 +476,7 @@ fn claim_state(
         },
         hold,
         balance,
+        None,
         idempotent_replay,
         spend_manager,
     )
@@ -449,6 +487,7 @@ fn claim_state_from_records(
     authorization: ValidatedSpendAuthorization,
     budget_hold: BudgetHold,
     budget_balance: BudgetBalance,
+    settlement_receipt: Option<PersistedSpendExecutorSettlementReceipt>,
     idempotent_replay: bool,
     spend_manager: &SpendManager,
 ) -> Result<ExecutorClaimState, ExecutorClaimServiceError> {
@@ -474,6 +513,7 @@ fn claim_state_from_records(
         authorization,
         budget_hold,
         budget_balance,
+        settlement_receipt,
         idempotent_replay,
     })
 }
@@ -497,7 +537,23 @@ mod tests {
             condition::{Condition, Field, PolicyValue},
             model::{Effect, Policy, Rule},
         },
+        spend::{SpendExecutorPriceModelSnapshot, SpendExecutorSettlementReceipt},
     };
+
+    fn settlement_receipt(actual_vendor_cost_cents: i64) -> SpendExecutorSettlementReceipt {
+        SpendExecutorSettlementReceipt {
+            actual_vendor_cost_cents,
+            provider_request_id: "provider-request-123".to_string(),
+            price_model_snapshot: SpendExecutorPriceModelSnapshot {
+                provider: "example-image-provider".to_string(),
+                model: "image-model-v1".to_string(),
+                unit_price_cents: actual_vendor_cost_cents,
+                pricing_unit: "image".to_string(),
+                currency: Currency::Usd,
+            },
+            artifact_reference: "artifact://hubu-logo.png".to_string(),
+        }
+    }
 
     struct ServiceHarness {
         service: ExecutorClaimService,
@@ -644,10 +700,11 @@ mod tests {
         let settled = harness
             .service
             .settle(
-                FinalizeExecutorClaimRequest {
+                SettleExecutorClaimRequest {
                     owner_user_id: harness.user.user_id.clone(),
                     agent_id: harness.agent_id.clone(),
                     operation_key: harness.authorization.operation_key.clone(),
+                    receipt: settlement_receipt(400),
                 },
                 Utc::now(),
                 &mut harness.spend_manager,
@@ -660,7 +717,16 @@ mod tests {
             SpendExecutorClaimStatus::Settled
         ));
         assert!(settled.token.used_at.is_some());
-        assert_eq!(settled.budget_balance.consumed_amount_cents, 500);
+        assert_eq!(settled.budget_balance.consumed_amount_cents, 400);
+        assert_eq!(settled.budget_balance.remaining_amount_cents, 600);
+        assert_eq!(
+            settled
+                .settlement_receipt
+                .as_ref()
+                .expect("receipt should be returned")
+                .authorized_max_cents,
+            500
+        );
     }
 
     #[test]
@@ -690,6 +756,7 @@ mod tests {
                     provider_reference: " vendor-charge-123 ".to_string(),
                     evidence: " provider export confirms billing ".to_string(),
                     outcome: ExecutorClaimReconciliationOutcome::VendorBilled,
+                    receipt: Some(settlement_receipt(400)),
                 },
                 after_expiry,
                 &mut harness.spend_manager,
@@ -709,7 +776,8 @@ mod tests {
             reconciled.claim.reconciliation_evidence.as_deref(),
             Some("provider export confirms billing")
         );
-        assert_eq!(reconciled.budget_balance.consumed_amount_cents, 500);
+        assert_eq!(reconciled.budget_balance.consumed_amount_cents, 400);
+        assert_eq!(reconciled.budget_balance.remaining_amount_cents, 600);
 
         let pending = harness
             .service
@@ -738,6 +806,7 @@ mod tests {
                     provider_reference: "vendor-search-456".to_string(),
                     evidence: "billing search found no charge".to_string(),
                     outcome: ExecutorClaimReconciliationOutcome::VendorDidNotBill,
+                    receipt: None,
                 },
                 after_expiry,
                 &mut harness.spend_manager,
