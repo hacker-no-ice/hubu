@@ -165,7 +165,7 @@ assert_contains "budget create" "${BUDGET_OUTPUT}" "Spending target warning (adv
 assert_contains "budget create" "${BUDGET_OUTPUT}" "target_id: ${TARGET_ID}"
 assert_contains "budget create" "${BUDGET_OUTPUT}" 'exceeded by: $25.00'
 
-ALLOW_OUTPUT="$(hubu spend --account-id "${ACCOUNT_ID}" --amount 20 --reason "Purchase API credits")"
+ALLOW_OUTPUT="$(hubu spend --operation-key integration-allow --account-id "${ACCOUNT_ID}" --amount 20 --reason "Purchase API credits")"
 assert_contains "allowed spend" "${ALLOW_OUTPUT}" "decision: allow"
 assert_contains "allowed spend" "${ALLOW_OUTPUT}" "status: succeeded"
 assert_contains "allowed spend" "${ALLOW_OUTPUT}" "owner_user: Alice Example (${USER_ID})"
@@ -175,7 +175,7 @@ assert_contains "allowed spend" "${ALLOW_OUTPUT}" 'frozen: $0.00'
 assert_contains "allowed spend" "${ALLOW_OUTPUT}" 'remaining: $55.00'
 assert_not_contains "allowed spend" "${ALLOW_OUTPUT}" "Cap hold"
 
-FAILED_OUTPUT="$(hubu spend --account-id "${ACCOUNT_ID}" --amount 15 --reason "Failed merchant payout" --merchant fail)"
+FAILED_OUTPUT="$(hubu spend --operation-key integration-failed --account-id "${ACCOUNT_ID}" --amount 15 --reason "Failed merchant payout" --merchant fail)"
 assert_contains "failed payment spend" "${FAILED_OUTPUT}" "decision: allow"
 assert_contains "failed payment spend" "${FAILED_OUTPUT}" "status: failed"
 assert_contains "failed payment spend" "${FAILED_OUTPUT}" "status: released"
@@ -183,7 +183,7 @@ assert_contains "failed payment spend" "${FAILED_OUTPUT}" 'consumed: $20.00'
 assert_contains "failed payment spend" "${FAILED_OUTPUT}" 'frozen: $0.00'
 assert_contains "failed payment spend" "${FAILED_OUTPUT}" 'remaining: $55.00'
 
-OVER_BUDGET_OUTPUT="$(hubu spend --account-id "${ACCOUNT_ID}" --amount 60 --reason "Over budget purchase")"
+OVER_BUDGET_OUTPUT="$(hubu spend --operation-key integration-over-budget --account-id "${ACCOUNT_ID}" --amount 60 --reason "Over budget purchase")"
 assert_contains "over budget spend" "${OVER_BUDGET_OUTPUT}" "decision: deny"
 assert_contains "over budget spend" "${OVER_BUDGET_OUTPUT}" "budget does not have enough remaining balance"
 if [[ "${OVER_BUDGET_OUTPUT}" == *"Payment"* ]]; then
@@ -195,14 +195,14 @@ if [[ "${OVER_BUDGET_OUTPUT}" == *"Budget hold"* ]]; then
   fail "over budget spend should not create a budget hold"
 fi
 
-NEEDS_APPROVAL_OUTPUT="$(hubu spend --account-id "${ACCOUNT_ID}" --amount 120 --reason "Large API credit purchase")"
+NEEDS_APPROVAL_OUTPUT="$(hubu spend --operation-key integration-needs-approval --account-id "${ACCOUNT_ID}" --amount 120 --reason "Large API credit purchase")"
 assert_contains "approval spend" "${NEEDS_APPROVAL_OUTPUT}" "decision: needs_approval"
 if [[ "${NEEDS_APPROVAL_OUTPUT}" == *"Payment"* ]]; then
   printf '%s\n' "${NEEDS_APPROVAL_OUTPUT}" >&2
   fail "needs_approval spend should not create a payment"
 fi
 
-DENY_OUTPUT="$(hubu spend --account-id "${ACCOUNT_ID}" --amount 20 --reason "Blocked merchant purchase" --merchant blocked-merchant)"
+DENY_OUTPUT="$(hubu spend --operation-key integration-deny --account-id "${ACCOUNT_ID}" --amount 20 --reason "Blocked merchant purchase" --merchant blocked-merchant)"
 assert_contains "denied spend" "${DENY_OUTPUT}" "decision: deny"
 assert_contains "denied spend" "${DENY_OUTPUT}" "merchant is blocked by the starter policy"
 if [[ "${DENY_OUTPUT}" == *"Payment"* ]]; then

@@ -208,7 +208,16 @@ human approves a `needs_approval` spend decision.
 freezing the agent budget. It does not submit payment or write a ledger transaction. This
 is the handoff point for future Hubu-hosted vendor/model proxy tools that need
 to consume a scoped spend authorization without exposing provider credentials to
-the agent.
+the agent. Both tools require a stable, agent-scoped `operation_key` supplied by
+the client platform or orchestrator, not invented by the model. Hubu durably
+stores workflow state under that key; identical retries recover the original
+workflow and changed scope is rejected.
+
+The current MCP transport exposes `operation_key` as an explicit tool argument
+and forwards it unchanged. It does not yet derive the key from trusted platform
+invocation metadata. Until a platform adapter is added, the client harness must
+inject and retain a stable key; model-generated keys are not a reliable
+idempotency boundary.
 
 ## Tool Mapping
 

@@ -170,7 +170,7 @@ hubu protocol agent-registration
 pause_for_reading
 
 step "Register an agent"
-REGISTER_OUTPUT="$(hubu register agent --owner-user-id "${USER_ID}")"
+REGISTER_OUTPUT="$(hubu register agent --name codex-agent --version 1.0)"
 say "${REGISTER_OUTPUT}"
 AGENT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/^  agent_id:/ { print $2; exit }')"
 ACCOUNT_ID="$(printf '%s\n' "${REGISTER_OUTPUT}" | awk -F': ' '/^  account_id:/ { print $2; exit }')"
@@ -206,6 +206,7 @@ pause_for_reading
 
 step "Submit an allowed spend request"
 ALLOW_OUTPUT="$(hubu spend \
+  --operation-key demo-allow \
   --account-id "${ACCOUNT_ID}" \
   --amount 20 \
   --reason "Purchase API credits")"
@@ -214,6 +215,7 @@ pause_for_reading
 
 step "Submit an allowed spend whose mock payment fails"
 FAILED_PAYMENT_OUTPUT="$(hubu spend \
+  --operation-key demo-failed \
   --account-id "${ACCOUNT_ID}" \
   --amount 15 \
   --reason "Test failed merchant payout" \
@@ -223,6 +225,7 @@ pause_for_reading
 
 step "Submit an over-limit spend request"
 NEEDS_APPROVAL_OUTPUT="$(hubu spend \
+  --operation-key demo-needs-approval \
   --account-id "${ACCOUNT_ID}" \
   --amount 120 \
   --reason "Large API credit purchase")"
@@ -231,6 +234,7 @@ pause_for_reading
 
 step "Submit a denied spend request"
 DENY_OUTPUT="$(hubu spend \
+  --operation-key demo-deny \
   --account-id "${ACCOUNT_ID}" \
   --amount 20 \
   --reason "Attempt blocked merchant purchase" \

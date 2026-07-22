@@ -354,6 +354,7 @@ fn submit_spend(
 
 fn spend_request_body(account_id: &str, amount_cents: i64, index: u64, merchant: &str) -> Value {
     json!({
+        "operation_key": format!("hubu-bench:{index}"),
         "account_id": account_id,
         "amount_cents": amount_cents,
         "reason": format!("bench-spend-{index}"),
@@ -992,6 +993,7 @@ mod tests {
 
         assert_eq!(body["account_id"], "acct_bench");
         assert!(body.get("agent_id").is_none());
+        assert_eq!(body["operation_key"], "hubu-bench:7");
         assert_eq!(body["amount_cents"], 250);
         assert_eq!(body["reason"], "bench-spend-7");
         assert_eq!(body["merchant"], "bench-merchant");

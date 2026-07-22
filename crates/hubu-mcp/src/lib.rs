@@ -13,7 +13,7 @@ const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const HUBU_APPROVAL_PROFILE_VERSION: &str = "hubu-mcp-client-approval-v1";
-const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Protected setup/admin tools require a human approval prompt before tools/call. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
+const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Spend calls currently require the client harness to supply a stable, namespaced operation_key; Hubu MCP does not yet derive it from trusted platform metadata, and the model should not invent one. Hubu stores workflow state under that key for authorization, claim, finalization, and retries. Protected setup/admin tools require a human approval prompt before tools/call. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
 const READ_TOOL_NAMES: &[&str] = &[
     "hubu_health",
     "hubu_registration_guidance",
@@ -238,25 +238,27 @@ fn tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "hubu_submit_spend",
-            "Submit an agent spend request. Human approval is only required when the returned decision is needs_approval.",
+            "Submit an agent spend request using a stable operation key supplied by the agent platform. Human approval is only required when the returned decision is needs_approval.",
             json_schema_required(json!({
+                "operation_key": { "type": "string", "description": "Stable, namespaced platform operation id; until a trusted adapter is available, the client harness must supply and reuse it for retries" },
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "workload_profile": { "type": "string" }
-            }), &["account_id", "amount_cents", "reason"]),
+            }), &["operation_key", "account_id", "amount_cents", "reason"]),
         ),
         write_tool(
             "hubu_authorize_spend",
-            "Authorize an agent spend request and reserve its agent budget without executing payment.",
+            "Authorize an agent spend request using a stable operation key supplied by the agent platform.",
             json_schema_required(json!({
+                "operation_key": { "type": "string", "description": "Stable, namespaced platform operation id supplied by the client harness and reused throughout the workflow" },
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "workload_profile": { "type": "string" }
-            }), &["account_id", "amount_cents", "reason"]),
+            }), &["operation_key", "account_id", "amount_cents", "reason"]),
         ),
         read_tool(
             "hubu_list_agents",
@@ -692,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn spend_tool_schemas_require_account_id_only() {
+    fn spend_tool_schemas_require_operation_key_and_account_id() {
         let tools = tool_definitions();
 
         for tool_name in ["hubu_submit_spend", "hubu_authorize_spend"] {
@@ -706,8 +708,11 @@ mod tests {
                 .expect("spend tool required fields should be an array");
 
             assert!(properties["account_id"].is_object());
+            assert!(properties["operation_key"].is_object());
+            assert!(properties.get("job_id").is_none());
             assert!(properties.get("agent_id").is_none());
             assert!(required.iter().any(|field| field == "account_id"));
+            assert!(required.iter().any(|field| field == "operation_key"));
             assert!(required.iter().any(|field| field == "amount_cents"));
             assert!(required.iter().any(|field| field == "reason"));
         }

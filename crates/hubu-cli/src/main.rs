@@ -1351,6 +1351,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let account_id = take_value(&mut args, "--account-id");
     let agent_id = take_value(&mut args, "--agent-id");
     let account_id = require_spend_account_id("hubu spend", account_id, agent_id)?;
+    let operation_key = take_required(&mut args, "--operation-key")?;
     let amount = take_required(&mut args, "--amount")?;
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
@@ -1359,6 +1360,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     ensure_no_args(args)?;
 
     let mut body = json!({
+        "operation_key": operation_key,
         "amount_cents": amount_to_cents(&amount)?,
         "reason": reason,
         "merchant": merchant,
@@ -1379,6 +1381,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let account_id = take_value(&mut args, "--account-id");
     let agent_id = take_value(&mut args, "--agent-id");
     let account_id = require_spend_account_id("hubu spend authorize", account_id, agent_id)?;
+    let operation_key = take_required(&mut args, "--operation-key")?;
     let amount = take_required(&mut args, "--amount")?;
     let reason = take_required(&mut args, "--reason")?;
     let merchant =
@@ -1387,6 +1390,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     ensure_no_args(args)?;
 
     let mut body = json!({
+        "operation_key": operation_key,
         "amount_cents": amount_to_cents(&amount)?,
         "reason": reason,
         "merchant": merchant,
@@ -1413,6 +1417,7 @@ fn require_spend_account_id(
 
 fn print_spend_response(response: &Value) -> Result<()> {
     println!("Spend evaluated");
+    println!("  operation_key: {}", string_at(response, "operation_key")?);
     println!("  account_id: {}", string_at(response, "account_id")?);
     println!("  agent_id: {}", string_at(response, "agent_id")?);
     println!("  decision: {}", string_at(response, "decision")?);
@@ -2161,15 +2166,16 @@ fn print_spend_help() {
         "Test an agent spend request
 
 Usage:
-  hubu spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
-  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
+  hubu spend --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
 
 Note:
   Spend commands require the agent account id because the account is the spending source. CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
+  The client harness must supply one immutable agent-scoped operation key before the first request, then reuse it for authorization, claim, finalization, and every retry.
 
 Examples:
-  hubu spend authorize --account-id ACCOUNT_ID --amount 5 --reason \"Reserve model API credits\"
-  hubu spend --account-id ACCOUNT_ID --amount 20 --reason \"Purchase API credits\""
+  hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --reason \"Reserve model API credits\"
+  hubu spend --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 20 --reason \"Purchase API credits\""
     );
 }
 
@@ -2178,10 +2184,13 @@ fn print_spend_authorize_help() {
         "Authorize spend and reserve budget without executing payment
 
 Usage:
-  hubu spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
+
+Note:
+  Supply one immutable agent-scoped operation key before the first request; do not generate a new key on retry.
 
 Example:
-  hubu spend authorize --account-id ACCOUNT_ID --amount 5 --reason \"Reserve model API credits\""
+  hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --reason \"Reserve model API credits\""
     );
 }
 

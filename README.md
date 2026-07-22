@@ -29,6 +29,8 @@ and MCP transport adapter.
 - Issues spend authorization tokens for allowed requests
 - Can authorize spend and freeze agent-budget capacity without executing payment,
   then give an external executor an exclusive, workload-timed claim before vendor work
+- Uses one immutable agent-scoped operation key across authorization, claim, and
+  finalization so identical retries return the original workflow state
 - Creates advisory user spending targets and single or recurring budgets owned by one agent
 - Warns when concurrent agent budget allocations exceed a user's spending target
 - Reserves one agent-budget hold before payment, then settles or releases it
@@ -118,12 +120,16 @@ through Hubu's policy and budget controls.
 To smoke-test the agent-initiated spend path from the CLI:
 
 ```sh
-hubu spend authorize --account-id ACCOUNT_ID --amount 5 --reason "Reserve model API credits"
-hubu spend --account-id ACCOUNT_ID --amount 20 --reason "Purchase API credits"
+hubu spend authorize --operation-key PLATFORM_OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --reason "Reserve model API credits"
+hubu spend --operation-key PLATFORM_OPERATION_KEY --account-id ACCOUNT_ID --amount 20 --reason "Purchase API credits"
 hubu user spending-target show
 hubu budget list
 hubu ledger list
 ```
+
+The agent platform supplies a stable, namespaced operation key. Hubu stores the
+authoritative workflow state under `(agent_id, operation_key)`, so replaying
+authorization, claim, or finalization recovers the same result.
 
 Codex is one supported MCP harness, not a Hubu requirement. To make Hubu tools
 discoverable to Codex agents, initialize the Codex MCP config:

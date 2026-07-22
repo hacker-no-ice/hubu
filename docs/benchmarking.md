@@ -126,8 +126,8 @@ budget exhaustion, or server restarts during load.
 2. Move shared state from coarse `Mutex` guards to storage and synchronization
    boundaries that match the domain invariants, especially spend tokens, budget
    holds, and ledger writes.
-3. Add idempotency and duplicate-request tests for `/spend` so client retries
-   cannot double-reserve or double-settle budget.
+3. Extend the load benchmark with duplicate operation keys and restart
+   injection to exercise the existing idempotency tests under concurrency.
 4. Add first-class telemetry: structured request logs, latency histograms,
    error counters, and budget/ledger consistency gauges.
 5. Extend this benchmark with mixed allow, deny, needs-approval, and

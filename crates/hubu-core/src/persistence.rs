@@ -155,15 +155,16 @@ impl SqliteGovernanceRepository {
         let sqlite_tx = self.conn.transaction()?;
         sqlite_tx.execute(
             "INSERT INTO spend_executor_claims
-             (id, spend_auth_token_id, owner_user_id, executor_execution_id, workload_profile,
-              status, claimed_at, expires_at, finalized_at, settlement_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             (id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
+              workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO NOTHING",
             params![
                 claim.id.to_string(),
                 claim.spend_auth_token_id.to_string(),
                 claim.owner_user_id.to_string(),
-                claim.executor_execution_id,
+                claim.agent_id.to_string(),
+                claim.operation_key,
                 claim.workload_profile,
                 executor_claim_status(&claim.status),
                 claim.claimed_at.to_rfc3339(),
@@ -192,16 +193,16 @@ impl SqliteGovernanceRepository {
 
     pub fn settle_executor_claim_transactionally(
         &mut self,
-        claim_id: &SpendExecutorClaimId,
         owner_user_id: &UserId,
-        executor_execution_id: &str,
+        agent_id: &AgentId,
+        operation_key: &str,
         proposed_settlement_id: PaymentId,
         settlement_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError> {
         self.finalize_executor_claim_transactionally(
-            claim_id,
             owner_user_id,
-            executor_execution_id,
+            agent_id,
+            operation_key,
             ExecutorFinalizationAction::Settle(proposed_settlement_id),
             settlement_started_at,
         )
@@ -209,15 +210,15 @@ impl SqliteGovernanceRepository {
 
     pub fn release_executor_claim_transactionally(
         &mut self,
-        claim_id: &SpendExecutorClaimId,
         owner_user_id: &UserId,
-        executor_execution_id: &str,
+        agent_id: &AgentId,
+        operation_key: &str,
         finalization_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError> {
         self.finalize_executor_claim_transactionally(
-            claim_id,
             owner_user_id,
-            executor_execution_id,
+            agent_id,
+            operation_key,
             ExecutorFinalizationAction::Release,
             finalization_started_at,
         )
@@ -225,25 +226,30 @@ impl SqliteGovernanceRepository {
 
     fn finalize_executor_claim_transactionally(
         &mut self,
-        claim_id: &SpendExecutorClaimId,
         owner_user_id: &UserId,
-        executor_execution_id: &str,
+        agent_id: &AgentId,
+        operation_key: &str,
         action: ExecutorFinalizationAction,
         finalization_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError> {
         let sqlite_tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut claim = load_executor_claim_by_id(&sqlite_tx, claim_id)?
+        let mut claim = load_executor_claim_by_operation(&sqlite_tx, agent_id, operation_key)?
             .ok_or_else(|| StorageError::InvalidData("unknown executor claim".to_string()))?;
         if &claim.owner_user_id != owner_user_id {
             return Err(StorageError::InvalidData(
                 "executor claim owner does not match".to_string(),
             ));
         }
-        if claim.executor_execution_id != executor_execution_id {
+        if claim.operation_key != operation_key {
             return Err(StorageError::InvalidData(
-                "executor claim execution id does not match".to_string(),
+                "executor claim operation key does not match".to_string(),
+            ));
+        }
+        if &claim.agent_id != agent_id {
+            return Err(StorageError::InvalidData(
+                "executor claim agent does not match".to_string(),
             ));
         }
 
@@ -251,7 +257,7 @@ impl SqliteGovernanceRepository {
             .ok_or_else(|| {
                 StorageError::InvalidData("executor claim token is missing".to_string())
             })?;
-        let mut hold = load_budget_hold_by_claim_id(&sqlite_tx, claim_id)?.ok_or_else(|| {
+        let mut hold = load_budget_hold_by_claim_id(&sqlite_tx, &claim.id)?.ok_or_else(|| {
             StorageError::InvalidData("executor claim budget hold is missing".to_string())
         })?;
         let mut balance =
@@ -270,14 +276,14 @@ impl SqliteGovernanceRepository {
                     && token.used_at.is_some()
                     && token.revoked_at.is_none()
                     && matches!(hold.status, BudgetHoldStatus::Settled)
-                    && hold.executor_claim_id.as_ref() == Some(claim_id)
+                    && hold.executor_claim_id.as_ref() == Some(&claim.id)
             }
             (ExecutorFinalizationAction::Release, SpendExecutorClaimStatus::Released) => {
                 token.revoked_at.is_some()
                     && token.used_at.is_none()
                     && token.used_by_payment_id.is_none()
                     && matches!(hold.status, BudgetHoldStatus::Released)
-                    && hold.executor_claim_id.as_ref() == Some(claim_id)
+                    && hold.executor_claim_id.as_ref() == Some(&claim.id)
             }
             (ExecutorFinalizationAction::Settle(_), SpendExecutorClaimStatus::Released) => {
                 return Err(StorageError::InvalidData(
@@ -327,7 +333,7 @@ impl SqliteGovernanceRepository {
             ));
         }
         if !matches!(hold.status, BudgetHoldStatus::Claimed)
-            || hold.executor_claim_id.as_ref() != Some(claim_id)
+            || hold.executor_claim_id.as_ref() != Some(&claim.id)
             || hold.spend_decision_id != token.spend_decision_id
         {
             return Err(StorageError::InvalidData(
@@ -483,6 +489,8 @@ impl SqliteGovernanceRepository {
             CREATE TABLE IF NOT EXISTS spend_decisions (
                 id TEXT PRIMARY KEY,
                 owner_user_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                operation_key TEXT NOT NULL,
                 request_json TEXT NOT NULL,
                 evaluation_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
@@ -504,7 +512,8 @@ impl SqliteGovernanceRepository {
                 id TEXT PRIMARY KEY,
                 spend_auth_token_id TEXT NOT NULL UNIQUE,
                 owner_user_id TEXT NOT NULL,
-                executor_execution_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                operation_key TEXT NOT NULL,
                 workload_profile TEXT NOT NULL,
                 status TEXT NOT NULL,
                 claimed_at TEXT NOT NULL,
@@ -580,6 +589,7 @@ impl SqliteGovernanceRepository {
         self.migrate_user_caps_to_spending_targets()?;
         self.migrate_executor_claim_budget_holds()?;
         self.migrate_spend_auth_token_claim_ttl()?;
+        self.migrate_spend_operation_keys()?;
         self.enforce_one_budget_hold_per_spend_decision()?;
         Ok(())
     }
@@ -684,6 +694,247 @@ impl SqliteGovernanceRepository {
         }
         Ok(())
     }
+
+    fn migrate_spend_operation_keys(&self) -> Result<(), StorageError> {
+        self.conn.execute_batch(
+            "DROP TRIGGER IF EXISTS spend_decisions_no_update;
+             DROP TRIGGER IF EXISTS spend_decisions_no_delete;
+             DROP TRIGGER IF EXISTS spend_executor_claims_workflow_matches;
+             DROP TRIGGER IF EXISTS spend_executor_claims_identity_immutable;
+             DROP TRIGGER IF EXISTS spend_decisions_job_id_required;
+             DROP TRIGGER IF EXISTS spend_executor_claims_job_id_required;
+             DROP TRIGGER IF EXISTS spend_executor_claims_operation_key_required;
+             DROP INDEX IF EXISTS spend_decisions_owner_job_unique;
+             DROP INDEX IF EXISTS spend_executor_claims_owner_job_unique;
+             DROP INDEX IF EXISTS spend_decisions_agent_job_unique;
+             DROP INDEX IF EXISTS spend_executor_claims_agent_job_unique;
+             DROP INDEX IF EXISTS spend_decisions_agent_operation_unique;
+             DROP INDEX IF EXISTS spend_executor_claims_agent_operation_unique;",
+        )?;
+        let decisions_had_operation_key =
+            table_has_column(&self.conn, "spend_decisions", "operation_key")?;
+        let decisions_had_job_id = table_has_column(&self.conn, "spend_decisions", "job_id")?;
+        let claims_had_operation_key =
+            table_has_column(&self.conn, "spend_executor_claims", "operation_key")?;
+        let claims_had_job_id = table_has_column(&self.conn, "spend_executor_claims", "job_id")?;
+        let claims_had_execution_id =
+            table_has_column(&self.conn, "spend_executor_claims", "executor_execution_id")?;
+
+        if !table_has_column(&self.conn, "spend_decisions", "agent_id")? {
+            self.conn
+                .execute("ALTER TABLE spend_decisions ADD COLUMN agent_id TEXT", [])?;
+        }
+        if !decisions_had_operation_key {
+            self.conn.execute(
+                "ALTER TABLE spend_decisions ADD COLUMN operation_key TEXT",
+                [],
+            )?;
+        }
+        if !table_has_column(&self.conn, "spend_executor_claims", "agent_id")? {
+            self.conn.execute(
+                "ALTER TABLE spend_executor_claims ADD COLUMN agent_id TEXT",
+                [],
+            )?;
+        }
+        if !claims_had_operation_key {
+            self.conn.execute(
+                "ALTER TABLE spend_executor_claims ADD COLUMN operation_key TEXT",
+                [],
+            )?;
+        }
+
+        self.conn.execute_batch(
+            "UPDATE spend_decisions
+             SET agent_id = json_extract(request_json, '$.agent_id')
+             WHERE agent_id IS NULL OR trim(agent_id) = '';",
+        )?;
+
+        if !decisions_had_operation_key {
+            if decisions_had_job_id {
+                self.conn.execute_batch(
+                    "UPDATE spend_decisions
+                     SET operation_key = job_id
+                     WHERE job_id IS NOT NULL AND trim(job_id) != '';",
+                )?;
+            } else if claims_had_operation_key {
+                self.copy_legacy_claim_identifier_to_decisions("operation_key")?;
+            } else if claims_had_job_id {
+                self.copy_legacy_claim_identifier_to_decisions("job_id")?;
+            } else if claims_had_execution_id {
+                self.copy_legacy_claim_identifier_to_decisions("executor_execution_id")?;
+            }
+        }
+
+        self.conn.execute_batch(
+            "UPDATE spend_decisions
+             SET operation_key = 'legacy:' || id
+             WHERE operation_key IS NULL OR trim(operation_key) = '';",
+        )?;
+
+        if !decisions_had_operation_key {
+            self.conn.execute_batch(
+                "UPDATE spend_decisions
+                 SET operation_key = operation_key || ':legacy:' || id
+                 WHERE id IN (
+                     SELECT id
+                     FROM (
+                         SELECT id,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY agent_id, operation_key
+                                    ORDER BY created_at, id
+                                ) AS duplicate_rank
+                         FROM spend_decisions
+                     )
+                     WHERE duplicate_rank > 1
+                 );",
+            )?;
+        }
+
+        self.conn.execute_batch(
+            "UPDATE spend_executor_claims AS claims
+             SET agent_id = (
+                 SELECT decisions.agent_id
+                 FROM spend_auth_tokens AS tokens
+                 JOIN spend_decisions AS decisions
+                   ON decisions.id = tokens.spend_decision_id
+                 WHERE tokens.id = claims.spend_auth_token_id
+             )
+             WHERE agent_id IS NULL OR trim(agent_id) = '';
+
+             UPDATE spend_executor_claims AS claims
+             SET operation_key = (
+                 SELECT decisions.operation_key
+                 FROM spend_auth_tokens AS tokens
+                 JOIN spend_decisions AS decisions
+                   ON decisions.id = tokens.spend_decision_id
+                 WHERE tokens.id = claims.spend_auth_token_id
+             )
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM spend_auth_tokens AS tokens
+                 WHERE tokens.id = claims.spend_auth_token_id
+             );
+
+             UPDATE spend_executor_claims
+             SET operation_key = 'legacy:' || id
+             WHERE operation_key IS NULL OR trim(operation_key) = '';",
+        )?;
+
+        if decisions_had_job_id {
+            self.conn
+                .execute("ALTER TABLE spend_decisions DROP COLUMN job_id", [])?;
+        }
+        if claims_had_job_id {
+            self.conn
+                .execute("ALTER TABLE spend_executor_claims DROP COLUMN job_id", [])?;
+        }
+        if claims_had_execution_id {
+            self.conn.execute(
+                "ALTER TABLE spend_executor_claims DROP COLUMN executor_execution_id",
+                [],
+            )?;
+        }
+
+        self.conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS spend_decisions_agent_operation_unique
+             ON spend_decisions(agent_id, operation_key);
+
+             CREATE UNIQUE INDEX IF NOT EXISTS spend_executor_claims_agent_operation_unique
+             ON spend_executor_claims(agent_id, operation_key);
+
+             CREATE TRIGGER IF NOT EXISTS spend_decisions_agent_id_required
+             BEFORE INSERT ON spend_decisions
+             WHEN NEW.agent_id IS NULL OR trim(NEW.agent_id) = ''
+             BEGIN
+                 SELECT RAISE(ABORT, 'spend decision agent id is required');
+             END;
+
+             CREATE TRIGGER IF NOT EXISTS spend_decisions_operation_key_required
+             BEFORE INSERT ON spend_decisions
+             WHEN NEW.operation_key IS NULL OR trim(NEW.operation_key) = ''
+             BEGIN
+                 SELECT RAISE(ABORT, 'spend decision operation key is required');
+             END;
+
+             CREATE TRIGGER IF NOT EXISTS spend_executor_claims_operation_key_required
+             BEFORE INSERT ON spend_executor_claims
+             WHEN NEW.operation_key IS NULL OR trim(NEW.operation_key) = ''
+             BEGIN
+                 SELECT RAISE(ABORT, 'executor claim operation key is required');
+             END;
+
+             CREATE TRIGGER IF NOT EXISTS spend_executor_claims_agent_id_required
+             BEFORE INSERT ON spend_executor_claims
+             WHEN NEW.agent_id IS NULL OR trim(NEW.agent_id) = ''
+             BEGIN
+                 SELECT RAISE(ABORT, 'executor claim agent id is required');
+             END;
+
+             CREATE TRIGGER IF NOT EXISTS spend_executor_claims_workflow_matches
+             BEFORE INSERT ON spend_executor_claims
+             WHEN NOT EXISTS (
+                 SELECT 1
+                 FROM spend_auth_tokens AS tokens
+                 JOIN spend_decisions AS decisions
+                   ON decisions.id = tokens.spend_decision_id
+                 WHERE tokens.id = NEW.spend_auth_token_id
+                   AND decisions.owner_user_id = NEW.owner_user_id
+                   AND decisions.agent_id = NEW.agent_id
+                   AND decisions.operation_key = NEW.operation_key
+             )
+             BEGIN
+                 SELECT RAISE(ABORT, 'executor claim does not match authorized operation');
+             END;
+
+             CREATE TRIGGER IF NOT EXISTS spend_executor_claims_identity_immutable
+             BEFORE UPDATE OF spend_auth_token_id, owner_user_id, agent_id, operation_key
+             ON spend_executor_claims
+             BEGIN
+                 SELECT RAISE(ABORT, 'executor claim identity is immutable');
+             END;
+
+             CREATE TRIGGER IF NOT EXISTS spend_decisions_no_update
+             BEFORE UPDATE ON spend_decisions
+             BEGIN
+                 SELECT RAISE(ABORT, 'spend decisions are immutable');
+             END;
+
+             CREATE TRIGGER IF NOT EXISTS spend_decisions_no_delete
+             BEFORE DELETE ON spend_decisions
+             BEGIN
+                 SELECT RAISE(ABORT, 'spend decisions are immutable');
+             END;",
+        )?;
+        Ok(())
+    }
+
+    fn copy_legacy_claim_identifier_to_decisions(
+        &self,
+        claim_column: &str,
+    ) -> Result<(), StorageError> {
+        self.conn.execute_batch(&format!(
+            "UPDATE spend_decisions AS decisions
+             SET operation_key = (
+                 SELECT claims.{claim_column}
+                 FROM spend_auth_tokens AS tokens
+                 JOIN spend_executor_claims AS claims
+                   ON claims.spend_auth_token_id = tokens.id
+                 WHERE tokens.spend_decision_id = decisions.id
+                 ORDER BY claims.claimed_at, claims.id
+                 LIMIT 1
+             )
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM spend_auth_tokens AS tokens
+                 JOIN spend_executor_claims AS claims
+                   ON claims.spend_auth_token_id = tokens.id
+                 WHERE tokens.spend_decision_id = decisions.id
+                   AND claims.{claim_column} IS NOT NULL
+                   AND trim(claims.{claim_column}) != ''
+             );"
+        ))?;
+        Ok(())
+    }
 }
 
 impl PolicyRepository for SqliteGovernanceRepository {
@@ -773,11 +1024,13 @@ impl SpendRepository for SqliteGovernanceRepository {
     fn save_spend_decision(&mut self, record: &SpendDecisionRecord) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO spend_decisions
-             (id, owner_user_id, request_json, evaluation_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (id, owner_user_id, agent_id, operation_key, request_json, evaluation_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 record.id.to_string(),
                 record.owner_user_id.to_string(),
+                record.request.agent_id.to_string(),
+                record.operation_key,
                 serde_json::to_string(&record.request)?,
                 serde_json::to_string(&record.evaluation)?,
                 record.created_at.to_rfc3339(),
@@ -826,20 +1079,31 @@ impl SpendRepository for SqliteGovernanceRepository {
 
     fn load_spend_decisions(&self) -> Result<Vec<SpendDecisionRecord>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, owner_user_id, request_json, evaluation_json, created_at
+            "SELECT id, owner_user_id, agent_id, operation_key, request_json, evaluation_json, created_at
              FROM spend_decisions
              ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let owner_user_id: String = row.get(1)?;
-            let request_json: String = row.get(2)?;
-            let evaluation_json: String = row.get(3)?;
-            let created_at: String = row.get(4)?;
+            let agent_id: String = row.get(2)?;
+            let operation_key: String = row.get(3)?;
+            let request_json: String = row.get(4)?;
+            let evaluation_json: String = row.get(5)?;
+            let created_at: String = row.get(6)?;
+            let request: crate::spend::SpendRequest = parse_json(&request_json)?;
+            if request.agent_id.to_string() != agent_id {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    StorageError::InvalidData(
+                        "spend decision agent id does not match request".to_string(),
+                    ),
+                )));
+            }
             Ok(SpendDecisionRecord {
                 id: parse_id(&id)?,
                 owner_user_id: parse_id(&owner_user_id)?,
-                request: parse_json(&request_json)?,
+                operation_key,
+                request,
                 evaluation: parse_json(&evaluation_json)?,
                 created_at: parse_timestamp(&created_at)?,
             })
@@ -864,15 +1128,16 @@ impl SpendRepository for SqliteGovernanceRepository {
     ) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO spend_executor_claims
-             (id, spend_auth_token_id, owner_user_id, executor_execution_id, workload_profile,
-              status, claimed_at, expires_at, finalized_at, settlement_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             (id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
+              workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO NOTHING",
             params![
                 record.id.to_string(),
                 record.spend_auth_token_id.to_string(),
                 record.owner_user_id.to_string(),
-                record.executor_execution_id,
+                record.agent_id.to_string(),
+                record.operation_key,
                 record.workload_profile,
                 executor_claim_status(&record.status),
                 record.claimed_at.to_rfc3339(),
@@ -886,7 +1151,7 @@ impl SpendRepository for SqliteGovernanceRepository {
 
     fn load_executor_claims(&self) -> Result<Vec<SpendExecutorClaimRecord>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, spend_auth_token_id, owner_user_id, executor_execution_id,
+            "SELECT id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
                     workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id
              FROM spend_executor_claims
              ORDER BY claimed_at ASC",
@@ -1156,16 +1421,34 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
     }
 }
 
+#[cfg(test)]
 fn load_executor_claim_by_id(
     conn: &Connection,
     claim_id: &SpendExecutorClaimId,
 ) -> Result<Option<SpendExecutorClaimRecord>, StorageError> {
     conn.query_row(
-        "SELECT id, spend_auth_token_id, owner_user_id, executor_execution_id,
+        "SELECT id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
                 workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id
          FROM spend_executor_claims
          WHERE id = ?1",
         params![claim_id.to_string()],
+        executor_claim_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn load_executor_claim_by_operation(
+    conn: &Connection,
+    agent_id: &AgentId,
+    operation_key: &str,
+) -> Result<Option<SpendExecutorClaimRecord>, StorageError> {
+    conn.query_row(
+        "SELECT id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
+                workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id
+         FROM spend_executor_claims
+         WHERE agent_id = ?1 AND operation_key = ?2",
+        params![agent_id.to_string(), operation_key],
         executor_claim_from_row,
     )
     .optional()
@@ -1225,17 +1508,19 @@ fn executor_claim_from_row(
     let id: String = row.get(0)?;
     let token_id: String = row.get(1)?;
     let owner_user_id: String = row.get(2)?;
-    let status: String = row.get(5)?;
-    let claimed_at: String = row.get(6)?;
-    let expires_at: String = row.get(7)?;
-    let finalized_at: Option<String> = row.get(8)?;
-    let settlement_id: Option<String> = row.get(9)?;
+    let agent_id: String = row.get(3)?;
+    let status: String = row.get(6)?;
+    let claimed_at: String = row.get(7)?;
+    let expires_at: String = row.get(8)?;
+    let finalized_at: Option<String> = row.get(9)?;
+    let settlement_id: Option<String> = row.get(10)?;
     Ok(SpendExecutorClaimRecord {
         id: parse_id(&id)?,
         spend_auth_token_id: parse_id(&token_id)?,
         owner_user_id: parse_id(&owner_user_id)?,
-        executor_execution_id: row.get(3)?,
-        workload_profile: row.get(4)?,
+        agent_id: parse_id(&agent_id)?,
+        operation_key: row.get(4)?,
+        workload_profile: row.get(5)?,
         status: parse_executor_claim_status(&status)?,
         claimed_at: parse_timestamp(&claimed_at)?,
         expires_at: parse_timestamp(&expires_at)?,
@@ -1545,6 +1830,7 @@ mod tests {
         SpendDecisionRecord {
             id: SpendDecisionId::new(),
             owner_user_id: user_id(),
+            operation_key: "gongbu-operation-transactional".to_string(),
             request: spend_request(),
             evaluation: Evaluation {
                 policy_id: "demo_policy".to_string(),
@@ -1581,7 +1867,8 @@ mod tests {
             id: SpendExecutorClaimId::new(),
             spend_auth_token_id: token.id.clone(),
             owner_user_id: user_id(),
-            executor_execution_id: "gongbu-job-transactional".to_string(),
+            agent_id: decision.request.agent_id.clone(),
+            operation_key: decision.operation_key.clone(),
             workload_profile: "default".to_string(),
             status: SpendExecutorClaimStatus::Claimed,
             claimed_at: Utc::now(),
@@ -1638,24 +1925,24 @@ mod tests {
         );
         let first_settlement_id = PaymentId::new();
 
-        let wrong_execution_error = repo
+        let wrong_operation_error = repo
             .settle_executor_claim_transactionally(
-                &claim.id,
                 &claim.owner_user_id,
-                "different-executor-job",
+                &claim.agent_id,
+                "another-operation",
                 PaymentId::new(),
                 settlement_started_at,
             )
             .unwrap_err();
-        assert!(wrong_execution_error
+        assert!(wrong_operation_error
             .to_string()
-            .contains("execution id does not match"));
+            .contains("unknown executor claim"));
 
         let first = repo
             .settle_executor_claim_transactionally(
-                &claim.id,
                 &claim.owner_user_id,
-                &claim.executor_execution_id,
+                &claim.agent_id,
+                &claim.operation_key,
                 first_settlement_id.clone(),
                 settlement_started_at,
             )
@@ -1677,9 +1964,9 @@ mod tests {
 
         let replay = repo
             .settle_executor_claim_transactionally(
-                &claim.id,
                 &claim.owner_user_id,
-                &claim.executor_execution_id,
+                &claim.agent_id,
+                &claim.operation_key,
                 PaymentId::new(),
                 settlement_started_at + Duration::seconds(1),
             )
@@ -1711,9 +1998,9 @@ mod tests {
 
         let error = repo
             .settle_executor_claim_transactionally(
-                &claim.id,
                 &claim.owner_user_id,
-                &claim.executor_execution_id,
+                &claim.agent_id,
+                &claim.operation_key,
                 PaymentId::new(),
                 settlement_started_at,
             )
@@ -1752,9 +2039,9 @@ mod tests {
 
         let error = repo
             .settle_executor_claim_transactionally(
-                &claim.id,
                 &claim.owner_user_id,
-                &claim.executor_execution_id,
+                &claim.agent_id,
+                &claim.operation_key,
                 PaymentId::new(),
                 settlement_started_at,
             )
@@ -1782,9 +2069,9 @@ mod tests {
 
         let released = repo
             .release_executor_claim_transactionally(
-                &claim.id,
                 &claim.owner_user_id,
-                &claim.executor_execution_id,
+                &claim.agent_id,
+                &claim.operation_key,
                 finalization_started_at,
             )
             .unwrap();
@@ -1800,9 +2087,9 @@ mod tests {
 
         let replay = repo
             .release_executor_claim_transactionally(
-                &claim.id,
                 &claim.owner_user_id,
-                &claim.executor_execution_id,
+                &claim.agent_id,
+                &claim.operation_key,
                 finalization_started_at + Duration::seconds(1),
             )
             .unwrap();
@@ -1811,9 +2098,9 @@ mod tests {
 
         let settle_error = repo
             .settle_executor_claim_transactionally(
-                &claim.id,
                 &claim.owner_user_id,
-                &claim.executor_execution_id,
+                &claim.agent_id,
+                &claim.operation_key,
                 PaymentId::new(),
                 finalization_started_at + Duration::seconds(1),
             )
@@ -1845,7 +2132,8 @@ mod tests {
             id: SpendExecutorClaimId::new(),
             spend_auth_token_id: token.id.clone(),
             owner_user_id: user_id(),
-            executor_execution_id: "gongbu-job-123".to_string(),
+            agent_id: decision.request.agent_id.clone(),
+            operation_key: decision.operation_key.clone(),
             workload_profile: "default".to_string(),
             status: SpendExecutorClaimStatus::Claimed,
             claimed_at: Utc::now(),
@@ -1863,7 +2151,143 @@ mod tests {
         let claims = repo.load_executor_claims().unwrap();
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].id, claim.id);
-        assert_eq!(claims[0].executor_execution_id, "gongbu-job-123");
+        assert_eq!(claims[0].operation_key, decision.operation_key);
+    }
+
+    #[test]
+    fn spend_operation_key_uniqueness_is_scoped_to_the_agent() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let first = spend_decision();
+        repo.save_spend_decision(&first).unwrap();
+
+        let mut second = spend_decision();
+        second.operation_key = first.operation_key.clone();
+        second.request.agent_id = AgentId::new();
+        repo.save_spend_decision(&second)
+            .expect("another agent should be able to reuse the operation key");
+
+        let mut duplicate = spend_decision();
+        duplicate.operation_key = first.operation_key.clone();
+        duplicate.request.agent_id = first.request.agent_id.clone();
+        let error = repo
+            .save_spend_decision(&duplicate)
+            .expect_err("one agent must not reuse an operation key");
+        assert!(error.to_string().contains("UNIQUE constraint failed"));
+    }
+
+    #[test]
+    fn migrates_duplicate_legacy_execution_ids_to_unique_operation_keys() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-governance-operation-migration-{}.sqlite",
+            UserId::new()
+        ));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE spend_decisions (
+                id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                evaluation_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+             );
+             CREATE TABLE spend_auth_tokens (
+                id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                spend_decision_id TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                claim_ttl_seconds INTEGER NOT NULL DEFAULT 900,
+                used_at TEXT,
+                used_by_payment_id TEXT,
+                revoked_at TEXT
+             );
+             CREATE TABLE spend_executor_claims (
+                id TEXT PRIMARY KEY,
+                spend_auth_token_id TEXT NOT NULL UNIQUE,
+                owner_user_id TEXT NOT NULL,
+                executor_execution_id TEXT NOT NULL,
+                workload_profile TEXT NOT NULL,
+                status TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                finalized_at TEXT,
+                settlement_id TEXT
+             );",
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            let decision = spend_decision();
+            let token_id = SpendAuthTokenId::new();
+            let claim_id = SpendExecutorClaimId::new();
+            conn.execute(
+                "INSERT INTO spend_decisions
+                 (id, owner_user_id, request_json, evaluation_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    decision.id.to_string(),
+                    decision.owner_user_id.to_string(),
+                    serde_json::to_string(&decision.request).unwrap(),
+                    serde_json::to_string(&decision.evaluation).unwrap(),
+                    decision.created_at.to_rfc3339(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO spend_auth_tokens
+                 (id, owner_user_id, spend_decision_id, expires_at, claim_ttl_seconds)
+                 VALUES (?1, ?2, ?3, ?4, 900)",
+                params![
+                    token_id.to_string(),
+                    user_id().to_string(),
+                    decision.id.to_string(),
+                    (Utc::now() + Duration::minutes(5)).to_rfc3339(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO spend_executor_claims
+                 (id, spend_auth_token_id, owner_user_id, executor_execution_id,
+                  workload_profile, status, claimed_at, expires_at)
+                 VALUES (?1, ?2, ?3, 'reused-legacy-execution', 'default',
+                         'claimed', ?4, ?5)",
+                params![
+                    claim_id.to_string(),
+                    token_id.to_string(),
+                    user_id().to_string(),
+                    Utc::now().to_rfc3339(),
+                    (Utc::now() + Duration::minutes(15)).to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let repo = SqliteGovernanceRepository::open(&path).expect("legacy database should migrate");
+        let claims = repo.load_executor_claims().unwrap();
+        let decisions = repo.load_spend_decisions().unwrap();
+        let tokens = repo.load_spend_auth_tokens().unwrap();
+        assert!(table_has_column(&repo.conn, "spend_decisions", "operation_key").unwrap());
+        assert!(table_has_column(&repo.conn, "spend_executor_claims", "operation_key").unwrap());
+        assert!(!table_has_column(&repo.conn, "spend_decisions", "job_id").unwrap());
+        assert!(!table_has_column(&repo.conn, "spend_executor_claims", "job_id").unwrap());
+        assert!(
+            !table_has_column(&repo.conn, "spend_executor_claims", "executor_execution_id")
+                .unwrap()
+        );
+        assert_eq!(claims.len(), 2);
+        assert_ne!(claims[0].operation_key, claims[1].operation_key);
+        for claim in claims {
+            let token = tokens
+                .iter()
+                .find(|token| token.id == claim.spend_auth_token_id)
+                .expect("claim token should migrate");
+            let decision = decisions
+                .iter()
+                .find(|decision| decision.id == token.spend_decision_id)
+                .expect("claim decision should migrate");
+            assert_eq!(claim.operation_key, decision.operation_key);
+        }
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
@@ -1958,11 +2382,13 @@ mod tests {
                 .unwrap();
             conn.execute(
                 "INSERT INTO spend_decisions
-                 (id, owner_user_id, request_json, evaluation_json, created_at)
-                 VALUES (?1, ?2, '{}', '{}', ?3)",
+                 (id, owner_user_id, agent_id, operation_key, request_json, evaluation_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, '{}', '{}', ?5)",
                 params![
                     spend_decision_id.to_string(),
                     user_id().to_string(),
+                    agent_id().to_string(),
+                    format!("legacy-{spend_decision_id}"),
                     now.to_rfc3339(),
                 ],
             )

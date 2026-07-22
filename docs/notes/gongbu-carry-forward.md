@@ -67,8 +67,8 @@ rather than remain Hubu responsibilities.
 - PR #58, `codex/logo-demo-provider-idempotency-header`
   - Useful for Gongbu: forwarding a stable idempotency key to vendors when
     supported.
-  - Gongbu requirement: derive idempotency from the Hubu authorization and
-    executor job id without leaking secrets.
+  - Gongbu requirement: derive vendor idempotency from the Hubu authorization
+    and operation key without leaking secrets.
 
 - PR #59, `codex/logo-demo-provider-retry-config`
   - Useful for Gongbu: bounded retry configuration for transient provider
@@ -132,4 +132,3 @@ lands they should likely be closed or archived rather than merged into Hubu:
 
 If needed, create a Gongbu bootstrap issue or project board from the "Carry
 Forward To Gongbu" section before closing the Hubu PRs.
-
