@@ -76,9 +76,15 @@ const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
+const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
+const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
+const RECONCILIATION_CAPABILITY_HEADER: &str = "x-hubu-reconciliation-capability";
 const SPEND_TIMING_CONFIG_ENV: &str = "HUBU_SPEND_TIMING_CONFIG";
 #[cfg(test)]
 const TEST_AUTH_TOKEN: &str = "test-local-auth-token";
+#[cfg(test)]
+const TEST_RECONCILIATION_TOKEN: &str = "test-human-reconciliation-token";
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 type LocalPaymentManager = PaymentManager<MockPaymentRail, SharedSpendAuthorizer>;
@@ -199,6 +205,7 @@ impl ServerState {
             "local_api_auth_configured",
             json!({
                 "source": auth.source(),
+                "reconciliation_source": auth.reconciliation_source(),
                 "owner_user_id": default_user.id.to_string(),
                 "owner_user_pub_id": default_user.pub_id,
             }),
@@ -331,15 +338,28 @@ fn load_spend_timing_config() -> Result<SpendTimingConfig> {
 struct LocalAuth {
     token_hash: String,
     token_source: String,
+    reconciliation_token_hash: String,
+    reconciliation_token_source: String,
     owner_user_id: Mutex<UserId>,
 }
 
 impl LocalAuth {
     fn new(owner_user_id: UserId) -> Result<Self> {
         let token = load_local_auth_token()?;
+        let reconciliation_token = load_local_reconciliation_token()?;
+        if constant_time_eq(
+            hash_token(&token.value).as_bytes(),
+            hash_token(&reconciliation_token.value).as_bytes(),
+        ) {
+            return Err(anyhow!(
+                "Hubu reconciliation capability must be distinct from the API bearer token"
+            ));
+        }
         Ok(Self {
             token_hash: hash_token(&token.value),
             token_source: token.source,
+            reconciliation_token_hash: hash_token(&reconciliation_token.value),
+            reconciliation_token_source: reconciliation_token.source,
             owner_user_id: Mutex::new(owner_user_id),
         })
     }
@@ -350,6 +370,17 @@ impl LocalAuth {
 
     fn source(&self) -> &str {
         &self.token_source
+    }
+
+    fn verifies_reconciliation_capability(&self, token: &str) -> bool {
+        constant_time_eq(
+            hash_token(token).as_bytes(),
+            self.reconciliation_token_hash.as_bytes(),
+        )
+    }
+
+    fn reconciliation_source(&self) -> &str {
+        &self.reconciliation_token_source
     }
 
     fn owner_user_id(&self) -> Result<UserId> {
@@ -421,13 +452,72 @@ fn load_local_auth_token() -> Result<LoadedLocalAuthToken> {
     }
 }
 
+fn load_local_reconciliation_token() -> Result<LoadedLocalAuthToken> {
+    #[cfg(test)]
+    if env::var(RECONCILIATION_TOKEN_ENV).is_err()
+        && env::var(RECONCILIATION_TOKEN_FILE_ENV).is_err()
+    {
+        return Ok(LoadedLocalAuthToken {
+            value: TEST_RECONCILIATION_TOKEN.to_string(),
+            source: "test".to_string(),
+        });
+    }
+
+    if let Ok(token) = env::var(RECONCILIATION_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{RECONCILIATION_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(LoadedLocalAuthToken {
+            value: token,
+            source: RECONCILIATION_TOKEN_ENV.to_string(),
+        });
+    }
+
+    let path = reconciliation_token_file_path();
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                return Err(anyhow!(
+                    "Hubu reconciliation token file `{}` is empty",
+                    path.display()
+                ));
+            }
+            Ok(LoadedLocalAuthToken {
+                value: token,
+                source: path.display().to_string(),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let token = create_token_file(&path, "hubu_reconcile_")?;
+            Ok(LoadedLocalAuthToken {
+                value: token,
+                source: path.display().to_string(),
+            })
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("read Hubu reconciliation token file `{}`", path.display())),
+    }
+}
+
 fn auth_token_file_path() -> PathBuf {
     env::var(AUTH_TOKEN_FILE_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_AUTH_TOKEN_FILE))
 }
 
+fn reconciliation_token_file_path() -> PathBuf {
+    env::var(RECONCILIATION_TOKEN_FILE_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_RECONCILIATION_TOKEN_FILE))
+}
+
 fn create_auth_token_file(path: &Path) -> Result<String> {
+    create_token_file(path, "hubu_")
+}
+
+fn create_token_file(path: &Path, prefix: &str) -> Result<String> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -436,7 +526,7 @@ fn create_auth_token_file(path: &Path) -> Result<String> {
             .with_context(|| format!("create auth token directory `{}`", parent.display()))?;
     }
 
-    let token = format!("hubu_{}", AgentSessionId::new());
+    let token = format!("{prefix}{}", AgentSessionId::new());
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1034,6 +1124,10 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         }
     }
 
+    let reconciliation_capability = request
+        .headers
+        .get(RECONCILIATION_CAPABILITY_HEADER)
+        .map(String::as_str);
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
         ("GET", "/registration/guidance")
@@ -1075,8 +1169,12 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("GET", "/spend/executor/reconciliation") => {
             list_executor_claims_requiring_reconciliation(state).map(to_json)
         }
-        ("POST", "/spend/executor/settle") => finalize_executor_spend(request.body, state, true),
-        ("POST", "/spend/executor/release") => finalize_executor_spend(request.body, state, false),
+        ("POST", "/spend/executor/settle") => {
+            finalize_executor_spend(request.body, state, true, reconciliation_capability)
+        }
+        ("POST", "/spend/executor/release") => {
+            finalize_executor_spend(request.body, state, false, reconciliation_capability)
+        }
         ("POST", "/spend") => spend(request.body, state).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
         _ => Err(anyhow!("no route for {} {}", request.method, request.path)),
@@ -1168,6 +1266,20 @@ fn authenticate_request(request: &HttpRequest, state: &ServerState) -> Result<()
         return Err(anyhow!("invalid authorization bearer token"));
     }
 
+    Ok(())
+}
+
+fn authenticate_reconciliation_capability(
+    capability: Option<&str>,
+    state: &ServerState,
+) -> Result<()> {
+    let capability = capability
+        .map(str::trim)
+        .filter(|capability| !capability.is_empty())
+        .ok_or_else(|| anyhow!("missing human reconciliation capability"))?;
+    if !state.auth.verifies_reconciliation_capability(capability) {
+        return Err(anyhow!("invalid human reconciliation capability"));
+    }
     Ok(())
 }
 
@@ -1274,7 +1386,12 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "vendor_billed": "POST /spend/executor/settle",
                 "vendor_did_not_bill": "POST /spend/executor/release"
             },
-            "human_gate": "The CLI is the direct human surface; MCP reconciliation tools require a trusted client approval prompt before invocation."
+            "human_gate": {
+                "capability_header": RECONCILIATION_CAPABILITY_HEADER,
+                "requirement": "The server requires a reconciliation capability distinct from the normal API bearer token.",
+                "cli": "The CLI reads HUBU_RECONCILIATION_TOKEN or HUBU_RECONCILIATION_TOKEN_FILE and sends it only for reconciliation.",
+                "mcp": "MCP reconciliation tools require both a trusted client approval prompt and the distinct reconciliation capability."
+            }
         },
         "timing": &state.spend_timing,
         "scope_rules": [
@@ -1299,6 +1416,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "expired claims keep their holds claimed for reconciliation instead of automatically releasing",
             "claim status lookup reports reconciliation_required once a claimed lease expires",
             "only expired claimed leases enter the reconciliation queue",
+            "the normal API bearer token cannot authorize reconciliation",
             "a human-confirmed vendor_billed resolution settles the hold; vendor_did_not_bill releases it",
             "each reconciliation stores the provider reference, evidence, resolving user, outcome, and timestamp"
         ],
@@ -2663,6 +2781,7 @@ fn finalize_executor_spend(
     body: String,
     state: &ServerState,
     vendor_billed: bool,
+    reconciliation_capability: Option<&str>,
 ) -> Result<Value> {
     match serde_json::from_str::<ExecutorSpendFinalizationHttpRequest>(&body)? {
         ExecutorSpendFinalizationHttpRequest::Executor(request) if vendor_billed => {
@@ -2672,6 +2791,7 @@ fn finalize_executor_spend(
             release_executor_spend_request(request, state).map(to_json)
         }
         ExecutorSpendFinalizationHttpRequest::Reconciliation(request) => {
+            authenticate_reconciliation_capability(reconciliation_capability, state)?;
             reconcile_executor_claim(request, state, vendor_billed).map(to_json)
         }
     }
@@ -5694,6 +5814,7 @@ mod tests {
             .to_string(),
             &state,
             true,
+            None,
         )
         .expect_err("executor and reconciliation request fields must not be mixed");
         assert!(mixed_mode_error
@@ -5714,6 +5835,7 @@ mod tests {
             .to_string(),
             &state,
             true,
+            None,
         )
         .expect_err("normal settlement should reject an expired claim");
         assert!(normal_error
@@ -5727,17 +5849,41 @@ mod tests {
         assert!(queue.claims[0].reconciliation_required);
         assert_eq!(queue.claims[0].spend.budget_hold.frozen_amount_cents, 500);
 
-        let reconciled = finalize_executor_spend(
-            json!({
-                "claim_id": claim.claim_id,
-                "provider_reference": "openai-request-abc123",
-                "evidence": "Provider usage export shows a completed billed request.",
-            })
-            .to_string(),
+        let reconciliation_body = json!({
+            "claim_id": claim.claim_id,
+            "provider_reference": "openai-request-abc123",
+            "evidence": "Provider usage export shows a completed billed request.",
+        });
+        let missing_capability = route(
+            authenticated_json_request("/spend/executor/settle", reconciliation_body.clone()),
             &state,
-            true,
-        )
-        .expect("human-confirmed billed claim should settle");
+        );
+        assert_eq!(missing_capability.status, 400);
+        assert!(missing_capability.body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("missing human reconciliation capability")));
+
+        let mut executor_capability_request =
+            authenticated_json_request("/spend/executor/settle", reconciliation_body.clone());
+        executor_capability_request.headers.insert(
+            RECONCILIATION_CAPABILITY_HEADER.to_string(),
+            TEST_AUTH_TOKEN.to_string(),
+        );
+        let executor_capability = route(executor_capability_request, &state);
+        assert_eq!(executor_capability.status, 400);
+        assert!(executor_capability.body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("invalid human reconciliation capability")));
+
+        let mut human_request =
+            authenticated_json_request("/spend/executor/settle", reconciliation_body);
+        human_request.headers.insert(
+            RECONCILIATION_CAPABILITY_HEADER.to_string(),
+            TEST_RECONCILIATION_TOKEN.to_string(),
+        );
+        let human_response = route(human_request, &state);
+        assert_eq!(human_response.status, 200);
+        let reconciled = human_response.body;
         assert_eq!(reconciled["status"], "settled");
         assert_eq!(
             reconciled["reconciliation_outcome"].as_str(),

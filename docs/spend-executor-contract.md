@@ -295,6 +295,7 @@ vendor billed, the human settles the hold:
 
 ```http
 POST /spend/executor/settle
+X-Hubu-Reconciliation-Capability: HUMAN_CAPABILITY
 ```
 
 ```json
@@ -310,6 +311,7 @@ shape:
 
 ```http
 POST /spend/executor/release
+X-Hubu-Reconciliation-Capability: HUMAN_CAPABILITY
 ```
 
 The existing settle/release endpoints therefore accept one of two exclusive
@@ -322,6 +324,13 @@ hold, and budget balance. A matching retry returns the stored outcome; a retry
 with different evidence is rejected. Reconciliation records the outcome,
 provider reference, evidence, resolving user, and timestamp. Evidence must not
 contain vendor credentials or sensitive provider payloads.
+
+The reconciliation capability is loaded separately from
+`HUBU_RECONCILIATION_TOKEN` or `HUBU_RECONCILIATION_TOKEN_FILE`. It must not
+equal or be distributed with the normal Hubu bearer token. Executors receive
+only the normal bearer, while human-facing CLI/MCP administration receives the
+reconciliation capability. The server validates both credentials before
+entering the reconciliation transaction.
 
 The CLI is the direct operator surface:
 
@@ -339,7 +348,9 @@ hubu spend reconcile not-billed --claim-id CLAIM_ID \
 MCP exposes the same lookup and queue as read-only tools. Its billed and
 not-billed resolution tools are protected administrative tools: Hubu advertises
 `prompt_before_call`, and the MCP adapter refuses them unless it is configured
-to trust a client-side human approval gate.
+to trust a client-side human approval gate. Even after that gate, the server
+requires the distinct reconciliation capability, so direct executor HTTP calls
+with only the normal bearer are rejected.
 
 ## Safety Rules
 
@@ -353,4 +364,5 @@ to trust a client-side human approval gate.
   spend scope.
 - Executors must not resolve expired claims. A human must review provider
   billing and choose the reconciliation outcome.
+- Never distribute the human reconciliation capability to an executor.
 - Hubu never stores executor vendor secrets through this contract.

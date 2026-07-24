@@ -11,9 +11,13 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
+const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
+const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
+const RECONCILIATION_CAPABILITY_HEADER: &str = "X-Hubu-Reconciliation-Capability";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const HUBU_APPROVAL_PROFILE_VERSION: &str = "hubu-mcp-client-approval-v1";
-const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Spend calls currently require the client harness to supply a stable, namespaced operation_key; Hubu MCP does not yet derive it from trusted platform metadata, and the model should not invent one. Hubu stores workflow state under that key for authorization, claim, finalization, and retries. Protected setup/admin tools require a human approval prompt before tools/call. Expired-claim reconciliation tools use the same human approval gate. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
+const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Spend calls currently require the client harness to supply a stable, namespaced operation_key; Hubu MCP does not yet derive it from trusted platform metadata, and the model should not invent one. Hubu stores workflow state under that key for authorization, claim, finalization, and retries. Protected setup/admin tools require a human approval prompt before tools/call. Expired-claim reconciliation tools use that prompt gate and a distinct server-verified human reconciliation capability that is never sent on executor requests. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
 const READ_TOOL_NAMES: &[&str] = &[
     "hubu_health",
     "hubu_registration_guidance",
@@ -535,11 +539,11 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
         }
         "hubu_reconcile_vendor_billed_claim" => {
             require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/spend/executor/settle", arguments)?
+            post_reconciliation_json(base_url, "/spend/executor/settle", arguments)?
         }
         "hubu_reconcile_vendor_did_not_bill_claim" => {
             require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/spend/executor/release", arguments)?
+            post_reconciliation_json(base_url, "/spend/executor/release", arguments)?
         }
         _ => bail!("unknown Hubu MCP tool `{name}`"),
     };
@@ -594,25 +598,45 @@ fn tool_result(value: Value) -> Value {
 }
 
 fn get_json(base_url: &str, path: &str) -> Result<Value> {
-    request_json(base_url, "GET", path, None)
+    request_json(base_url, "GET", path, None, false)
 }
 
 fn post_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body))
+    request_json(base_url, "POST", path, Some(body), false)
 }
 
-fn request_json(base_url: &str, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+fn post_reconciliation_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
+    request_json(base_url, "POST", path, Some(body), true)
+}
+
+fn request_json(
+    base_url: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    include_reconciliation_capability: bool,
+) -> Result<Value> {
     let (host, port) = parse_base_url(base_url)?;
     let body_text = body.map(|body| body.to_string()).unwrap_or_default();
     let authorization_header = auth_token()?
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
+    let reconciliation_header = if include_reconciliation_capability {
+        let token = reconciliation_token()?.ok_or_else(|| {
+            anyhow!(
+                "human reconciliation requires {RECONCILIATION_TOKEN_ENV} or {RECONCILIATION_TOKEN_FILE_ENV}"
+            )
+        })?;
+        format!("{RECONCILIATION_CAPABILITY_HEADER}: {token}\r\n")
+    } else {
+        String::new()
+    };
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("connect to Hubu server at {base_url}"))?;
 
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}{reconciliation_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body_text.len(),
         body_text
     )?;
@@ -668,6 +692,33 @@ fn auth_token() -> Result<Option<String>> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("read Hubu auth token file `{path}`")),
+    }
+}
+
+fn reconciliation_token() -> Result<Option<String>> {
+    if let Ok(token) = env::var(RECONCILIATION_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{RECONCILIATION_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(Some(token));
+    }
+
+    let path = env::var(RECONCILIATION_TOKEN_FILE_ENV)
+        .unwrap_or_else(|_| DEFAULT_RECONCILIATION_TOKEN_FILE.to_string());
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                Err(anyhow!("Hubu reconciliation token file `{path}` is empty"))
+            } else {
+                Ok(Some(token))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("read Hubu reconciliation token file `{path}`"))
+        }
     }
 }
 

@@ -87,8 +87,8 @@ const components = {
     copy:
       "The local server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, resolves public IDs, and leaves spend approval/payment state transitions to the core app service.",
     responsibilities: [
-      "Keeps health and guidance public while requiring a local bearer token for user setup, agent registration, policies, spending targets, budgets, spend, claim lookup/reconciliation, and ledger listing.",
-      "Uses the local token and current user context for protected workflow authority and agent registration ownership.",
+      "Keeps health and guidance public while requiring a local bearer token for protected routes and a second human capability for reconciliation mutations.",
+      "Uses the local token and current user context for protected workflow authority, while refusing to treat executor possession of that token as human reconciliation approval.",
       "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
       "Delegates authorize, reserve one agent budget, persist the token/hold, payment, and settle/release to `hubu-core::app` so the spend path is testable without HTTP.",
       "Bridges wallet payment authorization and durable external executor claims through shared spend and budget state.",
@@ -98,7 +98,7 @@ const components = {
     links: [sharedLinks.api, sharedLinks.appSpend, sharedLinks.spendExecutor, sharedLinks.persistence, sharedLinks.telemetry],
     nodes: [
       { id: "routes", label: "Routes", sub: "GET/POST JSON", x: 72, y: 92, w: 190, h: 90, tone: "agent" },
-      { id: "auth", label: "Local auth", sub: "token + owner", x: 410, y: 76, w: 220, h: 92, tone: "core" },
+      { id: "auth", label: "Local auth", sub: "bearer + human cap", x: 410, y: 76, w: 220, h: 92, tone: "core" },
       { id: "state", label: "ServerState", sub: "shared managers", x: 410, y: 250, w: 220, h: 96, tone: "core" },
       { id: "app", label: "App service", sub: "spend state machine", x: 410, y: 432, w: 220, h: 92, tone: "core", path: "crates/hubu-core/src/app/spend_approval.rs" },
       { id: "registration", label: "Registration", sub: "agent records", x: 805, y: 48, w: 190, h: 84, tone: "core" },
@@ -223,7 +223,7 @@ const components = {
       "Keys authorization, claim, and finalization by agent and platform operation key while returning stored state for identical retries.",
       "Reserves one hold per decision, moves executor work from frozen to exclusively claimed, and extends it to the workload claim lease.",
       "Enforces unique agent-scoped operation ownership and finalizes claim, token, hold, and budget balance in one immediate SQLite transaction while leaving expired claims frozen for reconciliation.",
-      "Lists expired claims for the owning user and records the provider reference, evidence, outcome, actor, and timestamp from a human-gated settle or release.",
+      "Lists expired claims for the owning user and requires a server-verified human capability before recording the provider reference, evidence, outcome, actor, and timestamp.",
       "Current settlement consumes or returns the authorized hold amount; future executor settlement may reconcile actual usage when it differs.",
       "A future shared allocation would be an explicit budget pool with agent membership, not a task-scoped branch in the MVP budget model.",
     ],

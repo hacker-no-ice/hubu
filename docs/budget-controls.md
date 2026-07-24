@@ -92,7 +92,8 @@ required, and the owner can list every expired claimed hold awaiting review.
 After checking vendor billing, a human must choose `vendor billed` to settle
 the hold into consumed balance or `vendor did not bill` to release it back to
 remaining balance. Both atomic resolutions require and persist a provider
-reference and evidence note. See the
+reference and evidence note, and the server requires a distinct human
+reconciliation capability in addition to the normal API bearer token. See the
 [spend executor contract](spend-executor-contract.md#expired-claims) for routes,
 CLI commands, and the human-gated MCP workflow.
 

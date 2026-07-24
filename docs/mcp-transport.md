@@ -169,6 +169,12 @@ after choosing an MCP client that enforces a human click for destructive tools.
 Without that trusted-client gate, protected tools return an error and do not
 forward requests to `hubu-server`.
 
+Reconciliation adds a server-side boundary beyond the MCP prompt:
+`hubu-server` and the human-facing MCP process must share
+`HUBU_RECONCILIATION_TOKEN` or `HUBU_RECONCILIATION_TOKEN_FILE`. The MCP adapter
+sends that capability only for the two reconciliation tools. An executor with
+only the normal Hubu bearer token cannot reconcile a claim through direct HTTP.
+
 Agents can call directly:
 
 - `hubu_health`
@@ -252,4 +258,6 @@ idempotency boundary.
 | `hubu_reconcile_vendor_did_not_bill_claim` | `POST /spend/executor/release` | required |
 
 All non-public HTTP routes behind these tools require the Hubu bearer token.
-Public HTTP routes are limited to health and protocol guidance.
+The two reconciliation mutations additionally require the distinct
+`X-Hubu-Reconciliation-Capability` header. Public HTTP routes are limited to
+health and protocol guidance.

@@ -137,11 +137,13 @@ discoverable to Codex agents, initialize the Codex MCP config:
 
 ```sh
 hubu init codex --token-file ~/.hubu/hubu.auth-token
-HUBU_AUTH_TOKEN_FILE=~/.hubu/hubu.auth-token hubu-server
+HUBU_AUTH_TOKEN_FILE=~/.hubu/hubu.auth-token \
+HUBU_RECONCILIATION_TOKEN_FILE=~/.hubu/hubu.reconciliation-token \
+hubu-server
 ```
 
 If the server from step 1 is already running with a different token file,
-restart it with the same `HUBU_AUTH_TOKEN_FILE` before restarting Codex. Codex
+restart it with the same auth and reconciliation token files before restarting Codex. Codex
 should then be able to discover Hubu MCP tools and call spend tools without
 holding wallet credentials. For other MCP clients, use Hubu's tool annotations
 or `hubu_client_approval_profile`; see
@@ -192,6 +194,12 @@ On startup the server reads `HUBU_AUTH_TOKEN`, or creates/reads
 client read the same token automatically and send it as a local bearer token for
 protected API routes. Use `HUBU_AUTH_TOKEN_FILE` when the server and clients
 need to share a token file at a different path.
+
+Human claim reconciliation additionally requires a distinct capability from
+`HUBU_RECONCILIATION_TOKEN` or `HUBU_RECONCILIATION_TOKEN_FILE` (default
+`hubu.reconciliation-token`). Executors should receive only the normal bearer
+token. The CLI and approved MCP reconciliation tools send the second capability
+only on reconciliation requests.
 
 Restart `hubu-server` after rebuilding API or storage changes; reinstalling the
 CLI only updates the client binary. To start over with clean local state:
