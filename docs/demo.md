@@ -226,6 +226,7 @@ produces a warning without blocking the $75 budget.
 
 ```sh
 hubu spend \
+  --operation-key demo-allow \
   --account-id aga_c6q3d9m1v8ra \
   --amount 20 \
   --reason "Purchase API credits"
@@ -235,6 +236,7 @@ Expected output:
 
 ```txt
 Spend evaluated
+  operation_key: demo-allow
   account_id: aga_c6q3d9m1v8ra
   agent_id: agt_8x7k2m4q9v1c
   decision: allow
@@ -266,6 +268,7 @@ balance.
 
 ```sh
 hubu spend authorize \
+  --operation-key demo-logo \
   --account-id aga_c6q3d9m1v8ra \
   --amount 5 \
   --reason "Generate Project Hubu logo" \
@@ -276,6 +279,7 @@ Expected output:
 
 ```txt
 Spend evaluated
+  operation_key: demo-logo
   account_id: aga_c6q3d9m1v8ra
   agent_id: agt_8x7k2m4q9v1c
   decision: allow
@@ -301,6 +305,7 @@ consume the token while keeping provider API keys inside Hubu.
 
 ```sh
 hubu spend \
+  --operation-key demo-failed \
   --account-id aga_c6q3d9m1v8ra \
   --amount 15 \
   --reason "Test failed merchant payout" \
@@ -311,6 +316,7 @@ Expected output:
 
 ```txt
 Spend evaluated
+  operation_key: demo-failed
   account_id: aga_c6q3d9m1v8ra
   agent_id: agt_8x7k2m4q9v1c
   decision: allow
@@ -339,6 +345,7 @@ Only successful payments become ledger transactions.
 
 ```sh
 hubu spend \
+  --operation-key demo-needs-approval \
   --account-id aga_c6q3d9m1v8ra \
   --amount 120 \
   --reason "Large API credit purchase"
@@ -348,6 +355,7 @@ Expected output:
 
 ```txt
 Spend evaluated
+  operation_key: demo-needs-approval
   account_id: aga_c6q3d9m1v8ra
   agent_id: agt_8x7k2m4q9v1c
   decision: needs_approval
@@ -361,6 +369,7 @@ returns `allow`.
 
 ```sh
 hubu spend \
+  --operation-key demo-deny \
   --account-id aga_c6q3d9m1v8ra \
   --amount 20 \
   --reason "Attempt blocked merchant purchase" \
@@ -371,6 +380,7 @@ Expected output:
 
 ```txt
 Spend evaluated
+  operation_key: demo-deny
   account_id: aga_c6q3d9m1v8ra
   agent_id: agt_8x7k2m4q9v1c
   decision: deny
@@ -443,8 +453,8 @@ hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --age
 hubu [--url http://127.0.0.1:8787] budget revoke --budget-id ID
 hubu [--url http://127.0.0.1:8787] budget replace --budget-id ID --amount AMOUNT
 hubu [--url http://127.0.0.1:8787] budget list [--all]
-hubu [--url http://127.0.0.1:8787] spend --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-hubu [--url http://127.0.0.1:8787] spend authorize --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+hubu [--url http://127.0.0.1:8787] spend --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+hubu [--url http://127.0.0.1:8787] spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
 hubu [--url http://127.0.0.1:8787] ledger list
 hubu [--url http://127.0.0.1:8787] health
 ```

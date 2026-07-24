@@ -25,14 +25,16 @@ pub enum SpendError {
     UserScopeMismatch,
     #[error("unknown workload profile `{0}`")]
     UnknownWorkloadProfile(String),
-    #[error("executor execution id cannot be empty")]
-    EmptyExecutorExecutionId,
-    #[error("spend auth token has already been claimed by another execution")]
+    #[error("operation key cannot be empty")]
+    EmptyOperationKey,
+    #[error("operation key was already authorized with different spend scope")]
+    OperationKeyConflict,
+    #[error("spend auth token has already been claimed by another operation")]
     SpendAuthTokenAlreadyClaimed,
     #[error("unknown executor spend claim")]
     UnknownExecutorClaim,
-    #[error("executor spend claim belongs to another execution")]
-    ExecutorClaimExecutionMismatch,
+    #[error("executor spend claim belongs to another operation")]
+    ExecutorClaimOperationMismatch,
     #[error("executor spend claim is expired and requires reconciliation")]
     ExpiredExecutorClaim,
     #[error("executor spend claim is already finalized")]

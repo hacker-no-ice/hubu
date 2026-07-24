@@ -31,6 +31,7 @@ pub struct SpendApprovalService;
 
 #[derive(Debug, Clone)]
 pub struct AuthorizeSpendRequest {
+    pub operation_key: String,
     pub user: UserContext,
     pub agent_id: AgentId,
     pub agent_account_id: AgentAccountId,
@@ -49,6 +50,7 @@ pub enum SpendAuthorizationOutcome {
 
 #[derive(Debug, Clone)]
 pub struct ApprovedSpendAuthorization {
+    pub operation_key: String,
     pub user: UserContext,
     pub agent_id: AgentId,
     pub agent_account_id: AgentAccountId,
@@ -70,6 +72,7 @@ impl ApprovedSpendAuthorization {
 
 #[derive(Debug, Clone)]
 pub struct RejectedSpendAuthorization {
+    pub operation_key: String,
     pub user: UserContext,
     pub agent_id: AgentId,
     pub agent_account_id: AgentAccountId,
@@ -192,7 +195,12 @@ impl SpendApprovalService {
             task_id: request.task_id.clone(),
             workload_profile: request.workload_profile.clone(),
         };
-        let evaluation = spend_manager.evaluate_spend(&request.user, spend_request, policy)?;
+        let evaluation = spend_manager.evaluate_spend(
+            &request.user,
+            &request.operation_key,
+            spend_request,
+            policy,
+        )?;
         let decision_record = spend_manager
             .decision_record(&evaluation.decision_id)
             .ok_or(SpendApprovalError::MissingSpendDecision)?;
@@ -201,11 +209,63 @@ impl SpendApprovalService {
             .as_ref()
             .and_then(|token| spend_manager.auth_token_record(&token.id));
 
+        if evaluation.idempotent_replay {
+            if evaluation.evaluation.decision != Effect::Allow {
+                return Ok(SpendAuthorizationOutcome::Rejected(
+                    RejectedSpendAuthorization {
+                        operation_key: evaluation.operation_key.clone(),
+                        user: request.user,
+                        agent_id: request.agent_id,
+                        agent_account_id: request.agent_account_id,
+                        amount_cents: request.amount_cents,
+                        currency: request.currency,
+                        merchant: request.merchant,
+                        task_id: request.task_id,
+                        workload_profile: request.workload_profile,
+                        decision: evaluation.evaluation.decision,
+                        reasons: evaluation.evaluation.reasons.clone(),
+                        evaluation,
+                    },
+                ));
+            }
+
+            let existing_hold =
+                budget_manager.get_budget_hold_by_spend_decision(&evaluation.decision_id);
+            if let (Some(token), Some(hold)) = (evaluation.auth_token.clone(), existing_hold) {
+                let balance = budget_manager
+                    .get_budget_balance(&hold.budget_id)
+                    .ok_or(SpendApprovalError::MissingActiveBudget)?;
+                return Ok(SpendAuthorizationOutcome::Approved(
+                    ApprovedSpendAuthorization {
+                        operation_key: evaluation.operation_key.clone(),
+                        user: request.user,
+                        agent_id: request.agent_id,
+                        agent_account_id: request.agent_account_id,
+                        amount_cents: request.amount_cents,
+                        currency: request.currency,
+                        merchant: request.merchant,
+                        task_id: request.task_id,
+                        workload_profile: request.workload_profile,
+                        evaluation,
+                        token,
+                        budget_reservation: ReserveBudgetResponse { hold, balance },
+                    },
+                ));
+            }
+
+            return Ok(SpendAuthorizationOutcome::Rejected(budget_rejection(
+                request,
+                evaluation,
+                "budget does not have enough remaining balance",
+            )));
+        }
+
         governance.save_spend_decision(&decision_record)?;
 
         if evaluation.evaluation.decision != Effect::Allow {
             return Ok(SpendAuthorizationOutcome::Rejected(
                 RejectedSpendAuthorization {
+                    operation_key: evaluation.operation_key.clone(),
                     user: request.user,
                     agent_id: request.agent_id,
                     agent_account_id: request.agent_account_id,
@@ -225,7 +285,18 @@ impl SpendApprovalService {
             .auth_token
             .clone()
             .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
-        let budget_id = active_budget_id_for_spend(budget_manager, &request.agent_id)?;
+        let budget_id = match active_budget_id_for_spend(budget_manager, &request.agent_id) {
+            Ok(budget_id) => budget_id,
+            Err(SpendApprovalError::MissingActiveBudget) => {
+                spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
+                return Ok(SpendAuthorizationOutcome::Rejected(budget_rejection(
+                    request,
+                    evaluation,
+                    "no active USD budget found for agent",
+                )));
+            }
+            Err(error) => return Err(error),
+        };
 
         let budget_reservation = match budget_manager.reserve_budget(ReserveBudgetRequest {
             budget_id: budget_id.clone(),
@@ -236,6 +307,7 @@ impl SpendApprovalService {
         }) {
             Ok(reservation) => reservation,
             Err(BudgetManagerError::InsufficientRemainingBudget) => {
+                spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
                 log_event(
                     "warn",
                     "spend_budget_denied",
@@ -279,6 +351,7 @@ impl SpendApprovalService {
             "info",
             "spend_authorization_reserved",
             json!({
+                "operation_key": evaluation.operation_key,
                 "budget_id": budget_reservation.hold.budget_id.to_string(),
                 "hold_id": budget_reservation.hold.id.to_string(),
                 "decision_id": evaluation.decision_id.to_string(),
@@ -290,6 +363,7 @@ impl SpendApprovalService {
 
         Ok(SpendAuthorizationOutcome::Approved(
             ApprovedSpendAuthorization {
+                operation_key: evaluation.operation_key.clone(),
                 user: request.user,
                 agent_id: request.agent_id,
                 agent_account_id: request.agent_account_id,
@@ -342,6 +416,12 @@ impl SpendApprovalService {
         let payment = match payment_manager.submit_payment(payment_request) {
             Ok(payment) => payment,
             Err(error) => {
+                if !matches!(
+                    authorization.budget_reservation.hold.status,
+                    crate::budget::BudgetHoldStatus::Frozen
+                ) {
+                    return Err(error.into());
+                }
                 let budget_release =
                     release_authorized_hold(budget_manager, &authorization.budget_reservation)?;
                 governance.update_budget_hold(&budget_release.hold, &budget_release.balance)?;
@@ -366,13 +446,33 @@ impl SpendApprovalService {
         }
 
         let budget_update = if payment.status == PaymentStatus::Succeeded {
-            let budget_settlement =
-                budget_manager.settle_budget(&authorization.budget_reservation.hold.id)?;
-            BudgetHoldUpdate::Settled(budget_settlement)
+            if matches!(
+                authorization.budget_reservation.hold.status,
+                crate::budget::BudgetHoldStatus::Settled
+            ) {
+                BudgetHoldUpdate::Settled(SettleBudgetResponse {
+                    hold: authorization.budget_reservation.hold.clone(),
+                    balance: authorization.budget_reservation.balance.clone(),
+                })
+            } else {
+                let budget_settlement =
+                    budget_manager.settle_budget(&authorization.budget_reservation.hold.id)?;
+                BudgetHoldUpdate::Settled(budget_settlement)
+            }
         } else if payment_spec.failed_payment_hold_policy == FailedPaymentHoldPolicy::Release {
-            let budget_release =
-                release_authorized_hold(budget_manager, &authorization.budget_reservation)?;
-            BudgetHoldUpdate::Released(budget_release)
+            if matches!(
+                authorization.budget_reservation.hold.status,
+                crate::budget::BudgetHoldStatus::Released
+            ) {
+                BudgetHoldUpdate::Released(ReleaseBudgetResponse {
+                    hold: authorization.budget_reservation.hold.clone(),
+                    balance: authorization.budget_reservation.balance.clone(),
+                })
+            } else {
+                let budget_release =
+                    release_authorized_hold(budget_manager, &authorization.budget_reservation)?;
+                BudgetHoldUpdate::Released(budget_release)
+            }
         } else {
             BudgetHoldUpdate::Frozen(authorization.budget_reservation.clone())
         };
@@ -406,6 +506,7 @@ fn budget_rejection(
     reason: &str,
 ) -> RejectedSpendAuthorization {
     RejectedSpendAuthorization {
+        operation_key: evaluation.operation_key.clone(),
         user: request.user,
         agent_id: request.agent_id,
         agent_account_id: request.agent_account_id,
@@ -639,6 +740,7 @@ mod tests {
             self.service
                 .authorize(
                     AuthorizeSpendRequest {
+                        operation_key: "test-operation".to_string(),
                         user: self.user.clone(),
                         agent_id: self.agent_id.clone(),
                         agent_account_id: self.account_id.clone(),

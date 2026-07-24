@@ -796,7 +796,9 @@ struct SpendingTargetWarningHttpResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpendHttpRequest {
+    operation_key: Option<String>,
     agent_id: Option<String>,
     account_id: Option<String>,
     amount_cents: i64,
@@ -807,6 +809,7 @@ struct SpendHttpRequest {
 
 #[derive(Debug, Serialize)]
 struct SpendHttpResponse {
+    operation_key: String,
     account_id: String,
     agent_id: String,
     decision_id: String,
@@ -833,17 +836,20 @@ struct ExecutorSpendHttpRequest {
 struct ExecutorSpendClaimHttpRequest {
     #[serde(flatten)]
     spend: ExecutorSpendHttpRequest,
-    executor_execution_id: String,
+    #[serde(alias = "executor_execution_id")]
+    operation_key: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct ExecutorSpendFinalizeHttpRequest {
-    claim_id: String,
-    executor_execution_id: String,
+    #[serde(alias = "executor_execution_id")]
+    operation_key: String,
+    agent_id: String,
 }
 
 #[derive(Debug, Serialize)]
 struct ExecutorSpendHttpResponse {
+    operation_key: String,
     spend_auth_token_id: String,
     decision_id: String,
     account_id: String,
@@ -858,8 +864,8 @@ struct ExecutorSpendHttpResponse {
 
 #[derive(Debug, Serialize)]
 struct ExecutorSpendClaimHttpResponse {
+    operation_key: String,
     claim_id: String,
-    executor_execution_id: String,
     workload_profile: String,
     status: String,
     claimed_at: String,
@@ -869,9 +875,9 @@ struct ExecutorSpendClaimHttpResponse {
 
 #[derive(Debug, Serialize)]
 struct ExecutorSpendSettlementHttpResponse {
+    operation_key: String,
     settlement_id: String,
     claim_id: String,
-    executor_execution_id: String,
     status: String,
     spend: ExecutorSpendHttpResponse,
 }
@@ -1128,7 +1134,7 @@ fn authenticate_request(request: &HttpRequest, state: &ServerState) -> Result<()
 
 fn spend_executor_guidance(state: &ServerState) -> Value {
     json!({
-        "protocol_version": "hubu-spend-executor-v2",
+        "protocol_version": "hubu-spend-executor-v3",
         "role_boundary": {
             "hubu": [
                 "register agents and owners",
@@ -1144,11 +1150,12 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             ]
         },
         "executor_flow": [
-            "agent requests POST /spend/authorize with merchant, task scope, and workload_profile",
-            "agent sends the spend_auth_token_id and matching scope to an executor",
-            "executor calls POST /spend/executor/claim with its immutable executor_execution_id before irreversible work",
+            "platform supplies one stable operation_key and requests POST /spend/authorize with merchant, task scope, and workload_profile",
+            "Hubu durably records the workflow under the agent-scoped operation_key",
+            "agent sends the operation_key, spend_auth_token_id, and matching scope to an executor",
+            "executor calls POST /spend/executor/claim with the same operation_key before irreversible work",
             "executor performs work with its own credentials",
-            "executor finalizes by claim_id and executor_execution_id with settle after successful irreversible work or release before work is performed"
+            "executor finalizes by agent_id and operation_key with settle after successful irreversible work or release before work is performed"
         ],
         "routes": {
             "guidance": [
@@ -1160,31 +1167,67 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "settle": "POST /spend/executor/settle",
             "release": "POST /spend/executor/release"
         },
+        "operation_key_policy": {
+            "responsibility": "agent platform or orchestrator, not the autonomous model",
+            "namespace": [
+                "agent_id",
+                "operation_key"
+            ],
+            "generation": {
+                "preferred": "reuse the platform's durable tool-call, run-step, or operation id with a platform prefix",
+                "fallback": "the platform adapter generates and persists an opaque operation key before the first authorization attempt",
+                "comparison": "case-sensitive after trimming surrounding whitespace"
+            },
+            "persistence": [
+                "Hubu is the authoritative store for workflow state under the agent-scoped operation_key",
+                "the client must reuse its stable operation_key for authorization, claim, finalization, and retries",
+                "do not rely on model conversation memory for the operation_key"
+            ],
+            "prohibited": [
+                "ask the autonomous model to invent the operation_key",
+                "derive operation_key from mutable spend fields such as amount or merchant",
+                "reuse one operation_key for different work by the same agent",
+                "generate a new operation_key for a retry"
+            ]
+        },
+        "authorization_request": {
+            "required": [
+                "operation_key",
+                "account_id",
+                "amount_cents",
+                "reason"
+            ],
+            "optional": [
+                "merchant",
+                "workload_profile"
+            ]
+        },
         "claim_request": {
             "required": [
                 "spend_auth_token_id",
+                "operation_key",
                 "account_id",
-                "amount_cents",
-                "executor_execution_id"
+                "amount_cents"
             ],
             "optional": [
                 "merchant",
                 "task_id"
             ],
-            "currency": "USD in v2"
+            "currency": "USD in v3"
         },
         "finalize_request": {
             "required": [
-                "claim_id",
-                "executor_execution_id"
+                "agent_id",
+                "operation_key"
             ]
         },
         "timing": &state.spend_timing,
         "scope_rules": [
+            "operation_key is platform-assigned, immutable, and scoped to the authorized agent; authorization retries must use the same spend scope",
             "account_id, amount_cents, merchant, and task_id must match the original authorized spend",
             "workload_profile is selected during authorization and cannot be changed by the executor",
             "the spend auth token must be unexpired, unused, unrevoked, and unclaimed when a new claim starts",
-            "a retry with the same executor_execution_id returns the same claim; a different execution is rejected",
+            "authorization and claim retries with the same operation_key return stored workflow state, including terminal state",
             "claiming moves the associated budget hold from frozen to claimed and extends it to claim_expires_at",
             "an active claim remains finalizable after the original authorization expires",
             "Hubu does not accept vendor API keys or model/provider payloads in this protocol"
@@ -1194,6 +1237,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "release only before irreversible billable work has occurred",
             "settlement atomically marks the claim settled and token used while consuming the claimed budget hold",
             "an identical settlement retry returns the original settlement_id without consuming budget twice",
+            "finalization resolves by agent_id and operation_key, so a caller can recover the result even if it lost the claim response",
             "claim expiry is evaluated once when the settlement transaction starts",
             "release atomically marks the claim released and token revoked while returning the reserved amount",
             "settle and release serialize so the first terminal finalization wins",
@@ -2338,6 +2382,7 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
     let authorization_expires_at = authorization.approval.token.expires_at.to_rfc3339();
 
     Ok(SpendHttpResponse {
+        operation_key: authorization.approval.operation_key.clone(),
         account_id: authorization.account_pub_id,
         agent_id: authorization.agent_pub_id,
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
@@ -2346,8 +2391,9 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
         auth_token_id: Some(auth_token_id),
         workload_profile,
         authorization_expires_at: Some(authorization_expires_at),
-        budget_hold: Some(frozen_budget_hold_response(
-            authorization.approval.budget_reservation,
+        budget_hold: Some(budget_hold_state_response(
+            authorization.approval.budget_reservation.hold,
+            authorization.approval.budget_reservation.balance,
         )),
         payment: None,
     })
@@ -2359,6 +2405,20 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         SpendAuthorization::Authorized(authorization) => authorization,
         SpendAuthorization::Response(response) => return Ok(response),
     };
+    if state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .executor_claim_for_operation(
+            &authorization.approval.agent_id,
+            &authorization.approval.operation_key,
+        )
+        .is_some()
+    {
+        return Err(anyhow!(
+            "job is already bound to the external executor workflow"
+        ));
+    }
     let owner = owner_metadata_for_user_id(&authorization.approval.user.user_id, state)?;
     let settlement = submit_authorized_payment(&authorization.approval, state)?;
     let budget_hold = Some(budget_hold_response(settlement.budget_update));
@@ -2380,6 +2440,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let authorization_expires_at = authorization.approval.token.expires_at.to_rfc3339();
 
     Ok(SpendHttpResponse {
+        operation_key: authorization.approval.operation_key.clone(),
         account_id: authorization.account_pub_id,
         agent_id: authorization.agent_pub_id,
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
@@ -2404,6 +2465,10 @@ fn claim_executor_spend(
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
+    let operation_key = request.operation_key.trim().to_string();
+    if operation_key.is_empty() {
+        return Err(anyhow!("executor spend operation_key is required"));
+    }
     let resolved = resolve_executor_spend_request(request.spend, state)?;
     let (claim, claim_validation, claimed_hold) = {
         let mut spend = state
@@ -2415,18 +2480,14 @@ fn claim_executor_spend(
             .lock()
             .map_err(|_| anyhow!("budget manager lock poisoned"))?;
         let authorization = resolved.payment_validation_request();
-        let (prevalidated, existing_claim) = spend.validate_auth_token_for_executor_claim(
-            &authorization,
-            &request.executor_execution_id,
-        )?;
+        let (prevalidated, existing_claim) =
+            spend.validate_auth_token_for_executor_claim(&authorization, &operation_key)?;
         let budget_hold = budgets
             .get_budget_hold_by_spend_decision(&prevalidated.spend_decision_id)
             .ok_or_else(|| anyhow!("spend authorization does not have a budget hold"))?;
         match existing_claim.as_ref() {
             None if matches!(budget_hold.status, BudgetHoldStatus::Frozen) => {}
-            Some(existing)
-                if matches!(budget_hold.status, BudgetHoldStatus::Claimed)
-                    && budget_hold.executor_claim_id.as_ref() == Some(&existing.id) => {}
+            Some(existing) if budget_hold.executor_claim_id.as_ref() == Some(&existing.id) => {}
             None => return Err(anyhow!("spend authorization budget hold is not frozen")),
             Some(_) => {
                 return Err(anyhow!(
@@ -2444,18 +2505,28 @@ fn claim_executor_spend(
         }
         let (claim, claim_validation) = spend.claim_auth_token(SpendExecutorClaimRequest {
             authorization,
-            executor_execution_id: request.executor_execution_id,
+            operation_key: operation_key.clone(),
         })?;
         if claim_validation.spend_decision_id != prevalidated.spend_decision_id {
             return Err(anyhow!(
                 "executor claim resolved a different spend decision"
             ));
         }
-        let claimed_hold =
-            budgets.claim_budget(&budget_hold.id, claim.id.clone(), claim.expires_at)?;
+        let claimed_hold = if existing_claim.is_some() {
+            let balance = budgets
+                .get_budget_balance(&budget_hold.budget_id)
+                .ok_or_else(|| anyhow!("spend authorization budget balance is missing"))?;
+            ReserveBudgetResponse {
+                hold: budget_hold,
+                balance,
+            }
+        } else {
+            budgets.claim_budget(&budget_hold.id, claim.id.clone(), claim.expires_at)?
+        };
         (claim, claim_validation, claimed_hold)
     };
     let validated = resolved.into_validated(
+        claim.operation_key.clone(),
         claim_validation,
         claimed_hold.hold.clone(),
         claimed_hold.balance.clone(),
@@ -2479,7 +2550,7 @@ fn claim_executor_spend(
         "executor_spend_claimed",
         json!({
             "claim_id": claim.id.to_string(),
-            "executor_execution_id": claim.executor_execution_id,
+            "operation_key": claim.operation_key,
             "spend_auth_token_id": claim.spend_auth_token_id.to_string(),
             "claim_expires_at": claim.expires_at.to_rfc3339(),
             "workload_profile": claim.workload_profile,
@@ -2494,7 +2565,7 @@ fn settle_executor_spend(
 ) -> Result<ExecutorSpendSettlementHttpResponse> {
     let request: ExecutorSpendFinalizeHttpRequest = serde_json::from_str(&body)?;
     let user = authenticated_user_context(state)?;
-    let claim_request = executor_claim_validation_request(request, user.user_id)?;
+    let claim_request = executor_claim_validation_request(request, &user, state)?;
     let settlement_started_at = Utc::now();
     let settlement = {
         state
@@ -2502,9 +2573,9 @@ fn settle_executor_spend(
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?
             .settle_executor_claim_transactionally(
-                &claim_request.claim_id,
                 &claim_request.owner_user_id,
-                &claim_request.executor_execution_id,
+                &claim_request.agent_id,
+                &claim_request.operation_key,
                 PaymentId::new(),
                 settlement_started_at,
             )?
@@ -2532,7 +2603,7 @@ fn settle_executor_spend(
         json!({
             "settlement_id": settlement_id.to_string(),
             "claim_id": settlement.claim.id.to_string(),
-            "executor_execution_id": settlement.claim.executor_execution_id,
+            "operation_key": settlement.claim.operation_key,
             "idempotent_replay": settlement.idempotent_replay,
             "spend_auth_token_id": validated.token_id.to_string(),
             "decision_id": validated.validation.spend_decision_id.to_string(),
@@ -2544,9 +2615,9 @@ fn settle_executor_spend(
     );
 
     Ok(ExecutorSpendSettlementHttpResponse {
+        operation_key: settlement.claim.operation_key.clone(),
         settlement_id: settlement_id.to_string(),
         claim_id: settlement.claim.id.to_string(),
-        executor_execution_id: settlement.claim.executor_execution_id,
         status: executor_claim_status_name(&settlement.claim.status).to_string(),
         spend: executor_spend_response_with_hold(&validated, settlement.hold, settlement.balance),
     })
@@ -2558,7 +2629,7 @@ fn release_executor_spend(
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let request: ExecutorSpendFinalizeHttpRequest = serde_json::from_str(&body)?;
     let user = authenticated_user_context(state)?;
-    let claim_request = executor_claim_validation_request(request, user.user_id)?;
+    let claim_request = executor_claim_validation_request(request, &user, state)?;
     let finalization_started_at = Utc::now();
     let release = {
         state
@@ -2566,9 +2637,9 @@ fn release_executor_spend(
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?
             .release_executor_claim_transactionally(
-                &claim_request.claim_id,
                 &claim_request.owner_user_id,
-                &claim_request.executor_execution_id,
+                &claim_request.agent_id,
+                &claim_request.operation_key,
                 finalization_started_at,
             )?
     };
@@ -2590,7 +2661,7 @@ fn release_executor_spend(
         json!({
             "spend_auth_token_id": validated.token_id.to_string(),
             "claim_id": release.claim.id.to_string(),
-            "executor_execution_id": release.claim.executor_execution_id,
+            "operation_key": release.claim.operation_key,
             "idempotent_replay": release.idempotent_replay,
             "decision_id": validated.validation.spend_decision_id.to_string(),
             "hold_id": release.hold.id.to_string(),
@@ -2605,6 +2676,7 @@ fn release_executor_spend(
 }
 
 struct ValidatedExecutorSpend {
+    operation_key: String,
     request: ExecutorSpendHttpRequest,
     account_pub_id: String,
     agent_pub_id: String,
@@ -2640,11 +2712,13 @@ impl ResolvedExecutorSpend {
 
     fn into_validated(
         self,
+        operation_key: String,
         validation: hubu_core::spend::ValidatedSpendAuthorization,
         budget_hold: BudgetHold,
         budget_balance: hubu_core::budget::BudgetBalance,
     ) -> ValidatedExecutorSpend {
         ValidatedExecutorSpend {
+            operation_key,
             request: self.request,
             account_pub_id: self.account_pub_id,
             agent_pub_id: self.agent_pub_id,
@@ -2667,6 +2741,7 @@ fn resolve_executor_spend_request(
 
     let user = authenticated_user_context(state)?;
     let spend_request = SpendHttpRequest {
+        operation_key: None,
         agent_id: request.agent_id.clone(),
         account_id: request.account_id.clone(),
         amount_cents: request.amount_cents,
@@ -2705,6 +2780,13 @@ fn validate_executor_spend_request(
         .lock()
         .map_err(|_| anyhow!("spend manager lock poisoned"))?
         .validate_auth_token_for_payment(&resolved.payment_validation_request())?;
+    let operation_key = state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .decision_record(&validation.spend_decision_id)
+        .ok_or_else(|| anyhow!("spend decision is missing"))?
+        .operation_key;
 
     let (budget_hold, budget_balance) = {
         let budgets = state
@@ -2746,20 +2828,26 @@ fn validate_executor_spend_request(
         }),
     );
 
-    Ok(resolved.into_validated(validation, budget_hold, budget_balance))
+    Ok(resolved.into_validated(operation_key, validation, budget_hold, budget_balance))
 }
 
 fn executor_claim_validation_request(
     request: ExecutorSpendFinalizeHttpRequest,
-    owner_user_id: UserId,
+    user: &UserContext,
+    state: &ServerState,
 ) -> Result<SpendExecutorClaimValidationRequest> {
+    let operation_key = request.operation_key.trim();
+    if operation_key.is_empty() {
+        return Err(anyhow!("executor spend operation_key is required"));
+    }
+    let agent_pub_id = request.agent_id.trim();
+    if agent_pub_id.is_empty() {
+        return Err(anyhow!("executor spend agent_id is required"));
+    }
     Ok(SpendExecutorClaimValidationRequest {
-        claim_id: request
-            .claim_id
-            .parse()
-            .with_context(|| "parse executor spend claim_id")?,
-        owner_user_id,
-        executor_execution_id: request.executor_execution_id,
+        owner_user_id: user.user_id.clone(),
+        agent_id: resolve_agent_id_for_user(agent_pub_id, user, state)?,
+        operation_key: operation_key.to_string(),
     })
 }
 
@@ -2822,6 +2910,7 @@ fn executor_spend_from_persisted_records(
     }
 
     Ok(ValidatedExecutorSpend {
+        operation_key: decision.operation_key.clone(),
         request: ExecutorSpendHttpRequest {
             spend_auth_token_id: token.id.to_string(),
             agent_id: Some(agent_pub_id.clone()),
@@ -2849,8 +2938,8 @@ fn executor_claim_response(
     spend: ExecutorSpendHttpResponse,
 ) -> ExecutorSpendClaimHttpResponse {
     ExecutorSpendClaimHttpResponse {
+        operation_key: claim.operation_key.clone(),
         claim_id: claim.id.to_string(),
-        executor_execution_id: claim.executor_execution_id.clone(),
         workload_profile: claim.workload_profile.clone(),
         status: executor_claim_status_name(&claim.status).to_string(),
         claimed_at: claim.claimed_at.to_rfc3339(),
@@ -2881,6 +2970,7 @@ fn executor_spend_response_with_hold(
     balance: hubu_core::budget::BudgetBalance,
 ) -> ExecutorSpendHttpResponse {
     ExecutorSpendHttpResponse {
+        operation_key: validated.operation_key.clone(),
         spend_auth_token_id: validated.token_id.to_string(),
         decision_id: validated.validation.spend_decision_id.to_string(),
         account_id: validated.account_pub_id.clone(),
@@ -2906,12 +2996,18 @@ enum SpendAuthorization {
 }
 
 fn evaluate_and_reserve_spend(
-    request: SpendHttpRequest,
+    mut request: SpendHttpRequest,
     state: &ServerState,
 ) -> Result<SpendAuthorization> {
     reconcile_expired_budget_holds(state)?;
 
     let user = authenticated_user_context(state)?;
+    let operation_key = request
+        .operation_key
+        .take()
+        .map(|operation_key| operation_key.trim().to_string())
+        .filter(|operation_key| !operation_key.is_empty())
+        .ok_or_else(|| anyhow!("spend operation_key is required"))?;
     let account = resolve_agent_account_for_spend(&request, &user, state)?;
     let account_pub_id = account.pub_id.clone();
     let agent_id = account.agent_id.clone();
@@ -2920,6 +3016,7 @@ fn evaluate_and_reserve_spend(
         "info",
         "spend_request_received",
         json!({
+            "operation_key": operation_key,
             "agent_pub_id": agent_pub_id,
             "account_pub_id": account_pub_id,
             "user_id": user.user_id.to_string(),
@@ -2945,8 +3042,14 @@ fn evaluate_and_reserve_spend(
             .governance
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        let workload_profile = request.workload_profile.clone().unwrap_or_else(|| {
+            spend_manager
+                .workload_profile_for_operation(&agent_id, &operation_key)
+                .unwrap_or_else(|| state.spend_timing.default_profile.clone())
+        });
         SpendApprovalService.authorize(
             AuthorizeSpendRequest {
+                operation_key: operation_key.clone(),
                 user: user.clone(),
                 agent_id: agent_id.clone(),
                 agent_account_id: account.id,
@@ -2954,10 +3057,7 @@ fn evaluate_and_reserve_spend(
                 currency: Currency::Usd,
                 merchant: request.merchant.clone(),
                 task_id: Some(request.reason.clone()),
-                workload_profile: request
-                    .workload_profile
-                    .clone()
-                    .unwrap_or_else(|| state.spend_timing.default_profile.clone()),
+                workload_profile,
             },
             &policy,
             &mut spend_manager,
@@ -3013,6 +3113,7 @@ fn log_spend_policy_evaluated(
             "agent_id": agent_id.to_string(),
             "user_id": user_id.to_string(),
             "decision_id": evaluation.decision_id.to_string(),
+            "operation_key": evaluation.operation_key,
             "decision": effect_name(evaluation.evaluation.decision),
             "policy_id": evaluation.evaluation.policy_id,
             "policy_version": evaluation.evaluation.policy_version,
@@ -3028,6 +3129,7 @@ fn spend_rejection_response(
     agent_pub_id: String,
 ) -> SpendHttpResponse {
     SpendHttpResponse {
+        operation_key: rejection.operation_key,
         account_id: account_pub_id,
         agent_id: agent_pub_id,
         decision_id: rejection.evaluation.decision_id.to_string(),
@@ -4268,6 +4370,7 @@ mod tests {
 
         let spend = spend(
             json!({
+                "operation_key": "owner-metadata-job",
                 "account_id": agent.account_id,
                 "amount_cents": 2_500,
                 "reason": "test purchase",
@@ -4355,6 +4458,7 @@ mod tests {
 
         let spend = spend(
             json!({
+                "operation_key": "agent-budget-job",
                 "account_id": agent.account_id,
                 "amount_cents": 2_500,
                 "reason": "agent budget purchase",
@@ -4739,6 +4843,7 @@ mod tests {
             create_test_agent_budget(&state, &agent.agent_id, 2_000);
             let spend = spend(
                 json!({
+                    "operation_key": "advisory-target-job",
                     "account_id": agent.account_id,
                     "amount_cents": 1_500,
                     "reason": "spend above advisory target",
@@ -4804,23 +4909,46 @@ mod tests {
 
         create_test_agent_budget(&state, &agent.agent_id, 10_000);
 
-        let spend = spend(
-            json!({
-                "account_id": agent.account_id,
-                "amount_cents": 2_500,
-                "reason": "account anchored purchase",
-                "merchant": "Acme Cafe",
-            })
-            .to_string(),
-            &state,
-        )
-        .expect("spend should be approved and paid from account");
+        let request = json!({
+            "operation_key": "account-spend-job-1",
+            "account_id": agent.account_id,
+            "amount_cents": 2_500,
+            "reason": "account anchored purchase",
+            "merchant": "Acme Cafe",
+        });
+        let spend_response = spend(request.to_string(), &state)
+            .expect("spend should be approved and paid from account");
 
-        assert_eq!(spend.account_id, agent.account_id);
-        assert_eq!(spend.agent_id, agent.agent_id);
-        let payment = spend.payment.expect("allowed spend should pay");
+        assert_eq!(spend_response.account_id, agent.account_id);
+        assert_eq!(spend_response.agent_id, agent.agent_id);
+        assert_eq!(spend_response.operation_key, "account-spend-job-1");
+        let payment = spend_response.payment.expect("allowed spend should pay");
         assert_eq!(payment.account_id, agent.account_id);
         assert_eq!(payment.owner_user_id, user.user_id);
+        let retry = spend(request.to_string(), &state)
+            .expect("same direct spend operation should return its prior result");
+        assert_eq!(retry.operation_key, "account-spend-job-1");
+        assert_eq!(
+            retry
+                .payment
+                .expect("retry should return payment")
+                .payment_id,
+            payment.payment_id
+        );
+        assert_eq!(
+            retry
+                .budget_hold
+                .expect("retry should return settled hold")
+                .consumed_amount_cents,
+            2_500
+        );
+        assert_eq!(
+            list_ledger(&state)
+                .expect("ledger should list")
+                .transactions
+                .len(),
+            1
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -4863,6 +4991,7 @@ mod tests {
 
         let authorization = authorize_spend(
             json!({
+                "operation_key": "logo-design-job-1",
                 "account_id": agent.account_id,
                 "amount_cents": 500,
                 "reason": "Generate Project Hubu logo",
@@ -4874,6 +5003,7 @@ mod tests {
         .expect("spend should authorize");
 
         assert_eq!(authorization.decision, "allow");
+        assert_eq!(authorization.operation_key, "logo-design-job-1");
         assert!(authorization.auth_token_id.is_some());
         assert!(authorization.payment.is_none());
         let budget_hold = authorization
@@ -4905,7 +5035,7 @@ mod tests {
             let response = route(public_request("GET", path), &state);
 
             assert_eq!(response.status, 200);
-            assert_eq!(response.body["protocol_version"], "hubu-spend-executor-v2");
+            assert_eq!(response.body["protocol_version"], "hubu-spend-executor-v3");
             assert!(response.body["role_boundary"]["hubu"]
                 .as_array()
                 .expect("hubu role list should be an array")
@@ -4925,7 +5055,20 @@ mod tests {
                 .as_array()
                 .expect("required fields should be an array")
                 .iter()
-                .any(|item| item == "executor_execution_id"));
+                .any(|item| item == "operation_key"));
+            assert!(response.body["authorization_request"]["required"]
+                .as_array()
+                .expect("authorization required fields should be an array")
+                .iter()
+                .any(|item| item == "operation_key"));
+            assert_eq!(
+                response.body["finalize_request"]["required"],
+                json!(["agent_id", "operation_key"])
+            );
+            assert_eq!(
+                response.body["operation_key_policy"]["namespace"],
+                json!(["agent_id", "operation_key"])
+            );
             assert_eq!(
                 response.body["timing"]["profiles"]["default"]["claim_ttl_seconds"],
                 900
@@ -4943,17 +5086,63 @@ mod tests {
     #[test]
     fn executor_can_claim_and_settle_authorized_spend() {
         let (path, state, agent, authorization) = setup_executor_authorization("executor-settle");
+        let operation_key = authorization.operation_key.clone();
         let token = authorization
             .auth_token_id
             .clone()
             .expect("authorization should issue a token");
+        let authorization_retry = authorize_spend(
+            json!({
+                "operation_key": operation_key,
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "reason": "hubu-logo-demo",
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("authorization retry should return the original workflow");
+        assert_eq!(authorization_retry.decision_id, authorization.decision_id);
+        assert_eq!(authorization_retry.operation_key, operation_key);
+        assert_eq!(
+            authorization_retry.auth_token_id,
+            authorization.auth_token_id
+        );
+        assert_eq!(
+            authorization_retry
+                .budget_hold
+                .as_ref()
+                .expect("authorization retry should return the hold")
+                .hold_id,
+            authorization
+                .budget_hold
+                .as_ref()
+                .expect("authorization should return the hold")
+                .hold_id
+        );
+
+        let conflict = authorize_spend(
+            json!({
+                "operation_key": operation_key,
+                "account_id": agent.account_id,
+                "amount_cents": 499,
+                "reason": "hubu-logo-demo",
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("an operation key cannot be reused for different spend scope");
+        assert!(conflict.to_string().contains("different spend scope"));
+
         let request = json!({
+            "operation_key": operation_key,
             "spend_auth_token_id": token,
             "account_id": agent.account_id,
             "amount_cents": 500,
             "merchant": "gongbu.image",
             "task_id": "hubu-logo-demo",
-            "executor_execution_id": "gongbu-job-123",
         });
 
         let claim =
@@ -4972,8 +5161,8 @@ mod tests {
         assert_eq!(retry.spend.budget_hold.status, "claimed");
 
         let finalize = json!({
-            "claim_id": claim.claim_id,
-            "executor_execution_id": "gongbu-job-123",
+            "agent_id": agent.agent_id,
+            "operation_key": claim.operation_key,
         });
         let settlement = settle_executor_spend(finalize.to_string(), &state)
             .expect("executor spend should settle");
@@ -4989,6 +5178,36 @@ mod tests {
         assert_eq!(replay.status, "settled");
         assert_eq!(replay.spend.budget_hold.consumed_amount_cents, 500);
         assert_eq!(replay.spend.budget_hold.frozen_amount_cents, 0);
+
+        let claim_replay = claim_executor_spend(request.to_string(), &state)
+            .expect("claim retry should return the stored terminal workflow state");
+        assert_eq!(claim_replay.claim_id, claim.claim_id);
+        assert_eq!(claim_replay.status, "settled");
+
+        let authorization_replay = authorize_spend(
+            json!({
+                "operation_key": operation_key,
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "reason": "hubu-logo-demo",
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("authorization retry should return terminal workflow state");
+        assert_eq!(authorization_replay.decision_id, authorization.decision_id);
+        assert_eq!(
+            authorization_replay.auth_token_id,
+            authorization.auth_token_id
+        );
+        assert_eq!(
+            authorization_replay
+                .budget_hold
+                .expect("terminal authorization replay should return the hold")
+                .status,
+            "settled"
+        );
 
         let validate_request = json!({
             "spend_auth_token_id": token,
@@ -5006,6 +5225,118 @@ mod tests {
     }
 
     #[test]
+    fn agents_owned_by_one_user_can_reuse_operation_keys_independently() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-agent-job-namespace-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create one user");
+
+        let first_agent = register_agent(
+            json!({"name": "first-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .expect("first agent should register");
+        let second_agent = register_agent(
+            json!({"name": "second-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .expect("second agent should register");
+
+        for agent in [&first_agent, &second_agent] {
+            add_policy(
+                json!({
+                    "agent_id": agent.agent_id,
+                    "daily_limit_cents": 500,
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("agent policy should be added");
+            create_test_agent_budget(&state, &agent.agent_id, 500);
+        }
+
+        let operation_key = "shared-platform-operation";
+        let first_authorization = authorize_spend(
+            json!({
+                "operation_key": operation_key,
+                "account_id": first_agent.account_id,
+                "amount_cents": 500,
+                "reason": "first-agent-task",
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("first agent should authorize its job");
+        let second_authorization = authorize_spend(
+            json!({
+                "operation_key": operation_key,
+                "account_id": second_agent.account_id,
+                "amount_cents": 500,
+                "reason": "second-agent-task",
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("second agent should reuse the same platform operation key");
+        assert_ne!(
+            first_authorization.decision_id,
+            second_authorization.decision_id
+        );
+        let first_claim_request = json!({
+            "operation_key": first_authorization.operation_key,
+            "spend_auth_token_id": first_authorization.auth_token_id,
+            "account_id": first_agent.account_id,
+            "amount_cents": 500,
+            "merchant": "gongbu.image",
+            "task_id": "first-agent-task",
+        });
+        let second_claim_request = json!({
+            "operation_key": second_authorization.operation_key,
+            "spend_auth_token_id": second_authorization.auth_token_id,
+            "account_id": second_agent.account_id,
+            "amount_cents": 500,
+            "merchant": "gongbu.image",
+            "task_id": "second-agent-task",
+        });
+        let first_claim = claim_executor_spend(first_claim_request.to_string(), &state)
+            .expect("first agent job should claim");
+        let second_claim = claim_executor_spend(second_claim_request.to_string(), &state)
+            .expect("second agent job should claim independently");
+        assert_ne!(first_claim.claim_id, second_claim.claim_id);
+
+        settle_executor_spend(
+            json!({
+                "agent_id": first_agent.agent_id,
+                "operation_key": first_authorization.operation_key,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("first agent job should settle");
+
+        let first_replay = claim_executor_spend(first_claim_request.to_string(), &state)
+            .expect("first agent should recover its terminal state");
+        let second_replay = claim_executor_spend(second_claim_request.to_string(), &state)
+            .expect("second agent claim should remain independent");
+        assert_eq!(first_replay.status, "settled");
+        assert_eq!(second_replay.status, "claimed");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn executor_release_returns_budget_and_blocks_reuse() {
         let (path, state, agent, authorization) = setup_executor_authorization("executor-release");
         let token = authorization
@@ -5013,19 +5344,19 @@ mod tests {
             .clone()
             .expect("authorization should issue a token");
         let request = json!({
+            "operation_key": authorization.operation_key,
             "spend_auth_token_id": token,
             "account_id": agent.account_id,
             "amount_cents": 500,
             "merchant": "gongbu.image",
             "task_id": "hubu-logo-demo",
-            "executor_execution_id": "gongbu-job-release",
         });
 
         let claim =
             claim_executor_spend(request.to_string(), &state).expect("executor spend should claim");
         let release_request = json!({
-            "claim_id": claim.claim_id,
-            "executor_execution_id": "gongbu-job-release",
+            "agent_id": agent.agent_id,
+            "operation_key": claim.operation_key,
         });
         let release = release_executor_spend(release_request.to_string(), &state)
             .expect("executor spend should release");
@@ -5062,6 +5393,7 @@ mod tests {
             setup_executor_authorization("executor-claim-restart");
         let claim = claim_executor_spend(
             json!({
+                "operation_key": authorization.operation_key,
                 "spend_auth_token_id": authorization
                     .auth_token_id
                     .expect("authorization should issue a token"),
@@ -5069,7 +5401,6 @@ mod tests {
                 "amount_cents": 500,
                 "merchant": "gongbu.image",
                 "task_id": "hubu-logo-demo",
-                "executor_execution_id": "gongbu-restart-job",
             })
             .to_string(),
             &state,
@@ -5079,10 +5410,34 @@ mod tests {
 
         let restarted =
             ServerState::new_with_db_path(&path).expect("server should reload claimed state");
+        let authorization_replay = authorize_spend(
+            json!({
+                "operation_key": authorization.operation_key,
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "reason": "hubu-logo-demo",
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &restarted,
+        )
+        .expect("authorization retry should survive restart");
+        assert_eq!(authorization_replay.decision_id, authorization.decision_id);
+        assert_eq!(
+            authorization_replay.operation_key,
+            authorization.operation_key
+        );
+        assert_eq!(
+            authorization_replay
+                .budget_hold
+                .expect("replayed authorization should return the claimed hold")
+                .status,
+            "claimed"
+        );
         let settlement = settle_executor_spend(
             json!({
-                "claim_id": claim.claim_id,
-                "executor_execution_id": "gongbu-restart-job",
+                "agent_id": agent.agent_id,
+                "operation_key": claim.operation_key,
             })
             .to_string(),
             &restarted,
@@ -5090,6 +5445,50 @@ mod tests {
         .expect("reloaded claim should settle");
         assert_eq!(settlement.status, "settled");
         assert_eq!(settlement.spend.budget_hold.status, "settled");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn authorization_replay_preserves_omitted_workload_profile_after_default_changes() {
+        let (path, state, agent, authorization) =
+            setup_executor_authorization("authorization-profile-restart");
+        drop(state);
+
+        let mut restarted =
+            ServerState::new_with_db_path(&path).expect("server should reload authorized spend");
+        restarted.spend_timing.default_profile = "new-default".to_string();
+
+        let replay = authorize_spend(
+            json!({
+                "operation_key": authorization.operation_key,
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "reason": "hubu-logo-demo",
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &restarted,
+        )
+        .expect("omitted profile should replay with the stored profile");
+        assert_eq!(replay.decision_id, authorization.decision_id);
+        assert_eq!(replay.auth_token_id, authorization.auth_token_id);
+        assert_eq!(replay.workload_profile, authorization.workload_profile);
+
+        let conflict = authorize_spend(
+            json!({
+                "operation_key": authorization.operation_key,
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "reason": "hubu-logo-demo",
+                "merchant": "gongbu.image",
+                "workload_profile": "new-default",
+            })
+            .to_string(),
+            &restarted,
+        )
+        .expect_err("an explicitly changed profile should still conflict");
+        assert!(conflict.to_string().contains("different spend scope"));
+
         std::fs::remove_file(path).ok();
     }
 
@@ -5118,8 +5517,38 @@ mod tests {
         )
         .expect("agent should register under initialized user");
 
+        let missing_operation_key_error = spend(
+            json!({
+                "account_id": agent.account_id,
+                "amount_cents": 2_500,
+                "reason": "missing operation key",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("spend should require a platform operation key");
+        assert!(missing_operation_key_error
+            .to_string()
+            .contains("spend operation_key is required"));
+
+        let client_job_id_error = spend(
+            json!({
+                "job_id": "client-generated-job-id",
+                "account_id": agent.account_id,
+                "amount_cents": 2_500,
+                "reason": "client supplied canonical id",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("authorization must reject a client-supplied job id");
+        assert!(client_job_id_error
+            .to_string()
+            .contains("unknown field `job_id`"));
+
         let error = spend(
             json!({
+                "operation_key": "agent-anchor-rejection-job",
                 "agent_id": agent.agent_id,
                 "amount_cents": 2_500,
                 "reason": "agent anchored purchase",
@@ -5216,6 +5645,7 @@ rules:
 
         let spend = spend(
             json!({
+                "operation_key": "yaml-policy-job",
                 "account_id": agents.agents[0].account_id,
                 "amount_cents": 2_500,
                 "reason": "yaml-backed policy spend",
@@ -5321,6 +5751,7 @@ rules: []
 
         let spend = spend(
             json!({
+                "operation_key": "failed-payment-job",
                 "account_id": agent.account_id,
                 "amount_cents": 1_500,
                 "reason": "failed test purchase",
@@ -5390,6 +5821,7 @@ rules: []
             authenticated_json_request(
                 "/spend",
                 json!({
+                    "operation_key": "over-budget-job",
                     "account_id": agent.account_id,
                     "amount_cents": 2_500,
                     "reason": "over budget purchase",
@@ -5400,6 +5832,7 @@ rules: []
         );
 
         assert_eq!(response.status, 200);
+        assert_eq!(response.body["operation_key"], "over-budget-job");
         assert_eq!(response.body["decision"], "deny");
         assert_eq!(response.body["auth_token_id"], Value::Null);
         assert_eq!(response.body["budget_hold"], Value::Null);
@@ -5503,6 +5936,7 @@ rules: []
             create_test_agent_budget(&state, &agent.agent_id, 10_000);
             spend(
                 json!({
+                    "operation_key": "restart-audit-job",
                     "account_id": agent.account_id,
                     "amount_cents": 2_500,
                     "reason": "restart audit purchase",
@@ -5537,6 +5971,7 @@ rules: []
 
         let resumed_spend = spend(
             json!({
+                "operation_key": "post-restart-policy-job",
                 "account_id": account_id,
                 "amount_cents": 1_000,
                 "reason": "post-restart policy spend",
@@ -5595,6 +6030,7 @@ rules: []
 
         let authorization = authorize_spend(
             json!({
+                "operation_key": format!("{test_name}-operation"),
                 "account_id": agent.account_id,
                 "amount_cents": 500,
                 "reason": "hubu-logo-demo",

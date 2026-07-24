@@ -75,14 +75,18 @@ policy allow
 
 `hubu spend authorize` stops after policy and budget reservation. It returns a
 scoped spend authorization token and freezes the agent budget without executing
-payment or writing a ledger transaction.
+payment or writing a ledger transaction. The caller supplies one immutable
+platform `operation_key`; Hubu stores the workflow under that agent-scoped key.
+Identical authorization retries return the same decision, token, and hold,
+while changed spend scope is rejected.
 
 External executors must turn that frozen authorization into an exclusive
 `claimed` hold before irreversible work. Claiming assigns a separate execution
 lease based on the authorization's workload profile. The original authorization
 may expire while the claim remains active. Expired claimed holds are not
 automatically returned because vendor work may already have completed; they
-remain frozen for reconciliation.
+remain frozen for reconciliation. Claim and finalization reuse the same
+agent-scoped operation key, and finalization retries return the persisted result.
 
 `hubu spend` continues into the wallet rail. In the current local server, that
 rail is mocked. Successful payment settles the budget hold into consumed

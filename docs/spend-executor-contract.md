@@ -13,7 +13,7 @@ prompts, or execution artifacts.
 
 ## Protocol Version
 
-The current version is `hubu-spend-executor-v2`. Agents and executors can
+The current version is `hubu-spend-executor-v3`. Agents and executors can
 discover its machine-readable guidance from either public route:
 
 ```http
@@ -21,9 +21,15 @@ GET /spend/executor/guidance
 GET /.well-known/hubu-spend-executor.json
 ```
 
-V2 adds an exclusive, durable execution claim between authorization and vendor
-work. `POST /spend/executor/validate` remains available for scope inspection,
-but validation alone does not authorize irreversible work.
+V3 uses one immutable, platform-provided `operation_key` from authorization
+through claim and finalization. Hubu stores workflow state under
+`(agent_id, operation_key)`. Retrying with the same key and scope returns that
+same workflow. Two agents owned by the same user may use the same operation
+key; one agent may not reuse an operation key for different work.
+V2's separate
+`executor_execution_id` is no longer part of the public contract.
+`POST /spend/executor/validate` remains available for scope inspection, but
+validation alone does not authorize irreversible work.
 
 ## Boundary
 
@@ -31,15 +37,22 @@ Hubu is responsible for:
 
 - agent and owner identity
 - policy evaluation and spend authorization tokens
+- authoritative workflow state keyed by agent and operation
 - one agent-budget hold per spend decision
 - exclusive executor claims and claim leases
 - budget settlement or release
 - audit events for spend state transitions
 
+Agent platforms or orchestrators are responsible for:
+
+- supplying one stable, namespaced `operation_key` for each logical operation
+- reusing that key for every authorization retry
+- keeping operation identity outside the language model's conversational memory
+
 Executors are responsible for:
 
 - storing vendor API keys and other execution secrets outside Hubu
-- assigning one immutable `executor_execution_id` to each attempted job
+- carrying the immutable `operation_key` into executor requests
 - claiming Hubu authorization before irreversible work
 - calling vendors or tools
 - settling after billable work or releasing before billable work
@@ -68,6 +81,29 @@ profiles:
     claim_ttl_seconds: 14400
 ```
 
+## Operation Key Generation and Storage
+
+The agent platform or orchestrator—not the language model—owns the operation
+key lifecycle. It should use a durable platform operation ID with a namespace,
+for example `codex:tool-call:01J...`. If the platform has no suitable ID, its
+adapter should generate and persist an opaque key before the first attempt.
+Operation keys are compared case-sensitively after trimming whitespace.
+
+Hubu is the authoritative store for workflow state under the agent-scoped key.
+Replaying authorization with the same agent, operation key, and scope recovers
+the decision, token, hold, and current workflow state. Claim and finalization
+use that same key.
+
+Do not derive the operation key from mutable request fields, generate it inside
+a retry loop, or ask the model to invent or remember it. A reusable skill can
+teach the protocol, but enforcement belongs in the platform adapter or SDK and
+Hubu's database constraints.
+
+The current Hubu MCP transport accepts this key as an explicit input but does
+not yet derive it from trusted platform invocation metadata. That adapter is a
+separate integration layer; this contract defines the server-side invariant it
+must satisfy.
+
 Hubu rejects unknown profiles and non-positive durations during startup or
 authorization. The effective timing configuration is published in executor
 guidance.
@@ -82,6 +118,7 @@ guidance.
 
    ```json
    {
+     "operation_key": "codex:tool-call:01JABC123",
      "account_id": "aga_example",
      "amount_cents": 500,
      "merchant": "gongbu.image",
@@ -90,10 +127,22 @@ guidance.
    }
    ```
 
-   Hubu returns `spend_auth_token_id`, `authorization_expires_at`, and a frozen
-   agent-budget hold.
+   Hubu returns the original `operation_key`, `auth_token_id`, decision, and
+   frozen agent-budget hold. Retrying the same operation key and scope returns
+   those same records; reusing the operation key with different scope for that
+   agent is rejected. Another agent may independently use the same operation
+   key.
 
-2. The agent sends the work request and `spend_auth_token_id` to the executor.
+   ```json
+   {
+     "operation_key": "codex:tool-call:01JABC123",
+     "decision": "allow",
+     "auth_token_id": "00000000-0000-4000-8000-000000000123"
+   }
+   ```
+
+2. The agent sends the work request, `operation_key`, and
+   `spend_auth_token_id` to the executor.
 
 3. Before irreversible work, the executor claims the authorization:
 
@@ -103,19 +152,19 @@ guidance.
 
    ```json
    {
+     "operation_key": "codex:tool-call:01JABC123",
      "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
      "account_id": "aga_example",
      "amount_cents": 500,
      "merchant": "gongbu.image",
-     "task_id": "hubu-logo-demo",
-     "executor_execution_id": "gongbu-job-123"
+     "task_id": "hubu-logo-demo"
    }
    ```
 
    Hubu accepts only if the token is unexpired, unused, unrevoked, unclaimed,
-   matches the authorized scope, and has a frozen agent-budget hold. A retry
-   with the same execution ID returns the existing claim. A different execution
-   ID cannot claim the token.
+   matches the authorized operation and scope, and has a frozen agent-budget
+   hold. A retry with the same operation key returns the existing claim,
+   including its terminal state if it has already been settled or released.
 
    Claiming moves the hold to `claimed` and extends its expiry to
    `claim_expires_at`. The claim may remain active after the original
@@ -131,14 +180,15 @@ guidance.
 
    ```json
    {
-     "claim_id": "00000000-0000-4000-8000-000000000456",
-     "executor_execution_id": "gongbu-job-123"
+     "agent_id": "agt_example",
+     "operation_key": "codex:tool-call:01JABC123"
    }
    ```
 
    Hubu marks the claim settled and token used and consumes the claimed hold in
-   one SQLite write transaction. An identical retry returns the original
-   `settlement_id` without consuming the budget twice.
+   one SQLite write transaction. Hubu resolves the claim from the agent and
+   operation key, so an identical retry returns the original `settlement_id`
+   even if the caller lost the claim response. Budget is not consumed twice.
 
 6. If no irreversible billable work occurred, the executor releases using the
    same finalize request shape:
@@ -155,13 +205,14 @@ guidance.
 
 ```json
 {
+  "operation_key": "codex:tool-call:01JABC123",
   "claim_id": "uuid",
-  "executor_execution_id": "gongbu-job-123",
   "workload_profile": "image_generation",
   "status": "claimed",
   "claimed_at": "2026-07-20T12:04:00Z",
   "claim_expires_at": "2026-07-20T13:04:00Z",
   "spend": {
+    "operation_key": "codex:tool-call:01JABC123",
     "spend_auth_token_id": "uuid",
     "decision_id": "uuid",
     "account_id": "aga_...",
@@ -216,9 +267,11 @@ settle/release requests reject it as requiring reconciliation.
 ## Safety Rules
 
 - Executors must claim before irreversible work; validation alone is insufficient.
-- Executors must use one stable execution ID for claim and finalization.
+- Agent platforms must supply one stable operation key and reuse it for
+  authorization, claim, finalization, and every retry.
 - Executors must settle after irreversible billable work succeeds.
 - Executors must release only when no irreversible billable work occurred.
-- Executors may retry the same settle request after an ambiguous response; they
-  must not use a finalized claim for different work.
+- Agents and executors may retry any stage after an ambiguous response; Hubu
+  returns stored workflow state for the same operation key and rejects changed
+  spend scope.
 - Hubu never stores executor vendor secrets through this contract.

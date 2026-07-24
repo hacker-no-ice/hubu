@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::policy::model::Evaluation;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SpendRequest {
     pub amount_cents: i64, // in minor unit
     pub currency: Currency,
@@ -93,6 +93,7 @@ impl SpendTimingConfig {
 pub struct SpendDecisionRecord {
     pub id: SpendDecisionId,
     pub owner_user_id: UserId,
+    pub operation_key: String,
     pub request: SpendRequest,
     pub evaluation: Evaluation,
     pub created_at: DateTime<Utc>,
@@ -113,9 +114,11 @@ pub struct SpendAuthTokenRecord {
 
 #[derive(Debug, Clone)]
 pub struct SpendEvaluationResponse {
+    pub operation_key: String,
     pub decision_id: SpendDecisionId,
     pub evaluation: Evaluation,
     pub auth_token: Option<IssuedSpendAuthToken>,
+    pub idempotent_replay: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -156,7 +159,8 @@ pub struct SpendExecutorClaimRecord {
     pub id: SpendExecutorClaimId,
     pub spend_auth_token_id: SpendAuthTokenId,
     pub owner_user_id: UserId,
-    pub executor_execution_id: String,
+    pub agent_id: AgentId,
+    pub operation_key: String,
     pub workload_profile: String,
     pub status: SpendExecutorClaimStatus,
     pub claimed_at: DateTime<Utc>,
@@ -168,12 +172,12 @@ pub struct SpendExecutorClaimRecord {
 #[derive(Debug, Clone)]
 pub struct SpendExecutorClaimRequest {
     pub authorization: SpendPaymentValidationRequest,
-    pub executor_execution_id: String,
+    pub operation_key: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct SpendExecutorClaimValidationRequest {
-    pub claim_id: SpendExecutorClaimId,
     pub owner_user_id: UserId,
-    pub executor_execution_id: String,
+    pub agent_id: AgentId,
+    pub operation_key: String,
 }
