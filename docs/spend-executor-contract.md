@@ -372,7 +372,7 @@ X-Hubu-Reconciliation-Capability: HUMAN_CAPABILITY
       "model": "image-model-v1",
       "unit_price_cents": 400,
       "pricing_unit": "image",
-      "currency": "USD"
+      "currency": "usd"
     },
     "artifact_reference": "artifact://hubu-logo.png"
   }
