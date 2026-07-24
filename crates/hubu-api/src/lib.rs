@@ -2386,7 +2386,7 @@ fn list_spending_targets(
                     && target
                         .period
                         .ending_before
-                        .is_none_or(|ending_before| ending_before > Utc::now()))
+                        .map_or(true, |ending_before| ending_before > Utc::now()))
         })
         .map(|target| spending_target_response(target, state))
         .collect::<Result<Vec<_>>>()?;

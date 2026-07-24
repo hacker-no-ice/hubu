@@ -28,7 +28,7 @@ pub struct RegistrationManager {
 impl RegistrationManager {
     pub fn new() -> Self {
         Self {
-            store: RegistrationStore::Memory(MemoryRegistrationStore::new()),
+            store: RegistrationStore::Memory(Box::new(MemoryRegistrationStore::new())),
         }
     }
 
@@ -155,7 +155,7 @@ impl Default for RegistrationManager {
 }
 
 enum RegistrationStore {
-    Memory(MemoryRegistrationStore),
+    Memory(Box<MemoryRegistrationStore>),
     Sqlite(SqliteRegistrationStore),
 }
 

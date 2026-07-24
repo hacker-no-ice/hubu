@@ -1,5 +1,4 @@
 use std::{
-    cmp,
     collections::BTreeMap,
     env, fmt, fs,
     io::{Read, Write},
@@ -100,7 +99,7 @@ impl Config {
                     .context("--workers must be a positive integer")
             })
             .transpose()?
-            .unwrap_or_else(|| cmp::min(32, cmp::max(1, agent_count)));
+            .unwrap_or_else(|| agent_count.clamp(1, 32));
         let amount_cents = take_value(&mut args, "--amount-cents")
             .unwrap_or_else(|| "100".to_string())
             .parse::<i64>()
@@ -264,7 +263,7 @@ fn run_benchmark(client: &HubuClient, scenario: &Scenario, config: &Config) -> R
     let results = Arc::new(Mutex::new(Vec::with_capacity(planned as usize)));
     let start = Instant::now();
     let interval_nanos = 1_000_000_000_u64 / config.rps;
-    let worker_count = cmp::min(config.workers, planned.max(1) as usize);
+    let worker_count = config.workers.min(planned.max(1) as usize);
 
     thread::scope(|scope| {
         for _ in 0..worker_count {

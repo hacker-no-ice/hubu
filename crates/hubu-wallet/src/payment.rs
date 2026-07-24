@@ -202,7 +202,7 @@ where
 
         let response = if rail_result.status == PaymentStatus::Succeeded {
             let ledger_accounts = ledger_accounts_for_user(
-                &mut self.ledger,
+                &self.ledger,
                 &mut self.ledger_accounts_by_user,
                 &request.owner_user_id,
             )?;

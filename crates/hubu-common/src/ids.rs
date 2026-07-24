@@ -69,12 +69,6 @@ impl SpendExecutorClaimId {
     }
 }
 
-impl Default for SpendExecutorClaimId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct PaymentId(Uuid);
 
@@ -129,12 +123,6 @@ impl SpendingTargetId {
     }
 }
 
-impl Default for SpendingTargetId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct UserId(Uuid);
 
@@ -152,6 +140,36 @@ impl BudgetHoldId {
         Self(Uuid::new_v4())
     }
 }
+
+macro_rules! default_uuid_id {
+    ($($id:ty),+ $(,)?) => {
+        $(
+            impl Default for $id {
+                fn default() -> Self {
+                    Self::new()
+                }
+            }
+        )+
+    };
+}
+
+default_uuid_id!(
+    AgentId,
+    AgentVersionId,
+    AgentAccountId,
+    AgentSessionId,
+    SpendDecisionId,
+    SpendAuthTokenId,
+    SpendExecutorClaimId,
+    PaymentId,
+    LedgerAccountId,
+    LedgerTransactionId,
+    LedgerEntryId,
+    BudgetId,
+    SpendingTargetId,
+    UserId,
+    BudgetHoldId,
+);
 
 macro_rules! public_uuid_suffix {
     ($($id:ty),+ $(,)?) => {

@@ -379,6 +379,9 @@ impl SpendApprovalService {
         ))
     }
 
+    // This orchestration boundary receives each stateful collaborator explicitly so callers
+    // retain control of locking, persistence, and token loading.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_payment<R, A, Attempts, Governance, LoadUsedToken>(
         &self,
         authorization: &ApprovedSpendAuthorization,
