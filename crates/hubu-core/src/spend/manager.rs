@@ -111,6 +111,17 @@ impl SpendManager {
         self.decisions.get(decision_id).cloned()
     }
 
+    pub fn workload_profile_for_operation(
+        &self,
+        agent_id: &AgentId,
+        operation_key: &str,
+    ) -> Option<String> {
+        self.decision_id_by_operation
+            .get(&(agent_id.clone(), operation_key.to_string()))
+            .and_then(|decision_id| self.decisions.get(decision_id))
+            .map(|decision| decision.request.workload_profile.clone())
+    }
+
     pub fn auth_token_record(&self, token_id: &SpendAuthTokenId) -> Option<SpendAuthTokenRecord> {
         self.tokens.get(token_id).cloned()
     }

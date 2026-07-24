@@ -3042,6 +3042,11 @@ fn evaluate_and_reserve_spend(
             .governance
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        let workload_profile = request.workload_profile.clone().unwrap_or_else(|| {
+            spend_manager
+                .workload_profile_for_operation(&agent_id, &operation_key)
+                .unwrap_or_else(|| state.spend_timing.default_profile.clone())
+        });
         SpendApprovalService.authorize(
             AuthorizeSpendRequest {
                 operation_key: operation_key.clone(),
@@ -3052,10 +3057,7 @@ fn evaluate_and_reserve_spend(
                 currency: Currency::Usd,
                 merchant: request.merchant.clone(),
                 task_id: Some(request.reason.clone()),
-                workload_profile: request
-                    .workload_profile
-                    .clone()
-                    .unwrap_or_else(|| state.spend_timing.default_profile.clone()),
+                workload_profile,
             },
             &policy,
             &mut spend_manager,
@@ -5443,6 +5445,50 @@ mod tests {
         .expect("reloaded claim should settle");
         assert_eq!(settlement.status, "settled");
         assert_eq!(settlement.spend.budget_hold.status, "settled");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn authorization_replay_preserves_omitted_workload_profile_after_default_changes() {
+        let (path, state, agent, authorization) =
+            setup_executor_authorization("authorization-profile-restart");
+        drop(state);
+
+        let mut restarted =
+            ServerState::new_with_db_path(&path).expect("server should reload authorized spend");
+        restarted.spend_timing.default_profile = "new-default".to_string();
+
+        let replay = authorize_spend(
+            json!({
+                "operation_key": authorization.operation_key,
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "reason": "hubu-logo-demo",
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &restarted,
+        )
+        .expect("omitted profile should replay with the stored profile");
+        assert_eq!(replay.decision_id, authorization.decision_id);
+        assert_eq!(replay.auth_token_id, authorization.auth_token_id);
+        assert_eq!(replay.workload_profile, authorization.workload_profile);
+
+        let conflict = authorize_spend(
+            json!({
+                "operation_key": authorization.operation_key,
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "reason": "hubu-logo-demo",
+                "merchant": "gongbu.image",
+                "workload_profile": "new-default",
+            })
+            .to_string(),
+            &restarted,
+        )
+        .expect_err("an explicitly changed profile should still conflict");
+        assert!(conflict.to_string().contains("different spend scope"));
+
         std::fs::remove_file(path).ok();
     }
 
