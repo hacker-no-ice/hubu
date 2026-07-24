@@ -143,6 +143,24 @@ impl SpendManager {
             .and_then(|claim_id| self.executor_claim_record(claim_id))
     }
 
+    pub fn executor_claim_records_for_owner(
+        &self,
+        owner_user_id: &hubu_common::ids::UserId,
+    ) -> Vec<SpendExecutorClaimRecord> {
+        let mut claims = self
+            .executor_claims
+            .values()
+            .filter(|claim| &claim.owner_user_id == owner_user_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        claims.sort_by(|left, right| {
+            left.expires_at
+                .cmp(&right.expires_at)
+                .then_with(|| left.id.to_string().cmp(&right.id.to_string()))
+        });
+        claims
+    }
+
     pub fn apply_persisted_executor_finalization(
         &mut self,
         claim: SpendExecutorClaimRecord,
@@ -408,6 +426,10 @@ impl SpendManager {
             expires_at: claimed_at + Duration::seconds(claim_ttl_seconds),
             finalized_at: None,
             settlement_id: None,
+            provider_reference: None,
+            reconciliation_evidence: None,
+            reconciled_at: None,
+            reconciled_by_user_id: None,
         };
         self.claim_id_by_token
             .insert(claim.spend_auth_token_id.clone(), claim.id.clone());

@@ -20,6 +20,10 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
+const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
+const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
+const RECONCILIATION_CAPABILITY_HEADER: &str = "X-Hubu-Reconciliation-Capability";
 const FINGERPRINT_PREFIX: &str = "sha256:";
 const DEFAULT_POLICY_TEMPLATE_PATH: &str = "policies/policy.yaml";
 const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../policies/starter-policy.yaml");
@@ -101,6 +105,9 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let token_file = take_value(&mut args, "--token-file")
         .map(PathBuf::from)
         .unwrap_or_else(default_codex_token_file_path);
+    let reconciliation_token_file = take_value(&mut args, "--reconciliation-token-file")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_codex_reconciliation_token_file_path(&token_file));
     let force = take_flag(&mut args, "--force");
     let dry_run = take_flag(&mut args, "--dry-run");
     let trust_client_approval = take_flag(&mut args, "--trust-client-approval");
@@ -115,7 +122,23 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
         ensure_auth_token_file(&token_file)
             .with_context(|| format!("prepare Hubu auth token file `{}`", token_file.display()))?
     };
-    let block = codex_mcp_config_block(&mcp_server, base_url, &token_file, trust_client_approval);
+    let reconciliation_token_file = if dry_run {
+        absolute_path(&reconciliation_token_file)?
+    } else {
+        ensure_reconciliation_token_file(&reconciliation_token_file).with_context(|| {
+            format!(
+                "prepare Hubu reconciliation token file `{}`",
+                reconciliation_token_file.display()
+            )
+        })?
+    };
+    let block = codex_mcp_config_block(
+        &mcp_server,
+        base_url,
+        &token_file,
+        &reconciliation_token_file,
+        trust_client_approval,
+    );
 
     if dry_run {
         println!("{block}");
@@ -130,10 +153,15 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     println!("  mcp_server: {}", mcp_server.display());
     println!("  hubu_url: {base_url}");
     println!("  token_file: {}", token_file.display());
+    println!(
+        "  reconciliation_token_file: {}",
+        reconciliation_token_file.display()
+    );
     println!("  next: restart Codex, then use /mcp or ask Codex to list Hubu tools");
     println!(
-        "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={}",
-        token_file.display()
+        "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
+        token_file.display(),
+        reconciliation_token_file.display()
     );
     println!(
         "  spend_tools: Codex pre-approves Hubu spend tool calls; Hubu still returns needs_approval without payment when policy requires review"
@@ -167,6 +195,17 @@ fn default_codex_token_file_path() -> PathBuf {
     }
 
     hubu_home().join(DEFAULT_AUTH_TOKEN_FILE)
+}
+
+fn default_codex_reconciliation_token_file_path(auth_token_file: &Path) -> PathBuf {
+    if let Ok(path) = env::var(RECONCILIATION_TOKEN_FILE_ENV) {
+        return PathBuf::from(path);
+    }
+    auth_token_file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(DEFAULT_RECONCILIATION_TOKEN_FILE)
 }
 
 fn hubu_home() -> PathBuf {
@@ -231,6 +270,22 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn ensure_auth_token_file(path: &Path) -> Result<PathBuf> {
+    ensure_token_file(path, AUTH_TOKEN_ENV, generate_local_auth_token)
+}
+
+fn ensure_reconciliation_token_file(path: &Path) -> Result<PathBuf> {
+    ensure_token_file(
+        path,
+        RECONCILIATION_TOKEN_ENV,
+        generate_local_reconciliation_token,
+    )
+}
+
+fn ensure_token_file(
+    path: &Path,
+    token_env: &str,
+    generate_token: fn() -> String,
+) -> Result<PathBuf> {
     let path = absolute_path(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -247,11 +302,11 @@ fn ensure_auth_token_file(path: &Path) -> Result<PathBuf> {
         Err(error) => return Err(error).with_context(|| format!("read `{}`", path.display())),
     }
 
-    let token = env::var(AUTH_TOKEN_ENV)
+    let token = env::var(token_env)
         .map(|value| value.trim().to_string())
         .ok()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(generate_local_auth_token);
+        .unwrap_or_else(generate_token);
     fs::write(&path, format!("{token}\n"))
         .with_context(|| format!("write token file `{}`", path.display()))?;
     restrict_token_permissions(&path)?;
@@ -260,6 +315,10 @@ fn ensure_auth_token_file(path: &Path) -> Result<PathBuf> {
 
 fn generate_local_auth_token() -> String {
     format!("hubu_{}", Uuid::new_v4().simple())
+}
+
+fn generate_local_reconciliation_token() -> String {
+    format!("hubu_reconcile_{}", Uuid::new_v4().simple())
 }
 
 #[cfg(unix)]
@@ -298,6 +357,7 @@ fn codex_mcp_config_block(
     mcp_server: &Path,
     base_url: &str,
     token_file: &Path,
+    reconciliation_token_file: &Path,
     trust_client_approval: bool,
 ) -> String {
     let mut block = format!(
@@ -308,10 +368,12 @@ fn codex_mcp_config_block(
          tool_timeout_sec = 60\n\n\
          [mcp_servers.hubu.env]\n\
          HUBU_URL = \"{}\"\n\
-         {AUTH_TOKEN_FILE_ENV} = \"{}\"\n",
+         {AUTH_TOKEN_FILE_ENV} = \"{}\"\n\
+         {RECONCILIATION_TOKEN_FILE_ENV} = \"{}\"\n",
         toml_basic_string(&mcp_server.display().to_string()),
         toml_basic_string(base_url),
-        toml_basic_string(&token_file.display().to_string())
+        toml_basic_string(&token_file.display().to_string()),
+        toml_basic_string(&reconciliation_token_file.display().to_string())
     );
     if trust_client_approval {
         let _ = writeln!(block, "HUBU_MCP_TRUST_CLIENT_APPROVAL = \"1\"");
@@ -1347,6 +1409,14 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         args.remove(0);
         return spend_authorize(base_url, args);
     }
+    if args.first().map(String::as_str) == Some("claim") {
+        args.remove(0);
+        return spend_claim_status(base_url, args);
+    }
+    if args.first().map(String::as_str) == Some("reconcile") {
+        args.remove(0);
+        return spend_reconcile(base_url, args);
+    }
 
     let account_id = take_value(&mut args, "--account-id");
     let agent_id = take_value(&mut args, "--agent-id");
@@ -1400,6 +1470,130 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
 
     let response = post_json(base_url, "/spend/authorize", body)?;
     print_spend_response(&response)
+}
+
+fn spend_claim_status(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    let claim_id = take_required(&mut args, "--claim-id")?;
+    ensure_no_args(args)?;
+    let response = get_json(
+        base_url,
+        &format!("/spend/executor/claim?claim_id={claim_id}"),
+    )?;
+    print_executor_claim(&response)
+}
+
+fn spend_reconcile(base_url: &str, args: Vec<String>) -> Result<()> {
+    let Some(command) = args.first().cloned() else {
+        print_spend_reconcile_help();
+        return Ok(());
+    };
+    let mut args = args;
+    args.remove(0);
+    match command.as_str() {
+        "list" => spend_reconcile_list(base_url, args),
+        "billed" => spend_reconcile_resolve(base_url, args, true),
+        "not-billed" => spend_reconcile_resolve(base_url, args, false),
+        "-h" | "--help" | "help" => {
+            print_spend_reconcile_help();
+            Ok(())
+        }
+        _ => bail!("unknown spend reconcile command `{command}`"),
+    }
+}
+
+fn spend_reconcile_list(base_url: &str, args: Vec<String>) -> Result<()> {
+    ensure_no_args(args)?;
+    let response = get_json(base_url, "/spend/executor/reconciliation")?;
+    let claims = response
+        .get("claims")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `claims`"))?;
+    if claims.is_empty() {
+        println!("No executor claims require reconciliation.");
+        return Ok(());
+    }
+    for claim in claims {
+        print_executor_claim(claim)?;
+    }
+    Ok(())
+}
+
+fn spend_reconcile_resolve(
+    base_url: &str,
+    mut args: Vec<String>,
+    vendor_billed: bool,
+) -> Result<()> {
+    let claim_id = take_required(&mut args, "--claim-id")?;
+    let provider_reference = take_required(&mut args, "--provider-reference")?;
+    let evidence = take_required(&mut args, "--evidence")?;
+    ensure_no_args(args)?;
+    let action = if vendor_billed { "settle" } else { "release" };
+    let response = post_reconciliation_json(
+        base_url,
+        &format!("/spend/executor/{action}"),
+        json!({
+            "claim_id": claim_id,
+            "provider_reference": provider_reference,
+            "evidence": evidence,
+        }),
+    )?;
+    println!(
+        "Claim reconciled: {}",
+        if vendor_billed {
+            "vendor billed; hold settled"
+        } else {
+            "vendor did not bill; hold released"
+        }
+    );
+    print_executor_claim(&response)
+}
+
+fn print_executor_claim(claim: &Value) -> Result<()> {
+    println!("Executor claim");
+    println!("  claim_id: {}", string_at(claim, "claim_id")?);
+    println!("  status: {}", string_at(claim, "status")?);
+    println!(
+        "  reconciliation_required: {}",
+        claim
+            .get("reconciliation_required")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow!("server response missing `reconciliation_required`"))?
+    );
+    println!("  operation_key: {}", string_at(claim, "operation_key")?);
+    println!(
+        "  claim_expires_at: {}",
+        string_at(claim, "claim_expires_at")?
+    );
+    for field in [
+        "settlement_id",
+        "reconciliation_outcome",
+        "provider_reference",
+        "evidence",
+        "reconciled_at",
+        "reconciled_by_user_id",
+    ] {
+        if let Some(value) = claim.get(field).and_then(Value::as_str) {
+            println!("  {field}: {value}");
+        }
+    }
+    let spend = claim
+        .get("spend")
+        .ok_or_else(|| anyhow!("server response missing `spend`"))?;
+    println!("  account_id: {}", string_at(spend, "account_id")?);
+    println!("  agent_id: {}", string_at(spend, "agent_id")?);
+    println!("  amount: {}", money_at(spend, "amount_cents")?);
+    if let Some(merchant) = spend.get("merchant").and_then(Value::as_str) {
+        println!("  merchant: {merchant}");
+    }
+    let hold = spend
+        .get("budget_hold")
+        .ok_or_else(|| anyhow!("server response missing `budget_hold`"))?;
+    println!("  hold_status: {}", string_at(hold, "status")?);
+    println!(
+        "  frozen_amount: {}",
+        money_at(hold, "frozen_amount_cents")?
+    );
+    Ok(())
 }
 
 fn require_spend_account_id(
@@ -1606,18 +1800,34 @@ fn health(base_url: &str) -> Result<()> {
     Ok(())
 }
 
-fn request_json(base_url: &str, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+fn request_json(
+    base_url: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    include_reconciliation_capability: bool,
+) -> Result<Value> {
     let (host, port) = parse_base_url(base_url)?;
     let body_text = body.map(|body| body.to_string()).unwrap_or_default();
     let authorization_header = auth_token()?
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
+    let reconciliation_header = if include_reconciliation_capability {
+        let token = reconciliation_token()?.ok_or_else(|| {
+            anyhow!(
+                "human reconciliation requires {RECONCILIATION_TOKEN_ENV} or {RECONCILIATION_TOKEN_FILE_ENV}"
+            )
+        })?;
+        format!("{RECONCILIATION_CAPABILITY_HEADER}: {token}\r\n")
+    } else {
+        String::new()
+    };
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("connect to Hubu server at {base_url}"))?;
 
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}{reconciliation_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body_text.len(),
         body_text
     )?;
@@ -1641,11 +1851,15 @@ fn request_json(base_url: &str, method: &str, path: &str, body: Option<Value>) -
 }
 
 fn get_json(base_url: &str, path: &str) -> Result<Value> {
-    request_json(base_url, "GET", path, None)
+    request_json(base_url, "GET", path, None, false)
 }
 
 fn post_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body))
+    request_json(base_url, "POST", path, Some(body), false)
+}
+
+fn post_reconciliation_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
+    request_json(base_url, "POST", path, Some(body), true)
 }
 
 fn auth_token() -> Result<Option<String>> {
@@ -1670,6 +1884,33 @@ fn auth_token() -> Result<Option<String>> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("read Hubu auth token file `{path}`")),
+    }
+}
+
+fn reconciliation_token() -> Result<Option<String>> {
+    if let Ok(token) = env::var(RECONCILIATION_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{RECONCILIATION_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(Some(token));
+    }
+
+    let path = env::var(RECONCILIATION_TOKEN_FILE_ENV)
+        .unwrap_or_else(|_| DEFAULT_RECONCILIATION_TOKEN_FILE.to_string());
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                Err(anyhow!("Hubu reconciliation token file `{path}` is empty"))
+            } else {
+                Ok(Some(token))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("read Hubu reconciliation token file `{path}`"))
+        }
     }
 }
 
@@ -1811,7 +2052,7 @@ Commands:
   init       Generate starter files and configure clients
   agent      Read registered agents
   budget     Create and list agent budgets
-  spend      Test the agent spend path
+  spend      Test spend and reconcile uncertain executor claims
   ledger     Read ledger transactions
   health     Check the Hubu server
 
@@ -2017,7 +2258,7 @@ fn print_init_help() {
 
 Usage:
   hubu init [--policy FILE] [--force]
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--force] [--dry-run]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--reconciliation-token-file FILE] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
@@ -2038,21 +2279,23 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--force] [--dry-run] [--trust-client-approval]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--reconciliation-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
   --mcp-server FILE         hubu-mcp-server executable (default: sibling of hubu, then PATH)
   --token-file FILE         Hubu auth token file (default: $HUBU_AUTH_TOKEN_FILE, ./hubu.auth-token, or ~/.hubu/hubu.auth-token)
-  --force                  Replace an existing unmanaged [mcp_servers.hubu] config block
-  --dry-run                Print the managed Codex config block without writing files
-  --trust-client-approval  Enable MCP setup/admin tools when the Codex client prompts for destructive tool approval
+  --reconciliation-token-file FILE
+                             Separate human reconciliation capability file (default: beside --token-file)
+  --force                   Replace an existing unmanaged [mcp_servers.hubu] config block
+  --dry-run                 Print the managed Codex config block without writing files
+  --trust-client-approval   Enable MCP setup/admin tools when the Codex client prompts for destructive tool approval
 
 Notes:
   Hubu spend tools are pre-approved in Codex; Hubu policy still controls needs_approval outcomes.
   Keep --trust-client-approval off for normal agent spend workflows.
   Use --trust-client-approval only when you want to ask Codex to perform setup/admin actions behind a human approval prompt.
-  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE shown by this command.
+  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
 
 Examples:
   hubu init codex --token-file ~/.hubu/hubu.auth-token
@@ -2168,6 +2411,10 @@ fn print_spend_help() {
 Usage:
   hubu spend --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
   hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
+  hubu spend claim --claim-id ID
+  hubu spend reconcile list
+  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT
+  hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
 
 Note:
   Spend commands require the agent account id because the account is the spending source. CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
@@ -2194,6 +2441,19 @@ Example:
     );
 }
 
+fn print_spend_reconcile_help() {
+    println!(
+        "Resolve expired executor claims after a human reviews vendor billing
+
+Usage:
+  hubu spend reconcile list
+  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT
+  hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
+
+The provider reference and evidence are stored with the atomic settlement or release. Do not include vendor credentials or sensitive payloads."
+    );
+}
+
 fn print_ledger_help() {
     println!(
         "Read ledger transactions
@@ -2216,12 +2476,15 @@ mod tests {
             Path::new("/tmp/hubu \"dev\"/hubu-mcp-server"),
             "http://127.0.0.1:8787",
             Path::new("/tmp/hubu\\token"),
+            Path::new("/tmp/hubu\\reconciliation-token"),
             false,
         );
 
         assert!(block.contains(HUBU_CODEX_MCP_BEGIN));
         assert!(block.contains("command = \"/tmp/hubu \\\"dev\\\"/hubu-mcp-server\""));
         assert!(block.contains("HUBU_AUTH_TOKEN_FILE = \"/tmp/hubu\\\\token\""));
+        assert!(block
+            .contains("HUBU_RECONCILIATION_TOKEN_FILE = \"/tmp/hubu\\\\reconciliation-token\""));
         assert!(block.contains("[mcp_servers.hubu.tools.hubu_authorize_spend]"));
         assert!(block.contains("[mcp_servers.hubu.tools.hubu_submit_spend]"));
         assert!(block.contains("approval_mode = \"approve\""));
@@ -2235,6 +2498,7 @@ mod tests {
             Path::new("/tmp/hubu-mcp-server"),
             "http://127.0.0.1:8787",
             Path::new("/tmp/hubu.auth-token"),
+            Path::new("/tmp/hubu.reconciliation-token"),
             true,
         );
 

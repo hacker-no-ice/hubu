@@ -18,7 +18,8 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Months, Utc};
 use hubu_common::{
     ids::{
-        AgentId, AgentSessionId, BudgetId, PaymentId, SpendAuthTokenId, SpendingTargetId, UserId,
+        AgentId, AgentSessionId, BudgetId, SpendAuthTokenId, SpendExecutorClaimId,
+        SpendingTargetId, UserId,
     },
     models::account::{AccountStatus, AgentAccount},
     models::identity::{
@@ -31,7 +32,9 @@ use hubu_common::{
 use hubu_core::{
     app::{
         ApprovedSpendAuthorization, AuthorizeSpendRequest, BudgetHoldUpdate,
-        FailedPaymentHoldPolicy, RejectedSpendAuthorization, SpendApprovalError,
+        ClaimExecutorSpendRequest, ExecutorClaimReconciliationOutcome, ExecutorClaimService,
+        ExecutorClaimState, FailedPaymentHoldPolicy, FinalizeExecutorClaimRequest,
+        ReconcileExecutorClaimRequest, RejectedSpendAuthorization, SpendApprovalError,
         SpendApprovalService, SpendAuthorizationOutcome, SpendPaymentSpec,
     },
     budget::{
@@ -40,8 +43,8 @@ use hubu_core::{
         ReserveBudgetResponse,
     },
     persistence::{
-        BudgetRepository, ExecutorFinalizationResult, PolicyAssignmentScope, PolicyRepository,
-        SpendRepository, SpendingTargetRepository, SqliteGovernanceRepository,
+        BudgetRepository, PolicyAssignmentScope, PolicyRepository, SpendRepository,
+        SpendingTargetRepository, SqliteGovernanceRepository,
     },
     policy::{
         condition::{Condition, Field, PolicyValue},
@@ -51,8 +54,7 @@ use hubu_core::{
     },
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
     spend::{
-        SpendAuthTokenRecord, SpendExecutorClaimRecord, SpendExecutorClaimRequest,
-        SpendExecutorClaimStatus, SpendExecutorClaimValidationRequest, SpendManager,
+        SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendManager,
         SpendPaymentValidationRequest, SpendTimingConfig,
     },
     spending_target::{
@@ -75,9 +77,15 @@ const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
+const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
+const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
+const RECONCILIATION_CAPABILITY_HEADER: &str = "x-hubu-reconciliation-capability";
 const SPEND_TIMING_CONFIG_ENV: &str = "HUBU_SPEND_TIMING_CONFIG";
 #[cfg(test)]
 const TEST_AUTH_TOKEN: &str = "test-local-auth-token";
+#[cfg(test)]
+const TEST_RECONCILIATION_TOKEN: &str = "test-human-reconciliation-token";
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 type LocalPaymentManager = PaymentManager<MockPaymentRail, SharedSpendAuthorizer>;
@@ -174,6 +182,13 @@ impl ServerState {
     }
 
     fn new_with_db_path(path: impl AsRef<Path>) -> Result<Self> {
+        Self::new_with_db_path_and_spend_timing(path, load_spend_timing_config()?)
+    }
+
+    fn new_with_db_path_and_spend_timing(
+        path: impl AsRef<Path>,
+        spend_timing: SpendTimingConfig,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let db_path = path.display().to_string();
         log_event(
@@ -191,13 +206,13 @@ impl ServerState {
             "local_api_auth_configured",
             json!({
                 "source": auth.source(),
+                "reconciliation_source": auth.reconciliation_source(),
                 "owner_user_id": default_user.id.to_string(),
                 "owner_user_pub_id": default_user.pub_id,
             }),
         );
         let mut governance =
             SqliteGovernanceRepository::open(&path).context("initialize governance store")?;
-        let spend_timing = load_spend_timing_config()?;
         governance
             .expire_overdue_budget_holds(Utc::now())
             .context("reconcile expired budget holds")?;
@@ -324,15 +339,28 @@ fn load_spend_timing_config() -> Result<SpendTimingConfig> {
 struct LocalAuth {
     token_hash: String,
     token_source: String,
+    reconciliation_token_hash: String,
+    reconciliation_token_source: String,
     owner_user_id: Mutex<UserId>,
 }
 
 impl LocalAuth {
     fn new(owner_user_id: UserId) -> Result<Self> {
         let token = load_local_auth_token()?;
+        let reconciliation_token = load_local_reconciliation_token()?;
+        if constant_time_eq(
+            hash_token(&token.value).as_bytes(),
+            hash_token(&reconciliation_token.value).as_bytes(),
+        ) {
+            return Err(anyhow!(
+                "Hubu reconciliation capability must be distinct from the API bearer token"
+            ));
+        }
         Ok(Self {
             token_hash: hash_token(&token.value),
             token_source: token.source,
+            reconciliation_token_hash: hash_token(&reconciliation_token.value),
+            reconciliation_token_source: reconciliation_token.source,
             owner_user_id: Mutex::new(owner_user_id),
         })
     }
@@ -343,6 +371,17 @@ impl LocalAuth {
 
     fn source(&self) -> &str {
         &self.token_source
+    }
+
+    fn verifies_reconciliation_capability(&self, token: &str) -> bool {
+        constant_time_eq(
+            hash_token(token).as_bytes(),
+            self.reconciliation_token_hash.as_bytes(),
+        )
+    }
+
+    fn reconciliation_source(&self) -> &str {
+        &self.reconciliation_token_source
     }
 
     fn owner_user_id(&self) -> Result<UserId> {
@@ -414,13 +453,72 @@ fn load_local_auth_token() -> Result<LoadedLocalAuthToken> {
     }
 }
 
+fn load_local_reconciliation_token() -> Result<LoadedLocalAuthToken> {
+    #[cfg(test)]
+    if env::var(RECONCILIATION_TOKEN_ENV).is_err()
+        && env::var(RECONCILIATION_TOKEN_FILE_ENV).is_err()
+    {
+        return Ok(LoadedLocalAuthToken {
+            value: TEST_RECONCILIATION_TOKEN.to_string(),
+            source: "test".to_string(),
+        });
+    }
+
+    if let Ok(token) = env::var(RECONCILIATION_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{RECONCILIATION_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(LoadedLocalAuthToken {
+            value: token,
+            source: RECONCILIATION_TOKEN_ENV.to_string(),
+        });
+    }
+
+    let path = reconciliation_token_file_path();
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                return Err(anyhow!(
+                    "Hubu reconciliation token file `{}` is empty",
+                    path.display()
+                ));
+            }
+            Ok(LoadedLocalAuthToken {
+                value: token,
+                source: path.display().to_string(),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let token = create_token_file(&path, "hubu_reconcile_")?;
+            Ok(LoadedLocalAuthToken {
+                value: token,
+                source: path.display().to_string(),
+            })
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("read Hubu reconciliation token file `{}`", path.display())),
+    }
+}
+
 fn auth_token_file_path() -> PathBuf {
     env::var(AUTH_TOKEN_FILE_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_AUTH_TOKEN_FILE))
 }
 
+fn reconciliation_token_file_path() -> PathBuf {
+    env::var(RECONCILIATION_TOKEN_FILE_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_RECONCILIATION_TOKEN_FILE))
+}
+
 fn create_auth_token_file(path: &Path) -> Result<String> {
+    create_token_file(path, "hubu_")
+}
+
+fn create_token_file(path: &Path, prefix: &str) -> Result<String> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -429,7 +527,7 @@ fn create_auth_token_file(path: &Path) -> Result<String> {
             .with_context(|| format!("create auth token directory `{}`", parent.display()))?;
     }
 
-    let token = format!("hubu_{}", AgentSessionId::new());
+    let token = format!("{prefix}{}", AgentSessionId::new());
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -841,10 +939,26 @@ struct ExecutorSpendClaimHttpRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ExecutorSpendFinalizationHttpRequest {
+    Executor(ExecutorSpendFinalizeHttpRequest),
+    Reconciliation(ExecutorClaimReconciliationHttpRequest),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExecutorSpendFinalizeHttpRequest {
     #[serde(alias = "executor_execution_id")]
     operation_key: String,
     agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutorClaimReconciliationHttpRequest {
+    claim_id: String,
+    provider_reference: String,
+    evidence: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -870,7 +984,20 @@ struct ExecutorSpendClaimHttpResponse {
     status: String,
     claimed_at: String,
     claim_expires_at: String,
+    finalized_at: Option<String>,
+    settlement_id: Option<String>,
+    reconciliation_required: bool,
+    reconciliation_outcome: Option<String>,
+    provider_reference: Option<String>,
+    evidence: Option<String>,
+    reconciled_at: Option<String>,
+    reconciled_by_user_id: Option<String>,
     spend: ExecutorSpendHttpResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutorClaimsHttpResponse {
+    claims: Vec<ExecutorSpendClaimHttpResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -998,6 +1125,10 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         }
     }
 
+    let reconciliation_capability = request
+        .headers
+        .get(RECONCILIATION_CAPABILITY_HEADER)
+        .map(String::as_str);
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
         ("GET", "/registration/guidance")
@@ -1032,11 +1163,18 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             validate_executor_spend(request.body, state).map(to_json)
         }
         ("POST", "/spend/executor/claim") => claim_executor_spend(request.body, state).map(to_json),
+        ("GET", "/spend/executor/claim") => {
+            get_executor_claim(request.query.get("claim_id").map(String::as_str), state)
+                .map(to_json)
+        }
+        ("GET", "/spend/executor/reconciliation") => {
+            list_executor_claims_requiring_reconciliation(state).map(to_json)
+        }
         ("POST", "/spend/executor/settle") => {
-            settle_executor_spend(request.body, state).map(to_json)
+            finalize_executor_spend(request.body, state, true, reconciliation_capability)
         }
         ("POST", "/spend/executor/release") => {
-            release_executor_spend(request.body, state).map(to_json)
+            finalize_executor_spend(request.body, state, false, reconciliation_capability)
         }
         ("POST", "/spend") => spend(request.body, state).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
@@ -1132,6 +1270,20 @@ fn authenticate_request(request: &HttpRequest, state: &ServerState) -> Result<()
     Ok(())
 }
 
+fn authenticate_reconciliation_capability(
+    capability: Option<&str>,
+    state: &ServerState,
+) -> Result<()> {
+    let capability = capability
+        .map(str::trim)
+        .filter(|capability| !capability.is_empty())
+        .ok_or_else(|| anyhow!("missing human reconciliation capability"))?;
+    if !state.auth.verifies_reconciliation_capability(capability) {
+        return Err(anyhow!("invalid human reconciliation capability"));
+    }
+    Ok(())
+}
+
 fn spend_executor_guidance(state: &ServerState) -> Value {
     json!({
         "protocol_version": "hubu-spend-executor-v3",
@@ -1163,9 +1315,13 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "GET /.well-known/hubu-spend-executor.json"
             ],
             "claim": "POST /spend/executor/claim",
+            "claim_status": "GET /spend/executor/claim?claim_id=CLAIM_ID",
             "validate": "POST /spend/executor/validate",
             "settle": "POST /spend/executor/settle",
-            "release": "POST /spend/executor/release"
+            "release": "POST /spend/executor/release",
+            "reconciliation_queue": "GET /spend/executor/reconciliation",
+            "reconcile_vendor_billed": "POST /spend/executor/settle",
+            "reconcile_vendor_did_not_bill": "POST /spend/executor/release"
         },
         "operation_key_policy": {
             "responsibility": "agent platform or orchestrator, not the autonomous model",
@@ -1221,6 +1377,23 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "operation_key"
             ]
         },
+        "reconciliation_request": {
+            "required": [
+                "claim_id",
+                "provider_reference",
+                "evidence"
+            ],
+            "routes": {
+                "vendor_billed": "POST /spend/executor/settle",
+                "vendor_did_not_bill": "POST /spend/executor/release"
+            },
+            "human_gate": {
+                "capability_header": RECONCILIATION_CAPABILITY_HEADER,
+                "requirement": "The server requires a reconciliation capability distinct from the normal API bearer token.",
+                "cli": "The CLI reads HUBU_RECONCILIATION_TOKEN or HUBU_RECONCILIATION_TOKEN_FILE and sends it only for reconciliation.",
+                "mcp": "MCP reconciliation tools require both a trusted client approval prompt and the distinct reconciliation capability."
+            }
+        },
         "timing": &state.spend_timing,
         "scope_rules": [
             "operation_key is platform-assigned, immutable, and scoped to the authorized agent; authorization retries must use the same spend scope",
@@ -1241,7 +1414,12 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "claim expiry is evaluated once when the settlement transaction starts",
             "release atomically marks the claim released and token revoked while returning the reserved amount",
             "settle and release serialize so the first terminal finalization wins",
-            "expired claims keep their holds claimed for reconciliation instead of automatically releasing"
+            "expired claims keep their holds claimed for reconciliation instead of automatically releasing",
+            "claim status lookup reports reconciliation_required once a claimed lease expires",
+            "only expired claimed leases enter the reconciliation queue",
+            "the normal API bearer token cannot authorize reconciliation",
+            "a human-confirmed vendor_billed resolution settles the hold; vendor_did_not_bill releases it",
+            "each reconciliation stores the provider reference, evidence, resolving user, outcome, and timestamp"
         ],
         "merchant_examples": [
             "gongbu.image",
@@ -2465,214 +2643,251 @@ fn claim_executor_spend(
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
-    let operation_key = request.operation_key.trim().to_string();
-    if operation_key.is_empty() {
-        return Err(anyhow!("executor spend operation_key is required"));
-    }
     let resolved = resolve_executor_spend_request(request.spend, state)?;
-    let (claim, claim_validation, claimed_hold) = {
-        let mut spend = state
+    let authorization = resolved.payment_validation_request();
+    let claim_state = {
+        let mut spend_manager = state
             .spend
             .lock()
             .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-        let mut budgets = state
+        let mut budget_manager = state
             .budgets
             .lock()
             .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        let authorization = resolved.payment_validation_request();
-        let (prevalidated, existing_claim) =
-            spend.validate_auth_token_for_executor_claim(&authorization, &operation_key)?;
-        let budget_hold = budgets
-            .get_budget_hold_by_spend_decision(&prevalidated.spend_decision_id)
-            .ok_or_else(|| anyhow!("spend authorization does not have a budget hold"))?;
-        match existing_claim.as_ref() {
-            None if matches!(budget_hold.status, BudgetHoldStatus::Frozen) => {}
-            Some(existing) if budget_hold.executor_claim_id.as_ref() == Some(&existing.id) => {}
-            None => return Err(anyhow!("spend authorization budget hold is not frozen")),
-            Some(_) => {
-                return Err(anyhow!(
-                    "spend authorization budget hold does not match the existing claim"
-                ));
-            }
-        }
-        if !budgets
-            .get_budget_by_id(&budget_hold.budget_id)
-            .is_some_and(|budget| budget.budget.agent_id == resolved.agent_id)
-        {
-            return Err(anyhow!(
-                "spend authorization hold does not belong to the authorized agent"
-            ));
-        }
-        let (claim, claim_validation) = spend.claim_auth_token(SpendExecutorClaimRequest {
-            authorization,
-            operation_key: operation_key.clone(),
-        })?;
-        if claim_validation.spend_decision_id != prevalidated.spend_decision_id {
-            return Err(anyhow!(
-                "executor claim resolved a different spend decision"
-            ));
-        }
-        let claimed_hold = if existing_claim.is_some() {
-            let balance = budgets
-                .get_budget_balance(&budget_hold.budget_id)
-                .ok_or_else(|| anyhow!("spend authorization budget balance is missing"))?;
-            ReserveBudgetResponse {
-                hold: budget_hold,
-                balance,
-            }
-        } else {
-            budgets.claim_budget(&budget_hold.id, claim.id.clone(), claim.expires_at)?
-        };
-        (claim, claim_validation, claimed_hold)
-    };
-    let validated = resolved.into_validated(
-        claim.operation_key.clone(),
-        claim_validation,
-        claimed_hold.hold.clone(),
-        claimed_hold.balance.clone(),
-    );
-
-    {
         let mut governance = state
             .governance
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        governance.save_executor_claim_with_budget_hold(
-            &claim,
-            &claimed_hold.hold,
-            &claimed_hold.balance,
-        )?;
-    }
-
-    let spend = executor_spend_response(&validated);
-    log_event(
-        "info",
-        "executor_spend_claimed",
-        json!({
-            "claim_id": claim.id.to_string(),
-            "operation_key": claim.operation_key,
-            "spend_auth_token_id": claim.spend_auth_token_id.to_string(),
-            "claim_expires_at": claim.expires_at.to_rfc3339(),
-            "workload_profile": claim.workload_profile,
-        }),
-    );
-    Ok(executor_claim_response(&claim, spend))
+        ExecutorClaimService.claim(
+            ClaimExecutorSpendRequest {
+                authorization,
+                operation_key: request.operation_key,
+            },
+            &mut spend_manager,
+            &mut budget_manager,
+            &mut *governance,
+        )?
+    };
+    let spend = executor_spend_response(&executor_spend_from_claim_state(&claim_state, state)?);
+    executor_claim_response(&claim_state.claim, spend, state)
 }
 
+fn get_executor_claim(
+    claim_id: Option<&str>,
+    state: &ServerState,
+) -> Result<ExecutorSpendClaimHttpResponse> {
+    let claim_id = claim_id
+        .ok_or_else(|| anyhow!("claim status lookup requires claim_id"))?
+        .parse::<SpendExecutorClaimId>()
+        .with_context(|| "parse executor spend claim_id")?;
+    let user = authenticated_user_context(state)?;
+    let claim_state = {
+        let spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        ExecutorClaimService.get(&claim_id, &user.user_id, &spend_manager, &budget_manager)?
+    };
+    executor_claim_http_response(&claim_state, state)
+}
+
+fn list_executor_claims_requiring_reconciliation(
+    state: &ServerState,
+) -> Result<ExecutorClaimsHttpResponse> {
+    let user = authenticated_user_context(state)?;
+    let claims = {
+        let spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        ExecutorClaimService.list_requiring_reconciliation(
+            &user.user_id,
+            Utc::now(),
+            &spend_manager,
+            &budget_manager,
+        )?
+    };
+    let claims = claims
+        .iter()
+        .map(|claim| executor_claim_http_response(claim, state))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ExecutorClaimsHttpResponse { claims })
+}
+
+fn finalize_executor_spend(
+    body: String,
+    state: &ServerState,
+    vendor_billed: bool,
+    reconciliation_capability: Option<&str>,
+) -> Result<Value> {
+    match serde_json::from_str::<ExecutorSpendFinalizationHttpRequest>(&body)? {
+        ExecutorSpendFinalizationHttpRequest::Executor(request) if vendor_billed => {
+            settle_executor_spend_request(request, state).map(to_json)
+        }
+        ExecutorSpendFinalizationHttpRequest::Executor(request) => {
+            release_executor_spend_request(request, state).map(to_json)
+        }
+        ExecutorSpendFinalizationHttpRequest::Reconciliation(request) => {
+            authenticate_reconciliation_capability(reconciliation_capability, state)?;
+            reconcile_executor_claim(request, state, vendor_billed).map(to_json)
+        }
+    }
+}
+
+fn reconcile_executor_claim(
+    request: ExecutorClaimReconciliationHttpRequest,
+    state: &ServerState,
+    vendor_billed: bool,
+) -> Result<ExecutorSpendClaimHttpResponse> {
+    let user = authenticated_user_context(state)?;
+    let claim_id = request
+        .claim_id
+        .parse::<SpendExecutorClaimId>()
+        .with_context(|| "parse executor spend claim_id")?;
+    let outcome = if vendor_billed {
+        ExecutorClaimReconciliationOutcome::VendorBilled
+    } else {
+        ExecutorClaimReconciliationOutcome::VendorDidNotBill
+    };
+    let claim_state = {
+        let mut spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let mut budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let mut governance = state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        ExecutorClaimService.reconcile(
+            ReconcileExecutorClaimRequest {
+                claim_id,
+                owner_user_id: user.user_id,
+                provider_reference: request.provider_reference,
+                evidence: request.evidence,
+                outcome,
+            },
+            Utc::now(),
+            &mut spend_manager,
+            &mut budget_manager,
+            &mut *governance,
+        )?
+    };
+    executor_claim_http_response(&claim_state, state)
+}
+
+fn executor_claim_http_response(
+    claim_state: &ExecutorClaimState,
+    state: &ServerState,
+) -> Result<ExecutorSpendClaimHttpResponse> {
+    let validated = executor_spend_from_claim_state(claim_state, state)?;
+    executor_claim_response(
+        &claim_state.claim,
+        executor_spend_response(&validated),
+        state,
+    )
+}
+
+#[cfg(test)]
 fn settle_executor_spend(
     body: String,
     state: &ServerState,
 ) -> Result<ExecutorSpendSettlementHttpResponse> {
     let request: ExecutorSpendFinalizeHttpRequest = serde_json::from_str(&body)?;
+    settle_executor_spend_request(request, state)
+}
+
+fn settle_executor_spend_request(
+    request: ExecutorSpendFinalizeHttpRequest,
+    state: &ServerState,
+) -> Result<ExecutorSpendSettlementHttpResponse> {
     let user = authenticated_user_context(state)?;
     let claim_request = executor_claim_validation_request(request, &user, state)?;
-    let settlement_started_at = Utc::now();
-    let settlement = {
-        state
+    let claim_state = {
+        let mut spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let mut budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let mut governance = state
             .governance
             .lock()
-            .map_err(|_| anyhow!("governance store lock poisoned"))?
-            .settle_executor_claim_transactionally(
-                &claim_request.owner_user_id,
-                &claim_request.agent_id,
-                &claim_request.operation_key,
-                PaymentId::new(),
-                settlement_started_at,
-            )?
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        ExecutorClaimService.settle(
+            claim_request,
+            Utc::now(),
+            &mut spend_manager,
+            &mut budget_manager,
+            &mut *governance,
+        )?
     };
-    state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .apply_persisted_executor_finalization(settlement.claim.clone(), settlement.token.clone());
-    state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .apply_persisted_finalization(settlement.hold.clone(), settlement.balance.clone());
-    let validated = executor_spend_for_finalization(&settlement, state)?;
-    let settlement_id = settlement
+    let validated = executor_spend_from_claim_state(&claim_state, state)?;
+    let settlement_id = claim_state
         .claim
         .settlement_id
         .clone()
         .ok_or_else(|| anyhow!("settled executor claim is missing settlement id"))?;
 
-    log_event(
-        "info",
-        "executor_spend_settled",
-        json!({
-            "settlement_id": settlement_id.to_string(),
-            "claim_id": settlement.claim.id.to_string(),
-            "operation_key": settlement.claim.operation_key,
-            "idempotent_replay": settlement.idempotent_replay,
-            "spend_auth_token_id": validated.token_id.to_string(),
-            "decision_id": validated.validation.spend_decision_id.to_string(),
-            "hold_id": settlement.hold.id.to_string(),
-            "amount_cents": settlement.hold.amount_cents,
-            "merchant": validated.request.merchant.clone(),
-            "task_id": validated.request.task_id.clone(),
-        }),
-    );
-
     Ok(ExecutorSpendSettlementHttpResponse {
-        operation_key: settlement.claim.operation_key.clone(),
+        operation_key: claim_state.claim.operation_key.clone(),
         settlement_id: settlement_id.to_string(),
-        claim_id: settlement.claim.id.to_string(),
-        status: executor_claim_status_name(&settlement.claim.status).to_string(),
-        spend: executor_spend_response_with_hold(&validated, settlement.hold, settlement.balance),
+        claim_id: claim_state.claim.id.to_string(),
+        status: executor_claim_status_name(&claim_state.claim.status).to_string(),
+        spend: executor_spend_response(&validated),
     })
 }
 
+#[cfg(test)]
 fn release_executor_spend(
     body: String,
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let request: ExecutorSpendFinalizeHttpRequest = serde_json::from_str(&body)?;
+    release_executor_spend_request(request, state)
+}
+
+fn release_executor_spend_request(
+    request: ExecutorSpendFinalizeHttpRequest,
+    state: &ServerState,
+) -> Result<ExecutorSpendClaimHttpResponse> {
     let user = authenticated_user_context(state)?;
     let claim_request = executor_claim_validation_request(request, &user, state)?;
-    let finalization_started_at = Utc::now();
-    let release = {
-        state
+    let claim_state = {
+        let mut spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let mut budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let mut governance = state
             .governance
             .lock()
-            .map_err(|_| anyhow!("governance store lock poisoned"))?
-            .release_executor_claim_transactionally(
-                &claim_request.owner_user_id,
-                &claim_request.agent_id,
-                &claim_request.operation_key,
-                finalization_started_at,
-            )?
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        ExecutorClaimService.release(
+            claim_request,
+            Utc::now(),
+            &mut spend_manager,
+            &mut budget_manager,
+            &mut *governance,
+        )?
     };
-    state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .apply_persisted_executor_finalization(release.claim.clone(), release.token.clone());
-    state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .apply_persisted_finalization(release.hold.clone(), release.balance.clone());
-    let validated = executor_spend_for_finalization(&release, state)?;
-
-    log_event(
-        "info",
-        "executor_spend_released",
-        json!({
-            "spend_auth_token_id": validated.token_id.to_string(),
-            "claim_id": release.claim.id.to_string(),
-            "operation_key": release.claim.operation_key,
-            "idempotent_replay": release.idempotent_replay,
-            "decision_id": validated.validation.spend_decision_id.to_string(),
-            "hold_id": release.hold.id.to_string(),
-            "amount_cents": release.hold.amount_cents,
-            "merchant": validated.request.merchant.clone(),
-            "task_id": validated.request.task_id.clone(),
-        }),
-    );
-
-    let spend = executor_spend_response_with_hold(&validated, release.hold, release.balance);
-    Ok(executor_claim_response(&release.claim, spend))
+    executor_claim_http_response(&claim_state, state)
 }
 
 struct ValidatedExecutorSpend {
@@ -2835,7 +3050,7 @@ fn executor_claim_validation_request(
     request: ExecutorSpendFinalizeHttpRequest,
     user: &UserContext,
     state: &ServerState,
-) -> Result<SpendExecutorClaimValidationRequest> {
+) -> Result<FinalizeExecutorClaimRequest> {
     let operation_key = request.operation_key.trim();
     if operation_key.is_empty() {
         return Err(anyhow!("executor spend operation_key is required"));
@@ -2844,108 +3059,94 @@ fn executor_claim_validation_request(
     if agent_pub_id.is_empty() {
         return Err(anyhow!("executor spend agent_id is required"));
     }
-    Ok(SpendExecutorClaimValidationRequest {
+    Ok(FinalizeExecutorClaimRequest {
         owner_user_id: user.user_id.clone(),
         agent_id: resolve_agent_id_for_user(agent_pub_id, user, state)?,
         operation_key: operation_key.to_string(),
     })
 }
 
-fn executor_spend_for_finalization(
-    finalization: &ExecutorFinalizationResult,
+fn executor_spend_from_claim_state(
+    claim_state: &ExecutorClaimState,
     state: &ServerState,
 ) -> Result<ValidatedExecutorSpend> {
-    executor_spend_from_persisted_records(
-        &finalization.claim,
-        finalization.token.clone(),
-        finalization.hold.clone(),
-        finalization.balance.clone(),
-        state,
-    )
-}
-
-fn executor_spend_from_persisted_records(
-    claim: &SpendExecutorClaimRecord,
-    token: SpendAuthTokenRecord,
-    budget_hold: BudgetHold,
-    budget_balance: hubu_core::budget::BudgetBalance,
-    state: &ServerState,
-) -> Result<ValidatedExecutorSpend> {
-    let decision = state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .decision_record(&token.spend_decision_id)
-        .ok_or_else(|| anyhow!("executor claim spend decision is missing"))?;
-    if decision.owner_user_id != claim.owner_user_id || token.owner_user_id != claim.owner_user_id {
-        return Err(anyhow!(
-            "executor claim owner does not match spend decision"
-        ));
-    }
-    if budget_hold.spend_decision_id != decision.id
-        || budget_hold.executor_claim_id.as_ref() != Some(&claim.id)
-    {
-        return Err(anyhow!(
-            "executor claim budget hold does not match persisted spend state"
-        ));
-    }
-
     let (account, agent_pub_id) = {
         let registration = state
             .registration
             .lock()
             .map_err(|_| anyhow!("registration manager lock poisoned"))?;
         let account = registration
-            .account_for_agent(&decision.request.agent_id)?
+            .account_for_agent(&claim_state.decision.request.agent_id)?
             .ok_or_else(|| anyhow!("executor claim agent account is missing"))?;
         let agent = registration
-            .agent_for_id(&decision.request.agent_id)?
+            .agent_for_id(&claim_state.decision.request.agent_id)?
             .ok_or_else(|| anyhow!("executor claim agent is missing"))?;
         (account, agent.pub_id)
     };
-    if account.id != decision.request.agent_account_id {
+    if account.id != claim_state.decision.request.agent_account_id {
         return Err(anyhow!(
             "executor claim account does not match spend decision"
         ));
     }
 
     Ok(ValidatedExecutorSpend {
-        operation_key: decision.operation_key.clone(),
+        operation_key: claim_state.decision.operation_key.clone(),
         request: ExecutorSpendHttpRequest {
-            spend_auth_token_id: token.id.to_string(),
+            spend_auth_token_id: claim_state.token.id.to_string(),
             agent_id: Some(agent_pub_id.clone()),
             account_id: Some(account.pub_id.clone()),
-            amount_cents: decision.request.amount_cents,
-            merchant: decision.request.merchant.clone(),
-            task_id: decision.request.task_id.clone(),
+            amount_cents: claim_state.decision.request.amount_cents,
+            merchant: claim_state.decision.request.merchant.clone(),
+            task_id: claim_state.decision.request.task_id.clone(),
         },
         account_pub_id: account.pub_id,
         agent_pub_id,
-        token_id: token.id.clone(),
-        validation: hubu_core::spend::ValidatedSpendAuthorization {
-            spend_auth_token_id: token.id,
-            owner_user_id: token.owner_user_id,
-            spend_decision_id: decision.id,
-            expires_at: token.expires_at,
-        },
-        budget_hold,
-        budget_balance,
+        token_id: claim_state.token.id.clone(),
+        validation: claim_state.authorization.clone(),
+        budget_hold: claim_state.budget_hold.clone(),
+        budget_balance: claim_state.budget_balance.clone(),
     })
 }
 
 fn executor_claim_response(
     claim: &SpendExecutorClaimRecord,
     spend: ExecutorSpendHttpResponse,
-) -> ExecutorSpendClaimHttpResponse {
-    ExecutorSpendClaimHttpResponse {
+    state: &ServerState,
+) -> Result<ExecutorSpendClaimHttpResponse> {
+    let reconciled_by_user_id = claim
+        .reconciled_by_user_id
+        .as_ref()
+        .map(|user_id| owner_metadata_for_user_id(user_id, state).map(|owner| owner.pub_id))
+        .transpose()?;
+    let reconciliation_outcome = if claim.reconciled_at.is_some() {
+        Some(match claim.status {
+            SpendExecutorClaimStatus::Settled => "vendor_billed".to_string(),
+            SpendExecutorClaimStatus::Released => "vendor_did_not_bill".to_string(),
+            SpendExecutorClaimStatus::Claimed => {
+                return Err(anyhow!("reconciled executor claim is not finalized"));
+            }
+        })
+    } else {
+        None
+    };
+    Ok(ExecutorSpendClaimHttpResponse {
         operation_key: claim.operation_key.clone(),
         claim_id: claim.id.to_string(),
         workload_profile: claim.workload_profile.clone(),
         status: executor_claim_status_name(&claim.status).to_string(),
         claimed_at: claim.claimed_at.to_rfc3339(),
         claim_expires_at: claim.expires_at.to_rfc3339(),
+        finalized_at: claim.finalized_at.map(|timestamp| timestamp.to_rfc3339()),
+        settlement_id: claim.settlement_id.as_ref().map(ToString::to_string),
+        reconciliation_required: matches!(claim.status, SpendExecutorClaimStatus::Claimed)
+            && claim.expires_at <= Utc::now(),
+        reconciliation_outcome,
+        provider_reference: claim.provider_reference.clone(),
+        evidence: claim.reconciliation_evidence.clone(),
+        reconciled_at: claim.reconciled_at.map(|timestamp| timestamp.to_rfc3339()),
+        reconciled_by_user_id,
         spend,
-    }
+    })
 }
 
 fn executor_claim_status_name(status: &SpendExecutorClaimStatus) -> &'static str {
@@ -5078,6 +5279,19 @@ mod tests {
                 .expect("scope rules should be an array")
                 .iter()
                 .any(|item| item == "account_id, amount_cents, merchant, and task_id must match the original authorized spend"));
+            assert_eq!(
+                response.body["routes"]["reconciliation_queue"],
+                "GET /spend/executor/reconciliation"
+            );
+            assert_eq!(
+                response.body["routes"]["reconcile_vendor_billed"],
+                "POST /spend/executor/settle"
+            );
+            assert!(response.body["reconciliation_request"]["required"]
+                .as_array()
+                .expect("reconciliation fields should be an array")
+                .iter()
+                .any(|item| item == "evidence"));
         }
 
         std::fs::remove_file(path).ok();
@@ -5384,6 +5598,146 @@ mod tests {
         assert!(retry_error
             .to_string()
             .contains("spend auth token has been revoked"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn expired_claim_lookup_queue_and_human_reconciliation_restore_budget_usability() {
+        let mut timing = SpendTimingConfig::default();
+        timing
+            .profiles
+            .get_mut("default")
+            .expect("default timing profile should exist")
+            .claim_ttl_seconds = 1;
+        let (path, state, agent, authorization) =
+            setup_executor_authorization_with_timing("executor-reconciliation", timing);
+        let claim = claim_executor_spend(
+            json!({
+                "spend_auth_token_id": authorization
+                    .auth_token_id
+                    .expect("authorization should issue a token"),
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "merchant": "gongbu.image",
+                "task_id": "hubu-logo-demo",
+                "operation_key": "executor-reconciliation-operation",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("executor should claim authorization");
+
+        let active = get_executor_claim(Some(&claim.claim_id), &state)
+            .expect("active claim status should be readable");
+        assert!(!active.reconciliation_required);
+        let mixed_mode_error = finalize_executor_spend(
+            json!({
+                "claim_id": claim.claim_id,
+                "operation_key": "executor-reconciliation-operation",
+                "agent_id": agent.agent_id,
+                "provider_reference": "must-not-mix",
+                "evidence": "must-not-mix",
+            })
+            .to_string(),
+            &state,
+            true,
+            None,
+        )
+        .expect_err("executor and reconciliation request fields must not be mixed");
+        assert!(mixed_mode_error
+            .to_string()
+            .contains("did not match any variant"));
+        assert!(list_executor_claims_requiring_reconciliation(&state)
+            .unwrap()
+            .claims
+            .is_empty());
+
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+        let normal_error = finalize_executor_spend(
+            json!({
+                "operation_key": "executor-reconciliation-operation",
+                "agent_id": agent.agent_id,
+            })
+            .to_string(),
+            &state,
+            true,
+            None,
+        )
+        .expect_err("normal settlement should reject an expired claim");
+        assert!(normal_error
+            .to_string()
+            .contains("expired and requires reconciliation"));
+
+        let queue = list_executor_claims_requiring_reconciliation(&state)
+            .expect("reconciliation queue should list");
+        assert_eq!(queue.claims.len(), 1);
+        assert_eq!(queue.claims[0].claim_id, claim.claim_id);
+        assert!(queue.claims[0].reconciliation_required);
+        assert_eq!(queue.claims[0].spend.budget_hold.frozen_amount_cents, 500);
+
+        let reconciliation_body = json!({
+            "claim_id": claim.claim_id,
+            "provider_reference": "openai-request-abc123",
+            "evidence": "Provider usage export shows a completed billed request.",
+        });
+        let missing_capability = route(
+            authenticated_json_request("/spend/executor/settle", reconciliation_body.clone()),
+            &state,
+        );
+        assert_eq!(missing_capability.status, 400);
+        assert!(missing_capability.body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("missing human reconciliation capability")));
+
+        let mut executor_capability_request =
+            authenticated_json_request("/spend/executor/settle", reconciliation_body.clone());
+        executor_capability_request.headers.insert(
+            RECONCILIATION_CAPABILITY_HEADER.to_string(),
+            TEST_AUTH_TOKEN.to_string(),
+        );
+        let executor_capability = route(executor_capability_request, &state);
+        assert_eq!(executor_capability.status, 400);
+        assert!(executor_capability.body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("invalid human reconciliation capability")));
+
+        let mut human_request =
+            authenticated_json_request("/spend/executor/settle", reconciliation_body);
+        human_request.headers.insert(
+            RECONCILIATION_CAPABILITY_HEADER.to_string(),
+            TEST_RECONCILIATION_TOKEN.to_string(),
+        );
+        let human_response = route(human_request, &state);
+        assert_eq!(human_response.status, 200);
+        let reconciled = human_response.body;
+        assert_eq!(reconciled["status"], "settled");
+        assert_eq!(
+            reconciled["reconciliation_outcome"].as_str(),
+            Some("vendor_billed")
+        );
+        assert_eq!(
+            reconciled["provider_reference"].as_str(),
+            Some("openai-request-abc123")
+        );
+        assert!(reconciled["reconciled_by_user_id"].is_string());
+        assert_eq!(reconciled["spend"]["budget_hold"]["frozen_amount_cents"], 0);
+        assert_eq!(
+            reconciled["spend"]["budget_hold"]["consumed_amount_cents"],
+            500
+        );
+        assert!(list_executor_claims_requiring_reconciliation(&state)
+            .unwrap()
+            .claims
+            .is_empty());
+
+        let status = get_executor_claim(Some(&claim.claim_id), &state)
+            .expect("reconciled claim status should remain readable");
+        assert_eq!(
+            status.reconciliation_outcome.as_deref(),
+            reconciled["reconciliation_outcome"].as_str()
+        );
+        assert_eq!(status.evidence.as_deref(), reconciled["evidence"].as_str());
         std::fs::remove_file(path).ok();
     }
 
@@ -5993,9 +6347,22 @@ rules: []
         RegisterAgentHttpResponse,
         SpendHttpResponse,
     ) {
+        setup_executor_authorization_with_timing(test_name, SpendTimingConfig::default())
+    }
+
+    fn setup_executor_authorization_with_timing(
+        test_name: &str,
+        timing: SpendTimingConfig,
+    ) -> (
+        std::path::PathBuf,
+        ServerState,
+        RegisterAgentHttpResponse,
+        SpendHttpResponse,
+    ) {
         let path =
             std::env::temp_dir().join(format!("hubu-api-{test_name}-{}.sqlite", UserId::new()));
-        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let state = ServerState::new_with_db_path_and_spend_timing(&path, timing)
+            .expect("server state should initialize");
         let _user = init(
             json!({
                 "display_name": "Alice Example",

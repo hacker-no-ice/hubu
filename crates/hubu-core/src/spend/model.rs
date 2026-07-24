@@ -167,6 +167,10 @@ pub struct SpendExecutorClaimRecord {
     pub expires_at: DateTime<Utc>,
     pub finalized_at: Option<DateTime<Utc>>,
     pub settlement_id: Option<PaymentId>,
+    pub provider_reference: Option<String>,
+    pub reconciliation_evidence: Option<String>,
+    pub reconciled_at: Option<DateTime<Utc>>,
+    pub reconciled_by_user_id: Option<UserId>,
 }
 
 #[derive(Debug, Clone)]

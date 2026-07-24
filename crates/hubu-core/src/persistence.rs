@@ -132,9 +132,77 @@ pub struct ExecutorFinalizationResult {
     pub idempotent_replay: bool,
 }
 
+/// Durable boundary used by the claim application service.
+///
+/// Implementations must commit each claim/hold transition atomically. The
+/// service owns workflow orchestration while the repository remains the
+/// concurrency authority for terminal claim state.
+pub trait ExecutorClaimRepository {
+    fn save_executor_claim_with_budget_hold(
+        &mut self,
+        claim: &SpendExecutorClaimRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+    ) -> Result<(), StorageError>;
+
+    fn settle_executor_claim_transactionally(
+        &mut self,
+        owner_user_id: &UserId,
+        agent_id: &AgentId,
+        operation_key: &str,
+        proposed_settlement_id: PaymentId,
+        settlement_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError>;
+
+    fn release_executor_claim_transactionally(
+        &mut self,
+        owner_user_id: &UserId,
+        agent_id: &AgentId,
+        operation_key: &str,
+        finalization_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError>;
+
+    fn reconcile_executor_claim_as_billed_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        proposed_settlement_id: PaymentId,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError>;
+
+    fn reconcile_executor_claim_as_not_billed_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError>;
+}
+
 enum ExecutorFinalizationAction {
     Settle(PaymentId),
     Release,
+}
+
+#[derive(Clone, Copy)]
+enum ExecutorClaimLocator<'a> {
+    Operation {
+        agent_id: &'a AgentId,
+        operation_key: &'a str,
+    },
+    ClaimId(&'a SpendExecutorClaimId),
+}
+
+enum ExecutorFinalizationAuthority {
+    Executor,
+    Reconciliation {
+        provider_reference: String,
+        evidence: String,
+        reconciled_by_user_id: UserId,
+    },
 }
 
 impl SqliteGovernanceRepository {
@@ -156,8 +224,9 @@ impl SqliteGovernanceRepository {
         sqlite_tx.execute(
             "INSERT INTO spend_executor_claims
              (id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
-              workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+              workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
+              provider_reference, reconciliation_evidence, reconciled_at, reconciled_by_user_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO NOTHING",
             params![
                 claim.id.to_string(),
@@ -171,6 +240,13 @@ impl SqliteGovernanceRepository {
                 claim.expires_at.to_rfc3339(),
                 claim.finalized_at.map(|timestamp| timestamp.to_rfc3339()),
                 claim.settlement_id.as_ref().map(ToString::to_string),
+                claim.provider_reference,
+                claim.reconciliation_evidence,
+                claim.reconciled_at.map(|timestamp| timestamp.to_rfc3339()),
+                claim
+                    .reconciled_by_user_id
+                    .as_ref()
+                    .map(ToString::to_string),
             ],
         )?;
         sqlite_tx.execute(
@@ -201,9 +277,12 @@ impl SqliteGovernanceRepository {
     ) -> Result<ExecutorFinalizationResult, StorageError> {
         self.finalize_executor_claim_transactionally(
             owner_user_id,
-            agent_id,
-            operation_key,
+            ExecutorClaimLocator::Operation {
+                agent_id,
+                operation_key,
+            },
             ExecutorFinalizationAction::Settle(proposed_settlement_id),
+            ExecutorFinalizationAuthority::Executor,
             settlement_started_at,
         )
     }
@@ -217,40 +296,128 @@ impl SqliteGovernanceRepository {
     ) -> Result<ExecutorFinalizationResult, StorageError> {
         self.finalize_executor_claim_transactionally(
             owner_user_id,
-            agent_id,
-            operation_key,
+            ExecutorClaimLocator::Operation {
+                agent_id,
+                operation_key,
+            },
             ExecutorFinalizationAction::Release,
+            ExecutorFinalizationAuthority::Executor,
             finalization_started_at,
+        )
+    }
+
+    pub fn reconcile_executor_claim_as_billed_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        proposed_settlement_id: PaymentId,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        self.reconcile_executor_claim_transactionally(
+            claim_id,
+            owner_user_id,
+            provider_reference,
+            evidence,
+            ExecutorFinalizationAction::Settle(proposed_settlement_id),
+            reconciliation_started_at,
+        )
+    }
+
+    pub fn reconcile_executor_claim_as_not_billed_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        self.reconcile_executor_claim_transactionally(
+            claim_id,
+            owner_user_id,
+            provider_reference,
+            evidence,
+            ExecutorFinalizationAction::Release,
+            reconciliation_started_at,
+        )
+    }
+
+    fn reconcile_executor_claim_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        action: ExecutorFinalizationAction,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        let provider_reference = provider_reference.trim();
+        if provider_reference.is_empty() {
+            return Err(StorageError::InvalidData(
+                "provider reference cannot be empty".to_string(),
+            ));
+        }
+        let evidence = evidence.trim();
+        if evidence.is_empty() {
+            return Err(StorageError::InvalidData(
+                "reconciliation evidence cannot be empty".to_string(),
+            ));
+        }
+        self.finalize_executor_claim_transactionally(
+            owner_user_id,
+            ExecutorClaimLocator::ClaimId(claim_id),
+            action,
+            ExecutorFinalizationAuthority::Reconciliation {
+                provider_reference: provider_reference.to_string(),
+                evidence: evidence.to_string(),
+                reconciled_by_user_id: owner_user_id.clone(),
+            },
+            reconciliation_started_at,
         )
     }
 
     fn finalize_executor_claim_transactionally(
         &mut self,
         owner_user_id: &UserId,
-        agent_id: &AgentId,
-        operation_key: &str,
+        locator: ExecutorClaimLocator<'_>,
         action: ExecutorFinalizationAction,
+        authority: ExecutorFinalizationAuthority,
         finalization_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError> {
         let sqlite_tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut claim = load_executor_claim_by_operation(&sqlite_tx, agent_id, operation_key)?
-            .ok_or_else(|| StorageError::InvalidData("unknown executor claim".to_string()))?;
+        let mut claim = match locator {
+            ExecutorClaimLocator::Operation {
+                agent_id,
+                operation_key,
+            } => load_executor_claim_by_operation(&sqlite_tx, agent_id, operation_key)?,
+            ExecutorClaimLocator::ClaimId(claim_id) => {
+                load_executor_claim_by_id(&sqlite_tx, claim_id)?
+            }
+        }
+        .ok_or_else(|| StorageError::InvalidData("unknown executor claim".to_string()))?;
         if &claim.owner_user_id != owner_user_id {
             return Err(StorageError::InvalidData(
                 "executor claim owner does not match".to_string(),
             ));
         }
-        if claim.operation_key != operation_key {
-            return Err(StorageError::InvalidData(
-                "executor claim operation key does not match".to_string(),
-            ));
-        }
-        if &claim.agent_id != agent_id {
-            return Err(StorageError::InvalidData(
-                "executor claim agent does not match".to_string(),
-            ));
+        if let ExecutorClaimLocator::Operation {
+            agent_id,
+            operation_key,
+        } = locator
+        {
+            if claim.operation_key != operation_key {
+                return Err(StorageError::InvalidData(
+                    "executor claim operation key does not match".to_string(),
+                ));
+            }
+            if &claim.agent_id != agent_id {
+                return Err(StorageError::InvalidData(
+                    "executor claim agent does not match".to_string(),
+                ));
+            }
         }
 
         let mut token = load_spend_auth_token_by_id(&sqlite_tx, &claim.spend_auth_token_id)?
@@ -297,6 +464,27 @@ impl SqliteGovernanceRepository {
             }
             (_, SpendExecutorClaimStatus::Claimed) => false,
         };
+        let reconciliation_replay_is_consistent = match &authority {
+            ExecutorFinalizationAuthority::Executor => true,
+            ExecutorFinalizationAuthority::Reconciliation {
+                provider_reference,
+                evidence,
+                reconciled_by_user_id,
+            } => {
+                claim.provider_reference.as_ref() == Some(provider_reference)
+                    && claim.reconciliation_evidence.as_ref() == Some(evidence)
+                    && claim.reconciled_at.is_some()
+                    && claim.reconciled_by_user_id.as_ref() == Some(reconciled_by_user_id)
+            }
+        };
+        if replay_is_consistent && !reconciliation_replay_is_consistent {
+            let message = if claim.reconciled_at.is_some() {
+                "executor claim was reconciled with different evidence"
+            } else {
+                "executor claim was finalized without reconciliation"
+            };
+            return Err(StorageError::InvalidData(message.to_string()));
+        }
         if replay_is_consistent {
             sqlite_tx.commit()?;
             return Ok(ExecutorFinalizationResult {
@@ -312,10 +500,22 @@ impl SqliteGovernanceRepository {
                 "finalized executor claim has inconsistent persisted state".to_string(),
             ));
         }
-        if claim.expires_at <= finalization_started_at {
-            return Err(StorageError::InvalidData(
-                "executor claim expired and requires reconciliation".to_string(),
-            ));
+        match &authority {
+            ExecutorFinalizationAuthority::Executor
+                if claim.expires_at <= finalization_started_at =>
+            {
+                return Err(StorageError::InvalidData(
+                    "executor claim expired and requires reconciliation".to_string(),
+                ));
+            }
+            ExecutorFinalizationAuthority::Reconciliation { .. }
+                if claim.expires_at > finalization_started_at =>
+            {
+                return Err(StorageError::InvalidData(
+                    "active executor claim does not require reconciliation".to_string(),
+                ));
+            }
+            _ => {}
         }
         if token.owner_user_id != claim.owner_user_id {
             return Err(StorageError::InvalidData(
@@ -375,16 +575,36 @@ impl SqliteGovernanceRepository {
             token_rows,
             &format!("executor claim token changed during {transition_name}"),
         )?;
+        let (provider_reference, reconciliation_evidence, reconciled_at, reconciled_by_user_id) =
+            match &authority {
+                ExecutorFinalizationAuthority::Executor => (None, None, None, None),
+                ExecutorFinalizationAuthority::Reconciliation {
+                    provider_reference,
+                    evidence,
+                    reconciled_by_user_id,
+                } => (
+                    Some(provider_reference.clone()),
+                    Some(evidence.clone()),
+                    Some(finalized_at.clone()),
+                    Some(reconciled_by_user_id.to_string()),
+                ),
+            };
         require_one_updated_row(
             sqlite_tx.execute(
                 "UPDATE spend_executor_claims
-                 SET status = ?2, finalized_at = ?3, settlement_id = ?4
+                 SET status = ?2, finalized_at = ?3, settlement_id = ?4,
+                     provider_reference = ?5, reconciliation_evidence = ?6,
+                     reconciled_at = ?7, reconciled_by_user_id = ?8
                  WHERE id = ?1 AND status = 'claimed'",
                 params![
                     claim.id.to_string(),
                     terminal_status,
                     finalized_at,
                     settlement_id,
+                    provider_reference,
+                    reconciliation_evidence,
+                    reconciled_at,
+                    reconciled_by_user_id,
                 ],
             )?,
             &format!("executor claim changed during {transition_name}"),
@@ -432,6 +652,17 @@ impl SqliteGovernanceRepository {
         )?;
 
         claim.finalized_at = Some(finalization_started_at);
+        if let ExecutorFinalizationAuthority::Reconciliation {
+            provider_reference,
+            evidence,
+            reconciled_by_user_id,
+        } = authority
+        {
+            claim.provider_reference = Some(provider_reference);
+            claim.reconciliation_evidence = Some(evidence);
+            claim.reconciled_at = Some(finalization_started_at);
+            claim.reconciled_by_user_id = Some(reconciled_by_user_id);
+        }
         hold.updated_at = finalization_started_at;
         balance.frozen_amount_cents -= hold.amount_cents;
         match action {
@@ -520,6 +751,10 @@ impl SqliteGovernanceRepository {
                 expires_at TEXT NOT NULL,
                 finalized_at TEXT,
                 settlement_id TEXT,
+                provider_reference TEXT,
+                reconciliation_evidence TEXT,
+                reconciled_at TEXT,
+                reconciled_by_user_id TEXT,
                 FOREIGN KEY(spend_auth_token_id) REFERENCES spend_auth_tokens(id)
             );
 
@@ -590,6 +825,7 @@ impl SqliteGovernanceRepository {
         self.migrate_executor_claim_budget_holds()?;
         self.migrate_spend_auth_token_claim_ttl()?;
         self.migrate_spend_operation_keys()?;
+        self.migrate_executor_claim_reconciliation()?;
         self.enforce_one_budget_hold_per_spend_decision()?;
         Ok(())
     }
@@ -935,6 +1171,106 @@ impl SqliteGovernanceRepository {
         ))?;
         Ok(())
     }
+
+    fn migrate_executor_claim_reconciliation(&self) -> Result<(), StorageError> {
+        for (column, column_type) in [
+            ("provider_reference", "TEXT"),
+            ("reconciliation_evidence", "TEXT"),
+            ("reconciled_at", "TEXT"),
+            ("reconciled_by_user_id", "TEXT"),
+        ] {
+            if !table_has_column(&self.conn, "spend_executor_claims", column)? {
+                self.conn.execute(
+                    &format!("ALTER TABLE spend_executor_claims ADD COLUMN {column} {column_type}"),
+                    [],
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ExecutorClaimRepository for SqliteGovernanceRepository {
+    fn save_executor_claim_with_budget_hold(
+        &mut self,
+        claim: &SpendExecutorClaimRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+    ) -> Result<(), StorageError> {
+        SqliteGovernanceRepository::save_executor_claim_with_budget_hold(self, claim, hold, balance)
+    }
+
+    fn settle_executor_claim_transactionally(
+        &mut self,
+        owner_user_id: &UserId,
+        agent_id: &AgentId,
+        operation_key: &str,
+        proposed_settlement_id: PaymentId,
+        settlement_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        SqliteGovernanceRepository::settle_executor_claim_transactionally(
+            self,
+            owner_user_id,
+            agent_id,
+            operation_key,
+            proposed_settlement_id,
+            settlement_started_at,
+        )
+    }
+
+    fn release_executor_claim_transactionally(
+        &mut self,
+        owner_user_id: &UserId,
+        agent_id: &AgentId,
+        operation_key: &str,
+        finalization_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        SqliteGovernanceRepository::release_executor_claim_transactionally(
+            self,
+            owner_user_id,
+            agent_id,
+            operation_key,
+            finalization_started_at,
+        )
+    }
+
+    fn reconcile_executor_claim_as_billed_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        proposed_settlement_id: PaymentId,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        SqliteGovernanceRepository::reconcile_executor_claim_as_billed_transactionally(
+            self,
+            claim_id,
+            owner_user_id,
+            provider_reference,
+            evidence,
+            proposed_settlement_id,
+            reconciliation_started_at,
+        )
+    }
+
+    fn reconcile_executor_claim_as_not_billed_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        SqliteGovernanceRepository::reconcile_executor_claim_as_not_billed_transactionally(
+            self,
+            claim_id,
+            owner_user_id,
+            provider_reference,
+            evidence,
+            reconciliation_started_at,
+        )
+    }
 }
 
 impl PolicyRepository for SqliteGovernanceRepository {
@@ -1129,8 +1465,9 @@ impl SpendRepository for SqliteGovernanceRepository {
         self.conn.execute(
             "INSERT INTO spend_executor_claims
              (id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
-              workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+              workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
+              provider_reference, reconciliation_evidence, reconciled_at, reconciled_by_user_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO NOTHING",
             params![
                 record.id.to_string(),
@@ -1144,6 +1481,13 @@ impl SpendRepository for SqliteGovernanceRepository {
                 record.expires_at.to_rfc3339(),
                 record.finalized_at.map(|timestamp| timestamp.to_rfc3339()),
                 record.settlement_id.as_ref().map(ToString::to_string),
+                record.provider_reference,
+                record.reconciliation_evidence,
+                record.reconciled_at.map(|timestamp| timestamp.to_rfc3339()),
+                record
+                    .reconciled_by_user_id
+                    .as_ref()
+                    .map(ToString::to_string),
             ],
         )?;
         Ok(())
@@ -1152,7 +1496,9 @@ impl SpendRepository for SqliteGovernanceRepository {
     fn load_executor_claims(&self) -> Result<Vec<SpendExecutorClaimRecord>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
-                    workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id
+                    workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
+                    provider_reference, reconciliation_evidence, reconciled_at,
+                    reconciled_by_user_id
              FROM spend_executor_claims
              ORDER BY claimed_at ASC",
         )?;
@@ -1421,14 +1767,15 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
     }
 }
 
-#[cfg(test)]
 fn load_executor_claim_by_id(
     conn: &Connection,
     claim_id: &SpendExecutorClaimId,
 ) -> Result<Option<SpendExecutorClaimRecord>, StorageError> {
     conn.query_row(
         "SELECT id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
-                workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id
+                workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
+                provider_reference, reconciliation_evidence, reconciled_at,
+                reconciled_by_user_id
          FROM spend_executor_claims
          WHERE id = ?1",
         params![claim_id.to_string()],
@@ -1445,7 +1792,9 @@ fn load_executor_claim_by_operation(
 ) -> Result<Option<SpendExecutorClaimRecord>, StorageError> {
     conn.query_row(
         "SELECT id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
-                workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id
+                workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
+                provider_reference, reconciliation_evidence, reconciled_at,
+                reconciled_by_user_id
          FROM spend_executor_claims
          WHERE agent_id = ?1 AND operation_key = ?2",
         params![agent_id.to_string(), operation_key],
@@ -1514,6 +1863,8 @@ fn executor_claim_from_row(
     let expires_at: String = row.get(8)?;
     let finalized_at: Option<String> = row.get(9)?;
     let settlement_id: Option<String> = row.get(10)?;
+    let reconciled_at: Option<String> = row.get(13)?;
+    let reconciled_by_user_id: Option<String> = row.get(14)?;
     Ok(SpendExecutorClaimRecord {
         id: parse_id(&id)?,
         spend_auth_token_id: parse_id(&token_id)?,
@@ -1526,6 +1877,10 @@ fn executor_claim_from_row(
         expires_at: parse_timestamp(&expires_at)?,
         finalized_at: parse_optional_timestamp(finalized_at)?,
         settlement_id: parse_optional_id(settlement_id)?,
+        provider_reference: row.get(11)?,
+        reconciliation_evidence: row.get(12)?,
+        reconciled_at: parse_optional_timestamp(reconciled_at)?,
+        reconciled_by_user_id: parse_optional_id(reconciled_by_user_id)?,
     })
 }
 
@@ -1875,6 +2230,10 @@ mod tests {
             expires_at: claim_expires_at,
             finalized_at: None,
             settlement_id: None,
+            provider_reference: None,
+            reconciliation_evidence: None,
+            reconciled_at: None,
+            reconciled_by_user_id: None,
         };
         let budget = Budget::new(
             BudgetId::new(),
@@ -1913,6 +2272,38 @@ mod tests {
         repo.save_budget_with_balance(&budget, &balance).unwrap();
         repo.save_budget_hold(&hold, &balance).unwrap();
         (claim, token, hold)
+    }
+
+    #[test]
+    fn migrates_executor_claim_reconciliation_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE spend_executor_claims (
+                id TEXT PRIMARY KEY,
+                spend_auth_token_id TEXT NOT NULL UNIQUE,
+                owner_user_id TEXT NOT NULL,
+                executor_execution_id TEXT NOT NULL,
+                workload_profile TEXT NOT NULL,
+                status TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                finalized_at TEXT,
+                settlement_id TEXT
+            );",
+        )
+        .unwrap();
+
+        let repo = SqliteGovernanceRepository::from_connection(conn)
+            .expect("legacy executor claim schema should migrate");
+
+        for column in [
+            "provider_reference",
+            "reconciliation_evidence",
+            "reconciled_at",
+            "reconciled_by_user_id",
+        ] {
+            assert!(table_has_column(&repo.conn, "spend_executor_claims", column).unwrap());
+        }
     }
 
     #[test]
@@ -2059,6 +2450,142 @@ mod tests {
     }
 
     #[test]
+    fn expired_executor_claim_can_be_reconciled_as_billed_with_durable_evidence() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let reconciliation_started_at = Utc::now();
+        let (claim, _, _) = persist_claimed_executor_spend(&mut repo, reconciliation_started_at);
+        let settlement_id = PaymentId::new();
+
+        let reconciled = repo
+            .reconcile_executor_claim_as_billed_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                " vendor-charge-123 ",
+                " Invoice confirms the vendor charge. ",
+                settlement_id.clone(),
+                reconciliation_started_at,
+            )
+            .unwrap();
+
+        assert!(!reconciled.idempotent_replay);
+        assert!(matches!(
+            reconciled.claim.status,
+            SpendExecutorClaimStatus::Settled
+        ));
+        assert_eq!(reconciled.claim.settlement_id, Some(settlement_id.clone()));
+        assert_eq!(
+            reconciled.claim.provider_reference.as_deref(),
+            Some("vendor-charge-123")
+        );
+        assert_eq!(
+            reconciled.claim.reconciliation_evidence.as_deref(),
+            Some("Invoice confirms the vendor charge.")
+        );
+        assert_eq!(
+            reconciled.claim.reconciled_at,
+            Some(reconciliation_started_at)
+        );
+        assert_eq!(
+            reconciled.claim.reconciled_by_user_id,
+            Some(claim.owner_user_id.clone())
+        );
+        assert_eq!(reconciled.balance.consumed_amount_cents, 2_500);
+        assert_eq!(reconciled.balance.frozen_amount_cents, 0);
+        let reloaded = load_executor_claim_by_id(&repo.conn, &claim.id)
+            .unwrap()
+            .expect("reconciled claim should persist");
+        assert_eq!(
+            reloaded.provider_reference,
+            reconciled.claim.provider_reference
+        );
+        assert_eq!(
+            reloaded.reconciliation_evidence,
+            reconciled.claim.reconciliation_evidence
+        );
+        assert_eq!(reloaded.reconciled_at, reconciled.claim.reconciled_at);
+        assert_eq!(
+            reloaded.reconciled_by_user_id,
+            reconciled.claim.reconciled_by_user_id
+        );
+
+        let replay = repo
+            .reconcile_executor_claim_as_billed_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                "vendor-charge-123",
+                "Invoice confirms the vendor charge.",
+                PaymentId::new(),
+                reconciliation_started_at + Duration::seconds(1),
+            )
+            .unwrap();
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.claim.settlement_id, Some(settlement_id));
+
+        let changed_evidence_error = repo
+            .reconcile_executor_claim_as_billed_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                "vendor-charge-123",
+                "Different evidence",
+                PaymentId::new(),
+                reconciliation_started_at + Duration::seconds(2),
+            )
+            .unwrap_err();
+        assert!(changed_evidence_error
+            .to_string()
+            .contains("different evidence"));
+    }
+
+    #[test]
+    fn expired_executor_claim_can_be_reconciled_as_not_billed() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let reconciliation_started_at = Utc::now();
+        let (claim, _, _) = persist_claimed_executor_spend(&mut repo, reconciliation_started_at);
+
+        let reconciled = repo
+            .reconcile_executor_claim_as_not_billed_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                "vendor-job-456",
+                "Provider billing search found no charge.",
+                reconciliation_started_at,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            reconciled.claim.status,
+            SpendExecutorClaimStatus::Released
+        ));
+        assert!(reconciled.token.revoked_at.is_some());
+        assert_eq!(reconciled.balance.frozen_amount_cents, 0);
+        assert_eq!(reconciled.balance.remaining_amount_cents, 10_000);
+    }
+
+    #[test]
+    fn active_executor_claim_cannot_use_reconciliation_path() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let reconciliation_started_at = Utc::now();
+        let (claim, _, _) = persist_claimed_executor_spend(
+            &mut repo,
+            reconciliation_started_at + Duration::minutes(15),
+        );
+
+        let error = repo
+            .reconcile_executor_claim_as_not_billed_transactionally(
+                &claim.id,
+                &claim.owner_user_id,
+                "vendor-job-active",
+                "No charge yet.",
+                reconciliation_started_at,
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("does not require reconciliation"));
+    }
+
+    #[test]
     fn executor_release_is_atomic_idempotent_and_blocks_settlement() {
         let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
         let finalization_started_at = Utc::now();
@@ -2140,6 +2667,10 @@ mod tests {
             expires_at: Utc::now() + Duration::minutes(15),
             finalized_at: None,
             settlement_id: None,
+            provider_reference: None,
+            reconciliation_evidence: None,
+            reconciled_at: None,
+            reconciled_by_user_id: None,
         };
         repo.save_executor_claim(&claim).unwrap();
 

@@ -11,9 +11,13 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
+const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
+const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
+const RECONCILIATION_CAPABILITY_HEADER: &str = "X-Hubu-Reconciliation-Capability";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const HUBU_APPROVAL_PROFILE_VERSION: &str = "hubu-mcp-client-approval-v1";
-const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Spend calls currently require the client harness to supply a stable, namespaced operation_key; Hubu MCP does not yet derive it from trusted platform metadata, and the model should not invent one. Hubu stores workflow state under that key for authorization, claim, finalization, and retries. Protected setup/admin tools require a human approval prompt before tools/call. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
+const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Spend calls currently require the client harness to supply a stable, namespaced operation_key; Hubu MCP does not yet derive it from trusted platform metadata, and the model should not invent one. Hubu stores workflow state under that key for authorization, claim, finalization, and retries. Protected setup/admin tools require a human approval prompt before tools/call. Expired-claim reconciliation tools use that prompt gate and a distinct server-verified human reconciliation capability that is never sent on executor requests. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
 const READ_TOOL_NAMES: &[&str] = &[
     "hubu_health",
     "hubu_registration_guidance",
@@ -22,6 +26,8 @@ const READ_TOOL_NAMES: &[&str] = &[
     "hubu_list_agents",
     "hubu_list_budgets",
     "hubu_list_ledger",
+    "hubu_get_executor_claim",
+    "hubu_list_claims_requiring_reconciliation",
 ];
 const SPEND_TOOL_NAMES: &[&str] = &["hubu_authorize_spend", "hubu_submit_spend"];
 const APPROVAL_TOOL_NAMES: &[&str] = &[
@@ -30,6 +36,8 @@ const APPROVAL_TOOL_NAMES: &[&str] = &[
     "hubu_add_policy",
     "hubu_create_budget",
     "hubu_create_recurring_budget",
+    "hubu_reconcile_vendor_billed_claim",
+    "hubu_reconcile_vendor_did_not_bill_claim",
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -277,6 +285,36 @@ fn tool_definitions() -> Vec<Value> {
             "List local ledger transactions.",
             json_schema(json!({})),
         ),
+        read_tool(
+            "hubu_get_executor_claim",
+            "Look up executor claim status, spend scope, hold balance, and reconciliation evidence.",
+            json_schema_required(json!({
+                "claim_id": { "type": "string" }
+            }), &["claim_id"]),
+        ),
+        read_tool(
+            "hubu_list_claims_requiring_reconciliation",
+            "List expired executor claims whose budget remains frozen pending human review.",
+            json_schema(json!({})),
+        ),
+        approval_tool(
+            "hubu_reconcile_vendor_billed_claim",
+            "Confirm after human review that an expired claim was billed and settle its frozen hold. Requires a human click.",
+            json_schema_required(json!({
+                "claim_id": { "type": "string" },
+                "provider_reference": { "type": "string" },
+                "evidence": { "type": "string" }
+            }), &["claim_id", "provider_reference", "evidence"]),
+        ),
+        approval_tool(
+            "hubu_reconcile_vendor_did_not_bill_claim",
+            "Confirm after human review that an expired claim was not billed and release its frozen hold. Requires a human click.",
+            json_schema_required(json!({
+                "claim_id": { "type": "string" },
+                "provider_reference": { "type": "string" },
+                "evidence": { "type": "string" }
+            }), &["claim_id", "provider_reference", "evidence"]),
+        ),
     ]
 }
 
@@ -486,6 +524,27 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
             }
         }
         "hubu_list_ledger" => get_json(base_url, "/ledger")?,
+        "hubu_get_executor_claim" => {
+            let claim_id = arguments
+                .get("claim_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("hubu_get_executor_claim requires claim_id"))?;
+            get_json(
+                base_url,
+                &format!("/spend/executor/claim?claim_id={claim_id}"),
+            )?
+        }
+        "hubu_list_claims_requiring_reconciliation" => {
+            get_json(base_url, "/spend/executor/reconciliation")?
+        }
+        "hubu_reconcile_vendor_billed_claim" => {
+            require_trusted_client_approval(config, name)?;
+            post_reconciliation_json(base_url, "/spend/executor/settle", arguments)?
+        }
+        "hubu_reconcile_vendor_did_not_bill_claim" => {
+            require_trusted_client_approval(config, name)?;
+            post_reconciliation_json(base_url, "/spend/executor/release", arguments)?
+        }
         _ => bail!("unknown Hubu MCP tool `{name}`"),
     };
 
@@ -539,25 +598,45 @@ fn tool_result(value: Value) -> Value {
 }
 
 fn get_json(base_url: &str, path: &str) -> Result<Value> {
-    request_json(base_url, "GET", path, None)
+    request_json(base_url, "GET", path, None, false)
 }
 
 fn post_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body))
+    request_json(base_url, "POST", path, Some(body), false)
 }
 
-fn request_json(base_url: &str, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+fn post_reconciliation_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
+    request_json(base_url, "POST", path, Some(body), true)
+}
+
+fn request_json(
+    base_url: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    include_reconciliation_capability: bool,
+) -> Result<Value> {
     let (host, port) = parse_base_url(base_url)?;
     let body_text = body.map(|body| body.to_string()).unwrap_or_default();
     let authorization_header = auth_token()?
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
+    let reconciliation_header = if include_reconciliation_capability {
+        let token = reconciliation_token()?.ok_or_else(|| {
+            anyhow!(
+                "human reconciliation requires {RECONCILIATION_TOKEN_ENV} or {RECONCILIATION_TOKEN_FILE_ENV}"
+            )
+        })?;
+        format!("{RECONCILIATION_CAPABILITY_HEADER}: {token}\r\n")
+    } else {
+        String::new()
+    };
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("connect to Hubu server at {base_url}"))?;
 
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}{reconciliation_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body_text.len(),
         body_text
     )?;
@@ -616,6 +695,33 @@ fn auth_token() -> Result<Option<String>> {
     }
 }
 
+fn reconciliation_token() -> Result<Option<String>> {
+    if let Ok(token) = env::var(RECONCILIATION_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{RECONCILIATION_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(Some(token));
+    }
+
+    let path = env::var(RECONCILIATION_TOKEN_FILE_ENV)
+        .unwrap_or_else(|_| DEFAULT_RECONCILIATION_TOKEN_FILE.to_string());
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                Err(anyhow!("Hubu reconciliation token file `{path}` is empty"))
+            } else {
+                Ok(Some(token))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("read Hubu reconciliation token file `{path}`"))
+        }
+    }
+}
+
 fn parse_http_response(raw: &str) -> Result<(u16, &str)> {
     let (head, body) = raw
         .split_once("\r\n\r\n")
@@ -646,6 +752,37 @@ mod tests {
             "required"
         );
         assert_eq!(protected["annotations"]["destructiveHint"], true);
+    }
+
+    #[test]
+    fn claim_reconciliation_reads_are_automatic_and_resolutions_require_human_approval() {
+        let tools = tool_definitions();
+        let queue = tools
+            .iter()
+            .find(|tool| tool["name"] == "hubu_list_claims_requiring_reconciliation")
+            .expect("reconciliation queue tool should exist");
+        assert_eq!(queue["annotations"]["readOnlyHint"], true);
+        assert_eq!(queue["annotations"]["x_hubu_human_approval"], "none");
+
+        for tool_name in [
+            "hubu_reconcile_vendor_billed_claim",
+            "hubu_reconcile_vendor_did_not_bill_claim",
+        ] {
+            let resolution = tools
+                .iter()
+                .find(|tool| tool["name"] == tool_name)
+                .expect("reconciliation resolution tool should exist");
+            assert_eq!(
+                resolution["annotations"]["x_hubu_client_approval_mode"],
+                "prompt_before_call"
+            );
+            assert_eq!(resolution["annotations"]["destructiveHint"], true);
+            let required = resolution["inputSchema"]["required"]
+                .as_array()
+                .expect("resolution fields should be required");
+            assert!(required.iter().any(|field| field == "provider_reference"));
+            assert!(required.iter().any(|field| field == "evidence"));
+        }
     }
 
     #[test]
