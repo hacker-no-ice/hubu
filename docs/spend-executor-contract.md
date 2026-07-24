@@ -46,6 +46,12 @@ Hubu is responsible for:
 - audit events for spend state transitions
 - durable provider references and evidence for human reconciliation decisions
 
+Inside Hubu, `hubu-core::app::ExecutorClaimService` owns claim creation,
+owner-scoped lookup, reconciliation queue selection, executor settlement or
+release, and human reconciliation orchestration. The HTTP API remains the
+transport and authentication boundary, while the SQLite repository atomically
+commits claim, token, hold, and budget-balance transitions.
+
 Agent platforms or orchestrators are responsible for:
 
 - supplying one stable, namespaced `operation_key` for each logical operation

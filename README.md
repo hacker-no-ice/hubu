@@ -48,7 +48,7 @@ and MCP transport adapter.
 ## Crates
 
 - `hubu-common`: shared agent identity, ownership, and session/account models
-- `hubu-core`: registration, policy, and spend authorization logic
+- `hubu-core`: registration, policy, spend approval, and executor claim lifecycle services
 - `hubu-wallet`: payment orchestration, mock rails, and ledger recording
 - `hubu-api`: local HTTP API and `hubu-server` binary
 - `hubu-cli`: human developer `hubu` CLI binary

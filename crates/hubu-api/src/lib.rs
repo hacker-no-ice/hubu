@@ -18,7 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Months, Utc};
 use hubu_common::{
     ids::{
-        AgentId, AgentSessionId, BudgetId, PaymentId, SpendAuthTokenId, SpendExecutorClaimId,
+        AgentId, AgentSessionId, BudgetId, SpendAuthTokenId, SpendExecutorClaimId,
         SpendingTargetId, UserId,
     },
     models::account::{AccountStatus, AgentAccount},
@@ -32,7 +32,9 @@ use hubu_common::{
 use hubu_core::{
     app::{
         ApprovedSpendAuthorization, AuthorizeSpendRequest, BudgetHoldUpdate,
-        FailedPaymentHoldPolicy, RejectedSpendAuthorization, SpendApprovalError,
+        ClaimExecutorSpendRequest, ExecutorClaimReconciliationOutcome, ExecutorClaimService,
+        ExecutorClaimState, FailedPaymentHoldPolicy, FinalizeExecutorClaimRequest,
+        ReconcileExecutorClaimRequest, RejectedSpendAuthorization, SpendApprovalError,
         SpendApprovalService, SpendAuthorizationOutcome, SpendPaymentSpec,
     },
     budget::{
@@ -41,8 +43,8 @@ use hubu_core::{
         ReserveBudgetResponse,
     },
     persistence::{
-        BudgetRepository, ExecutorFinalizationResult, PolicyAssignmentScope, PolicyRepository,
-        SpendRepository, SpendingTargetRepository, SqliteGovernanceRepository,
+        BudgetRepository, PolicyAssignmentScope, PolicyRepository, SpendRepository,
+        SpendingTargetRepository, SqliteGovernanceRepository,
     },
     policy::{
         condition::{Condition, Field, PolicyValue},
@@ -52,8 +54,7 @@ use hubu_core::{
     },
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
     spend::{
-        SpendAuthTokenRecord, SpendExecutorClaimRecord, SpendExecutorClaimRequest,
-        SpendExecutorClaimStatus, SpendExecutorClaimValidationRequest, SpendManager,
+        SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendManager,
         SpendPaymentValidationRequest, SpendTimingConfig,
     },
     spending_target::{
@@ -2642,98 +2643,33 @@ fn claim_executor_spend(
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
-    let operation_key = request.operation_key.trim().to_string();
-    if operation_key.is_empty() {
-        return Err(anyhow!("executor spend operation_key is required"));
-    }
     let resolved = resolve_executor_spend_request(request.spend, state)?;
-    let (claim, claim_validation, claimed_hold) = {
-        let mut spend = state
+    let authorization = resolved.payment_validation_request();
+    let claim_state = {
+        let mut spend_manager = state
             .spend
             .lock()
             .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-        let mut budgets = state
+        let mut budget_manager = state
             .budgets
             .lock()
             .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        let authorization = resolved.payment_validation_request();
-        let (prevalidated, existing_claim) =
-            spend.validate_auth_token_for_executor_claim(&authorization, &operation_key)?;
-        let budget_hold = budgets
-            .get_budget_hold_by_spend_decision(&prevalidated.spend_decision_id)
-            .ok_or_else(|| anyhow!("spend authorization does not have a budget hold"))?;
-        match existing_claim.as_ref() {
-            None if matches!(budget_hold.status, BudgetHoldStatus::Frozen) => {}
-            Some(existing) if budget_hold.executor_claim_id.as_ref() == Some(&existing.id) => {}
-            None => return Err(anyhow!("spend authorization budget hold is not frozen")),
-            Some(_) => {
-                return Err(anyhow!(
-                    "spend authorization budget hold does not match the existing claim"
-                ));
-            }
-        }
-        if !budgets
-            .get_budget_by_id(&budget_hold.budget_id)
-            .is_some_and(|budget| budget.budget.agent_id == resolved.agent_id)
-        {
-            return Err(anyhow!(
-                "spend authorization hold does not belong to the authorized agent"
-            ));
-        }
-        let (claim, claim_validation) = spend.claim_auth_token(SpendExecutorClaimRequest {
-            authorization,
-            operation_key: operation_key.clone(),
-        })?;
-        if claim_validation.spend_decision_id != prevalidated.spend_decision_id {
-            return Err(anyhow!(
-                "executor claim resolved a different spend decision"
-            ));
-        }
-        let claimed_hold = if existing_claim.is_some() {
-            let balance = budgets
-                .get_budget_balance(&budget_hold.budget_id)
-                .ok_or_else(|| anyhow!("spend authorization budget balance is missing"))?;
-            ReserveBudgetResponse {
-                hold: budget_hold,
-                balance,
-            }
-        } else {
-            budgets.claim_budget(&budget_hold.id, claim.id.clone(), claim.expires_at)?
-        };
-        (claim, claim_validation, claimed_hold)
-    };
-    let validated = resolved.into_validated(
-        claim.operation_key.clone(),
-        claim_validation,
-        claimed_hold.hold.clone(),
-        claimed_hold.balance.clone(),
-    );
-
-    {
         let mut governance = state
             .governance
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        governance.save_executor_claim_with_budget_hold(
-            &claim,
-            &claimed_hold.hold,
-            &claimed_hold.balance,
-        )?;
-    }
-
-    let spend = executor_spend_response(&validated);
-    log_event(
-        "info",
-        "executor_spend_claimed",
-        json!({
-            "claim_id": claim.id.to_string(),
-            "operation_key": claim.operation_key,
-            "spend_auth_token_id": claim.spend_auth_token_id.to_string(),
-            "claim_expires_at": claim.expires_at.to_rfc3339(),
-            "workload_profile": claim.workload_profile,
-        }),
-    );
-    executor_claim_response(&claim, spend, state)
+        ExecutorClaimService.claim(
+            ClaimExecutorSpendRequest {
+                authorization,
+                operation_key: request.operation_key,
+            },
+            &mut spend_manager,
+            &mut budget_manager,
+            &mut *governance,
+        )?
+    };
+    let spend = executor_spend_response(&executor_spend_from_claim_state(&claim_state, state)?);
+    executor_claim_response(&claim_state.claim, spend, state)
 }
 
 fn get_executor_claim(
@@ -2745,34 +2681,43 @@ fn get_executor_claim(
         .parse::<SpendExecutorClaimId>()
         .with_context(|| "parse executor spend claim_id")?;
     let user = authenticated_user_context(state)?;
-    let claim = state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .executor_claim_record(&claim_id)
-        .filter(|claim| claim.owner_user_id == user.user_id)
-        .ok_or_else(|| anyhow!("unknown executor spend claim"))?;
-    executor_claim_http_response(&claim, state)
+    let claim_state = {
+        let spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        ExecutorClaimService.get(&claim_id, &user.user_id, &spend_manager, &budget_manager)?
+    };
+    executor_claim_http_response(&claim_state, state)
 }
 
 fn list_executor_claims_requiring_reconciliation(
     state: &ServerState,
 ) -> Result<ExecutorClaimsHttpResponse> {
     let user = authenticated_user_context(state)?;
-    let now = Utc::now();
     let claims = {
-        state
+        let spend_manager = state
             .spend
             .lock()
-            .map_err(|_| anyhow!("spend manager lock poisoned"))?
-            .executor_claim_records_for_owner(&user.user_id)
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        ExecutorClaimService.list_requiring_reconciliation(
+            &user.user_id,
+            Utc::now(),
+            &spend_manager,
+            &budget_manager,
+        )?
     };
     let claims = claims
-        .into_iter()
-        .filter(|claim| {
-            matches!(claim.status, SpendExecutorClaimStatus::Claimed) && claim.expires_at <= now
-        })
-        .map(|claim| executor_claim_http_response(&claim, state))
+        .iter()
+        .map(|claim| executor_claim_http_response(claim, state))
         .collect::<Result<Vec<_>>>()?;
     Ok(ExecutorClaimsHttpResponse { claims })
 }
@@ -2807,106 +2752,51 @@ fn reconcile_executor_claim(
         .claim_id
         .parse::<SpendExecutorClaimId>()
         .with_context(|| "parse executor spend claim_id")?;
-    let reconciliation_started_at = Utc::now();
-    let finalization = {
+    let outcome = if vendor_billed {
+        ExecutorClaimReconciliationOutcome::VendorBilled
+    } else {
+        ExecutorClaimReconciliationOutcome::VendorDidNotBill
+    };
+    let claim_state = {
+        let mut spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let mut budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
         let mut governance = state
             .governance
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        if vendor_billed {
-            governance.reconcile_executor_claim_as_billed_transactionally(
-                &claim_id,
-                &user.user_id,
-                &request.provider_reference,
-                &request.evidence,
-                PaymentId::new(),
-                reconciliation_started_at,
-            )?
-        } else {
-            governance.reconcile_executor_claim_as_not_billed_transactionally(
-                &claim_id,
-                &user.user_id,
-                &request.provider_reference,
-                &request.evidence,
-                reconciliation_started_at,
-            )?
-        }
+        ExecutorClaimService.reconcile(
+            ReconcileExecutorClaimRequest {
+                claim_id,
+                owner_user_id: user.user_id,
+                provider_reference: request.provider_reference,
+                evidence: request.evidence,
+                outcome,
+            },
+            Utc::now(),
+            &mut spend_manager,
+            &mut budget_manager,
+            &mut *governance,
+        )?
     };
-    apply_executor_finalization_to_memory(&finalization, state)?;
-    let validated = executor_spend_for_finalization(&finalization, state)?;
-    let outcome = if vendor_billed {
-        "vendor_billed"
-    } else {
-        "vendor_did_not_bill"
-    };
-
-    log_event(
-        "info",
-        "executor_claim_reconciled",
-        json!({
-            "claim_id": finalization.claim.id.to_string(),
-            "outcome": outcome,
-            "provider_reference": finalization.claim.provider_reference,
-            "reconciled_by_user_id": user.user_id.to_string(),
-            "idempotent_replay": finalization.idempotent_replay,
-            "hold_id": finalization.hold.id.to_string(),
-            "amount_cents": finalization.hold.amount_cents,
-        }),
-    );
-
-    let spend = executor_spend_response_with_hold(
-        &validated,
-        finalization.hold.clone(),
-        finalization.balance.clone(),
-    );
-    executor_claim_response(&finalization.claim, spend, state)
-}
-
-fn apply_executor_finalization_to_memory(
-    finalization: &ExecutorFinalizationResult,
-    state: &ServerState,
-) -> Result<()> {
-    state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .apply_persisted_executor_finalization(
-            finalization.claim.clone(),
-            finalization.token.clone(),
-        );
-    state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .apply_persisted_finalization(finalization.hold.clone(), finalization.balance.clone());
-    Ok(())
+    executor_claim_http_response(&claim_state, state)
 }
 
 fn executor_claim_http_response(
-    claim: &SpendExecutorClaimRecord,
+    claim_state: &ExecutorClaimState,
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
-    let token = state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .auth_token_record(&claim.spend_auth_token_id)
-        .ok_or_else(|| anyhow!("executor claim token is missing"))?;
-    let (hold, balance) = {
-        let budgets = state
-            .budgets
-            .lock()
-            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        let hold = budgets
-            .get_budget_hold_by_spend_decision(&token.spend_decision_id)
-            .ok_or_else(|| anyhow!("executor claim budget hold is missing"))?;
-        let balance = budgets
-            .get_budget_balance(&hold.budget_id)
-            .ok_or_else(|| anyhow!("executor claim budget balance is missing"))?;
-        (hold, balance)
-    };
-    let validated = executor_spend_from_persisted_records(claim, token, hold, balance, state)?;
-    executor_claim_response(claim, executor_spend_response(&validated), state)
+    let validated = executor_spend_from_claim_state(claim_state, state)?;
+    executor_claim_response(
+        &claim_state.claim,
+        executor_spend_response(&validated),
+        state,
+    )
 }
 
 #[cfg(test)]
@@ -2924,51 +2814,40 @@ fn settle_executor_spend_request(
 ) -> Result<ExecutorSpendSettlementHttpResponse> {
     let user = authenticated_user_context(state)?;
     let claim_request = executor_claim_validation_request(request, &user, state)?;
-    let settlement_started_at = Utc::now();
-    let settlement = {
-        state
+    let claim_state = {
+        let mut spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let mut budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let mut governance = state
             .governance
             .lock()
-            .map_err(|_| anyhow!("governance store lock poisoned"))?
-            .settle_executor_claim_transactionally(
-                &claim_request.owner_user_id,
-                &claim_request.agent_id,
-                &claim_request.operation_key,
-                PaymentId::new(),
-                settlement_started_at,
-            )?
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        ExecutorClaimService.settle(
+            claim_request,
+            Utc::now(),
+            &mut spend_manager,
+            &mut budget_manager,
+            &mut *governance,
+        )?
     };
-    apply_executor_finalization_to_memory(&settlement, state)?;
-    let validated = executor_spend_for_finalization(&settlement, state)?;
-    let settlement_id = settlement
+    let validated = executor_spend_from_claim_state(&claim_state, state)?;
+    let settlement_id = claim_state
         .claim
         .settlement_id
         .clone()
         .ok_or_else(|| anyhow!("settled executor claim is missing settlement id"))?;
 
-    log_event(
-        "info",
-        "executor_spend_settled",
-        json!({
-            "settlement_id": settlement_id.to_string(),
-            "claim_id": settlement.claim.id.to_string(),
-            "operation_key": settlement.claim.operation_key,
-            "idempotent_replay": settlement.idempotent_replay,
-            "spend_auth_token_id": validated.token_id.to_string(),
-            "decision_id": validated.validation.spend_decision_id.to_string(),
-            "hold_id": settlement.hold.id.to_string(),
-            "amount_cents": settlement.hold.amount_cents,
-            "merchant": validated.request.merchant.clone(),
-            "task_id": validated.request.task_id.clone(),
-        }),
-    );
-
     Ok(ExecutorSpendSettlementHttpResponse {
-        operation_key: settlement.claim.operation_key.clone(),
+        operation_key: claim_state.claim.operation_key.clone(),
         settlement_id: settlement_id.to_string(),
-        claim_id: settlement.claim.id.to_string(),
-        status: executor_claim_status_name(&settlement.claim.status).to_string(),
-        spend: executor_spend_response_with_hold(&validated, settlement.hold, settlement.balance),
+        claim_id: claim_state.claim.id.to_string(),
+        status: executor_claim_status_name(&claim_state.claim.status).to_string(),
+        spend: executor_spend_response(&validated),
     })
 }
 
@@ -2987,40 +2866,28 @@ fn release_executor_spend_request(
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let user = authenticated_user_context(state)?;
     let claim_request = executor_claim_validation_request(request, &user, state)?;
-    let finalization_started_at = Utc::now();
-    let release = {
-        state
+    let claim_state = {
+        let mut spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let mut budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let mut governance = state
             .governance
             .lock()
-            .map_err(|_| anyhow!("governance store lock poisoned"))?
-            .release_executor_claim_transactionally(
-                &claim_request.owner_user_id,
-                &claim_request.agent_id,
-                &claim_request.operation_key,
-                finalization_started_at,
-            )?
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        ExecutorClaimService.release(
+            claim_request,
+            Utc::now(),
+            &mut spend_manager,
+            &mut budget_manager,
+            &mut *governance,
+        )?
     };
-    apply_executor_finalization_to_memory(&release, state)?;
-    let validated = executor_spend_for_finalization(&release, state)?;
-
-    log_event(
-        "info",
-        "executor_spend_released",
-        json!({
-            "spend_auth_token_id": validated.token_id.to_string(),
-            "claim_id": release.claim.id.to_string(),
-            "operation_key": release.claim.operation_key,
-            "idempotent_replay": release.idempotent_replay,
-            "decision_id": validated.validation.spend_decision_id.to_string(),
-            "hold_id": release.hold.id.to_string(),
-            "amount_cents": release.hold.amount_cents,
-            "merchant": validated.request.merchant.clone(),
-            "task_id": validated.request.task_id.clone(),
-        }),
-    );
-
-    let spend = executor_spend_response_with_hold(&validated, release.hold, release.balance);
-    executor_claim_response(&release.claim, spend, state)
+    executor_claim_http_response(&claim_state, state)
 }
 
 struct ValidatedExecutorSpend {
@@ -3183,7 +3050,7 @@ fn executor_claim_validation_request(
     request: ExecutorSpendFinalizeHttpRequest,
     user: &UserContext,
     state: &ServerState,
-) -> Result<SpendExecutorClaimValidationRequest> {
+) -> Result<FinalizeExecutorClaimRequest> {
     let operation_key = request.operation_key.trim();
     if operation_key.is_empty() {
         return Err(anyhow!("executor spend operation_key is required"));
@@ -3192,92 +3059,52 @@ fn executor_claim_validation_request(
     if agent_pub_id.is_empty() {
         return Err(anyhow!("executor spend agent_id is required"));
     }
-    Ok(SpendExecutorClaimValidationRequest {
+    Ok(FinalizeExecutorClaimRequest {
         owner_user_id: user.user_id.clone(),
         agent_id: resolve_agent_id_for_user(agent_pub_id, user, state)?,
         operation_key: operation_key.to_string(),
     })
 }
 
-fn executor_spend_for_finalization(
-    finalization: &ExecutorFinalizationResult,
+fn executor_spend_from_claim_state(
+    claim_state: &ExecutorClaimState,
     state: &ServerState,
 ) -> Result<ValidatedExecutorSpend> {
-    executor_spend_from_persisted_records(
-        &finalization.claim,
-        finalization.token.clone(),
-        finalization.hold.clone(),
-        finalization.balance.clone(),
-        state,
-    )
-}
-
-fn executor_spend_from_persisted_records(
-    claim: &SpendExecutorClaimRecord,
-    token: SpendAuthTokenRecord,
-    budget_hold: BudgetHold,
-    budget_balance: hubu_core::budget::BudgetBalance,
-    state: &ServerState,
-) -> Result<ValidatedExecutorSpend> {
-    let decision = state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .decision_record(&token.spend_decision_id)
-        .ok_or_else(|| anyhow!("executor claim spend decision is missing"))?;
-    if decision.owner_user_id != claim.owner_user_id || token.owner_user_id != claim.owner_user_id {
-        return Err(anyhow!(
-            "executor claim owner does not match spend decision"
-        ));
-    }
-    if budget_hold.spend_decision_id != decision.id
-        || budget_hold.executor_claim_id.as_ref() != Some(&claim.id)
-    {
-        return Err(anyhow!(
-            "executor claim budget hold does not match persisted spend state"
-        ));
-    }
-
     let (account, agent_pub_id) = {
         let registration = state
             .registration
             .lock()
             .map_err(|_| anyhow!("registration manager lock poisoned"))?;
         let account = registration
-            .account_for_agent(&decision.request.agent_id)?
+            .account_for_agent(&claim_state.decision.request.agent_id)?
             .ok_or_else(|| anyhow!("executor claim agent account is missing"))?;
         let agent = registration
-            .agent_for_id(&decision.request.agent_id)?
+            .agent_for_id(&claim_state.decision.request.agent_id)?
             .ok_or_else(|| anyhow!("executor claim agent is missing"))?;
         (account, agent.pub_id)
     };
-    if account.id != decision.request.agent_account_id {
+    if account.id != claim_state.decision.request.agent_account_id {
         return Err(anyhow!(
             "executor claim account does not match spend decision"
         ));
     }
 
     Ok(ValidatedExecutorSpend {
-        operation_key: decision.operation_key.clone(),
+        operation_key: claim_state.decision.operation_key.clone(),
         request: ExecutorSpendHttpRequest {
-            spend_auth_token_id: token.id.to_string(),
+            spend_auth_token_id: claim_state.token.id.to_string(),
             agent_id: Some(agent_pub_id.clone()),
             account_id: Some(account.pub_id.clone()),
-            amount_cents: decision.request.amount_cents,
-            merchant: decision.request.merchant.clone(),
-            task_id: decision.request.task_id.clone(),
+            amount_cents: claim_state.decision.request.amount_cents,
+            merchant: claim_state.decision.request.merchant.clone(),
+            task_id: claim_state.decision.request.task_id.clone(),
         },
         account_pub_id: account.pub_id,
         agent_pub_id,
-        token_id: token.id.clone(),
-        validation: hubu_core::spend::ValidatedSpendAuthorization {
-            spend_auth_token_id: token.id,
-            owner_user_id: token.owner_user_id,
-            spend_decision_id: decision.id,
-            expires_at: token.expires_at,
-        },
-        budget_hold,
-        budget_balance,
+        token_id: claim_state.token.id.clone(),
+        validation: claim_state.authorization.clone(),
+        budget_hold: claim_state.budget_hold.clone(),
+        budget_balance: claim_state.budget_balance.clone(),
     })
 }
 

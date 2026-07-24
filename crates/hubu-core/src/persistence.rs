@@ -132,6 +132,56 @@ pub struct ExecutorFinalizationResult {
     pub idempotent_replay: bool,
 }
 
+/// Durable boundary used by the claim application service.
+///
+/// Implementations must commit each claim/hold transition atomically. The
+/// service owns workflow orchestration while the repository remains the
+/// concurrency authority for terminal claim state.
+pub trait ExecutorClaimRepository {
+    fn save_executor_claim_with_budget_hold(
+        &mut self,
+        claim: &SpendExecutorClaimRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+    ) -> Result<(), StorageError>;
+
+    fn settle_executor_claim_transactionally(
+        &mut self,
+        owner_user_id: &UserId,
+        agent_id: &AgentId,
+        operation_key: &str,
+        proposed_settlement_id: PaymentId,
+        settlement_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError>;
+
+    fn release_executor_claim_transactionally(
+        &mut self,
+        owner_user_id: &UserId,
+        agent_id: &AgentId,
+        operation_key: &str,
+        finalization_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError>;
+
+    fn reconcile_executor_claim_as_billed_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        proposed_settlement_id: PaymentId,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError>;
+
+    fn reconcile_executor_claim_as_not_billed_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError>;
+}
+
 enum ExecutorFinalizationAction {
     Settle(PaymentId),
     Release,
@@ -1137,6 +1187,89 @@ impl SqliteGovernanceRepository {
             }
         }
         Ok(())
+    }
+}
+
+impl ExecutorClaimRepository for SqliteGovernanceRepository {
+    fn save_executor_claim_with_budget_hold(
+        &mut self,
+        claim: &SpendExecutorClaimRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+    ) -> Result<(), StorageError> {
+        SqliteGovernanceRepository::save_executor_claim_with_budget_hold(self, claim, hold, balance)
+    }
+
+    fn settle_executor_claim_transactionally(
+        &mut self,
+        owner_user_id: &UserId,
+        agent_id: &AgentId,
+        operation_key: &str,
+        proposed_settlement_id: PaymentId,
+        settlement_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        SqliteGovernanceRepository::settle_executor_claim_transactionally(
+            self,
+            owner_user_id,
+            agent_id,
+            operation_key,
+            proposed_settlement_id,
+            settlement_started_at,
+        )
+    }
+
+    fn release_executor_claim_transactionally(
+        &mut self,
+        owner_user_id: &UserId,
+        agent_id: &AgentId,
+        operation_key: &str,
+        finalization_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        SqliteGovernanceRepository::release_executor_claim_transactionally(
+            self,
+            owner_user_id,
+            agent_id,
+            operation_key,
+            finalization_started_at,
+        )
+    }
+
+    fn reconcile_executor_claim_as_billed_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        proposed_settlement_id: PaymentId,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        SqliteGovernanceRepository::reconcile_executor_claim_as_billed_transactionally(
+            self,
+            claim_id,
+            owner_user_id,
+            provider_reference,
+            evidence,
+            proposed_settlement_id,
+            reconciliation_started_at,
+        )
+    }
+
+    fn reconcile_executor_claim_as_not_billed_transactionally(
+        &mut self,
+        claim_id: &SpendExecutorClaimId,
+        owner_user_id: &UserId,
+        provider_reference: &str,
+        evidence: &str,
+        reconciliation_started_at: DateTime<Utc>,
+    ) -> Result<ExecutorFinalizationResult, StorageError> {
+        SqliteGovernanceRepository::reconcile_executor_claim_as_not_billed_transactionally(
+            self,
+            claim_id,
+            owner_user_id,
+            provider_reference,
+            evidence,
+            reconciliation_started_at,
+        )
     }
 }
 
