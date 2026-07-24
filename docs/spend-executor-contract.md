@@ -9,11 +9,12 @@ Hubu controls spend; executors do work.
 
 Gongbu can implement this contract for model calls, image generation, or other
 vendor-backed work. Hubu does not receive vendor credentials, provider payloads,
-prompts, or execution artifacts.
+prompts, or artifact contents. It does retain compact provider and artifact
+references needed for settlement auditability.
 
 ## Protocol Version
 
-The current version is `hubu-spend-executor-v3`. Agents and executors can
+The current version is `hubu-spend-executor-v4`. Agents and executors can
 discover its machine-readable guidance from either public route:
 
 ```http
@@ -21,17 +22,17 @@ GET /spend/executor/guidance
 GET /.well-known/hubu-spend-executor.json
 ```
 
-V3 uses one immutable, platform-provided `operation_key` from authorization
+V4 retains V3's immutable, platform-provided `operation_key` from authorization
 through claim and finalization. Hubu stores workflow state under
 `(agent_id, operation_key)`. Retrying with the same key and scope returns that
 same workflow. Two agents owned by the same user may use the same operation
 key; one agent may not reuse an operation key for different work.
-V2's separate
-`executor_execution_id` is no longer part of the public contract.
-V3 also keeps the exclusive, durable execution claim introduced in V2 and adds
-owner-scoped claim lookup plus human-gated reconciliation for expired,
-uncertain claims. `POST /spend/executor/validate` remains available for scope
-inspection, but validation alone does not authorize irreversible work.
+V2's separate `executor_execution_id` is no longer part of the public contract.
+V4 adds durable provider receipts and actual-cost settlement to V3's exclusive
+claims, owner-scoped lookup, and human-gated reconciliation. Settlement consumes
+the actual vendor cost and releases the remainder of the authorized maximum.
+`POST /spend/executor/validate` remains available for scope inspection, but
+validation alone does not authorize irreversible work.
 
 ## Boundary
 
@@ -42,7 +43,8 @@ Hubu is responsible for:
 - authoritative workflow state keyed by agent and operation
 - one agent-budget hold per spend decision
 - exclusive executor claims and claim leases
-- budget settlement or release
+- actual-cost budget settlement and release of unused authorization
+- durable provider request, price/model, and artifact references
 - audit events for spend state transitions
 - durable provider references and evidence for human reconciliation decisions
 
@@ -50,7 +52,7 @@ Inside Hubu, `hubu-core::app::ExecutorClaimService` owns claim creation,
 owner-scoped lookup, reconciliation queue selection, executor settlement or
 release, and human reconciliation orchestration. The HTTP API remains the
 transport and authentication boundary, while the SQLite repository atomically
-commits claim, token, hold, and budget-balance transitions.
+commits receipt, claim, token, hold, and budget-balance transitions.
 
 Agent platforms or orchestrators are responsible for:
 
@@ -64,6 +66,8 @@ Executors are responsible for:
 - carrying the immutable `operation_key` into executor requests
 - claiming Hubu authorization before irreversible work
 - calling vendors or tools
+- reporting the actual vendor cost with a provider request ID, price/model
+  snapshot, and artifact reference
 - settling after billable work or releasing before billable work
 
 ## Timing Profiles
@@ -190,20 +194,42 @@ guidance.
    ```json
    {
      "agent_id": "agt_example",
-     "operation_key": "codex:tool-call:01JABC123"
+     "operation_key": "codex:tool-call:01JABC123",
+     "receipt": {
+       "actual_vendor_cost_cents": 400,
+       "provider_request_id": "provider-request-abc123",
+       "price_model_snapshot": {
+         "provider": "example-image-provider",
+         "model": "image-model-v1",
+         "unit_price_cents": 400,
+         "pricing_unit": "image",
+         "currency": "usd"
+       },
+       "artifact_reference": "artifact://hubu-logo.png"
+     }
    }
    ```
 
-   Hubu marks the claim settled and token used and consumes the claimed hold in
-   one SQLite write transaction. Hubu resolves the claim from the agent and
-   operation key, so an identical retry returns the original `settlement_id`
-   even if the caller lost the claim response. Budget is not consumed twice.
+   Hubu persists the receipt, marks the claim settled and token used, consumes
+   the 400-cent actual cost, and releases the 100-cent remainder in one SQLite
+   write transaction. Actual cost cannot be negative or exceed the 500-cent
+   authorized maximum. Hubu resolves the claim from the agent and operation key,
+   so an identical retry returns the original `settlement_id` and receipt even
+   if the caller lost the response. A retry with changed receipt data is
+   rejected, and budget is not consumed twice.
 
-6. If no irreversible billable work occurred, the executor releases using the
-   same finalize request shape:
+6. If no irreversible billable work occurred, the executor releases without a
+   receipt:
 
    ```http
    POST /spend/executor/release
+   ```
+
+   ```json
+   {
+     "agent_id": "agt_example",
+     "operation_key": "codex:tool-call:01JABC123"
+   }
    ```
 
    Hubu atomically marks the claim released and token revoked while returning
@@ -265,6 +291,33 @@ The response includes `reconciliation_required`, terminal settlement details,
 and any stored reconciliation outcome, provider reference, evidence, resolving
 user, and timestamp.
 
+## Settlement Response
+
+```json
+{
+  "operation_key": "codex:tool-call:01JABC123",
+  "settlement_id": "uuid",
+  "claim_id": "uuid",
+  "status": "settled",
+  "receipt": {
+    "authorized_max_cents": 500,
+    "actual_vendor_cost_cents": 400,
+    "released_amount_cents": 100,
+    "currency": "usd",
+    "provider_request_id": "provider-request-abc123",
+    "price_model_snapshot": {
+      "provider": "example-image-provider",
+      "model": "image-model-v1",
+      "unit_price_cents": 400,
+      "pricing_unit": "image",
+      "currency": "usd"
+    },
+    "artifact_reference": "artifact://hubu-logo.png",
+    "created_at": "2026-07-20T12:05:00Z"
+  }
+}
+```
+
 ## Transactional Finalization
 
 Hubu captures one `settlement_started_at` value after parsing and authenticating
@@ -274,11 +327,13 @@ check the claim against that timestamp, and atomically update:
 - the executor claim to `settled` with a stable `settlement_id`, or `released`
 - the spend authorization token to `used`, or `revoked`
 - the claimed budget hold to `settled`, or `released`
-- the budget balance from frozen to consumed, or back to remaining
+- the immutable provider receipt for settlement
+- the budget balance from frozen to actual cost consumed plus the unused
+  remainder returned, or the full hold returned for release
 
 This removes the internal race where token and claim state could commit before
 the hold and balance. It also serializes settle against release so the first
-terminal transaction wins. If any update fails, SQLite rolls all four changes
+terminal transaction wins. If any update fails, SQLite rolls all five changes
 back. A claim that was active when the transaction began can complete even if
 wall-clock time passes its lease during the transaction; a claim at or past
 expiry when the transaction begins is rejected for reconciliation.
@@ -308,7 +363,19 @@ X-Hubu-Reconciliation-Capability: HUMAN_CAPABILITY
 {
   "claim_id": "00000000-0000-4000-8000-000000000456",
   "provider_reference": "vendor-request-abc123",
-  "evidence": "Provider usage export confirms the completed billed request."
+  "evidence": "Provider usage export confirms the completed billed request.",
+  "receipt": {
+    "actual_vendor_cost_cents": 400,
+    "provider_request_id": "vendor-request-abc123",
+    "price_model_snapshot": {
+      "provider": "example-image-provider",
+      "model": "image-model-v1",
+      "unit_price_cents": 400,
+      "pricing_unit": "image",
+      "currency": "usd"
+    },
+    "artifact_reference": "artifact://hubu-logo.png"
+  }
 }
 ```
 
@@ -324,12 +391,14 @@ The existing settle/release endpoints therefore accept one of two exclusive
 request shapes: the normal executor shape with `agent_id` plus the immutable
 `operation_key`, or the human reconciliation shape with `claim_id`,
 `provider_reference`, and `evidence`. Mixing the shapes is rejected. The
-reconciliation shape requires non-empty evidence fields, accepts only an
-expired claim owned by the active user, and atomically updates the claim, token,
-hold, and budget balance. A matching retry returns the stored outcome; a retry
-with different evidence is rejected. Reconciliation records the outcome,
-provider reference, evidence, resolving user, and timestamp. Evidence must not
-contain vendor credentials or sensitive provider payloads.
+vendor-billed shape also requires the provider receipt; vendor-did-not-bill
+rejects one. Reconciliation requires non-empty evidence fields, accepts only an
+expired claim owned by the active user, and atomically updates the receipt,
+claim, token, hold, and budget balance. A matching retry returns the stored
+outcome; a retry with different evidence or receipt is rejected. Reconciliation
+records the outcome, provider reference, evidence, resolving user, and
+timestamp. Evidence must not contain vendor credentials or sensitive provider
+payloads.
 
 The reconciliation capability is loaded separately from
 `HUBU_RECONCILIATION_TOKEN` or `HUBU_RECONCILIATION_TOKEN_FILE`. It must not
@@ -345,7 +414,14 @@ hubu spend claim --claim-id CLAIM_ID
 hubu spend reconcile list
 hubu spend reconcile billed --claim-id CLAIM_ID \
   --provider-reference VENDOR_REFERENCE \
-  --evidence "Provider usage export confirms billing"
+  --evidence "Provider usage export confirms billing" \
+  --actual-vendor-cost-cents 400 \
+  --provider-request-id VENDOR_REQUEST_ID \
+  --provider example-image-provider \
+  --model image-model-v1 \
+  --unit-price-cents 400 \
+  --pricing-unit image \
+  --artifact-reference artifact://hubu-logo.png
 hubu spend reconcile not-billed --claim-id CLAIM_ID \
   --provider-reference VENDOR_REFERENCE \
   --evidence "Provider billing search found no charge"
@@ -364,6 +440,8 @@ with only the normal bearer are rejected.
 - Agent platforms must supply one stable operation key and reuse it for
   authorization, claim, finalization, and every retry.
 - Executors must settle after irreversible billable work succeeds.
+- Settlement must report actual vendor cost and immutable provider receipt
+  metadata; actual cost cannot exceed the authorized maximum.
 - Executors must release only when no irreversible billable work occurred.
 - Agents and executors may retry any stage after an ambiguous response; Hubu
   returns stored workflow state for the same operation key and rejects changed

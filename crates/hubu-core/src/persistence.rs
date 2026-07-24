@@ -10,7 +10,8 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use crate::budget::{Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetStatus};
 use crate::policy::Policy;
 use crate::spend::{
-    SpendAuthTokenRecord, SpendDecisionRecord, SpendExecutorClaimRecord, SpendExecutorClaimStatus,
+    PersistedSpendExecutorSettlementReceipt, SpendAuthTokenRecord, SpendDecisionRecord,
+    SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendExecutorSettlementReceipt,
 };
 use crate::spending_target::{SpendingTarget, SpendingTargetStatus};
 use crate::storage::StorageError;
@@ -129,6 +130,7 @@ pub struct ExecutorFinalizationResult {
     pub token: SpendAuthTokenRecord,
     pub hold: BudgetHold,
     pub balance: BudgetBalance,
+    pub receipt: Option<PersistedSpendExecutorSettlementReceipt>,
     pub idempotent_replay: bool,
 }
 
@@ -151,6 +153,7 @@ pub trait ExecutorClaimRepository {
         agent_id: &AgentId,
         operation_key: &str,
         proposed_settlement_id: PaymentId,
+        receipt: SpendExecutorSettlementReceipt,
         settlement_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError>;
 
@@ -169,6 +172,7 @@ pub trait ExecutorClaimRepository {
         provider_reference: &str,
         evidence: &str,
         proposed_settlement_id: PaymentId,
+        receipt: SpendExecutorSettlementReceipt,
         reconciliation_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError>;
 
@@ -183,7 +187,10 @@ pub trait ExecutorClaimRepository {
 }
 
 enum ExecutorFinalizationAction {
-    Settle(PaymentId),
+    Settle {
+        settlement_id: PaymentId,
+        receipt: SpendExecutorSettlementReceipt,
+    },
     Release,
 }
 
@@ -273,6 +280,7 @@ impl SqliteGovernanceRepository {
         agent_id: &AgentId,
         operation_key: &str,
         proposed_settlement_id: PaymentId,
+        receipt: SpendExecutorSettlementReceipt,
         settlement_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError> {
         self.finalize_executor_claim_transactionally(
@@ -281,7 +289,10 @@ impl SqliteGovernanceRepository {
                 agent_id,
                 operation_key,
             },
-            ExecutorFinalizationAction::Settle(proposed_settlement_id),
+            ExecutorFinalizationAction::Settle {
+                settlement_id: proposed_settlement_id,
+                receipt,
+            },
             ExecutorFinalizationAuthority::Executor,
             settlement_started_at,
         )
@@ -313,6 +324,7 @@ impl SqliteGovernanceRepository {
         provider_reference: &str,
         evidence: &str,
         proposed_settlement_id: PaymentId,
+        receipt: SpendExecutorSettlementReceipt,
         reconciliation_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError> {
         self.reconcile_executor_claim_transactionally(
@@ -320,7 +332,10 @@ impl SqliteGovernanceRepository {
             owner_user_id,
             provider_reference,
             evidence,
-            ExecutorFinalizationAction::Settle(proposed_settlement_id),
+            ExecutorFinalizationAction::Settle {
+                settlement_id: proposed_settlement_id,
+                receipt,
+            },
             reconciliation_started_at,
         )
     }
@@ -432,18 +447,40 @@ impl SqliteGovernanceRepository {
                 StorageError::InvalidData("executor claim budget balance is missing".to_string())
             })?;
 
+        let mut persisted_receipt =
+            load_executor_settlement_receipt_by_claim_id(&sqlite_tx, &claim.id)?;
         let replay_is_consistent = match (&action, &claim.status) {
-            (ExecutorFinalizationAction::Settle(_), SpendExecutorClaimStatus::Settled) => {
+            (
+                ExecutorFinalizationAction::Settle { receipt, .. },
+                SpendExecutorClaimStatus::Settled,
+            ) => {
                 let settlement_id = claim.settlement_id.as_ref().ok_or_else(|| {
                     StorageError::InvalidData(
                         "settled executor claim has no settlement id".to_string(),
                     )
                 })?;
+                let stored_receipt = persisted_receipt.as_ref().ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "settled executor claim has no settlement receipt".to_string(),
+                    )
+                })?;
+                if &stored_receipt.receipt != receipt {
+                    return Err(StorageError::InvalidData(
+                        "settlement receipt does not match the original settlement".to_string(),
+                    ));
+                }
                 token.used_by_payment_id.as_ref() == Some(settlement_id)
                     && token.used_at.is_some()
                     && token.revoked_at.is_none()
                     && matches!(hold.status, BudgetHoldStatus::Settled)
                     && hold.executor_claim_id.as_ref() == Some(&claim.id)
+                    && &stored_receipt.settlement_id == settlement_id
+                    && stored_receipt.authorized_max_cents == hold.amount_cents
+                    && stored_receipt.receipt.actual_vendor_cost_cents >= 0
+                    && stored_receipt.receipt.actual_vendor_cost_cents <= hold.amount_cents
+                    && stored_receipt.released_amount_cents
+                        == hold.amount_cents - stored_receipt.receipt.actual_vendor_cost_cents
+                    && stored_receipt.currency == hold.currency
             }
             (ExecutorFinalizationAction::Release, SpendExecutorClaimStatus::Released) => {
                 token.revoked_at.is_some()
@@ -451,8 +488,9 @@ impl SqliteGovernanceRepository {
                     && token.used_by_payment_id.is_none()
                     && matches!(hold.status, BudgetHoldStatus::Released)
                     && hold.executor_claim_id.as_ref() == Some(&claim.id)
+                    && persisted_receipt.is_none()
             }
-            (ExecutorFinalizationAction::Settle(_), SpendExecutorClaimStatus::Released) => {
+            (ExecutorFinalizationAction::Settle { .. }, SpendExecutorClaimStatus::Released) => {
                 return Err(StorageError::InvalidData(
                     "executor claim has already been released".to_string(),
                 ));
@@ -492,12 +530,18 @@ impl SqliteGovernanceRepository {
                 token,
                 hold,
                 balance,
+                receipt: persisted_receipt,
                 idempotent_replay: true,
             });
         }
         if !matches!(claim.status, SpendExecutorClaimStatus::Claimed) {
             return Err(StorageError::InvalidData(
                 "finalized executor claim has inconsistent persisted state".to_string(),
+            ));
+        }
+        if persisted_receipt.is_some() {
+            return Err(StorageError::InvalidData(
+                "unsettled executor claim already has a settlement receipt".to_string(),
             ));
         }
         match &authority {
@@ -545,16 +589,19 @@ impl SqliteGovernanceRepository {
                 "executor claim budget balance is inconsistent".to_string(),
             ));
         }
+        if let ExecutorFinalizationAction::Settle { receipt, .. } = &action {
+            validate_executor_settlement_receipt(receipt, &hold)?;
+        }
 
         let finalized_at = finalization_started_at.to_rfc3339();
         let (terminal_status, settlement_id, transition_name) = match &action {
-            ExecutorFinalizationAction::Settle(settlement_id) => {
+            ExecutorFinalizationAction::Settle { settlement_id, .. } => {
                 ("settled", Some(settlement_id.to_string()), "settlement")
             }
             ExecutorFinalizationAction::Release => ("released", None, "release"),
         };
         let token_rows = match &action {
-            ExecutorFinalizationAction::Settle(settlement_id) => sqlite_tx.execute(
+            ExecutorFinalizationAction::Settle { settlement_id, .. } => sqlite_tx.execute(
                 "UPDATE spend_auth_tokens
                  SET used_at = ?2, used_by_payment_id = ?3
                  WHERE id = ?1 AND used_at IS NULL AND revoked_at IS NULL",
@@ -624,13 +671,19 @@ impl SqliteGovernanceRepository {
             &format!("executor claim budget hold changed during {transition_name}"),
         )?;
         let balance_rows = match &action {
-            ExecutorFinalizationAction::Settle(_) => sqlite_tx.execute(
+            ExecutorFinalizationAction::Settle { receipt, .. } => sqlite_tx.execute(
                 "UPDATE budget_balances
                  SET frozen_amount_cents = frozen_amount_cents - ?2,
-                     consumed_amount_cents = consumed_amount_cents + ?2,
-                     updated_at = ?3
+                     consumed_amount_cents = consumed_amount_cents + ?3,
+                     remaining_amount_cents = remaining_amount_cents + (?2 - ?3),
+                     updated_at = ?4
                  WHERE budget_id = ?1 AND frozen_amount_cents >= ?2",
-                params![hold.budget_id.to_string(), hold.amount_cents, finalized_at],
+                params![
+                    hold.budget_id.to_string(),
+                    hold.amount_cents,
+                    receipt.actual_vendor_cost_cents,
+                    finalized_at
+                ],
             )?,
             ExecutorFinalizationAction::Release => sqlite_tx.execute(
                 "UPDATE budget_balances
@@ -666,13 +719,29 @@ impl SqliteGovernanceRepository {
         hold.updated_at = finalization_started_at;
         balance.frozen_amount_cents -= hold.amount_cents;
         match action {
-            ExecutorFinalizationAction::Settle(settlement_id) => {
+            ExecutorFinalizationAction::Settle {
+                settlement_id,
+                receipt,
+            } => {
+                let released_amount_cents = hold.amount_cents - receipt.actual_vendor_cost_cents;
+                let receipt_record = PersistedSpendExecutorSettlementReceipt {
+                    claim_id: claim.id.clone(),
+                    settlement_id: settlement_id.clone(),
+                    authorized_max_cents: hold.amount_cents,
+                    released_amount_cents,
+                    currency: hold.currency,
+                    receipt,
+                    created_at: finalization_started_at,
+                };
+                save_executor_settlement_receipt(&sqlite_tx, &receipt_record)?;
                 token.used_at = Some(finalization_started_at);
                 token.used_by_payment_id = Some(settlement_id.clone());
                 claim.status = SpendExecutorClaimStatus::Settled;
                 claim.settlement_id = Some(settlement_id);
                 hold.status = BudgetHoldStatus::Settled;
-                balance.consumed_amount_cents += hold.amount_cents;
+                balance.consumed_amount_cents += receipt_record.receipt.actual_vendor_cost_cents;
+                balance.remaining_amount_cents += released_amount_cents;
+                persisted_receipt = Some(receipt_record);
             }
             ExecutorFinalizationAction::Release => {
                 token.revoked_at = Some(finalization_started_at);
@@ -689,6 +758,7 @@ impl SqliteGovernanceRepository {
             token,
             hold,
             balance,
+            receipt: persisted_receipt,
             idempotent_replay: false,
         })
     }
@@ -756,6 +826,24 @@ impl SqliteGovernanceRepository {
                 reconciled_at TEXT,
                 reconciled_by_user_id TEXT,
                 FOREIGN KEY(spend_auth_token_id) REFERENCES spend_auth_tokens(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS spend_executor_settlement_receipts (
+                claim_id TEXT PRIMARY KEY,
+                settlement_id TEXT NOT NULL UNIQUE,
+                authorized_max_cents INTEGER NOT NULL,
+                actual_vendor_cost_cents INTEGER NOT NULL,
+                released_amount_cents INTEGER NOT NULL,
+                currency TEXT NOT NULL,
+                provider_request_id TEXT NOT NULL,
+                price_model_snapshot_json TEXT NOT NULL,
+                artifact_reference TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                CHECK(authorized_max_cents > 0),
+                CHECK(actual_vendor_cost_cents >= 0),
+                CHECK(actual_vendor_cost_cents <= authorized_max_cents),
+                CHECK(released_amount_cents = authorized_max_cents - actual_vendor_cost_cents),
+                FOREIGN KEY(claim_id) REFERENCES spend_executor_claims(id)
             );
 
             CREATE TABLE IF NOT EXISTS budgets (
@@ -1206,6 +1294,7 @@ impl ExecutorClaimRepository for SqliteGovernanceRepository {
         agent_id: &AgentId,
         operation_key: &str,
         proposed_settlement_id: PaymentId,
+        receipt: SpendExecutorSettlementReceipt,
         settlement_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError> {
         SqliteGovernanceRepository::settle_executor_claim_transactionally(
@@ -1214,6 +1303,7 @@ impl ExecutorClaimRepository for SqliteGovernanceRepository {
             agent_id,
             operation_key,
             proposed_settlement_id,
+            receipt,
             settlement_started_at,
         )
     }
@@ -1241,6 +1331,7 @@ impl ExecutorClaimRepository for SqliteGovernanceRepository {
         provider_reference: &str,
         evidence: &str,
         proposed_settlement_id: PaymentId,
+        receipt: SpendExecutorSettlementReceipt,
         reconciliation_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError> {
         SqliteGovernanceRepository::reconcile_executor_claim_as_billed_transactionally(
@@ -1250,6 +1341,7 @@ impl ExecutorClaimRepository for SqliteGovernanceRepository {
             provider_reference,
             evidence,
             proposed_settlement_id,
+            receipt,
             reconciliation_started_at,
         )
     }
@@ -1804,6 +1896,103 @@ fn load_executor_claim_by_operation(
     .map_err(Into::into)
 }
 
+fn load_executor_settlement_receipt_by_claim_id(
+    conn: &Connection,
+    claim_id: &SpendExecutorClaimId,
+) -> Result<Option<PersistedSpendExecutorSettlementReceipt>, StorageError> {
+    conn.query_row(
+        "SELECT claim_id, settlement_id, authorized_max_cents, actual_vendor_cost_cents,
+                released_amount_cents, currency, provider_request_id,
+                price_model_snapshot_json, artifact_reference, created_at
+         FROM spend_executor_settlement_receipts
+         WHERE claim_id = ?1",
+        params![claim_id.to_string()],
+        executor_settlement_receipt_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn save_executor_settlement_receipt(
+    conn: &Connection,
+    record: &PersistedSpendExecutorSettlementReceipt,
+) -> Result<(), StorageError> {
+    let price_model_snapshot_json = serde_json::to_string(&record.receipt.price_model_snapshot)?;
+    conn.execute(
+        "INSERT INTO spend_executor_settlement_receipts
+         (claim_id, settlement_id, authorized_max_cents, actual_vendor_cost_cents,
+          released_amount_cents, currency, provider_request_id, price_model_snapshot_json,
+          artifact_reference, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            record.claim_id.to_string(),
+            record.settlement_id.to_string(),
+            record.authorized_max_cents,
+            record.receipt.actual_vendor_cost_cents,
+            record.released_amount_cents,
+            record.currency.to_string(),
+            record.receipt.provider_request_id,
+            price_model_snapshot_json,
+            record.receipt.artifact_reference,
+            record.created_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn validate_executor_settlement_receipt(
+    receipt: &SpendExecutorSettlementReceipt,
+    hold: &BudgetHold,
+) -> Result<(), StorageError> {
+    if receipt.actual_vendor_cost_cents < 0 {
+        return Err(StorageError::InvalidData(
+            "actual vendor cost cannot be negative".to_string(),
+        ));
+    }
+    if receipt.actual_vendor_cost_cents > hold.amount_cents {
+        return Err(StorageError::InvalidData(
+            "actual vendor cost exceeds the authorized maximum".to_string(),
+        ));
+    }
+    if receipt.provider_request_id.trim().is_empty() {
+        return Err(StorageError::InvalidData(
+            "provider request id cannot be empty".to_string(),
+        ));
+    }
+    if receipt.artifact_reference.trim().is_empty() {
+        return Err(StorageError::InvalidData(
+            "artifact reference cannot be empty".to_string(),
+        ));
+    }
+    let snapshot = &receipt.price_model_snapshot;
+    if snapshot.provider.trim().is_empty() {
+        return Err(StorageError::InvalidData(
+            "price/model snapshot provider cannot be empty".to_string(),
+        ));
+    }
+    if snapshot.model.trim().is_empty() {
+        return Err(StorageError::InvalidData(
+            "price/model snapshot model cannot be empty".to_string(),
+        ));
+    }
+    if snapshot.unit_price_cents < 0 {
+        return Err(StorageError::InvalidData(
+            "price/model snapshot unit price cannot be negative".to_string(),
+        ));
+    }
+    if snapshot.pricing_unit.trim().is_empty() {
+        return Err(StorageError::InvalidData(
+            "price/model snapshot pricing unit cannot be empty".to_string(),
+        ));
+    }
+    if snapshot.currency != hold.currency {
+        return Err(StorageError::InvalidData(
+            "price/model snapshot currency does not match the authorization".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn load_spend_auth_token_by_id(
     conn: &Connection,
     token_id: &hubu_common::ids::SpendAuthTokenId,
@@ -1881,6 +2070,30 @@ fn executor_claim_from_row(
         reconciliation_evidence: row.get(12)?,
         reconciled_at: parse_optional_timestamp(reconciled_at)?,
         reconciled_by_user_id: parse_optional_id(reconciled_by_user_id)?,
+    })
+}
+
+fn executor_settlement_receipt_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<PersistedSpendExecutorSettlementReceipt, rusqlite::Error> {
+    let claim_id: String = row.get(0)?;
+    let settlement_id: String = row.get(1)?;
+    let currency: String = row.get(5)?;
+    let price_model_snapshot_json: String = row.get(7)?;
+    let created_at: String = row.get(9)?;
+    Ok(PersistedSpendExecutorSettlementReceipt {
+        claim_id: parse_id(&claim_id)?,
+        settlement_id: parse_id(&settlement_id)?,
+        authorized_max_cents: row.get(2)?,
+        released_amount_cents: row.get(4)?,
+        currency: parse_currency(&currency)?,
+        receipt: SpendExecutorSettlementReceipt {
+            actual_vendor_cost_cents: row.get(3)?,
+            provider_request_id: row.get(6)?,
+            price_model_snapshot: parse_json(&price_model_snapshot_json)?,
+            artifact_reference: row.get(8)?,
+        },
+        created_at: parse_timestamp(&created_at)?,
     })
 }
 
@@ -2139,7 +2352,7 @@ mod tests {
         condition::{Condition, Field, PolicyValue},
         Effect, Evaluation, Rule, RuleResult,
     };
-    use crate::spend::SpendRequest;
+    use crate::spend::{SpendExecutorPriceModelSnapshot, SpendRequest};
 
     fn user_id() -> UserId {
         "00000000-0000-4000-8000-000000000123".parse().unwrap()
@@ -2147,6 +2360,21 @@ mod tests {
 
     fn agent_id() -> AgentId {
         "00000000-0000-4000-8000-000000000456".parse().unwrap()
+    }
+
+    fn settlement_receipt(actual_vendor_cost_cents: i64) -> SpendExecutorSettlementReceipt {
+        SpendExecutorSettlementReceipt {
+            actual_vendor_cost_cents,
+            provider_request_id: "provider-request-123".to_string(),
+            price_model_snapshot: SpendExecutorPriceModelSnapshot {
+                provider: "example-image-provider".to_string(),
+                model: "image-model-v1".to_string(),
+                unit_price_cents: actual_vendor_cost_cents,
+                pricing_unit: "image".to_string(),
+                currency: Currency::Usd,
+            },
+            artifact_reference: "artifact://hubu-logo.png".to_string(),
+        }
     }
 
     fn policy() -> Policy {
@@ -2322,6 +2550,7 @@ mod tests {
                 &claim.agent_id,
                 "another-operation",
                 PaymentId::new(),
+                settlement_receipt(2_000),
                 settlement_started_at,
             )
             .unwrap_err();
@@ -2335,6 +2564,7 @@ mod tests {
                 &claim.agent_id,
                 &claim.operation_key,
                 first_settlement_id.clone(),
+                settlement_receipt(2_000),
                 settlement_started_at,
             )
             .unwrap();
@@ -2349,9 +2579,19 @@ mod tests {
             SpendExecutorClaimStatus::Settled
         ));
         assert!(matches!(first.hold.status, BudgetHoldStatus::Settled));
-        assert_eq!(first.balance.consumed_amount_cents, 2_500);
+        assert_eq!(first.balance.consumed_amount_cents, 2_000);
         assert_eq!(first.balance.frozen_amount_cents, 0);
-        assert_eq!(first.balance.remaining_amount_cents, 7_500);
+        assert_eq!(first.balance.remaining_amount_cents, 8_000);
+        let receipt = first.receipt.as_ref().expect("receipt should be returned");
+        assert_eq!(receipt.authorized_max_cents, 2_500);
+        assert_eq!(receipt.receipt.actual_vendor_cost_cents, 2_000);
+        assert_eq!(receipt.released_amount_cents, 500);
+        assert_eq!(
+            load_executor_settlement_receipt_by_claim_id(&repo.conn, &claim.id)
+                .unwrap()
+                .expect("receipt should be durable"),
+            *receipt
+        );
 
         let replay = repo
             .settle_executor_claim_transactionally(
@@ -2359,13 +2599,67 @@ mod tests {
                 &claim.agent_id,
                 &claim.operation_key,
                 PaymentId::new(),
+                settlement_receipt(2_000),
                 settlement_started_at + Duration::seconds(1),
             )
             .unwrap();
         assert!(replay.idempotent_replay);
         assert_eq!(replay.claim.settlement_id, Some(first_settlement_id));
-        assert_eq!(replay.balance.consumed_amount_cents, 2_500);
+        assert_eq!(replay.balance.consumed_amount_cents, 2_000);
         assert_eq!(replay.balance.frozen_amount_cents, 0);
+
+        let changed_receipt_error = repo
+            .settle_executor_claim_transactionally(
+                &claim.owner_user_id,
+                &claim.agent_id,
+                &claim.operation_key,
+                PaymentId::new(),
+                settlement_receipt(1_999),
+                settlement_started_at + Duration::seconds(2),
+            )
+            .unwrap_err();
+        assert!(changed_receipt_error
+            .to_string()
+            .contains("receipt does not match"));
+    }
+
+    #[test]
+    fn executor_settlement_rejects_cost_above_authorized_maximum() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let settlement_started_at = Utc::now();
+        let (claim, token, hold) = persist_claimed_executor_spend(
+            &mut repo,
+            settlement_started_at + Duration::minutes(15),
+        );
+
+        let error = repo
+            .settle_executor_claim_transactionally(
+                &claim.owner_user_id,
+                &claim.agent_id,
+                &claim.operation_key,
+                PaymentId::new(),
+                settlement_receipt(2_501),
+                settlement_started_at,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds the authorized maximum"));
+        assert!(matches!(
+            load_executor_claim_by_id(&repo.conn, &claim.id)
+                .unwrap()
+                .expect("claim should remain")
+                .status,
+            SpendExecutorClaimStatus::Claimed
+        ));
+        assert!(load_spend_auth_token_by_id(&repo.conn, &token.id)
+            .unwrap()
+            .expect("token should remain")
+            .used_at
+            .is_none());
+        let balance = load_budget_balance_by_id(&repo.conn, &hold.budget_id)
+            .unwrap()
+            .expect("balance should remain");
+        assert_eq!(balance.consumed_amount_cents, 0);
+        assert_eq!(balance.frozen_amount_cents, 2_500);
     }
 
     #[test]
@@ -2378,11 +2672,10 @@ mod tests {
         );
         repo.conn
             .execute_batch(
-                "CREATE TRIGGER fail_executor_hold_settlement
-                 BEFORE UPDATE OF status ON budget_holds
-                 WHEN NEW.status = 'settled'
+                "CREATE TRIGGER fail_executor_receipt_insert
+                 BEFORE INSERT ON spend_executor_settlement_receipts
                  BEGIN
-                   SELECT RAISE(ABORT, 'injected settlement failure');
+                   SELECT RAISE(ABORT, 'injected receipt write failure');
                  END;",
             )
             .unwrap();
@@ -2393,10 +2686,11 @@ mod tests {
                 &claim.agent_id,
                 &claim.operation_key,
                 PaymentId::new(),
+                settlement_receipt(2_000),
                 settlement_started_at,
             )
             .unwrap_err();
-        assert!(error.to_string().contains("injected settlement failure"));
+        assert!(error.to_string().contains("injected receipt write failure"));
 
         let reloaded_claim = load_executor_claim_by_id(&repo.conn, &claim.id)
             .unwrap()
@@ -2420,6 +2714,11 @@ mod tests {
         assert!(matches!(reloaded_hold.status, BudgetHoldStatus::Claimed));
         assert_eq!(reloaded_balance.consumed_amount_cents, 0);
         assert_eq!(reloaded_balance.frozen_amount_cents, 2_500);
+        assert!(
+            load_executor_settlement_receipt_by_claim_id(&repo.conn, &claim.id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2434,6 +2733,7 @@ mod tests {
                 &claim.agent_id,
                 &claim.operation_key,
                 PaymentId::new(),
+                settlement_receipt(2_000),
                 settlement_started_at,
             )
             .unwrap_err();
@@ -2463,6 +2763,7 @@ mod tests {
                 " vendor-charge-123 ",
                 " Invoice confirms the vendor charge. ",
                 settlement_id.clone(),
+                settlement_receipt(2_000),
                 reconciliation_started_at,
             )
             .unwrap();
@@ -2489,7 +2790,8 @@ mod tests {
             reconciled.claim.reconciled_by_user_id,
             Some(claim.owner_user_id.clone())
         );
-        assert_eq!(reconciled.balance.consumed_amount_cents, 2_500);
+        assert_eq!(reconciled.balance.consumed_amount_cents, 2_000);
+        assert_eq!(reconciled.balance.remaining_amount_cents, 8_000);
         assert_eq!(reconciled.balance.frozen_amount_cents, 0);
         let reloaded = load_executor_claim_by_id(&repo.conn, &claim.id)
             .unwrap()
@@ -2515,6 +2817,7 @@ mod tests {
                 "vendor-charge-123",
                 "Invoice confirms the vendor charge.",
                 PaymentId::new(),
+                settlement_receipt(2_000),
                 reconciliation_started_at + Duration::seconds(1),
             )
             .unwrap();
@@ -2528,6 +2831,7 @@ mod tests {
                 "vendor-charge-123",
                 "Different evidence",
                 PaymentId::new(),
+                settlement_receipt(2_000),
                 reconciliation_started_at + Duration::seconds(2),
             )
             .unwrap_err();
@@ -2629,6 +2933,7 @@ mod tests {
                 &claim.agent_id,
                 &claim.operation_key,
                 PaymentId::new(),
+                settlement_receipt(2_000),
                 finalization_started_at + Duration::seconds(1),
             )
             .unwrap_err();

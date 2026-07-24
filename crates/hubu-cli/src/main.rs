@@ -1526,17 +1526,44 @@ fn spend_reconcile_resolve(
     let claim_id = take_required(&mut args, "--claim-id")?;
     let provider_reference = take_required(&mut args, "--provider-reference")?;
     let evidence = take_required(&mut args, "--evidence")?;
+    let receipt = if vendor_billed {
+        let actual_vendor_cost_cents = take_required(&mut args, "--actual-vendor-cost-cents")?
+            .parse::<i64>()
+            .context("--actual-vendor-cost-cents must be an integer")?;
+        let provider_request_id = take_required(&mut args, "--provider-request-id")?;
+        let provider = take_required(&mut args, "--provider")?;
+        let model = take_required(&mut args, "--model")?;
+        let unit_price_cents = take_required(&mut args, "--unit-price-cents")?
+            .parse::<i64>()
+            .context("--unit-price-cents must be an integer")?;
+        let pricing_unit = take_required(&mut args, "--pricing-unit")?;
+        let artifact_reference = take_required(&mut args, "--artifact-reference")?;
+        Some(json!({
+            "actual_vendor_cost_cents": actual_vendor_cost_cents,
+            "provider_request_id": provider_request_id,
+            "price_model_snapshot": {
+                "provider": provider,
+                "model": model,
+                "unit_price_cents": unit_price_cents,
+                "pricing_unit": pricing_unit,
+                "currency": "usd",
+            },
+            "artifact_reference": artifact_reference,
+        }))
+    } else {
+        None
+    };
     ensure_no_args(args)?;
     let action = if vendor_billed { "settle" } else { "release" };
-    let response = post_reconciliation_json(
-        base_url,
-        &format!("/spend/executor/{action}"),
-        json!({
-            "claim_id": claim_id,
-            "provider_reference": provider_reference,
-            "evidence": evidence,
-        }),
-    )?;
+    let mut body = json!({
+        "claim_id": claim_id,
+        "provider_reference": provider_reference,
+        "evidence": evidence,
+    });
+    if let Some(receipt) = receipt {
+        body["receipt"] = receipt;
+    }
+    let response = post_reconciliation_json(base_url, &format!("/spend/executor/{action}"), body)?;
     println!(
         "Claim reconciled: {}",
         if vendor_billed {
@@ -2413,7 +2440,7 @@ Usage:
   hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
   hubu spend claim --claim-id ID
   hubu spend reconcile list
-  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT
+  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-cents CENTS --provider-request-id ID --provider NAME --model NAME --unit-price-cents CENTS --pricing-unit UNIT --artifact-reference REF
   hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
 
 Note:
@@ -2447,10 +2474,10 @@ fn print_spend_reconcile_help() {
 
 Usage:
   hubu spend reconcile list
-  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT
+  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-cents CENTS --provider-request-id ID --provider NAME --model NAME --unit-price-cents CENTS --pricing-unit UNIT --artifact-reference REF
   hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
 
-The provider reference and evidence are stored with the atomic settlement or release. Do not include vendor credentials or sensitive payloads."
+The provider reference and evidence are stored with the atomic settlement or release. A billed resolution also records the actual vendor cost, provider request id, price/model snapshot, and artifact reference, then releases unused authorization. Currency is usd in this protocol version. Do not include vendor credentials or sensitive payloads."
     );
 }
 

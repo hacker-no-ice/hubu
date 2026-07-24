@@ -303,8 +303,30 @@ fn tool_definitions() -> Vec<Value> {
             json_schema_required(json!({
                 "claim_id": { "type": "string" },
                 "provider_reference": { "type": "string" },
-                "evidence": { "type": "string" }
-            }), &["claim_id", "provider_reference", "evidence"]),
+                "evidence": { "type": "string" },
+                "receipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "actual_vendor_cost_cents": { "type": "integer", "minimum": 0 },
+                        "provider_request_id": { "type": "string" },
+                        "price_model_snapshot": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "provider": { "type": "string" },
+                                "model": { "type": "string" },
+                                "unit_price_cents": { "type": "integer", "minimum": 0 },
+                                "pricing_unit": { "type": "string" },
+                                "currency": { "type": "string", "enum": ["usd"] }
+                            },
+                            "required": ["provider", "model", "unit_price_cents", "pricing_unit", "currency"]
+                        },
+                        "artifact_reference": { "type": "string" }
+                    },
+                    "required": ["actual_vendor_cost_cents", "provider_request_id", "price_model_snapshot", "artifact_reference"]
+                }
+            }), &["claim_id", "provider_reference", "evidence", "receipt"]),
         ),
         approval_tool(
             "hubu_reconcile_vendor_did_not_bill_claim",
@@ -782,6 +804,9 @@ mod tests {
                 .expect("resolution fields should be required");
             assert!(required.iter().any(|field| field == "provider_reference"));
             assert!(required.iter().any(|field| field == "evidence"));
+            if tool_name == "hubu_reconcile_vendor_billed_claim" {
+                assert!(required.iter().any(|field| field == "receipt"));
+            }
         }
     }
 
