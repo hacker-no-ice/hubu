@@ -114,9 +114,7 @@ fn handle_json_rpc(base_url: &str, config: McpConfig, request: Value) -> Option<
         _ => Err(anyhow!("unsupported MCP method `{method}`")),
     };
 
-    let Some(id) = id else {
-        return None;
-    };
+    let id = id?;
     Some(match result {
         Ok(result) => json!({
             "jsonrpc": "2.0",
@@ -354,16 +352,26 @@ fn json_schema_required(properties: Value, required: &[&str]) -> Value {
     schema
 }
 
+struct ToolAnnotations {
+    read_only: bool,
+    destructive: bool,
+    human_approval: &'static str,
+    client_approval_mode: &'static str,
+    runtime_approval: &'static str,
+}
+
 fn read_tool(name: &str, description: &str, input_schema: Value) -> Value {
     tool(
         name,
         description,
         input_schema,
-        true,
-        false,
-        "none",
-        "auto",
-        "none",
+        ToolAnnotations {
+            read_only: true,
+            destructive: false,
+            human_approval: "none",
+            client_approval_mode: "auto",
+            runtime_approval: "none",
+        },
     )
 }
 
@@ -372,11 +380,13 @@ fn write_tool(name: &str, description: &str, input_schema: Value) -> Value {
         name,
         description,
         input_schema,
-        false,
-        false,
-        "conditional",
-        "auto",
-        "hubu_policy_needs_approval",
+        ToolAnnotations {
+            read_only: false,
+            destructive: false,
+            human_approval: "conditional",
+            client_approval_mode: "auto",
+            runtime_approval: "hubu_policy_needs_approval",
+        },
     )
 }
 
@@ -385,36 +395,29 @@ fn approval_tool(name: &str, description: &str, input_schema: Value) -> Value {
         name,
         description,
         input_schema,
-        false,
-        true,
-        "required",
-        "prompt_before_call",
-        "client_human_approval_required",
+        ToolAnnotations {
+            read_only: false,
+            destructive: true,
+            human_approval: "required",
+            client_approval_mode: "prompt_before_call",
+            runtime_approval: "client_human_approval_required",
+        },
     )
 }
 
-fn tool(
-    name: &str,
-    description: &str,
-    input_schema: Value,
-    read_only: bool,
-    destructive: bool,
-    human_approval: &str,
-    client_approval_mode: &str,
-    runtime_approval: &str,
-) -> Value {
+fn tool(name: &str, description: &str, input_schema: Value, annotations: ToolAnnotations) -> Value {
     json!({
         "name": name,
         "description": description,
         "inputSchema": input_schema,
         "annotations": {
-            "readOnlyHint": read_only,
-            "destructiveHint": destructive,
+            "readOnlyHint": annotations.read_only,
+            "destructiveHint": annotations.destructive,
             "idempotentHint": false,
             "openWorldHint": true,
-            "x_hubu_human_approval": human_approval,
-            "x_hubu_client_approval_mode": client_approval_mode,
-            "x_hubu_runtime_approval": runtime_approval
+            "x_hubu_human_approval": annotations.human_approval,
+            "x_hubu_client_approval_mode": annotations.client_approval_mode,
+            "x_hubu_runtime_approval": annotations.runtime_approval
         }
     })
 }

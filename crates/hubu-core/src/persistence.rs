@@ -165,6 +165,8 @@ pub trait ExecutorClaimRepository {
         finalization_started_at: DateTime<Utc>,
     ) -> Result<ExecutorFinalizationResult, StorageError>;
 
+    // These fields form one auditable atomic reconciliation command at the storage boundary.
+    #[allow(clippy::too_many_arguments)]
     fn reconcile_executor_claim_as_billed_transactionally(
         &mut self,
         claim_id: &SpendExecutorClaimId,
@@ -317,6 +319,8 @@ impl SqliteGovernanceRepository {
         )
     }
 
+    // Keep the full reconciliation evidence explicit at this transactional boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn reconcile_executor_claim_as_billed_transactionally(
         &mut self,
         claim_id: &SpendExecutorClaimId,

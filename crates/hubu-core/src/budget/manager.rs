@@ -861,7 +861,7 @@ mod tests {
             .expect("budget should revoke");
         manager
             .create_single_budget(CreateSingleBudgetRequest {
-                agent_id: agent_id,
+                agent_id,
                 amount_limit_cents: 20_000,
                 currency: Currency::Usd,
                 period: period(2026, 6, 15, 2026, 7, 1),
@@ -958,7 +958,7 @@ mod tests {
 
         let error = manager
             .create_single_budget(CreateSingleBudgetRequest {
-                agent_id: agent_id,
+                agent_id,
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: period(2026, 6, 15, 2026, 7, 15),
@@ -984,7 +984,7 @@ mod tests {
 
         manager
             .create_single_budget(CreateSingleBudgetRequest {
-                agent_id: agent_id,
+                agent_id,
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: period(2026, 7, 1, 2026, 8, 1),
@@ -1010,7 +1010,7 @@ mod tests {
 
         let error = manager
             .create_single_budget(CreateSingleBudgetRequest {
-                agent_id: agent_id,
+                agent_id,
                 amount_limit_cents: 10_000,
                 currency: Currency::Usd,
                 period: period(2026, 7, 1, 2026, 8, 1),
@@ -1243,7 +1243,7 @@ mod tests {
 
         let renewed = manager
             .create_single_budget(CreateSingleBudgetRequest {
-                agent_id: agent_id,
+                agent_id,
                 amount_limit_cents: 2_000,
                 currency: Currency::Usd,
                 period: active_period(),
