@@ -130,6 +130,7 @@ A mandate is a task-scoped sub-allocation of an agent budget.
   "available_amount_cents": 200,
   "reserved_amount_cents": 0,
   "consumed_amount_cents": 0,
+  "released_amount_cents": 0,
   "expires_at": "2026-07-27T20:00:00Z",
   "constraints": {
     "max_attempts": 4,
@@ -194,10 +195,14 @@ For every mandate:
 
 ```text
 authorized_amount
-  = available_amount + reserved_amount + consumed_amount
+  = available_amount + reserved_amount + consumed_amount + released_amount
 ```
 
 All amounts are non-negative integers in the mandate currency.
+`released_amount` is authorization returned to the underlying agent budget
+when the mandate becomes terminal. Releasing an individual attempt does not
+increase this field; it returns that attempt's reservation to mandate
+availability.
 
 For an open mandate:
 
@@ -240,6 +245,7 @@ The remainder stays frozen for later attempts. At terminal mandate closure:
 ```text
 agent budget frozen   -= mandate available
 agent budget remaining += mandate available
+mandate released += mandate available
 mandate available = 0
 ```
 
@@ -288,15 +294,30 @@ credentials or other secrets.
 
 An allowed mandate response includes one Hubu-issued bearer token that wraps
 the mandate's immutable execution scope, including mandate identity, agent,
-account, merchant, currency, authorized maximum, executor, and expiry. The
-agent platform passes this single `mandate_token` to Gongbu rather than asking
-Gongbu to reconstruct the scope from separate untrusted fields.
+account, merchant, currency, authorized maximum, executor, mandate expiry, and
+capability expiry. The agent platform passes this single `mandate_token` to
+Gongbu rather than asking Gongbu to reconstruct the scope from separate
+untrusted fields.
 
 Gongbu presents the token as a bearer capability when it inspects the mandate,
 reserves or finalizes attempts, and requests closure. Hubu verifies the token
 and rechecks current durable mandate state on every mutation. The token is not a
 balance snapshot: possession never allows Gongbu to bypass current available
 amount, lifecycle, attempt-count, or claim-lease checks.
+
+Mandate expiry and capability expiry are distinct:
+
+- `expires_at` is the authorization deadline for creating new attempt claims.
+- `capability_expires_at` is the bearer-token deadline and must be late enough
+  to finalize every claim Hubu can issue.
+- Hubu must enforce `claim_expires_at <= capability_expires_at` when reserving
+  and claiming an attempt.
+- After `expires_at`, the capability may inspect the mandate, settle or release
+  an already claimed attempt before its claim lease expires, and request
+  closure. It cannot create another attempt.
+
+This lets Gongbu finalize work authorized immediately before mandate expiry
+without turning the bearer token into an unbounded credential.
 
 The token format and signing profile can follow Hubu's existing spend-token
 approach. It must be opaque to the language model, must not contain provider
@@ -349,9 +370,11 @@ The allow response envelope includes the capability and Hubu callback links:
     "available_amount_cents": 200,
     "reserved_amount_cents": 0,
     "consumed_amount_cents": 0,
+    "released_amount_cents": 0,
     "currency": "usd"
   },
   "mandate_token": "opaque-hubu-bearer-token",
+  "capability_expires_at": "2026-07-27T20:15:00Z",
   "links": {
     "self": "/spend/mandates/spm_example",
     "reserve_attempt": "/spend/mandates/spm_example/attempts/reserve",
@@ -609,6 +632,7 @@ Hubu and Gongbu can implement in parallel against this minimum profile:
 - actual cost no greater than reserved maximum
 - stable platform task keys and Gongbu attempt keys
 - one Hubu-issued mandate bearer capability passed from the platform to Gongbu
+- capability lifetime covers every claim lease Hubu can issue
 - durable idempotency across process restart
 - compact provider receipt and artifact reference
 - no automatic release of uncertain provider work
