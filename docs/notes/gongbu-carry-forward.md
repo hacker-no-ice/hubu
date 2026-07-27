@@ -16,10 +16,16 @@ These belong in Hubu because they define generic spend control-plane behavior:
   - Keep: spend authorization tokens, frozen budget holds, expiry/reconciliation.
   - Status: merged into `main`.
 
-- `codex/spend-executor-contract`
-  - Keep: `hubu-spend-executor-v1` guidance, validation, settlement, and release
-    routes for external executors.
-  - This is the contract future Gongbu work should target.
+- `docs/spend-executor-contract.md`
+  - Keep: the current `hubu-spend-executor-v4` single-spend claim, receipt,
+    settlement, release, and reconciliation contract.
+  - This remains the normative contract for one authorized provider call.
+
+- `docs/multi-spend-mandate-protocol.md`
+  - Carry forward: the provisional `hubu-spend-executor-v5-draft` mandate and
+    child-attempt contract.
+  - Gongbu and Hubu can implement the documented MVP interoperability profile
+    in parallel while v4 remains available.
 
 ## Carry Forward To Gongbu
 

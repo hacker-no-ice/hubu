@@ -1,5 +1,9 @@
 # Spend Executor Contract
 
+> The task-scoped, multi-provider extension is being designed separately in
+> [`hubu-spend-executor-v5-draft`](multi-spend-mandate-protocol.md). This v4
+> contract remains normative for one authorized executor call.
+
 This contract lets an external work service use Hubu for spend control without
 turning Hubu into the service that performs the work:
 
