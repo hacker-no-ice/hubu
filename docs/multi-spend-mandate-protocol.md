@@ -309,15 +309,21 @@ Mandate expiry and capability expiry are distinct:
 
 - `expires_at` is the authorization deadline for creating new attempt claims.
 - `capability_expires_at` is the bearer-token deadline and must be late enough
-  to finalize every claim Hubu can issue.
-- Hubu must enforce `claim_expires_at <= capability_expires_at` when reserving
+  to finalize and recover every claim Hubu can issue.
+- Hubu defines a positive `finalization_recovery_grace_seconds` and must enforce
+  `claim_expires_at + recovery grace <= capability_expires_at` when reserving
   and claiming an attempt.
 - After `expires_at`, the capability may inspect the mandate, settle or release
   an already claimed attempt before its claim lease expires, and request
   closure. It cannot create another attempt.
+- After `claim_expires_at`, the capability remains valid through the recovery
+  grace period for inspection, closure, and idempotent replay of a finalization
+  that Hubu already committed. A replay may return stored terminal state but
+  must not newly settle or release an attempt whose claim lease expired.
 
 This lets Gongbu finalize work authorized immediately before mandate expiry
-without turning the bearer token into an unbounded credential.
+and recover an ambiguous Hubu response without turning the bearer token into an
+unbounded credential.
 
 The token format and signing profile can follow Hubu's existing spend-token
 approach. It must be opaque to the language model, must not contain provider
@@ -374,7 +380,8 @@ The allow response envelope includes the capability and Hubu callback links:
     "currency": "usd"
   },
   "mandate_token": "opaque-hubu-bearer-token",
-  "capability_expires_at": "2026-07-27T20:15:00Z",
+  "capability_expires_at": "2026-07-27T20:20:00Z",
+  "finalization_recovery_grace_seconds": 300,
   "links": {
     "self": "/spend/mandates/spm_example",
     "reserve_attempt": "/spend/mandates/spm_example/attempts/reserve",
@@ -568,7 +575,7 @@ an automatic tolerance or post-hoc mandate overage.
 | Provider billed but artifact persistence fails | Settle with an audit-safe failed-artifact reference |
 | Provider timeout with idempotent status lookup | Recover provider status, then settle or release |
 | Provider timeout with uncertain billing | Do not retry blindly; allow the attempt to require reconciliation |
-| Hubu settlement response is lost | Retry identical settlement with the same attempt key and receipt |
+| Hubu settlement response is lost | Inspect the attempt, then retry identical settlement with the same attempt key and receipt; the capability recovery grace permits inspection and replay of a stored settlement |
 | Gongbu process restarts | Recover mandate and attempt state from Hubu before scheduling more work |
 
 Retries performed internally by a provider SDK must be included in the reserved
@@ -632,7 +639,8 @@ Hubu and Gongbu can implement in parallel against this minimum profile:
 - actual cost no greater than reserved maximum
 - stable platform task keys and Gongbu attempt keys
 - one Hubu-issued mandate bearer capability passed from the platform to Gongbu
-- capability lifetime covers every claim lease Hubu can issue
+- capability lifetime covers every claim lease Hubu can issue plus a positive
+  finalization recovery grace period
 - durable idempotency across process restart
 - compact provider receipt and artifact reference
 - no automatic release of uncertain provider work
