@@ -168,6 +168,35 @@ where
     Ok(serde_json::from_str(response_body)?)
 }
 
+pub fn get_json<R>(url: &str) -> Result<R, HttpClientError>
+where
+    R: for<'de> Deserialize<'de>,
+{
+    let target = HttpTarget::parse(url)?;
+    let mut stream = TcpStream::connect((target.host.as_str(), target.port))?;
+    stream.set_read_timeout(Some(READ_TIMEOUT))?;
+    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    write!(
+        stream,
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        target.path,
+        target.host_header(),
+    )?;
+    stream.flush()?;
+    stream.shutdown(Shutdown::Write)?;
+
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw)?;
+    let (status, response_body) = parse_response(&raw)?;
+    if !(200..300).contains(&status) {
+        return Err(HttpClientError::Status {
+            status,
+            body: response_body.to_string(),
+        });
+    }
+    Ok(serde_json::from_str(response_body)?)
+}
+
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }

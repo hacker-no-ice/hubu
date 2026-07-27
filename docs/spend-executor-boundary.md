@@ -1,6 +1,6 @@
 # Spend Executor Boundary
 
-Gongbu implements Hubu's `hubu-spend-executor-v1` contract.
+Gongbu implements Hubu's `hubu-spend-executor-v4` contract.
 
 The canonical contract, ownership boundary, request shapes, response shapes,
 and safety rules live in Hubu:
@@ -38,14 +38,21 @@ The image job endpoint implements the first real Gongbu work domain for
    merchant and amount, and non-secret readiness.
 2. `POST /image-jobs` accepts a prompt, Hubu spend auth token, expected spend
    scope, and optional provider/model confirmation.
-3. Gongbu validates provider/model and Hubu spend scope before calling the
-   provider.
+3. Gongbu validates provider/model and exclusively claims the Hubu spend scope
+   before calling the provider.
 4. The local mock adapter writes a deterministic SVG artifact.
 5. The Gemini `generateContent` adapter sends the API key server-side via
    `x-goog-api-key`, asks for `IMAGE` response modality, extracts inline image
    bytes, and writes a local artifact.
 6. Gongbu settles only after artifact writes succeed, and releases after
-   validated pre-work failures where no irreversible provider work occurred.
+   claimed pre-work failures where no irreversible provider work occurred.
+
+The request's immutable, platform-provided `operation_key` is reused for claim,
+inspection, settlement or release, and every retry. Ambiguous claim responses
+are retried with the same scope. Ambiguous finalization responses first trigger
+an authoritative claim lookup and then the same idempotent finalization
+request. Gongbu does not derive artifact names from spend authorization tokens
+or persist those tokens alongside artifacts.
 
 Provider endpoints must be HTTPS for remote vendors. Plain HTTP is accepted
 only for loopback test endpoints, and URL userinfo such as

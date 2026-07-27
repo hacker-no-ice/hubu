@@ -10,7 +10,9 @@ use serde_json::{json, Value};
 use crate::{
     config::Config,
     hubu::{
-        ExecutorSpendRequest, ExecutorSpendResponse, ExecutorSpendSettlementResponse, HubuClient,
+        ExecutorSpendClaimRequest, ExecutorSpendClaimResponse, ExecutorSpendFinalizationRequest,
+        ExecutorSpendRequest, ExecutorSpendSettlementResponse, HubuClient, PriceModelSnapshot,
+        ProviderReceipt,
     },
     image_jobs::{create_image_job, image_job_guidance, ImageJobRequest},
     simple_http::{parse_request, read_request, write_response, HttpRequest, HttpResponse},
@@ -89,7 +91,7 @@ fn health(state: &ServerState) -> Value {
         "status": "ok",
         "service": "gongbu",
         "hubu_base_url": state.config.hubu_base_url,
-        "spend_executor_protocol": "hubu-spend-executor-v1",
+        "spend_executor_protocol": "hubu-spend-executor-v4",
         "image_provider": state.config.image_provider.provider,
         "image_model": state.config.image_provider.model,
         "image_provider_ready": state.config.image_provider.readiness().ready,
@@ -102,34 +104,62 @@ fn mock_executor_dry_run(body: String, state: &ServerState) -> Result<Value> {
     request.validate()?;
 
     let spend_request = request.spend_request();
-    let validation = state
+    let claim = state
         .hubu
-        .validate(&spend_request)
-        .context("validate Hubu spend authorization")?;
+        .claim(&ExecutorSpendClaimRequest {
+            operation_key: request.operation_key.clone(),
+            spend: spend_request,
+        })
+        .context("claim Hubu spend authorization")?;
 
     let job_id = format!("dryrun-{}", NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed));
     match request.outcome {
         DryRunOutcome::Success => {
             let settlement = state
                 .hubu
-                .settle(&spend_request)
+                .settle(
+                    &ExecutorSpendFinalizationRequest {
+                        agent_id: claim.spend.agent_id.clone(),
+                        operation_key: request.operation_key,
+                        receipt: Some(ProviderReceipt {
+                            actual_vendor_cost_cents: request.amount_cents,
+                            provider_request_id: job_id.clone(),
+                            price_model_snapshot: PriceModelSnapshot {
+                                provider: "gongbu-dry-run".to_string(),
+                                model: "none".to_string(),
+                                unit_price_cents: request.amount_cents,
+                                pricing_unit: "dry_run".to_string(),
+                                currency: "usd".to_string(),
+                            },
+                            artifact_reference: format!("dry-run://{job_id}"),
+                        }),
+                    },
+                    &claim.claim_id,
+                )
                 .context("settle Hubu spend authorization")?;
             Ok(to_json(MockExecutorDryRunResponse {
                 job_id,
                 status: "settled".to_string(),
-                validation,
+                claim,
                 closure: SpendClosure::Settlement(settlement),
             })?)
         }
         DryRunOutcome::PreWorkFailure => {
             let release = state
                 .hubu
-                .release(&spend_request)
+                .release(
+                    &ExecutorSpendFinalizationRequest {
+                        agent_id: claim.spend.agent_id.clone(),
+                        operation_key: request.operation_key,
+                        receipt: None,
+                    },
+                    &claim.claim_id,
+                )
                 .context("release Hubu spend authorization")?;
             Ok(to_json(MockExecutorDryRunResponse {
                 job_id,
                 status: "released".to_string(),
-                validation,
+                claim,
                 closure: SpendClosure::Release(release),
             })?)
         }
@@ -142,6 +172,7 @@ fn to_json<T: Serialize>(value: T) -> Result<Value> {
 
 #[derive(Debug, Deserialize)]
 struct MockExecutorDryRunRequest {
+    operation_key: String,
     spend_auth_token_id: String,
     agent_id: Option<String>,
     account_id: Option<String>,
@@ -164,6 +195,9 @@ impl MockExecutorDryRunRequest {
         }
         if self.spend_auth_token_id.trim().is_empty() {
             return Err(anyhow!("spend_auth_token_id is required"));
+        }
+        if self.operation_key.trim().is_empty() {
+            return Err(anyhow!("operation_key is required"));
         }
         if self.amount_cents <= 0 {
             return Err(anyhow!("amount_cents must be positive"));
@@ -195,7 +229,7 @@ enum DryRunOutcome {
 struct MockExecutorDryRunResponse {
     job_id: String,
     status: String,
-    validation: ExecutorSpendResponse,
+    claim: ExecutorSpendClaimResponse,
     closure: SpendClosure,
 }
 
@@ -203,7 +237,7 @@ struct MockExecutorDryRunResponse {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum SpendClosure {
     Settlement(ExecutorSpendSettlementResponse),
-    Release(ExecutorSpendResponse),
+    Release(ExecutorSpendClaimResponse),
 }
 
 #[cfg(test)]
@@ -219,7 +253,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::hubu::BudgetHold;
+    use crate::hubu::{BudgetHold, ExecutorSpendResponse};
     use crate::image_provider::{
         HttpJsonImageProviderFields, ImageProviderAdapterKind, ImageProviderConfig,
     };
@@ -244,14 +278,14 @@ mod tests {
         assert_eq!(response.body["status"], "ok");
         assert_eq!(
             response.body["spend_executor_protocol"],
-            "hubu-spend-executor-v1"
+            "hubu-spend-executor-v4"
         );
     }
 
     #[test]
     fn dry_run_success_validates_then_settles() {
         let fake = FakeHubu::start(vec![
-            fake_response("/spend/executor/validate", spend_response("frozen")),
+            fake_response("/spend/executor/claim", spend_response("frozen")),
             fake_response(
                 "/spend/executor/settle",
                 json!({
@@ -280,14 +314,14 @@ mod tests {
         assert_eq!(response.body["closure"]["kind"], "settlement");
         assert_eq!(
             fake.paths(),
-            vec!["/spend/executor/validate", "/spend/executor/settle"]
+            vec!["/spend/executor/claim", "/spend/executor/settle"]
         );
     }
 
     #[test]
     fn dry_run_pre_work_failure_validates_then_releases() {
         let fake = FakeHubu::start(vec![
-            fake_response("/spend/executor/validate", spend_response("frozen")),
+            fake_response("/spend/executor/claim", spend_response("frozen")),
             fake_response("/spend/executor/release", spend_response("released")),
         ]);
         let state = ServerState::new(Config {
@@ -310,7 +344,7 @@ mod tests {
         assert_eq!(response.body["closure"]["kind"], "release");
         assert_eq!(
             fake.paths(),
-            vec!["/spend/executor/validate", "/spend/executor/release"]
+            vec!["/spend/executor/claim", "/spend/executor/release"]
         );
     }
 
@@ -327,6 +361,7 @@ mod tests {
                 method: "POST".to_string(),
                 path: "/mock-executor/dry-run".to_string(),
                 body: json!({
+                    "operation_key": "codex:tool-call:test-1",
                     "spend_auth_token_id": "token-1",
                     "amount_cents": 500,
                     "merchant": "gongbu.image",
@@ -382,7 +417,7 @@ mod tests {
             std::process::id()
         ));
         let fake = FakeHubu::start(vec![
-            fake_response("/spend/executor/validate", spend_response("frozen")),
+            fake_response("/spend/executor/claim", spend_response("frozen")),
             fake_response(
                 "/spend/executor/settle",
                 json!({
@@ -411,7 +446,7 @@ mod tests {
         assert_eq!(response.body["model"], "mock-image-v1");
         assert_eq!(
             fake.paths(),
-            vec!["/spend/executor/validate", "/spend/executor/settle"]
+            vec!["/spend/executor/claim", "/spend/executor/settle"]
         );
         let output_path = response.body["output_ref"]
             .as_str()
@@ -444,7 +479,7 @@ mod tests {
             std::process::id()
         ));
         let fake_hubu = FakeHubu::start(vec![
-            fake_response("/spend/executor/validate", spend_response("frozen")),
+            fake_response("/spend/executor/claim", spend_response("frozen")),
             fake_response(
                 "/spend/executor/settle",
                 json!({
@@ -491,7 +526,7 @@ mod tests {
         );
         assert_eq!(
             fake_hubu.paths(),
-            vec!["/spend/executor/validate", "/spend/executor/settle"]
+            vec!["/spend/executor/claim", "/spend/executor/settle"]
         );
         std::fs::remove_file(output_path).ok();
         std::fs::remove_dir(output_dir).ok();
@@ -506,7 +541,7 @@ mod tests {
         std::fs::write(&blocker, b"not a directory").expect("write blocker");
         let provider = FakeProvider::start(json!({ "unused": true }));
         let fake_hubu = FakeHubu::start(vec![
-            fake_response("/spend/executor/validate", spend_response("frozen")),
+            fake_response("/spend/executor/claim", spend_response("frozen")),
             fake_response("/spend/executor/release", spend_response("released")),
         ]);
         let state = ServerState::new(Config {
@@ -531,14 +566,49 @@ mod tests {
             .contains("provider_artifact_write_failed"));
         assert_eq!(
             fake_hubu.paths(),
-            vec!["/spend/executor/validate", "/spend/executor/release"]
+            vec!["/spend/executor/claim", "/spend/executor/release"]
         );
         assert!(provider.request_if_any().is_none());
         std::fs::remove_file(blocker).ok();
     }
 
+    #[test]
+    fn image_job_does_not_repeat_provider_work_for_settled_claim() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "gongbu-settled-image-job-output-{}",
+            std::process::id()
+        ));
+        let fake_hubu = FakeHubu::start(vec![fake_response(
+            "/spend/executor/claim",
+            spend_response("settled"),
+        )]);
+        let state = ServerState::new(Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            hubu_base_url: fake_hubu.base_url.clone(),
+            image_provider: mock_provider_config(output_dir.clone()),
+        });
+
+        let response = route(
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/image-jobs".to_string(),
+                body: image_job_body("local-mock", "mock-image-v1"),
+            },
+            &state,
+        );
+
+        assert_eq!(response.status, 400);
+        assert!(response.body["error"]
+            .as_str()
+            .expect("error")
+            .contains("not executable in status 'settled'"));
+        assert_eq!(fake_hubu.paths(), vec!["/spend/executor/claim"]);
+        assert!(!output_dir.exists());
+    }
+
     fn dry_run_body(outcome: &str) -> String {
         json!({
+            "operation_key": "codex:tool-call:test-1",
             "spend_auth_token_id": "token-1",
             "agent_id": "agt_example",
             "amount_cents": 500,
@@ -551,6 +621,7 @@ mod tests {
 
     fn image_job_body(provider: &str, model: &str) -> String {
         json!({
+            "operation_key": "codex:tool-call:test-1",
             "spend_auth_token_id": "token-1",
             "agent_id": "agt_example",
             "amount_cents": 500,
@@ -600,6 +671,7 @@ mod tests {
 
     fn spend_response(status: &str) -> Value {
         serde_json::to_value(ExecutorSpendResponse {
+            operation_key: "codex:tool-call:test-1".to_string(),
             spend_auth_token_id: "token-1".to_string(),
             decision_id: "decision-1".to_string(),
             account_id: "acct_example".to_string(),
@@ -623,6 +695,53 @@ mod tests {
     }
 
     fn fake_response(path: &str, body: Value) -> (&'static str, Value) {
+        let body = match path {
+            "/spend/executor/claim" => json!({
+                "operation_key": "codex:tool-call:test-1",
+                "claim_id": "claim-1",
+                "workload_profile": "image_generation",
+                "status": match body["budget_hold"]["status"].as_str() {
+                    Some("settled") => "settled",
+                    Some("released") => "released",
+                    _ => "claimed",
+                },
+                "claimed_at": "2026-06-05T11:00:00Z",
+                "claim_expires_at": "2026-06-05T12:15:00Z",
+                "finalized_at": match body["budget_hold"]["status"].as_str() {
+                    Some("settled") | Some("released") => Some("2026-06-05T11:01:00Z"),
+                    _ => None,
+                },
+                "settlement_id": match body["budget_hold"]["status"].as_str() {
+                    Some("settled") => Some("settlement-1"),
+                    _ => None,
+                },
+                "reconciliation_required": false,
+                "spend": body,
+            }),
+            "/spend/executor/settle" => json!({
+                "operation_key": "codex:tool-call:test-1",
+                "settlement_id": body["settlement_id"].clone(),
+                "claim_id": "claim-1",
+                "status": "settled",
+                "receipt": {
+                    "actual_vendor_cost_cents": 500
+                },
+                "spend": body["spend"].clone(),
+            }),
+            "/spend/executor/release" => json!({
+                "operation_key": "codex:tool-call:test-1",
+                "claim_id": "claim-1",
+                "workload_profile": "image_generation",
+                "status": "released",
+                "claimed_at": "2026-06-05T11:00:00Z",
+                "claim_expires_at": "2026-06-05T12:15:00Z",
+                "finalized_at": "2026-06-05T11:01:00Z",
+                "settlement_id": null,
+                "reconciliation_required": false,
+                "spend": body,
+            }),
+            _ => body,
+        };
         (Box::leak(path.to_string().into_boxed_str()), body)
     }
 
