@@ -108,7 +108,7 @@ pub fn create_image_job(
 
     // The platform operation key is safe to reuse across retries. The
     // authorization token is deliberately excluded from artifact names.
-    let artifact_id = safe_artifact_id(&request.operation_key);
+    let artifact_id = artifact_id_from_operation_key(&request.operation_key);
     if config.adapter_kind.writes_local_artifact() {
         if let Err(error) = ensure_image_output_dir_ready(&config.output_dir, &artifact_id) {
             release_after_pre_work_failure(hubu, &claim)?;
@@ -242,15 +242,31 @@ fn release_after_pre_work_failure(
     Ok(())
 }
 
-fn safe_artifact_id(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
+fn artifact_id_from_operation_key(operation_key: &str) -> String {
+    let mut id = String::with_capacity(3 + operation_key.len() * 2);
+    id.push_str("op-");
+    for byte in operation_key.as_bytes() {
+        use std::fmt::Write as _;
+        write!(id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::artifact_id_from_operation_key;
+
+    #[test]
+    fn artifact_ids_preserve_operation_key_uniqueness() {
+        let punctuation = artifact_id_from_operation_key("a:b");
+        let underscore = artifact_id_from_operation_key("a_b");
+
+        assert_eq!(punctuation, "op-613a62");
+        assert_eq!(underscore, "op-615f62");
+        assert_ne!(punctuation, underscore);
+        assert_eq!(
+            artifact_id_from_operation_key("模型:一"),
+            artifact_id_from_operation_key("模型:一")
+        );
+    }
 }
