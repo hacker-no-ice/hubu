@@ -32,7 +32,7 @@ jobs:
       - name: Lint all targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Test Hubu v4 recovery
+      - name: Test Gongbu Hubu v4 client recovery
         run: cargo test --workspace --locked 'hubu::tests::'
 
       - name: Test workspace
