@@ -95,6 +95,7 @@ pub fn create_image_job(
             spend: spend_request,
         })
         .context("claim Hubu spend authorization")?;
+    ensure_claim_executable(&claim, &request.operation_key)?;
 
     let adapter = match config.adapter() {
         Ok(adapter) => adapter,
@@ -203,6 +204,26 @@ impl ImageJobRequest {
             task_id: self.task_id.clone(),
         }
     }
+}
+
+fn ensure_claim_executable(claim: &ExecutorSpendClaimResponse, operation_key: &str) -> Result<()> {
+    if claim.operation_key != operation_key {
+        return Err(anyhow!(
+            "Hubu claim operation_key does not match the work request"
+        ));
+    }
+    if claim.reconciliation_required {
+        return Err(anyhow!(
+            "Hubu claim requires reconciliation and is not executable"
+        ));
+    }
+    if claim.status != "claimed" || claim.finalized_at.is_some() || claim.settlement_id.is_some() {
+        return Err(anyhow!(
+            "Hubu claim is not executable in status '{}'",
+            claim.status
+        ));
+    }
+    Ok(())
 }
 
 fn release_after_pre_work_failure(

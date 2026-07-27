@@ -572,6 +572,40 @@ mod tests {
         std::fs::remove_file(blocker).ok();
     }
 
+    #[test]
+    fn image_job_does_not_repeat_provider_work_for_settled_claim() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "gongbu-settled-image-job-output-{}",
+            std::process::id()
+        ));
+        let fake_hubu = FakeHubu::start(vec![fake_response(
+            "/spend/executor/claim",
+            spend_response("settled"),
+        )]);
+        let state = ServerState::new(Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            hubu_base_url: fake_hubu.base_url.clone(),
+            image_provider: mock_provider_config(output_dir.clone()),
+        });
+
+        let response = route(
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/image-jobs".to_string(),
+                body: image_job_body("local-mock", "mock-image-v1"),
+            },
+            &state,
+        );
+
+        assert_eq!(response.status, 400);
+        assert!(response.body["error"]
+            .as_str()
+            .expect("error")
+            .contains("not executable in status 'settled'"));
+        assert_eq!(fake_hubu.paths(), vec!["/spend/executor/claim"]);
+        assert!(!output_dir.exists());
+    }
+
     fn dry_run_body(outcome: &str) -> String {
         json!({
             "operation_key": "codex:tool-call:test-1",
@@ -666,11 +700,21 @@ mod tests {
                 "operation_key": "codex:tool-call:test-1",
                 "claim_id": "claim-1",
                 "workload_profile": "image_generation",
-                "status": "claimed",
+                "status": match body["budget_hold"]["status"].as_str() {
+                    Some("settled") => "settled",
+                    Some("released") => "released",
+                    _ => "claimed",
+                },
                 "claimed_at": "2026-06-05T11:00:00Z",
                 "claim_expires_at": "2026-06-05T12:15:00Z",
-                "finalized_at": null,
-                "settlement_id": null,
+                "finalized_at": match body["budget_hold"]["status"].as_str() {
+                    Some("settled") | Some("released") => Some("2026-06-05T11:01:00Z"),
+                    _ => None,
+                },
+                "settlement_id": match body["budget_hold"]["status"].as_str() {
+                    Some("settled") => Some("settlement-1"),
+                    _ => None,
+                },
                 "reconciliation_required": false,
                 "spend": body,
             }),
