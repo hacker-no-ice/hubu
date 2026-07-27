@@ -17,9 +17,8 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
   ledger recording flow
 - [spend-executor-contract.md](spend-executor-contract.md): external executor
   contract for scoped spend authorization, validation, settlement, and release
-- [multi-spend-mandate-protocol.md](multi-spend-mandate-protocol.md): draft v5
-  task mandate and child-attempt contract for multiple provider calls under one
-  authorized maximum
+- [multi-spend-mandate-protocol.md](multi-spend-mandate-protocol.md): deferred
+  v5 design research for multiple provider calls under one authorized maximum
 - [mcp-transport.md](mcp-transport.md): MCP adapter setup, approval boundaries,
   and tool mapping
 - [benchmarking.md](benchmarking.md): local benchmark usage and current MVP

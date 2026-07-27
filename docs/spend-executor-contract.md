@@ -1,8 +1,8 @@
 # Spend Executor Contract
 
-> The task-scoped, multi-provider extension is being designed separately in
-> [`hubu-spend-executor-v5-draft`](multi-spend-mandate-protocol.md). This v4
-> contract remains normative for one authorized executor call.
+> The proposed task-scoped mandate extension is deferred. This v4 contract is
+> normative: one authorization funds one potentially billable executor call.
+> Multi-call tasks use multiple independent v4 operations.
 
 This contract lets an external work service use Hubu for spend control without
 turning Hubu into the service that performs the work:
@@ -37,6 +37,34 @@ claims, owner-scoped lookup, and human-gated reconciliation. Settlement consumes
 the actual vendor cost and releases the remainder of the authorized maximum.
 `POST /spend/executor/validate` remains available for scope inspection, but
 validation alone does not authorize irreversible work.
+
+## Multiple Invocations In One Agent Task
+
+The agent platform orchestrates tasks that need more than one model or provider
+invocation. It creates a separate v4 spend operation for every call that may
+produce a distinct vendor charge:
+
+```text
+agent task
+├── operation A: authorize -> claim -> invoke -> settle or release
+├── operation B: authorize -> claim -> invoke -> settle or release
+└── operation C: authorize -> claim -> invoke -> settle or release
+```
+
+Each operation has a unique, durable `operation_key` and an immutable invocation
+scope consisting of its merchant, maximum amount, workload profile, and
+operation purpose. An HTTP retry of the same provider invocation reuses that
+operation. A retry or alternate model call that may create another charge uses
+a new operation key and requires a new authorization.
+
+The platform may retain a shared task identifier to correlate operations,
+artifacts, and presentation. Hubu does not treat that correlation identifier as
+a pooled allocation: v4 enforces each operation maximum and the authoritative
+agent budget, not a separate task-level aggregate ceiling.
+
+The deferred [multi-spend mandate design](multi-spend-mandate-protocol.md) may
+be revisited if dogfooding demonstrates a need for one authorization covering
+several charges under a hard shared maximum.
 
 ## Boundary
 
