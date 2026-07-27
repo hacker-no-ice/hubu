@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     hubu::{
-        ExecutorSpendRequest, ExecutorSpendResponse, ExecutorSpendSettlementResponse, HubuClient,
+        ExecutorSpendClaimRequest, ExecutorSpendClaimResponse, ExecutorSpendFinalizationRequest,
+        ExecutorSpendRequest, ExecutorSpendSettlementResponse, HubuClient, PriceModelSnapshot,
+        ProviderReceipt,
     },
     image_provider::{
         ensure_image_output_dir_ready, redact_image_provider_error_message, ImageGenerationOutput,
@@ -14,6 +16,7 @@ use crate::{
 #[derive(Debug, Deserialize)]
 pub struct ImageJobRequest {
     pub prompt: String,
+    pub operation_key: String,
     pub spend_auth_token_id: String,
     pub agent_id: Option<String>,
     pub account_id: Option<String>,
@@ -30,8 +33,7 @@ pub struct ImageJobResponse {
     pub provider: String,
     pub model: String,
     pub output_ref: String,
-    pub spend_auth_token_id: String,
-    pub validation: ExecutorSpendResponse,
+    pub claim: ExecutorSpendClaimResponse,
     pub settlement: ExecutorSpendSettlementResponse,
 }
 
@@ -87,23 +89,28 @@ pub fn create_image_job(
     request.validate(config)?;
     let (provider, model) = config.resolve(request.provider.clone(), request.model.clone())?;
     let spend_request = request.spend_request();
-    let validation = hubu
-        .validate(&spend_request)
-        .context("validate Hubu spend authorization")?;
+    let claim = hubu
+        .claim(&ExecutorSpendClaimRequest {
+            operation_key: request.operation_key.clone(),
+            spend: spend_request,
+        })
+        .context("claim Hubu spend authorization")?;
 
     let adapter = match config.adapter() {
         Ok(adapter) => adapter,
         Err(error) => {
-            release_after_pre_work_failure(hubu, &spend_request)?;
+            release_after_pre_work_failure(hubu, &claim)?;
             let failure = redact_image_provider_error_message(&error.to_string(), config);
             return Err(anyhow!("image provider configuration invalid: {failure}"));
         }
     };
 
-    let artifact_id = safe_artifact_id(&validation.spend_auth_token_id);
+    // The platform operation key is safe to reuse across retries. The
+    // authorization token is deliberately excluded from artifact names.
+    let artifact_id = safe_artifact_id(&request.operation_key);
     if config.adapter_kind.writes_local_artifact() {
         if let Err(error) = ensure_image_output_dir_ready(&config.output_dir, &artifact_id) {
-            release_after_pre_work_failure(hubu, &spend_request)?;
+            release_after_pre_work_failure(hubu, &claim)?;
             let failure = redact_image_provider_error_message(&error.to_string(), config);
             return Err(anyhow!("image provider generation failed: {failure}"));
         }
@@ -117,22 +124,39 @@ pub fn create_image_job(
     }) {
         Ok(output) => output,
         Err(error) => {
-            release_after_pre_work_failure(hubu, &spend_request)?;
+            release_after_pre_work_failure(hubu, &claim)?;
             let failure = redact_image_provider_error_message(&error.to_string(), config);
             return Err(anyhow!("image provider generation failed: {failure}"));
         }
     };
 
     let settlement = hubu
-        .settle(&spend_request)
+        .settle(
+            &ExecutorSpendFinalizationRequest {
+                agent_id: claim.spend.agent_id.clone(),
+                operation_key: request.operation_key,
+                receipt: Some(ProviderReceipt {
+                    actual_vendor_cost_cents: request.amount_cents,
+                    provider_request_id: format!("gongbu:{artifact_id}"),
+                    price_model_snapshot: PriceModelSnapshot {
+                        provider: provider.clone(),
+                        model: model.clone(),
+                        unit_price_cents: request.amount_cents,
+                        pricing_unit: "image".to_string(),
+                        currency: "usd".to_string(),
+                    },
+                    artifact_reference: output.output_ref.clone(),
+                }),
+            },
+            &claim.claim_id,
+        )
         .context("settle Hubu spend authorization after image artifact write")?;
     Ok(ImageJobResponse {
         job_id: format!("img-{artifact_id}"),
         provider,
         model,
         output_ref: output.output_ref,
-        spend_auth_token_id: validation.spend_auth_token_id.clone(),
-        validation,
+        claim,
         settlement,
     })
 }
@@ -152,6 +176,9 @@ impl ImageJobRequest {
         }
         if self.spend_auth_token_id.trim().is_empty() {
             return Err(anyhow!("spend_auth_token_id is required"));
+        }
+        if self.operation_key.trim().is_empty() {
+            return Err(anyhow!("operation_key is required"));
         }
         if self.amount_cents != config.price_cents {
             return Err(anyhow!(
@@ -178,9 +205,19 @@ impl ImageJobRequest {
     }
 }
 
-fn release_after_pre_work_failure(hubu: &HubuClient, request: &ExecutorSpendRequest) -> Result<()> {
-    hubu.release(request)
-        .context("release Hubu spend authorization after pre-work failure")?;
+fn release_after_pre_work_failure(
+    hubu: &HubuClient,
+    claim: &ExecutorSpendClaimResponse,
+) -> Result<()> {
+    hubu.release(
+        &ExecutorSpendFinalizationRequest {
+            agent_id: claim.spend.agent_id.clone(),
+            operation_key: claim.operation_key.clone(),
+            receipt: None,
+        },
+        &claim.claim_id,
+    )
+    .context("release Hubu spend authorization after pre-work failure")?;
     Ok(())
 }
 

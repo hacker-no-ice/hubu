@@ -22,7 +22,7 @@ Gongbu is responsible for:
 
 - storing execution secrets server-side
 - accepting work requests from agents
-- validating Hubu spend authorization before irreversible work
+- exclusively claiming Hubu spend authorization before irreversible work
 - calling model or image vendors
 - writing or storing artifacts
 - settling Hubu spend after successful billable work
@@ -41,6 +41,11 @@ Gongbu currently exposes:
 Image jobs support a local mock provider and a Gemini `generateContent` adapter.
 Remote provider endpoints must use HTTPS. Plain HTTP is accepted only for
 loopback test endpoints.
+
+Each work request carries the platform-provided `operation_key` and one Hubu v4
+authorization reference. Gongbu reuses that key for claim, settlement or
+release, and every retry. Authorization tokens are not used in artifact names
+or returned as artifact metadata.
 
 ## Secret Handling
 
