@@ -22,10 +22,10 @@ These belong in Hubu because they define generic spend control-plane behavior:
   - This remains the normative contract for one authorized provider call.
 
 - `docs/multi-spend-mandate-protocol.md`
-  - Carry forward: the provisional `hubu-spend-executor-v5-draft` mandate and
-    child-attempt contract.
-  - Gongbu and Hubu can implement the documented MVP interoperability profile
-    in parallel while v4 remains available.
+  - Retain as deferred design research only.
+  - Hubu and Gongbu will not implement v5 for the current dogfood phase.
+    Multi-provider work uses one independent v4 spend operation per potentially
+    billable invocation.
 
 ## Carry Forward To Gongbu
 

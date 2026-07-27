@@ -1,8 +1,26 @@
 # Multi-Spend Mandate Protocol
 
-Status: **draft for parallel Hubu and Gongbu implementation**
+Status: **deferred; not planned for the current implementation**
 
 Provisional protocol version: `hubu-spend-executor-v5-draft`
+
+## Implementation Decision
+
+Hubu and Gongbu will not implement this draft for the current dogfood phase.
+The normative integration remains
+[`hubu-spend-executor-v4`](spend-executor-contract.md): one spend authorization
+funds exactly one potentially billable provider invocation.
+
+When an agent task needs several model or provider calls, the agent platform
+issues several independent v4 spend requests. Each request has its own stable
+`operation_key`, immutable invocation scope, maximum cost, claim lease, and
+settlement or release. A shared task identifier may correlate those operations
+for audit and presentation, but it does not create a task-level allocation or
+hard aggregate cap.
+
+This draft is retained as design research for a future requirement to authorize
+multiple charges under one strict shared ceiling. Its routes, records,
+capabilities, and accounting model are not current implementation targets.
 
 This protocol extends the single-spend executor contract with one task-scoped
 authorization that can fund several separately reserved and settled provider
@@ -16,10 +34,8 @@ mandate
 ```
 
 The existing [`hubu-spend-executor-v4`](spend-executor-contract.md) contract
-remains normative for single-spend execution. This document is a compatibility
-target for Hubu and Gongbu development; names and routes may change before v5
-becomes stable, but the accounting and idempotency invariants are intended to
-remain stable.
+remains normative for all current executor spend. The material below describes
+the deferred design and may change if mandate work resumes.
 
 ## Goals
 
