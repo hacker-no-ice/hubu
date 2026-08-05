@@ -1,11 +1,11 @@
 //! Gongbu-owned artifact normalization and storage.
 use crate::persistence::{Artifact, CreateArtifactParams, Repository};
-use image::{GenericImageView, ImageFormat};
+use image::ImageFormat;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Cursor, Write},
     path::{Component, Path, PathBuf},
 };
 use thiserror::Error;
@@ -180,16 +180,26 @@ impl ArtifactService {
         if image::guess_format(bytes).ok() != Some(format) {
             return Err(Error::MediaTypeMismatch);
         }
-        let decoded =
-            image::load_from_memory_with_format(bytes, format).map_err(|_| Error::InvalidImage)?;
-        let (width, height) = decoded.dimensions();
+        let (width, height) = image::io::Reader::with_format(Cursor::new(bytes), format)
+            .into_dimensions()
+            .map_err(|_| Error::InvalidImage)?;
         if width > self.limits.max_width || height > self.limits.max_height {
             return Err(Error::Limit("dimensions"));
         }
-        let decoded_size = decoded.to_rgba8().len() as u64;
+        let decoded_size = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(Error::Limit("decoded size"))?;
         if decoded_size > self.limits.max_decoded_bytes {
             return Err(Error::Limit("decoded size"));
         }
+        let mut decoder = image::io::Reader::with_format(Cursor::new(bytes), format);
+        let mut decoder_limits = image::io::Limits::default();
+        decoder_limits.max_image_width = Some(self.limits.max_width);
+        decoder_limits.max_image_height = Some(self.limits.max_height);
+        decoder_limits.max_alloc = Some(self.limits.max_decoded_bytes);
+        decoder.limits(decoder_limits);
+        decoder.decode().map_err(|_| Error::InvalidImage)?;
 
         let artifact_id = Uuid::new_v4().to_string();
         let storage_key = format!("executions/{execution_id}/{artifact_id}.{extension}");
@@ -486,6 +496,34 @@ mod tests {
             Err(Error::Limit("artifact count"))
         ));
         assert!(!directory.path().join("executions").exists());
+    }
+
+    #[test]
+    fn rejects_decoded_size_from_headers_before_full_decode() {
+        let directory = tempdir().unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let execution_id = execution(&repository, "owner", "header-limit");
+        let mut corrupt = png(4, 4);
+        let idat = corrupt
+            .windows(4)
+            .position(|window| window == b"IDAT")
+            .unwrap();
+        corrupt[idat + 4] ^= 0xff;
+        let limits = ArtifactLimits {
+            max_decoded_bytes: 63,
+            ..ArtifactLimits::default()
+        };
+        let result = service(directory.path(), repository, limits).store_image(
+            &execution_id,
+            None,
+            "image/png",
+            &corrupt,
+            "now",
+        );
+        assert!(
+            matches!(result, Err(Error::Limit("decoded size"))),
+            "unexpected result: {result:?}"
+        );
     }
 
     #[test]
