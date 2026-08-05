@@ -29,8 +29,9 @@ pub struct HubuTokenReference(String);
 impl HubuTokenReference {
     pub fn new(v: impl Into<String>) -> Result<Self> {
         let v = v.into();
+        let v = v.trim();
         let l = v.to_ascii_lowercase();
-        if v.trim().is_empty()
+        if v.is_empty()
             || v.len() > 255
             || l.starts_with("bearer ")
             || l.starts_with("eyj")
@@ -38,7 +39,7 @@ impl HubuTokenReference {
         {
             Err(Error::Invalid("raw Hubu token"))
         } else {
-            Ok(Self(v))
+            Ok(Self(v.to_owned()))
         }
     }
 }
@@ -342,16 +343,23 @@ impl Repository {
             )
             .optional()?
             .ok_or(Error::NotFound)?;
-        let attempt_execution: String = c
+        let (attempt_execution, attempt_outcome, attempt_completed_at): (
+            String,
+            String,
+            Option<String>,
+        ) = c
             .query_row(
-                "SELECT execution_id FROM provider_attempts WHERE provider_attempt_id=?1",
+                "SELECT execution_id,outcome,completed_at FROM provider_attempts WHERE provider_attempt_id=?1",
                 [&n.provider_attempt_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?
             .ok_or(Error::NotFound)?;
         if attempt_execution != n.execution_id {
             return Err(Error::Invalid("receipt attempt relationship"));
+        }
+        if attempt_outcome != "succeeded" || attempt_completed_at.is_none() {
+            return Err(Error::Invalid("receipt requires a succeeded attempt"));
         }
         if n.settlement_minor > auth.0 || n.currency != auth.1 {
             return Err(Error::OverAuthorization);
@@ -538,6 +546,22 @@ mod tests {
         .unwrap()
         .provider_attempt_id
     }
+    fn complete_success(repo: &Repository, attempt_id: &str) {
+        repo.complete_provider_attempt(
+            attempt_id,
+            &AttemptResult {
+                outcome: "succeeded".into(),
+                completed_at: "2026-08-05T20:02:00Z".into(),
+                usage: json!({"images":1}),
+                usage_schema_version: 1,
+                provider_amount_minor: Some(50),
+                provider_currency: Some("USD".into()),
+                failure_code: None,
+                failure_message_redacted: None,
+            },
+        )
+        .unwrap();
+    }
     #[test]
     fn scoped_idempotency_and_immutable_snapshots() {
         let r = Repository::in_memory().unwrap();
@@ -639,6 +663,7 @@ mod tests {
         assert_eq!(r.count("artifacts"), 0);
         let e = r.create_execution(&new("a", "restrict")).unwrap();
         let a = attempt(&r, &e);
+        complete_success(&r, &a);
         r.create_receipt(&CreateReceiptParams {
             receipt_id: "r".into(),
             execution_id: e.execution_id.clone(),
@@ -723,6 +748,7 @@ mod tests {
             artifact.provider_attempt_id,
             Some(attempt.provider_attempt_id.clone())
         );
+        complete_success(&r, &attempt.provider_attempt_id);
         let receipt = r
             .create_receipt(&CreateReceiptParams {
                 receipt_id: "receipt-model".into(),
@@ -740,14 +766,56 @@ mod tests {
         assert_eq!(receipt.settlement_minor, 100);
     }
     #[test]
+    fn receipt_requires_a_successfully_completed_attempt() {
+        let r = Repository::in_memory().unwrap();
+        let execution = r.create_execution(&new("a", "billable-only")).unwrap();
+        let started = attempt(&r, &execution);
+        let receipt_for = |attempt_id: String| CreateReceiptParams {
+            receipt_id: format!("receipt-{attempt_id}"),
+            execution_id: execution.execution_id.clone(),
+            provider_attempt_id: attempt_id,
+            settlement_minor: 100,
+            currency: "USD".into(),
+            pricing_catalog_version: "prices-v1".into(),
+            created_at: "2026-08-05T20:03:00Z".into(),
+            settled_at: None,
+            hubu_settlement_id: None,
+        };
+        assert!(matches!(
+            r.create_receipt(&receipt_for(started)),
+            Err(Error::Invalid("receipt requires a succeeded attempt"))
+        ));
+        let failed = attempt(&r, &execution);
+        r.complete_provider_attempt(
+            &failed,
+            &AttemptResult {
+                outcome: "failed".into(),
+                completed_at: "2026-08-05T20:02:00Z".into(),
+                usage: json!({}),
+                usage_schema_version: 1,
+                provider_amount_minor: None,
+                provider_currency: None,
+                failure_code: Some("provider_error".into()),
+                failure_message_redacted: Some("provider request failed".into()),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            r.create_receipt(&receipt_for(failed)),
+            Err(Error::Invalid("receipt requires a succeeded attempt"))
+        ));
+    }
+    #[test]
     fn secrets_and_authorization_are_guarded() {
         assert!(HubuTokenReference::new("eyJhbGciOi.x.y").is_err());
+        assert!(HubuTokenReference::new("  Bearer opaque-token").is_err());
         let r = Repository::in_memory().unwrap();
         let mut bad = new("a", "bad");
         bad.normalized_input = json!({"api_key":"oops"});
         assert!(r.create_execution(&bad).is_err());
         let e = r.create_execution(&new("a", "ok")).unwrap();
         let a = attempt(&r, &e);
+        complete_success(&r, &a);
         let receipt = CreateReceiptParams {
             receipt_id: "r".into(),
             execution_id: e.execution_id,
