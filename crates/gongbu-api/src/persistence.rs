@@ -305,7 +305,11 @@ impl Repository {
         max_per_execution: u64,
     ) -> Result<Artifact> {
         safe_json(&n.metadata)?;
-        if n.artifact_id.trim().is_empty()
+        if n.artifact_id.is_empty()
+            || !n
+                .artifact_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
             || n.storage_backend != "local_fs"
             || n.size_bytes < 0
             || n.metadata_schema_version < 1
@@ -802,6 +806,32 @@ mod tests {
             "op"
         );
         std::fs::remove_file(path).unwrap()
+    }
+    #[test]
+    fn artifact_repository_rejects_traversing_ids_and_keys() {
+        let repository = Repository::in_memory().unwrap();
+        let execution = repository
+            .create_execution(&new("account", "traversal"))
+            .unwrap();
+        let params = CreateArtifactParams {
+            artifact_id: "../escape".into(),
+            execution_id: execution.execution_id.clone(),
+            provider_attempt_id: None,
+            kind: "image".into(),
+            storage_backend: "local_fs".into(),
+            media_type: "image/png".into(),
+            storage_key: format!("executions/{}/../escape.png", execution.execution_id),
+            size_bytes: 1,
+            sha256: "a".repeat(64),
+            metadata: json!({}),
+            metadata_schema_version: 1,
+            created_at: "2026-08-05T20:02:00Z".into(),
+        };
+        assert!(matches!(
+            repository.create_artifact(&params),
+            Err(Error::Invalid("artifact"))
+        ));
+        assert_eq!(repository.count("artifacts"), 0);
     }
     #[test]
     fn cascade_without_receipt_and_restrict_with_receipt() {
