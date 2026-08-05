@@ -11,10 +11,16 @@ use crate::{
         ensure_image_output_dir_ready, redact_image_provider_error_message, ImageGenerationOutput,
         ImageGenerationRequest, ImageProviderConfig,
     },
+    provider_targets::ProviderTargetConfig,
 };
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImageJobRequest {
+    pub workload_type: String,
+    pub provider: String,
+    pub adapter: String,
+    pub model: String,
     pub prompt: String,
     pub operation_key: String,
     pub spend_auth_token_id: String,
@@ -23,8 +29,6 @@ pub struct ImageJobRequest {
     pub amount_cents: i64,
     pub merchant: String,
     pub task_id: Option<String>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -32,6 +36,8 @@ pub struct ImageJobResponse {
     pub job_id: String,
     pub provider: String,
     pub model: String,
+    pub adapter: String,
+    pub provider_config_version: String,
     pub output_ref: String,
     pub claim: ExecutorSpendClaimResponse,
     pub settlement: ExecutorSpendSettlementResponse,
@@ -85,9 +91,31 @@ pub fn create_image_job(
     request: ImageJobRequest,
     hubu: &HubuClient,
     config: &ImageProviderConfig,
+    targets: &ProviderTargetConfig,
 ) -> Result<ImageJobResponse> {
     request.validate(config)?;
-    let (provider, model) = config.resolve(request.provider.clone(), request.model.clone())?;
+    let resolved = targets.resolve(
+        &request.workload_type,
+        &request.provider,
+        &request.adapter,
+        &request.model,
+    )?;
+    if request.provider != config.provider
+        || request.adapter != config.adapter_kind.label()
+        || request.model != config.model
+    {
+        return Err(anyhow!(
+            "requested provider target is not available in this Gongbu process"
+        ));
+    }
+    config.adapter().map_err(|error| {
+        let failure = redact_image_provider_error_message(&error.to_string(), config);
+        anyhow!("image provider configuration invalid: {failure}")
+    })?;
+    let provider = request.provider.clone();
+    let model = request.model.clone();
+    let adapter_name = request.adapter.clone();
+    let provider_config_version = resolved.provider_config_version.clone();
     let spend_request = request.spend_request();
     let claim = hubu
         .claim(&ExecutorSpendClaimRequest {
@@ -156,6 +184,8 @@ pub fn create_image_job(
         job_id: format!("img-{artifact_id}"),
         provider,
         model,
+        adapter: adapter_name,
+        provider_config_version,
         output_ref: output.output_ref,
         claim,
         settlement,
@@ -254,7 +284,7 @@ fn artifact_id_from_operation_key(operation_key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::artifact_id_from_operation_key;
+    use super::{artifact_id_from_operation_key, ImageJobRequest};
 
     #[test]
     fn artifact_ids_preserve_operation_key_uniqueness() {
@@ -268,5 +298,15 @@ mod tests {
             artifact_id_from_operation_key("模型:一"),
             artifact_id_from_operation_key("模型:一")
         );
+    }
+
+    #[test]
+    fn caller_cannot_supply_operator_controlled_provider_fields() {
+        let error = serde_json::from_str::<ImageJobRequest>(r#"{
+          "workload_type":"image_generation","provider":"vendor","adapter":"http-json","model":"image-v1",
+          "prompt":"logo","operation_key":"op","spend_auth_token_id":"ref","agent_id":"agent",
+          "amount_cents":1,"merchant":"gongbu.image","endpoint":"https://attacker.example","headers":{"x":"y"}
+        }"#).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
     }
 }

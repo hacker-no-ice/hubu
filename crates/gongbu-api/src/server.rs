@@ -75,6 +75,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
                 request,
                 &state.hubu,
                 &state.config.image_provider,
+                &state.config.provider_targets,
             )?)
         })(),
         _ => return HttpResponse::not_found(&request.method, &request.path),
@@ -95,6 +96,7 @@ fn health(state: &ServerState) -> Value {
         "image_provider": state.config.image_provider.provider,
         "image_model": state.config.image_provider.model,
         "image_provider_ready": state.config.image_provider.readiness().ready,
+        "provider_config_versions": state.config.provider_targets.provider_configs.iter().filter(|target| target.enabled).map(|target| &target.provider_config_version).collect::<Vec<_>>(),
     })
 }
 
@@ -257,6 +259,7 @@ mod tests {
     use crate::image_provider::{
         HttpJsonImageProviderFields, ImageProviderAdapterKind, ImageProviderConfig,
     };
+    use crate::provider_targets::{ProviderConfigVersion, ProviderTargetConfig};
 
     #[test]
     fn health_reports_contract_and_hubu_url() {
@@ -264,6 +267,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             hubu_base_url: "http://127.0.0.1:8787".to_string(),
             image_provider: mock_provider_config(std::env::temp_dir()),
+            provider_targets: test_targets(),
         });
         let response = route(
             HttpRequest {
@@ -298,6 +302,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             hubu_base_url: fake.base_url.clone(),
             image_provider: mock_provider_config(std::env::temp_dir()),
+            provider_targets: test_targets(),
         });
 
         let response = route(
@@ -328,6 +333,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             hubu_base_url: fake.base_url.clone(),
             image_provider: mock_provider_config(std::env::temp_dir()),
+            provider_targets: test_targets(),
         });
 
         let response = route(
@@ -354,6 +360,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             hubu_base_url: "http://127.0.0.1:1".to_string(),
             image_provider: mock_provider_config(std::env::temp_dir()),
+            provider_targets: test_targets(),
         });
 
         let response = route(
@@ -387,6 +394,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             hubu_base_url: "http://127.0.0.1:8787".to_string(),
             image_provider: mock_provider_config(std::env::temp_dir()),
+            provider_targets: test_targets(),
         });
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept request");
@@ -430,6 +438,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             hubu_base_url: fake.base_url.clone(),
             image_provider: mock_provider_config(output_dir.clone()),
+            provider_targets: test_targets(),
         });
 
         let response = route(
@@ -458,6 +467,31 @@ mod tests {
             .contains("Create a crisp logo for Project Hubu"));
         std::fs::remove_file(output_path).ok();
         std::fs::remove_dir(output_dir).ok();
+    }
+
+    #[test]
+    fn unknown_target_fails_before_hubu_claim() {
+        let fake = FakeHubu::start(vec![]);
+        let state = ServerState::new(Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            hubu_base_url: fake.base_url.clone(),
+            image_provider: mock_provider_config(std::env::temp_dir()),
+            provider_targets: test_targets(),
+        });
+        let response = route(
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/image-jobs".to_string(),
+                body: image_job_body("unknown-provider", "mock-image-v1"),
+            },
+            &state,
+        );
+        assert_eq!(response.status, 400);
+        assert!(response.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("not configured"));
+        assert!(fake.paths().is_empty());
     }
 
     #[test]
@@ -492,6 +526,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             hubu_base_url: fake_hubu.base_url.clone(),
             image_provider: gemini_provider_config(provider.endpoint.clone(), output_dir.clone()),
+            provider_targets: test_targets(),
         });
 
         let response = route(
@@ -548,6 +583,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             hubu_base_url: fake_hubu.base_url.clone(),
             image_provider: gemini_provider_config(provider.endpoint.clone(), blocker.clone()),
+            provider_targets: test_targets(),
         });
 
         let response = route(
@@ -586,6 +622,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             hubu_base_url: fake_hubu.base_url.clone(),
             image_provider: mock_provider_config(output_dir.clone()),
+            provider_targets: test_targets(),
         });
 
         let response = route(
@@ -620,7 +657,13 @@ mod tests {
     }
 
     fn image_job_body(provider: &str, model: &str) -> String {
+        let adapter = if provider == "local-mock" {
+            "mock"
+        } else {
+            "gemini-generate-content"
+        };
         json!({
+            "workload_type": "image_generation",
             "operation_key": "codex:tool-call:test-1",
             "spend_auth_token_id": "token-1",
             "agent_id": "agt_example",
@@ -629,9 +672,33 @@ mod tests {
             "task_id": "hubu-logo-demo",
             "prompt": "Create a crisp logo for Project Hubu",
             "provider": provider,
+            "adapter": adapter,
             "model": model,
         })
         .to_string()
+    }
+
+    fn test_targets() -> ProviderTargetConfig {
+        ProviderTargetConfig {
+            provider_configs: vec![
+                ProviderConfigVersion {
+                    provider_config_version: "mock-v1".into(),
+                    workload_type: "image_generation".into(),
+                    provider: "local-mock".into(),
+                    adapter: "mock".into(),
+                    model: "mock-image-v1".into(),
+                    enabled: true,
+                },
+                ProviderConfigVersion {
+                    provider_config_version: "gemini-v1".into(),
+                    workload_type: "image_generation".into(),
+                    provider: "google-gemini".into(),
+                    adapter: "gemini-generate-content".into(),
+                    model: "gemini-2.5-flash-image".into(),
+                    enabled: true,
+                },
+            ],
+        }
     }
 
     fn mock_provider_config(output_dir: std::path::PathBuf) -> ImageProviderConfig {
