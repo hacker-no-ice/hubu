@@ -94,6 +94,11 @@ pub fn create_image_job(
     targets: &ProviderTargetConfig,
 ) -> Result<ImageJobResponse> {
     request.validate(config)?;
+    if request.workload_type != "image_generation" {
+        return Err(anyhow!(
+            "image jobs require workload_type 'image_generation'"
+        ));
+    }
     let resolved = targets.resolve(
         &request.workload_type,
         &request.provider,

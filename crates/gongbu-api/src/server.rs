@@ -495,6 +495,43 @@ mod tests {
     }
 
     #[test]
+    fn non_image_workload_fails_before_hubu_claim() {
+        let fake = FakeHubu::start(vec![]);
+        let mut targets = test_targets();
+        targets.provider_configs.push(ProviderConfigVersion {
+            provider_config_version: "audio-v1".into(),
+            workload_type: "audio_generation".into(),
+            provider: "local-mock".into(),
+            adapter: "mock".into(),
+            model: "mock-image-v1".into(),
+            enabled: true,
+        });
+        let state = ServerState::new(Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            hubu_base_url: fake.base_url.clone(),
+            image_provider: mock_provider_config(std::env::temp_dir()),
+            provider_targets: targets,
+        });
+        let mut body: Value =
+            serde_json::from_str(&image_job_body("local-mock", "mock-image-v1")).unwrap();
+        body["workload_type"] = json!("audio_generation");
+        let response = route(
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/image-jobs".to_string(),
+                body: body.to_string(),
+            },
+            &state,
+        );
+        assert_eq!(response.status, 400);
+        assert!(response.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("image_generation"));
+        assert!(fake.paths().is_empty());
+    }
+
+    #[test]
     fn image_job_with_gemini_provider_keeps_api_key_server_side_and_settles() {
         let provider = FakeProvider::start(json!({
             "candidates": [{
