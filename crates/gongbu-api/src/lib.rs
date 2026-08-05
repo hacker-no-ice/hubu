@@ -2,6 +2,7 @@ mod config;
 mod hubu;
 mod image_jobs;
 mod image_provider;
+pub mod persistence;
 mod secrets;
 mod server;
 mod simple_http;
