@@ -688,9 +688,9 @@ mod tests {
             target: "mock/image".into(),
             config_version: "cfg-v1".into(),
             workload_type: "image_generation".into(),
-            provider: "local-mock".into(),
+            provider: "example".into(),
             adapter: "mock".into(),
-            model: "mock-image-v1".into(),
+            model: "image-v1".into(),
             provider_config_version: "pcv-1".into(),
             pricing_snapshot: json!({"minor_per_image":100}),
             pricing_schema_version: 1,
@@ -729,9 +729,9 @@ mod tests {
         let r = Repository::in_memory().unwrap();
         let a = r.create_execution(&new("a", "same")).unwrap();
         assert_eq!(a.workload_type, "image_generation");
-        assert_eq!(a.provider, "local-mock");
+        assert_eq!(a.provider, "example");
         assert_eq!(a.adapter, "mock");
-        assert_eq!(a.model, "mock-image-v1");
+        assert_eq!(a.model, "image-v1");
         assert_eq!(a.provider_config_version, "pcv-1");
         let mut changed = new("a", "same");
         changed.normalized_input = json!({"prompt":"changed"});

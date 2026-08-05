@@ -45,11 +45,11 @@ never chooses, orders, optimizes, or falls back between targets.
 ```json
 {
   "provider_configs": [{
-    "provider_config_version": "local-mock-2026-08-05",
+    "provider_config_version": "example-image-2026-08-05",
     "workload_type": "image_generation",
-    "provider": "local-mock",
-    "adapter": "mock",
-    "model": "mock-image-v1",
+    "provider": "example",
+    "adapter": "fixture",
+    "model": "image-v1",
     "enabled": true
   }]
 }
