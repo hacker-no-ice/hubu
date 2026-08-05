@@ -65,6 +65,30 @@ receives provider keys.
 
 ## Local Development
 
+Set `GONGBU_PROVIDER_CONFIG` to an operator-owned JSON file. It is loaded and
+validated once at startup, so changing a target requires a restart. Callers
+must request one exact `workload_type + provider + adapter + model`; Gongbu
+never chooses, orders, optimizes, or falls back between targets.
+
+```json
+{
+  "provider_configs": [{
+    "provider_config_version": "local-mock-2026-08-05",
+    "workload_type": "image_generation",
+    "provider": "local-mock",
+    "adapter": "mock",
+    "model": "mock-image-v1",
+    "enabled": true
+  }]
+}
+```
+
+The immutable version and resolved selector are stored on each `Execution`.
+Duplicate selectors or versions, unknown fields, an unavailable adapter, and a
+missing provider secret fail closed. Endpoints, credentials, headers, account
+identifiers, timeouts, and retry settings remain process/operator configuration
+and are not accepted in image-job request JSON.
+
 ```sh
 cargo run --bin gongbu-server
 ```
