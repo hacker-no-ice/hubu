@@ -271,7 +271,6 @@ name = "gongbu-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64",
  "image",
  "rusqlite",
  "serde",
