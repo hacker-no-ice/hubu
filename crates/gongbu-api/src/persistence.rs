@@ -212,6 +212,7 @@ impl Repository {
         c.pragma_update(None, "foreign_keys", "ON")?;
         c.pragma_update(None, "busy_timeout", 5000)?;
         c.execute_batch(MIGRATION)?;
+        migrate_artifact_storage_columns(&c)?;
         migrate_resolved_target_columns(&c)?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
@@ -502,6 +503,31 @@ impl Repository {
             .unwrap()
             .execute("DELETE FROM executions WHERE execution_id=?1", [id])
     }
+}
+fn migrate_artifact_storage_columns(c: &Connection) -> rusqlite::Result<()> {
+    let artifact_columns = || -> rusqlite::Result<std::collections::BTreeSet<String>> {
+        let mut statement = c.prepare("PRAGMA table_info(artifacts)")?;
+        let columns = statement
+            .query_map([], |row| row.get(1))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(columns)
+    };
+
+    let mut existing = artifact_columns()?;
+    if !existing.contains("storage_backend") {
+        c.execute(
+            "ALTER TABLE artifacts ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'local_fs'",
+            [],
+        )?;
+        existing.insert("storage_backend".to_string());
+    }
+    if existing.contains("byte_size") && !existing.contains("size_bytes") {
+        c.execute(
+            "ALTER TABLE artifacts RENAME COLUMN byte_size TO size_bytes",
+            [],
+        )?;
+    }
+    Ok(())
 }
 fn migrate_resolved_target_columns(c: &Connection) -> rusqlite::Result<()> {
     let mut statement = c.prepare("PRAGMA table_info(executions)")?;
@@ -806,6 +832,40 @@ mod tests {
             "op"
         );
         std::fs::remove_file(path).unwrap()
+    }
+
+    #[test]
+    fn opening_current_main_schema_migrates_and_preserves_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite3");
+        let legacy_migration = MIGRATION
+            .replace(
+                "kind TEXT NOT NULL, storage_backend TEXT NOT NULL, media_type TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, size_bytes INTEGER",
+                "kind TEXT NOT NULL, media_type TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, byte_size INTEGER",
+            )
+            .replace("CHECK(size_bytes>=0)", "CHECK(byte_size>=0)");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(&legacy_migration).unwrap();
+        connection.execute(
+            "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at) VALUES('execution-1','account-1','operation-1','auth-1','token-ref',500,'USD','{}','hash',1,'example/image-v1','config-1','{}',1,'pending','now','now')",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO artifacts(artifact_id,execution_id,kind,media_type,storage_key,byte_size,sha256,metadata_json,metadata_schema_version,created_at) VALUES('artifact-1','execution-1','image','image/png','executions/execution-1/artifact-1.png',3,'hash','{}',1,'now')",
+            [],
+        ).unwrap();
+        drop(connection);
+
+        let repository = Repository::open(&path).unwrap();
+        let artifact = repository
+            .get_artifact_for_account("artifact-1", "account-1")
+            .unwrap();
+        assert_eq!(artifact.storage_backend, "local_fs");
+        assert_eq!(artifact.size_bytes, 3);
+        assert_eq!(
+            artifact.storage_key,
+            "executions/execution-1/artifact-1.png"
+        );
     }
     #[test]
     fn artifact_repository_rejects_traversing_ids_and_keys() {
