@@ -61,6 +61,27 @@ missing provider secret fail closed. Endpoints, credentials, headers, account
 identifiers, timeouts, and retry settings remain operator configuration and are
 not accepted from callers.
 
+## Versioned pricing contract
+
+`PricingCatalog` loads an operator-managed JSON catalog, validates and
+canonicalizes its rules, computes a SHA-256 digest, and freezes the result in
+memory. A bundled mock catalog is available for local development; production
+startup code should load the operator path once and retain that catalog for the
+process lifetime.
+
+Each execution persists a typed pricing snapshot containing the provider and
+model, catalog version and digest, rule ID, unit amount, bounded quantity,
+conservative estimate, and currency. Persistence rejects malformed snapshots,
+target mismatches, insufficient authorization, and receipts above either the
+authorization or frozen estimate.
+
+The provider boundary exposes normalized request, usage, outcome, capability,
+retry, redaction, and opaque idempotency-key contracts. Retries require an
+adapter-declared vendor idempotency guarantee. Provider-reported amounts remain
+evidence only; deterministic settlement uses normalized usage and the frozen
+snapshot. No routing, failover, quote resource, scheduled activation, or billing
+export is implemented here.
+
 ## Development
 
 ```sh

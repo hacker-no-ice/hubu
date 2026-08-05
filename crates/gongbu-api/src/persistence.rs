@@ -1,5 +1,6 @@
 //! SQLite persistence for the execution aggregate.
 //! Schema units and formats are documented in the migration.
+use crate::provider_contract::{PricingSnapshot, PRICING_SNAPSHOT_SCHEMA_VERSION};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::{
@@ -433,11 +434,11 @@ impl Repository {
             return Err(Error::Invalid("settlement"));
         }
         let c = self.0.lock().unwrap();
-        let auth: (i64, String) = c
+        let auth: (i64, String, String) = c
             .query_row(
-                "SELECT authorized_minor,authorization_currency FROM executions WHERE execution_id=?1",
+                "SELECT authorized_minor,authorization_currency,pricing_snapshot_json FROM executions WHERE execution_id=?1",
                 [&n.execution_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?
             .ok_or(Error::NotFound)?;
@@ -459,7 +460,16 @@ impl Repository {
         if attempt_outcome != "succeeded" || attempt_completed_at.is_none() {
             return Err(Error::Invalid("receipt requires a succeeded attempt"));
         }
-        if n.settlement_minor > auth.0 || n.currency != auth.1 {
+        let snapshot: PricingSnapshot =
+            serde_json::from_str(&auth.2).map_err(|_| Error::Invalid("pricing snapshot"))?;
+        snapshot
+            .validate_integrity()
+            .map_err(|_| Error::Invalid("pricing snapshot"))?;
+        if n.settlement_minor > auth.0
+            || n.settlement_minor > snapshot.estimated_amount_minor
+            || !n.currency.eq_ignore_ascii_case(&auth.1)
+            || !n.currency.eq_ignore_ascii_case(&snapshot.currency)
+        {
             return Err(Error::OverAuthorization);
         }
         c.execute(
@@ -647,7 +657,19 @@ fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
         return Err(Error::Invalid("execution"));
     }
     safe_json(&n.normalized_input)?;
-    safe_json(&n.pricing_snapshot)
+    safe_json(&n.pricing_snapshot)?;
+    if n.pricing_schema_version != PRICING_SNAPSHOT_SCHEMA_VERSION {
+        return Err(Error::Invalid("pricing schema version"));
+    }
+    let snapshot: PricingSnapshot = serde_json::from_value(n.pricing_snapshot.clone())
+        .map_err(|_| Error::Invalid("pricing snapshot"))?;
+    snapshot
+        .check_authorization(n.authorized_minor, &n.authorization_currency)
+        .map_err(|_| Error::Invalid("pricing snapshot authorization"))?;
+    if snapshot.provider != n.provider || snapshot.model != n.model {
+        return Err(Error::Invalid("pricing snapshot target"));
+    }
+    Ok(())
 }
 fn safe_json(v: &Value) -> Result<()> {
     const BAD: [&str; 7] = [
@@ -718,7 +740,13 @@ mod tests {
             adapter: "mock".into(),
             model: "image-v1".into(),
             provider_config_version: "pcv-1".into(),
-            pricing_snapshot: json!({"minor_per_image":100}),
+            pricing_snapshot: json!({
+                "provider":"example","model":"image-v1",
+                "catalog_version":"v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),
+                "pricing_rule_id":"example-image","unit":"image",
+                "unit_amount_minor":100,"quantity":1,
+                "estimated_amount_minor":100,"currency":"USD"
+            }),
             pricing_schema_version: 1,
             created_at: "2026-08-05T20:00:00Z".into(),
         }
@@ -761,7 +789,8 @@ mod tests {
         assert_eq!(a.provider_config_version, "pcv-1");
         let mut changed = new("a", "same");
         changed.normalized_input = json!({"prompt":"changed"});
-        changed.pricing_snapshot = json!({"minor_per_image":999});
+        changed.pricing_snapshot["unit_amount_minor"] = json!(499);
+        changed.pricing_snapshot["estimated_amount_minor"] = json!(499);
         let b = r.create_execution(&changed).unwrap();
         let c = r.create_execution(&new("b", "same")).unwrap();
         assert_eq!(a.execution_id, b.execution_id);
@@ -1075,17 +1104,22 @@ mod tests {
         let e = r.create_execution(&new("a", "ok")).unwrap();
         let a = attempt(&r, &e);
         complete_success(&r, &a);
-        let receipt = CreateReceiptParams {
+        let mut receipt = CreateReceiptParams {
             receipt_id: "r".into(),
             execution_id: e.execution_id,
             provider_attempt_id: a,
-            settlement_minor: 501,
+            settlement_minor: 101,
             currency: "USD".into(),
             pricing_catalog_version: "v1".into(),
             created_at: "2026-08-05T20:02:00Z".into(),
             settled_at: None,
             hubu_settlement_id: None,
         };
+        assert!(matches!(
+            r.create_receipt(&receipt),
+            Err(Error::OverAuthorization)
+        ));
+        receipt.settlement_minor = 501;
         assert!(matches!(
             r.create_receipt(&receipt),
             Err(Error::OverAuthorization)
