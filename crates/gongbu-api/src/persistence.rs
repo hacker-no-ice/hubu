@@ -575,6 +575,22 @@ mod tests {
         assert!(matches!(
             r.create_receipt(&receipt),
             Err(Error::OverAuthorization)
-        ))
+        ));
+        let other = r.create_execution(&new("b", "other")).unwrap();
+        let mismatched = NewReceipt {
+            receipt_id: "cross-aggregate".into(),
+            execution_id: other.execution_id,
+            provider_attempt_id: receipt.provider_attempt_id,
+            settlement_minor: 1,
+            currency: "USD".into(),
+            pricing_catalog_version: "v1".into(),
+            created_at: "2026-08-05T20:03:00Z".into(),
+            settled_at: None,
+            hubu_settlement_id: None,
+        };
+        assert!(matches!(
+            r.create_receipt(&mismatched),
+            Err(Error::Invalid("receipt attempt relationship"))
+        ));
     }
 }
