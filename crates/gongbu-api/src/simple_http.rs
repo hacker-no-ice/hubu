@@ -1,57 +1,14 @@
 use std::{
-    fmt,
     io::{Read, Write},
     net::{Shutdown, TcpStream},
     time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use thiserror::Error;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpRequest {
-    pub method: String,
-    pub path: String,
-    pub body: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct HttpResponse {
-    pub status: u16,
-    pub body: Value,
-}
-
-impl HttpResponse {
-    pub fn ok(body: Value) -> Self {
-        Self { status: 200, body }
-    }
-
-    pub fn bad_request(error: impl fmt::Display) -> Self {
-        Self {
-            status: 400,
-            body: json!({ "error": error.to_string() }),
-        }
-    }
-
-    pub fn not_found(method: &str, path: &str) -> Self {
-        Self {
-            status: 404,
-            body: json!({ "error": format!("no route for {method} {path}") }),
-        }
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum HttpParseError {
-    #[error("missing request line")]
-    MissingRequestLine,
-    #[error("invalid request line")]
-    InvalidRequestLine,
-}
 
 #[derive(Debug, Error)]
 pub enum HttpClientError {
@@ -65,74 +22,6 @@ pub enum HttpClientError {
     Json(#[from] serde_json::Error),
     #[error("server returned HTTP {status}: {body}")]
     Status { status: u16, body: String },
-}
-
-pub fn parse_request(raw: &str) -> Result<HttpRequest, HttpParseError> {
-    let (head, body) = split_head_and_body(raw);
-    let request_line = head
-        .lines()
-        .next()
-        .ok_or(HttpParseError::MissingRequestLine)?;
-    let mut parts = request_line.split_whitespace();
-    let method = parts
-        .next()
-        .ok_or(HttpParseError::InvalidRequestLine)?
-        .to_string();
-    let path = parts
-        .next()
-        .ok_or(HttpParseError::InvalidRequestLine)?
-        .to_string();
-    if parts.next().is_none() {
-        return Ok(HttpRequest {
-            method,
-            path,
-            body: body.to_string(),
-        });
-    }
-    Ok(HttpRequest {
-        method,
-        path,
-        body: body.to_string(),
-    })
-}
-
-pub fn read_request(stream: &mut impl Read) -> std::io::Result<String> {
-    let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 1024];
-    loop {
-        let read = stream.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buffer[..read]);
-        let Some(header_end) = find_header_end(&bytes) else {
-            continue;
-        };
-        let headers = String::from_utf8_lossy(&bytes[..header_end]);
-        let content_length = content_length(&headers).unwrap_or(0);
-        let body_start = header_end + 4;
-        while bytes.len() < body_start + content_length {
-            let read = stream.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&buffer[..read]);
-        }
-        break;
-    }
-    Ok(String::from_utf8_lossy(&bytes).to_string())
-}
-
-pub fn write_response(stream: &mut impl Write, response: &HttpResponse) -> std::io::Result<()> {
-    let body = response.body.to_string();
-    write!(
-        stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-        response.status,
-        reason_phrase(response.status),
-        body.len(),
-        body
-    )
 }
 
 pub fn post_json<T, R>(url: &str, body: &T) -> Result<R, HttpClientError>
@@ -197,21 +86,6 @@ where
     Ok(serde_json::from_str(response_body)?)
 }
 
-fn find_header_end(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-fn content_length(headers: &str) -> Option<usize> {
-    headers.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if name.eq_ignore_ascii_case("content-length") {
-            value.trim().parse::<usize>().ok()
-        } else {
-            None
-        }
-    })
-}
-
 fn split_head_and_body(raw: &str) -> (&str, &str) {
     raw.split_once("\r\n\r\n")
         .or_else(|| raw.split_once("\n\n"))
@@ -229,16 +103,6 @@ fn parse_response(raw: &str) -> Result<(u16, &str), HttpClientError> {
             url: "malformed HTTP response".to_string(),
         })?;
     Ok((status, body))
-}
-
-fn reason_phrase(status: u16) -> &'static str {
-    match status {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        500 => "Internal Server Error",
-        _ => "OK",
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -29,7 +29,7 @@ impl HubuClient {
         &self,
         request: &ExecutorSpendClaimRequest,
     ) -> Result<ExecutorSpendClaimResponse, HttpClientError> {
-        self.retry_ambiguous_post("/spend/executor/claim", request)
+        self.post_json("/spend/executor/claim", request)
     }
 
     pub fn inspect_claim(
@@ -47,17 +47,15 @@ impl HubuClient {
     pub fn settle(
         &self,
         request: &ExecutorSpendFinalizationRequest,
-        claim_id: &str,
     ) -> Result<ExecutorSpendSettlementResponse, HttpClientError> {
-        self.retry_ambiguous_finalization("/spend/executor/settle", request, claim_id)
+        self.post_json("/spend/executor/settle", request)
     }
 
     pub fn release(
         &self,
         request: &ExecutorSpendFinalizationRequest,
-        claim_id: &str,
     ) -> Result<ExecutorSpendClaimResponse, HttpClientError> {
-        self.retry_ambiguous_finalization("/spend/executor/release", request, claim_id)
+        self.post_json("/spend/executor/release", request)
     }
 
     fn post_json<T, R>(&self, path: &str, body: &T) -> Result<R, HttpClientError>
@@ -68,44 +66,6 @@ impl HubuClient {
         let url = format!("{}{}", self.base_url, path);
         simple_http::post_json(&url, body)
     }
-
-    fn retry_ambiguous_post<T, R>(&self, path: &str, body: &T) -> Result<R, HttpClientError>
-    where
-        T: Serialize,
-        R: for<'de> Deserialize<'de>,
-    {
-        match self.post_json(path, body) {
-            Err(error) if is_ambiguous(&error) => self.post_json(path, body),
-            result => result,
-        }
-    }
-
-    fn retry_ambiguous_finalization<R>(
-        &self,
-        path: &str,
-        request: &ExecutorSpendFinalizationRequest,
-        claim_id: &str,
-    ) -> Result<R, HttpClientError>
-    where
-        R: for<'de> Deserialize<'de>,
-    {
-        match self.post_json(path, request) {
-            Err(error) if is_ambiguous(&error) => {
-                // Hubu is authoritative. Inspect the durable claim before making
-                // the same idempotent finalization request again.
-                self.inspect_claim(claim_id)?;
-                self.post_json(path, request)
-            }
-            result => result,
-        }
-    }
-}
-
-fn is_ambiguous(error: &HttpClientError) -> bool {
-    matches!(
-        error,
-        HttpClientError::Io(_) | HttpClientError::Json(_) | HttpClientError::InvalidUrl { .. }
-    )
 }
 
 fn percent_encode_query(value: &str) -> String {
@@ -232,66 +192,44 @@ mod tests {
         thread,
     };
 
-    use serde_json::json;
-
     use super::*;
 
     #[test]
-    fn claim_retries_same_operation_after_ambiguous_response() {
-        let (client, paths) = fake_hubu(vec![None, Some(claim_response("claimed"))]);
-        let response = client.claim(&claim_request()).expect("claim retry");
-
-        assert_eq!(response.claim_id, "claim-1");
+    fn ambiguous_claim_is_returned_without_retry() {
+        let (client, paths) = fake_hubu(vec![None]);
+        client
+            .claim(&claim_request())
+            .expect_err("ambiguous claim must reach the durable workflow");
         assert_eq!(
             paths.lock().expect("paths").clone(),
-            vec!["/spend/executor/claim", "/spend/executor/claim"]
+            vec!["/spend/executor/claim"]
         );
     }
 
     #[test]
-    fn settlement_inspects_claim_before_idempotent_retry() {
-        let (client, paths) = fake_hubu(vec![
-            None,
-            Some(claim_response("claimed")),
-            Some(json!({
-                "operation_key": "platform:op-1",
-                "settlement_id": "settlement-1",
-                "claim_id": "claim-1",
-                "status": "settled",
-                "receipt": {},
-                "spend": spend_response("settled"),
-            })),
-        ]);
-        let response = client
-            .settle(
-                &ExecutorSpendFinalizationRequest {
-                    agent_id: "agt_example".to_string(),
-                    operation_key: "platform:op-1".to_string(),
-                    receipt: Some(ProviderReceipt {
-                        actual_vendor_cost_cents: 500,
-                        provider_request_id: "provider-1".to_string(),
-                        price_model_snapshot: PriceModelSnapshot {
-                            provider: "example".to_string(),
-                            model: "image-v1".to_string(),
-                            unit_price_cents: 500,
-                            pricing_unit: "image".to_string(),
-                            currency: "usd".to_string(),
-                        },
-                        artifact_reference: "artifact://image-1".to_string(),
-                    }),
-                },
-                "claim-1",
-            )
-            .expect("settlement recovery");
-
-        assert_eq!(response.settlement_id, "settlement-1");
+    fn ambiguous_settlement_is_returned_without_inspection_or_retry() {
+        let (client, paths) = fake_hubu(vec![None]);
+        client
+            .settle(&ExecutorSpendFinalizationRequest {
+                agent_id: "agt_example".to_string(),
+                operation_key: "platform:op-1".to_string(),
+                receipt: Some(ProviderReceipt {
+                    actual_vendor_cost_cents: 500,
+                    provider_request_id: "provider-1".to_string(),
+                    price_model_snapshot: PriceModelSnapshot {
+                        provider: "example".to_string(),
+                        model: "image-v1".to_string(),
+                        unit_price_cents: 500,
+                        pricing_unit: "image".to_string(),
+                        currency: "usd".to_string(),
+                    },
+                    artifact_reference: "artifact://image-1".to_string(),
+                }),
+            })
+            .expect_err("ambiguous settlement must reach the durable workflow");
         assert_eq!(
             paths.lock().expect("paths").clone(),
-            vec![
-                "/spend/executor/settle",
-                "/spend/executor/claim?claim_id=claim-1",
-                "/spend/executor/settle",
-            ]
+            vec!["/spend/executor/settle"]
         );
     }
 
@@ -307,45 +245,6 @@ mod tests {
                 task_id: Some("task-1".to_string()),
             },
         }
-    }
-
-    fn claim_response(status: &str) -> serde_json::Value {
-        json!({
-            "operation_key": "platform:op-1",
-            "claim_id": "claim-1",
-            "workload_profile": "image_generation",
-            "status": status,
-            "claimed_at": "2026-07-27T00:00:00Z",
-            "claim_expires_at": "2026-07-27T00:15:00Z",
-            "finalized_at": null,
-            "settlement_id": null,
-            "reconciliation_required": false,
-            "spend": spend_response(status),
-        })
-    }
-
-    fn spend_response(status: &str) -> serde_json::Value {
-        json!({
-            "operation_key": "platform:op-1",
-            "spend_auth_token_id": "token-1",
-            "decision_id": "decision-1",
-            "account_id": "aga_example",
-            "agent_id": "agt_example",
-            "amount_cents": 500,
-            "currency": "usd",
-            "merchant": "gongbu.image",
-            "task_id": "task-1",
-            "expires_at": "2026-07-27T00:05:00Z",
-            "budget_hold": {
-                "hold_id": "hold-1",
-                "budget_id": "budget-1",
-                "status": status,
-                "amount_cents": 500,
-                "consumed_amount_cents": 0,
-                "frozen_amount_cents": 500,
-                "remaining_amount_cents": 0
-            }
-        })
     }
 
     fn fake_hubu(

@@ -1,69 +1,41 @@
 # Gongbu
 
-Gongbu is the execution plane for Hubu-authorized work.
+Gongbu is the execution plane for Hubu-authorized work. The repository currently
+contains the v1 persistence and normalized-artifact foundations; execution
+orchestration, provider adapters, and the v1 HTTP API are intentionally not yet
+implemented.
 
-Hubu controls policy, spend authorization, budget holds, settlement, release,
-and audit state. Gongbu performs the work after Hubu approves spend. This keeps
-vendor credentials, provider adapters, artifact generation, retries, and
-execution-specific failures outside Hubu.
+## V1 boundary
 
-## Boundary
+`Execution` is the persisted aggregate root and is unique by
+`(account_id, operation_key)`. Provider attempts, artifact metadata, and receipts
+are persisted under that aggregate. Raw Hubu tokens and provider credentials are
+not persisted.
 
-Hubu is responsible for:
+Gongbu owns normalized artifact bytes. The local backend stores them beneath an
+operator-supplied artifact root and persists only generated, storage-neutral
+keys. The artifact service accepts PNG and JPEG, validates count and decoded-size
+limits, and never exposes absolute filesystem paths.
 
-- policy evaluation
-- spend authorization tokens
-- frozen budget holds
-- executor validation
-- spend settlement and release
-- audit state
+The retained Hubu v4 client is a low-level protocol client for future durable
+workflow work. No current production path claims, settles, releases, or invokes a
+provider.
 
-Gongbu is responsible for:
+## Planned service surface
 
-- storing execution secrets server-side
-- accepting work requests from agents
-- exclusively claiming Hubu spend authorization before irreversible work
-- calling model or image vendors
-- writing or storing artifacts
-- settling Hubu spend after successful billable work
-- releasing Hubu holds when no irreversible billable work happened
-- returning execution result metadata to agents
+HUB-23 will add the authoritative v1 routes:
 
-## Service Surface
+- `POST /v1/executions`
+- `GET /v1/executions/{execution_id}`
+- `POST /v1/executions/{execution_id}/cancel`
+- `GET /v1/executions/{execution_id}/artifacts`
+- `GET /v1/artifacts/{artifact_id}`
 
-Gongbu currently exposes:
+There is no persisted quote resource. Provider invocation, durable workflow,
+remote artifact fetching, SVG support, retention, and cloud storage remain out
+of scope for the current foundation.
 
-- `GET /health`
-- `POST /mock-executor/dry-run` for exercising the Hubu executor contract
-- `GET /image-jobs/guidance` for non-secret image provider readiness
-- `POST /image-jobs` for Hubu-authorized image generation
-
-Image jobs support a local mock provider and a Gemini `generateContent` adapter.
-Remote provider endpoints must use HTTPS. Plain HTTP is accepted only for
-loopback test endpoints.
-
-Each work request carries the platform-provided `operation_key` and one Hubu v4
-authorization reference. Gongbu reuses that key for claim, settlement or
-release, and every retry. Authorization tokens are not used in artifact names
-or returned as artifact metadata.
-
-## Secret Handling
-
-Gongbu is designed to run as a separate service with its own runtime identity.
-Agents should not share Gongbu's filesystem, process environment, or cloud
-credentials.
-
-Secret provider modes:
-
-- `none`: no provider API key is loaded, suitable for the local mock provider.
-- `gcp-secret-manager`: recommended for real Gemini runs.
-- `env-dev`: local-only fallback for development.
-
-With `gcp-secret-manager`, Gongbu fetches the configured provider key at startup
-using its Google Cloud runtime identity and keeps it in memory. Hubu never
-receives provider keys.
-
-## Local Development
+## Operator target configuration
 
 Set `GONGBU_PROVIDER_CONFIG` to an operator-owned JSON file. It is loaded and
 validated once at startup, so changing a target requires a restart. Callers
@@ -73,11 +45,11 @@ never chooses, orders, optimizes, or falls back between targets.
 ```json
 {
   "provider_configs": [{
-    "provider_config_version": "local-mock-2026-08-05",
+    "provider_config_version": "example-image-2026-08-05",
     "workload_type": "image_generation",
-    "provider": "local-mock",
-    "adapter": "mock",
-    "model": "mock-image-v1",
+    "provider": "example",
+    "adapter": "fixture",
+    "model": "image-v1",
     "enabled": true
   }]
 }
@@ -86,12 +58,10 @@ never chooses, orders, optimizes, or falls back between targets.
 The immutable version and resolved selector are stored on each `Execution`.
 Duplicate selectors or versions, unknown fields, an unavailable adapter, and a
 missing provider secret fail closed. Endpoints, credentials, headers, account
-identifiers, timeouts, and retry settings remain process/operator configuration
-and are not accepted in image-job request JSON.
+identifiers, timeouts, and retry settings remain operator configuration and are
+not accepted from callers.
 
-```sh
-cargo run --bin gongbu-server
-```
+## Development
 
 ```sh
 cargo test --workspace
