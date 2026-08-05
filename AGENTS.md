@@ -2,6 +2,12 @@
 
 ## Pull Request Review Comments
 
+GitHub connector actions may post through the user's authenticated identity.
+Prefix every agent-authored review reply or PR comment with
+`🤖 **Codex:**` so readers can distinguish it from a human-authored comment.
+Use `🤖 **Codex recommendation:**` when the comment presents a judgment or
+scope recommendation rather than reporting an implemented change.
+
 When asked to address or fix pull request review feedback:
 
 1. Inspect all current review threads and identify the comments in scope.
