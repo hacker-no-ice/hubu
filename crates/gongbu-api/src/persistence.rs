@@ -22,6 +22,8 @@ pub enum Error {
     Stale,
     #[error("settlement exceeds authorization")]
     OverAuthorization,
+    #[error("limit exceeded: {0}")]
+    Limit(&'static str),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,12 +147,14 @@ pub struct AttemptResult {
 }
 #[derive(Clone, Debug)]
 pub struct CreateArtifactParams {
+    pub artifact_id: String,
     pub execution_id: String,
     pub provider_attempt_id: Option<String>,
     pub kind: String,
+    pub storage_backend: String,
     pub media_type: String,
     pub storage_key: String,
-    pub byte_size: i64,
+    pub size_bytes: i64,
     pub sha256: String,
     pub metadata: Value,
     pub metadata_schema_version: i64,
@@ -162,9 +166,10 @@ pub struct Artifact {
     pub execution_id: String,
     pub provider_attempt_id: Option<String>,
     pub kind: String,
+    pub storage_backend: String,
     pub media_type: String,
     pub storage_key: String,
-    pub byte_size: i64,
+    pub size_bytes: i64,
     pub sha256: String,
     pub metadata: Value,
     pub metadata_schema_version: i64,
@@ -292,13 +297,49 @@ impl Repository {
         }
     }
     pub fn create_artifact(&self, n: &CreateArtifactParams) -> Result<Artifact> {
+        self.create_artifact_with_limit(n, u64::MAX)
+    }
+    pub fn create_artifact_with_limit(
+        &self,
+        n: &CreateArtifactParams,
+        max_per_execution: u64,
+    ) -> Result<Artifact> {
         safe_json(&n.metadata)?;
-        if n.byte_size < 0 || n.metadata_schema_version < 1 {
+        if n.artifact_id.trim().is_empty()
+            || n.storage_backend != "local_fs"
+            || n.size_bytes < 0
+            || n.metadata_schema_version < 1
+        {
             return Err(Error::Invalid("artifact"));
         }
-        let c = self.0.lock().unwrap();
+        let extension = match n.media_type.as_str() {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            _ => return Err(Error::Invalid("artifact media type")),
+        };
+        if n.kind != "image"
+            || n.storage_key
+                != format!(
+                    "executions/{}/{}.{}",
+                    n.execution_id, n.artifact_id, extension
+                )
+            || n.sha256.len() != 64
+            || !n.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(Error::Invalid("artifact storage metadata"));
+        }
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let count: u64 = tx.query_row(
+            "SELECT count(*) FROM artifacts WHERE execution_id=?1",
+            [&n.execution_id],
+            |r| r.get(0),
+        )?;
+        if count >= max_per_execution {
+            return Err(Error::Limit("artifact count"));
+        }
         if let Some(attempt_id) = &n.provider_attempt_id {
-            let attempt_execution: String = c
+            let attempt_execution: String = tx
                 .query_row(
                     "SELECT execution_id FROM provider_attempts WHERE provider_attempt_id=?1",
                     [attempt_id],
@@ -310,36 +351,77 @@ impl Repository {
                 return Err(Error::Invalid("artifact attempt relationship"));
             }
         }
-        let id = Uuid::new_v4().to_string();
-        c.execute(
-            "INSERT INTO artifacts VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        tx.execute(
+            "INSERT INTO artifacts(artifact_id,execution_id,provider_attempt_id,kind,storage_backend,storage_key,media_type,size_bytes,sha256,metadata_json,metadata_schema_version,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
-                id,
+                n.artifact_id,
                 n.execution_id,
                 n.provider_attempt_id,
                 n.kind,
-                n.media_type,
+                n.storage_backend,
                 n.storage_key,
-                n.byte_size,
+                n.media_type,
+                n.size_bytes,
                 n.sha256,
                 j(&n.metadata),
                 n.metadata_schema_version,
                 n.created_at
             ],
         )?;
-        Ok(Artifact {
-            artifact_id: id,
+        let artifact = Artifact {
+            artifact_id: n.artifact_id.clone(),
             execution_id: n.execution_id.clone(),
             provider_attempt_id: n.provider_attempt_id.clone(),
             kind: n.kind.clone(),
+            storage_backend: n.storage_backend.clone(),
             media_type: n.media_type.clone(),
             storage_key: n.storage_key.clone(),
-            byte_size: n.byte_size,
+            size_bytes: n.size_bytes,
             sha256: n.sha256.clone(),
             metadata: n.metadata.clone(),
             metadata_schema_version: n.metadata_schema_version,
             created_at: n.created_at.clone(),
-        })
+        };
+        tx.commit()?;
+        Ok(artifact)
+    }
+    pub fn count_artifacts_for_execution(&self, execution_id: &str) -> Result<u64> {
+        self.0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM artifacts WHERE execution_id=?1",
+                [execution_id],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
+    }
+    pub fn get_artifact_for_account(
+        &self,
+        artifact_id: &str,
+        account_id: &str,
+    ) -> Result<Artifact> {
+        self.0
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("{ARTIFACT_SELECT} JOIN executions e ON e.execution_id=a.execution_id WHERE a.artifact_id=?1 AND e.account_id=?2"),
+                params![artifact_id, account_id],
+                map_artifact,
+            )
+            .optional()?
+            .ok_or(Error::NotFound)
+    }
+    pub fn list_artifacts_for_account(
+        &self,
+        execution_id: &str,
+        account_id: &str,
+    ) -> Result<Vec<Artifact>> {
+        let c = self.0.lock().unwrap();
+        let mut statement = c.prepare(&format!("{ARTIFACT_SELECT} JOIN executions e ON e.execution_id=a.execution_id WHERE a.execution_id=?1 AND e.account_id=?2 ORDER BY a.created_at,a.artifact_id"))?;
+        let rows = statement.query_map(params![execution_id, account_id], map_artifact)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
     pub fn create_receipt(&self, n: &CreateReceiptParams) -> Result<Receipt> {
         if n.settlement_minor < 0 {
@@ -417,7 +499,6 @@ impl Repository {
             .execute("DELETE FROM executions WHERE execution_id=?1", [id])
     }
 }
-
 fn migrate_resolved_target_columns(c: &Connection) -> rusqlite::Result<()> {
     let mut statement = c.prepare("PRAGMA table_info(executions)")?;
     let existing: std::collections::BTreeSet<String> = statement
@@ -438,6 +519,31 @@ fn migrate_resolved_target_columns(c: &Connection) -> rusqlite::Result<()> {
         }
     }
     Ok(())
+}
+
+const ARTIFACT_SELECT: &str = "SELECT a.artifact_id,a.execution_id,a.provider_attempt_id,a.kind,a.storage_backend,a.storage_key,a.media_type,a.size_bytes,a.sha256,a.metadata_json,a.metadata_schema_version,a.created_at FROM artifacts a";
+fn map_artifact(r: &rusqlite::Row) -> rusqlite::Result<Artifact> {
+    let metadata: String = r.get(9)?;
+    Ok(Artifact {
+        artifact_id: r.get(0)?,
+        execution_id: r.get(1)?,
+        provider_attempt_id: r.get(2)?,
+        kind: r.get(3)?,
+        storage_backend: r.get(4)?,
+        storage_key: r.get(5)?,
+        media_type: r.get(6)?,
+        size_bytes: r.get(7)?,
+        sha256: r.get(8)?,
+        metadata: serde_json::from_str(&metadata).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                metadata.len(),
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?,
+        metadata_schema_version: r.get(10)?,
+        created_at: r.get(11)?,
+    })
 }
 fn query_key(c: &Connection, a: &str, k: &str) -> Result<Execution> {
     c.query_row(
@@ -703,13 +809,15 @@ mod tests {
         let e = r.create_execution(&new("a", "cascade")).unwrap();
         let a = attempt(&r, &e);
         r.create_artifact(&CreateArtifactParams {
+            artifact_id: "cascade-artifact".into(),
             execution_id: e.execution_id.clone(),
             provider_attempt_id: Some(a),
             kind: "image".into(),
+            storage_backend: "local_fs".into(),
             media_type: "image/png".into(),
-            storage_key: "objects/cascade".into(),
-            byte_size: 1,
-            sha256: "x".into(),
+            storage_key: format!("executions/{}/cascade-artifact.png", e.execution_id),
+            size_bytes: 1,
+            sha256: "a".repeat(64),
             metadata: json!({}),
             metadata_schema_version: 1,
             created_at: "2026-08-05T20:02:00Z".into(),
@@ -756,13 +864,15 @@ mod tests {
             )
             .unwrap();
             r.create_artifact(&CreateArtifactParams {
+                artifact_id: format!("artifact-{n}"),
                 execution_id: e.execution_id.clone(),
                 provider_attempt_id: Some(a),
                 kind: "image".into(),
+                storage_backend: "local_fs".into(),
                 media_type: "image/png".into(),
-                storage_key: format!("objects/{n}"),
-                byte_size: 1,
-                sha256: format!("h{n}"),
+                storage_key: format!("executions/{}/artifact-{n}.png", e.execution_id),
+                size_bytes: 1,
+                sha256: format!("{n}").repeat(64),
                 metadata: json!({}),
                 metadata_schema_version: 1,
                 created_at: "2026-08-05T20:02:00Z".into(),
@@ -789,13 +899,15 @@ mod tests {
         assert_eq!(attempt.outcome, "started");
         let artifact = r
             .create_artifact(&CreateArtifactParams {
+                artifact_id: "artifact-model".into(),
                 execution_id: execution.execution_id.clone(),
                 provider_attempt_id: Some(attempt.provider_attempt_id.clone()),
                 kind: "image".into(),
+                storage_backend: "local_fs".into(),
                 media_type: "image/png".into(),
-                storage_key: "objects/model-output".into(),
-                byte_size: 1,
-                sha256: "hash".into(),
+                storage_key: format!("executions/{}/artifact-model.png", execution.execution_id),
+                size_bytes: 1,
+                sha256: "a".repeat(64),
                 metadata: json!({}),
                 metadata_schema_version: 1,
                 created_at: "2026-08-05T20:02:00Z".into(),
@@ -890,13 +1002,15 @@ mod tests {
         ));
         let other = r.create_execution(&new("b", "other")).unwrap();
         let cross_artifact = CreateArtifactParams {
+            artifact_id: "cross-artifact".into(),
             execution_id: other.execution_id.clone(),
             provider_attempt_id: Some(receipt.provider_attempt_id.clone()),
             kind: "image".into(),
+            storage_backend: "local_fs".into(),
             media_type: "image/png".into(),
-            storage_key: "objects/cross-aggregate".into(),
-            byte_size: 1,
-            sha256: "cross".into(),
+            storage_key: format!("executions/{}/cross-artifact.png", other.execution_id),
+            size_bytes: 1,
+            sha256: "a".repeat(64),
             metadata: json!({}),
             metadata_schema_version: 1,
             created_at: "2026-08-05T20:03:00Z".into(),

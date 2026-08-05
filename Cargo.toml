@@ -17,3 +17,6 @@ base64 = "0.22"
 ureq = { version = "2", features = ["json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+image = { version = "0.24.9", default-features = false, features = ["png", "jpeg"] }
+tempfile = "3"

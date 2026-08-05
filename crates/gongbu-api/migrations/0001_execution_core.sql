@@ -20,7 +20,7 @@ CREATE INDEX IF NOT EXISTS attempts_execution_started ON provider_attempts(execu
 CREATE UNIQUE INDEX IF NOT EXISTS attempts_provider_request ON provider_attempts(provider,provider_request_id) WHERE provider_request_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS artifacts(
  artifact_id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions ON DELETE CASCADE, provider_attempt_id TEXT REFERENCES provider_attempts ON DELETE SET NULL,
- kind TEXT NOT NULL, media_type TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, byte_size INTEGER NOT NULL CHECK(byte_size>=0), sha256 TEXT NOT NULL,
+ kind TEXT NOT NULL, storage_backend TEXT NOT NULL, media_type TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL CHECK(size_bytes>=0), sha256 TEXT NOT NULL,
  metadata_json TEXT NOT NULL CHECK(json_valid(metadata_json)), metadata_schema_version INTEGER NOT NULL CHECK(metadata_schema_version>0), created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS artifacts_execution_created ON artifacts(execution_id,created_at);
 CREATE TABLE IF NOT EXISTS receipts(

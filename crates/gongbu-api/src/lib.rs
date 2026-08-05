@@ -1,3 +1,4 @@
+pub mod artifacts;
 mod config;
 mod hubu;
 mod image_jobs;
