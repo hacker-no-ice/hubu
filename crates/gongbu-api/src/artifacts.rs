@@ -25,8 +25,12 @@ pub struct ArtifactLimits {
 impl Default for ArtifactLimits {
     fn default() -> Self {
         Self {
-            max_artifacts_per_execution: 16,
+            // Four outputs covers the intended v1 image-generation fan-out while
+            // bounding storage and decode work before per-target configuration lands.
+            max_artifacts_per_execution: 4,
             max_encoded_bytes: 20 * 1024 * 1024,
+            // This is the maximum normalized RGBA allocation, not the compressed
+            // file size. Keep it independently configurable for operator tuning.
             max_decoded_bytes: 100 * 1024 * 1024,
             max_width: 16_384,
             max_height: 16_384,
@@ -339,6 +343,11 @@ mod tests {
                 input_schema_version: 1,
                 target: "provider/model".into(),
                 config_version: "v1".into(),
+                workload_type: "image_generation".into(),
+                provider: "provider".into(),
+                adapter: "test".into(),
+                model: "model".into(),
+                provider_config_version: "v1".into(),
                 pricing_snapshot: json!({}),
                 pricing_schema_version: 1,
                 created_at: "2026-08-05T20:00:00Z".into(),
