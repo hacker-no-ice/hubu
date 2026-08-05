@@ -129,6 +129,12 @@ pub fn create_image_job(
         })
         .context("claim Hubu spend authorization")?;
     ensure_claim_executable(&claim, &request.operation_key)?;
+    if claim.workload_profile != request.workload_type {
+        release_after_pre_work_failure(hubu, &claim)?;
+        return Err(anyhow!(
+            "Hubu claim workload_profile does not match the requested workload_type"
+        ));
+    }
 
     let adapter = match config.adapter() {
         Ok(adapter) => adapter,

@@ -532,6 +532,44 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_hubu_workload_releases_before_provider_work() {
+        let mut claim = fake_response("/spend/executor/claim", spend_response("frozen"));
+        claim.1["workload_profile"] = json!("audio_generation");
+        let fake = FakeHubu::start(vec![
+            claim,
+            fake_response("/spend/executor/release", spend_response("released")),
+        ]);
+        let output_dir = std::env::temp_dir().join(format!(
+            "gongbu-workload-mismatch-output-{}",
+            std::process::id()
+        ));
+        let state = ServerState::new(Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            hubu_base_url: fake.base_url.clone(),
+            image_provider: mock_provider_config(output_dir.clone()),
+            provider_targets: test_targets(),
+        });
+        let response = route(
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/image-jobs".to_string(),
+                body: image_job_body("local-mock", "mock-image-v1"),
+            },
+            &state,
+        );
+        assert_eq!(response.status, 400);
+        assert!(response.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("workload_profile"));
+        assert_eq!(
+            fake.paths(),
+            vec!["/spend/executor/claim", "/spend/executor/release"]
+        );
+        assert!(!output_dir.exists());
+    }
+
+    #[test]
     fn image_job_with_gemini_provider_keeps_api_key_server_side_and_settles() {
         let provider = FakeProvider::start(json!({
             "candidates": [{
