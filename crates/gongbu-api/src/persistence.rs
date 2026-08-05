@@ -465,6 +465,9 @@ impl Repository {
         snapshot
             .validate_integrity()
             .map_err(|_| Error::Invalid("pricing snapshot"))?;
+        if n.pricing_catalog_version != snapshot.catalog_version {
+            return Err(Error::Invalid("pricing catalog version"));
+        }
         if n.settlement_minor > auth.0
             || n.settlement_minor > snapshot.estimated_amount_minor
             || !n.currency.eq_ignore_ascii_case(&auth.1)
@@ -742,7 +745,7 @@ mod tests {
             provider_config_version: "pcv-1".into(),
             pricing_snapshot: json!({
                 "provider":"example","model":"image-v1",
-                "catalog_version":"v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),
+                "catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),
                 "pricing_rule_id":"example-image","unit":"image",
                 "unit_amount_minor":100,"quantity":1,
                 "estimated_amount_minor":100,"currency":"USD"
@@ -1110,7 +1113,7 @@ mod tests {
             provider_attempt_id: a,
             settlement_minor: 101,
             currency: "USD".into(),
-            pricing_catalog_version: "v1".into(),
+            pricing_catalog_version: "prices-v1".into(),
             created_at: "2026-08-05T20:02:00Z".into(),
             settled_at: None,
             hubu_settlement_id: None,
@@ -1119,7 +1122,14 @@ mod tests {
             r.create_receipt(&receipt),
             Err(Error::OverAuthorization)
         ));
+        receipt.settlement_minor = 100;
+        receipt.pricing_catalog_version = "stale-version".into();
+        assert!(matches!(
+            r.create_receipt(&receipt),
+            Err(Error::Invalid("pricing catalog version"))
+        ));
         receipt.settlement_minor = 501;
+        receipt.pricing_catalog_version = "prices-v1".into();
         assert!(matches!(
             r.create_receipt(&receipt),
             Err(Error::OverAuthorization)
