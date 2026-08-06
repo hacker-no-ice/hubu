@@ -104,6 +104,7 @@ impl GeminiTransport for ReqwestGeminiTransport {
             std::str::from_utf8(bearer).map_err(|_| MessageError("credential encoding".into()))?;
         let client = Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
         let mut request = client.post(url.clone()).bearer_auth(token);
@@ -143,6 +144,7 @@ impl GeminiTransport for ReqwestGeminiTransport {
             std::str::from_utf8(bearer).map_err(|_| MessageError("credential encoding".into()))?;
         let mut response = Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| MessageError("artifact client failure".into()))?
             .get(url.clone())
@@ -710,6 +712,44 @@ mod tests {
             matches!(error, ContractError::Provider { code } if code == "artifact_policy_failure")
         );
         assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn referenced_artifact_transport_never_follows_redirects() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let destination_url = format!("http://{}/secret", destination.local_addr().unwrap());
+        let redirector = TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirect_url = Url::parse(&format!(
+            "http://{}/artifact",
+            redirector.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = redirector.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: {destination_url}\r\nContent-Length: 0\r\n\r\n"
+            )
+            .unwrap();
+        });
+        let result = ReqwestGeminiTransport.fetch_artifact(
+            &redirect_url,
+            b"credential",
+            Duration::from_secs(2),
+        );
+        server.join().unwrap();
+        assert!(result.is_err());
+        assert!(
+            matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
     }
 
     #[test]
