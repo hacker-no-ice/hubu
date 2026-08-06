@@ -23,9 +23,14 @@ impl Redactor {
             .into_iter()
             .filter_map(|v| std::str::from_utf8(v).ok())
             .filter(|v| !v.is_empty())
-            .map(str::to_owned)
+            .flat_map(|value| {
+                let json = serde_json::to_string(value).expect("string serialization cannot fail");
+                let escaped = json[1..json.len() - 1].to_owned();
+                [value.to_owned(), escaped]
+            })
             .collect();
         exact.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        exact.dedup();
         Self { exact }
     }
 
@@ -148,5 +153,18 @@ mod tests {
     fn overlapping_secrets_are_fully_redacted_regardless_of_registration_order() {
         let value = Redactor::new([b"abc".as_slice(), b"abcdef".as_slice()]).redact("abcdef abc");
         assert_eq!(value, "[REDACTED] [REDACTED]");
+    }
+
+    #[test]
+    fn escaped_secret_renderings_are_redacted() {
+        let secret = "canary-\"slash\\newline\nsecret";
+        let rendered = format!(
+            "SDK api_key={}",
+            &serde_json::to_string(secret).unwrap()
+                [1..serde_json::to_string(secret).unwrap().len() - 1]
+        );
+        let value = Redactor::new([secret.as_bytes()]).redact(&rendered);
+        assert!(!value.contains("canary"));
+        assert!(value.contains(REDACTED));
     }
 }
