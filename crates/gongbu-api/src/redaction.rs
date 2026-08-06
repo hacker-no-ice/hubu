@@ -8,6 +8,7 @@ const SENSITIVE_QUERY_KEYS: &[&str] = &[
     "apikey",
     "key",
     "secret",
+    "client_secret",
     "sig",
     "signature",
     "token",
@@ -26,10 +27,13 @@ impl Redactor {
             .flat_map(|value| {
                 let json = serde_json::to_string(value).expect("string serialization cannot fail");
                 let debug = format!("{value:?}");
+                let percent = percent_encode(value.as_bytes());
                 [
                     value.to_owned(),
                     json[1..json.len() - 1].to_owned(),
                     debug[1..debug.len() - 1].to_owned(),
+                    percent.clone(),
+                    percent.to_ascii_lowercase(),
                 ]
             })
             .collect();
@@ -84,6 +88,18 @@ impl Redactor {
         }
         parts.join(": ")
     }
+}
+
+fn percent_encode(value: &[u8]) -> String {
+    value
+        .iter()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (*byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 impl Default for Redactor {
@@ -210,5 +226,12 @@ mod tests {
     fn sequential_replacements_cannot_synthesize_a_registered_secret() {
         let value = Redactor::new([b"a[REDACTED]b".as_slice(), b"x".as_slice()]).redact("axb");
         assert!(!value.contains("a[REDACTED]b"));
+    }
+
+    #[test]
+    fn percent_encoded_secret_renderings_are_redacted() {
+        let value =
+            Redactor::new([b"abc/def?x".as_slice()]).redact("SDK client_secret=abc%2fdef%3fx");
+        assert!(!value.contains("abc%2fdef%3fx"));
     }
 }

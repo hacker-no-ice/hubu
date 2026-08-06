@@ -25,6 +25,8 @@ pub enum Error {
     Empty,
     #[error("provider target identifiers cannot be empty")]
     EmptyIdentifier,
+    #[error("invalid provider secret reference")]
+    InvalidSecretReference,
     #[error("duplicate provider target definition")]
     DuplicateTarget,
     #[error("duplicate provider config version")]
@@ -104,6 +106,9 @@ impl ProviderTargetConfig {
             {
                 return Err(Error::EmptyIdentifier);
             }
+            target
+                .secret_reference()
+                .map_err(|_| Error::InvalidSecretReference)?;
             if !targets.insert((
                 &target.workload_type,
                 &target.provider,
@@ -221,5 +226,13 @@ mod tests {
         assert!(serde_json::from_str::<ProviderTargetConfig>(
             r#"{"provider_configs":[],"authorization":"Bearer caller","retry_policy":{"max_retries":99}}"#
         ).is_err());
+        let invalid = parse(&format!(
+            r#"{{"provider_configs":[{{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"{}","secret_account":"local"}}]}}"#,
+            "x".repeat(256)
+        ));
+        assert!(matches!(
+            invalid.validate(),
+            Err(Error::InvalidSecretReference)
+        ));
     }
 }
