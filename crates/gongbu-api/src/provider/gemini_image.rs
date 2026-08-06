@@ -129,6 +129,14 @@ impl GeminiTransport for ReqwestGeminiTransport {
         let status = response.status().as_u16();
         let request_id = header(&response, &["x-goog-request-id", "x-request-id"]);
         let operation_id = header(&response, &["x-goog-operation-id"]);
+        if (400..500).contains(&status) {
+            return Ok(TransportResponse {
+                status,
+                request_id,
+                operation_id,
+                body: Value::Null,
+            });
+        }
         let body_bytes =
             read_bounded(&mut response, MAX_PROVIDER_RESPONSE_BYTES).map_err(|_| {
                 Box::new(HttpFailure::UnknownOutcome {
@@ -1015,6 +1023,44 @@ mod tests {
         assert!(
             matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
         );
+    }
+
+    #[test]
+    fn definitive_client_rejection_does_not_require_a_decodable_body() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!(
+            "http://{}/generate",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 403 Forbidden\r\nx-goog-request-id: rejected-1\r\nContent-Length: 8\r\n\r\nnot-json"
+            )
+            .unwrap();
+        });
+        let response = ReqwestGeminiTransport
+            .generate(
+                &url,
+                b"credential",
+                Duration::from_secs(2),
+                &std::collections::BTreeMap::new(),
+                &json!({"prompt":"cat"}),
+            )
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(response.status, 403);
+        assert_eq!(response.request_id.as_deref(), Some("rejected-1"));
+        assert_eq!(response.body, Value::Null);
     }
 
     #[test]
