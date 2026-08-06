@@ -198,7 +198,7 @@ impl ExecutionWorkflow<'_> {
                                 {
                                     self.transition(
                                         &execution,
-                                        "persisting",
+                                        "settling",
                                         None,
                                         now,
                                         Some("succeeded"),
@@ -254,17 +254,6 @@ impl ExecutionWorkflow<'_> {
                             )?;
                         }
                     }
-                }
-                "persisting" => {
-                    self.transition(
-                        &execution,
-                        "settling",
-                        None,
-                        now,
-                        None,
-                        Some("succeeded"),
-                        None,
-                    )?;
                 }
                 "settling" => {
                     let attempt = self

@@ -21,6 +21,11 @@ The workflow drives one persisted execution through preflight, claim, one
 durably recorded provider attempt, normalized artifact persistence, and Hubu
 settlement or safe release. Ambiguous post-boundary outcomes stop in
 `reconciliation_required`; they are never blindly retried or released.
+Artifact validation and durable publication occur while the execution remains
+`executing`; it transitions directly to `settling` only after durability is
+confirmed. The former `persisting` state was never merged, stored by a shipped
+schema, or exposed by a shipped API, so v1 removes it without compatibility
+handling or a cleanup migration.
 
 ## Service surface
 
