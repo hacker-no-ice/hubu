@@ -56,15 +56,6 @@ pub struct CreateExecutionRequest {
     pub provider: String,
     pub adapter: String,
     pub model: String,
-    pub pricing: PricingRequest,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PricingRequest {
-    pub image_count: Option<i64>,
-    pub input_tokens: Option<i64>,
-    pub max_output_tokens: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -258,6 +249,18 @@ impl Api {
         let request: CreateExecutionRequest =
             serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
         validate_create(&request)?;
+        let normalized_input = canonicalize(&request.input);
+        match self
+            .repository
+            .get_execution_by_operation(&account.account_id, request.operation_key.trim())
+        {
+            Ok(existing) if immutable_request_matches(&existing, &request, &normalized_input) => {
+                return Ok(json_response(200, &execution_response(existing)?));
+            }
+            Ok(_) => return Err(ApiError::conflict()),
+            Err(PersistenceError::NotFound) => {}
+            Err(error) => return Err(map_persistence(error)),
+        }
         let resolved = self
             .targets
             .resolve(
@@ -272,12 +275,11 @@ impl Api {
             .snapshot(&NormalizedRequest {
                 provider: resolved.provider.clone(),
                 model: resolved.model.clone(),
-                image_count: request.pricing.image_count,
-                input_tokens: request.pricing.input_tokens,
-                max_output_tokens: request.pricing.max_output_tokens,
+                image_count: input_quantity(&normalized_input, "image_count")?,
+                input_tokens: input_quantity(&normalized_input, "input_tokens")?,
+                max_output_tokens: input_quantity(&normalized_input, "max_output_tokens")?,
             })
             .map_err(map_pricing_error)?;
-        let normalized_input = canonicalize(&request.input);
         let input_hash = immutable_hash(&request, resolved, &pricing_snapshot, &normalized_input)?;
         let params = CreateExecutionParams {
             account_id: account.account_id.clone(),
@@ -382,6 +384,37 @@ impl Api {
             body: retrieved.bytes,
         })
     }
+}
+
+fn input_quantity(input: &Value, field: &str) -> Result<Option<i64>, ApiError> {
+    match input.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .filter(|quantity| *quantity >= 0)
+            .map(Some)
+            .ok_or_else(ApiError::validation),
+    }
+}
+
+fn immutable_request_matches(
+    execution: &Execution,
+    request: &CreateExecutionRequest,
+    normalized_input: &Value,
+) -> bool {
+    execution.hubu_authorization_id == request.hubu_authorization_id
+        && execution.hubu_claim_id == request.hubu_claim_id
+        && execution.hubu_token_reference.as_str() == request.hubu_token_reference.trim()
+        && execution.authorized_minor == request.authorization.amount_minor
+        && execution
+            .authorization_currency
+            .eq_ignore_ascii_case(&request.authorization.currency)
+        && &execution.normalized_input == normalized_input
+        && execution.input_schema_version == request.input_schema_version
+        && execution.workload_type == request.workload_type
+        && execution.provider == request.provider
+        && execution.adapter == request.adapter
+        && execution.model == request.model
 }
 
 fn validate_create(request: &CreateExecutionRequest) -> Result<(), ApiError> {
@@ -553,6 +586,7 @@ mod tests {
 
     struct Fixture {
         api: Api,
+        repository: Repository,
         artifacts: ArtifactService,
         owner: AuthenticatedAccount,
         other: AuthenticatedAccount,
@@ -594,9 +628,14 @@ mod tests {
         )
         .unwrap();
         Fixture {
-            api: Api::new(repository, artifacts.clone(), targets, pricing, || {
-                "2026-08-05T20:00:00Z".into()
-            }),
+            api: Api::new(
+                repository.clone(),
+                artifacts.clone(),
+                targets,
+                pricing,
+                || "2026-08-05T20:00:00Z".into(),
+            ),
+            repository,
             artifacts,
             owner: AuthenticatedAccount::from_verified_claim("account-a").unwrap(),
             other: AuthenticatedAccount::from_verified_claim("account-b").unwrap(),
@@ -612,17 +651,16 @@ mod tests {
             "hubu_claim_id": "claim-1",
             "hubu_token_reference": "sha256:opaque-reference",
             "authorization": {"amount_minor": 500, "currency": "USD"},
-            "input": {"prompt": "cat", "options": {"height": 512, "width": 512}},
+            "input": {
+                "prompt": "cat",
+                "image_count": 1,
+                "options": {"height": 512, "width": 512}
+            },
             "input_schema_version": 1,
             "workload_type": "image_generation",
             "provider": "example",
             "adapter": "fixture",
-            "model": "image-v1",
-            "pricing": {
-                "image_count": 1,
-                "input_tokens": null,
-                "max_output_tokens": null
-            }
+            "model": "image-v1"
         })
     }
 
@@ -651,7 +689,11 @@ mod tests {
 
         // Object member ordering is immaterial to canonical immutable input.
         let mut reordered = request("operation-1");
-        reordered["input"] = json!({"options": {"width": 512, "height": 512}, "prompt": "cat"});
+        reordered["input"] = json!({
+            "options": {"width": 512, "height": 512},
+            "image_count": 1,
+            "prompt": "cat"
+        });
         let replay = execution(&call_create(&fixture, &reordered));
         assert_eq!(replay.execution_id, first.execution_id);
 
@@ -726,6 +768,53 @@ mod tests {
         let mut fabricated_snapshot = request("operation-3");
         fabricated_snapshot["pricing_snapshot"] = json!({"unit_amount_minor": 0});
         assert_eq!(call_create(&fixture, &fabricated_snapshot).status, 400);
+    }
+
+    #[test]
+    fn replay_precedes_changed_operator_target_and_catalog_state() {
+        let fixture = fixture();
+        let created = execution(&call_create(&fixture, &request("operation-1")));
+        let disabled_targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "provider_configs": [{
+                "provider_config_version": "provider-v2",
+                "workload_type": "image_generation",
+                "provider": "example",
+                "adapter": "fixture",
+                "model": "image-v1",
+                "enabled": false
+            }]
+        }))
+        .unwrap();
+        let changed_pricing = PricingCatalog::from_json(
+            br#"{
+                "schema_version":1,
+                "catalog_version":"prices-v2",
+                "rules":[{
+                    "rule_id":"example-image-v2",
+                    "provider":"example",
+                    "model":"image-v1",
+                    "currency":"USD",
+                    "unit":"image",
+                    "unit_amount_minor":200
+                }]
+            }"#,
+        )
+        .unwrap();
+        let restarted = Api::new(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            disabled_targets,
+            changed_pricing,
+            || "2026-08-06T00:00:00Z".into(),
+        );
+        let replay = restarted.handle(
+            "POST",
+            "/v1/executions",
+            Some(&fixture.owner),
+            &serde_json::to_vec(&request("operation-1")).unwrap(),
+        );
+        assert_eq!(replay.status, 200);
+        assert_eq!(execution(&replay).execution_id, created.execution_id);
     }
 
     #[test]
