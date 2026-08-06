@@ -146,6 +146,7 @@ pub struct ProviderAttempt {
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
     pub started_at: String,
+    pub transmission_started_at: Option<String>,
     pub completed_at: Option<String>,
 }
 #[derive(Clone, Debug)]
@@ -158,6 +159,7 @@ pub struct AttemptResult {
     pub provider_currency: Option<String>,
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
+    pub provider_request_id: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct CreateArtifactParams {
@@ -233,6 +235,8 @@ impl Repository {
         c.execute_batch(MIGRATION)?;
         migrate_artifact_storage_columns(&c)?;
         migrate_resolved_target_columns(&c)?;
+        migrate_execution_lifecycle(&c)?;
+        migrate_attempt_lifecycle(&c)?;
         Ok(Self(Arc::new(Mutex::new(c)), redactor))
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
@@ -402,7 +406,7 @@ impl Repository {
             id.as_str(),
             "started",
         ])?;
-        self.0.lock().unwrap().execute("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,started_at)VALUES(?1,?2,?3,?4,?5,'started',?6)",params![id,n.execution_id,n.provider,n.provider_request_id,n.provider_operation_id,n.started_at])?;
+        self.0.lock().unwrap().execute("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,started_at,transmission_started_at)VALUES(?1,?2,?3,?4,?5,'started',?6,?6)",params![id,n.execution_id,n.provider,n.provider_request_id,n.provider_operation_id,n.started_at])?;
         Ok(ProviderAttempt {
             provider_attempt_id: id,
             execution_id: n.execution_id.clone(),
@@ -417,8 +421,53 @@ impl Repository {
             failure_code: None,
             failure_message_redacted: None,
             started_at: n.started_at.clone(),
+            transmission_started_at: Some(n.started_at.clone()),
             completed_at: None,
         })
+    }
+    pub fn start_provider_attempt(
+        &self,
+        execution: &Execution,
+        at: &str,
+    ) -> Result<ProviderAttempt> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: String = tx
+            .query_row(
+                "SELECT status FROM executions WHERE execution_id=?1 AND version=?2",
+                params![execution.execution_id, execution.version],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(Error::Stale)?;
+        if current != "claimed" {
+            return Err(Error::ForbiddenTransition {
+                from: current,
+                to: "executing".into(),
+            });
+        }
+        let existing: i64 = tx.query_row(
+            "SELECT count(*) FROM provider_attempts WHERE execution_id=?1",
+            [&execution.execution_id],
+            |r| r.get(0),
+        )?;
+        if existing != 0 {
+            return Err(Error::Invalid("execution already has provider attempt"));
+        }
+        let id = Uuid::new_v4().to_string();
+        tx.execute("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,outcome,started_at) VALUES(?1,?2,?3,'started',?4)",params![id,execution.execution_id,execution.provider,at])?;
+        tx.execute("UPDATE executions SET status='executing',started_at=COALESCE(started_at,?1),updated_at=?1,version=version+1 WHERE execution_id=?2 AND version=?3",params![at,execution.execution_id,execution.version])?;
+        tx.commit()?;
+        drop(c);
+        self.get_provider_attempt_for_execution(&execution.execution_id)
+    }
+    pub fn begin_provider_transmission(&self, attempt_id: &str, at: &str) -> Result<()> {
+        let changed=self.0.lock().unwrap().execute("UPDATE provider_attempts SET transmission_started_at=?1 WHERE provider_attempt_id=?2 AND transmission_started_at IS NULL AND completed_at IS NULL",params![at,attempt_id])?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(Error::Stale)
+        }
     }
     pub fn complete_provider_attempt(&self, id: &str, r: &AttemptResult) -> Result<()> {
         safe_json(&r.usage)?;
@@ -445,7 +494,7 @@ impl Repository {
             failure.as_deref().unwrap_or(""),
             id,
         ])?;
-        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=?7,failure_message_redacted=?8 WHERE provider_attempt_id=?9 AND completed_at IS NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.failure_code,failure,id])?;
+        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=?7,failure_message_redacted=?8,provider_request_id=?9 WHERE provider_attempt_id=?10 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.failure_code,failure,r.provider_request_id,id])?;
         if n == 1 {
             Ok(())
         } else {
@@ -456,9 +505,9 @@ impl Repository {
         &self,
         execution_id: &str,
     ) -> Result<ProviderAttempt> {
-        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,usage_json,usage_schema_version,provider_amount_minor,provider_currency,failure_code,failure_message_redacted,started_at,completed_at FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
+        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,usage_json,usage_schema_version,provider_amount_minor,provider_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
             let usage: Option<String> = r.get(6)?;
-            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, outcome:r.get(5)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(7)?, provider_amount_minor:r.get(8)?, provider_currency:r.get(9)?, failure_code:r.get(10)?, failure_message_redacted:r.get(11)?, started_at:r.get(12)?, completed_at:r.get(13)? })
+            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, outcome:r.get(5)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(7)?, provider_amount_minor:r.get(8)?, provider_currency:r.get(9)?, failure_code:r.get(10)?, failure_message_redacted:r.get(11)?, started_at:r.get(12)?, transmission_started_at:r.get(13)?, completed_at:r.get(14)? })
         }).optional()?.ok_or(Error::NotFound)
     }
     pub fn create_artifact(&self, n: &CreateArtifactParams) -> Result<Artifact> {
@@ -643,22 +692,26 @@ impl Repository {
             )
             .optional()?
             .ok_or(Error::NotFound)?;
-        let (attempt_execution, attempt_outcome, attempt_completed_at): (
+        let (attempt_execution, attempt_outcome, attempt_completed_at, provider_request_id): (
             String,
             String,
             Option<String>,
+            Option<String>,
         ) = c
             .query_row(
-                "SELECT execution_id,outcome,completed_at FROM provider_attempts WHERE provider_attempt_id=?1",
+                "SELECT execution_id,outcome,completed_at,provider_request_id FROM provider_attempts WHERE provider_attempt_id=?1",
                 [&n.provider_attempt_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?
             .ok_or(Error::NotFound)?;
         if attempt_execution != n.execution_id {
             return Err(Error::Invalid("receipt attempt relationship"));
         }
-        if attempt_outcome != "succeeded" || attempt_completed_at.is_none() {
+        if attempt_outcome != "succeeded"
+            || attempt_completed_at.is_none()
+            || provider_request_id.is_none()
+        {
             return Err(Error::Invalid("receipt requires a succeeded attempt"));
         }
         let snapshot: PricingSnapshot =
@@ -813,6 +866,50 @@ fn migrate_resolved_target_columns(c: &Connection) -> rusqlite::Result<()> {
                 [],
             )?;
         }
+    }
+    Ok(())
+}
+fn migrate_execution_lifecycle(c: &Connection) -> rusqlite::Result<()> {
+    let mut statement = c.prepare("PRAGMA table_info(executions)")?;
+    let columns: std::collections::BTreeSet<String> = statement
+        .query_map([], |r| r.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(statement);
+    if columns.contains("provider_outcome") {
+        return Ok(());
+    }
+    c.execute_batch("PRAGMA foreign_keys=OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE executions_v2(
+ execution_id TEXT PRIMARY KEY, account_id TEXT NOT NULL CHECK(trim(account_id)<>''), operation_key TEXT NOT NULL CHECK(trim(operation_key)<>''),
+ hubu_authorization_id TEXT NOT NULL, hubu_claim_id TEXT, hubu_token_reference TEXT NOT NULL CHECK(length(hubu_token_reference) BETWEEN 1 AND 255),
+ authorized_minor INTEGER NOT NULL CHECK(authorized_minor>=0), authorization_currency TEXT NOT NULL CHECK(length(authorization_currency)=3),
+ normalized_input_json TEXT NOT NULL CHECK(json_valid(normalized_input_json)), input_hash TEXT NOT NULL, input_schema_version INTEGER NOT NULL CHECK(input_schema_version>0),
+ target TEXT NOT NULL, config_version TEXT NOT NULL, workload_type TEXT NOT NULL, provider TEXT NOT NULL, adapter TEXT NOT NULL, model TEXT NOT NULL, provider_config_version TEXT NOT NULL,
+ pricing_snapshot_json TEXT NOT NULL CHECK(json_valid(pricing_snapshot_json)), pricing_schema_version INTEGER NOT NULL CHECK(pricing_schema_version>0),
+ status TEXT NOT NULL CHECK(status IN ('pending','preflighting','claimed','executing','persisting','settling','succeeded','released','failed','cancelled','reconciliation_required')), outcome TEXT,
+ provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT, cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancellation_requested IN (0,1)),
+ failure_code TEXT, failure_message_redacted TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0), UNIQUE(account_id,operation_key));
+INSERT INTO executions_v2(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,version)
+ SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,
+ CASE status WHEN 'running' THEN 'reconciliation_required' WHEN 'canceled' THEN 'cancelled' ELSE status END,outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,version FROM executions;
+DROP TABLE executions;
+ALTER TABLE executions_v2 RENAME TO executions;
+CREATE INDEX executions_status_created ON executions(status,created_at);
+CREATE INDEX executions_claim ON executions(hubu_claim_id) WHERE hubu_claim_id IS NOT NULL;
+COMMIT;
+PRAGMA foreign_keys=ON;")
+}
+fn migrate_attempt_lifecycle(c: &Connection) -> rusqlite::Result<()> {
+    let mut statement = c.prepare("PRAGMA table_info(provider_attempts)")?;
+    let columns: std::collections::BTreeSet<String> = statement
+        .query_map([], |r| r.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !columns.contains("transmission_started_at") {
+        c.execute(
+            "ALTER TABLE provider_attempts ADD COLUMN transmission_started_at TEXT",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -1070,6 +1167,7 @@ mod tests {
                 provider_currency: Some("USD".into()),
                 failure_code: None,
                 failure_message_redacted: None,
+                provider_request_id: Some("provider-request".into()),
             },
         )
         .unwrap();
@@ -1168,6 +1266,14 @@ mod tests {
         let path = directory.path().join("legacy.sqlite3");
         let legacy_migration = MIGRATION
             .replace(
+                "status TEXT NOT NULL CHECK(status IN ('pending','preflighting','claimed','executing','persisting','settling','succeeded','released','failed','cancelled','reconciliation_required')), outcome TEXT,\n provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT, cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancellation_requested IN (0,1)),",
+                "status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','canceled','reconciliation_required')), outcome TEXT,",
+            )
+            .replace(
+                "started_at TEXT NOT NULL, transmission_started_at TEXT, completed_at TEXT,",
+                "started_at TEXT NOT NULL, completed_at TEXT,",
+            )
+            .replace(
                 "kind TEXT NOT NULL, storage_backend TEXT NOT NULL, media_type TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, size_bytes INTEGER",
                 "kind TEXT NOT NULL, media_type TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, byte_size INTEGER",
             )
@@ -1175,7 +1281,7 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch(&legacy_migration).unwrap();
         connection.execute(
-            "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at) VALUES('execution-1','account-1','operation-1','auth-1','token-ref',500,'USD','{}','hash',1,'example/image-v1','config-1','{}',1,'pending','now','now')",
+            "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at) VALUES('execution-1','account-1','operation-1','auth-1','token-ref',500,'USD','{}','hash',1,'example/image-v1','config-1','{}',1,'running','now','now')",
             [],
         ).unwrap();
         connection.execute(
@@ -1190,6 +1296,10 @@ mod tests {
             .unwrap();
         assert_eq!(artifact.storage_backend, "local_fs");
         assert_eq!(artifact.size_bytes, 3);
+        assert_eq!(
+            repository.get_execution("execution-1").unwrap().status,
+            "reconciliation_required"
+        );
         assert_eq!(
             artifact.storage_key,
             "executions/execution-1/artifact-1.png"
@@ -1278,6 +1388,7 @@ mod tests {
                     provider_currency: Some("USD".into()),
                     failure_code: None,
                     failure_message_redacted: None,
+                    provider_request_id: Some(format!("provider-request-{n}")),
                 },
             )
             .unwrap();
@@ -1384,6 +1495,7 @@ mod tests {
                 provider_currency: None,
                 failure_code: Some("provider_error".into()),
                 failure_message_redacted: Some("provider request failed".into()),
+                provider_request_id: None,
             },
         )
         .unwrap();
@@ -1525,6 +1637,7 @@ mod tests {
                 provider_currency: None,
                 failure_code: Some("provider_error".into()),
                 failure_message_redacted: Some(format!("nested SDK error: api_key={CANARY}")),
+                provider_request_id: None,
             },
         )
         .unwrap();

@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS provider_attempts(
  provider_request_id TEXT, provider_operation_id TEXT, outcome TEXT NOT NULL CHECK(outcome IN ('started','succeeded','failed','ambiguous','canceled')),
  usage_json TEXT CHECK(usage_json IS NULL OR json_valid(usage_json)), usage_schema_version INTEGER CHECK(usage_schema_version IS NULL OR usage_schema_version>0),
  provider_amount_minor INTEGER CHECK(provider_amount_minor IS NULL OR provider_amount_minor>=0), provider_currency TEXT, failure_code TEXT, failure_message_redacted TEXT,
- started_at TEXT NOT NULL, completed_at TEXT, CHECK((usage_json IS NULL)=(usage_schema_version IS NULL)), CHECK((provider_amount_minor IS NULL)=(provider_currency IS NULL)));
+ started_at TEXT NOT NULL, transmission_started_at TEXT, completed_at TEXT, CHECK((usage_json IS NULL)=(usage_schema_version IS NULL)), CHECK((provider_amount_minor IS NULL)=(provider_currency IS NULL)));
 CREATE INDEX IF NOT EXISTS attempts_execution_started ON provider_attempts(execution_id,started_at);
 CREATE UNIQUE INDEX IF NOT EXISTS attempts_provider_request ON provider_attempts(provider,provider_request_id) WHERE provider_request_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS artifacts(

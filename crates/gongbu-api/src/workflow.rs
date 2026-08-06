@@ -4,8 +4,8 @@
 //! activity replay-safe by consulting the persisted aggregate before acting.
 use crate::{
     execution::{
-        AttemptResult, CreateProviderAttemptParams, CreateReceiptParams, Error as PersistenceError,
-        Execution, ExecutionUpdate, Repository,
+        AttemptResult, CreateReceiptParams, Error as PersistenceError, Execution, ExecutionUpdate,
+        Repository,
     },
     provider_contract::{NormalizedUsage, PricingSnapshot},
 };
@@ -173,24 +173,7 @@ impl ExecutionWorkflow<'_> {
                         }
                         continue;
                     }
-                    let attempt = match self
-                        .repository
-                        .get_provider_attempt_for_execution(execution_id)
-                    {
-                        Ok(a) => a,
-                        Err(PersistenceError::NotFound) => self
-                            .repository
-                            .create_provider_attempt(&CreateProviderAttemptParams {
-                                execution_id: execution_id.into(),
-                                provider: execution.provider.clone(),
-                                provider_request_id: None,
-                                provider_operation_id: None,
-                                started_at: now.into(),
-                            })?,
-                        Err(e) => return Err(e.into()),
-                    };
-                    let _ = attempt;
-                    self.transition(&execution, "executing", None, now, None, None, None)?;
+                    self.repository.start_provider_attempt(&execution, now)?;
                 }
                 "executing" => {
                     let attempt = self
@@ -200,6 +183,20 @@ impl ExecutionWorkflow<'_> {
                         self.advance_completed_attempt(&execution, &attempt.outcome, now)?;
                         continue;
                     }
+                    if attempt.transmission_started_at.is_some() {
+                        self.transition(
+                            &execution,
+                            "reconciliation_required",
+                            Some("provider_delivery_interrupted"),
+                            now,
+                            Some("ambiguous"),
+                            None,
+                            None,
+                        )?;
+                        continue;
+                    }
+                    self.repository
+                        .begin_provider_transmission(&attempt.provider_attempt_id, now)?;
                     match self
                         .provider
                         .invoke(&execution, &attempt.provider_attempt_id)
@@ -216,6 +213,7 @@ impl ExecutionWorkflow<'_> {
                                     provider_currency: None,
                                     failure_code: None,
                                     failure_message_redacted: None,
+                                    provider_request_id: Some(success.request_id),
                                 },
                             )?;
                             match self.artifacts.persist(
@@ -417,7 +415,15 @@ impl ExecutionWorkflow<'_> {
     ) -> Result<(), WorkflowError> {
         match outcome {
             "succeeded" => {
-                self.transition(e, "persisting", None, now, Some("succeeded"), None, None)?;
+                self.transition(
+                    e,
+                    "reconciliation_required",
+                    Some("artifact_delivery_interrupted"),
+                    now,
+                    Some("succeeded"),
+                    Some("ambiguous"),
+                    None,
+                )?;
             }
             "failed" => self.release_or_reconcile(e, "provider_failed", now)?,
             _ => {
@@ -475,6 +481,7 @@ fn attempt_failure(outcome: &str, code: &str, now: &str) -> AttemptResult {
         provider_currency: None,
         failure_code: Some(code.into()),
         failure_message_redacted: None,
+        provider_request_id: None,
     }
 }
 fn usage_value(usage: &NormalizedUsage) -> serde_json::Value {
@@ -704,6 +711,62 @@ mod tests {
         };
         assert_eq!(w.run(&e.execution_id, "now").unwrap().status, "cancelled");
         assert_eq!((h.claims.get(), p.calls.get()), (0, 0));
+    }
+    #[test]
+    fn interrupted_transmission_reconciles_without_second_invoke_or_attempt() {
+        let repo = Repository::in_memory().unwrap();
+        let pending = execution(&repo, "interrupted");
+        let preflight = repo
+            .update_execution(
+                &pending.execution_id,
+                pending.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("now".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "now",
+            )
+            .unwrap();
+        let claimed = repo
+            .set_claim(&preflight.execution_id, preflight.version, "claim-1", "now")
+            .unwrap();
+        let attempt = repo.start_provider_attempt(&claimed, "now").unwrap();
+        assert!(matches!(
+            repo.start_provider_attempt(&claimed, "now"),
+            Err(PersistenceError::Stale)
+        ));
+        repo.begin_provider_transmission(&attempt.provider_attempt_id, "now")
+            .unwrap();
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        assert_eq!(
+            w.run(&pending.execution_id, "later").unwrap().status,
+            "reconciliation_required"
+        );
+        assert_eq!(p.calls.get(), 0);
+        assert_eq!(
+            repo.get_provider_attempt_for_execution(&pending.execution_id)
+                .unwrap()
+                .provider_attempt_id,
+            attempt.provider_attempt_id
+        );
     }
     #[test]
     fn terminal_states_are_immutable_and_skips_are_forbidden() {
