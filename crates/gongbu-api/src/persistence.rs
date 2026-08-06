@@ -207,10 +207,9 @@ pub struct Receipt {
 #[derive(Clone)]
 pub struct Repository(Arc<Mutex<Connection>>, Arc<Redactor>);
 impl Repository {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::init(Connection::open(path)?, Arc::new(Redactor::default()))
-    }
-    pub fn open_with_redactor(path: impl AsRef<Path>, redactor: Redactor) -> Result<Self> {
+    /// Persistent repositories require an explicitly configured redactor so the
+    /// production path cannot silently omit operator credential registration.
+    pub fn open(path: impl AsRef<Path>, redactor: Redactor) -> Result<Self> {
         Self::init(Connection::open(path)?, Arc::new(redactor))
     }
     pub fn in_memory() -> Result<Self> {
@@ -933,7 +932,7 @@ mod tests {
     #[test]
     fn concurrent_create_returns_one() {
         let path = std::env::temp_dir().join(format!("gongbu-{}.db", Uuid::new_v4()));
-        let r = Repository::open(&path).unwrap();
+        let r = Repository::open(&path, Redactor::default()).unwrap();
         let barrier = Arc::new(Barrier::new(8));
         let handles: Vec<_> = (0..8)
             .map(|_| {
@@ -978,14 +977,14 @@ mod tests {
     fn restart_persistence() {
         let path = std::env::temp_dir().join(format!("gongbu-restart-{}.db", Uuid::new_v4()));
         let id = {
-            Repository::open(&path)
+            Repository::open(&path, Redactor::default())
                 .unwrap()
                 .create_execution(&new("a", "op"))
                 .unwrap()
                 .execution_id
         };
         assert_eq!(
-            Repository::open(&path)
+            Repository::open(&path, Redactor::default())
                 .unwrap()
                 .get_execution(&id)
                 .unwrap()
@@ -1017,7 +1016,7 @@ mod tests {
         ).unwrap();
         drop(connection);
 
-        let repository = Repository::open(&path).unwrap();
+        let repository = Repository::open(&path, Redactor::default()).unwrap();
         let artifact = repository
             .get_artifact_for_account("artifact-1", "account-1")
             .unwrap();
