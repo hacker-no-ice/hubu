@@ -158,6 +158,10 @@ impl ArtifactService {
         self.storage.preflight()
     }
 
+    pub fn max_artifacts_per_execution(&self) -> u64 {
+        self.limits.max_artifacts_per_execution
+    }
+
     pub fn store_image(
         &self,
         execution_id: &str,

@@ -270,12 +270,20 @@ impl Api {
                 &request.model,
             )
             .map_err(map_target_error)?;
+        let image_count = input_quantity(&normalized_input, "image_count")?;
+        if image_count.is_some_and(|count| {
+            u64::try_from(count).map_or(true, |count| {
+                count > self.artifacts.max_artifacts_per_execution()
+            })
+        }) {
+            return Err(ApiError::validation());
+        }
         let pricing_snapshot = self
             .pricing
             .snapshot(&NormalizedRequest {
                 provider: resolved.provider.clone(),
                 model: resolved.model.clone(),
-                image_count: input_quantity(&normalized_input, "image_count")?,
+                image_count,
                 input_tokens: input_quantity(&normalized_input, "input_tokens")?,
                 max_output_tokens: input_quantity(&normalized_input, "max_output_tokens")?,
             })
@@ -932,6 +940,14 @@ mod tests {
             &serde_json::to_vec(&text_request).unwrap(),
         );
         assert_eq!(response.status, 400);
+    }
+
+    #[test]
+    fn image_count_cannot_exceed_artifact_capacity() {
+        let fixture = fixture();
+        let mut oversized = request("operation-too-many-images");
+        oversized["input"]["image_count"] = json!(5);
+        assert_eq!(call_create(&fixture, &oversized).status, 400);
     }
 
     #[test]
