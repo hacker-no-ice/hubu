@@ -349,6 +349,11 @@ impl ProviderActivities for IdeogramProviderActivities {
                 "provider_unknown_outcome".into(),
             ));
         }
+        if outcome.provider_request_id.is_none() && outcome.provider_operation_id.is_none() {
+            return Err(WorkflowActivityError::Ambiguous(
+                "missing_provider_identifier".into(),
+            ));
+        }
         Ok(ProviderSuccess {
             request_id: outcome.provider_request_id,
             operation_id: outcome.provider_operation_id,

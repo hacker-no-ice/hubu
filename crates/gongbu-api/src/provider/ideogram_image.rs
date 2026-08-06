@@ -105,7 +105,12 @@ impl IdeogramTransport for ReqwestIdeogramTransport {
         for (name, value) in headers {
             request = request.header(name, value);
         }
-        let mut response = request.json(body).send().map_err(|_| {
+        let prompt = body
+            .get("prompt")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
+        let form = reqwest::blocking::multipart::Form::new().text("prompt", prompt.to_owned());
+        let mut response = request.multipart(form).send().map_err(|_| {
             Box::new(HttpFailure::UnknownOutcome {
                 request_id: None,
                 operation_id: None,
@@ -348,7 +353,10 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
         let bytes = self
             .transport
             .fetch_artifact(&url, Duration::from_millis(self.config.timeout_ms))
-            .map_err(|error| classify_transport(error, secret, true))?;
+            .map_err(|error| {
+                let _ = classify_transport(error, secret, true);
+                with_evidence("artifact_policy_failure", &request_id, &operation_id)
+            })?;
         let media_type = if url.path().to_ascii_lowercase().ends_with(".jpg")
             || url.path().to_ascii_lowercase().ends_with(".jpeg")
         {
@@ -625,6 +633,76 @@ mod tests {
             assert_eq!(code, expected);
             assert_eq!(*calls.lock().unwrap(), 1);
         }
+    }
+
+    #[test]
+    fn artifact_fetch_failure_preserves_generation_evidence() {
+        let (adapter, calls) = adapter(
+            json!({"data":[{"url":"https://ideogram.ai/image.png"}]}),
+            200,
+            Err("oversize".into()),
+        );
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ContractError::ProviderWithEvidence {
+                code,
+                request_id: Some(request_id),
+                operation_id: Some(operation_id),
+            } if code == "artifact_policy_failure"
+                && request_id == "request-1"
+                && operation_id == "generation-1"
+        ));
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn production_transport_sends_prompt_as_multipart_form_data() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!(
+            "http://{}/generate",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = vec![0; 8192];
+            let count = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            let lowercase = request.to_ascii_lowercase();
+            assert!(lowercase.contains("content-type: multipart/form-data; boundary="));
+            assert!(request.contains("name=\"prompt\""));
+            assert!(request.contains("cat"));
+            assert!(!lowercase.contains("application/json"));
+            write!(
+                stream,
+                "HTTP/1.1 422 Unprocessable Entity\r\nContent-Length: 0\r\n\r\n"
+            )
+            .unwrap();
+        });
+        let response = ReqwestIdeogramTransport
+            .generate(
+                &url,
+                b"credential",
+                Duration::from_secs(2),
+                &Default::default(),
+                &json!({"prompt":"cat"}),
+            )
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(response.status, 422);
     }
 
     #[test]
