@@ -11,7 +11,7 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
-const MIGRATION: &str = include_str!("../migrations/0001_execution_core.sql");
+const MIGRATION: &str = include_str!("../../migrations/0001_execution_core.sql");
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("database: {0}")]
