@@ -355,6 +355,22 @@ fn extract_artifacts<T: GeminiTransport>(
         .and_then(|c| c.pointer("/content/parts"))
         .and_then(Value::as_array)
         .ok_or_else(|| provider_error("malformed_response"))?;
+    let image_parts = parts
+        .iter()
+        .filter(|part| {
+            part.get("inlineData")
+                .or_else(|| part.get("inline_data"))
+                .or_else(|| part.get("fileData"))
+                .or_else(|| part.get("file_data"))
+                .is_some()
+        })
+        .count();
+    // Gemini image requests are normalized to exactly one output. Enforce the
+    // bound before fetching any references so a small response cannot fan out
+    // into unbounded provider-controlled downloads.
+    if image_parts > 1 {
+        return Err(provider_error("artifact_policy_failure"));
+    }
     let mut artifacts = Vec::new();
     for part in parts {
         if let Some(inline) = part.get("inlineData").or_else(|| part.get("inline_data")) {
@@ -582,6 +598,23 @@ mod tests {
         assert!(
             matches!(rejected_adapter.invoke(&request(), &json!({"prompt":"cat"}), &secret_for_test("secret-canary"), None), Err(ContractError::Provider { code }) if code == "artifact_policy_failure")
         );
+
+        let (multiple_adapter, _) = adapter(
+            json!({"candidates":[{"content":{"parts":[
+                {"fileData":{"mimeType":"image/png","fileUri":"https://storage.googleapis.com/one.png"}},
+                {"fileData":{"mimeType":"image/png","fileUri":"https://storage.googleapis.com/two.png"}}
+            ]}}]}),
+            200,
+        );
+        assert!(matches!(
+            multiple_adapter.invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None
+            ),
+            Err(ContractError::Provider { code }) if code == "artifact_policy_failure"
+        ));
     }
     #[test]
     fn stable_failures_and_no_retry() {

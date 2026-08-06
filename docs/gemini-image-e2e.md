@@ -42,7 +42,7 @@ GONGBU_PRICING_CATALOG=/absolute/path/pricing.json \
 GONGBU_LIVE_GEMINI_MAX_MINOR=10 \
 GONGBU_LIVE_GEMINI_CONFIRM=I_ACCEPT_GOOGLE_CHARGES \
 GONGBU_LIVE_GEMINI_PROMPT='Draw one small blue circle on white.' \
-cargo test -p gongbu-api live_gemini_e2e_requires_explicit_spend_guard_and_never_uses_fixture -- --ignored --exact
+cargo test -p gongbu-api provider::gemini_image::tests::live_gemini_e2e_requires_explicit_spend_guard_and_never_uses_fixture -- --ignored --exact
 ```
 
 The check fails closed when configuration, credentials, the exact confirmation,
