@@ -108,6 +108,7 @@ pub struct Execution {
     pub updated_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    pub release_transmission_started_at: Option<String>,
     pub version: i64,
 }
 #[derive(Clone, Debug)]
@@ -382,6 +383,19 @@ impl Repository {
     pub fn accept_existing_claim(&self, id: &str, expected: i64, at: &str) -> Result<Execution> {
         let c = self.0.lock().unwrap();
         let changed = c.execute("UPDATE executions SET status='claimed',updated_at=?1,version=version+1 WHERE execution_id=?2 AND version=?3 AND status='preflighting' AND hubu_claim_id IS NOT NULL", params![at,id,expected])?;
+        if changed == 0 {
+            return Err(Error::Stale);
+        }
+        query_id(&c, id)
+    }
+    pub fn begin_release_transmission(
+        &self,
+        id: &str,
+        expected: i64,
+        at: &str,
+    ) -> Result<Execution> {
+        let c = self.0.lock().unwrap();
+        let changed = c.execute("UPDATE executions SET release_transmission_started_at=?1,updated_at=?1,version=version+1 WHERE execution_id=?2 AND version=?3 AND status='executing' AND release_transmission_started_at IS NULL", params![at,id,expected])?;
         if changed == 0 {
             return Err(Error::Stale);
         }
@@ -918,7 +932,7 @@ fn query_id(c: &Connection, id: &str) -> Result<Execution> {
     .optional()?
     .ok_or(Error::NotFound)
 }
-const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,version FROM executions";
+const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,release_transmission_started_at,version FROM executions";
 fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
     let i: String = r.get(8)?;
     let p: String = r.get(18)?;
@@ -954,7 +968,8 @@ fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
         updated_at: r.get(28)?,
         started_at: r.get(29)?,
         completed_at: r.get(30)?,
-        version: r.get(31)?,
+        release_transmission_started_at: r.get(31)?,
+        version: r.get(32)?,
     })
 }
 fn validate_execution(n: &CreateExecutionParams) -> Result<()> {

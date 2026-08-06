@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS executions(
  status TEXT NOT NULL CHECK(status IN ('pending','preflighting','claimed','executing','persisting','settling','succeeded','released','failed','reconciliation_required')), outcome TEXT,
  provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT,
  failure_code TEXT, failure_message_redacted TEXT,
- created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0), UNIQUE(account_id,operation_key));
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, release_transmission_started_at TEXT, version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0), UNIQUE(account_id,operation_key));
 CREATE INDEX IF NOT EXISTS executions_status_created ON executions(status,created_at);
 CREATE INDEX IF NOT EXISTS executions_claim ON executions(hubu_claim_id) WHERE hubu_claim_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS provider_attempts(

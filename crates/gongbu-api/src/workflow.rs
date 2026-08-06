@@ -158,6 +158,7 @@ impl ExecutionWorkflow<'_> {
                         .invoke(&execution, &attempt.provider_attempt_id)
                     {
                         Ok(success) => {
+                            let has_provider_artifact = !success.artifacts.is_empty();
                             self.repository.complete_provider_attempt(
                                 &attempt.provider_attempt_id,
                                 &AttemptResult {
@@ -172,12 +173,29 @@ impl ExecutionWorkflow<'_> {
                                     provider_request_id: Some(success.request_id),
                                 },
                             )?;
+                            if !has_provider_artifact {
+                                self.transition(
+                                    &execution,
+                                    "reconciliation_required",
+                                    Some("provider_returned_no_artifacts"),
+                                    now,
+                                    Some("succeeded"),
+                                    Some("failed"),
+                                    None,
+                                )?;
+                                continue;
+                            }
                             match self.artifacts.persist(
                                 &execution,
                                 &attempt.provider_attempt_id,
                                 &success.artifacts,
                             ) {
-                                Ok(()) => {
+                                Ok(())
+                                    if self
+                                        .repository
+                                        .count_artifacts_for_execution(execution_id)?
+                                        > 0 =>
+                                {
                                     self.transition(
                                         &execution,
                                         "persisting",
@@ -185,6 +203,17 @@ impl ExecutionWorkflow<'_> {
                                         now,
                                         Some("succeeded"),
                                         Some("succeeded"),
+                                        None,
+                                    )?;
+                                }
+                                Ok(()) => {
+                                    self.transition(
+                                        &execution,
+                                        "reconciliation_required",
+                                        Some("artifact_not_persisted"),
+                                        now,
+                                        Some("succeeded"),
+                                        Some("failed"),
                                         None,
                                     )?;
                                 }
@@ -351,10 +380,25 @@ impl ExecutionWorkflow<'_> {
         code: &str,
         now: &str,
     ) -> Result<(), WorkflowError> {
-        match self.hubu.release(e) {
+        if e.release_transmission_started_at.is_some() {
+            self.transition(
+                e,
+                "reconciliation_required",
+                Some("release_delivery_interrupted"),
+                now,
+                Some("failed"),
+                None,
+                Some("ambiguous"),
+            )?;
+            return Ok(());
+        }
+        let marked = self
+            .repository
+            .begin_release_transmission(&e.execution_id, e.version, now)?;
+        match self.hubu.release(&marked) {
             Ok(()) => {
                 self.transition(
-                    e,
+                    &marked,
                     "released",
                     Some(code),
                     now,
@@ -365,7 +409,7 @@ impl ExecutionWorkflow<'_> {
             }
             Err(ActivityError::Proven(c)) | Err(ActivityError::Ambiguous(c)) => {
                 self.transition(
-                    e,
+                    &marked,
                     "reconciliation_required",
                     Some(&c),
                     now,
@@ -483,6 +527,7 @@ mod tests {
         settles: Cell<u32>,
         releases: Cell<u32>,
         panic_on_settle: Cell<bool>,
+        panic_on_release: Cell<bool>,
         claim_error: RefCell<Option<ActivityError>>,
         settle_error: RefCell<Option<ActivityError>>,
     }
@@ -493,6 +538,7 @@ mod tests {
                 settles: Cell::new(0),
                 releases: Cell::new(0),
                 panic_on_settle: Cell::new(false),
+                panic_on_release: Cell::new(false),
                 claim_error: RefCell::new(None),
                 settle_error: RefCell::new(None),
             }
@@ -524,18 +570,24 @@ mod tests {
         }
         fn release(&self, _: &Execution) -> Result<(), ActivityError> {
             self.releases.set(self.releases.get() + 1);
+            assert!(
+                !self.panic_on_release.replace(false),
+                "simulated worker loss"
+            );
             Ok(())
         }
     }
     struct Provider {
         calls: Cell<u32>,
         error: RefCell<Option<ActivityError>>,
+        empty_artifacts: Cell<bool>,
     }
     impl Default for Provider {
         fn default() -> Self {
             Self {
                 calls: Cell::new(0),
                 error: RefCell::new(None),
+                empty_artifacts: Cell::new(false),
             }
         }
     }
@@ -554,10 +606,14 @@ mod tests {
                         images: Some(1),
                         ..Default::default()
                     },
-                    artifacts: vec![ProviderArtifact {
-                        media_type: "image/png".into(),
-                        bytes: vec![1],
-                    }],
+                    artifacts: if self.empty_artifacts.get() {
+                        vec![]
+                    } else {
+                        vec![ProviderArtifact {
+                            media_type: "image/png".into(),
+                            bytes: vec![1],
+                        }]
+                    },
                 })
             }
         }
@@ -714,6 +770,63 @@ mod tests {
             "reconciliation_required"
         );
         assert_eq!(h.settles.get(), 1);
+    }
+    #[test]
+    fn empty_provider_artifacts_reconcile_without_settlement() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "empty-artifacts");
+        let h = Hubu::default();
+        let p = Provider::default();
+        p.empty_artifacts.set(true);
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        let done = w.run(&e.execution_id, "now").unwrap();
+        assert_eq!(done.status, "reconciliation_required");
+        assert_eq!(done.artifact_outcome.as_deref(), Some("failed"));
+        assert_eq!(h.settles.get(), 0);
+    }
+
+    #[test]
+    fn interrupted_release_reconciles_without_second_release() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "release-interrupted");
+        let h = Hubu::default();
+        h.panic_on_release.set(true);
+        let p = Provider::default();
+        p.error
+            .replace(Some(ActivityError::Proven("declined".into())));
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || w.run(&e.execution_id, "now")
+        ))
+        .is_err());
+        assert!(repo
+            .get_execution(&e.execution_id)
+            .unwrap()
+            .release_transmission_started_at
+            .is_some());
+        assert_eq!(
+            w.run(&e.execution_id, "later").unwrap().status,
+            "reconciliation_required"
+        );
+        assert_eq!(h.releases.get(), 1);
     }
     #[test]
     fn ambiguous_provider_stops_without_retry_or_release() {
