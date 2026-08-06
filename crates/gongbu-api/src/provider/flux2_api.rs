@@ -1,0 +1,962 @@
+//! Black Forest Labs FLUX.2 asynchronous image-generation adapter.
+//!
+//! A generation is submitted exactly once. If it is asynchronous, the returned
+//! operation URL is polled under the same overall deadline; polling never
+//! resubmits the generation. Returned bytes remain untrusted until the shared
+//! artifact service validates and stores them.
+
+use super::{
+    contract::{
+        AdapterCapabilities, AdapterOutcome, ContractError, NormalizedArtifact, NormalizedRequest,
+        NormalizedUsage, OutcomeKind, ProviderAdapter, Result, RetryPolicy,
+    },
+    targets::{Flux2ApiConfig, ProviderConfigVersion},
+};
+use crate::{redaction::Redactor, secrets::ProviderSecret};
+use reqwest::{
+    blocking::Client,
+    header::{HeaderName, HeaderValue},
+    Url,
+};
+use serde_json::{json, Value};
+use std::{
+    collections::BTreeMap,
+    error::Error as StdError,
+    fmt,
+    io::Read,
+    thread,
+    time::{Duration, Instant},
+};
+
+pub const PROVIDER_ID: &str = "flux";
+pub const ADAPTER_ID: &str = "flux2_api";
+const MAX_ARTIFACT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Debug)]
+pub struct TransportResponse {
+    pub status: u16,
+    pub request_id: Option<String>,
+    pub body: Value,
+}
+
+pub trait Flux2Transport: Send + Sync {
+    fn submit(
+        &self,
+        url: &Url,
+        credential: &[u8],
+        timeout: Duration,
+        headers: &BTreeMap<String, String>,
+        idempotency: Option<(&str, &str)>,
+        body: &Value,
+    ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>>;
+    fn poll(
+        &self,
+        url: &Url,
+        credential: &[u8],
+        timeout: Duration,
+        headers: &BTreeMap<String, String>,
+    ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>>;
+    fn fetch_artifact(
+        &self,
+        url: &Url,
+        timeout: Duration,
+    ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>>;
+}
+
+impl<T: Flux2Transport + ?Sized> Flux2Transport for std::sync::Arc<T> {
+    fn submit(
+        &self,
+        url: &Url,
+        credential: &[u8],
+        timeout: Duration,
+        headers: &BTreeMap<String, String>,
+        idempotency: Option<(&str, &str)>,
+        body: &Value,
+    ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+        self.as_ref()
+            .submit(url, credential, timeout, headers, idempotency, body)
+    }
+    fn poll(
+        &self,
+        url: &Url,
+        credential: &[u8],
+        timeout: Duration,
+        headers: &BTreeMap<String, String>,
+    ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+        self.as_ref().poll(url, credential, timeout, headers)
+    }
+    fn fetch_artifact(
+        &self,
+        url: &Url,
+        timeout: Duration,
+    ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+        self.as_ref().fetch_artifact(url, timeout)
+    }
+}
+
+#[derive(Debug)]
+enum HttpFailure {
+    BeforeSend,
+    UnknownOutcome,
+}
+impl fmt::Display for HttpFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FLUX HTTP failure")
+    }
+}
+impl StdError for HttpFailure {}
+
+pub struct ReqwestFlux2Transport;
+impl ReqwestFlux2Transport {
+    fn client(timeout: Duration) -> std::result::Result<Client, Box<dyn StdError + Send + Sync>> {
+        Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as _)
+    }
+    fn response(
+        mut response: reqwest::blocking::Response,
+    ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+        let status = response.status().as_u16();
+        let request_id = ["x-request-id", "x-bfl-request-id"]
+            .iter()
+            .find_map(|name| {
+                response
+                    .headers()
+                    .get(*name)?
+                    .to_str()
+                    .ok()
+                    .map(str::to_owned)
+            });
+        if (400..500).contains(&status) {
+            return Ok(TransportResponse {
+                status,
+                request_id,
+                body: Value::Null,
+            });
+        }
+        let bytes = read_bounded(&mut response, MAX_RESPONSE_BYTES).map_err(|_| {
+            Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+        })?;
+        let body = serde_json::from_slice(&bytes).map_err(|_| {
+            Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+        })?;
+        Ok(TransportResponse {
+            status,
+            request_id,
+            body,
+        })
+    }
+}
+impl Flux2Transport for ReqwestFlux2Transport {
+    fn submit(
+        &self,
+        url: &Url,
+        credential: &[u8],
+        timeout: Duration,
+        headers: &BTreeMap<String, String>,
+        idempotency: Option<(&str, &str)>,
+        body: &Value,
+    ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+        let credential = std::str::from_utf8(credential)
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
+        let mut request = Self::client(timeout)?
+            .post(url.clone())
+            .header("x-key", credential)
+            .json(body);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        if let Some((name, value)) = idempotency {
+            request = request.header(name, value);
+        }
+        let response = request.send().map_err(|_| {
+            Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+        })?;
+        Self::response(response)
+    }
+    fn poll(
+        &self,
+        url: &Url,
+        credential: &[u8],
+        timeout: Duration,
+        headers: &BTreeMap<String, String>,
+    ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+        let credential = std::str::from_utf8(credential)
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
+        let mut request = Self::client(timeout)?
+            .get(url.clone())
+            .header("x-key", credential);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        Self::response(request.send().map_err(|_| {
+            Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+        })?)
+    }
+    fn fetch_artifact(
+        &self,
+        url: &Url,
+        timeout: Duration,
+    ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+        let mut response = Self::client(timeout)?.get(url.clone()).send()?;
+        if !response.status().is_success() {
+            return Err(Box::new(HttpFailure::UnknownOutcome));
+        }
+        read_bounded(&mut response, MAX_ARTIFACT_BYTES)
+    }
+}
+
+fn read_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(Box::new(HttpFailure::UnknownOutcome));
+    }
+    Ok(bytes)
+}
+
+pub struct Flux2ApiAdapter<T = ReqwestFlux2Transport> {
+    config: Flux2ApiConfig,
+    model: String,
+    transport: T,
+}
+impl Flux2ApiAdapter<ReqwestFlux2Transport> {
+    pub fn from_target(target: &ProviderConfigVersion) -> Result<Self> {
+        if target.provider != PROVIDER_ID || target.adapter != ADAPTER_ID {
+            return Err(provider_error("target_mismatch"));
+        }
+        Self::new(
+            target
+                .flux2_api
+                .clone()
+                .ok_or_else(|| provider_error("config_invalid"))?,
+            target.model.clone(),
+            ReqwestFlux2Transport,
+        )
+    }
+}
+impl<T: Flux2Transport> Flux2ApiAdapter<T> {
+    pub fn new(config: Flux2ApiConfig, model: String, transport: T) -> Result<Self> {
+        RetryPolicy {
+            max_retries: config.max_retries,
+        }
+        .validate(AdapterCapabilities {
+            vendor_enforced_idempotency: config.idempotency_header.is_some(),
+        })?;
+        if model.trim().is_empty()
+            || config.timeout_ms == 0
+            || config.poll_interval_ms == 0
+            || config.max_retries != 0
+        {
+            return Err(provider_error("config_invalid"));
+        }
+        for (name, value) in &config.headers {
+            HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| provider_error("config_invalid"))?;
+            HeaderValue::from_str(value).map_err(|_| provider_error("config_invalid"))?;
+        }
+        if let Some(name) = &config.idempotency_header {
+            HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| provider_error("config_invalid"))?;
+        }
+        submit_url(&config, &model)?;
+        Ok(Self {
+            config,
+            model,
+            transport,
+        })
+    }
+
+    fn invoke_inner(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+        idempotency_key: Option<&str>,
+    ) -> Result<AdapterOutcome> {
+        self.validate_request(request)?;
+        let prompt = input
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty() && p.len() <= 32_000)
+            .ok_or_else(|| provider_error("invalid_request"))?;
+        let mut body = json!({"prompt": prompt});
+        for field in [
+            "width",
+            "height",
+            "seed",
+            "safety_tolerance",
+            "output_format",
+        ] {
+            if let Some(value) = input.get(field) {
+                body[field] = value.clone();
+            }
+        }
+        let deadline = Instant::now() + Duration::from_millis(self.config.timeout_ms);
+        let idempotency = match (&self.config.idempotency_header, idempotency_key) {
+            (Some(name), Some(key)) => Some((name.as_str(), key)),
+            _ => None,
+        };
+        let response = self
+            .transport
+            .submit(
+                &submit_url(&self.config, &self.model)?,
+                secret.expose(),
+                remaining(deadline)?,
+                &self.config.headers,
+                idempotency,
+                &body,
+            )
+            .map_err(|error| classify_transport(error, secret, true, None, None))?;
+        let request_id = response
+            .request_id
+            .or_else(|| string_at(&response.body, &["request_id", "requestId"]));
+        if (400..500).contains(&response.status) {
+            return Err(provider_error("provider_rejected"));
+        }
+        if !(200..300).contains(&response.status) {
+            return Err(with_evidence("provider_failure", request_id, None));
+        }
+        let operation_id = string_at(&response.body, &["id", "operation_id", "operationId"]);
+        let mut current = response.body;
+        if !is_ready(&current) {
+            let operation_id = operation_id
+                .clone()
+                .ok_or_else(|| with_evidence("malformed_response", request_id.clone(), None))?;
+            let poll_url = poll_url(&self.config, &current, &operation_id)?;
+            loop {
+                let wait = Duration::from_millis(self.config.poll_interval_ms).min(
+                    remaining(deadline).map_err(|_| {
+                        with_evidence(
+                            "timeout_unknown_outcome",
+                            request_id.clone(),
+                            Some(operation_id.clone()),
+                        )
+                    })?,
+                );
+                thread::sleep(wait);
+                let response = self
+                    .transport
+                    .poll(
+                        &poll_url,
+                        secret.expose(),
+                        remaining(deadline).map_err(|_| {
+                            with_evidence(
+                                "timeout_unknown_outcome",
+                                request_id.clone(),
+                                Some(operation_id.clone()),
+                            )
+                        })?,
+                        &self.config.headers,
+                    )
+                    .map_err(|error| {
+                        classify_transport(
+                            error,
+                            secret,
+                            false,
+                            request_id.clone(),
+                            Some(operation_id.clone()),
+                        )
+                    })?;
+                if (400..500).contains(&response.status) {
+                    return Err(with_evidence(
+                        "provider_rejected",
+                        request_id,
+                        Some(operation_id),
+                    ));
+                }
+                if !(200..300).contains(&response.status) {
+                    return Err(with_evidence(
+                        "provider_failure",
+                        request_id,
+                        Some(operation_id),
+                    ));
+                }
+                current = response.body;
+                if is_failed(&current) {
+                    return Err(with_evidence(
+                        "provider_rejected",
+                        request_id,
+                        Some(operation_id),
+                    ));
+                }
+                if is_ready(&current) {
+                    break;
+                }
+            }
+        }
+        let operation_id =
+            operation_id.or_else(|| string_at(&current, &["id", "operation_id", "operationId"]));
+        let artifact_url = current
+            .pointer("/result/sample")
+            .or_else(|| current.pointer("/result/image/url"))
+            .or_else(|| current.get("sample"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                with_evidence(
+                    if current.get("result").is_some() {
+                        "missing_image"
+                    } else {
+                        "malformed_response"
+                    },
+                    request_id.clone(),
+                    operation_id.clone(),
+                )
+            })?;
+        let artifact_url = Url::parse(artifact_url).map_err(|_| {
+            with_evidence(
+                "artifact_policy_failure",
+                request_id.clone(),
+                operation_id.clone(),
+            )
+        })?;
+        if artifact_url.scheme() != "https"
+            || !self
+                .config
+                .approved_artifact_hosts
+                .iter()
+                .any(|host| artifact_url.host_str() == Some(host))
+        {
+            return Err(with_evidence(
+                "artifact_policy_failure",
+                request_id,
+                operation_id,
+            ));
+        }
+        let bytes = self
+            .transport
+            .fetch_artifact(
+                &artifact_url,
+                remaining(deadline).map_err(|_| {
+                    with_evidence(
+                        "artifact_policy_failure",
+                        request_id.clone(),
+                        operation_id.clone(),
+                    )
+                })?,
+            )
+            .map_err(|error| {
+                let _ = Redactor::new([secret.expose()]).error_chain(error.as_ref());
+                with_evidence(
+                    "artifact_policy_failure",
+                    request_id.clone(),
+                    operation_id.clone(),
+                )
+            })?;
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(with_evidence(
+                "artifact_policy_failure",
+                request_id,
+                operation_id,
+            ));
+        }
+        let media_type =
+            if artifact_url.path().ends_with(".jpg") || artifact_url.path().ends_with(".jpeg") {
+                "image/jpeg"
+            } else {
+                "image/png"
+            };
+        let provider_amount_minor = current
+            .pointer("/result/cost")
+            .and_then(Value::as_f64)
+            .and_then(|dollars| {
+                if dollars.is_finite() && dollars >= 0.0 {
+                    Some((dollars * 100.0).round() as i64)
+                } else {
+                    None
+                }
+            });
+        Ok(AdapterOutcome {
+            outcome: OutcomeKind::Succeeded,
+            usage: Some(NormalizedUsage {
+                images: Some(1),
+                ..Default::default()
+            }),
+            provider_amount_minor,
+            provider_currency: provider_amount_minor.map(|_| "USD".into()),
+            provider_request_id: request_id,
+            provider_operation_id: operation_id,
+            artifacts: vec![NormalizedArtifact {
+                media_type: media_type.into(),
+                bytes,
+            }],
+        })
+    }
+}
+
+impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
+    fn adapter_id(&self) -> &str {
+        ADAPTER_ID
+    }
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities {
+            vendor_enforced_idempotency: self.config.idempotency_header.is_some(),
+        }
+    }
+    fn validate_request(&self, request: &NormalizedRequest) -> Result<()> {
+        request.validate()?;
+        if request.provider != PROVIDER_ID
+            || request.model != self.model
+            || request.image_count != Some(1)
+        {
+            return Err(provider_error("invalid_request"));
+        }
+        Ok(())
+    }
+    fn invoke(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+    ) -> Result<AdapterOutcome> {
+        if vendor_idempotency_key.is_some() != self.config.idempotency_header.is_some() {
+            return Err(provider_error("idempotency_policy_mismatch"));
+        }
+        self.invoke_inner(request, input, secret, vendor_idempotency_key)
+    }
+    fn redact_error(&self, error: &(dyn StdError + 'static)) -> ContractError {
+        let _ = Redactor::default().error_chain(error);
+        provider_error("provider_failure")
+    }
+}
+
+fn submit_url(config: &Flux2ApiConfig, model: &str) -> Result<Url> {
+    let mut url = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
+    if url.scheme() != "https" || url.host_str().is_none() || url.query().is_some() {
+        return Err(provider_error("config_invalid"));
+    }
+    url.set_path(&format!(
+        "{}/{}",
+        config.api_version.trim_matches('/'),
+        model
+    ));
+    Ok(url)
+}
+fn poll_url(config: &Flux2ApiConfig, body: &Value, operation_id: &str) -> Result<Url> {
+    let url = if let Some(value) = string_at(body, &["polling_url", "pollingUrl"]) {
+        Url::parse(&value).map_err(|_| provider_error("malformed_response"))?
+    } else {
+        let mut url = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
+        url.set_path(&format!(
+            "{}/get_result",
+            config.api_version.trim_matches('/')
+        ));
+        url.query_pairs_mut().append_pair("id", operation_id);
+        url
+    };
+    let base = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
+    if url.scheme() != "https" || url.host_str() != base.host_str() {
+        return Err(provider_error("artifact_policy_failure"));
+    }
+    Ok(url)
+}
+fn remaining(deadline: Instant) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|value| !value.is_zero())
+        .ok_or_else(|| provider_error("timeout_unknown_outcome"))
+}
+fn string_at(body: &Value, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| body.get(*name)?.as_str().map(str::to_owned))
+}
+fn status(body: &Value) -> Option<String> {
+    body.get("status")
+        .and_then(Value::as_str)
+        .map(|s| s.to_ascii_lowercase())
+}
+fn is_ready(body: &Value) -> bool {
+    matches!(
+        status(body).as_deref(),
+        Some("ready" | "succeeded" | "completed")
+    ) || body.pointer("/result/sample").is_some()
+}
+fn is_failed(body: &Value) -> bool {
+    matches!(
+        status(body).as_deref(),
+        Some("error" | "failed" | "rejected" | "content moderated")
+    )
+}
+fn provider_error(code: &str) -> ContractError {
+    ContractError::Provider { code: code.into() }
+}
+fn with_evidence(
+    code: &str,
+    request_id: Option<String>,
+    operation_id: Option<String>,
+) -> ContractError {
+    ContractError::ProviderWithEvidence {
+        code: code.into(),
+        request_id,
+        operation_id,
+    }
+}
+fn classify_transport(
+    error: Box<dyn StdError + Send + Sync>,
+    secret: &ProviderSecret,
+    submission: bool,
+    request_id: Option<String>,
+    operation_id: Option<String>,
+) -> ContractError {
+    let _ = Redactor::new([secret.expose()]).error_chain(error.as_ref());
+    match error.downcast_ref::<HttpFailure>() {
+        Some(HttpFailure::BeforeSend) if submission => provider_error("provider_pre_send_failure"),
+        _ if submission => with_evidence("timeout_unknown_outcome", request_id, operation_id),
+        _ => with_evidence("timeout_unknown_outcome", request_id, operation_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secrets::secret_for_test;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Fixture {
+        submit: Arc<Mutex<u32>>,
+        polls: Arc<Mutex<Vec<Value>>>,
+        artifact: Vec<u8>,
+        fail_submit: Option<String>,
+        fail_poll: Option<String>,
+    }
+    impl Flux2Transport for Fixture {
+        fn submit(
+            &self,
+            _: &Url,
+            credential: &[u8],
+            _: Duration,
+            _: &BTreeMap<String, String>,
+            idempotency: Option<(&str, &str)>,
+            body: &Value,
+        ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+            assert_eq!(credential, b"secret-canary");
+            assert_eq!(idempotency, Some(("x-idempotency-key", "opaque-key")));
+            assert_eq!(body["prompt"], "cat");
+            *self.submit.lock().unwrap() += 1;
+            if self.fail_submit.is_some() {
+                return Err(Box::new(HttpFailure::UnknownOutcome));
+            }
+            Ok(TransportResponse {
+                status: 202,
+                request_id: Some("req-1".into()),
+                body: json!({"id":"op-1","polling_url":"https://api.bfl.ai/v1/get_result?id=op-1","status":"Pending"}),
+            })
+        }
+        fn poll(
+            &self,
+            _: &Url,
+            _: &[u8],
+            _: Duration,
+            _: &BTreeMap<String, String>,
+        ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+            if self.fail_poll.is_some() {
+                return Err(Box::new(HttpFailure::UnknownOutcome));
+            }
+            let body = self.polls.lock().unwrap().remove(0);
+            Ok(TransportResponse {
+                status: 200,
+                request_id: Some("poll-1".into()),
+                body,
+            })
+        }
+        fn fetch_artifact(
+            &self,
+            _: &Url,
+            _: Duration,
+        ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+            Ok(self.artifact.clone())
+        }
+    }
+    fn config() -> Flux2ApiConfig {
+        Flux2ApiConfig {
+            endpoint: "https://api.bfl.ai".into(),
+            api_version: "v1".into(),
+            timeout_ms: 1000,
+            poll_interval_ms: 1,
+            max_retries: 0,
+            idempotency_header: Some("x-idempotency-key".into()),
+            approved_artifact_hosts: vec!["cdn.bfl.ai".into()],
+            headers: BTreeMap::new(),
+        }
+    }
+    fn request() -> NormalizedRequest {
+        NormalizedRequest {
+            provider: PROVIDER_ID.into(),
+            model: "flux-2-pro".into(),
+            image_count: Some(1),
+            input_tokens: None,
+            max_output_tokens: None,
+        }
+    }
+    fn fixture(polls: Vec<Value>) -> (Flux2ApiAdapter<Fixture>, Arc<Mutex<u32>>) {
+        let submit = Arc::new(Mutex::new(0));
+        (
+            Flux2ApiAdapter::new(
+                config(),
+                "flux-2-pro".into(),
+                Fixture {
+                    submit: submit.clone(),
+                    polls: Arc::new(Mutex::new(polls)),
+                    artifact: vec![1, 2, 3],
+                    fail_submit: None,
+                    fail_poll: None,
+                },
+            )
+            .unwrap(),
+            submit,
+        )
+    }
+    fn code(error: ContractError) -> String {
+        match error {
+            ContractError::Provider { code } | ContractError::ProviderWithEvidence { code, .. } => {
+                code
+            }
+            other => panic!("{other}"),
+        }
+    }
+
+    #[test]
+    fn submits_once_polls_same_operation_and_normalizes_missing_cost() {
+        let (adapter, submits) = fixture(vec![
+            json!({"id":"op-1","status":"Pending"}),
+            json!({"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}}),
+        ]);
+        let outcome = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap();
+        assert_eq!(*submits.lock().unwrap(), 1);
+        assert_eq!(outcome.provider_operation_id.as_deref(), Some("op-1"));
+        assert_eq!(outcome.provider_request_id.as_deref(), Some("req-1"));
+        assert_eq!(outcome.provider_amount_minor, None);
+        assert_eq!(outcome.usage.unwrap().images, Some(1));
+        assert_eq!(outcome.artifacts[0].bytes, vec![1, 2, 3]);
+    }
+    #[test]
+    fn stable_rejection_malformed_missing_image_and_artifact_policy_failures() {
+        for (body, expected) in [
+            (
+                json!({"id":"op-1","status":"Rejected"}),
+                "provider_rejected",
+            ),
+            (json!({"id":"op-1","status":"Ready"}), "malformed_response"),
+            (
+                json!({"id":"op-1","status":"Ready","result":{}}),
+                "missing_image",
+            ),
+            (
+                json!({"id":"op-1","status":"Ready","result":{"sample":"https://evil.example/out.png"}}),
+                "artifact_policy_failure",
+            ),
+        ] {
+            let (adapter, submits) = fixture(vec![body]);
+            let error = adapter
+                .invoke(
+                    &request(),
+                    &json!({"prompt":"cat"}),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap_err();
+            assert_eq!(code(error), expected);
+            assert_eq!(*submits.lock().unwrap(), 1);
+        }
+    }
+    #[test]
+    fn ambiguous_submission_and_poll_timeout_never_resubmit() {
+        let submits = Arc::new(Mutex::new(0));
+        let adapter = Flux2ApiAdapter::new(
+            config(),
+            "flux-2-pro".into(),
+            Fixture {
+                submit: submits.clone(),
+                polls: Arc::new(Mutex::new(vec![])),
+                artifact: vec![],
+                fail_submit: Some("secret-canary".into()),
+                fail_poll: None,
+            },
+        )
+        .unwrap();
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap_err();
+        assert_eq!(code(error), "timeout_unknown_outcome");
+        assert_eq!(*submits.lock().unwrap(), 1);
+        let submits = Arc::new(Mutex::new(0));
+        let adapter = Flux2ApiAdapter::new(
+            config(),
+            "flux-2-pro".into(),
+            Fixture {
+                submit: submits.clone(),
+                polls: Arc::new(Mutex::new(vec![])),
+                artifact: vec![],
+                fail_submit: None,
+                fail_poll: Some("nested secret-canary".into()),
+            },
+        )
+        .unwrap();
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider error (timeout_unknown_outcome)"
+        );
+        assert!(!error.to_string().contains("secret-canary"));
+        assert_eq!(*submits.lock().unwrap(), 1);
+    }
+    #[test]
+    fn rejects_invalid_request_and_retry_policy_before_network() {
+        let (adapter, submits) = fixture(vec![]);
+        let mut bad = request();
+        bad.image_count = Some(2);
+        assert_eq!(
+            code(
+                adapter
+                    .invoke(
+                        &bad,
+                        &json!({"prompt":"cat"}),
+                        &secret_for_test("secret-canary"),
+                        Some("opaque-key")
+                    )
+                    .unwrap_err()
+            ),
+            "invalid_request"
+        );
+        assert_eq!(*submits.lock().unwrap(), 0);
+        let mut invalid = config();
+        invalid.max_retries = 1;
+        assert!(Flux2ApiAdapter::new(
+            invalid,
+            "flux-2-pro".into(),
+            Fixture {
+                submit: submits,
+                polls: Arc::new(Mutex::new(vec![])),
+                artifact: vec![],
+                fail_submit: None,
+                fail_poll: None
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fixture_output_uses_shared_artifact_policy_and_frozen_pricing_for_settlement() {
+        use crate::{
+            artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference, Repository},
+            provider::contract::PricingCatalog,
+        };
+        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use std::io::Cursor;
+        use tempfile::tempdir;
+
+        let mut png = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])))
+            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .unwrap();
+        let submits = Arc::new(Mutex::new(0));
+        let adapter = Flux2ApiAdapter::new(
+            config(),
+            "flux-2-pro".into(),
+            Fixture {
+                submit: submits,
+                polls: Arc::new(Mutex::new(vec![json!({"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}})])),
+                artifact: png.clone(),
+                fail_submit: None,
+                fail_poll: None,
+            },
+        )
+        .unwrap();
+        let outcome = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"fixture-v1","rules":[{"rule_id":"flux2-pro","provider":"flux","model":"flux-2-pro","currency":"USD","unit":"image","unit_amount_minor":45}]}"#).unwrap();
+        let snapshot = pricing.snapshot(&request()).unwrap();
+        assert_eq!(snapshot.estimated_amount_minor, 45);
+        assert_eq!(
+            snapshot
+                .settle(outcome.usage.as_ref().unwrap(), 45)
+                .unwrap(),
+            45
+        );
+        assert_eq!(outcome.provider_amount_minor, None);
+
+        let repository = Repository::in_memory().unwrap();
+        let execution = repository
+            .create_execution(&CreateExecutionParams {
+                account_id: "account".into(),
+                operation_key: "flux-fixture".into(),
+                hubu_authorization_id: "auth".into(),
+                hubu_claim_id: Some("claim".into()),
+                hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
+                authorized_minor: 45,
+                authorization_currency: "USD".into(),
+                normalized_input: json!({"prompt":"cat","image_count":1}),
+                input_hash: "hash".into(),
+                input_schema_version: 1,
+                target: "flux/flux-2-pro".into(),
+                config_version: "cfg".into(),
+                workload_type: "image_generation".into(),
+                provider: "flux".into(),
+                adapter: "flux2_api".into(),
+                model: "flux-2-pro".into(),
+                provider_config_version: "pcv".into(),
+                pricing_snapshot: serde_json::to_value(snapshot).unwrap(),
+                pricing_schema_version: 1,
+                created_at: "now".into(),
+            })
+            .unwrap();
+        let root = tempdir().unwrap();
+        let service = ArtifactService::new(
+            repository,
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let artifact = service
+            .store_image(
+                &execution.execution_id,
+                None,
+                &outcome.artifacts[0].media_type,
+                &outcome.artifacts[0].bytes,
+                "now",
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .retrieve_for_account(&artifact.artifact_id, "account")
+                .unwrap()
+                .bytes,
+            png
+        );
+    }
+}

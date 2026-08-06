@@ -619,6 +619,7 @@ mod tests {
             secret_service: "gongbu.vendor".into(),
             secret_account: "local".into(),
             gemini_image: None,
+            flux2_api: None,
             enabled: true,
         };
         let adapter = Adapter(AtomicUsize::new(0));
