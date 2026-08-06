@@ -13,9 +13,9 @@ const SENSITIVE_QUERY_KEYS: &[&str] = &[
     "token",
 ];
 
-#[derive(Default)]
 pub struct Redactor {
     exact: Vec<String>,
+    marker: &'static str,
 }
 impl Redactor {
     pub fn new<'a>(secrets: impl IntoIterator<Item = &'a [u8]>) -> Self {
@@ -35,16 +35,21 @@ impl Redactor {
             .collect();
         exact.sort_by_key(|value| std::cmp::Reverse(value.len()));
         exact.dedup();
-        Self { exact }
+        let marker = if exact.iter().any(|secret| REDACTED.contains(secret)) {
+            ""
+        } else {
+            REDACTED
+        };
+        Self { exact, marker }
     }
 
     pub fn redact(&self, input: &str) -> String {
         let mut value = input.to_owned();
         for secret in &self.exact {
-            value = value.replace(secret, REDACTED);
+            value = value.replace(secret, self.marker);
         }
-        value = redact_authorization(&value);
-        redact_query(&value)
+        value = redact_authorization(&value, self.marker);
+        redact_query(&value, self.marker)
     }
 
     pub fn contains_registered_secret(&self, input: &str) -> bool {
@@ -75,15 +80,21 @@ impl Redactor {
     }
 }
 
-fn redact_authorization(input: &str) -> String {
+impl Default for Redactor {
+    fn default() -> Self {
+        Self::new(std::iter::empty::<&'static [u8]>())
+    }
+}
+
+fn redact_authorization(input: &str, marker: &str) -> String {
     input
         .lines()
         .map(|line| {
             let lower = line.to_ascii_lowercase();
             if let Some(index) = lower.find("authorization:") {
-                format!("{}authorization: {REDACTED}", &line[..index])
+                format!("{}authorization: {marker}", &line[..index])
             } else if let Some(index) = lower.find("bearer ") {
-                format!("{}Bearer {REDACTED}", &line[..index])
+                format!("{}Bearer {marker}", &line[..index])
             } else {
                 line.to_owned()
             }
@@ -92,7 +103,7 @@ fn redact_authorization(input: &str) -> String {
         .join("\n")
 }
 
-fn redact_query(input: &str) -> String {
+fn redact_query(input: &str, marker: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(index) = rest.find(['?', '&']) {
@@ -108,7 +119,7 @@ fn redact_query(input: &str) -> String {
             {
                 output.push_str(key);
                 output.push('=');
-                output.push_str(REDACTED);
+                output.push_str(marker);
                 rest = &rest[end..];
             }
         }
@@ -179,5 +190,13 @@ mod tests {
         let value = Redactor::new([secret.as_bytes()]).redact(&rendered);
         assert!(!value.contains("canary"));
         assert!(value.contains(REDACTED));
+    }
+
+    #[test]
+    fn redaction_marker_cannot_reintroduce_a_registered_secret() {
+        for secret in ["[REDACTED]", "REDACTED", "["] {
+            let value = Redactor::new([secret.as_bytes()]).redact(secret);
+            assert!(!value.contains(secret));
+        }
     }
 }
