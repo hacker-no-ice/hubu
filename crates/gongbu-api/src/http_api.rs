@@ -637,7 +637,9 @@ mod tests {
                 "workload_type": "image_generation",
                 "provider": "example",
                 "adapter": "fixture",
-                "model": "image-v1"
+                "model": "image-v1",
+                "secret_service": "gongbu.example",
+                "secret_account": "local"
             }]
         }))
         .unwrap();
@@ -811,6 +813,8 @@ mod tests {
                 "provider": "example",
                 "adapter": "fixture",
                 "model": "image-v1",
+                "secret_service": "gongbu.example",
+                "secret_account": "local",
                 "enabled": false
             }]
         }))
@@ -856,7 +860,9 @@ mod tests {
                 "workload_type": "image_generation",
                 "provider": "example",
                 "adapter": "fixture",
-                "model": "image-v1"
+                "model": "image-v1",
+                "secret_service": "gongbu.example",
+                "secret_account": "local"
             }]
         }))
         .unwrap();
@@ -909,7 +915,9 @@ mod tests {
                 "workload_type": "text_generation",
                 "provider": "example",
                 "adapter": "fixture",
-                "model": "text-v1"
+                "model": "text-v1",
+                "secret_service": "gongbu.example",
+                "secret_account": "local"
             }]
         }))
         .unwrap();
