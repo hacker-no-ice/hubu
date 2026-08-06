@@ -954,7 +954,7 @@ impl Repository {
         if inserted == 0 {
             let existing:(String,String)=tx.query_row("SELECT action,evidence_json FROM reconciliation_operator_actions WHERE execution_id=?1 AND action_id=?2",params![execution_id,action_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
             if existing != (action.to_owned(), j(&redacted_evidence)) {
-                return Err(Error::Invalid("operator action identity"));
+                return Ok(false);
             }
             return Ok(true);
         }

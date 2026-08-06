@@ -490,7 +490,7 @@ impl ExecutionWorkflow<'_> {
             if request.action_id.trim().is_empty() || !request.evidence.is_object() {
                 return Ok(execution);
             }
-            self.repository.record_operator_action(
+            if !self.repository.record_operator_action(
                 execution_id,
                 &request.action_id,
                 match request.action {
@@ -500,7 +500,9 @@ impl ExecutionWorkflow<'_> {
                 },
                 &request.evidence,
                 now,
-            )?;
+            )? {
+                return Ok(execution);
+            }
         }
         let attempt = match self
             .repository
@@ -1462,6 +1464,62 @@ mod tests {
         .unwrap();
         assert_eq!(
             w.recover(&e.execution_id, "redelivery", Some(&request))
+                .unwrap()
+                .status,
+            "released"
+        );
+        assert_eq!(p.calls.get(), 0);
+        assert_eq!(h.releases.get(), 1);
+    }
+
+    #[test]
+    fn conflicting_operator_action_identity_does_not_block_later_signals() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "operator-conflict");
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        h.claim_validation_error
+            .replace(Some(ActivityError::Proven("claim_expired".into())));
+        assert_eq!(
+            w.run(&e.execution_id, "now").unwrap().status,
+            "reconciliation_required"
+        );
+        repo.record_operator_action(
+            &e.execution_id,
+            "reused",
+            "release",
+            &json!({"proof":"original"}),
+            "received",
+        )
+        .unwrap();
+        let conflict = OperatorReconciliationRequest {
+            action_id: "reused".into(),
+            action: ReconciliationAction::Settle,
+            evidence: json!({"proof":"different"}),
+        };
+        assert_eq!(
+            w.recover(&e.execution_id, "conflict", Some(&conflict))
+                .unwrap()
+                .status,
+            "reconciliation_required"
+        );
+        let valid = OperatorReconciliationRequest {
+            action_id: "fresh".into(),
+            action: ReconciliationAction::Release,
+            evidence: json!({"proof":"original"}),
+        };
+        assert_eq!(
+            w.recover(&e.execution_id, "next-signal", Some(&valid))
                 .unwrap()
                 .status,
             "released"

@@ -15,7 +15,9 @@ use futures::{channel::oneshot, future::poll_fn, Future};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use temporalio_client::{Client, WorkflowSignalOptions, WorkflowStartOptions};
-use temporalio_common_wasm::protos::temporal::api::enums::v1::WorkflowIdConflictPolicy;
+use temporalio_common_wasm::protos::temporal::api::enums::v1::{
+    WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
+};
 use temporalio_macros::{activities, workflow, workflow_methods};
 use temporalio_sdk::{
     activities::{ActivityContext, ActivityError},
@@ -97,9 +99,27 @@ impl DurableExecutionRunner for PersistedExecutionRunner {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ExecutionWorkflowInput {
-    pub execution_id: String,
-    pub recovery_delays_seconds: Vec<u64>,
+#[serde(untagged)]
+pub enum ExecutionWorkflowInput {
+    Legacy(String),
+    Bounded {
+        execution_id: String,
+        recovery_delays_seconds: Vec<u64>,
+    },
+}
+
+impl ExecutionWorkflowInput {
+    fn into_parts(self) -> (String, Vec<u64>) {
+        match self {
+            // Legacy histories never captured operator configuration. Fixed
+            // defaults keep their replay deterministic across deployments.
+            Self::Legacy(execution_id) => (execution_id, vec![30, 120, 600]),
+            Self::Bounded {
+                execution_id,
+                recovery_delays_seconds,
+            } => (execution_id, recovery_delays_seconds),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -122,19 +142,20 @@ impl DurableExecutionWorkflow {
         ctx: &mut WorkflowContext<Self>,
         input: ExecutionWorkflowInput,
     ) -> WorkflowResult<String> {
+        let (execution_id, recovery_delays_seconds) = input.into_parts();
         let options = ActivityOptions::start_to_close_timeout(Duration::from_secs(300));
         let mut status = ctx
             .execute_activity(
                 ExecutionActivities::run_execution,
-                input.execution_id.clone(),
+                execution_id.clone(),
                 options.clone(),
             )
             .await?;
         if status != "reconciliation_required" {
             return Ok(status);
         }
-        let delay_count = input.recovery_delays_seconds.len();
-        for (index, delay) in input.recovery_delays_seconds.into_iter().enumerate() {
+        let delay_count = recovery_delays_seconds.len();
+        for (index, delay) in recovery_delays_seconds.into_iter().enumerate() {
             let mut timer = ctx.timer(Duration::from_secs(delay));
             loop {
                 let automatic = temporalio_sdk::workflows::select! {
@@ -150,7 +171,7 @@ impl DurableExecutionWorkflow {
                     .execute_activity(
                         ExecutionActivities::recover_execution,
                         RecoveryActivityInput {
-                            execution_id: input.execution_id.clone(),
+                            execution_id: execution_id.clone(),
                             exhausted: automatic && index + 1 == delay_count,
                             operator,
                         },
@@ -172,7 +193,7 @@ impl DurableExecutionWorkflow {
                 .execute_activity(
                     ExecutionActivities::recover_execution,
                     RecoveryActivityInput {
-                        execution_id: input.execution_id.clone(),
+                        execution_id: execution_id.clone(),
                         operator,
                         exhausted: false,
                     },
@@ -463,20 +484,25 @@ async fn start_execution(client: Client, execution_id: String) -> ScheduleResult
     client
         .start_workflow(
             DurableExecutionWorkflow::run,
-            ExecutionWorkflowInput {
+            ExecutionWorkflowInput::Bounded {
                 execution_id: execution_id.clone(),
                 recovery_delays_seconds: recovery_delays_seconds(),
             },
-            WorkflowStartOptions::new(
-                EXECUTION_TASK_QUEUE,
-                format!("gongbu-execution-{execution_id}"),
-            )
-            .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
-            .build(),
+            execution_start_options(&execution_id),
         )
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+fn execution_start_options(execution_id: &str) -> WorkflowStartOptions {
+    WorkflowStartOptions::new(
+        EXECUTION_TASK_QUEUE,
+        format!("gongbu-execution-{execution_id}"),
+    )
+    .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
+    .id_reuse_policy(WorkflowIdReusePolicy::AllowDuplicate)
+    .build()
 }
 
 async fn signal_reconciliation(
@@ -484,6 +510,9 @@ async fn signal_reconciliation(
     execution_id: String,
     request: OperatorReconciliationRequest,
 ) -> ScheduleResult {
+    // UseExisting preserves a live workflow; AllowDuplicate starts a new run
+    // when a pre-HUB-19 workflow with this stable ID already completed.
+    start_execution(client.clone(), execution_id.clone()).await?;
     client
         .get_workflow_handle::<DurableExecutionWorkflow>(format!("gongbu-execution-{execution_id}"))
         .signal(
@@ -518,5 +547,30 @@ mod tests {
     fn registers_workflow_and_activity_on_execution_queue() {
         let options = worker_options(Arc::new(Runner));
         assert_eq!(options.task_queue, EXECUTION_TASK_QUEUE);
+    }
+
+    #[test]
+    fn workflow_input_accepts_legacy_and_bounded_histories() {
+        let legacy: ExecutionWorkflowInput = serde_json::from_str("\"execution-1\"").unwrap();
+        assert_eq!(legacy.into_parts().0, "execution-1");
+        let bounded: ExecutionWorkflowInput = serde_json::from_value(serde_json::json!({
+            "execution_id":"execution-2", "recovery_delays_seconds":[1,2,3]
+        }))
+        .unwrap();
+        assert_eq!(bounded.into_parts(), ("execution-2".into(), vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn reconciliation_start_reuses_live_ids_and_restarts_closed_ids() {
+        let options = execution_start_options("execution-1");
+        assert_eq!(options.workflow_id, "gongbu-execution-execution-1");
+        assert_eq!(
+            options.id_conflict_policy,
+            WorkflowIdConflictPolicy::UseExisting
+        );
+        assert_eq!(
+            options.id_reuse_policy,
+            WorkflowIdReusePolicy::AllowDuplicate
+        );
     }
 }
