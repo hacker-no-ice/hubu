@@ -226,9 +226,10 @@ fn map_gemini_invoke_error(
         _ => "provider_contract_failure".into(),
     };
     match code.as_str() {
-        "provider_rejected" | "invalid_request" | "retry_not_supported" => {
-            WorkflowActivityError::Proven(code)
-        }
+        "provider_rejected"
+        | "provider_pre_send_failure"
+        | "invalid_request"
+        | "retry_not_supported" => WorkflowActivityError::Proven(code),
         _ => WorkflowActivityError::Ambiguous(code),
     }
 }
@@ -614,6 +615,12 @@ mod tests {
                 code: "provider_rejected".into()
             }),
             WorkflowActivityError::Proven("provider_rejected".into())
+        );
+        assert_eq!(
+            map_gemini_invoke_error(ContractError::Provider {
+                code: "provider_pre_send_failure".into()
+            }),
+            WorkflowActivityError::Proven("provider_pre_send_failure".into())
         );
     }
 }

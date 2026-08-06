@@ -100,8 +100,8 @@ impl GeminiTransport for ReqwestGeminiTransport {
         headers: &std::collections::BTreeMap<String, String>,
         body: &Value,
     ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
-        let token =
-            std::str::from_utf8(bearer).map_err(|_| MessageError("credential encoding".into()))?;
+        let token = std::str::from_utf8(bearer)
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
         let client = Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -438,7 +438,13 @@ fn classify_transport(
         error.downcast_ref::<HttpFailure>(),
         Some(HttpFailure::UnknownOutcome)
     );
-    if unknown && !artifact {
+    let before_send = matches!(
+        error.downcast_ref::<HttpFailure>(),
+        Some(HttpFailure::BeforeSend)
+    );
+    if before_send && !artifact {
+        provider_error("provider_pre_send_failure")
+    } else if unknown && !artifact {
         provider_error("timeout_unknown_outcome")
     } else if artifact {
         provider_error("artifact_policy_failure")
@@ -486,6 +492,8 @@ mod tests {
                 .map_err(|message| {
                     if message == "timeout" {
                         Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+                    } else if message == "pre_send" {
+                        Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>
                     } else {
                         Box::new(MessageError(message)) as Box<dyn StdError + Send + Sync>
                     }
@@ -692,6 +700,30 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(error, ContractError::Provider { code } if code == "timeout_unknown_outcome")
+        );
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn pre_send_transport_failure_has_a_distinct_stable_code() {
+        let calls = Arc::new(Mutex::new(0));
+        let transport = FixtureTransport {
+            response: Arc::new(Mutex::new(Some(Err("pre_send".into())))),
+            calls: calls.clone(),
+            referenced: Vec::new(),
+        };
+        let adapter =
+            GeminiImageAdapter::new(config(), "gemini-image-v1".into(), transport).unwrap();
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, ContractError::Provider { code } if code == "provider_pre_send_failure")
         );
         assert_eq!(*calls.lock().unwrap(), 1);
     }
