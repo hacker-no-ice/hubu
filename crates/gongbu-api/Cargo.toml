@@ -20,6 +20,8 @@ temporalio-workflow.workspace = true
 temporalio-common-wasm.workspace = true
 temporalio-common.workspace = true
 futures.workspace = true
+temporalio-client.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
