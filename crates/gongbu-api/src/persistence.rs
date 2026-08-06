@@ -45,6 +45,9 @@ impl HubuTokenReference {
             Ok(Self(v.to_owned()))
         }
     }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 #[derive(Clone, Debug)]
 pub struct CreateExecutionParams {
@@ -230,6 +233,22 @@ impl Repository {
     pub fn get_execution(&self, id: &str) -> Result<Execution> {
         query_id(&self.0.lock().unwrap(), id)
     }
+    pub fn get_execution_by_operation(
+        &self,
+        account_id: &str,
+        operation_key: &str,
+    ) -> Result<Execution> {
+        self.0
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("{EXECUTION_SELECT} WHERE account_id=?1 AND operation_key=?2"),
+                params![account_id, operation_key],
+                map,
+            )
+            .optional()?
+            .ok_or(Error::NotFound)
+    }
     pub fn update_execution(
         &self,
         id: &str,
@@ -413,6 +432,18 @@ impl Repository {
             .query_row(
                 &format!("{ARTIFACT_SELECT} JOIN executions e ON e.execution_id=a.execution_id WHERE a.artifact_id=?1 AND e.account_id=?2"),
                 params![artifact_id, account_id],
+                map_artifact,
+            )
+            .optional()?
+            .ok_or(Error::NotFound)
+    }
+    pub fn get_artifact(&self, artifact_id: &str) -> Result<Artifact> {
+        self.0
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("{ARTIFACT_SELECT} WHERE a.artifact_id=?1"),
+                [artifact_id],
                 map_artifact,
             )
             .optional()?

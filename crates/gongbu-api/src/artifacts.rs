@@ -92,7 +92,7 @@ impl LocalFsStorage {
         Ok(self.root.join(key))
     }
 
-    fn read(&self, key: &str) -> Result<Vec<u8>> {
+    pub(crate) fn read(&self, key: &str) -> Result<Vec<u8>> {
         Ok(fs::read(self.path_for(key)?)?)
     }
 
@@ -156,6 +156,10 @@ impl ArtifactService {
 
     pub fn preflight(&self) -> Result<()> {
         self.storage.preflight()
+    }
+
+    pub fn max_artifacts_per_execution(&self) -> u64 {
+        self.limits.max_artifacts_per_execution
     }
 
     pub fn store_image(
