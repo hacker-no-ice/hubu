@@ -24,4 +24,5 @@ temporalio-common-wasm = "0.6"
 temporalio-common = "0.6"
 futures = "0.3"
 temporalio-client = "0.6"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread"] }
+axum = "0.8"

@@ -22,6 +22,7 @@ temporalio-common.workspace = true
 futures.workspace = true
 temporalio-client.workspace = true
 tokio.workspace = true
+axum.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

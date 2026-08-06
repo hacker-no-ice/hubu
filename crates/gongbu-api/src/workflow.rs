@@ -519,13 +519,17 @@ impl ExecutionWorkflow<'_> {
                     .filter(|_| matches!(status, "failed" | "reconciliation_required"))
                     .map(str::to_owned),
                 failure_message_redacted: None,
-                provider_outcome: provider.map(str::to_owned),
-                artifact_outcome: artifact.map(str::to_owned),
-                settlement_outcome: settlement.map(str::to_owned),
+                provider_outcome: provider.map(typed_outcome),
+                artifact_outcome: artifact.map(typed_outcome),
+                settlement_outcome: settlement.map(typed_outcome),
             },
             now,
         )?)
     }
+}
+fn typed_outcome(value: &str) -> crate::execution::LifecycleOutcome {
+    crate::execution::LifecycleOutcome::parse(value)
+        .expect("workflow only emits defined lifecycle outcomes")
 }
 fn attempt_failure(outcome: &str, code: &str, now: &str) -> AttemptResult {
     AttemptResult {
@@ -949,7 +953,10 @@ mod tests {
         };
         let done = w.run(&e.execution_id, "now").unwrap();
         assert_eq!(done.status, "reconciliation_required");
-        assert_eq!(done.artifact_outcome.as_deref(), Some("failed"));
+        assert_eq!(
+            done.artifact_outcome,
+            Some(crate::execution::LifecycleOutcome::Failed)
+        );
         assert_eq!(h.settles.get(), 0);
     }
 

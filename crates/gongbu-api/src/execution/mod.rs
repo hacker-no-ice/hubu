@@ -99,9 +99,9 @@ pub struct Execution {
     pub pricing_schema_version: i64,
     pub status: String,
     pub outcome: Option<String>,
-    pub provider_outcome: Option<String>,
-    pub artifact_outcome: Option<String>,
-    pub settlement_outcome: Option<String>,
+    pub provider_outcome: Option<LifecycleOutcome>,
+    pub artifact_outcome: Option<LifecycleOutcome>,
+    pub settlement_outcome: Option<LifecycleOutcome>,
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
     pub created_at: String,
@@ -111,6 +111,58 @@ pub struct Execution {
     pub release_transmission_started_at: Option<String>,
     pub version: i64,
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct ExecutionSnapshot<'a> {
+    pub execution_id: &'a str,
+    pub account_id: &'a str,
+    pub operation_key: &'a str,
+    pub normalized_input: &'a Value,
+    pub target: &'a str,
+    pub pricing_snapshot: &'a Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LifecycleOutcome {
+    Succeeded,
+    Failed,
+    Ambiguous,
+    Released,
+}
+
+impl LifecycleOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Ambiguous => "ambiguous",
+            Self::Released => "released",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "ambiguous" => Some(Self::Ambiguous),
+            "released" => Some(Self::Released),
+            _ => None,
+        }
+    }
+}
+
+impl Execution {
+    pub fn snapshot(&self) -> ExecutionSnapshot<'_> {
+        ExecutionSnapshot {
+            execution_id: &self.execution_id,
+            account_id: &self.account_id,
+            operation_key: &self.operation_key,
+            normalized_input: &self.normalized_input,
+            target: &self.target,
+            pricing_snapshot: &self.pricing_snapshot,
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct ExecutionUpdate {
     pub status: String,
@@ -119,9 +171,9 @@ pub struct ExecutionUpdate {
     pub completed_at: Option<String>,
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
-    pub provider_outcome: Option<String>,
-    pub artifact_outcome: Option<String>,
-    pub settlement_outcome: Option<String>,
+    pub provider_outcome: Option<LifecycleOutcome>,
+    pub artifact_outcome: Option<LifecycleOutcome>,
+    pub settlement_outcome: Option<LifecycleOutcome>,
 }
 #[derive(Clone, Debug)]
 pub struct CreateProviderAttemptParams {
@@ -348,7 +400,10 @@ impl Repository {
                 to: u.status.clone(),
             });
         }
-        let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,provider_outcome=COALESCE(?8,provider_outcome),artifact_outcome=COALESCE(?9,artifact_outcome),settlement_outcome=COALESCE(?10,settlement_outcome),version=version+1 WHERE execution_id=?11 AND version=?12",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,failure,at,u.provider_outcome,u.artifact_outcome,u.settlement_outcome,id,expected])?;
+        let provider_outcome = u.provider_outcome.map(LifecycleOutcome::as_str);
+        let artifact_outcome = u.artifact_outcome.map(LifecycleOutcome::as_str);
+        let settlement_outcome = u.settlement_outcome.map(LifecycleOutcome::as_str);
+        let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,provider_outcome=COALESCE(?8,provider_outcome),artifact_outcome=COALESCE(?9,artifact_outcome),settlement_outcome=COALESCE(?10,settlement_outcome),version=version+1 WHERE execution_id=?11 AND version=?12",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,failure,at,provider_outcome,artifact_outcome,settlement_outcome,id,expected])?;
         if changed == 0 {
             return if c
                 .query_row(
@@ -970,9 +1025,9 @@ fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
         pricing_schema_version: r.get(19)?,
         status: r.get(20)?,
         outcome: r.get(21)?,
-        provider_outcome: r.get(22)?,
-        artifact_outcome: r.get(23)?,
-        settlement_outcome: r.get(24)?,
+        provider_outcome: map_lifecycle_outcome(r.get(22)?)?,
+        artifact_outcome: map_lifecycle_outcome(r.get(23)?)?,
+        settlement_outcome: map_lifecycle_outcome(r.get(24)?)?,
         failure_code: r.get(25)?,
         failure_message_redacted: r.get(26)?,
         created_at: r.get(27)?,
@@ -982,6 +1037,12 @@ fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
         release_transmission_started_at: r.get(31)?,
         version: r.get(32)?,
     })
+}
+
+fn map_lifecycle_outcome(value: Option<String>) -> rusqlite::Result<Option<LifecycleOutcome>> {
+    value
+        .map(|value| LifecycleOutcome::parse(&value).ok_or(rusqlite::Error::InvalidQuery))
+        .transpose()
 }
 fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
     if n.account_id.trim().is_empty()
@@ -1393,7 +1454,7 @@ mod tests {
         let receipt = r
             .create_receipt(&CreateReceiptParams {
                 receipt_id: "receipt-model".into(),
-                execution_id: execution.execution_id,
+                execution_id: execution.execution_id.clone(),
                 provider_attempt_id: attempt.provider_attempt_id,
                 settlement_minor: 100,
                 currency: "USD".into(),
@@ -1506,7 +1567,7 @@ mod tests {
         ));
         let mismatched = CreateReceiptParams {
             receipt_id: "cross-aggregate".into(),
-            execution_id: other.execution_id,
+            execution_id: other.execution_id.clone(),
             provider_attempt_id: receipt.provider_attempt_id,
             settlement_minor: 1,
             currency: "USD".into(),
