@@ -14,10 +14,12 @@ use crate::{redaction::Redactor, secrets::ProviderSecret};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::{blocking::Client, Url};
 use serde_json::{json, Value};
-use std::{error::Error as StdError, fmt, time::Duration};
+use std::{error::Error as StdError, fmt, io::Read, time::Duration};
 
 pub const PROVIDER_ID: &str = "google";
 pub const ADAPTER_ID: &str = "gemini_image";
+const MAX_ARTIFACT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_PROVIDER_RESPONSE_BYTES: usize = 30 * 1024 * 1024;
 
 #[derive(Debug)]
 struct MessageError(String);
@@ -57,8 +59,8 @@ pub struct TransportResponse {
 pub struct ReqwestGeminiTransport;
 #[derive(Debug)]
 enum HttpFailure {
-    Timeout,
-    Other,
+    BeforeSend,
+    UnknownOutcome,
 }
 impl fmt::Display for HttpFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -81,16 +83,26 @@ impl GeminiTransport for ReqwestGeminiTransport {
         let client = Client::builder()
             .timeout(timeout)
             .build()
-            .map_err(http_failure)?;
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
         let mut request = client.post(url.clone()).bearer_auth(token);
         for (name, value) in headers {
             request = request.header(name, value);
         }
-        let response = request.json(body).send().map_err(http_failure)?;
+        // Once `send` begins, a failure cannot prove that Google did not receive,
+        // generate, or bill the request. Classify every such failure conservatively.
+        let mut response = request.json(body).send().map_err(|_| {
+            Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+        })?;
         let status = response.status().as_u16();
         let request_id = header(&response, &["x-goog-request-id", "x-request-id"]);
         let operation_id = header(&response, &["x-goog-operation-id"]);
-        let body = response.json().map_err(http_failure)?;
+        let body_bytes =
+            read_bounded(&mut response, MAX_PROVIDER_RESPONSE_BYTES).map_err(|_| {
+                Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+            })?;
+        let body = serde_json::from_slice(&body_bytes).map_err(|_| {
+            Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+        })?;
         Ok(TransportResponse {
             status,
             request_id,
@@ -107,27 +119,32 @@ impl GeminiTransport for ReqwestGeminiTransport {
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
         let token =
             std::str::from_utf8(bearer).map_err(|_| MessageError("credential encoding".into()))?;
-        let response = Client::builder()
+        let mut response = Client::builder()
             .timeout(timeout)
             .build()
-            .map_err(http_failure)?
+            .map_err(|_| MessageError("artifact client failure".into()))?
             .get(url.clone())
             .bearer_auth(token)
-            .send()
-            .map_err(http_failure)?;
+            .send()?;
         if !response.status().is_success() {
             return Err(Box::new(MessageError("artifact fetch rejected".into())));
         }
-        Ok(response.bytes().map_err(http_failure)?.to_vec())
+        read_bounded(&mut response, MAX_ARTIFACT_BYTES)
     }
 }
 
-fn http_failure(error: reqwest::Error) -> Box<dyn StdError + Send + Sync> {
-    Box::new(if error.is_timeout() {
-        HttpFailure::Timeout
-    } else {
-        HttpFailure::Other
-    })
+fn read_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    reader.take((limit as u64) + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(Box::new(MessageError(
+            "provider body limit exceeded".into(),
+        )));
+    }
+    Ok(bytes)
 }
 
 fn header(response: &reqwest::blocking::Response, names: &[&str]) -> Option<String> {
@@ -326,6 +343,11 @@ fn extract_artifacts<T: GeminiTransport>(
                 .get("data")
                 .and_then(Value::as_str)
                 .ok_or_else(|| provider_error("malformed_response"))?;
+            // Reject before allocating the decoded image. Base64 expands input
+            // by 4/3, so this is a conservative bound for the artifact limit.
+            if data.len() > MAX_ARTIFACT_BYTES.saturating_mul(4).div_ceil(3) {
+                return Err(provider_error("artifact_policy_failure"));
+            }
             let bytes = STANDARD
                 .decode(data)
                 .map_err(|_| provider_error("malformed_response"))?;
@@ -372,11 +394,11 @@ fn classify_transport(
 ) -> ContractError {
     let redactor = Redactor::new([secret.expose()]);
     let _redacted_evidence = redactor.error_chain(error.as_ref());
-    let timeout = matches!(
+    let unknown = matches!(
         error.downcast_ref::<HttpFailure>(),
-        Some(HttpFailure::Timeout)
+        Some(HttpFailure::UnknownOutcome)
     );
-    if timeout && !artifact {
+    if unknown && !artifact {
         provider_error("timeout_unknown_outcome")
     } else if artifact {
         provider_error("artifact_policy_failure")
@@ -423,7 +445,7 @@ mod tests {
                 .unwrap()
                 .map_err(|message| {
                     if message == "timeout" {
-                        Box::new(HttpFailure::Timeout) as Box<dyn StdError + Send + Sync>
+                        Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
                     } else {
                         Box::new(MessageError(message)) as Box<dyn StdError + Send + Sync>
                     }
@@ -641,6 +663,30 @@ mod tests {
         assert_eq!(error.to_string(), "provider error (provider_failure)");
         assert!(!error.to_string().contains("secret-canary"));
         assert!(!error.to_string().contains("sensitive-project"));
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn response_and_inline_artifact_buffers_are_bounded() {
+        let mut oversized = std::io::Cursor::new(vec![0; 9]);
+        assert!(read_bounded(&mut oversized, 8).is_err());
+
+        let encoded = "A".repeat(MAX_ARTIFACT_BYTES.saturating_mul(4).div_ceil(3) + 1);
+        let (adapter, calls) = adapter(
+            json!({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":encoded}}]}}]}),
+            200,
+        );
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, ContractError::Provider { code } if code == "artifact_policy_failure")
+        );
         assert_eq!(*calls.lock().unwrap(), 1);
     }
 
