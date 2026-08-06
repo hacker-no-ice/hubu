@@ -263,15 +263,6 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
                 &body,
             )
             .map_err(|error| classify_transport(error, secret, false))?;
-        if !(200..300).contains(&response.status) {
-            return Err(provider_error(if (400..500).contains(&response.status) {
-                "provider_rejected"
-            } else {
-                // Redirects and server errors occur after transmission and do not
-                // prove that Google neither generated nor billed the request.
-                "provider_failure"
-            }));
-        }
         let request_id = response.request_id.or_else(|| {
             response
                 .body
@@ -280,6 +271,18 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
                 .map(str::to_owned)
         });
         let operation_id = response.operation_id;
+        if !(200..300).contains(&response.status) {
+            if (400..500).contains(&response.status) {
+                return Err(provider_error("provider_rejected"));
+            }
+            // Redirects and server errors occur after transmission and do not
+            // prove that Google neither generated nor billed the request.
+            return Err(ContractError::ProviderWithEvidence {
+                code: "provider_failure".into(),
+                request_id,
+                operation_id,
+            });
+        }
         let artifacts = extract_artifacts(
             &response.body,
             &self.config,
@@ -759,7 +762,16 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(matches!(error, ContractError::Provider { code } if code == "provider_failure"));
+        assert!(matches!(
+            error,
+            ContractError::ProviderWithEvidence {
+                code,
+                request_id: Some(request_id),
+                operation_id: Some(operation_id),
+            } if code == "provider_failure"
+                && request_id == "request-1"
+                && operation_id == "operation-1"
+        ));
         assert_eq!(*calls.lock().unwrap(), 1);
     }
     #[test]
