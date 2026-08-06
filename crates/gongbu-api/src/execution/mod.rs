@@ -1083,7 +1083,6 @@ fn status(s: &str) -> Result<()> {
         "preflighting",
         "claimed",
         "executing",
-        "persisting",
         "settling",
         "succeeded",
         "failed",
@@ -1117,11 +1116,9 @@ fn allowed_transition(from: &str, to: &str) -> bool {
             | ("claimed", "executing")
             | ("claimed", "released")
             | ("claimed", "reconciliation_required")
-            | ("executing", "persisting")
+            | ("executing", "settling")
             | ("executing", "released")
             | ("executing", "reconciliation_required")
-            | ("persisting", "settling")
-            | ("persisting", "reconciliation_required")
             | ("settling", "succeeded")
             | ("settling", "reconciliation_required")
     )
@@ -1262,6 +1259,12 @@ mod tests {
             r.update_execution(&e.execution_id, 0, &u, "2026-08-05T20:02:00Z"),
             Err(Error::Stale)
         ))
+    }
+    #[test]
+    fn v1_state_model_skips_unshipped_persisting_phase() {
+        assert!(status("persisting").is_err());
+        assert!(allowed_transition("executing", "settling"));
+        assert!(!allowed_transition("executing", "persisting"));
     }
     #[test]
     fn restart_persistence() {
