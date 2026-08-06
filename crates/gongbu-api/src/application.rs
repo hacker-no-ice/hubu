@@ -19,6 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
     Router,
 };
+use futures::future::{select, Either};
 use std::{future::Future, net::SocketAddr, sync::Arc};
 use temporalio_client::Client;
 use temporalio_sdk::Runtime;
@@ -68,7 +69,7 @@ pub async fn serve<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let worker = start_worker(
+    let mut worker = start_worker(
         dependencies.temporal_runtime,
         dependencies.temporal_client,
         dependencies.execution_runner,
@@ -85,22 +86,29 @@ where
         api,
         authenticator: dependencies.authenticator,
     };
+    let completion = worker.take_completion();
+    let supervised_shutdown = wait_for_shutdown(shutdown, completion);
     let result = axum::serve(listener, Router::new().fallback(dispatch).with_state(state))
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(supervised_shutdown)
         .await;
     stop_worker(worker)?;
     result.map_err(Into::into)
+}
+
+async fn wait_for_shutdown<F>(shutdown: F, completion: futures::channel::oneshot::Receiver<()>)
+where
+    F: Future<Output = ()>,
+{
+    match select(Box::pin(shutdown), Box::pin(completion)).await {
+        Either::Left(_) | Either::Right(_) => {}
+    }
 }
 
 fn stop_worker(
     worker: StartedTemporalWorker,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     worker.shutdown();
-    worker
-        .thread
-        .join()
-        .map_err(|_| std::io::Error::other("Temporal worker thread panicked"))??;
-    Ok(())
+    worker.join()
 }
 
 async fn dispatch(State(state): State<ApplicationState>, request: Request<Body>) -> Response {
@@ -152,5 +160,16 @@ mod tests {
             .block_on(to_bytes(response.into_body(), MAX_REQUEST_BYTES))
             .unwrap();
         assert_eq!(body, br#"{"error":"conflict"}"#.as_slice());
+    }
+
+    #[test]
+    fn worker_completion_triggers_http_shutdown() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (completion_tx, completion_rx) = futures::channel::oneshot::channel();
+        completion_tx.send(()).unwrap();
+        runtime.block_on(wait_for_shutdown(futures::future::pending(), completion_rx));
     }
 }
