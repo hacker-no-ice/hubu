@@ -9,6 +9,11 @@ use crate::{
         Artifact, CreateExecutionParams, Error as PersistenceError, Execution, HubuTokenReference,
         Repository,
     },
+    provider_contract::{
+        ContractError, NormalizedRequest, PricingCatalog, PricingSnapshot,
+        PRICING_SNAPSHOT_SCHEMA_VERSION,
+    },
+    provider_targets::{Error as TargetError, ProviderConfigVersion, ProviderTargetConfig},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -47,15 +52,19 @@ pub struct CreateExecutionRequest {
     pub authorization: Money,
     pub input: Value,
     pub input_schema_version: i64,
-    pub target: String,
-    pub config_version: String,
     pub workload_type: String,
     pub provider: String,
     pub adapter: String,
     pub model: String,
-    pub provider_config_version: String,
-    pub pricing_snapshot: Value,
-    pub pricing_schema_version: i64,
+    pub pricing: PricingRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PricingRequest {
+    pub image_count: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub max_output_tokens: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -191,6 +200,8 @@ impl ApiError {
 pub struct Api {
     repository: Repository,
     artifacts: ArtifactService,
+    targets: ProviderTargetConfig,
+    pricing: PricingCatalog,
     now: Arc<dyn Fn() -> String + Send + Sync>,
 }
 
@@ -198,11 +209,15 @@ impl Api {
     pub fn new(
         repository: Repository,
         artifacts: ArtifactService,
+        targets: ProviderTargetConfig,
+        pricing: PricingCatalog,
         now: impl Fn() -> String + Send + Sync + 'static,
     ) -> Self {
         Self {
             repository,
             artifacts,
+            targets,
+            pricing,
             now: Arc::new(now),
         }
     }
@@ -243,8 +258,27 @@ impl Api {
         let request: CreateExecutionRequest =
             serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
         validate_create(&request)?;
+        let resolved = self
+            .targets
+            .resolve(
+                &request.workload_type,
+                &request.provider,
+                &request.adapter,
+                &request.model,
+            )
+            .map_err(map_target_error)?;
+        let pricing_snapshot = self
+            .pricing
+            .snapshot(&NormalizedRequest {
+                provider: resolved.provider.clone(),
+                model: resolved.model.clone(),
+                image_count: request.pricing.image_count,
+                input_tokens: request.pricing.input_tokens,
+                max_output_tokens: request.pricing.max_output_tokens,
+            })
+            .map_err(map_pricing_error)?;
         let normalized_input = canonicalize(&request.input);
-        let input_hash = immutable_hash(&request, &normalized_input)?;
+        let input_hash = immutable_hash(&request, resolved, &pricing_snapshot, &normalized_input)?;
         let params = CreateExecutionParams {
             account_id: account.account_id.clone(),
             operation_key: request.operation_key.trim().to_owned(),
@@ -257,15 +291,19 @@ impl Api {
             normalized_input,
             input_hash: input_hash.clone(),
             input_schema_version: request.input_schema_version,
-            target: request.target,
-            config_version: request.config_version,
-            workload_type: request.workload_type,
-            provider: request.provider,
-            adapter: request.adapter,
-            model: request.model,
-            provider_config_version: request.provider_config_version,
-            pricing_snapshot: request.pricing_snapshot,
-            pricing_schema_version: request.pricing_schema_version,
+            target: format!(
+                "{}/{}/{}/{}",
+                resolved.workload_type, resolved.provider, resolved.adapter, resolved.model
+            ),
+            config_version: resolved.provider_config_version.clone(),
+            workload_type: resolved.workload_type.clone(),
+            provider: resolved.provider.clone(),
+            adapter: resolved.adapter.clone(),
+            model: resolved.model.clone(),
+            provider_config_version: resolved.provider_config_version.clone(),
+            pricing_snapshot: serde_json::to_value(pricing_snapshot)
+                .map_err(|_| ApiError::internal())?,
+            pricing_schema_version: PRICING_SNAPSHOT_SCHEMA_VERSION,
             created_at: (self.now)(),
         };
         let execution = self
@@ -356,16 +394,12 @@ fn validate_create(request: &CreateExecutionRequest) -> Result<(), ApiError> {
         || currency.len() != 3
         || !currency.iter().all(u8::is_ascii_alphabetic)
         || request.input_schema_version < 1
-        || request.pricing_schema_version < 1
         || !request.input.is_object()
         || [
-            &request.target,
-            &request.config_version,
             &request.workload_type,
             &request.provider,
             &request.adapter,
             &request.model,
-            &request.provider_config_version,
         ]
         .iter()
         .any(|value| value.trim().is_empty() || value.len() > 255)
@@ -377,6 +411,8 @@ fn validate_create(request: &CreateExecutionRequest) -> Result<(), ApiError> {
 
 fn immutable_hash(
     request: &CreateExecutionRequest,
+    resolved: &ProviderConfigVersion,
+    pricing_snapshot: &PricingSnapshot,
     normalized_input: &Value,
 ) -> Result<String, ApiError> {
     let scope = json!({
@@ -386,15 +422,13 @@ fn immutable_hash(
         "authorization": request.authorization,
         "input": normalized_input,
         "input_schema_version": request.input_schema_version,
-        "target": request.target,
-        "config_version": request.config_version,
-        "workload_type": request.workload_type,
-        "provider": request.provider,
-        "adapter": request.adapter,
-        "model": request.model,
-        "provider_config_version": request.provider_config_version,
-        "pricing_snapshot": canonicalize(&request.pricing_snapshot),
-        "pricing_schema_version": request.pricing_schema_version,
+        "workload_type": resolved.workload_type,
+        "provider": resolved.provider,
+        "adapter": resolved.adapter,
+        "model": resolved.model,
+        "provider_config_version": resolved.provider_config_version,
+        "pricing_snapshot": pricing_snapshot,
+        "pricing_schema_version": PRICING_SNAPSHOT_SCHEMA_VERSION,
     });
     let bytes = serde_json::to_vec(&canonicalize(&scope)).map_err(|_| ApiError::validation())?;
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
@@ -482,6 +516,24 @@ fn map_artifact_error(error: ArtifactError) -> ApiError {
     }
 }
 
+fn map_target_error(error: TargetError) -> ApiError {
+    match error {
+        TargetError::Disabled | TargetError::NotConfigured | TargetError::Ambiguous => {
+            ApiError::validation()
+        }
+        _ => ApiError::internal(),
+    }
+}
+
+fn map_pricing_error(error: ContractError) -> ApiError {
+    match error {
+        ContractError::UnsupportedTarget
+        | ContractError::IndeterminableCost
+        | ContractError::InsufficientAuthorization => ApiError::validation(),
+        _ => ApiError::internal(),
+    }
+}
+
 fn json_response(status: u16, body: &impl Serialize) -> HttpResponse {
     HttpResponse {
         status,
@@ -515,8 +567,34 @@ mod tests {
             LocalFsStorage::new(root.path()),
             ArtifactLimits::default(),
         );
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "provider_configs": [{
+                "provider_config_version": "provider-v1",
+                "workload_type": "image_generation",
+                "provider": "example",
+                "adapter": "fixture",
+                "model": "image-v1"
+            }]
+        }))
+        .unwrap();
+        targets.validate().unwrap();
+        let pricing = PricingCatalog::from_json(
+            br#"{
+                "schema_version":1,
+                "catalog_version":"prices-v1",
+                "rules":[{
+                    "rule_id":"example-image",
+                    "provider":"example",
+                    "model":"image-v1",
+                    "currency":"USD",
+                    "unit":"image",
+                    "unit_amount_minor":100
+                }]
+            }"#,
+        )
+        .unwrap();
         Fixture {
-            api: Api::new(repository, artifacts.clone(), || {
+            api: Api::new(repository, artifacts.clone(), targets, pricing, || {
                 "2026-08-05T20:00:00Z".into()
             }),
             artifacts,
@@ -536,22 +614,15 @@ mod tests {
             "authorization": {"amount_minor": 500, "currency": "USD"},
             "input": {"prompt": "cat", "options": {"height": 512, "width": 512}},
             "input_schema_version": 1,
-            "target": "example/image-v1",
-            "config_version": "cfg-v1",
             "workload_type": "image_generation",
             "provider": "example",
             "adapter": "fixture",
             "model": "image-v1",
-            "provider_config_version": "provider-v1",
-            "pricing_snapshot": {
-                "provider": "example", "model": "image-v1",
-                "catalog_version": "prices-v1",
-                "catalog_digest": format!("sha256:{}", "a".repeat(64)),
-                "pricing_rule_id": "example-image", "unit": "image",
-                "unit_amount_minor": 100, "quantity": 1,
-                "estimated_amount_minor": 100, "currency": "USD"
-            },
-            "pricing_schema_version": 1
+            "pricing": {
+                "image_count": 1,
+                "input_tokens": null,
+                "max_output_tokens": null
+            }
         })
     }
 
@@ -598,8 +669,7 @@ mod tests {
         let fixture = fixture();
         assert_eq!(call_create(&fixture, &request("operation-1")).status, 200);
         let mut changed = request("operation-1");
-        changed["model"] = json!("image-v2");
-        changed["pricing_snapshot"]["model"] = json!("image-v2");
+        changed["input"]["prompt"] = json!("dog");
         let response = call_create(&fixture, &changed);
         assert_eq!(response.status, 409);
         let error: ErrorResponse = serde_json::from_slice(&response.body).unwrap();
@@ -640,6 +710,22 @@ mod tests {
                 .status,
             404
         );
+    }
+
+    #[test]
+    fn operator_target_and_pricing_fields_cannot_be_fabricated() {
+        let fixture = fixture();
+        let mut unknown = request("operation-1");
+        unknown["provider"] = json!("attacker-provider");
+        assert_eq!(call_create(&fixture, &unknown).status, 400);
+
+        let mut fabricated_version = request("operation-2");
+        fabricated_version["provider_config_version"] = json!("attacker-version");
+        assert_eq!(call_create(&fixture, &fabricated_version).status, 400);
+
+        let mut fabricated_snapshot = request("operation-3");
+        fabricated_snapshot["pricing_snapshot"] = json!({"unit_amount_minor": 0});
+        assert_eq!(call_create(&fixture, &fabricated_snapshot).status, 400);
     }
 
     #[test]
