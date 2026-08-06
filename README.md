@@ -40,6 +40,10 @@ The composition boundary requires an explicit authenticated-principal verifier
 and durable activity implementations. It never installs a caller-selected
 identity or fixture provider implicitly. An executable host supplies the Gemini
 adapter to `PersistedExecutionRunner` and then calls `application::serve`.
+`application::gemini_execution_runner` provides the production composition: it
+connects the selected Gemini target and Keychain credential to provider
+activities, routes returned bytes through `ArtifactService`, and uses the same
+durable workflow for settlement. No provider or fixture fallback is installed.
 
 ## Service surface
 

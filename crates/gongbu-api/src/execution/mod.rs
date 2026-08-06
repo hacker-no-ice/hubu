@@ -212,6 +212,7 @@ pub struct AttemptResult {
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
     pub provider_request_id: Option<String>,
+    pub provider_operation_id: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct CreateArtifactParams {
@@ -537,7 +538,7 @@ impl Repository {
         }
     }
     pub fn complete_provider_attempt(&self, id: &str, r: &AttemptResult) -> Result<()> {
-        safe_json(&r.usage)?;
+        safe_usage_json(&r.usage)?;
         if r.usage_schema_version < 1
             || r.provider_amount_minor.is_some() != r.provider_currency.is_some()
             || r.provider_amount_minor.is_some_and(|v| v < 0)
@@ -560,9 +561,10 @@ impl Repository {
             r.failure_code.as_deref().unwrap_or(""),
             failure.as_deref().unwrap_or(""),
             r.provider_request_id.as_deref().unwrap_or(""),
+            r.provider_operation_id.as_deref().unwrap_or(""),
             id,
         ])?;
-        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=?7,failure_message_redacted=?8,provider_request_id=?9 WHERE provider_attempt_id=?10 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.failure_code,failure,r.provider_request_id,id])?;
+        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=?7,failure_message_redacted=?8,provider_request_id=?9,provider_operation_id=?10 WHERE provider_attempt_id=?11 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.failure_code,failure,r.provider_request_id,r.provider_operation_id,id])?;
         if n == 1 {
             Ok(())
         } else {
@@ -771,16 +773,17 @@ impl Repository {
             )
             .optional()?
             .ok_or(Error::NotFound)?;
-        let (attempt_execution, attempt_outcome, attempt_completed_at, provider_request_id): (
+        let (attempt_execution, attempt_outcome, attempt_completed_at, provider_request_id, provider_operation_id): (
             String,
             String,
+            Option<String>,
             Option<String>,
             Option<String>,
         ) = c
             .query_row(
-                "SELECT execution_id,outcome,completed_at,provider_request_id FROM provider_attempts WHERE provider_attempt_id=?1",
+                "SELECT execution_id,outcome,completed_at,provider_request_id,provider_operation_id FROM provider_attempts WHERE provider_attempt_id=?1",
                 [&n.provider_attempt_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?
             .ok_or(Error::NotFound)?;
@@ -789,7 +792,7 @@ impl Repository {
         }
         if attempt_outcome != "succeeded"
             || attempt_completed_at.is_none()
-            || provider_request_id.is_none()
+            || (provider_request_id.is_none() && provider_operation_id.is_none())
         {
             return Err(Error::Invalid("receipt requires a succeeded attempt"));
         }
@@ -1102,6 +1105,12 @@ fn safe_json(v: &Value) -> Result<()> {
         Ok(())
     }
 }
+
+fn safe_usage_json(value: &Value) -> Result<()> {
+    let _: crate::provider_contract::NormalizedUsage =
+        serde_json::from_value(value.clone()).map_err(|_| Error::Invalid("provider usage"))?;
+    Ok(())
+}
 fn status(s: &str) -> Result<()> {
     if [
         "pending",
@@ -1211,6 +1220,7 @@ mod tests {
                 failure_code: None,
                 failure_message_redacted: None,
                 provider_request_id: Some("provider-request".into()),
+                provider_operation_id: None,
             },
         )
         .unwrap();
@@ -1393,6 +1403,7 @@ mod tests {
                     failure_code: None,
                     failure_message_redacted: None,
                     provider_request_id: Some(format!("provider-request-{n}")),
+                    provider_operation_id: None,
                 },
             )
             .unwrap();
@@ -1500,6 +1511,7 @@ mod tests {
                 failure_code: Some("provider_error".into()),
                 failure_message_redacted: Some("provider request failed".into()),
                 provider_request_id: None,
+                provider_operation_id: None,
             },
         )
         .unwrap();
@@ -1640,6 +1652,7 @@ mod tests {
             failure_code: None,
             failure_message_redacted: None,
             provider_request_id: Some(CANARY.into()),
+            provider_operation_id: None,
         };
         assert!(matches!(
             r.complete_provider_attempt(&a, &leaked_request_id),
@@ -1657,6 +1670,7 @@ mod tests {
                 failure_code: Some("provider_error".into()),
                 failure_message_redacted: Some(format!("nested SDK error: api_key={CANARY}")),
                 provider_request_id: None,
+                provider_operation_id: None,
             },
         )
         .unwrap();

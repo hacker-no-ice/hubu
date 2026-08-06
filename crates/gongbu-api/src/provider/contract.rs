@@ -270,6 +270,7 @@ impl PricingSnapshot {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedUsage {
     pub images: Option<i64>,
     pub input_tokens: Option<i64>,

@@ -19,7 +19,8 @@ pub struct ProviderArtifact {
 }
 #[derive(Clone, Debug)]
 pub struct ProviderSuccess {
-    pub request_id: String,
+    pub request_id: Option<String>,
+    pub operation_id: Option<String>,
     pub usage: NormalizedUsage,
     pub artifacts: Vec<ProviderArtifact>,
 }
@@ -185,7 +186,8 @@ impl ExecutionWorkflow<'_> {
                                     provider_currency: None,
                                     failure_code: None,
                                     failure_message_redacted: None,
-                                    provider_request_id: Some(success.request_id.clone()),
+                                    provider_request_id: success.request_id.clone(),
+                                    provider_operation_id: success.operation_id.clone(),
                                 },
                             )?;
                             if !has_provider_artifact {
@@ -542,6 +544,7 @@ fn attempt_failure(outcome: &str, code: &str, now: &str) -> AttemptResult {
         failure_code: Some(code.into()),
         failure_message_redacted: None,
         provider_request_id: None,
+        provider_operation_id: None,
     }
 }
 fn usage_value(usage: &NormalizedUsage) -> serde_json::Value {
@@ -663,7 +666,8 @@ mod tests {
                 Err(e)
             } else {
                 Ok(ProviderSuccess {
-                    request_id: "provider-1".into(),
+                    request_id: Some("provider-1".into()),
+                    operation_id: None,
                     usage: NormalizedUsage {
                         images: Some(self.image_usage.get()),
                         ..Default::default()

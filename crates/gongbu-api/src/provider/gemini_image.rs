@@ -48,6 +48,28 @@ pub trait GeminiTransport: Send + Sync {
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>>;
 }
 
+impl<T: GeminiTransport + ?Sized> GeminiTransport for std::sync::Arc<T> {
+    fn generate(
+        &self,
+        url: &Url,
+        bearer: &[u8],
+        timeout: Duration,
+        headers: &std::collections::BTreeMap<String, String>,
+        body: &Value,
+    ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+        self.as_ref().generate(url, bearer, timeout, headers, body)
+    }
+
+    fn fetch_artifact(
+        &self,
+        url: &Url,
+        bearer: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+        self.as_ref().fetch_artifact(url, bearer, timeout)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TransportResponse {
     pub status: u16,
