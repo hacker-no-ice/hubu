@@ -86,7 +86,10 @@ pub struct ReqwestGeminiTransport;
 #[derive(Debug)]
 enum HttpFailure {
     BeforeSend,
-    UnknownOutcome,
+    UnknownOutcome {
+        request_id: Option<String>,
+        operation_id: Option<String>,
+    },
 }
 impl fmt::Display for HttpFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -118,17 +121,26 @@ impl GeminiTransport for ReqwestGeminiTransport {
         // Once `send` begins, a failure cannot prove that Google did not receive,
         // generate, or bill the request. Classify every such failure conservatively.
         let mut response = request.json(body).send().map_err(|_| {
-            Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+            Box::new(HttpFailure::UnknownOutcome {
+                request_id: None,
+                operation_id: None,
+            }) as Box<dyn StdError + Send + Sync>
         })?;
         let status = response.status().as_u16();
         let request_id = header(&response, &["x-goog-request-id", "x-request-id"]);
         let operation_id = header(&response, &["x-goog-operation-id"]);
         let body_bytes =
             read_bounded(&mut response, MAX_PROVIDER_RESPONSE_BYTES).map_err(|_| {
-                Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+                Box::new(HttpFailure::UnknownOutcome {
+                    request_id: request_id.clone(),
+                    operation_id: operation_id.clone(),
+                }) as Box<dyn StdError + Send + Sync>
             })?;
         let body = serde_json::from_slice(&body_bytes).map_err(|_| {
-            Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+            Box::new(HttpFailure::UnknownOutcome {
+                request_id: request_id.clone(),
+                operation_id: operation_id.clone(),
+            }) as Box<dyn StdError + Send + Sync>
         })?;
         Ok(TransportResponse {
             status,
@@ -472,18 +484,27 @@ fn classify_transport(
 ) -> ContractError {
     let redactor = Redactor::new([secret.expose()]);
     let _redacted_evidence = redactor.error_chain(error.as_ref());
-    let unknown = matches!(
-        error.downcast_ref::<HttpFailure>(),
-        Some(HttpFailure::UnknownOutcome)
-    );
+    let unknown = error
+        .downcast_ref::<HttpFailure>()
+        .and_then(|failure| match failure {
+            HttpFailure::UnknownOutcome {
+                request_id,
+                operation_id,
+            } => Some((request_id.clone(), operation_id.clone())),
+            HttpFailure::BeforeSend => None,
+        });
     let before_send = matches!(
         error.downcast_ref::<HttpFailure>(),
         Some(HttpFailure::BeforeSend)
     );
     if before_send && !artifact {
         provider_error("provider_pre_send_failure")
-    } else if unknown && !artifact {
-        provider_error("timeout_unknown_outcome")
+    } else if let Some((request_id, operation_id)) = unknown.filter(|_| !artifact) {
+        ContractError::ProviderWithEvidence {
+            code: "timeout_unknown_outcome".into(),
+            request_id,
+            operation_id,
+        }
     } else if artifact {
         provider_error("artifact_policy_failure")
     } else {
@@ -529,7 +550,10 @@ mod tests {
                 .unwrap()
                 .map_err(|message| {
                     if message == "timeout" {
-                        Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+                        Box::new(HttpFailure::UnknownOutcome {
+                            request_id: None,
+                            operation_id: None,
+                        }) as Box<dyn StdError + Send + Sync>
                     } else if message == "pre_send" {
                         Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>
                     } else {
@@ -845,10 +869,37 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(
-            matches!(error, ContractError::Provider { code } if code == "timeout_unknown_outcome")
-        );
+        assert!(matches!(
+            error,
+            ContractError::ProviderWithEvidence {
+                code,
+                request_id: None,
+                operation_id: None,
+            } if code == "timeout_unknown_outcome"
+        ));
         assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn response_decode_failure_retains_captured_header_ids() {
+        let error = classify_transport(
+            Box::new(HttpFailure::UnknownOutcome {
+                request_id: Some("request-header".into()),
+                operation_id: Some("operation-header".into()),
+            }),
+            &secret_for_test("secret-canary"),
+            false,
+        );
+        assert!(matches!(
+            error,
+            ContractError::ProviderWithEvidence {
+                code,
+                request_id: Some(request_id),
+                operation_id: Some(operation_id),
+            } if code == "timeout_unknown_outcome"
+                && request_id == "request-header"
+                && operation_id == "operation-header"
+        ));
     }
 
     #[test]
