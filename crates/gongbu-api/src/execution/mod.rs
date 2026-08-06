@@ -697,6 +697,17 @@ impl Repository {
             )
             .map_err(Into::into)
     }
+    pub fn count_artifacts_for_attempt(&self, provider_attempt_id: &str) -> Result<u64> {
+        self.0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM artifacts WHERE provider_attempt_id=?1",
+                [provider_attempt_id],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
+    }
     pub fn get_artifact_for_account(
         &self,
         artifact_id: &str,
