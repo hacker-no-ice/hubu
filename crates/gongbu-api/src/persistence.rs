@@ -245,6 +245,11 @@ impl Repository {
             n.provider_config_version.as_str(),
             n.created_at.as_str(),
         ])?;
+        self.reject_registered_numbers([
+            n.authorized_minor,
+            n.input_schema_version,
+            n.pricing_schema_version,
+        ])?;
         let normalized_input = j(&n.normalized_input);
         let pricing_snapshot = j(&n.pricing_snapshot);
         self.reject_registered_json([&n.normalized_input, &n.pricing_snapshot])?;
@@ -363,6 +368,8 @@ impl Repository {
             .as_deref()
             .map(|value| self.1.redact(value));
         let usage = j(&r.usage);
+        let numeric = [Some(r.usage_schema_version), r.provider_amount_minor];
+        self.reject_registered_numbers(numeric.into_iter().flatten())?;
         self.reject_registered_json([&r.usage])?;
         self.reject_registered_secrets([
             r.outcome.as_str(),
@@ -389,6 +396,7 @@ impl Repository {
         max_per_execution: u64,
     ) -> Result<Artifact> {
         let metadata = j(&n.metadata);
+        self.reject_registered_numbers([n.size_bytes, n.metadata_schema_version])?;
         self.reject_registered_json([&n.metadata])?;
         self.reject_registered_secrets([
             n.artifact_id.as_str(),
@@ -548,6 +556,7 @@ impl Repository {
             n.settled_at.as_deref().unwrap_or(""),
             n.hubu_settlement_id.as_deref().unwrap_or(""),
         ])?;
+        self.reject_registered_numbers([n.settlement_minor])?;
         if n.settlement_minor < 0 {
             return Err(Error::Invalid("settlement"));
         }
@@ -654,6 +663,16 @@ impl Repository {
         if values
             .into_iter()
             .any(|value| self.1.json_contains_registered_secret(value))
+        {
+            Err(Error::Invalid("secret-bearing persistence value"))
+        } else {
+            Ok(())
+        }
+    }
+    fn reject_registered_numbers(&self, values: impl IntoIterator<Item = i64>) -> Result<()> {
+        if values
+            .into_iter()
+            .any(|value| self.1.contains_registered_secret(&value.to_string()))
         {
             Err(Error::Invalid("secret-bearing persistence value"))
         } else {
@@ -1381,5 +1400,16 @@ mod tests {
             [&a], |row| row.get(0)).unwrap();
         assert!(!stored.contains(CANARY));
         assert!(stored.contains("[REDACTED]"));
+
+        let numeric_secret = "777777";
+        let numeric_repo =
+            Repository::in_memory_with_redactor(Redactor::new([numeric_secret.as_bytes()]))
+                .unwrap();
+        let mut numeric = new("a", "numeric");
+        numeric.authorized_minor = 777777;
+        assert!(matches!(
+            numeric_repo.create_execution(&numeric),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
     }
 }
