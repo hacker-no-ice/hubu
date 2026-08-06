@@ -293,6 +293,13 @@ pub struct AdapterOutcome {
     pub provider_amount_minor: Option<i64>,
     pub provider_currency: Option<String>,
     pub provider_request_id: Option<String>,
+    pub provider_operation_id: Option<String>,
+    pub artifacts: Vec<NormalizedArtifact>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct NormalizedArtifact {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
 }
 impl AdapterOutcome {
     pub fn validate(&self) -> Result<()> {
@@ -338,6 +345,7 @@ pub trait ProviderAdapter {
     fn invoke(
         &self,
         request: &NormalizedRequest,
+        normalized_input: &serde_json::Value,
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome>;
@@ -537,6 +545,7 @@ mod tests {
             fn invoke(
                 &self,
                 _: &NormalizedRequest,
+                _: &serde_json::Value,
                 _: &ProviderSecret,
                 _: Option<&str>,
             ) -> Result<AdapterOutcome> {
@@ -577,6 +586,7 @@ mod tests {
             fn invoke(
                 &self,
                 _: &NormalizedRequest,
+                _: &serde_json::Value,
                 secret: &ProviderSecret,
                 _: Option<&str>,
             ) -> Result<AdapterOutcome> {
@@ -588,6 +598,8 @@ mod tests {
                     provider_amount_minor: None,
                     provider_currency: None,
                     provider_request_id: None,
+                    provider_operation_id: None,
+                    artifacts: Vec::new(),
                 })
             }
         }
@@ -599,6 +611,7 @@ mod tests {
             model: "image-v1".into(),
             secret_service: "gongbu.vendor".into(),
             secret_account: "local".into(),
+            gemini_image: None,
             enabled: true,
         };
         let adapter = Adapter(AtomicUsize::new(0));
@@ -609,7 +622,9 @@ mod tests {
         let secret =
             preflight_selected_secret(&adapter, &Secrets(true), &target, &request()).unwrap();
         assert_eq!(adapter.0.load(Ordering::SeqCst), 0);
-        adapter.invoke(&request(), &secret, None).unwrap();
+        adapter
+            .invoke(&request(), &serde_json::json!({}), &secret, None)
+            .unwrap();
         assert_eq!(adapter.0.load(Ordering::SeqCst), 1);
 
         let mut wrong_request = request();

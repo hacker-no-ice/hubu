@@ -1,6 +1,10 @@
 use crate::secrets::{SecretError, SecretReference};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, env, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
+    path::Path,
+};
 use thiserror::Error;
 
 const PROVIDER_CONFIG_ENV: &str = "GONGBU_PROVIDER_CONFIG";
@@ -51,8 +55,26 @@ pub struct ProviderConfigVersion {
     pub model: String,
     pub secret_service: String,
     pub secret_account: String,
+    #[serde(default)]
+    pub gemini_image: Option<GeminiImageConfig>,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GeminiImageConfig {
+    pub endpoint: String,
+    pub api_version: String,
+    pub project: String,
+    pub location: String,
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub max_retries: u32,
+    #[serde(default)]
+    pub approved_artifact_hosts: Vec<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 fn enabled_by_default() -> bool {
@@ -109,6 +131,34 @@ impl ProviderTargetConfig {
             target
                 .secret_reference()
                 .map_err(|_| Error::InvalidSecretReference)?;
+            if target.provider == "google" || target.adapter == "gemini_image" {
+                let Some(gemini) = &target.gemini_image else {
+                    return Err(Error::EmptyIdentifier);
+                };
+                if target.provider != "google"
+                    || target.adapter != "gemini_image"
+                    || [
+                        &gemini.endpoint,
+                        &gemini.api_version,
+                        &gemini.project,
+                        &gemini.location,
+                    ]
+                    .iter()
+                    .any(|value| value.trim().is_empty())
+                    || gemini.timeout_ms == 0
+                    || gemini.max_retries != 0
+                    || gemini.headers.iter().any(|(name, value)| {
+                        name.trim().is_empty()
+                            || value.contains(['\r', '\n'])
+                            || name.eq_ignore_ascii_case("authorization")
+                            || name.eq_ignore_ascii_case("x-goog-api-key")
+                    })
+                {
+                    return Err(Error::EmptyIdentifier);
+                }
+            } else if target.gemini_image.is_some() {
+                return Err(Error::EmptyIdentifier);
+            }
             if !targets.insert((
                 &target.workload_type,
                 &target.provider,

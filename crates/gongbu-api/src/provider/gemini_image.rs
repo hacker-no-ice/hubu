@@ -1,0 +1,765 @@
+//! Google Gemini image-generation adapter.
+//!
+//! The adapter performs one generation request. It never retries or falls back.
+//! Returned bytes are still untrusted and must pass `ArtifactService::store_image`.
+
+use super::{
+    contract::{
+        AdapterCapabilities, AdapterOutcome, ContractError, NormalizedArtifact, NormalizedRequest,
+        NormalizedUsage, OutcomeKind, ProviderAdapter, Result, RetryPolicy,
+    },
+    targets::{GeminiImageConfig, ProviderConfigVersion},
+};
+use crate::{redaction::Redactor, secrets::ProviderSecret};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use reqwest::{blocking::Client, Url};
+use serde_json::{json, Value};
+use std::{error::Error as StdError, fmt, time::Duration};
+
+pub const PROVIDER_ID: &str = "google";
+pub const ADAPTER_ID: &str = "gemini_image";
+
+#[derive(Debug)]
+struct MessageError(String);
+impl fmt::Display for MessageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl StdError for MessageError {}
+
+pub trait GeminiTransport: Send + Sync {
+    fn generate(
+        &self,
+        url: &Url,
+        bearer: &[u8],
+        timeout: Duration,
+        headers: &std::collections::BTreeMap<String, String>,
+        body: &Value,
+    ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>>;
+
+    fn fetch_artifact(
+        &self,
+        url: &Url,
+        bearer: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>>;
+}
+
+#[derive(Clone, Debug)]
+pub struct TransportResponse {
+    pub status: u16,
+    pub request_id: Option<String>,
+    pub operation_id: Option<String>,
+    pub body: Value,
+}
+
+pub struct ReqwestGeminiTransport;
+#[derive(Debug)]
+enum HttpFailure {
+    Timeout,
+    Other,
+}
+impl fmt::Display for HttpFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Google HTTP request failed")
+    }
+}
+impl StdError for HttpFailure {}
+
+impl GeminiTransport for ReqwestGeminiTransport {
+    fn generate(
+        &self,
+        url: &Url,
+        bearer: &[u8],
+        timeout: Duration,
+        headers: &std::collections::BTreeMap<String, String>,
+        body: &Value,
+    ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+        let token =
+            std::str::from_utf8(bearer).map_err(|_| MessageError("credential encoding".into()))?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(http_failure)?;
+        let mut request = client.post(url.clone()).bearer_auth(token);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        let response = request.json(body).send().map_err(http_failure)?;
+        let status = response.status().as_u16();
+        let request_id = header(&response, &["x-goog-request-id", "x-request-id"]);
+        let operation_id = header(&response, &["x-goog-operation-id"]);
+        let body = response.json().map_err(http_failure)?;
+        Ok(TransportResponse {
+            status,
+            request_id,
+            operation_id,
+            body,
+        })
+    }
+
+    fn fetch_artifact(
+        &self,
+        url: &Url,
+        bearer: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+        let token =
+            std::str::from_utf8(bearer).map_err(|_| MessageError("credential encoding".into()))?;
+        let response = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(http_failure)?
+            .get(url.clone())
+            .bearer_auth(token)
+            .send()
+            .map_err(http_failure)?;
+        if !response.status().is_success() {
+            return Err(Box::new(MessageError("artifact fetch rejected".into())));
+        }
+        Ok(response.bytes().map_err(http_failure)?.to_vec())
+    }
+}
+
+fn http_failure(error: reqwest::Error) -> Box<dyn StdError + Send + Sync> {
+    Box::new(if error.is_timeout() {
+        HttpFailure::Timeout
+    } else {
+        HttpFailure::Other
+    })
+}
+
+fn header(response: &reqwest::blocking::Response, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        response
+            .headers()
+            .get(*name)?
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    })
+}
+
+pub struct GeminiImageAdapter<T = ReqwestGeminiTransport> {
+    config: GeminiImageConfig,
+    model: String,
+    transport: T,
+}
+
+impl GeminiImageAdapter<ReqwestGeminiTransport> {
+    pub fn from_target(target: &ProviderConfigVersion) -> Result<Self> {
+        if target.provider != PROVIDER_ID || target.adapter != ADAPTER_ID {
+            return Err(provider_error("target_mismatch"));
+        }
+        let config = target
+            .gemini_image
+            .clone()
+            .ok_or_else(|| provider_error("config_invalid"))?;
+        Self::new(config, target.model.clone(), ReqwestGeminiTransport)
+    }
+}
+
+impl<T: GeminiTransport> GeminiImageAdapter<T> {
+    pub fn new(config: GeminiImageConfig, model: String, transport: T) -> Result<Self> {
+        RetryPolicy {
+            max_retries: config.max_retries,
+        }
+        .validate(AdapterCapabilities {
+            vendor_enforced_idempotency: false,
+        })?;
+        if model.trim().is_empty() || config.timeout_ms == 0 {
+            return Err(provider_error("config_invalid"));
+        }
+        endpoint_url(&config, &model)?;
+        Ok(Self {
+            config,
+            model,
+            transport,
+        })
+    }
+
+    fn invoke_inner(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+    ) -> Result<AdapterOutcome> {
+        self.validate_request(request)?;
+        if request.provider != PROVIDER_ID
+            || request.model != self.model
+            || request.image_count != Some(1)
+        {
+            return Err(provider_error("invalid_request"));
+        }
+        let prompt = input
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.len() <= 32_000)
+            .ok_or_else(|| provider_error("invalid_request"))?;
+        let body = json!({
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["IMAGE"]}
+        });
+        let timeout = Duration::from_millis(self.config.timeout_ms);
+        let response = self
+            .transport
+            .generate(
+                &endpoint_url(&self.config, &self.model)?,
+                secret.expose(),
+                timeout,
+                &self.config.headers,
+                &body,
+            )
+            .map_err(|error| classify_transport(error, secret, false))?;
+        if !(200..300).contains(&response.status) {
+            return Err(provider_error("provider_rejected"));
+        }
+        let artifacts = extract_artifacts(
+            &response.body,
+            &self.config,
+            &self.transport,
+            secret,
+            timeout,
+        )?;
+        if artifacts.is_empty() {
+            return Err(provider_error("missing_image"));
+        }
+        let usage = response.body.get("usageMetadata");
+        Ok(AdapterOutcome {
+            outcome: OutcomeKind::Succeeded,
+            usage: Some(NormalizedUsage {
+                images: Some(artifacts.len() as i64),
+                input_tokens: usage
+                    .and_then(|v| v.get("promptTokenCount"))
+                    .and_then(Value::as_i64),
+                output_tokens: usage
+                    .and_then(|v| v.get("candidatesTokenCount"))
+                    .and_then(Value::as_i64),
+            }),
+            provider_amount_minor: None,
+            provider_currency: None,
+            provider_request_id: response.request_id,
+            provider_operation_id: response.operation_id,
+            artifacts,
+        })
+    }
+}
+
+impl<T: GeminiTransport> ProviderAdapter for GeminiImageAdapter<T> {
+    fn adapter_id(&self) -> &str {
+        ADAPTER_ID
+    }
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities {
+            vendor_enforced_idempotency: false,
+        }
+    }
+    fn validate_request(&self, request: &NormalizedRequest) -> Result<()> {
+        request.validate()?;
+        if request.provider != PROVIDER_ID
+            || request.model != self.model
+            || request.image_count != Some(1)
+        {
+            return Err(provider_error("invalid_request"));
+        }
+        Ok(())
+    }
+    fn invoke(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+    ) -> Result<AdapterOutcome> {
+        if vendor_idempotency_key.is_some() || self.config.max_retries != 0 {
+            return Err(provider_error("retry_not_supported"));
+        }
+        self.invoke_inner(request, input, secret)
+    }
+    fn redact_error(&self, error: &(dyn StdError + 'static)) -> ContractError {
+        let _ = Redactor::default().error_chain(error);
+        provider_error("provider_failure")
+    }
+}
+
+fn endpoint_url(config: &GeminiImageConfig, model: &str) -> Result<Url> {
+    let mut base = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
+    if base.scheme() != "https" || base.host_str().is_none() || base.query().is_some() {
+        return Err(provider_error("config_invalid"));
+    }
+    let path = format!(
+        "{}/projects/{}/locations/{}/publishers/google/models/{}:generateContent",
+        config.api_version.trim_matches('/'),
+        config.project,
+        config.location,
+        model
+    );
+    base.set_path(&path);
+    Ok(base)
+}
+
+fn extract_artifacts<T: GeminiTransport>(
+    body: &Value,
+    config: &GeminiImageConfig,
+    transport: &T,
+    secret: &ProviderSecret,
+    timeout: Duration,
+) -> Result<Vec<NormalizedArtifact>> {
+    let parts = body
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|c| c.first())
+        .and_then(|c| c.pointer("/content/parts"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| provider_error("malformed_response"))?;
+    let mut artifacts = Vec::new();
+    for part in parts {
+        if let Some(inline) = part.get("inlineData").or_else(|| part.get("inline_data")) {
+            let media_type = inline
+                .get("mimeType")
+                .or_else(|| inline.get("mime_type"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| provider_error("malformed_response"))?;
+            let data = inline
+                .get("data")
+                .and_then(Value::as_str)
+                .ok_or_else(|| provider_error("malformed_response"))?;
+            let bytes = STANDARD
+                .decode(data)
+                .map_err(|_| provider_error("malformed_response"))?;
+            artifacts.push(NormalizedArtifact {
+                media_type: media_type.into(),
+                bytes,
+            });
+        } else if let Some(file) = part.get("fileData").or_else(|| part.get("file_data")) {
+            let media_type = file
+                .get("mimeType")
+                .or_else(|| file.get("mime_type"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| provider_error("malformed_response"))?;
+            let uri = file
+                .get("fileUri")
+                .or_else(|| file.get("file_uri"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| provider_error("malformed_response"))?;
+            let url = Url::parse(uri).map_err(|_| provider_error("artifact_policy_failure"))?;
+            if url.scheme() != "https"
+                || !config
+                    .approved_artifact_hosts
+                    .iter()
+                    .any(|host| Some(host.as_str()) == url.host_str())
+            {
+                return Err(provider_error("artifact_policy_failure"));
+            }
+            let bytes = transport
+                .fetch_artifact(&url, secret.expose(), timeout)
+                .map_err(|error| classify_transport(error, secret, true))?;
+            artifacts.push(NormalizedArtifact {
+                media_type: media_type.into(),
+                bytes,
+            });
+        }
+    }
+    Ok(artifacts)
+}
+
+fn classify_transport(
+    error: Box<dyn StdError + Send + Sync>,
+    secret: &ProviderSecret,
+    artifact: bool,
+) -> ContractError {
+    let redactor = Redactor::new([secret.expose()]);
+    let _redacted_evidence = redactor.error_chain(error.as_ref());
+    let timeout = matches!(
+        error.downcast_ref::<HttpFailure>(),
+        Some(HttpFailure::Timeout)
+    );
+    if timeout && !artifact {
+        provider_error("timeout_unknown_outcome")
+    } else if artifact {
+        provider_error("artifact_policy_failure")
+    } else {
+        provider_error("provider_failure")
+    }
+}
+
+fn provider_error(code: &str) -> ContractError {
+    ContractError::Provider { code: code.into() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secrets::secret_for_test;
+    use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+    use std::{
+        io::Cursor,
+        sync::{Arc, Mutex},
+    };
+
+    #[derive(Clone)]
+    struct FixtureTransport {
+        response: Arc<Mutex<Option<std::result::Result<TransportResponse, String>>>>,
+        calls: Arc<Mutex<u32>>,
+        referenced: Vec<u8>,
+    }
+    impl GeminiTransport for FixtureTransport {
+        fn generate(
+            &self,
+            _: &Url,
+            bearer: &[u8],
+            _: Duration,
+            _: &std::collections::BTreeMap<String, String>,
+            _: &Value,
+        ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+            assert_eq!(bearer, b"secret-canary");
+            *self.calls.lock().unwrap() += 1;
+            self.response
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .map_err(|message| {
+                    if message == "timeout" {
+                        Box::new(HttpFailure::Timeout) as Box<dyn StdError + Send + Sync>
+                    } else {
+                        Box::new(MessageError(message)) as Box<dyn StdError + Send + Sync>
+                    }
+                })
+        }
+        fn fetch_artifact(
+            &self,
+            _: &Url,
+            _: &[u8],
+            _: Duration,
+        ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+            Ok(self.referenced.clone())
+        }
+    }
+    fn png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])))
+            .write_to(&mut Cursor::new(&mut bytes), ImageOutputFormat::Png)
+            .unwrap();
+        bytes
+    }
+    fn config() -> GeminiImageConfig {
+        GeminiImageConfig {
+            endpoint: "https://us-central1-aiplatform.googleapis.com".into(),
+            api_version: "v1".into(),
+            project: "sensitive-project".into(),
+            location: "us-central1".into(),
+            timeout_ms: 10_000,
+            max_retries: 0,
+            approved_artifact_hosts: vec!["storage.googleapis.com".into()],
+            headers: std::collections::BTreeMap::new(),
+        }
+    }
+    fn request() -> NormalizedRequest {
+        NormalizedRequest {
+            provider: PROVIDER_ID.into(),
+            model: "gemini-image-v1".into(),
+            image_count: Some(1),
+            input_tokens: None,
+            max_output_tokens: None,
+        }
+    }
+    fn adapter(
+        body: Value,
+        status: u16,
+    ) -> (GeminiImageAdapter<FixtureTransport>, Arc<Mutex<u32>>) {
+        let calls = Arc::new(Mutex::new(0));
+        let transport = FixtureTransport {
+            response: Arc::new(Mutex::new(Some(Ok(TransportResponse {
+                status,
+                request_id: Some("request-1".into()),
+                operation_id: Some("operation-1".into()),
+                body,
+            })))),
+            calls: calls.clone(),
+            referenced: png(),
+        };
+        (
+            GeminiImageAdapter::new(config(), "gemini-image-v1".into(), transport).unwrap(),
+            calls,
+        )
+    }
+    #[test]
+    fn fixture_happy_path_maps_one_call_usage_ids_and_inline_image() {
+        let bytes = png();
+        let (adapter, calls) = adapter(
+            json!({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":STANDARD.encode(&bytes)}}]}}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":7}}),
+            200,
+        );
+        let outcome = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"draw a cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), 1);
+        assert_eq!(outcome.provider_request_id.as_deref(), Some("request-1"));
+        assert_eq!(
+            outcome.provider_operation_id.as_deref(),
+            Some("operation-1")
+        );
+        assert_eq!(outcome.usage.unwrap().images, Some(1));
+        assert_eq!(outcome.artifacts[0].bytes, bytes);
+    }
+    #[test]
+    fn referenced_output_requires_approved_host() {
+        let (approved_adapter, _) = adapter(
+            json!({"candidates":[{"content":{"parts":[{"fileData":{"mimeType":"image/png","fileUri":"https://storage.googleapis.com/output.png"}}]}}]}),
+            200,
+        );
+        assert_eq!(
+            approved_adapter
+                .invoke(
+                    &request(),
+                    &json!({"prompt":"cat"}),
+                    &secret_for_test("secret-canary"),
+                    None
+                )
+                .unwrap()
+                .artifacts[0]
+                .bytes,
+            png()
+        );
+        let (rejected_adapter, _) = adapter(
+            json!({"candidates":[{"content":{"parts":[{"fileData":{"mimeType":"image/png","fileUri":"https://evil.example/output.png"}}]}}]}),
+            200,
+        );
+        assert!(
+            matches!(rejected_adapter.invoke(&request(), &json!({"prompt":"cat"}), &secret_for_test("secret-canary"), None), Err(ContractError::Provider { code }) if code == "artifact_policy_failure")
+        );
+    }
+    #[test]
+    fn stable_failures_and_no_retry() {
+        for (body, status, code) in [
+            (
+                json!({"error":{"message":"secret-canary"}}),
+                403,
+                "provider_rejected",
+            ),
+            (json!({"candidates":"bad"}), 200, "malformed_response"),
+            (
+                json!({"candidates":[{"content":{"parts":[{"text":"no image"}]}}]}),
+                200,
+                "missing_image",
+            ),
+        ] {
+            let (adapter, calls) = adapter(body, status);
+            let error = adapter
+                .invoke(
+                    &request(),
+                    &json!({"prompt":"cat"}),
+                    &secret_for_test("secret-canary"),
+                    None,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, ContractError::Provider { code: ref actual } if actual == code)
+            );
+            assert_eq!(*calls.lock().unwrap(), 1);
+            assert!(!error.to_string().contains("secret-canary"));
+            assert!(!error.to_string().contains("sensitive-project"));
+        }
+    }
+    #[test]
+    fn rejects_retry_and_invalid_normalized_input_before_network() {
+        let (adapter, calls) = adapter(json!({}), 200);
+        assert!(adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                Some("key")
+            )
+            .is_err());
+        let mut bad = request();
+        bad.image_count = Some(2);
+        assert!(adapter
+            .invoke(
+                &bad,
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None
+            )
+            .is_err());
+        assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn timeout_after_possible_transmission_is_ambiguous_and_called_once() {
+        let calls = Arc::new(Mutex::new(0));
+        let transport = FixtureTransport {
+            response: Arc::new(Mutex::new(Some(Err("timeout".into())))),
+            calls: calls.clone(),
+            referenced: Vec::new(),
+        };
+        let adapter =
+            GeminiImageAdapter::new(config(), "gemini-image-v1".into(), transport).unwrap();
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, ContractError::Provider { code } if code == "timeout_unknown_outcome")
+        );
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn nested_secret_bearing_transport_error_is_not_exposed() {
+        let calls = Arc::new(Mutex::new(0));
+        let transport = FixtureTransport {
+            response: Arc::new(Mutex::new(Some(Err(
+                "outer SDK error: Authorization: Bearer secret-canary?project=sensitive-project"
+                    .into(),
+            )))),
+            calls: calls.clone(),
+            referenced: Vec::new(),
+        };
+        let adapter =
+            GeminiImageAdapter::new(config(), "gemini-image-v1".into(), transport).unwrap();
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "provider error (provider_failure)");
+        assert!(!error.to_string().contains("secret-canary"));
+        assert!(!error.to_string().contains("sensitive-project"));
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn generated_bytes_only_become_durable_through_artifact_policy() {
+        use crate::{
+            artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference, Repository},
+        };
+        use tempfile::tempdir;
+        let bytes = png();
+        let (adapter, _) = adapter(
+            json!({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":STANDARD.encode(&bytes)}}]}}]}),
+            200,
+        );
+        let outcome = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let execution = repository.create_execution(&CreateExecutionParams {
+            account_id: "account".into(), operation_key: "gemini-fixture".into(), hubu_authorization_id: "auth".into(), hubu_claim_id: Some("claim".into()), hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(), authorized_minor: 25, authorization_currency: "USD".into(), normalized_input: json!({"prompt":"cat","image_count":1}), input_hash: "hash".into(), input_schema_version: 1, target: "google/gemini-image-v1".into(), config_version: "cfg".into(), workload_type: "image_generation".into(), provider: "google".into(), adapter: "gemini_image".into(), model: "gemini-image-v1".into(), provider_config_version: "pcv".into(), pricing_snapshot: json!({"provider":"google","model":"gemini-image-v1","catalog_version":"prices","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-image","unit":"image","unit_amount_minor":25,"quantity":1,"estimated_amount_minor":25,"currency":"USD"}), pricing_schema_version: 1, created_at: "now".into()
+        }).unwrap();
+        let root = tempdir().unwrap();
+        let service = ArtifactService::new(
+            repository.clone(),
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let artifact = service
+            .store_image(
+                &execution.execution_id,
+                None,
+                &outcome.artifacts[0].media_type,
+                &outcome.artifacts[0].bytes,
+                "now",
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .retrieve_for_account(&artifact.artifact_id, "account")
+                .unwrap()
+                .bytes,
+            bytes
+        );
+        let strict = ArtifactService::new(
+            repository,
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits {
+                max_encoded_bytes: 1,
+                ..ArtifactLimits::default()
+            },
+        );
+        assert!(matches!(
+            strict.store_image(&execution.execution_id, None, "image/png", &png(), "later"),
+            Err(crate::artifact::Error::Limit("encoded size"))
+        ));
+    }
+
+    #[test]
+    #[ignore = "explicit live Google spend; see docs/gemini-image-e2e.md"]
+    fn live_gemini_e2e_requires_explicit_spend_guard_and_never_uses_fixture() {
+        use crate::{
+            provider::contract::{enforce_cost, preflight_selected_secret, PricingCatalog},
+            provider::targets::ProviderTargetConfig,
+            secrets::MacOsKeychain,
+        };
+        use std::{env, path::Path};
+        assert_eq!(
+            env::var("GONGBU_LIVE_GEMINI_CONFIRM").as_deref(),
+            Ok("I_ACCEPT_GOOGLE_CHARGES")
+        );
+        let config_path =
+            env::var("GONGBU_PROVIDER_CONFIG").expect("operator target config is required");
+        let pricing_path = env::var("GONGBU_PRICING_CATALOG").expect("pricing catalog is required");
+        let max_spend: i64 = env::var("GONGBU_LIVE_GEMINI_MAX_MINOR")
+            .expect("explicit spend guard is required")
+            .parse()
+            .expect("spend guard must be integer minor units");
+        assert!(max_spend > 0);
+        let targets = ProviderTargetConfig::from_path(Path::new(&config_path)).unwrap();
+        let target = targets
+            .provider_configs
+            .iter()
+            .find(|target| {
+                target.provider == PROVIDER_ID && target.adapter == ADAPTER_ID && target.enabled
+            })
+            .expect("one enabled Gemini image target is required");
+        let request = NormalizedRequest {
+            provider: PROVIDER_ID.into(),
+            model: target.model.clone(),
+            image_count: Some(1),
+            input_tokens: None,
+            max_output_tokens: None,
+        };
+        let snapshot = PricingCatalog::load(pricing_path)
+            .unwrap()
+            .snapshot(&request)
+            .unwrap();
+        enforce_cost(&snapshot, max_spend, "USD").unwrap();
+        let adapter = GeminiImageAdapter::from_target(target).unwrap();
+        let secret = preflight_selected_secret(&adapter, &MacOsKeychain, target, &request).unwrap();
+        let prompt = env::var("GONGBU_LIVE_GEMINI_PROMPT").expect("explicit prompt is required");
+        let outcome = adapter
+            .invoke(&request, &json!({"prompt": prompt}), &secret, None)
+            .unwrap();
+        assert_eq!(outcome.outcome, OutcomeKind::Succeeded);
+        assert_eq!(outcome.artifacts.len(), 1);
+        image::load_from_memory(&outcome.artifacts[0].bytes)
+            .expect("Google returned a decodable image");
+        assert_eq!(
+            snapshot
+                .settle(outcome.usage.as_ref().unwrap(), max_spend)
+                .unwrap(),
+            snapshot.estimated_amount_minor
+        );
+    }
+}
