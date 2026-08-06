@@ -330,6 +330,7 @@ impl RetryPolicy {
 }
 
 pub trait ProviderAdapter {
+    fn adapter_id(&self) -> &str;
     fn capabilities(&self) -> AdapterCapabilities;
     fn validate_request(&self, request: &NormalizedRequest) -> Result<()> {
         request.validate()
@@ -347,20 +348,28 @@ pub trait ProviderAdapter {
     }
 }
 
-/// The credential gate. Call this before claim/attempt creation; a missing secret
-/// returns without entering adapter code.
-pub fn invoke_selected(
+/// Preflight the credential before claim/attempt creation. This never invokes the
+/// adapter; orchestration retains the secret and invokes only after durable claim
+/// and attempt creation.
+pub fn preflight_selected_secret(
     adapter: &dyn ProviderAdapter,
     secret_provider: &dyn SecretProvider,
     target: &ProviderConfigVersion,
     request: &NormalizedRequest,
-    idempotency_key: Option<&str>,
-) -> Result<AdapterOutcome> {
+) -> Result<ProviderSecret> {
+    if adapter.adapter_id() != target.adapter
+        || request.provider != target.provider
+        || request.model != target.model
+    {
+        return Err(ContractError::Provider {
+            code: "target_mismatch".into(),
+        });
+    }
     let secret =
         resolve_selected(secret_provider, target).map_err(|_| ContractError::Provider {
             code: "secret_unavailable".into(),
         })?;
-    adapter.invoke(request, &secret, idempotency_key)
+    Ok(secret)
 }
 
 pub fn vendor_idempotency_key(
@@ -517,6 +526,9 @@ mod tests {
     fn default_redaction_does_not_leak_vendor_error() {
         struct A;
         impl ProviderAdapter for A {
+            fn adapter_id(&self) -> &str {
+                "a"
+            }
             fn capabilities(&self) -> AdapterCapabilities {
                 AdapterCapabilities {
                     vendor_enforced_idempotency: false,
@@ -554,6 +566,9 @@ mod tests {
         }
         struct Adapter(AtomicUsize);
         impl ProviderAdapter for Adapter {
+            fn adapter_id(&self) -> &str {
+                "a"
+            }
             fn capabilities(&self) -> AdapterCapabilities {
                 AdapterCapabilities {
                     vendor_enforced_idempotency: false,
@@ -587,14 +602,20 @@ mod tests {
             enabled: true,
         };
         let adapter = Adapter(AtomicUsize::new(0));
-        assert_eq!(
-            invoke_selected(&adapter, &Secrets(false), &target, &request(), None),
-            Err(ContractError::Provider {
-                code: "secret_unavailable".into()
-            })
+        assert!(
+            matches!(preflight_selected_secret(&adapter, &Secrets(false), &target, &request()), Err(ContractError::Provider { code }) if code == "secret_unavailable")
         );
         assert_eq!(adapter.0.load(Ordering::SeqCst), 0);
-        invoke_selected(&adapter, &Secrets(true), &target, &request(), None).unwrap();
+        let secret =
+            preflight_selected_secret(&adapter, &Secrets(true), &target, &request()).unwrap();
+        assert_eq!(adapter.0.load(Ordering::SeqCst), 0);
+        adapter.invoke(&request(), &secret, None).unwrap();
         assert_eq!(adapter.0.load(Ordering::SeqCst), 1);
+
+        let mut wrong_request = request();
+        wrong_request.provider = "other".into();
+        assert!(
+            matches!(preflight_selected_secret(&adapter, &Secrets(true), &target, &wrong_request), Err(ContractError::Provider { code }) if code == "target_mismatch")
+        );
     }
 }

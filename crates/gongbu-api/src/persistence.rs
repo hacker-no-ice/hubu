@@ -229,28 +229,7 @@ impl Repository {
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
         validate_execution(n)?;
-        let persistence_values = [
-            n.account_id.as_str(),
-            n.operation_key.as_str(),
-            n.hubu_authorization_id.as_str(),
-            n.input_hash.as_str(),
-            n.target.as_str(),
-            n.config_version.as_str(),
-            n.workload_type.as_str(),
-            n.provider.as_str(),
-            n.adapter.as_str(),
-            n.model.as_str(),
-            n.provider_config_version.as_str(),
-            n.authorization_currency.as_str(),
-        ];
-        if persistence_values
-            .iter()
-            .any(|value| self.1.contains_registered_secret(value))
-            || self.1.contains_registered_secret(&j(&n.normalized_input))
-            || self.1.contains_registered_secret(&j(&n.pricing_snapshot))
-        {
-            return Err(Error::Invalid("secret-bearing persistence value"));
-        }
+        self.reject_registered_secret(n)?;
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = Uuid::new_v4().to_string();
@@ -291,6 +270,16 @@ impl Repository {
             .failure_message_redacted
             .as_deref()
             .map(|value| self.1.redact(value));
+        self.reject_registered_secret(&(
+            &u.status,
+            &u.outcome,
+            &u.started_at,
+            &u.completed_at,
+            &u.failure_code,
+            &failure,
+            at,
+            id,
+        ))?;
         let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,version=version+1 WHERE execution_id=?8 AND version=?9",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,failure,at,id,expected])?;
         if changed == 0 {
             return if c
@@ -316,6 +305,7 @@ impl Repository {
         if n.provider.trim().is_empty() {
             return Err(Error::Invalid("provider"));
         }
+        self.reject_registered_secret(n)?;
         let id = Uuid::new_v4().to_string();
         self.0.lock().unwrap().execute("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,started_at)VALUES(?1,?2,?3,?4,?5,'started',?6)",params![id,n.execution_id,n.provider,n.provider_request_id,n.provider_operation_id,n.started_at])?;
         Ok(ProviderAttempt {
@@ -347,6 +337,17 @@ impl Repository {
             .failure_message_redacted
             .as_deref()
             .map(|value| self.1.redact(value));
+        self.reject_registered_secret(&(
+            &r.outcome,
+            &r.completed_at,
+            &r.usage,
+            r.usage_schema_version,
+            r.provider_amount_minor,
+            &r.provider_currency,
+            &r.failure_code,
+            &failure,
+            id,
+        ))?;
         let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=?7,failure_message_redacted=?8 WHERE provider_attempt_id=?9 AND completed_at IS NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.failure_code,failure,id])?;
         if n == 1 {
             Ok(())
@@ -362,6 +363,7 @@ impl Repository {
         n: &CreateArtifactParams,
         max_per_execution: u64,
     ) -> Result<Artifact> {
+        self.reject_registered_secret(n)?;
         safe_json(&n.metadata)?;
         if n.artifact_id.is_empty()
             || !n
@@ -498,6 +500,7 @@ impl Repository {
             .map_err(Into::into)
     }
     pub fn create_receipt(&self, n: &CreateReceiptParams) -> Result<Receipt> {
+        self.reject_registered_secret(n)?;
         if n.settlement_minor < 0 {
             return Err(Error::Invalid("settlement"));
         }
@@ -583,6 +586,13 @@ impl Repository {
             .lock()
             .unwrap()
             .execute("DELETE FROM executions WHERE execution_id=?1", [id])
+    }
+    fn reject_registered_secret(&self, value: &impl std::fmt::Debug) -> Result<()> {
+        if self.1.contains_registered_secret(&format!("{value:?}")) {
+            Err(Error::Invalid("secret-bearing persistence value"))
+        } else {
+            Ok(())
+        }
     }
 }
 fn migrate_artifact_storage_columns(c: &Connection) -> rusqlite::Result<()> {
@@ -1246,6 +1256,18 @@ mod tests {
         leaked.normalized_input = json!({"prompt": CANARY});
         assert!(matches!(
             r.create_execution(&leaked),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+        let mut leaked_claim = new("a", "leaked-claim");
+        leaked_claim.hubu_claim_id = Some(CANARY.into());
+        assert!(matches!(
+            r.create_execution(&leaked_claim),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+        let mut leaked_reference = new("a", "leaked-reference");
+        leaked_reference.hubu_token_reference = HubuTokenReference::new(CANARY).unwrap();
+        assert!(matches!(
+            r.create_execution(&leaked_reference),
             Err(Error::Invalid("secret-bearing persistence value"))
         ));
 

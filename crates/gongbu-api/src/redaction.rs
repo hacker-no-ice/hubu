@@ -19,12 +19,13 @@ pub struct Redactor {
 }
 impl Redactor {
     pub fn new<'a>(secrets: impl IntoIterator<Item = &'a [u8]>) -> Self {
-        let exact = secrets
+        let mut exact: Vec<_> = secrets
             .into_iter()
             .filter_map(|v| std::str::from_utf8(v).ok())
             .filter(|v| !v.is_empty())
             .map(str::to_owned)
             .collect();
+        exact.sort_by_key(|value| std::cmp::Reverse(value.len()));
         Self { exact }
     }
 
@@ -128,5 +129,11 @@ mod tests {
         assert!(!value.contains(CANARY));
         assert!(value.matches(REDACTED).count() >= 3);
         assert!(value.contains("ok=1"));
+    }
+
+    #[test]
+    fn overlapping_secrets_are_fully_redacted_regardless_of_registration_order() {
+        let value = Redactor::new([b"abc".as_slice(), b"abcdef".as_slice()]).redact("abcdef abc");
+        assert_eq!(value, "[REDACTED] [REDACTED]");
     }
 }
