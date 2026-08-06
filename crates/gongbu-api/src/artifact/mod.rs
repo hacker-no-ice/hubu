@@ -369,7 +369,6 @@ mod tests {
             })
             .unwrap()
             .execution_id
-            .clone()
     }
 
     fn service(root: &Path, repository: Repository, limits: ArtifactLimits) -> ArtifactService {

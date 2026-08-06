@@ -5,7 +5,6 @@ use crate::redaction::Redactor;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::{
-    ops::Deref,
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -77,7 +76,7 @@ pub struct CreateExecutionParams {
     pub created_at: String,
 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct ExecutionSnapshot {
+pub struct Execution {
     pub execution_id: String,
     pub account_id: String,
     pub operation_key: String,
@@ -98,6 +97,29 @@ pub struct ExecutionSnapshot {
     pub provider_config_version: String,
     pub pricing_snapshot: Value,
     pub pricing_schema_version: i64,
+    pub status: String,
+    pub outcome: Option<String>,
+    pub provider_outcome: Option<LifecycleOutcome>,
+    pub artifact_outcome: Option<LifecycleOutcome>,
+    pub settlement_outcome: Option<LifecycleOutcome>,
+    pub failure_code: Option<String>,
+    pub failure_message_redacted: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub release_transmission_started_at: Option<String>,
+    pub version: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ExecutionSnapshot<'a> {
+    pub execution_id: &'a str,
+    pub account_id: &'a str,
+    pub operation_key: &'a str,
+    pub normalized_input: &'a Value,
+    pub target: &'a str,
+    pub pricing_snapshot: &'a Value,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,31 +139,28 @@ impl LifecycleOutcome {
             Self::Released => "released",
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "ambiguous" => Some(Self::Ambiguous),
+            "released" => Some(Self::Released),
+            _ => None,
+        }
+    }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Execution {
-    pub snapshot: ExecutionSnapshot,
-    pub status: String,
-    pub outcome: Option<String>,
-    pub provider_outcome: Option<LifecycleOutcome>,
-    pub artifact_outcome: Option<LifecycleOutcome>,
-    pub settlement_outcome: Option<LifecycleOutcome>,
-    pub failure_code: Option<String>,
-    pub failure_message_redacted: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub started_at: Option<String>,
-    pub completed_at: Option<String>,
-    pub release_transmission_started_at: Option<String>,
-    pub version: i64,
-}
-
-impl Deref for Execution {
-    type Target = ExecutionSnapshot;
-
-    fn deref(&self) -> &Self::Target {
-        &self.snapshot
+impl Execution {
+    pub fn snapshot(&self) -> ExecutionSnapshot<'_> {
+        ExecutionSnapshot {
+            execution_id: &self.execution_id,
+            account_id: &self.account_id,
+            operation_key: &self.operation_key,
+            normalized_input: &self.normalized_input,
+            target: &self.target,
+            pricing_snapshot: &self.pricing_snapshot,
+        }
     }
 }
 #[derive(Clone, Debug)]
@@ -152,9 +171,9 @@ pub struct ExecutionUpdate {
     pub completed_at: Option<String>,
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
-    pub provider_outcome: Option<String>,
-    pub artifact_outcome: Option<String>,
-    pub settlement_outcome: Option<String>,
+    pub provider_outcome: Option<LifecycleOutcome>,
+    pub artifact_outcome: Option<LifecycleOutcome>,
+    pub settlement_outcome: Option<LifecycleOutcome>,
 }
 #[derive(Clone, Debug)]
 pub struct CreateProviderAttemptParams {
@@ -381,7 +400,10 @@ impl Repository {
                 to: u.status.clone(),
             });
         }
-        let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,provider_outcome=COALESCE(?8,provider_outcome),artifact_outcome=COALESCE(?9,artifact_outcome),settlement_outcome=COALESCE(?10,settlement_outcome),version=version+1 WHERE execution_id=?11 AND version=?12",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,failure,at,u.provider_outcome,u.artifact_outcome,u.settlement_outcome,id,expected])?;
+        let provider_outcome = u.provider_outcome.map(LifecycleOutcome::as_str);
+        let artifact_outcome = u.artifact_outcome.map(LifecycleOutcome::as_str);
+        let settlement_outcome = u.settlement_outcome.map(LifecycleOutcome::as_str);
+        let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,provider_outcome=COALESCE(?8,provider_outcome),artifact_outcome=COALESCE(?9,artifact_outcome),settlement_outcome=COALESCE(?10,settlement_outcome),version=version+1 WHERE execution_id=?11 AND version=?12",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,failure,at,provider_outcome,artifact_outcome,settlement_outcome,id,expected])?;
         if changed == 0 {
             return if c
                 .query_row(
@@ -970,28 +992,26 @@ fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
     let i: String = r.get(8)?;
     let p: String = r.get(18)?;
     Ok(Execution {
-        snapshot: ExecutionSnapshot {
-            execution_id: r.get(0)?,
-            account_id: r.get(1)?,
-            operation_key: r.get(2)?,
-            hubu_authorization_id: r.get(3)?,
-            hubu_claim_id: r.get(4)?,
-            hubu_token_reference: HubuTokenReference(r.get(5)?),
-            authorized_minor: r.get(6)?,
-            authorization_currency: r.get(7)?,
-            normalized_input: serde_json::from_str(&i).unwrap(),
-            input_hash: r.get(9)?,
-            input_schema_version: r.get(10)?,
-            target: r.get(11)?,
-            config_version: r.get(12)?,
-            workload_type: r.get(13)?,
-            provider: r.get(14)?,
-            adapter: r.get(15)?,
-            model: r.get(16)?,
-            provider_config_version: r.get(17)?,
-            pricing_snapshot: serde_json::from_str(&p).unwrap(),
-            pricing_schema_version: r.get(19)?,
-        },
+        execution_id: r.get(0)?,
+        account_id: r.get(1)?,
+        operation_key: r.get(2)?,
+        hubu_authorization_id: r.get(3)?,
+        hubu_claim_id: r.get(4)?,
+        hubu_token_reference: HubuTokenReference(r.get(5)?),
+        authorized_minor: r.get(6)?,
+        authorization_currency: r.get(7)?,
+        normalized_input: serde_json::from_str(&i).unwrap(),
+        input_hash: r.get(9)?,
+        input_schema_version: r.get(10)?,
+        target: r.get(11)?,
+        config_version: r.get(12)?,
+        workload_type: r.get(13)?,
+        provider: r.get(14)?,
+        adapter: r.get(15)?,
+        model: r.get(16)?,
+        provider_config_version: r.get(17)?,
+        pricing_snapshot: serde_json::from_str(&p).unwrap(),
+        pricing_schema_version: r.get(19)?,
         status: r.get(20)?,
         outcome: r.get(21)?,
         provider_outcome: map_lifecycle_outcome(r.get(22)?)?,
@@ -1010,13 +1030,7 @@ fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
 
 fn map_lifecycle_outcome(value: Option<String>) -> rusqlite::Result<Option<LifecycleOutcome>> {
     value
-        .map(|value| match value.as_str() {
-            "succeeded" => Ok(LifecycleOutcome::Succeeded),
-            "failed" => Ok(LifecycleOutcome::Failed),
-            "ambiguous" => Ok(LifecycleOutcome::Ambiguous),
-            "released" => Ok(LifecycleOutcome::Released),
-            _ => Err(rusqlite::Error::InvalidQuery),
-        })
+        .map(|value| LifecycleOutcome::parse(&value).ok_or(rusqlite::Error::InvalidQuery))
         .transpose()
 }
 fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
@@ -1221,10 +1235,7 @@ mod tests {
                 let b = barrier.clone();
                 thread::spawn(move || {
                     b.wait();
-                    r.create_execution(&new("a", "op"))
-                        .unwrap()
-                        .execution_id
-                        .clone()
+                    r.create_execution(&new("a", "op")).unwrap().execution_id
                 })
             })
             .collect();
@@ -1275,7 +1286,6 @@ mod tests {
                 .create_execution(&new("a", "op"))
                 .unwrap()
                 .execution_id
-                .clone()
         };
         assert_eq!(
             Repository::open(&path, Redactor::default())
@@ -1500,7 +1510,7 @@ mod tests {
         complete_success(&r, &a);
         let mut receipt = CreateReceiptParams {
             receipt_id: "r".into(),
-            execution_id: e.execution_id.clone(),
+            execution_id: e.execution_id,
             provider_attempt_id: a,
             settlement_minor: 101,
             currency: "USD".into(),
@@ -1590,7 +1600,7 @@ mod tests {
                 .unwrap();
         let execution = escaped_repo.create_execution(&new("a", "escaped")).unwrap();
         let result = escaped_repo.create_provider_attempt(&CreateProviderAttemptParams {
-            execution_id: execution.execution_id.clone(),
+            execution_id: execution.execution_id,
             provider: "vendor".into(),
             provider_request_id: Some(escaped_canary.into()),
             provider_operation_id: None,
