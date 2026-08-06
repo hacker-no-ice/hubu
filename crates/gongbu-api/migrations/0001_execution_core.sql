@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS executions(
  normalized_input_json TEXT NOT NULL CHECK(json_valid(normalized_input_json)), input_hash TEXT NOT NULL, input_schema_version INTEGER NOT NULL CHECK(input_schema_version>0),
  target TEXT NOT NULL, config_version TEXT NOT NULL, pricing_snapshot_json TEXT NOT NULL CHECK(json_valid(pricing_snapshot_json)), pricing_schema_version INTEGER NOT NULL CHECK(pricing_schema_version>0),
  status TEXT NOT NULL CHECK(status IN ('pending','preflighting','claimed','executing','persisting','settling','succeeded','released','failed','cancelled','reconciliation_required')), outcome TEXT,
- provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT, cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancellation_requested IN (0,1)),
+ provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT,
  failure_code TEXT, failure_message_redacted TEXT,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0), UNIQUE(account_id,operation_key));
 CREATE INDEX IF NOT EXISTS executions_status_created ON executions(status,created_at);

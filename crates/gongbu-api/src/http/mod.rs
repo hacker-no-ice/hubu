@@ -92,6 +92,7 @@ pub enum ExecutionStatus {
     Succeeded,
     Released,
     Failed,
+    /// Read compatibility for executions cancelled before the v1 contract was frozen.
     Cancelled,
     ReconciliationRequired,
 }

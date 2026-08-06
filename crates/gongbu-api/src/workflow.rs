@@ -80,33 +80,9 @@ impl ExecutionWorkflow<'_> {
             }
             match execution.status.as_str() {
                 "pending" => {
-                    if execution.cancellation_requested {
-                        self.transition(
-                            &execution,
-                            "cancelled",
-                            Some("cancelled"),
-                            now,
-                            None,
-                            None,
-                            None,
-                        )?;
-                        continue;
-                    }
                     self.transition(&execution, "preflighting", None, now, None, None, None)?;
                 }
                 "preflighting" => {
-                    if execution.cancellation_requested {
-                        self.transition(
-                            &execution,
-                            "cancelled",
-                            Some("cancelled"),
-                            now,
-                            None,
-                            None,
-                            None,
-                        )?;
-                        continue;
-                    }
                     if let Err(e) = self.preflight(&execution) {
                         self.fail_before_claim(&execution, e, now)?;
                         continue;
@@ -145,34 +121,6 @@ impl ExecutionWorkflow<'_> {
                     }
                 }
                 "claimed" => {
-                    if execution.cancellation_requested {
-                        match self.hubu.release(&execution) {
-                            Ok(()) => {
-                                self.transition(
-                                    &execution,
-                                    "released",
-                                    Some("cancelled"),
-                                    now,
-                                    None,
-                                    None,
-                                    Some("released"),
-                                )?;
-                            }
-                            Err(ActivityError::Proven(code))
-                            | Err(ActivityError::Ambiguous(code)) => {
-                                self.transition(
-                                    &execution,
-                                    "reconciliation_required",
-                                    Some(&code),
-                                    now,
-                                    None,
-                                    None,
-                                    Some("ambiguous"),
-                                )?;
-                            }
-                        }
-                        continue;
-                    }
                     self.repository.start_provider_attempt(&execution, now)?;
                 }
                 "executing" => {
@@ -692,27 +640,6 @@ mod tests {
         assert_eq!(h.releases.get(), 0);
     }
     #[test]
-    fn cancellation_before_claim_is_terminal_without_side_effects() {
-        let repo = Repository::in_memory().unwrap();
-        let e = execution(&repo, "cancel");
-        repo.request_cancellation(&e.execution_id, e.version, "now")
-            .unwrap();
-        let h = Hubu::default();
-        let p = Provider::default();
-        let a = Artifacts {
-            repo: &repo,
-            calls: Cell::new(0),
-        };
-        let w = ExecutionWorkflow {
-            repository: &repo,
-            hubu: &h,
-            provider: &p,
-            artifacts: &a,
-        };
-        assert_eq!(w.run(&e.execution_id, "now").unwrap().status, "cancelled");
-        assert_eq!((h.claims.get(), p.calls.get()), (0, 0));
-    }
-    #[test]
     fn interrupted_transmission_reconciles_without_second_invoke_or_attempt() {
         let repo = Repository::in_memory().unwrap();
         let pending = execution(&repo, "interrupted");
@@ -787,15 +714,15 @@ mod tests {
             repo.update_execution(&e.execution_id, e.version, &bad, "now"),
             Err(PersistenceError::ForbiddenTransition { .. })
         ));
-        let cancel = ExecutionUpdate {
-            status: "cancelled".into(),
+        let terminal_update = ExecutionUpdate {
+            status: "failed".into(),
             ..bad
         };
         let done = repo
-            .update_execution(&e.execution_id, e.version, &cancel, "now")
+            .update_execution(&e.execution_id, e.version, &terminal_update, "now")
             .unwrap();
         assert!(matches!(
-            repo.update_execution(&e.execution_id, done.version, &cancel, "later"),
+            repo.update_execution(&e.execution_id, done.version, &terminal_update, "later"),
             Err(PersistenceError::ForbiddenTransition { .. })
         ));
     }

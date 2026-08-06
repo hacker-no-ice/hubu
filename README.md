@@ -32,11 +32,13 @@ The authoritative v1 routes are:
 - `GET /v1/artifacts/{artifact_id}`
 
 Transport adapters validate authentication before constructing the trusted
-account principal; request bodies cannot override it. Cancellation is a durable
-workflow signal before provider transmission, but no public cancellation route
-is included here. Remote artifact fetching, SVG support, retention, cloud
-storage, multi-provider execution, and operator reconciliation remain out of
-scope.
+account principal; request bodies cannot override it. Accepted v1 executions
+run to a terminal outcome; public and in-flight cancellation are deferred to
+HUB-37. Remote artifact fetching, SVG support, retention, cloud storage,
+multi-provider execution, and operator reconciliation remain out of scope.
+The persistence reader retains the legacy terminal `cancelled` value solely for
+databases created before this contract change; HUB-17 exposes no transition or
+operation that creates it.
 
 ## Operator target configuration
 

@@ -102,7 +102,6 @@ pub struct Execution {
     pub provider_outcome: Option<String>,
     pub artifact_outcome: Option<String>,
     pub settlement_outcome: Option<String>,
-    pub cancellation_requested: bool,
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
     pub created_at: String,
@@ -364,14 +363,6 @@ impl Repository {
             } else {
                 Err(Error::NotFound)
             };
-        }
-        query_id(&c, id)
-    }
-    pub fn request_cancellation(&self, id: &str, expected: i64, at: &str) -> Result<Execution> {
-        let c = self.0.lock().unwrap();
-        let changed = c.execute("UPDATE executions SET cancellation_requested=1,updated_at=?1,version=version+1 WHERE execution_id=?2 AND version=?3 AND status IN ('pending','preflighting','claimed')", params![at,id,expected])?;
-        if changed == 0 {
-            return Err(Error::Stale);
         }
         query_id(&c, id)
     }
@@ -888,7 +879,7 @@ CREATE TABLE executions_v2(
  target TEXT NOT NULL, config_version TEXT NOT NULL, workload_type TEXT NOT NULL, provider TEXT NOT NULL, adapter TEXT NOT NULL, model TEXT NOT NULL, provider_config_version TEXT NOT NULL,
  pricing_snapshot_json TEXT NOT NULL CHECK(json_valid(pricing_snapshot_json)), pricing_schema_version INTEGER NOT NULL CHECK(pricing_schema_version>0),
  status TEXT NOT NULL CHECK(status IN ('pending','preflighting','claimed','executing','persisting','settling','succeeded','released','failed','cancelled','reconciliation_required')), outcome TEXT,
- provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT, cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancellation_requested IN (0,1)),
+ provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT,
  failure_code TEXT, failure_message_redacted TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0), UNIQUE(account_id,operation_key));
 INSERT INTO executions_v2(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,version)
  SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,
@@ -955,7 +946,7 @@ fn query_id(c: &Connection, id: &str) -> Result<Execution> {
     .optional()?
     .ok_or(Error::NotFound)
 }
-const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,cancellation_requested,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,version FROM executions";
+const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,version FROM executions";
 fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
     let i: String = r.get(8)?;
     let p: String = r.get(18)?;
@@ -985,14 +976,13 @@ fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
         provider_outcome: r.get(22)?,
         artifact_outcome: r.get(23)?,
         settlement_outcome: r.get(24)?,
-        cancellation_requested: r.get(25)?,
-        failure_code: r.get(26)?,
-        failure_message_redacted: r.get(27)?,
-        created_at: r.get(28)?,
-        updated_at: r.get(29)?,
-        started_at: r.get(30)?,
-        completed_at: r.get(31)?,
-        version: r.get(32)?,
+        failure_code: r.get(25)?,
+        failure_message_redacted: r.get(26)?,
+        created_at: r.get(27)?,
+        updated_at: r.get(28)?,
+        started_at: r.get(29)?,
+        completed_at: r.get(30)?,
+        version: r.get(31)?,
     })
 }
 fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
@@ -1088,10 +1078,8 @@ fn allowed_transition(from: &str, to: &str) -> bool {
         (from, to),
         ("pending", "preflighting")
             | ("pending", "failed")
-            | ("pending", "cancelled")
             | ("preflighting", "claimed")
             | ("preflighting", "failed")
-            | ("preflighting", "cancelled")
             | ("preflighting", "reconciliation_required")
             | ("claimed", "executing")
             | ("claimed", "released")
@@ -1266,7 +1254,7 @@ mod tests {
         let path = directory.path().join("legacy.sqlite3");
         let legacy_migration = MIGRATION
             .replace(
-                "status TEXT NOT NULL CHECK(status IN ('pending','preflighting','claimed','executing','persisting','settling','succeeded','released','failed','cancelled','reconciliation_required')), outcome TEXT,\n provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT, cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancellation_requested IN (0,1)),",
+                "status TEXT NOT NULL CHECK(status IN ('pending','preflighting','claimed','executing','persisting','settling','succeeded','released','failed','cancelled','reconciliation_required')), outcome TEXT,\n provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT,",
                 "status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','canceled','reconciliation_required')), outcome TEXT,",
             )
             .replace(
