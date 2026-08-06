@@ -27,6 +27,14 @@ confirmed. The former `persisting` state was never merged, stored by a shipped
 schema, or exposed by a shipped API, so v1 removes it without compatibility
 handling or a cleanup migration.
 
+Production composition starts Temporal with `temporal::start_worker`, retains
+the returned worker thread for process lifetime, and passes its `scheduler` to
+`http::Api::new`. Each accepted or replayed pending execution starts the stable
+workflow ID `gongbu-execution-{execution_id}` on `gongbu-executions`; Temporal's
+use-existing conflict policy makes duplicate scheduling safe. Interrupted
+activities are redelivered, while persisted transmission markers prevent
+provider or Hubu side effects from being repeated.
+
 ## Service surface
 
 The authoritative v1 routes are:
