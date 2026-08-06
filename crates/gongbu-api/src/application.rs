@@ -119,7 +119,13 @@ async fn dispatch(State(state): State<ApplicationState>, request: Request<Body>)
         Ok(body) => body,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
-    into_axum(state.api.handle(&method, &path, account.as_ref(), &body))
+    let api = state.api.clone();
+    match tokio::task::spawn_blocking(move || api.handle(&method, &path, account.as_ref(), &body))
+        .await
+    {
+        Ok(response) => into_axum(response),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 fn into_axum(response: HttpResponse) -> Response {
