@@ -19,7 +19,8 @@ pub struct ProviderArtifact {
 }
 #[derive(Clone, Debug)]
 pub struct ProviderSuccess {
-    pub request_id: String,
+    pub request_id: Option<String>,
+    pub operation_id: Option<String>,
     pub usage: NormalizedUsage,
     pub artifacts: Vec<ProviderArtifact>,
 }
@@ -27,6 +28,11 @@ pub struct ProviderSuccess {
 pub enum ActivityError {
     Proven(String),
     Ambiguous(String),
+    AmbiguousWithEvidence {
+        code: String,
+        request_id: Option<String>,
+        operation_id: Option<String>,
+    },
 }
 
 pub trait HubuActivities {
@@ -128,6 +134,17 @@ impl ExecutionWorkflow<'_> {
                                 Some("ambiguous"),
                             )?;
                         }
+                        Err(ActivityError::AmbiguousWithEvidence { code, .. }) => {
+                            self.transition(
+                                &execution,
+                                "reconciliation_required",
+                                Some(&code),
+                                now,
+                                None,
+                                None,
+                                Some("ambiguous"),
+                            )?;
+                        }
                     }
                 }
                 "claimed" => match self.hubu.validate_claim(&execution) {
@@ -135,6 +152,17 @@ impl ExecutionWorkflow<'_> {
                         self.repository.start_provider_attempt(&execution, now)?;
                     }
                     Err(ActivityError::Proven(code)) | Err(ActivityError::Ambiguous(code)) => {
+                        self.transition(
+                            &execution,
+                            "reconciliation_required",
+                            Some(&code),
+                            now,
+                            None,
+                            None,
+                            Some("ambiguous"),
+                        )?;
+                    }
+                    Err(ActivityError::AmbiguousWithEvidence { code, .. }) => {
                         self.transition(
                             &execution,
                             "reconciliation_required",
@@ -185,7 +213,8 @@ impl ExecutionWorkflow<'_> {
                                     provider_currency: None,
                                     failure_code: None,
                                     failure_message_redacted: None,
-                                    provider_request_id: Some(success.request_id.clone()),
+                                    provider_request_id: success.request_id.clone(),
+                                    provider_operation_id: success.operation_id.clone(),
                                 },
                             )?;
                             if !has_provider_artifact {
@@ -245,6 +274,17 @@ impl ExecutionWorkflow<'_> {
                                         None,
                                     )?;
                                 }
+                                Err(ActivityError::AmbiguousWithEvidence { code, .. }) => {
+                                    self.transition(
+                                        &execution,
+                                        "reconciliation_required",
+                                        Some(&code),
+                                        now,
+                                        Some("succeeded"),
+                                        Some("failed"),
+                                        None,
+                                    )?;
+                                }
                             }
                         }
                         Err(ActivityError::Proven(code)) => {
@@ -258,6 +298,28 @@ impl ExecutionWorkflow<'_> {
                             self.repository.complete_provider_attempt(
                                 &attempt.provider_attempt_id,
                                 &attempt_failure("ambiguous", &code, now),
+                            )?;
+                            self.transition(
+                                &execution,
+                                "reconciliation_required",
+                                Some(&code),
+                                now,
+                                Some("ambiguous"),
+                                None,
+                                None,
+                            )?;
+                        }
+                        Err(ActivityError::AmbiguousWithEvidence {
+                            code,
+                            request_id,
+                            operation_id,
+                        }) => {
+                            let mut failure = attempt_failure("ambiguous", &code, now);
+                            failure.provider_request_id = request_id;
+                            failure.provider_operation_id = operation_id;
+                            self.repository.complete_provider_attempt(
+                                &attempt.provider_attempt_id,
+                                &failure,
                             )?;
                             self.transition(
                                 &execution,
@@ -368,6 +430,17 @@ impl ExecutionWorkflow<'_> {
                                 Some("ambiguous"),
                             )?;
                         }
+                        Err(ActivityError::AmbiguousWithEvidence { code, .. }) => {
+                            self.transition(
+                                &execution,
+                                "reconciliation_required",
+                                Some(&code),
+                                now,
+                                None,
+                                None,
+                                Some("ambiguous"),
+                            )?;
+                        }
                     }
                 }
                 _ => return Err(PersistenceError::Invalid("workflow status").into()),
@@ -412,6 +485,7 @@ impl ExecutionWorkflow<'_> {
     ) -> Result<(), WorkflowError> {
         let code = match error {
             ActivityError::Proven(c) | ActivityError::Ambiguous(c) => c,
+            ActivityError::AmbiguousWithEvidence { code, .. } => code,
         };
         self.transition(e, "failed", Some(&code), now, None, None, None)
             .map(|_| ())
@@ -454,6 +528,17 @@ impl ExecutionWorkflow<'_> {
                     &marked,
                     "reconciliation_required",
                     Some(&c),
+                    now,
+                    Some("failed"),
+                    None,
+                    Some("ambiguous"),
+                )?;
+            }
+            Err(ActivityError::AmbiguousWithEvidence { code, .. }) => {
+                self.transition(
+                    &marked,
+                    "reconciliation_required",
+                    Some(&code),
                     now,
                     Some("failed"),
                     None,
@@ -542,6 +627,7 @@ fn attempt_failure(outcome: &str, code: &str, now: &str) -> AttemptResult {
         failure_code: Some(code.into()),
         failure_message_redacted: None,
         provider_request_id: None,
+        provider_operation_id: None,
     }
 }
 fn usage_value(usage: &NormalizedUsage) -> serde_json::Value {
@@ -663,7 +749,8 @@ mod tests {
                 Err(e)
             } else {
                 Ok(ProviderSuccess {
-                    request_id: "provider-1".into(),
+                    request_id: Some("provider-1".into()),
+                    operation_id: None,
                     usage: NormalizedUsage {
                         images: Some(self.image_usage.get()),
                         ..Default::default()
@@ -1017,6 +1104,43 @@ mod tests {
             "reconciliation_required"
         );
         w.run(&e.execution_id, "later").unwrap();
+        assert_eq!(p.calls.get(), 1);
+        assert_eq!(h.releases.get(), 0);
+    }
+    #[test]
+    fn ambiguous_provider_evidence_is_persisted_for_reconciliation() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "ambiguous-evidence");
+        let h = Hubu::default();
+        let p = Provider::default();
+        p.error.replace(Some(ActivityError::AmbiguousWithEvidence {
+            code: "artifact_policy_failure".into(),
+            request_id: Some("request-123".into()),
+            operation_id: Some("operation-456".into()),
+        }));
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        assert_eq!(
+            w.run(&e.execution_id, "now").unwrap().status,
+            "reconciliation_required"
+        );
+        let attempt = repo
+            .get_provider_attempt_for_execution(&e.execution_id)
+            .unwrap();
+        assert_eq!(attempt.provider_request_id.as_deref(), Some("request-123"));
+        assert_eq!(
+            attempt.provider_operation_id.as_deref(),
+            Some("operation-456")
+        );
+        assert_eq!(attempt.outcome, "ambiguous");
         assert_eq!(p.calls.get(), 1);
         assert_eq!(h.releases.get(), 0);
     }

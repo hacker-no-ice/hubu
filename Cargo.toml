@@ -26,3 +26,5 @@ futures = "0.3"
 temporalio-client = "0.6"
 tokio = { version = "1", features = ["net", "rt-multi-thread"] }
 axum = "0.8"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
