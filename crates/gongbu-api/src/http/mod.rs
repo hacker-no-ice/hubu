@@ -84,10 +84,15 @@ pub struct ExecutionResponse {
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStatus {
     Pending,
-    Running,
+    Preflighting,
+    Claimed,
+    Executing,
+    Persisting,
+    Settling,
     Succeeded,
+    Released,
     Failed,
-    Canceled,
+    Cancelled,
     ReconciliationRequired,
 }
 
@@ -517,10 +522,15 @@ fn canonicalize(value: &Value) -> Value {
 fn execution_response(execution: Execution) -> Result<ExecutionResponse, ApiError> {
     let status = match execution.status.as_str() {
         "pending" => ExecutionStatus::Pending,
-        "running" => ExecutionStatus::Running,
+        "preflighting" => ExecutionStatus::Preflighting,
+        "claimed" => ExecutionStatus::Claimed,
+        "executing" => ExecutionStatus::Executing,
+        "persisting" => ExecutionStatus::Persisting,
+        "settling" => ExecutionStatus::Settling,
         "succeeded" => ExecutionStatus::Succeeded,
         "failed" => ExecutionStatus::Failed,
-        "canceled" => ExecutionStatus::Canceled,
+        "released" => ExecutionStatus::Released,
+        "cancelled" => ExecutionStatus::Cancelled,
         "reconciliation_required" => ExecutionStatus::ReconciliationRequired,
         _ => return Err(ApiError::internal()),
     };

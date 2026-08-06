@@ -1,0 +1,739 @@
+//! Deterministic orchestration for one durable execution.
+//!
+//! Temporal owns delivery of `run`; this module makes each externally visible
+//! activity replay-safe by consulting the persisted aggregate before acting.
+use crate::{
+    execution::{
+        AttemptResult, CreateProviderAttemptParams, CreateReceiptParams, Error as PersistenceError,
+        Execution, ExecutionUpdate, Repository,
+    },
+    provider_contract::{NormalizedUsage, PricingSnapshot},
+};
+use serde_json::to_value;
+use thiserror::Error;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderArtifact {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+#[derive(Clone, Debug)]
+pub struct ProviderSuccess {
+    pub request_id: String,
+    pub usage: NormalizedUsage,
+    pub artifacts: Vec<ProviderArtifact>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActivityError {
+    Proven(String),
+    Ambiguous(String),
+}
+
+pub trait HubuActivities {
+    fn preflight(&self, execution: &Execution) -> Result<(), ActivityError>;
+    fn claim(&self, execution: &Execution) -> Result<String, ActivityError>;
+    fn settle(
+        &self,
+        execution: &Execution,
+        receipt_id: &str,
+        amount_minor: i64,
+    ) -> Result<String, ActivityError>;
+    fn release(&self, execution: &Execution) -> Result<(), ActivityError>;
+}
+pub trait ProviderActivities {
+    fn preflight(&self, execution: &Execution) -> Result<(), ActivityError>;
+    fn invoke(
+        &self,
+        execution: &Execution,
+        attempt_id: &str,
+    ) -> Result<ProviderSuccess, ActivityError>;
+}
+pub trait ArtifactActivities {
+    fn preflight(&self) -> Result<(), ActivityError>;
+    fn persist(
+        &self,
+        execution: &Execution,
+        attempt_id: &str,
+        artifacts: &[ProviderArtifact],
+    ) -> Result<(), ActivityError>;
+}
+
+#[derive(Debug, Error)]
+pub enum WorkflowError {
+    #[error(transparent)]
+    Persistence(#[from] PersistenceError),
+}
+
+pub struct ExecutionWorkflow<'a> {
+    pub repository: &'a Repository,
+    pub hubu: &'a dyn HubuActivities,
+    pub provider: &'a dyn ProviderActivities,
+    pub artifacts: &'a dyn ArtifactActivities,
+}
+
+impl ExecutionWorkflow<'_> {
+    pub fn run(&self, execution_id: &str, now: &str) -> Result<Execution, WorkflowError> {
+        loop {
+            let execution = self.repository.get_execution(execution_id)?;
+            if terminal(&execution.status) {
+                return Ok(execution);
+            }
+            match execution.status.as_str() {
+                "pending" => {
+                    if execution.cancellation_requested {
+                        self.transition(
+                            &execution,
+                            "cancelled",
+                            Some("cancelled"),
+                            now,
+                            None,
+                            None,
+                            None,
+                        )?;
+                        continue;
+                    }
+                    self.transition(&execution, "preflighting", None, now, None, None, None)?;
+                }
+                "preflighting" => {
+                    if execution.cancellation_requested {
+                        self.transition(
+                            &execution,
+                            "cancelled",
+                            Some("cancelled"),
+                            now,
+                            None,
+                            None,
+                            None,
+                        )?;
+                        continue;
+                    }
+                    if let Err(e) = self.preflight(&execution) {
+                        self.fail_before_claim(&execution, e, now)?;
+                        continue;
+                    }
+                    match self.hubu.claim(&execution) {
+                        Ok(claim) => {
+                            self.repository.set_claim(
+                                execution_id,
+                                execution.version,
+                                &claim,
+                                now,
+                            )?;
+                        }
+                        Err(ActivityError::Proven(code)) => {
+                            self.transition(
+                                &execution,
+                                "failed",
+                                Some(&code),
+                                now,
+                                None,
+                                None,
+                                None,
+                            )?;
+                        }
+                        Err(ActivityError::Ambiguous(code)) => {
+                            self.transition(
+                                &execution,
+                                "reconciliation_required",
+                                Some(&code),
+                                now,
+                                None,
+                                None,
+                                Some("ambiguous"),
+                            )?;
+                        }
+                    }
+                }
+                "claimed" => {
+                    if execution.cancellation_requested {
+                        match self.hubu.release(&execution) {
+                            Ok(()) => {
+                                self.transition(
+                                    &execution,
+                                    "released",
+                                    Some("cancelled"),
+                                    now,
+                                    None,
+                                    None,
+                                    Some("released"),
+                                )?;
+                            }
+                            Err(ActivityError::Proven(code))
+                            | Err(ActivityError::Ambiguous(code)) => {
+                                self.transition(
+                                    &execution,
+                                    "reconciliation_required",
+                                    Some(&code),
+                                    now,
+                                    None,
+                                    None,
+                                    Some("ambiguous"),
+                                )?;
+                            }
+                        }
+                        continue;
+                    }
+                    let attempt = match self
+                        .repository
+                        .get_provider_attempt_for_execution(execution_id)
+                    {
+                        Ok(a) => a,
+                        Err(PersistenceError::NotFound) => self
+                            .repository
+                            .create_provider_attempt(&CreateProviderAttemptParams {
+                                execution_id: execution_id.into(),
+                                provider: execution.provider.clone(),
+                                provider_request_id: None,
+                                provider_operation_id: None,
+                                started_at: now.into(),
+                            })?,
+                        Err(e) => return Err(e.into()),
+                    };
+                    let _ = attempt;
+                    self.transition(&execution, "executing", None, now, None, None, None)?;
+                }
+                "executing" => {
+                    let attempt = self
+                        .repository
+                        .get_provider_attempt_for_execution(execution_id)?;
+                    if attempt.completed_at.is_some() {
+                        self.advance_completed_attempt(&execution, &attempt.outcome, now)?;
+                        continue;
+                    }
+                    match self
+                        .provider
+                        .invoke(&execution, &attempt.provider_attempt_id)
+                    {
+                        Ok(success) => {
+                            self.repository.complete_provider_attempt(
+                                &attempt.provider_attempt_id,
+                                &AttemptResult {
+                                    outcome: "succeeded".into(),
+                                    completed_at: now.into(),
+                                    usage: usage_value(&success.usage),
+                                    usage_schema_version: 1,
+                                    provider_amount_minor: None,
+                                    provider_currency: None,
+                                    failure_code: None,
+                                    failure_message_redacted: None,
+                                },
+                            )?;
+                            match self.artifacts.persist(
+                                &execution,
+                                &attempt.provider_attempt_id,
+                                &success.artifacts,
+                            ) {
+                                Ok(()) => {
+                                    self.transition(
+                                        &execution,
+                                        "persisting",
+                                        None,
+                                        now,
+                                        Some("succeeded"),
+                                        Some("succeeded"),
+                                        None,
+                                    )?;
+                                }
+                                Err(ActivityError::Proven(code))
+                                | Err(ActivityError::Ambiguous(code)) => {
+                                    self.transition(
+                                        &execution,
+                                        "reconciliation_required",
+                                        Some(&code),
+                                        now,
+                                        Some("succeeded"),
+                                        Some("failed"),
+                                        None,
+                                    )?;
+                                }
+                            }
+                        }
+                        Err(ActivityError::Proven(code)) => {
+                            self.repository.complete_provider_attempt(
+                                &attempt.provider_attempt_id,
+                                &attempt_failure("failed", &code, now),
+                            )?;
+                            self.release_or_reconcile(&execution, &code, now)?;
+                        }
+                        Err(ActivityError::Ambiguous(code)) => {
+                            self.repository.complete_provider_attempt(
+                                &attempt.provider_attempt_id,
+                                &attempt_failure("ambiguous", &code, now),
+                            )?;
+                            self.transition(
+                                &execution,
+                                "reconciliation_required",
+                                Some(&code),
+                                now,
+                                Some("ambiguous"),
+                                None,
+                                None,
+                            )?;
+                        }
+                    }
+                }
+                "persisting" => {
+                    self.transition(
+                        &execution,
+                        "settling",
+                        None,
+                        now,
+                        None,
+                        Some("succeeded"),
+                        None,
+                    )?;
+                }
+                "settling" => {
+                    let attempt = self
+                        .repository
+                        .get_provider_attempt_for_execution(execution_id)?;
+                    let snapshot: PricingSnapshot =
+                        serde_json::from_value(execution.pricing_snapshot.clone())
+                            .map_err(|_| PersistenceError::Invalid("pricing snapshot"))?;
+                    let usage: NormalizedUsage = serde_json::from_value(
+                        attempt
+                            .usage
+                            .clone()
+                            .ok_or(PersistenceError::Invalid("attempt usage"))?,
+                    )
+                    .map_err(|_| PersistenceError::Invalid("attempt usage"))?;
+                    let amount = snapshot
+                        .settle(&usage, execution.authorized_minor)
+                        .map_err(|_| PersistenceError::OverAuthorization)?;
+                    let receipt = match self.repository.get_receipt_for_execution(execution_id) {
+                        Ok(r) => r,
+                        Err(PersistenceError::NotFound) => {
+                            self.repository.create_receipt(&CreateReceiptParams {
+                                receipt_id: format!("receipt-{execution_id}"),
+                                execution_id: execution_id.into(),
+                                provider_attempt_id: attempt.provider_attempt_id,
+                                settlement_minor: amount,
+                                currency: snapshot.currency.clone(),
+                                pricing_catalog_version: snapshot.catalog_version,
+                                created_at: now.into(),
+                                settled_at: None,
+                                hubu_settlement_id: None,
+                            })?
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
+                    if receipt.settled_at.is_some() {
+                        self.transition(
+                            &execution,
+                            "succeeded",
+                            Some("succeeded"),
+                            now,
+                            None,
+                            None,
+                            Some("succeeded"),
+                        )?;
+                        continue;
+                    }
+                    match self.hubu.settle(&execution, &receipt.receipt_id, amount) {
+                        Ok(id) => {
+                            self.repository
+                                .complete_receipt(&receipt.receipt_id, &id, now)?;
+                            self.transition(
+                                &execution,
+                                "succeeded",
+                                Some("succeeded"),
+                                now,
+                                None,
+                                None,
+                                Some("succeeded"),
+                            )?;
+                        }
+                        Err(ActivityError::Proven(code)) | Err(ActivityError::Ambiguous(code)) => {
+                            self.transition(
+                                &execution,
+                                "reconciliation_required",
+                                Some(&code),
+                                now,
+                                None,
+                                None,
+                                Some("ambiguous"),
+                            )?;
+                        }
+                    }
+                }
+                _ => return Err(PersistenceError::Invalid("workflow status").into()),
+            }
+        }
+    }
+    fn preflight(&self, e: &Execution) -> Result<(), ActivityError> {
+        self.hubu.preflight(e)?;
+        self.provider.preflight(e)?;
+        self.artifacts.preflight()
+    }
+    fn fail_before_claim(
+        &self,
+        e: &Execution,
+        error: ActivityError,
+        now: &str,
+    ) -> Result<(), WorkflowError> {
+        let code = match error {
+            ActivityError::Proven(c) | ActivityError::Ambiguous(c) => c,
+        };
+        self.transition(e, "failed", Some(&code), now, None, None, None)
+            .map(|_| ())
+    }
+    fn release_or_reconcile(
+        &self,
+        e: &Execution,
+        code: &str,
+        now: &str,
+    ) -> Result<(), WorkflowError> {
+        match self.hubu.release(e) {
+            Ok(()) => {
+                self.transition(
+                    e,
+                    "released",
+                    Some(code),
+                    now,
+                    Some("failed"),
+                    None,
+                    Some("released"),
+                )?;
+            }
+            Err(ActivityError::Proven(c)) | Err(ActivityError::Ambiguous(c)) => {
+                self.transition(
+                    e,
+                    "reconciliation_required",
+                    Some(&c),
+                    now,
+                    Some("failed"),
+                    None,
+                    Some("ambiguous"),
+                )?;
+            }
+        }
+        Ok(())
+    }
+    fn advance_completed_attempt(
+        &self,
+        e: &Execution,
+        outcome: &str,
+        now: &str,
+    ) -> Result<(), WorkflowError> {
+        match outcome {
+            "succeeded" => {
+                self.transition(e, "persisting", None, now, Some("succeeded"), None, None)?;
+            }
+            "failed" => self.release_or_reconcile(e, "provider_failed", now)?,
+            _ => {
+                self.transition(
+                    e,
+                    "reconciliation_required",
+                    Some("provider_ambiguous"),
+                    now,
+                    Some("ambiguous"),
+                    None,
+                    None,
+                )?;
+            }
+        }
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)] // The three independent durable outcomes are intentionally explicit at every transition.
+    fn transition(
+        &self,
+        e: &Execution,
+        status: &str,
+        outcome: Option<&str>,
+        now: &str,
+        provider: Option<&str>,
+        artifact: Option<&str>,
+        settlement: Option<&str>,
+    ) -> Result<Execution, WorkflowError> {
+        Ok(self.repository.update_execution(
+            &e.execution_id,
+            e.version,
+            &ExecutionUpdate {
+                status: status.into(),
+                outcome: outcome.map(str::to_owned),
+                started_at: Some(now.into()),
+                completed_at: terminal(status).then(|| now.into()),
+                failure_code: outcome
+                    .filter(|_| matches!(status, "failed" | "reconciliation_required"))
+                    .map(str::to_owned),
+                failure_message_redacted: None,
+                provider_outcome: provider.map(str::to_owned),
+                artifact_outcome: artifact.map(str::to_owned),
+                settlement_outcome: settlement.map(str::to_owned),
+            },
+            now,
+        )?)
+    }
+}
+fn attempt_failure(outcome: &str, code: &str, now: &str) -> AttemptResult {
+    AttemptResult {
+        outcome: outcome.into(),
+        completed_at: now.into(),
+        usage: serde_json::json!({}),
+        usage_schema_version: 1,
+        provider_amount_minor: None,
+        provider_currency: None,
+        failure_code: Some(code.into()),
+        failure_message_redacted: None,
+    }
+}
+fn usage_value(usage: &NormalizedUsage) -> serde_json::Value {
+    let mut value = to_value(usage).expect("usage serializes");
+    if let Some(map) = value.as_object_mut() {
+        map.retain(|_, v| !v.is_null());
+    }
+    value
+}
+fn terminal(s: &str) -> bool {
+    matches!(
+        s,
+        "succeeded" | "released" | "failed" | "cancelled" | "reconciliation_required"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::{CreateArtifactParams, CreateExecutionParams, HubuTokenReference};
+    use serde_json::json;
+    use std::cell::{Cell, RefCell};
+
+    fn execution(repo: &Repository, key: &str) -> Execution {
+        repo.create_execution(&CreateExecutionParams { account_id:"account".into(),operation_key:key.into(),hubu_authorization_id:"auth".into(),hubu_claim_id:None,hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(),authorized_minor:500,authorization_currency:"USD".into(),normalized_input:json!({"prompt":"cat"}),input_hash:"hash".into(),input_schema_version:1,target:"example/image-v1".into(),config_version:"cfg-1".into(),workload_type:"image_generation".into(),provider:"example".into(),adapter:"fixture".into(),model:"image-v1".into(),provider_config_version:"pcv-1".into(),pricing_snapshot:json!({"provider":"example","model":"image-v1","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","unit":"image","unit_amount_minor":100,"quantity":1,"estimated_amount_minor":100,"currency":"USD"}),pricing_schema_version:1,created_at:"2026-08-05T00:00:00Z".into() }).unwrap()
+    }
+    struct Hubu {
+        claims: Cell<u32>,
+        settles: Cell<u32>,
+        releases: Cell<u32>,
+        claim_error: RefCell<Option<ActivityError>>,
+        settle_error: RefCell<Option<ActivityError>>,
+    }
+    impl Default for Hubu {
+        fn default() -> Self {
+            Self {
+                claims: Cell::new(0),
+                settles: Cell::new(0),
+                releases: Cell::new(0),
+                claim_error: RefCell::new(None),
+                settle_error: RefCell::new(None),
+            }
+        }
+    }
+    impl HubuActivities for Hubu {
+        fn preflight(&self, _: &Execution) -> Result<(), ActivityError> {
+            Ok(())
+        }
+        fn claim(&self, _: &Execution) -> Result<String, ActivityError> {
+            self.claims.set(self.claims.get() + 1);
+            if let Some(e) = self.claim_error.borrow_mut().take() {
+                Err(e)
+            } else {
+                Ok("claim-1".into())
+            }
+        }
+        fn settle(&self, _: &Execution, _: &str, _: i64) -> Result<String, ActivityError> {
+            self.settles.set(self.settles.get() + 1);
+            if let Some(e) = self.settle_error.borrow_mut().take() {
+                Err(e)
+            } else {
+                Ok("settlement-1".into())
+            }
+        }
+        fn release(&self, _: &Execution) -> Result<(), ActivityError> {
+            self.releases.set(self.releases.get() + 1);
+            Ok(())
+        }
+    }
+    struct Provider {
+        calls: Cell<u32>,
+        error: RefCell<Option<ActivityError>>,
+    }
+    impl Default for Provider {
+        fn default() -> Self {
+            Self {
+                calls: Cell::new(0),
+                error: RefCell::new(None),
+            }
+        }
+    }
+    impl ProviderActivities for Provider {
+        fn preflight(&self, _: &Execution) -> Result<(), ActivityError> {
+            Ok(())
+        }
+        fn invoke(&self, _: &Execution, _: &str) -> Result<ProviderSuccess, ActivityError> {
+            self.calls.set(self.calls.get() + 1);
+            if let Some(e) = self.error.borrow_mut().take() {
+                Err(e)
+            } else {
+                Ok(ProviderSuccess {
+                    request_id: "provider-1".into(),
+                    usage: NormalizedUsage {
+                        images: Some(1),
+                        ..Default::default()
+                    },
+                    artifacts: vec![ProviderArtifact {
+                        media_type: "image/png".into(),
+                        bytes: vec![1],
+                    }],
+                })
+            }
+        }
+    }
+    struct Artifacts<'a> {
+        repo: &'a Repository,
+        calls: Cell<u32>,
+    }
+    impl ArtifactActivities for Artifacts<'_> {
+        fn preflight(&self) -> Result<(), ActivityError> {
+            Ok(())
+        }
+        fn persist(
+            &self,
+            e: &Execution,
+            a: &str,
+            _: &[ProviderArtifact],
+        ) -> Result<(), ActivityError> {
+            self.calls.set(self.calls.get() + 1);
+            if self
+                .repo
+                .count_artifacts_for_execution(&e.execution_id)
+                .unwrap()
+                == 0
+            {
+                self.repo
+                    .create_artifact(&CreateArtifactParams {
+                        artifact_id: "artifact-1".into(),
+                        execution_id: e.execution_id.clone(),
+                        provider_attempt_id: Some(a.into()),
+                        kind: "image".into(),
+                        storage_backend: "local_fs".into(),
+                        media_type: "image/png".into(),
+                        storage_key: format!("executions/{}/artifact-1.png", e.execution_id),
+                        size_bytes: 1,
+                        sha256: "a".repeat(64),
+                        metadata: json!({}),
+                        metadata_schema_version: 1,
+                        created_at: "2026-08-05T00:00:01Z".into(),
+                    })
+                    .unwrap();
+            }
+            Ok(())
+        }
+    }
+    #[test]
+    fn happy_path_is_durable_and_duplicate_delivery_is_a_noop() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "happy");
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        let done = w.run(&e.execution_id, "2026-08-05T00:00:01Z").unwrap();
+        assert_eq!(done.status, "succeeded");
+        assert_eq!(
+            repo.count_artifacts_for_execution(&e.execution_id).unwrap(),
+            1
+        );
+        assert!(repo
+            .get_receipt_for_execution(&e.execution_id)
+            .unwrap()
+            .settled_at
+            .is_some());
+        w.run(&e.execution_id, "later").unwrap();
+        assert_eq!(
+            (
+                h.claims.get(),
+                p.calls.get(),
+                a.calls.get(),
+                h.settles.get()
+            ),
+            (1, 1, 1, 1)
+        );
+    }
+    #[test]
+    fn ambiguous_provider_stops_without_retry_or_release() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "ambiguous");
+        let h = Hubu::default();
+        let p = Provider::default();
+        p.error
+            .replace(Some(ActivityError::Ambiguous("timeout".into())));
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        assert_eq!(
+            w.run(&e.execution_id, "now").unwrap().status,
+            "reconciliation_required"
+        );
+        w.run(&e.execution_id, "later").unwrap();
+        assert_eq!(p.calls.get(), 1);
+        assert_eq!(h.releases.get(), 0);
+    }
+    #[test]
+    fn cancellation_before_claim_is_terminal_without_side_effects() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "cancel");
+        repo.request_cancellation(&e.execution_id, e.version, "now")
+            .unwrap();
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        assert_eq!(w.run(&e.execution_id, "now").unwrap().status, "cancelled");
+        assert_eq!((h.claims.get(), p.calls.get()), (0, 0));
+    }
+    #[test]
+    fn terminal_states_are_immutable_and_skips_are_forbidden() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "states");
+        let bad = ExecutionUpdate {
+            status: "executing".into(),
+            outcome: None,
+            started_at: None,
+            completed_at: None,
+            failure_code: None,
+            failure_message_redacted: None,
+            provider_outcome: None,
+            artifact_outcome: None,
+            settlement_outcome: None,
+        };
+        assert!(matches!(
+            repo.update_execution(&e.execution_id, e.version, &bad, "now"),
+            Err(PersistenceError::ForbiddenTransition { .. })
+        ));
+        let cancel = ExecutionUpdate {
+            status: "cancelled".into(),
+            ..bad
+        };
+        let done = repo
+            .update_execution(&e.execution_id, e.version, &cancel, "now")
+            .unwrap();
+        assert!(matches!(
+            repo.update_execution(&e.execution_id, done.version, &cancel, "later"),
+            Err(PersistenceError::ForbiddenTransition { .. })
+        ));
+    }
+}

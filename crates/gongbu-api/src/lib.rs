@@ -6,6 +6,7 @@ pub mod execution;
 pub mod http;
 pub mod hubu;
 pub mod provider;
+pub mod workflow;
 
 // Preserve the original public module paths while callers migrate at their own pace.
 pub use artifact as artifacts;

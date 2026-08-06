@@ -26,6 +26,8 @@ pub enum Error {
     OverAuthorization,
     #[error("limit exceeded: {0}")]
     Limit(&'static str),
+    #[error("forbidden execution transition from {from} to {to}")]
+    ForbiddenTransition { from: String, to: String },
 }
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +99,10 @@ pub struct Execution {
     pub pricing_schema_version: i64,
     pub status: String,
     pub outcome: Option<String>,
+    pub provider_outcome: Option<String>,
+    pub artifact_outcome: Option<String>,
+    pub settlement_outcome: Option<String>,
+    pub cancellation_requested: bool,
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
     pub created_at: String,
@@ -113,6 +119,9 @@ pub struct ExecutionUpdate {
     pub completed_at: Option<String>,
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
+    pub provider_outcome: Option<String>,
+    pub artifact_outcome: Option<String>,
+    pub settlement_outcome: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct CreateProviderAttemptParams {
@@ -308,7 +317,35 @@ impl Repository {
             id,
         ])?;
         self.reject_registered_numbers([expected.saturating_add(1)])?;
-        let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,version=version+1 WHERE execution_id=?8 AND version=?9",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,failure,at,id,expected])?;
+        let current: Option<String> = c
+            .query_row(
+                "SELECT status FROM executions WHERE execution_id=?1 AND version=?2",
+                params![id, expected],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return if c
+                .query_row(
+                    "SELECT 1 FROM executions WHERE execution_id=?1",
+                    [id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+            {
+                Err(Error::Stale)
+            } else {
+                Err(Error::NotFound)
+            };
+        };
+        if !allowed_transition(&current, &u.status) {
+            return Err(Error::ForbiddenTransition {
+                from: current,
+                to: u.status.clone(),
+            });
+        }
+        let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,provider_outcome=COALESCE(?8,provider_outcome),artifact_outcome=COALESCE(?9,artifact_outcome),settlement_outcome=COALESCE(?10,settlement_outcome),version=version+1 WHERE execution_id=?11 AND version=?12",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,failure,at,u.provider_outcome,u.artifact_outcome,u.settlement_outcome,id,expected])?;
         if changed == 0 {
             return if c
                 .query_row(
@@ -323,6 +360,28 @@ impl Repository {
             } else {
                 Err(Error::NotFound)
             };
+        }
+        query_id(&c, id)
+    }
+    pub fn request_cancellation(&self, id: &str, expected: i64, at: &str) -> Result<Execution> {
+        let c = self.0.lock().unwrap();
+        let changed = c.execute("UPDATE executions SET cancellation_requested=1,updated_at=?1,version=version+1 WHERE execution_id=?2 AND version=?3 AND status IN ('pending','preflighting','claimed')", params![at,id,expected])?;
+        if changed == 0 {
+            return Err(Error::Stale);
+        }
+        query_id(&c, id)
+    }
+    pub fn set_claim(
+        &self,
+        id: &str,
+        expected: i64,
+        claim_id: &str,
+        at: &str,
+    ) -> Result<Execution> {
+        let c = self.0.lock().unwrap();
+        let changed = c.execute("UPDATE executions SET hubu_claim_id=?1,status='claimed',updated_at=?2,version=version+1 WHERE execution_id=?3 AND version=?4 AND status='preflighting' AND hubu_claim_id IS NULL",params![claim_id,at,id,expected])?;
+        if changed == 0 {
+            return Err(Error::Stale);
         }
         query_id(&c, id)
     }
@@ -392,6 +451,15 @@ impl Repository {
         } else {
             Err(Error::NotFound)
         }
+    }
+    pub fn get_provider_attempt_for_execution(
+        &self,
+        execution_id: &str,
+    ) -> Result<ProviderAttempt> {
+        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,usage_json,usage_schema_version,provider_amount_minor,provider_currency,failure_code,failure_message_redacted,started_at,completed_at FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
+            let usage: Option<String> = r.get(6)?;
+            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, outcome:r.get(5)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(7)?, provider_amount_minor:r.get(8)?, provider_currency:r.get(9)?, failure_code:r.get(10)?, failure_message_redacted:r.get(11)?, started_at:r.get(12)?, completed_at:r.get(13)? })
+        }).optional()?.ok_or(Error::NotFound)
     }
     pub fn create_artifact(&self, n: &CreateArtifactParams) -> Result<Artifact> {
         self.create_artifact_with_limit(n, u64::MAX)
@@ -634,6 +702,22 @@ impl Repository {
             hubu_settlement_id: n.hubu_settlement_id.clone(),
         })
     }
+    pub fn get_receipt_for_execution(&self, execution_id: &str) -> Result<Receipt> {
+        self.0.lock().unwrap().query_row("SELECT receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,created_at,settled_at,hubu_settlement_id FROM receipts WHERE execution_id=?1",[execution_id],|r| Ok(Receipt { receipt_id:r.get(0)?,execution_id:r.get(1)?,provider_attempt_id:r.get(2)?,settlement_minor:r.get(3)?,currency:r.get(4)?,pricing_catalog_version:r.get(5)?,created_at:r.get(6)?,settled_at:r.get(7)?,hubu_settlement_id:r.get(8)? })).optional()?.ok_or(Error::NotFound)
+    }
+    pub fn complete_receipt(
+        &self,
+        receipt_id: &str,
+        settlement_id: &str,
+        settled_at: &str,
+    ) -> Result<()> {
+        let changed=self.0.lock().unwrap().execute("UPDATE receipts SET settled_at=?1,hubu_settlement_id=?2 WHERE receipt_id=?3 AND settled_at IS NULL",params![settled_at,settlement_id,receipt_id])?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(Error::Stale)
+        }
+    }
     #[cfg(test)]
     fn count(&self, t: &str) -> i64 {
         self.0
@@ -774,7 +858,7 @@ fn query_id(c: &Connection, id: &str) -> Result<Execution> {
     .optional()?
     .ok_or(Error::NotFound)
 }
-const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,version FROM executions";
+const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,cancellation_requested,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,version FROM executions";
 fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
     let i: String = r.get(8)?;
     let p: String = r.get(18)?;
@@ -801,13 +885,17 @@ fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
         pricing_schema_version: r.get(19)?,
         status: r.get(20)?,
         outcome: r.get(21)?,
-        failure_code: r.get(22)?,
-        failure_message_redacted: r.get(23)?,
-        created_at: r.get(24)?,
-        updated_at: r.get(25)?,
-        started_at: r.get(26)?,
-        completed_at: r.get(27)?,
-        version: r.get(28)?,
+        provider_outcome: r.get(22)?,
+        artifact_outcome: r.get(23)?,
+        settlement_outcome: r.get(24)?,
+        cancellation_requested: r.get(25)?,
+        failure_code: r.get(26)?,
+        failure_message_redacted: r.get(27)?,
+        created_at: r.get(28)?,
+        updated_at: r.get(29)?,
+        started_at: r.get(30)?,
+        completed_at: r.get(31)?,
+        version: r.get(32)?,
     })
 }
 fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
@@ -871,10 +959,15 @@ fn safe_json(v: &Value) -> Result<()> {
 fn status(s: &str) -> Result<()> {
     if [
         "pending",
-        "running",
+        "preflighting",
+        "claimed",
+        "executing",
+        "persisting",
+        "settling",
         "succeeded",
         "failed",
-        "canceled",
+        "released",
+        "cancelled",
         "reconciliation_required",
     ]
     .contains(&s)
@@ -883,6 +976,37 @@ fn status(s: &str) -> Result<()> {
     } else {
         Err(Error::Invalid("status"))
     }
+}
+fn terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "succeeded" | "released" | "failed" | "cancelled" | "reconciliation_required"
+    )
+}
+fn allowed_transition(from: &str, to: &str) -> bool {
+    if terminal(from) {
+        return false;
+    }
+    matches!(
+        (from, to),
+        ("pending", "preflighting")
+            | ("pending", "failed")
+            | ("pending", "cancelled")
+            | ("preflighting", "claimed")
+            | ("preflighting", "failed")
+            | ("preflighting", "cancelled")
+            | ("preflighting", "reconciliation_required")
+            | ("claimed", "executing")
+            | ("claimed", "released")
+            | ("claimed", "reconciliation_required")
+            | ("executing", "persisting")
+            | ("executing", "released")
+            | ("executing", "reconciliation_required")
+            | ("persisting", "settling")
+            | ("persisting", "reconciliation_required")
+            | ("settling", "succeeded")
+            | ("settling", "reconciliation_required")
+    )
 }
 fn j(v: &Value) -> String {
     serde_json::to_string(v).unwrap()
@@ -996,12 +1120,15 @@ mod tests {
         let r = Repository::in_memory().unwrap();
         let e = r.create_execution(&new("a", "op")).unwrap();
         let u = ExecutionUpdate {
-            status: "running".into(),
+            status: "preflighting".into(),
             outcome: None,
             started_at: Some("2026-08-05T20:01:00Z".into()),
             completed_at: None,
             failure_code: None,
             failure_message_redacted: None,
+            provider_outcome: None,
+            artifact_outcome: None,
+            settlement_outcome: None,
         };
         assert_eq!(
             r.update_execution(&e.execution_id, 0, &u, "2026-08-05T20:01:00Z")
