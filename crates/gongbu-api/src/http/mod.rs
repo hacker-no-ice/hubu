@@ -92,8 +92,6 @@ pub enum ExecutionStatus {
     Succeeded,
     Released,
     Failed,
-    /// Read compatibility for executions cancelled before the v1 contract was frozen.
-    Cancelled,
     ReconciliationRequired,
 }
 
@@ -531,7 +529,6 @@ fn execution_response(execution: Execution) -> Result<ExecutionResponse, ApiErro
         "succeeded" => ExecutionStatus::Succeeded,
         "failed" => ExecutionStatus::Failed,
         "released" => ExecutionStatus::Released,
-        "cancelled" => ExecutionStatus::Cancelled,
         "reconciliation_required" => ExecutionStatus::ReconciliationRequired,
         _ => return Err(ApiError::internal()),
     };

@@ -14,6 +14,12 @@ rusqlite.workspace = true
 uuid.workspace = true
 sha2.workspace = true
 image.workspace = true
+temporalio-sdk.workspace = true
+temporalio-macros.workspace = true
+temporalio-workflow.workspace = true
+temporalio-common-wasm.workspace = true
+temporalio-common.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -36,9 +36,6 @@ account principal; request bodies cannot override it. Accepted v1 executions
 run to a terminal outcome; public and in-flight cancellation are deferred to
 HUB-37. Remote artifact fetching, SVG support, retention, cloud storage,
 multi-provider execution, and operator reconciliation remain out of scope.
-The persistence reader retains the legacy terminal `cancelled` value solely for
-databases created before this contract change; HUB-17 exposes no transition or
-operation that creates it.
 
 ## Operator target configuration
 
@@ -114,6 +111,10 @@ contracts. The crate root contains only domain declarations and compatibility
 re-exports that preserve the original public module paths.
 
 ## Development
+
+The official Temporal Rust SDK compiles its protobuf definitions during the
+build, so install `protoc` first (`brew install protobuf` on macOS or
+`apt-get install protobuf-compiler` on Debian/Ubuntu).
 
 ```sh
 cargo test --workspace

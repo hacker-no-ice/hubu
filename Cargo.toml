@@ -6,7 +6,7 @@ resolver = "2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hacker-no-ice/gongbu"
-rust-version = "1.78"
+rust-version = "1.85"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -17,3 +17,9 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 image = { version = "0.24.9", default-features = false, features = ["png", "jpeg"] }
 tempfile = "3"
+temporalio-sdk = "0.6"
+temporalio-macros = "0.6"
+temporalio-workflow = "0.6"
+temporalio-common-wasm = "0.6"
+temporalio-common = "0.6"
+futures = "0.3"

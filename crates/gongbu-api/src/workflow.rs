@@ -87,6 +87,14 @@ impl ExecutionWorkflow<'_> {
                         self.fail_before_claim(&execution, e, now)?;
                         continue;
                     }
+                    if execution.hubu_claim_id.is_some() {
+                        self.repository.accept_existing_claim(
+                            execution_id,
+                            execution.version,
+                            now,
+                        )?;
+                        continue;
+                    }
                     match self.hubu.claim(&execution) {
                         Ok(claim) => {
                             self.repository.set_claim(
@@ -275,6 +283,20 @@ impl ExecutionWorkflow<'_> {
                         )?;
                         continue;
                     }
+                    if receipt.transmission_started_at.is_some() {
+                        self.transition(
+                            &execution,
+                            "reconciliation_required",
+                            Some("settlement_delivery_interrupted"),
+                            now,
+                            None,
+                            None,
+                            Some("ambiguous"),
+                        )?;
+                        continue;
+                    }
+                    self.repository
+                        .begin_settlement_transmission(&receipt.receipt_id, now)?;
                     match self.hubu.settle(&execution, &receipt.receipt_id, amount) {
                         Ok(id) => {
                             self.repository
@@ -442,7 +464,7 @@ fn usage_value(usage: &NormalizedUsage) -> serde_json::Value {
 fn terminal(s: &str) -> bool {
     matches!(
         s,
-        "succeeded" | "released" | "failed" | "cancelled" | "reconciliation_required"
+        "succeeded" | "released" | "failed" | "reconciliation_required"
     )
 }
 
@@ -460,6 +482,7 @@ mod tests {
         claims: Cell<u32>,
         settles: Cell<u32>,
         releases: Cell<u32>,
+        panic_on_settle: Cell<bool>,
         claim_error: RefCell<Option<ActivityError>>,
         settle_error: RefCell<Option<ActivityError>>,
     }
@@ -469,6 +492,7 @@ mod tests {
                 claims: Cell::new(0),
                 settles: Cell::new(0),
                 releases: Cell::new(0),
+                panic_on_settle: Cell::new(false),
                 claim_error: RefCell::new(None),
                 settle_error: RefCell::new(None),
             }
@@ -488,6 +512,10 @@ mod tests {
         }
         fn settle(&self, _: &Execution, _: &str, _: i64) -> Result<String, ActivityError> {
             self.settles.set(self.settles.get() + 1);
+            assert!(
+                !self.panic_on_settle.replace(false),
+                "simulated worker loss"
+            );
             if let Some(e) = self.settle_error.borrow_mut().take() {
                 Err(e)
             } else {
@@ -612,6 +640,80 @@ mod tests {
             ),
             (1, 1, 1, 1)
         );
+    }
+    #[test]
+    fn supplied_claim_is_adopted_without_claiming_again() {
+        let repo = Repository::in_memory().unwrap();
+        let params = CreateExecutionParams {
+            account_id: "account".into(),
+            operation_key: "supplied-claim".into(),
+            hubu_authorization_id: "auth".into(),
+            hubu_claim_id: Some("existing-claim".into()),
+            hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
+            authorized_minor: 500,
+            authorization_currency: "USD".into(),
+            normalized_input: json!({"prompt":"cat"}),
+            input_hash: "hash".into(),
+            input_schema_version: 1,
+            target: "example/image-v1".into(),
+            config_version: "cfg-1".into(),
+            workload_type: "image_generation".into(),
+            provider: "example".into(),
+            adapter: "fixture".into(),
+            model: "image-v1".into(),
+            provider_config_version: "pcv-1".into(),
+            pricing_snapshot: json!({"provider":"example","model":"image-v1","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","unit":"image","unit_amount_minor":100,"quantity":1,"estimated_amount_minor":100,"currency":"USD"}),
+            pricing_schema_version: 1,
+            created_at: "now".into(),
+        };
+        let e = repo.create_execution(&params).unwrap();
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        assert_eq!(w.run(&e.execution_id, "later").unwrap().status, "succeeded");
+        assert_eq!(h.claims.get(), 0);
+    }
+
+    #[test]
+    fn interrupted_settlement_reconciles_without_second_settle() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "settlement-interrupted");
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        h.panic_on_settle.set(true);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            w.run(&e.execution_id, "now")
+        }))
+        .is_err());
+        assert!(repo
+            .get_receipt_for_execution(&e.execution_id)
+            .unwrap()
+            .transmission_started_at
+            .is_some());
+        assert_eq!(
+            w.run(&e.execution_id, "later").unwrap().status,
+            "reconciliation_required"
+        );
+        assert_eq!(h.settles.get(), 1);
     }
     #[test]
     fn ambiguous_provider_stops_without_retry_or_release() {
