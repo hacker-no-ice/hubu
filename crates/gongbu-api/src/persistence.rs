@@ -247,6 +247,7 @@ impl Repository {
         ])?;
         let normalized_input = j(&n.normalized_input);
         let pricing_snapshot = j(&n.pricing_snapshot);
+        self.reject_registered_json([&n.normalized_input, &n.pricing_snapshot])?;
         self.reject_registered_secrets([normalized_input.as_str(), pricing_snapshot.as_str()])?;
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -362,6 +363,7 @@ impl Repository {
             .as_deref()
             .map(|value| self.1.redact(value));
         let usage = j(&r.usage);
+        self.reject_registered_json([&r.usage])?;
         self.reject_registered_secrets([
             r.outcome.as_str(),
             r.completed_at.as_str(),
@@ -387,6 +389,7 @@ impl Repository {
         max_per_execution: u64,
     ) -> Result<Artifact> {
         let metadata = j(&n.metadata);
+        self.reject_registered_json([&n.metadata])?;
         self.reject_registered_secrets([
             n.artifact_id.as_str(),
             n.execution_id.as_str(),
@@ -638,6 +641,19 @@ impl Repository {
         if values
             .into_iter()
             .any(|value| self.1.contains_registered_secret(value))
+        {
+            Err(Error::Invalid("secret-bearing persistence value"))
+        } else {
+            Ok(())
+        }
+    }
+    fn reject_registered_json<'a>(
+        &self,
+        values: impl IntoIterator<Item = &'a Value>,
+    ) -> Result<()> {
+        if values
+            .into_iter()
+            .any(|value| self.1.json_contains_registered_secret(value))
         {
             Err(Error::Invalid("secret-bearing persistence value"))
         } else {
@@ -1335,6 +1351,12 @@ mod tests {
         });
         assert!(matches!(
             result,
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+        let mut escaped_json = new("a", "escaped-json");
+        escaped_json.normalized_input = json!({"prompt": escaped_canary});
+        assert!(matches!(
+            escaped_repo.create_execution(&escaped_json),
             Err(Error::Invalid("secret-bearing persistence value"))
         ));
 

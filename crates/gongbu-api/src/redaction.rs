@@ -42,6 +42,19 @@ impl Redactor {
         self.exact.iter().any(|secret| input.contains(secret))
     }
 
+    pub fn json_contains_registered_secret(&self, value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(value) => self.contains_registered_secret(value),
+            serde_json::Value::Array(values) => values
+                .iter()
+                .any(|value| self.json_contains_registered_secret(value)),
+            serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+                self.contains_registered_secret(key) || self.json_contains_registered_secret(value)
+            }),
+            _ => false,
+        }
+    }
+
     pub fn error_chain(&self, error: &(dyn Error + 'static)) -> String {
         let mut parts = Vec::new();
         let mut current = Some(error);
