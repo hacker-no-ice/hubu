@@ -59,6 +59,8 @@ pub struct ProviderConfigVersion {
     pub gemini_image: Option<GeminiImageConfig>,
     #[serde(default)]
     pub flux2_api: Option<Flux2ApiConfig>,
+    #[serde(default)]
+    pub ideogram_image: Option<IdeogramImageConfig>,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
 }
@@ -91,6 +93,20 @@ pub struct Flux2ApiConfig {
     pub max_retries: u32,
     #[serde(default)]
     pub idempotency_header: Option<String>,
+    #[serde(default)]
+    pub approved_artifact_hosts: Vec<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IdeogramImageConfig {
+    pub endpoint: String,
+    pub api_version: String,
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub max_retries: u32,
     #[serde(default)]
     pub approved_artifact_hosts: Vec<String>,
     #[serde(default)]
@@ -214,6 +230,30 @@ impl ProviderTargetConfig {
             } else if target.flux2_api.is_some() {
                 return Err(Error::EmptyIdentifier);
             }
+            if target.provider == "ideogram" || target.adapter == "ideogram_image" {
+                let Some(ideogram) = &target.ideogram_image else {
+                    return Err(Error::EmptyIdentifier);
+                };
+                if target.provider != "ideogram"
+                    || target.adapter != "ideogram_image"
+                    || [&ideogram.endpoint, &ideogram.api_version]
+                        .iter()
+                        .any(|value| value.trim().is_empty())
+                    || ideogram.timeout_ms == 0
+                    || ideogram.max_retries != 0
+                    || ideogram.approved_artifact_hosts.is_empty()
+                    || ideogram.headers.iter().any(|(name, value)| {
+                        name.trim().is_empty()
+                            || value.contains(['\r', '\n'])
+                            || name.eq_ignore_ascii_case("authorization")
+                            || name.eq_ignore_ascii_case("api-key")
+                    })
+                {
+                    return Err(Error::EmptyIdentifier);
+                }
+            } else if target.ideogram_image.is_some() {
+                return Err(Error::EmptyIdentifier);
+            }
             if !targets.insert((
                 &target.workload_type,
                 &target.provider,
@@ -315,6 +355,27 @@ mod tests {
         assert!(matches!(
             duplicate_version.validate(),
             Err(Error::DuplicateVersion)
+        ));
+    }
+
+    #[test]
+    fn validates_only_operator_owned_ideogram_generation_config() {
+        let valid = parse(
+            r#"{"provider_configs":[{"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"local","ideogram_image":{"endpoint":"https://api.ideogram.ai","api_version":"v1","timeout_ms":30000,"approved_artifact_hosts":["ideogram.ai"]}}]}"#,
+        );
+        valid.validate().unwrap();
+
+        let retries = parse(
+            r#"{"provider_configs":[{"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"local","ideogram_image":{"endpoint":"https://api.ideogram.ai","api_version":"v1","timeout_ms":30000,"max_retries":1,"approved_artifact_hosts":["ideogram.ai"]}}]}"#,
+        );
+        assert!(matches!(retries.validate(), Err(Error::EmptyIdentifier)));
+
+        let credential_header = parse(
+            r#"{"provider_configs":[{"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"local","ideogram_image":{"endpoint":"https://api.ideogram.ai","api_version":"v1","timeout_ms":30000,"approved_artifact_hosts":["ideogram.ai"],"headers":{"Api-Key":"must-not-live-here"}}}]}"#,
+        );
+        assert!(matches!(
+            credential_header.validate(),
+            Err(Error::EmptyIdentifier)
         ));
     }
 
