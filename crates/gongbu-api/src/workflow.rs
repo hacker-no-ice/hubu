@@ -32,6 +32,8 @@ pub enum ActivityError {
 pub trait HubuActivities {
     fn preflight(&self, execution: &Execution) -> Result<(), ActivityError>;
     fn claim(&self, execution: &Execution) -> Result<String, ActivityError>;
+    /// Confirm the persisted claim is still active immediately before paid work.
+    fn validate_claim(&self, execution: &Execution) -> Result<(), ActivityError>;
     fn settle(
         &self,
         execution: &Execution,
@@ -128,9 +130,22 @@ impl ExecutionWorkflow<'_> {
                         }
                     }
                 }
-                "claimed" => {
-                    self.repository.start_provider_attempt(&execution, now)?;
-                }
+                "claimed" => match self.hubu.validate_claim(&execution) {
+                    Ok(()) => {
+                        self.repository.start_provider_attempt(&execution, now)?;
+                    }
+                    Err(ActivityError::Proven(code)) | Err(ActivityError::Ambiguous(code)) => {
+                        self.transition(
+                            &execution,
+                            "reconciliation_required",
+                            Some(&code),
+                            now,
+                            None,
+                            None,
+                            Some("ambiguous"),
+                        )?;
+                    }
+                },
                 "executing" => {
                     let attempt = self
                         .repository
@@ -170,7 +185,7 @@ impl ExecutionWorkflow<'_> {
                                     provider_currency: None,
                                     failure_code: None,
                                     failure_message_redacted: None,
-                                    provider_request_id: Some(success.request_id),
+                                    provider_request_id: Some(success.request_id.clone()),
                                 },
                             )?;
                             if !has_provider_artifact {
@@ -191,10 +206,11 @@ impl ExecutionWorkflow<'_> {
                                 &success.artifacts,
                             ) {
                                 Ok(())
-                                    if self
-                                        .repository
-                                        .count_artifacts_for_execution(execution_id)?
-                                        > 0 =>
+                                    if self.artifacts_match_usage(
+                                        &execution,
+                                        &attempt.provider_attempt_id,
+                                        &success,
+                                    )? =>
                                 {
                                     self.transition(
                                         &execution,
@@ -210,7 +226,7 @@ impl ExecutionWorkflow<'_> {
                                     self.transition(
                                         &execution,
                                         "reconciliation_required",
-                                        Some("artifact_not_persisted"),
+                                        Some("artifact_count_mismatch"),
                                         now,
                                         Some("succeeded"),
                                         Some("failed"),
@@ -362,6 +378,31 @@ impl ExecutionWorkflow<'_> {
         self.hubu.preflight(e)?;
         self.provider.preflight(e)?;
         self.artifacts.preflight()
+    }
+    fn artifacts_match_usage(
+        &self,
+        execution: &Execution,
+        attempt_id: &str,
+        success: &ProviderSuccess,
+    ) -> Result<bool, WorkflowError> {
+        let durable = self.repository.count_artifacts_for_attempt(attempt_id)?;
+        let returned = u64::try_from(success.artifacts.len())
+            .map_err(|_| PersistenceError::Invalid("provider artifact count"))?;
+        if durable == 0 || durable != returned {
+            return Ok(false);
+        }
+        let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
+            .map_err(|_| PersistenceError::Invalid("pricing snapshot"))?;
+        if snapshot.unit == crate::provider_contract::PricingUnit::Image {
+            if let Some(images) = success
+                .usage
+                .images
+                .and_then(|value| u64::try_from(value).ok())
+            {
+                return Ok(durable == images);
+            }
+        }
+        Ok(true)
     }
     fn fail_before_claim(
         &self,
@@ -521,7 +562,10 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     fn execution(repo: &Repository, key: &str) -> Execution {
-        repo.create_execution(&CreateExecutionParams { account_id:"account".into(),operation_key:key.into(),hubu_authorization_id:"auth".into(),hubu_claim_id:None,hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(),authorized_minor:500,authorization_currency:"USD".into(),normalized_input:json!({"prompt":"cat"}),input_hash:"hash".into(),input_schema_version:1,target:"example/image-v1".into(),config_version:"cfg-1".into(),workload_type:"image_generation".into(),provider:"example".into(),adapter:"fixture".into(),model:"image-v1".into(),provider_config_version:"pcv-1".into(),pricing_snapshot:json!({"provider":"example","model":"image-v1","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","unit":"image","unit_amount_minor":100,"quantity":1,"estimated_amount_minor":100,"currency":"USD"}),pricing_schema_version:1,created_at:"2026-08-05T00:00:00Z".into() }).unwrap()
+        execution_with_quantity(repo, key, 1)
+    }
+    fn execution_with_quantity(repo: &Repository, key: &str, quantity: i64) -> Execution {
+        repo.create_execution(&CreateExecutionParams { account_id:"account".into(),operation_key:key.into(),hubu_authorization_id:"auth".into(),hubu_claim_id:None,hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(),authorized_minor:500,authorization_currency:"USD".into(),normalized_input:json!({"prompt":"cat"}),input_hash:"hash".into(),input_schema_version:1,target:"example/image-v1".into(),config_version:"cfg-1".into(),workload_type:"image_generation".into(),provider:"example".into(),adapter:"fixture".into(),model:"image-v1".into(),provider_config_version:"pcv-1".into(),pricing_snapshot:json!({"provider":"example","model":"image-v1","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","unit":"image","unit_amount_minor":100,"quantity":quantity,"estimated_amount_minor":100 * quantity,"currency":"USD"}),pricing_schema_version:1,created_at:"2026-08-05T00:00:00Z".into() }).unwrap()
     }
     struct Hubu {
         claims: Cell<u32>,
@@ -530,6 +574,7 @@ mod tests {
         panic_on_settle: Cell<bool>,
         panic_on_release: Cell<bool>,
         claim_error: RefCell<Option<ActivityError>>,
+        claim_validation_error: RefCell<Option<ActivityError>>,
         settle_error: RefCell<Option<ActivityError>>,
     }
     impl Default for Hubu {
@@ -541,6 +586,7 @@ mod tests {
                 panic_on_settle: Cell::new(false),
                 panic_on_release: Cell::new(false),
                 claim_error: RefCell::new(None),
+                claim_validation_error: RefCell::new(None),
                 settle_error: RefCell::new(None),
             }
         }
@@ -555,6 +601,13 @@ mod tests {
                 Err(e)
             } else {
                 Ok("claim-1".into())
+            }
+        }
+        fn validate_claim(&self, _: &Execution) -> Result<(), ActivityError> {
+            if let Some(error) = self.claim_validation_error.borrow_mut().take() {
+                Err(error)
+            } else {
+                Ok(())
             }
         }
         fn settle(&self, _: &Execution, _: &str, _: i64) -> Result<String, ActivityError> {
@@ -583,6 +636,7 @@ mod tests {
         error: RefCell<Option<ActivityError>>,
         empty_artifacts: Cell<bool>,
         image_usage: Cell<i64>,
+        artifact_count: Cell<usize>,
     }
     impl Default for Provider {
         fn default() -> Self {
@@ -591,6 +645,7 @@ mod tests {
                 error: RefCell::new(None),
                 empty_artifacts: Cell::new(false),
                 image_usage: Cell::new(1),
+                artifact_count: Cell::new(1),
             }
         }
     }
@@ -612,10 +667,12 @@ mod tests {
                     artifacts: if self.empty_artifacts.get() {
                         vec![]
                     } else {
-                        vec![ProviderArtifact {
-                            media_type: "image/png".into(),
-                            bytes: vec![1],
-                        }]
+                        (0..self.artifact_count.get())
+                            .map(|_| ProviderArtifact {
+                                media_type: "image/png".into(),
+                                bytes: vec![1],
+                            })
+                            .collect()
                     },
                 })
             }
@@ -748,7 +805,7 @@ mod tests {
         let e = execution(&repo, "invalid-provider-usage");
         let h = Hubu::default();
         let p = Provider::default();
-        p.image_usage.set(2);
+        p.image_usage.set(-1);
         let a = Artifacts {
             repo: &repo,
             calls: Cell::new(0),
@@ -771,6 +828,73 @@ mod tests {
 
         w.run(&e.execution_id, "later").unwrap();
         assert_eq!(p.calls.get(), 1);
+        assert_eq!(h.settles.get(), 0);
+    }
+
+    #[test]
+    fn invalid_or_expired_claim_reconciles_before_provider_attempt() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "expired-claim");
+        let h = Hubu::default();
+        h.claim_validation_error
+            .replace(Some(ActivityError::Proven("claim_expired".into())));
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+
+        let done = w.run(&e.execution_id, "now").unwrap();
+        assert_eq!(done.status, "reconciliation_required");
+        assert_eq!(done.failure_code.as_deref(), Some("claim_expired"));
+        assert_eq!(p.calls.get(), 0);
+        assert!(matches!(
+            repo.get_provider_attempt_for_execution(&e.execution_id),
+            Err(PersistenceError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn partial_artifact_publication_reconciles_without_settlement() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution_with_quantity(&repo, "partial-artifacts", 2);
+        let h = Hubu::default();
+        let p = Provider::default();
+        p.image_usage.set(2);
+        p.artifact_count.set(2);
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+
+        let done = w.run(&e.execution_id, "now").unwrap();
+        assert_eq!(done.status, "reconciliation_required");
+        assert_eq!(
+            done.failure_code.as_deref(),
+            Some("artifact_count_mismatch")
+        );
+        assert_eq!(
+            repo.count_artifacts_for_attempt(
+                &repo
+                    .get_provider_attempt_for_execution(&e.execution_id)
+                    .unwrap()
+                    .provider_attempt_id
+            )
+            .unwrap(),
+            1
+        );
         assert_eq!(h.settles.get(), 0);
     }
 
