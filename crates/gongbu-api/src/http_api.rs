@@ -501,7 +501,7 @@ fn canonicalize(value: &Value) -> Value {
     match value {
         Value::Object(object) => {
             let mut entries: Vec<_> = object.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(key, _)| *key);
             Value::Object(
                 entries
                     .into_iter()
