@@ -348,7 +348,18 @@ mod tests {
                 adapter: "test".into(),
                 model: "model".into(),
                 provider_config_version: "v1".into(),
-                pricing_snapshot: json!({}),
+                pricing_snapshot: json!({
+                    "provider": "provider",
+                    "model": "model",
+                    "catalog_version": "prices-v1",
+                    "catalog_digest": format!("sha256:{}", "a".repeat(64)),
+                    "pricing_rule_id": "provider-model",
+                    "unit": "image",
+                    "unit_amount_minor": 100,
+                    "quantity": 1,
+                    "estimated_amount_minor": 100,
+                    "currency": "USD"
+                }),
                 pricing_schema_version: 1,
                 created_at: "2026-08-05T20:00:00Z".into(),
             })

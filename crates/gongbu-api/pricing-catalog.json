@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "catalog_version": "builtin-v1",
+  "rules": [
+    {
+      "rule_id": "local-mock-image-v1",
+      "provider": "local-mock",
+      "model": "mock-image-v1",
+      "currency": "USD",
+      "unit": "image",
+      "unit_amount_minor": 500
+    }
+  ]
+}
