@@ -12,7 +12,11 @@ use super::{
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use reqwest::{blocking::Client, Url};
+use reqwest::{
+    blocking::Client,
+    header::{HeaderName, HeaderValue},
+    Url,
+};
 use serde_json::{json, Value};
 use std::{error::Error as StdError, fmt, io::Read, time::Duration};
 
@@ -212,6 +216,11 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
         if model.trim().is_empty() || config.timeout_ms == 0 {
             return Err(provider_error("config_invalid"));
         }
+        for (name, value) in &config.headers {
+            HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| provider_error("config_invalid"))?;
+            HeaderValue::from_str(value).map_err(|_| provider_error("config_invalid"))?;
+        }
         endpoint_url(&config, &model)?;
         Ok(Self {
             config,
@@ -263,15 +272,35 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
                 "provider_failure"
             }));
         }
+        let request_id = response.request_id.or_else(|| {
+            response
+                .body
+                .get("responseId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+        let operation_id = response.operation_id;
         let artifacts = extract_artifacts(
             &response.body,
             &self.config,
             &self.transport,
             secret,
             timeout,
-        )?;
+        )
+        .map_err(|error| match error {
+            ContractError::Provider { code } => ContractError::ProviderWithEvidence {
+                code,
+                request_id: request_id.clone(),
+                operation_id: operation_id.clone(),
+            },
+            other => other,
+        })?;
         if artifacts.is_empty() {
-            return Err(provider_error("missing_image"));
+            return Err(ContractError::ProviderWithEvidence {
+                code: "missing_image".into(),
+                request_id,
+                operation_id,
+            });
         }
         let usage = response.body.get("usageMetadata");
         Ok(AdapterOutcome {
@@ -287,14 +316,8 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
             }),
             provider_amount_minor: None,
             provider_currency: None,
-            provider_request_id: response.request_id.or_else(|| {
-                response
-                    .body
-                    .get("responseId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            }),
-            provider_operation_id: response.operation_id,
+            provider_request_id: request_id,
+            provider_operation_id: operation_id,
             artifacts,
         })
     }
@@ -621,6 +644,32 @@ mod tests {
         assert_eq!(outcome.provider_operation_id, None);
     }
     #[test]
+    fn post_response_artifact_failure_retains_provider_identifiers() {
+        let (adapter, calls) = adapter(
+            json!({"candidates":[{"content":{"parts":[{"text":"no image"}]}}]}),
+            200,
+        );
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ContractError::ProviderWithEvidence {
+                code,
+                request_id: Some(request_id),
+                operation_id: Some(operation_id),
+            } if code == "missing_image"
+                && request_id == "request-1"
+                && operation_id == "operation-1"
+        ));
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+    #[test]
     fn referenced_output_requires_approved_host() {
         let (approved_adapter, _) = adapter(
             json!({"candidates":[{"content":{"parts":[{"fileData":{"mimeType":"image/png","fileUri":"https://storage.googleapis.com/output.png"}}]}}]}),
@@ -644,7 +693,7 @@ mod tests {
             200,
         );
         assert!(
-            matches!(rejected_adapter.invoke(&request(), &json!({"prompt":"cat"}), &secret_for_test("secret-canary"), None), Err(ContractError::Provider { code }) if code == "artifact_policy_failure")
+            matches!(rejected_adapter.invoke(&request(), &json!({"prompt":"cat"}), &secret_for_test("secret-canary"), None), Err(ContractError::ProviderWithEvidence { code, .. }) if code == "artifact_policy_failure")
         );
 
         let (multiple_adapter, _) = adapter(
@@ -661,7 +710,7 @@ mod tests {
                 &secret_for_test("secret-canary"),
                 None
             ),
-            Err(ContractError::Provider { code }) if code == "artifact_policy_failure"
+            Err(ContractError::ProviderWithEvidence { code, .. }) if code == "artifact_policy_failure"
         ));
     }
     #[test]
@@ -688,9 +737,12 @@ mod tests {
                     None,
                 )
                 .unwrap_err();
-            assert!(
-                matches!(error, ContractError::Provider { code: ref actual } if actual == code)
-            );
+            let actual = match &error {
+                ContractError::Provider { code }
+                | ContractError::ProviderWithEvidence { code, .. } => code,
+                _ => panic!("unexpected contract error"),
+            };
+            assert_eq!(actual, code);
             assert_eq!(*calls.lock().unwrap(), 1);
             assert!(!error.to_string().contains("secret-canary"));
             assert!(!error.to_string().contains("sensitive-project"));
@@ -732,6 +784,35 @@ mod tests {
             )
             .is_err());
         assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn invalid_operator_headers_fail_adapter_construction_before_send() {
+        let mut invalid_name = config();
+        invalid_name
+            .headers
+            .insert("invalid header".into(), "value".into());
+        assert!(matches!(
+            GeminiImageAdapter::new(invalid_name, "gemini-image-v1".into(), FixtureTransport {
+                response: Arc::new(Mutex::new(None)),
+                calls: Arc::new(Mutex::new(0)),
+                referenced: Vec::new(),
+            }),
+            Err(ContractError::Provider { code }) if code == "config_invalid"
+        ));
+
+        let mut invalid_value = config();
+        invalid_value
+            .headers
+            .insert("x-valid".into(), "value\0bad".into());
+        assert!(matches!(
+            GeminiImageAdapter::new(invalid_value, "gemini-image-v1".into(), FixtureTransport {
+                response: Arc::new(Mutex::new(None)),
+                calls: Arc::new(Mutex::new(0)),
+                referenced: Vec::new(),
+            }),
+            Err(ContractError::Provider { code }) if code == "config_invalid"
+        ));
     }
 
     #[test]
@@ -827,9 +908,11 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(
-            matches!(error, ContractError::Provider { code } if code == "artifact_policy_failure")
-        );
+        assert!(matches!(
+            error,
+            ContractError::ProviderWithEvidence { code, .. }
+                if code == "artifact_policy_failure"
+        ));
         assert_eq!(*calls.lock().unwrap(), 1);
     }
 

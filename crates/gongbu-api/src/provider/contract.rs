@@ -35,6 +35,12 @@ pub enum ContractError {
     UnsafeRetry,
     #[error("provider error ({code})")]
     Provider { code: String },
+    #[error("provider error ({code})")]
+    ProviderWithEvidence {
+        code: String,
+        request_id: Option<String>,
+        operation_id: Option<String>,
+    },
     #[error("I/O: {0}")]
     Io(String),
 }

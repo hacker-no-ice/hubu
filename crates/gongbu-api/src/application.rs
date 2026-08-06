@@ -209,6 +209,7 @@ impl ProviderActivities for GeminiProviderActivities {
 fn map_gemini_error(error: crate::provider_contract::ContractError) -> WorkflowActivityError {
     let code = match error {
         crate::provider_contract::ContractError::Provider { code } => code,
+        crate::provider_contract::ContractError::ProviderWithEvidence { code, .. } => code,
         _ => "provider_contract_failure".into(),
     };
     if code == "timeout_unknown_outcome" {
@@ -221,10 +222,22 @@ fn map_gemini_error(error: crate::provider_contract::ContractError) -> WorkflowA
 fn map_gemini_invoke_error(
     error: crate::provider_contract::ContractError,
 ) -> WorkflowActivityError {
-    let code = match error {
-        crate::provider_contract::ContractError::Provider { code } => code,
-        _ => "provider_contract_failure".into(),
+    let (code, evidence) = match error {
+        crate::provider_contract::ContractError::Provider { code } => (code, None),
+        crate::provider_contract::ContractError::ProviderWithEvidence {
+            code,
+            request_id,
+            operation_id,
+        } => (code, Some((request_id, operation_id))),
+        _ => ("provider_contract_failure".into(), None),
     };
+    if let Some((request_id, operation_id)) = evidence {
+        return WorkflowActivityError::AmbiguousWithEvidence {
+            code,
+            request_id,
+            operation_id,
+        };
+    }
     match code.as_str() {
         "provider_rejected"
         | "provider_pre_send_failure"
