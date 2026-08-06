@@ -1,6 +1,7 @@
 //! SQLite persistence for the execution aggregate.
 //! Schema units and formats are documented in the migration.
 use crate::provider_contract::{PricingSnapshot, PRICING_SNAPSHOT_SCHEMA_VERSION};
+use crate::redaction::Redactor;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::{
@@ -204,27 +205,61 @@ pub struct Receipt {
     pub hubu_settlement_id: Option<String>,
 }
 #[derive(Clone)]
-pub struct Repository(Arc<Mutex<Connection>>);
+pub struct Repository(Arc<Mutex<Connection>>, Arc<Redactor>);
 impl Repository {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::init(Connection::open(path)?)
+    /// Persistent repositories require an explicitly configured redactor so the
+    /// production path cannot silently omit operator credential registration.
+    pub fn open(path: impl AsRef<Path>, redactor: Redactor) -> Result<Self> {
+        Self::init(Connection::open(path)?, Arc::new(redactor))
     }
     pub fn in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, Arc::new(Redactor::default()))
     }
-    fn init(c: Connection) -> Result<Self> {
+    pub fn in_memory_with_redactor(redactor: Redactor) -> Result<Self> {
+        Self::init(Connection::open_in_memory()?, Arc::new(redactor))
+    }
+    fn init(c: Connection, redactor: Arc<Redactor>) -> Result<Self> {
         c.pragma_update(None, "foreign_keys", "ON")?;
         c.pragma_update(None, "busy_timeout", 5000)?;
         c.execute_batch(MIGRATION)?;
         migrate_artifact_storage_columns(&c)?;
         migrate_resolved_target_columns(&c)?;
-        Ok(Self(Arc::new(Mutex::new(c))))
+        Ok(Self(Arc::new(Mutex::new(c)), redactor))
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
         validate_execution(n)?;
+        let id = Uuid::new_v4().to_string();
+        self.reject_registered_secrets([
+            n.account_id.as_str(),
+            n.operation_key.as_str(),
+            n.hubu_authorization_id.as_str(),
+            n.hubu_claim_id.as_deref().unwrap_or(""),
+            n.hubu_token_reference.0.as_str(),
+            n.authorization_currency.as_str(),
+            n.input_hash.as_str(),
+            n.target.as_str(),
+            n.config_version.as_str(),
+            n.workload_type.as_str(),
+            n.provider.as_str(),
+            n.adapter.as_str(),
+            n.model.as_str(),
+            n.provider_config_version.as_str(),
+            n.created_at.as_str(),
+            id.as_str(),
+            "pending",
+        ])?;
+        self.reject_registered_numbers([
+            n.authorized_minor,
+            n.input_schema_version,
+            n.pricing_schema_version,
+            0,
+        ])?;
+        let normalized_input = j(&n.normalized_input);
+        let pricing_snapshot = j(&n.pricing_snapshot);
+        self.reject_registered_json([&n.normalized_input, &n.pricing_snapshot])?;
+        self.reject_registered_secrets([normalized_input.as_str(), pricing_snapshot.as_str()])?;
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let id = Uuid::new_v4().to_string();
         tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,'pending',?21,?21,0)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,n.authorized_minor,n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,j(&n.pricing_snapshot),n.pricing_schema_version,n.created_at])?;
         let e = query_key(&tx, &n.account_id, &n.operation_key)?;
         tx.commit()?;
@@ -258,7 +293,22 @@ impl Repository {
     ) -> Result<Execution> {
         status(&u.status)?;
         let c = self.0.lock().unwrap();
-        let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,version=version+1 WHERE execution_id=?8 AND version=?9",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,u.failure_message_redacted,at,id,expected])?;
+        let failure = u
+            .failure_message_redacted
+            .as_deref()
+            .map(|value| self.1.redact(value));
+        self.reject_registered_secrets([
+            u.status.as_str(),
+            u.outcome.as_deref().unwrap_or(""),
+            u.started_at.as_deref().unwrap_or(""),
+            u.completed_at.as_deref().unwrap_or(""),
+            u.failure_code.as_deref().unwrap_or(""),
+            failure.as_deref().unwrap_or(""),
+            at,
+            id,
+        ])?;
+        self.reject_registered_numbers([expected.saturating_add(1)])?;
+        let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,version=version+1 WHERE execution_id=?8 AND version=?9",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,failure,at,id,expected])?;
         if changed == 0 {
             return if c
                 .query_row(
@@ -284,6 +334,15 @@ impl Repository {
             return Err(Error::Invalid("provider"));
         }
         let id = Uuid::new_v4().to_string();
+        self.reject_registered_secrets([
+            n.execution_id.as_str(),
+            n.provider.as_str(),
+            n.provider_request_id.as_deref().unwrap_or(""),
+            n.provider_operation_id.as_deref().unwrap_or(""),
+            n.started_at.as_str(),
+            id.as_str(),
+            "started",
+        ])?;
         self.0.lock().unwrap().execute("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,started_at)VALUES(?1,?2,?3,?4,?5,'started',?6)",params![id,n.execution_id,n.provider,n.provider_request_id,n.provider_operation_id,n.started_at])?;
         Ok(ProviderAttempt {
             provider_attempt_id: id,
@@ -310,7 +369,24 @@ impl Repository {
         {
             return Err(Error::Invalid("attempt result"));
         }
-        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=?7,failure_message_redacted=?8 WHERE provider_attempt_id=?9 AND completed_at IS NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.failure_code,r.failure_message_redacted,id])?;
+        let failure = r
+            .failure_message_redacted
+            .as_deref()
+            .map(|value| self.1.redact(value));
+        let usage = j(&r.usage);
+        let numeric = [Some(r.usage_schema_version), r.provider_amount_minor];
+        self.reject_registered_numbers(numeric.into_iter().flatten())?;
+        self.reject_registered_json([&r.usage])?;
+        self.reject_registered_secrets([
+            r.outcome.as_str(),
+            r.completed_at.as_str(),
+            usage.as_str(),
+            r.provider_currency.as_deref().unwrap_or(""),
+            r.failure_code.as_deref().unwrap_or(""),
+            failure.as_deref().unwrap_or(""),
+            id,
+        ])?;
+        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=?7,failure_message_redacted=?8 WHERE provider_attempt_id=?9 AND completed_at IS NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.failure_code,failure,id])?;
         if n == 1 {
             Ok(())
         } else {
@@ -325,6 +401,21 @@ impl Repository {
         n: &CreateArtifactParams,
         max_per_execution: u64,
     ) -> Result<Artifact> {
+        let metadata = j(&n.metadata);
+        self.reject_registered_numbers([n.size_bytes, n.metadata_schema_version])?;
+        self.reject_registered_json([&n.metadata])?;
+        self.reject_registered_secrets([
+            n.artifact_id.as_str(),
+            n.execution_id.as_str(),
+            n.provider_attempt_id.as_deref().unwrap_or(""),
+            n.kind.as_str(),
+            n.storage_backend.as_str(),
+            n.media_type.as_str(),
+            n.storage_key.as_str(),
+            n.sha256.as_str(),
+            metadata.as_str(),
+            n.created_at.as_str(),
+        ])?;
         safe_json(&n.metadata)?;
         if n.artifact_id.is_empty()
             || !n
@@ -461,6 +552,17 @@ impl Repository {
             .map_err(Into::into)
     }
     pub fn create_receipt(&self, n: &CreateReceiptParams) -> Result<Receipt> {
+        self.reject_registered_secrets([
+            n.receipt_id.as_str(),
+            n.execution_id.as_str(),
+            n.provider_attempt_id.as_str(),
+            n.currency.as_str(),
+            n.pricing_catalog_version.as_str(),
+            n.created_at.as_str(),
+            n.settled_at.as_deref().unwrap_or(""),
+            n.hubu_settlement_id.as_deref().unwrap_or(""),
+        ])?;
+        self.reject_registered_numbers([n.settlement_minor])?;
         if n.settlement_minor < 0 {
             return Err(Error::Invalid("settlement"));
         }
@@ -546,6 +648,42 @@ impl Repository {
             .lock()
             .unwrap()
             .execute("DELETE FROM executions WHERE execution_id=?1", [id])
+    }
+    fn reject_registered_secrets<'a>(
+        &self,
+        values: impl IntoIterator<Item = &'a str>,
+    ) -> Result<()> {
+        if values
+            .into_iter()
+            .any(|value| self.1.contains_registered_secret(value))
+        {
+            Err(Error::Invalid("secret-bearing persistence value"))
+        } else {
+            Ok(())
+        }
+    }
+    fn reject_registered_json<'a>(
+        &self,
+        values: impl IntoIterator<Item = &'a Value>,
+    ) -> Result<()> {
+        if values
+            .into_iter()
+            .any(|value| self.1.json_contains_registered_secret(value))
+        {
+            Err(Error::Invalid("secret-bearing persistence value"))
+        } else {
+            Ok(())
+        }
+    }
+    fn reject_registered_numbers(&self, values: impl IntoIterator<Item = i64>) -> Result<()> {
+        if values
+            .into_iter()
+            .any(|value| self.1.contains_registered_secret(&value.to_string()))
+        {
+            Err(Error::Invalid("secret-bearing persistence value"))
+        } else {
+            Ok(())
+        }
     }
 }
 fn migrate_artifact_storage_columns(c: &Connection) -> rusqlite::Result<()> {
@@ -835,7 +973,7 @@ mod tests {
     #[test]
     fn concurrent_create_returns_one() {
         let path = std::env::temp_dir().join(format!("gongbu-{}.db", Uuid::new_v4()));
-        let r = Repository::open(&path).unwrap();
+        let r = Repository::open(&path, Redactor::default()).unwrap();
         let barrier = Arc::new(Barrier::new(8));
         let handles: Vec<_> = (0..8)
             .map(|_| {
@@ -880,14 +1018,14 @@ mod tests {
     fn restart_persistence() {
         let path = std::env::temp_dir().join(format!("gongbu-restart-{}.db", Uuid::new_v4()));
         let id = {
-            Repository::open(&path)
+            Repository::open(&path, Redactor::default())
                 .unwrap()
                 .create_execution(&new("a", "op"))
                 .unwrap()
                 .execution_id
         };
         assert_eq!(
-            Repository::open(&path)
+            Repository::open(&path, Redactor::default())
                 .unwrap()
                 .get_execution(&id)
                 .unwrap()
@@ -919,7 +1057,7 @@ mod tests {
         ).unwrap();
         drop(connection);
 
-        let repository = Repository::open(&path).unwrap();
+        let repository = Repository::open(&path, Redactor::default()).unwrap();
         let artifact = repository
             .get_artifact_for_account("artifact-1", "account-1")
             .unwrap();
@@ -1198,6 +1336,92 @@ mod tests {
         assert!(matches!(
             r.create_receipt(&mismatched),
             Err(Error::Invalid("receipt attempt relationship"))
+        ));
+    }
+
+    #[test]
+    fn canary_secret_is_redacted_from_failures_and_rejected_from_records() {
+        const CANARY: &str = "gongbu-canary-provider-secret-7c91";
+        let r = Repository::in_memory_with_redactor(Redactor::new([CANARY.as_bytes()])).unwrap();
+        let mut leaked = new("a", "leaked-input");
+        leaked.normalized_input = json!({"prompt": CANARY});
+        assert!(matches!(
+            r.create_execution(&leaked),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+        let mut leaked_claim = new("a", "leaked-claim");
+        leaked_claim.hubu_claim_id = Some(CANARY.into());
+        assert!(matches!(
+            r.create_execution(&leaked_claim),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+        let mut leaked_reference = new("a", "leaked-reference");
+        leaked_reference.hubu_token_reference = HubuTokenReference::new(CANARY).unwrap();
+        assert!(matches!(
+            r.create_execution(&leaked_reference),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+
+        let escaped_canary = "gongbu-canary-\"slash\\newline\nsecret";
+        let escaped_repo =
+            Repository::in_memory_with_redactor(Redactor::new([escaped_canary.as_bytes()]))
+                .unwrap();
+        let execution = escaped_repo.create_execution(&new("a", "escaped")).unwrap();
+        let result = escaped_repo.create_provider_attempt(&CreateProviderAttemptParams {
+            execution_id: execution.execution_id,
+            provider: "vendor".into(),
+            provider_request_id: Some(escaped_canary.into()),
+            provider_operation_id: None,
+            started_at: "now".into(),
+        });
+        assert!(matches!(
+            result,
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+        let mut escaped_json = new("a", "escaped-json");
+        escaped_json.normalized_input = json!({"prompt": escaped_canary});
+        assert!(matches!(
+            escaped_repo.create_execution(&escaped_json),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+
+        let e = r.create_execution(&new("a", "redacted-failure")).unwrap();
+        let a = attempt(&r, &e);
+        r.complete_provider_attempt(
+            &a,
+            &AttemptResult {
+                outcome: "failed".into(),
+                completed_at: "now".into(),
+                usage: json!({}),
+                usage_schema_version: 1,
+                provider_amount_minor: None,
+                provider_currency: None,
+                failure_code: Some("provider_error".into()),
+                failure_message_redacted: Some(format!("nested SDK error: api_key={CANARY}")),
+            },
+        )
+        .unwrap();
+        let stored: String = r.0.lock().unwrap().query_row(
+            "SELECT failure_message_redacted FROM provider_attempts WHERE provider_attempt_id=?1",
+            [&a], |row| row.get(0)).unwrap();
+        assert!(!stored.contains(CANARY));
+        assert!(stored.contains("[REDACTED]"));
+
+        let numeric_secret = "777777";
+        let numeric_repo =
+            Repository::in_memory_with_redactor(Redactor::new([numeric_secret.as_bytes()]))
+                .unwrap();
+        let mut numeric = new("a", "numeric");
+        numeric.authorized_minor = 777777;
+        assert!(matches!(
+            numeric_repo.create_execution(&numeric),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+        let fixed_repo =
+            Repository::in_memory_with_redactor(Redactor::new([b"pending".as_slice()])).unwrap();
+        assert!(matches!(
+            fixed_repo.create_execution(&new("a", "fixed-status")),
+            Err(Error::Invalid("secret-bearing persistence value"))
         ));
     }
 }

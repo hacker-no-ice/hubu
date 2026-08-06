@@ -51,6 +51,8 @@ never chooses, orders, optimizes, or falls back between targets.
     "provider": "example",
     "adapter": "fixture",
     "model": "image-v1",
+    "secret_service": "gongbu.example",
+    "secret_account": "local",
     "enabled": true
   }]
 }
@@ -61,6 +63,9 @@ Duplicate selectors or versions, unknown fields, an unavailable adapter, and a
 missing provider secret fail closed. Endpoints, credentials, headers, account
 identifiers, timeouts, and retry settings remain operator configuration and are
 not accepted from callers.
+
+See [Local Keychain secrets](docs/local-keychain-secrets.md) for setup and
+manual credential replacement.
 
 ## Versioned pricing contract
 

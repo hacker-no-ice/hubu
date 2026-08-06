@@ -380,7 +380,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let database = directory.path().join("gongbu.sqlite3");
         let root = directory.path().join("artifacts");
-        let repository = Repository::open(&database).unwrap();
+        let repository =
+            Repository::open(&database, crate::redaction::Redactor::default()).unwrap();
         let execution_id = execution(&repository, "owner", "restart");
         let bytes = png(2, 3);
         let first = service(&root, repository, ArtifactLimits::default());
@@ -412,7 +413,7 @@ mod tests {
 
         let restarted = service(
             &root,
-            Repository::open(&database).unwrap(),
+            Repository::open(&database, crate::redaction::Redactor::default()).unwrap(),
             ArtifactLimits::default(),
         );
         assert_eq!(

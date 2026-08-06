@@ -6,6 +6,10 @@ use std::{
     sync::Arc,
 };
 
+use crate::{
+    provider_targets::ProviderConfigVersion,
+    secrets::{resolve_selected, ProviderSecret, SecretProvider},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -326,6 +330,7 @@ impl RetryPolicy {
 }
 
 pub trait ProviderAdapter {
+    fn adapter_id(&self) -> &str;
     fn capabilities(&self) -> AdapterCapabilities;
     fn validate_request(&self, request: &NormalizedRequest) -> Result<()> {
         request.validate()
@@ -333,6 +338,7 @@ pub trait ProviderAdapter {
     fn invoke(
         &self,
         request: &NormalizedRequest,
+        secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome>;
     fn redact_error(&self, _error: &(dyn std::error::Error + 'static)) -> ContractError {
@@ -340,6 +346,30 @@ pub trait ProviderAdapter {
             code: "provider_failure".into(),
         }
     }
+}
+
+/// Preflight the credential before claim/attempt creation. This never invokes the
+/// adapter; orchestration retains the secret and invokes only after durable claim
+/// and attempt creation.
+pub fn preflight_selected_secret(
+    adapter: &dyn ProviderAdapter,
+    secret_provider: &dyn SecretProvider,
+    target: &ProviderConfigVersion,
+    request: &NormalizedRequest,
+) -> Result<ProviderSecret> {
+    if adapter.adapter_id() != target.adapter
+        || request.provider != target.provider
+        || request.model != target.model
+    {
+        return Err(ContractError::Provider {
+            code: "target_mismatch".into(),
+        });
+    }
+    let secret =
+        resolve_selected(secret_provider, target).map_err(|_| ContractError::Provider {
+            code: "secret_unavailable".into(),
+        })?;
+    Ok(secret)
 }
 
 pub fn vendor_idempotency_key(
@@ -496,12 +526,20 @@ mod tests {
     fn default_redaction_does_not_leak_vendor_error() {
         struct A;
         impl ProviderAdapter for A {
+            fn adapter_id(&self) -> &str {
+                "a"
+            }
             fn capabilities(&self) -> AdapterCapabilities {
                 AdapterCapabilities {
                     vendor_enforced_idempotency: false,
                 }
             }
-            fn invoke(&self, _: &NormalizedRequest, _: Option<&str>) -> Result<AdapterOutcome> {
+            fn invoke(
+                &self,
+                _: &NormalizedRequest,
+                _: &ProviderSecret,
+                _: Option<&str>,
+            ) -> Result<AdapterOutcome> {
                 unreachable!()
             }
         }
@@ -509,6 +547,75 @@ mod tests {
         assert_eq!(
             A.redact_error(&raw).to_string(),
             "provider error (provider_failure)"
+        );
+    }
+
+    #[test]
+    fn selected_secret_is_the_only_credential_passed_and_missing_fails_before_adapter() {
+        use crate::secrets::{SecretError, SecretReference};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Secrets(bool);
+        impl SecretProvider for Secrets {
+            fn resolve(&self, _: &SecretReference) -> crate::secrets::Result<ProviderSecret> {
+                if self.0 {
+                    Ok(crate::secrets::secret_for_test("selected-canary"))
+                } else {
+                    Err(SecretError::Unavailable)
+                }
+            }
+        }
+        struct Adapter(AtomicUsize);
+        impl ProviderAdapter for Adapter {
+            fn adapter_id(&self) -> &str {
+                "a"
+            }
+            fn capabilities(&self) -> AdapterCapabilities {
+                AdapterCapabilities {
+                    vendor_enforced_idempotency: false,
+                }
+            }
+            fn invoke(
+                &self,
+                _: &NormalizedRequest,
+                secret: &ProviderSecret,
+                _: Option<&str>,
+            ) -> Result<AdapterOutcome> {
+                assert_eq!(secret.expose(), b"selected-canary");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(AdapterOutcome {
+                    outcome: OutcomeKind::Succeeded,
+                    usage: None,
+                    provider_amount_minor: None,
+                    provider_currency: None,
+                    provider_request_id: None,
+                })
+            }
+        }
+        let target = ProviderConfigVersion {
+            provider_config_version: "v1".into(),
+            workload_type: "image_generation".into(),
+            provider: "vendor".into(),
+            adapter: "a".into(),
+            model: "image-v1".into(),
+            secret_service: "gongbu.vendor".into(),
+            secret_account: "local".into(),
+            enabled: true,
+        };
+        let adapter = Adapter(AtomicUsize::new(0));
+        assert!(
+            matches!(preflight_selected_secret(&adapter, &Secrets(false), &target, &request()), Err(ContractError::Provider { code }) if code == "secret_unavailable")
+        );
+        assert_eq!(adapter.0.load(Ordering::SeqCst), 0);
+        let secret =
+            preflight_selected_secret(&adapter, &Secrets(true), &target, &request()).unwrap();
+        assert_eq!(adapter.0.load(Ordering::SeqCst), 0);
+        adapter.invoke(&request(), &secret, None).unwrap();
+        assert_eq!(adapter.0.load(Ordering::SeqCst), 1);
+
+        let mut wrong_request = request();
+        wrong_request.provider = "other".into();
+        assert!(
+            matches!(preflight_selected_secret(&adapter, &Secrets(true), &target, &wrong_request), Err(ContractError::Provider { code }) if code == "target_mismatch")
         );
     }
 }
