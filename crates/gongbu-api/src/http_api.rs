@@ -10,7 +10,7 @@ use crate::{
         Repository,
     },
     provider_contract::{
-        ContractError, NormalizedRequest, PricingCatalog, PricingSnapshot,
+        ContractError, NormalizedRequest, PricingCatalog, PricingSnapshot, PricingUnit,
         PRICING_SNAPSHOT_SCHEMA_VERSION,
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, ProviderTargetConfig},
@@ -280,6 +280,12 @@ impl Api {
                 max_output_tokens: input_quantity(&normalized_input, "max_output_tokens")?,
             })
             .map_err(map_pricing_error)?;
+        // Tokenization belongs to provider-bound request normalization, which is
+        // not part of this HTTP/persistence milestone. Fail closed rather than
+        // accepting a caller-asserted token count that could underfund execution.
+        if pricing_snapshot.unit != PricingUnit::Image {
+            return Err(ApiError::validation());
+        }
         let input_hash = immutable_hash(&request, resolved, &pricing_snapshot, &normalized_input)?;
         let params = CreateExecutionParams {
             account_id: account.account_id.clone(),
@@ -312,7 +318,7 @@ impl Api {
             .repository
             .create_execution(&params)
             .map_err(map_persistence)?;
-        if execution.input_hash != input_hash {
+        if !immutable_params_match(&execution, &params) {
             return Err(ApiError::conflict());
         }
         Ok(json_response(200, &execution_response(execution)?))
@@ -415,6 +421,22 @@ fn immutable_request_matches(
         && execution.provider == request.provider
         && execution.adapter == request.adapter
         && execution.model == request.model
+}
+
+fn immutable_params_match(execution: &Execution, params: &CreateExecutionParams) -> bool {
+    execution.hubu_authorization_id == params.hubu_authorization_id
+        && execution.hubu_claim_id == params.hubu_claim_id
+        && execution.hubu_token_reference == params.hubu_token_reference
+        && execution.authorized_minor == params.authorized_minor
+        && execution
+            .authorization_currency
+            .eq_ignore_ascii_case(&params.authorization_currency)
+        && execution.normalized_input == params.normalized_input
+        && execution.input_schema_version == params.input_schema_version
+        && execution.workload_type == params.workload_type
+        && execution.provider == params.provider
+        && execution.adapter == params.adapter
+        && execution.model == params.model
 }
 
 fn validate_create(request: &CreateExecutionRequest) -> Result<(), ApiError> {
@@ -581,7 +603,7 @@ mod tests {
     use crate::artifacts::{ArtifactLimits, LocalFsStorage};
     use image::{DynamicImage, ImageOutputFormat, RgbaImage};
     use serde_json::json;
-    use std::io::Cursor;
+    use std::{io::Cursor, sync::Barrier, thread};
     use tempfile::TempDir;
 
     struct Fixture {
@@ -815,6 +837,101 @@ mod tests {
         );
         assert_eq!(replay.status, 200);
         assert_eq!(execution(&replay).execution_id, created.execution_id);
+    }
+
+    #[test]
+    fn concurrent_create_replays_across_operator_snapshot_changes() {
+        let fixture = fixture();
+        let changed_targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "provider_configs": [{
+                "provider_config_version": "provider-v2",
+                "workload_type": "image_generation",
+                "provider": "example",
+                "adapter": "fixture",
+                "model": "image-v1"
+            }]
+        }))
+        .unwrap();
+        let changed_pricing = PricingCatalog::from_json(
+            br#"{
+                "schema_version":1,"catalog_version":"prices-v2",
+                "rules":[{"rule_id":"example-image-v2","provider":"example",
+                "model":"image-v1","currency":"USD","unit":"image",
+                "unit_amount_minor":200}]
+            }"#,
+        )
+        .unwrap();
+        let changed_api = Api::new(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            changed_targets,
+            changed_pricing,
+            || "2026-08-06T00:00:00Z".into(),
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = [fixture.api.clone(), changed_api]
+            .into_iter()
+            .map(|api| {
+                let barrier = barrier.clone();
+                let owner = fixture.owner.clone();
+                thread::spawn(move || {
+                    let body = serde_json::to_vec(&request("operation-race")).unwrap();
+                    barrier.wait();
+                    api.handle("POST", "/v1/executions", Some(&owner), &body)
+                })
+            })
+            .collect();
+        let responses: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(responses.iter().all(|response| response.status == 200));
+        assert_eq!(
+            execution(&responses[0]).execution_id,
+            execution(&responses[1]).execution_id
+        );
+    }
+
+    #[test]
+    fn token_priced_workloads_fail_closed_until_provider_normalization() {
+        let fixture = fixture();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "provider_configs": [{
+                "provider_config_version": "text-v1",
+                "workload_type": "text_generation",
+                "provider": "example",
+                "adapter": "fixture",
+                "model": "text-v1"
+            }]
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            br#"{
+                "schema_version":1,"catalog_version":"prices-v1",
+                "rules":[{"rule_id":"example-text","provider":"example",
+                "model":"text-v1","currency":"USD","unit":"input_token",
+                "unit_amount_minor":1}]
+            }"#,
+        )
+        .unwrap();
+        let api = Api::new(
+            fixture.repository,
+            fixture.artifacts,
+            targets,
+            pricing,
+            || "2026-08-06T00:00:00Z".into(),
+        );
+        let mut text_request = request("operation-text");
+        text_request["workload_type"] = json!("text_generation");
+        text_request["model"] = json!("text-v1");
+        text_request["input"] = json!({"prompt": "very long prompt", "input_tokens": 1});
+        let response = api.handle(
+            "POST",
+            "/v1/executions",
+            Some(&fixture.owner),
+            &serde_json::to_vec(&text_request).unwrap(),
+        );
+        assert_eq!(response.status, 400);
     }
 
     #[test]
