@@ -57,6 +57,8 @@ pub struct ProviderConfigVersion {
     pub secret_account: String,
     #[serde(default)]
     pub gemini_image: Option<GeminiImageConfig>,
+    #[serde(default)]
+    pub flux2_api: Option<Flux2ApiConfig>,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
 }
@@ -75,6 +77,28 @@ pub struct GeminiImageConfig {
     pub approved_artifact_hosts: Vec<String>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Flux2ApiConfig {
+    pub endpoint: String,
+    pub api_version: String,
+    pub timeout_ms: u64,
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    #[serde(default)]
+    pub max_retries: u32,
+    #[serde(default)]
+    pub idempotency_header: Option<String>,
+    #[serde(default)]
+    pub approved_artifact_hosts: Vec<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+fn default_poll_interval_ms() -> u64 {
+    500
 }
 
 fn enabled_by_default() -> bool {
@@ -157,6 +181,37 @@ impl ProviderTargetConfig {
                     return Err(Error::EmptyIdentifier);
                 }
             } else if target.gemini_image.is_some() {
+                return Err(Error::EmptyIdentifier);
+            }
+            if target.provider == "flux" || target.adapter == "flux2_api" {
+                let Some(flux) = &target.flux2_api else {
+                    return Err(Error::EmptyIdentifier);
+                };
+                if target.provider != "flux"
+                    || target.adapter != "flux2_api"
+                    || flux.endpoint.trim().is_empty()
+                    || flux.api_version.trim().is_empty()
+                    || flux.timeout_ms == 0
+                    || flux.poll_interval_ms == 0
+                    || flux.max_retries != 0
+                    || flux.idempotency_header.as_ref().is_some_and(|idempotency| {
+                        idempotency.eq_ignore_ascii_case("x-key")
+                            || idempotency.eq_ignore_ascii_case("authorization")
+                            || flux
+                                .headers
+                                .keys()
+                                .any(|header| header.eq_ignore_ascii_case(idempotency))
+                    })
+                    || flux.headers.iter().any(|(name, value)| {
+                        name.trim().is_empty()
+                            || value.contains(['\r', '\n'])
+                            || name.eq_ignore_ascii_case("authorization")
+                            || name.eq_ignore_ascii_case("x-key")
+                    })
+                {
+                    return Err(Error::EmptyIdentifier);
+                }
+            } else if target.flux2_api.is_some() {
                 return Err(Error::EmptyIdentifier);
             }
             if !targets.insert((
@@ -284,5 +339,41 @@ mod tests {
             invalid.validate(),
             Err(Error::InvalidSecretReference)
         ));
+    }
+
+    #[test]
+    fn validates_operator_owned_flux2_configuration() {
+        let config = parse(
+            r#"{"provider_configs":[{"provider_config_version":"flux-pcv-1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"local","flux2_api":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":30000,"poll_interval_ms":500,"max_retries":0,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["cdn.bfl.ai"],"headers":{"x-client":"gongbu"}}}]}"#,
+        );
+        config.validate().unwrap();
+        let target = config
+            .resolve("image_generation", "flux", "flux2_api", "flux-2-pro")
+            .unwrap();
+        assert_eq!(target.flux2_api.as_ref().unwrap().timeout_ms, 30_000);
+
+        let mut retrying = config.clone();
+        retrying.provider_configs[0]
+            .flux2_api
+            .as_mut()
+            .unwrap()
+            .max_retries = 1;
+        assert!(retrying.validate().is_err());
+        let mut credential_header = config;
+        credential_header.provider_configs[0]
+            .flux2_api
+            .as_mut()
+            .unwrap()
+            .headers
+            .insert("x-key".into(), "caller-secret".into());
+        assert!(credential_header.validate().is_err());
+        let mut idempotency_collision = retrying;
+        let flux = idempotency_collision.provider_configs[0]
+            .flux2_api
+            .as_mut()
+            .unwrap();
+        flux.max_retries = 0;
+        flux.idempotency_header = Some("X-CLIENT".into());
+        assert!(idempotency_collision.validate().is_err());
     }
 }
