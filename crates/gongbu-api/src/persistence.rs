@@ -228,6 +228,7 @@ impl Repository {
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
         validate_execution(n)?;
+        let id = Uuid::new_v4().to_string();
         self.reject_registered_secrets([
             n.account_id.as_str(),
             n.operation_key.as_str(),
@@ -244,11 +245,14 @@ impl Repository {
             n.model.as_str(),
             n.provider_config_version.as_str(),
             n.created_at.as_str(),
+            id.as_str(),
+            "pending",
         ])?;
         self.reject_registered_numbers([
             n.authorized_minor,
             n.input_schema_version,
             n.pricing_schema_version,
+            0,
         ])?;
         let normalized_input = j(&n.normalized_input);
         let pricing_snapshot = j(&n.pricing_snapshot);
@@ -256,7 +260,6 @@ impl Repository {
         self.reject_registered_secrets([normalized_input.as_str(), pricing_snapshot.as_str()])?;
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let id = Uuid::new_v4().to_string();
         tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,'pending',?21,?21,0)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,n.authorized_minor,n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,j(&n.pricing_snapshot),n.pricing_schema_version,n.created_at])?;
         let e = query_key(&tx, &n.account_id, &n.operation_key)?;
         tx.commit()?;
@@ -304,6 +307,7 @@ impl Repository {
             at,
             id,
         ])?;
+        self.reject_registered_numbers([expected.saturating_add(1)])?;
         let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,version=version+1 WHERE execution_id=?8 AND version=?9",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,failure,at,id,expected])?;
         if changed == 0 {
             return if c
@@ -329,14 +333,16 @@ impl Repository {
         if n.provider.trim().is_empty() {
             return Err(Error::Invalid("provider"));
         }
+        let id = Uuid::new_v4().to_string();
         self.reject_registered_secrets([
             n.execution_id.as_str(),
             n.provider.as_str(),
             n.provider_request_id.as_deref().unwrap_or(""),
             n.provider_operation_id.as_deref().unwrap_or(""),
             n.started_at.as_str(),
+            id.as_str(),
+            "started",
         ])?;
-        let id = Uuid::new_v4().to_string();
         self.0.lock().unwrap().execute("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,started_at)VALUES(?1,?2,?3,?4,?5,'started',?6)",params![id,n.execution_id,n.provider,n.provider_request_id,n.provider_operation_id,n.started_at])?;
         Ok(ProviderAttempt {
             provider_attempt_id: id,
@@ -1409,6 +1415,12 @@ mod tests {
         numeric.authorized_minor = 777777;
         assert!(matches!(
             numeric_repo.create_execution(&numeric),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+        let fixed_repo =
+            Repository::in_memory_with_redactor(Redactor::new([b"pending".as_slice()])).unwrap();
+        assert!(matches!(
+            fixed_repo.create_execution(&new("a", "fixed-status")),
             Err(Error::Invalid("secret-bearing persistence value"))
         ));
     }

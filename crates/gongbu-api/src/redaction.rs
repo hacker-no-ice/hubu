@@ -45,8 +45,14 @@ impl Redactor {
 
     pub fn redact(&self, input: &str) -> String {
         let mut value = input.to_owned();
-        for secret in &self.exact {
-            value = value.replace(secret, self.marker);
+        loop {
+            let before = value.clone();
+            for secret in &self.exact {
+                value = value.replace(secret, self.marker);
+            }
+            if value == before {
+                break;
+            }
         }
         value = redact_authorization(&value, self.marker);
         redact_query(&value, self.marker)
@@ -198,5 +204,11 @@ mod tests {
             let value = Redactor::new([secret.as_bytes()]).redact(secret);
             assert!(!value.contains(secret));
         }
+    }
+
+    #[test]
+    fn sequential_replacements_cannot_synthesize_a_registered_secret() {
+        let value = Redactor::new([b"a[REDACTED]b".as_slice(), b"x".as_slice()]).redact("axb");
+        assert!(!value.contains("a[REDACTED]b"));
     }
 }
