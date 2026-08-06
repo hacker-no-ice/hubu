@@ -88,6 +88,27 @@ evidence only; deterministic settlement uses normalized usage and the frozen
 snapshot. No routing, failover, quote resource, scheduled activation, or billing
 export is implemented here.
 
+## API module map
+
+`gongbu-api` is organized by domain:
+
+- `execution` owns the persisted execution aggregate, lifecycle-facing repository
+  operations, provider attempts, receipts, and persistence errors.
+- `provider` owns shared adapter and pricing contracts plus operator-selected
+  provider targets.
+- `artifact` owns normalized artifact validation and storage.
+- `hubu` owns the Hubu client integration and its private outbound transport.
+- `http` owns routes, request/response DTOs, authentication, and HTTP error mapping.
+- `config` owns secret-provider wiring and sensitive-value redaction.
+
+Dependencies point inward from `http` and composition code to the domain modules.
+`artifact` may use `execution` persistence, provider target configuration may use
+`config` secret resolution, and persistence may use provider pricing contracts and
+redaction. Provider contracts, execution, and artifacts must not depend on HTTP
+routes or DTOs; provider-specific adapters must depend on the shared provider
+contracts. The crate root contains only domain declarations and compatibility
+re-exports that preserve the original public module paths.
+
 ## Development
 
 ```sh
