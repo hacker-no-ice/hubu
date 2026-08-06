@@ -17,6 +17,10 @@ use crate::{
         gemini_image::{
             GeminiImageAdapter, GeminiTransport, ReqwestGeminiTransport, ADAPTER_ID, PROVIDER_ID,
         },
+        ideogram_image::{
+            IdeogramImageAdapter, IdeogramTransport, ReqwestIdeogramTransport,
+            ADAPTER_ID as IDEOGRAM_ADAPTER_ID, PROVIDER_ID as IDEOGRAM_PROVIDER_ID,
+        },
         targets::ProviderTargetConfig,
     },
     secrets::{MacOsKeychain, SecretProvider},
@@ -206,6 +210,163 @@ impl ProviderActivities for GeminiProviderActivities {
     }
 }
 
+/// Production bridge from a frozen Ideogram target to the shared durable
+/// execution lifecycle. It never retries, recovers, or falls back.
+pub struct IdeogramProviderActivities {
+    targets: ProviderTargetConfig,
+    secrets: Arc<dyn SecretProvider>,
+    transport: Arc<dyn IdeogramTransport>,
+}
+
+impl IdeogramProviderActivities {
+    pub fn production(targets: ProviderTargetConfig) -> Self {
+        Self::new(
+            targets,
+            Arc::new(MacOsKeychain),
+            Arc::new(ReqwestIdeogramTransport),
+        )
+    }
+
+    pub fn new(
+        targets: ProviderTargetConfig,
+        secrets: Arc<dyn SecretProvider>,
+        transport: Arc<dyn IdeogramTransport>,
+    ) -> Self {
+        Self {
+            targets,
+            secrets,
+            transport,
+        }
+    }
+
+    fn selected<'a>(
+        &'a self,
+        execution: &Execution,
+    ) -> Result<
+        (
+            &'a crate::provider_targets::ProviderConfigVersion,
+            NormalizedRequest,
+            PricingSnapshot,
+        ),
+        WorkflowActivityError,
+    > {
+        if execution.provider != IDEOGRAM_PROVIDER_ID || execution.adapter != IDEOGRAM_ADAPTER_ID {
+            return Err(WorkflowActivityError::Proven(
+                "provider_target_mismatch".into(),
+            ));
+        }
+        let target = self
+            .targets
+            .resolve(
+                &execution.workload_type,
+                &execution.provider,
+                &execution.adapter,
+                &execution.model,
+            )
+            .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
+        if target.provider_config_version != execution.provider_config_version {
+            return Err(WorkflowActivityError::Proven(
+                "provider_config_changed".into(),
+            ));
+        }
+        let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
+            .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
+        if snapshot.unit != PricingUnit::Image {
+            return Err(WorkflowActivityError::Proven(
+                "pricing_snapshot_invalid".into(),
+            ));
+        }
+        enforce_cost(
+            &snapshot,
+            execution.authorized_minor,
+            &execution.authorization_currency,
+        )
+        .map_err(|_| WorkflowActivityError::Proven("authorization_invalid".into()))?;
+        let request = NormalizedRequest {
+            provider: snapshot.provider.clone(),
+            model: snapshot.model.clone(),
+            image_count: Some(snapshot.quantity),
+            input_tokens: None,
+            max_output_tokens: None,
+        };
+        Ok((target, request, snapshot))
+    }
+}
+
+impl ProviderActivities for IdeogramProviderActivities {
+    fn preflight(&self, execution: &Execution) -> Result<(), WorkflowActivityError> {
+        let (target, request, _) = self.selected(execution)?;
+        let adapter = IdeogramImageAdapter::new(
+            target
+                .ideogram_image
+                .clone()
+                .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
+            target.model.clone(),
+            Arc::clone(&self.transport),
+        )
+        .map_err(map_gemini_error)?;
+        adapter
+            .validate_request(&request)
+            .map_err(map_gemini_error)?;
+        self.secrets
+            .resolve(
+                &target
+                    .secret_reference()
+                    .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?,
+            )
+            .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
+        Ok(())
+    }
+
+    fn invoke(
+        &self,
+        execution: &Execution,
+        _attempt_id: &str,
+    ) -> Result<ProviderSuccess, WorkflowActivityError> {
+        let (target, request, _) = self.selected(execution)?;
+        let adapter = IdeogramImageAdapter::new(
+            target
+                .ideogram_image
+                .clone()
+                .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
+            target.model.clone(),
+            Arc::clone(&self.transport),
+        )
+        .map_err(map_gemini_error)?;
+        let secret = self
+            .secrets
+            .resolve(
+                &target
+                    .secret_reference()
+                    .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?,
+            )
+            .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
+        let outcome = adapter
+            .invoke(&request, &execution.normalized_input, &secret, None)
+            .map_err(map_gemini_invoke_error)?;
+        if outcome.outcome != OutcomeKind::Succeeded {
+            return Err(WorkflowActivityError::Ambiguous(
+                "provider_unknown_outcome".into(),
+            ));
+        }
+        Ok(ProviderSuccess {
+            request_id: outcome.provider_request_id,
+            operation_id: outcome.provider_operation_id,
+            usage: outcome
+                .usage
+                .ok_or_else(|| WorkflowActivityError::Ambiguous("missing_provider_usage".into()))?,
+            artifacts: outcome
+                .artifacts
+                .into_iter()
+                .map(|artifact| ProviderArtifact {
+                    media_type: artifact.media_type,
+                    bytes: artifact.bytes,
+                })
+                .collect(),
+        })
+    }
+}
+
 fn map_gemini_error(error: crate::provider_contract::ContractError) -> WorkflowActivityError {
     let code = match error {
         crate::provider_contract::ContractError::Provider { code } => code,
@@ -302,6 +463,24 @@ pub fn gemini_execution_runner(
         repository,
         hubu,
         Arc::new(GeminiProviderActivities::production(targets)),
+        Arc::new(ArtifactServiceActivities::new(artifacts, artifact_now)),
+        now,
+    ))
+}
+
+/// Compose Ideogram and Gongbu artifact activities into the durable runner.
+pub fn ideogram_execution_runner(
+    repository: Repository,
+    hubu: Arc<dyn HubuActivities + Send + Sync>,
+    artifacts: ArtifactService,
+    targets: ProviderTargetConfig,
+    now: impl Fn() -> String + Send + Sync + Clone + 'static,
+) -> Arc<dyn DurableExecutionRunner> {
+    let artifact_now = now.clone();
+    Arc::new(PersistedExecutionRunner::new(
+        repository,
+        hubu,
+        Arc::new(IdeogramProviderActivities::production(targets)),
         Arc::new(ArtifactServiceActivities::new(artifacts, artifact_now)),
         now,
     ))
@@ -605,6 +784,152 @@ mod tests {
                 .unwrap()
                 .settlement_minor,
             25
+        );
+    }
+
+    #[test]
+    fn fixture_ideogram_uses_frozen_price_and_durable_artifact_pipeline() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::ideogram_image::TransportResponse,
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use serde_json::json;
+        use std::{
+            io::Cursor,
+            sync::atomic::{AtomicUsize, Ordering},
+            time::Duration,
+        };
+        use tempfile::tempdir;
+
+        struct Secrets;
+        impl SecretProvider for Secrets {
+            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                Ok(crate::secrets::secret_for_test("ideogram-fixture-secret"))
+            }
+        }
+        struct Transport(AtomicUsize, Vec<u8>);
+        impl IdeogramTransport for Transport {
+            fn generate(
+                &self,
+                _: &reqwest::Url,
+                _: &[u8],
+                _: Duration,
+                _: &std::collections::BTreeMap<String, String>,
+                _: &serde_json::Value,
+            ) -> Result<TransportResponse, Box<dyn std::error::Error + Send + Sync>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(TransportResponse {
+                    status: 200,
+                    request_id: Some("ideogram-request-1".into()),
+                    operation_id: Some("ideogram-generation-1".into()),
+                    body: json!({"data":[{"url":"https://ideogram.ai/output.png"}]}),
+                })
+            }
+            fn fetch_artifact(
+                &self,
+                _: &reqwest::Url,
+                _: Duration,
+            ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+                Ok(self.1.clone())
+            }
+        }
+        #[derive(Default)]
+        struct Hubu(AtomicUsize);
+        impl HubuActivities for Hubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                unreachable!()
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                amount_minor: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                assert_eq!(amount_minor, 30);
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok("settlement-1".into())
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                unreachable!()
+            }
+        }
+
+        let mut png = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
+            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .unwrap();
+        let transport = Arc::new(Transport(AtomicUsize::new(0), png.clone()));
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({"provider_configs":[{
+            "provider_config_version":"ideogram-pcv-1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"fixture","ideogram_image":{"endpoint":"https://api.ideogram.ai","api_version":"v1","timeout_ms":1000,"max_retries":0,"approved_artifact_hosts":["ideogram.ai"]}
+        }]})).unwrap();
+        targets.validate().unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let execution = repository.create_execution(&CreateExecutionParams {
+            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"auth".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:30, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"ideogram/ideogram-v3".into(), config_version:"cfg".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), pricing_snapshot:json!({"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","unit":"image","unit_amount_minor":30,"quantity":1,"estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:1, created_at:"now".into()
+        }).unwrap();
+        let root = tempdir().unwrap();
+        let artifacts = ArtifactService::new(
+            repository.clone(),
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let hubu = Arc::new(Hubu::default());
+        let runner = PersistedExecutionRunner::new(
+            repository.clone(),
+            hubu.clone(),
+            Arc::new(IdeogramProviderActivities::new(
+                targets,
+                Arc::new(Secrets),
+                transport.clone(),
+            )),
+            Arc::new(ArtifactServiceActivities::new(artifacts.clone(), || {
+                "now".into()
+            })),
+            || "now".into(),
+        );
+        assert_eq!(
+            runner.run_execution(&execution.execution_id).unwrap(),
+            "succeeded"
+        );
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
+        assert_eq!(hubu.0.load(Ordering::SeqCst), 1);
+        let attempt = repository
+            .get_provider_attempt_for_execution(&execution.execution_id)
+            .unwrap();
+        assert_eq!(
+            attempt.provider_request_id.as_deref(),
+            Some("ideogram-request-1")
+        );
+        assert_eq!(
+            attempt.provider_operation_id.as_deref(),
+            Some("ideogram-generation-1")
+        );
+        let stored = artifacts
+            .list_for_account(&execution.execution_id, "account")
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            artifacts
+                .retrieve_for_account(&stored[0].artifact_id, "account")
+                .unwrap()
+                .bytes,
+            png
+        );
+        assert_eq!(
+            repository
+                .get_receipt_for_execution(&execution.execution_id)
+                .unwrap()
+                .settlement_minor,
+            30
         );
     }
 

@@ -3,7 +3,8 @@
 Gongbu is the execution plane for Hubu-authorized work. The repository currently
 contains the v1 persistence, normalized-artifact foundations, authenticated
 Execution and Artifact HTTP contract, and the first single-provider durable
-execution workflow, plus the operator-selected Google Gemini image adapter.
+execution workflow, plus operator-selected Google Gemini and Ideogram image
+adapters.
 
 ## V1 boundary
 
@@ -40,8 +41,9 @@ The composition boundary requires an explicit authenticated-principal verifier
 and durable activity implementations. It never installs a caller-selected
 identity or fixture provider implicitly. An executable host supplies the Gemini
 adapter to `PersistedExecutionRunner` and then calls `application::serve`.
-`application::gemini_execution_runner` provides the production composition: it
-connects the selected Gemini target and Keychain credential to provider
+`application::gemini_execution_runner` and
+`application::ideogram_execution_runner` provide the production compositions:
+each connects its selected provider target and Keychain credential to provider
 activities, routes returned bytes through `ArtifactService`, and uses the same
 durable workflow for settlement. No provider or fixture fallback is installed.
 
@@ -90,7 +92,9 @@ not accepted from callers.
 
 See [Local Keychain secrets](docs/local-keychain-secrets.md) for setup and
 manual credential replacement. The deliberately opt-in live check is documented
-in [Gemini image E2E](docs/gemini-image-e2e.md); CI uses fixtures only.
+in [Gemini image E2E](docs/gemini-image-e2e.md); CI uses fixtures only. The
+Ideogram adapter is likewise fixture-backed in CI and has no implicit live-call
+or alternate-provider path.
 
 ## Versioned pricing contract
 

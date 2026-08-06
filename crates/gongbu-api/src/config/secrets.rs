@@ -144,6 +144,7 @@ mod tests {
             secret_account: "production".into(),
             gemini_image: None,
             flux2_api: None,
+            ideogram_image: None,
             enabled: true,
         };
         let secret = resolve_selected(&provider, &target).unwrap();
