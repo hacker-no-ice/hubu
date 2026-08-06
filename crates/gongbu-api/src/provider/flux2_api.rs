@@ -264,6 +264,15 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         if let Some(name) = &config.idempotency_header {
             HeaderName::from_bytes(name.as_bytes())
                 .map_err(|_| provider_error("config_invalid"))?;
+            if name.eq_ignore_ascii_case("x-key")
+                || name.eq_ignore_ascii_case("authorization")
+                || config
+                    .headers
+                    .keys()
+                    .any(|header| header.eq_ignore_ascii_case(name))
+            {
+                return Err(provider_error("config_invalid"));
+            }
         }
         submit_url(&config, &model)?;
         Ok(Self {
@@ -288,6 +297,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             .filter(|p| !p.is_empty() && p.len() <= 32_000)
             .ok_or_else(|| provider_error("invalid_request"))?;
         let mut body = json!({"prompt": prompt});
+        let options = input.get("options").and_then(Value::as_object);
         for field in [
             "width",
             "height",
@@ -295,7 +305,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             "safety_tolerance",
             "output_format",
         ] {
-            if let Some(value) = input.get(field) {
+            if let Some(value) = options.and_then(|options| options.get(field)) {
                 body[field] = value.clone();
             }
         }
@@ -326,6 +336,9 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         }
         let operation_id = string_at(&response.body, &["id", "operation_id", "operationId"]);
         let mut current = response.body;
+        if is_failed(&current) {
+            return Err(with_evidence("provider_rejected", request_id, operation_id));
+        }
         if !is_ready(&current) {
             let operation_id = operation_id
                 .clone()
@@ -628,6 +641,8 @@ mod tests {
         artifact: Vec<u8>,
         fail_submit: Option<String>,
         fail_poll: Option<String>,
+        submit_body: Option<Value>,
+        expected_options: Option<Value>,
     }
     impl Flux2Transport for Fixture {
         fn submit(
@@ -642,6 +657,17 @@ mod tests {
             assert_eq!(credential, b"secret-canary");
             assert_eq!(idempotency, Some(("x-idempotency-key", "opaque-key")));
             assert_eq!(body["prompt"], "cat");
+            if let Some(expected) = &self.expected_options {
+                for field in [
+                    "width",
+                    "height",
+                    "seed",
+                    "safety_tolerance",
+                    "output_format",
+                ] {
+                    assert_eq!(body.get(field), expected.get(field));
+                }
+            }
             *self.submit.lock().unwrap() += 1;
             if self.fail_submit.is_some() {
                 return Err(Box::new(HttpFailure::UnknownOutcome));
@@ -649,7 +675,7 @@ mod tests {
             Ok(TransportResponse {
                 status: 202,
                 request_id: Some("req-1".into()),
-                body: json!({"id":"op-1","polling_url":"https://api.bfl.ai/v1/get_result?id=op-1","status":"Pending"}),
+                body: self.submit_body.clone().unwrap_or_else(|| json!({"id":"op-1","polling_url":"https://api.bfl.ai/v1/get_result?id=op-1","status":"Pending"})),
             })
         }
         fn poll(
@@ -710,6 +736,8 @@ mod tests {
                     artifact: vec![1, 2, 3],
                     fail_submit: None,
                     fail_poll: None,
+                    submit_body: None,
+                    expected_options: None,
                 },
             )
             .unwrap(),
@@ -745,6 +773,38 @@ mod tests {
         assert_eq!(outcome.provider_amount_minor, None);
         assert_eq!(outcome.usage.unwrap().images, Some(1));
         assert_eq!(outcome.artifacts[0].bytes, vec![1, 2, 3]);
+    }
+    #[test]
+    fn maps_v1_options_and_rejects_terminal_submission_without_polling() {
+        let submits = Arc::new(Mutex::new(0));
+        let options =
+            json!({"width":1024,"height":768,"seed":42,"safety_tolerance":2,"output_format":"png"});
+        let adapter = Flux2ApiAdapter::new(
+            config(),
+            "flux-2-pro".into(),
+            Fixture {
+                submit: submits.clone(),
+                polls: Arc::new(Mutex::new(vec![])),
+                artifact: vec![],
+                fail_submit: None,
+                fail_poll: None,
+                submit_body: Some(json!({"id":"op-rejected","status":"Rejected"})),
+                expected_options: Some(options.clone()),
+            },
+        )
+        .unwrap();
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat","options":options}),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, ContractError::ProviderWithEvidence { code, operation_id: Some(operation_id), .. } if code == "provider_rejected" && operation_id == "op-rejected")
+        );
+        assert_eq!(*submits.lock().unwrap(), 1);
     }
     #[test]
     fn stable_rejection_malformed_missing_image_and_artifact_policy_failures() {
@@ -788,6 +848,8 @@ mod tests {
                 artifact: vec![],
                 fail_submit: Some("secret-canary".into()),
                 fail_poll: None,
+                submit_body: None,
+                expected_options: None,
             },
         )
         .unwrap();
@@ -811,6 +873,8 @@ mod tests {
                 artifact: vec![],
                 fail_submit: None,
                 fail_poll: Some("nested secret-canary".into()),
+                submit_body: None,
+                expected_options: None,
             },
         )
         .unwrap();
@@ -858,10 +922,32 @@ mod tests {
                 polls: Arc::new(Mutex::new(vec![])),
                 artifact: vec![],
                 fail_submit: None,
-                fail_poll: None
+                fail_poll: None,
+                submit_body: None,
+                expected_options: None
             }
         )
         .is_err());
+
+        for name in ["x-key", "Authorization", "X-STATIC"] {
+            let mut invalid = config();
+            invalid.idempotency_header = Some(name.into());
+            invalid.headers.insert("x-static".into(), "operator".into());
+            assert!(Flux2ApiAdapter::new(
+                invalid,
+                "flux-2-pro".into(),
+                Fixture {
+                    submit: Arc::new(Mutex::new(0)),
+                    polls: Arc::new(Mutex::new(vec![])),
+                    artifact: vec![],
+                    fail_submit: None,
+                    fail_poll: None,
+                    submit_body: None,
+                    expected_options: None,
+                }
+            )
+            .is_err());
+        }
     }
 
     #[test]
@@ -889,6 +975,8 @@ mod tests {
                 artifact: png.clone(),
                 fail_submit: None,
                 fail_poll: None,
+                submit_body: None,
+                expected_options: None,
             },
         )
         .unwrap();

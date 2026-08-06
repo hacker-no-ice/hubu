@@ -194,6 +194,14 @@ impl ProviderTargetConfig {
                     || flux.timeout_ms == 0
                     || flux.poll_interval_ms == 0
                     || flux.max_retries != 0
+                    || flux.idempotency_header.as_ref().is_some_and(|idempotency| {
+                        idempotency.eq_ignore_ascii_case("x-key")
+                            || idempotency.eq_ignore_ascii_case("authorization")
+                            || flux
+                                .headers
+                                .keys()
+                                .any(|header| header.eq_ignore_ascii_case(idempotency))
+                    })
                     || flux.headers.iter().any(|(name, value)| {
                         name.trim().is_empty()
                             || value.contains(['\r', '\n'])
@@ -359,5 +367,13 @@ mod tests {
             .headers
             .insert("x-key".into(), "caller-secret".into());
         assert!(credential_header.validate().is_err());
+        let mut idempotency_collision = retrying;
+        let flux = idempotency_collision.provider_configs[0]
+            .flux2_api
+            .as_mut()
+            .unwrap();
+        flux.max_retries = 0;
+        flux.idempotency_header = Some("X-CLIENT".into());
+        assert!(idempotency_collision.validate().is_err());
     }
 }
