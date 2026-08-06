@@ -92,7 +92,7 @@ impl LocalFsStorage {
         Ok(self.root.join(key))
     }
 
-    fn read(&self, key: &str) -> Result<Vec<u8>> {
+    pub(crate) fn read(&self, key: &str) -> Result<Vec<u8>> {
         Ok(fs::read(self.path_for(key)?)?)
     }
 

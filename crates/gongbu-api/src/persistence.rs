@@ -418,6 +418,18 @@ impl Repository {
             .optional()?
             .ok_or(Error::NotFound)
     }
+    pub fn get_artifact(&self, artifact_id: &str) -> Result<Artifact> {
+        self.0
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("{ARTIFACT_SELECT} WHERE a.artifact_id=?1"),
+                [artifact_id],
+                map_artifact,
+            )
+            .optional()?
+            .ok_or(Error::NotFound)
+    }
     pub fn list_artifacts_for_account(
         &self,
         execution_id: &str,

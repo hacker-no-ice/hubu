@@ -1,9 +1,9 @@
 # Gongbu
 
 Gongbu is the execution plane for Hubu-authorized work. The repository currently
-contains the v1 persistence and normalized-artifact foundations; execution
-orchestration, provider adapters, and the v1 HTTP API are intentionally not yet
-implemented.
+contains the v1 persistence, normalized-artifact foundations, and authenticated
+Execution and Artifact HTTP contract. Execution orchestration and provider
+adapters are intentionally not yet implemented.
 
 ## V1 boundary
 
@@ -21,19 +21,20 @@ The retained Hubu v4 client is a low-level protocol client for future durable
 workflow work. No current production path claims, settles, releases, or invokes a
 provider.
 
-## Planned service surface
+## Service surface
 
-HUB-23 will add the authoritative v1 routes:
+The authoritative v1 routes are:
 
 - `POST /v1/executions`
 - `GET /v1/executions/{execution_id}`
-- `POST /v1/executions/{execution_id}/cancel`
 - `GET /v1/executions/{execution_id}/artifacts`
 - `GET /v1/artifacts/{artifact_id}`
 
-There is no persisted quote resource. Provider invocation, durable workflow,
-remote artifact fetching, SVG support, retention, and cloud storage remain out
-of scope for the current foundation.
+Transport adapters validate authentication before constructing the trusted
+account principal; request bodies cannot override it. There is no cancellation
+route or persisted quote resource. Provider invocation, durable workflow, remote
+artifact fetching, SVG support, retention, and cloud storage remain out of scope
+for the current foundation.
 
 ## Operator target configuration
 
