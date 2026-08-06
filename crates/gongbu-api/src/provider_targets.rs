@@ -1,3 +1,4 @@
+use crate::secrets::{SecretError, SecretReference};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, env, fs, path::Path};
 use thiserror::Error;
@@ -46,6 +47,8 @@ pub struct ProviderConfigVersion {
     pub provider: String,
     pub adapter: String,
     pub model: String,
+    pub secret_service: String,
+    pub secret_account: String,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
 }
@@ -93,6 +96,8 @@ impl ProviderTargetConfig {
                 &target.provider,
                 &target.adapter,
                 &target.model,
+                &target.secret_service,
+                &target.secret_account,
             ]
             .iter()
             .any(|value| value.trim().is_empty())
@@ -140,6 +145,12 @@ impl ProviderTargetConfig {
     }
 }
 
+impl ProviderConfigVersion {
+    pub fn secret_reference(&self) -> std::result::Result<SecretReference, SecretError> {
+        SecretReference::new(self.secret_service.clone(), self.secret_account.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,7 +162,7 @@ mod tests {
     #[test]
     fn resolves_exact_allowlisted_target_to_version() {
         let config = parse(
-            r#"{"provider_configs":[{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1"}]}"#,
+            r#"{"provider_configs":[{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"gongbu.example","secret_account":"local"}]}"#,
         );
         config.validate().unwrap();
         assert_eq!(
@@ -166,7 +177,7 @@ mod tests {
     #[test]
     fn rejects_disabled_and_unknown_targets() {
         let config = parse(
-            r#"{"provider_configs":[{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","enabled":false}]}"#,
+            r#"{"provider_configs":[{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"gongbu.example","secret_account":"local","enabled":false}]}"#,
         );
         assert!(matches!(
             config.resolve("image_generation", "example", "fixture", "image-v1"),
@@ -181,7 +192,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_targets_and_versions() {
         let duplicate_target = parse(
-            r#"{"provider_configs":[{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1"},{"provider_config_version":"pcv-2","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1"}]}"#,
+            r#"{"provider_configs":[{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"gongbu.example","secret_account":"local"},{"provider_config_version":"pcv-2","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"gongbu.example","secret_account":"local"}]}"#,
         );
         assert!(matches!(
             duplicate_target.validate(),
@@ -189,7 +200,7 @@ mod tests {
         ));
 
         let duplicate_version = parse(
-            r#"{"provider_configs":[{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1"},{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"other","adapter":"fixture","model":"image-v1"}]}"#,
+            r#"{"provider_configs":[{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"gongbu.example","secret_account":"local"},{"provider_config_version":"pcv-1","workload_type":"image_generation","provider":"other","adapter":"fixture","model":"image-v1","secret_service":"gongbu.other","secret_account":"local"}]}"#,
         );
         assert!(matches!(
             duplicate_version.validate(),
@@ -207,5 +218,8 @@ mod tests {
             r#"{"provider_configs":[],"endpoint":"https://caller.example"}"#
         )
         .is_err());
+        assert!(serde_json::from_str::<ProviderTargetConfig>(
+            r#"{"provider_configs":[],"authorization":"Bearer caller","retry_policy":{"max_retries":99}}"#
+        ).is_err());
     }
 }

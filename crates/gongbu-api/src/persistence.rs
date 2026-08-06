@@ -1,6 +1,7 @@
 //! SQLite persistence for the execution aggregate.
 //! Schema units and formats are documented in the migration.
 use crate::provider_contract::{PricingSnapshot, PRICING_SNAPSHOT_SCHEMA_VERSION};
+use crate::redaction::Redactor;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::{
@@ -204,24 +205,52 @@ pub struct Receipt {
     pub hubu_settlement_id: Option<String>,
 }
 #[derive(Clone)]
-pub struct Repository(Arc<Mutex<Connection>>);
+pub struct Repository(Arc<Mutex<Connection>>, Arc<Redactor>);
 impl Repository {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::init(Connection::open(path)?)
+        Self::init(Connection::open(path)?, Arc::new(Redactor::default()))
+    }
+    pub fn open_with_redactor(path: impl AsRef<Path>, redactor: Redactor) -> Result<Self> {
+        Self::init(Connection::open(path)?, Arc::new(redactor))
     }
     pub fn in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, Arc::new(Redactor::default()))
     }
-    fn init(c: Connection) -> Result<Self> {
+    pub fn in_memory_with_redactor(redactor: Redactor) -> Result<Self> {
+        Self::init(Connection::open_in_memory()?, Arc::new(redactor))
+    }
+    fn init(c: Connection, redactor: Arc<Redactor>) -> Result<Self> {
         c.pragma_update(None, "foreign_keys", "ON")?;
         c.pragma_update(None, "busy_timeout", 5000)?;
         c.execute_batch(MIGRATION)?;
         migrate_artifact_storage_columns(&c)?;
         migrate_resolved_target_columns(&c)?;
-        Ok(Self(Arc::new(Mutex::new(c))))
+        Ok(Self(Arc::new(Mutex::new(c)), redactor))
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
         validate_execution(n)?;
+        let persistence_values = [
+            n.account_id.as_str(),
+            n.operation_key.as_str(),
+            n.hubu_authorization_id.as_str(),
+            n.input_hash.as_str(),
+            n.target.as_str(),
+            n.config_version.as_str(),
+            n.workload_type.as_str(),
+            n.provider.as_str(),
+            n.adapter.as_str(),
+            n.model.as_str(),
+            n.provider_config_version.as_str(),
+            n.authorization_currency.as_str(),
+        ];
+        if persistence_values
+            .iter()
+            .any(|value| self.1.contains_registered_secret(value))
+            || self.1.contains_registered_secret(&j(&n.normalized_input))
+            || self.1.contains_registered_secret(&j(&n.pricing_snapshot))
+        {
+            return Err(Error::Invalid("secret-bearing persistence value"));
+        }
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = Uuid::new_v4().to_string();
@@ -258,7 +287,11 @@ impl Repository {
     ) -> Result<Execution> {
         status(&u.status)?;
         let c = self.0.lock().unwrap();
-        let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,version=version+1 WHERE execution_id=?8 AND version=?9",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,u.failure_message_redacted,at,id,expected])?;
+        let failure = u
+            .failure_message_redacted
+            .as_deref()
+            .map(|value| self.1.redact(value));
+        let changed=c.execute("UPDATE executions SET status=?1,outcome=?2,started_at=COALESCE(started_at,?3),completed_at=?4,failure_code=?5,failure_message_redacted=?6,updated_at=?7,version=version+1 WHERE execution_id=?8 AND version=?9",params![u.status,u.outcome,u.started_at,u.completed_at,u.failure_code,failure,at,id,expected])?;
         if changed == 0 {
             return if c
                 .query_row(
@@ -310,7 +343,11 @@ impl Repository {
         {
             return Err(Error::Invalid("attempt result"));
         }
-        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=?7,failure_message_redacted=?8 WHERE provider_attempt_id=?9 AND completed_at IS NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.failure_code,r.failure_message_redacted,id])?;
+        let failure = r
+            .failure_message_redacted
+            .as_deref()
+            .map(|value| self.1.redact(value));
+        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=?7,failure_message_redacted=?8 WHERE provider_attempt_id=?9 AND completed_at IS NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.failure_code,failure,id])?;
         if n == 1 {
             Ok(())
         } else {
@@ -1199,5 +1236,39 @@ mod tests {
             r.create_receipt(&mismatched),
             Err(Error::Invalid("receipt attempt relationship"))
         ));
+    }
+
+    #[test]
+    fn canary_secret_is_redacted_from_failures_and_rejected_from_records() {
+        const CANARY: &str = "gongbu-canary-provider-secret-7c91";
+        let r = Repository::in_memory_with_redactor(Redactor::new([CANARY.as_bytes()])).unwrap();
+        let mut leaked = new("a", "leaked-input");
+        leaked.normalized_input = json!({"prompt": CANARY});
+        assert!(matches!(
+            r.create_execution(&leaked),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+
+        let e = r.create_execution(&new("a", "redacted-failure")).unwrap();
+        let a = attempt(&r, &e);
+        r.complete_provider_attempt(
+            &a,
+            &AttemptResult {
+                outcome: "failed".into(),
+                completed_at: "now".into(),
+                usage: json!({}),
+                usage_schema_version: 1,
+                provider_amount_minor: None,
+                provider_currency: None,
+                failure_code: Some("provider_error".into()),
+                failure_message_redacted: Some(format!("nested SDK error: api_key={CANARY}")),
+            },
+        )
+        .unwrap();
+        let stored: String = r.0.lock().unwrap().query_row(
+            "SELECT failure_message_redacted FROM provider_attempts WHERE provider_attempt_id=?1",
+            [&a], |row| row.get(0)).unwrap();
+        assert!(!stored.contains(CANARY));
+        assert!(stored.contains("[REDACTED]"));
     }
 }
