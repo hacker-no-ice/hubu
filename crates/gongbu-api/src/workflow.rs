@@ -269,9 +269,21 @@ impl ExecutionWorkflow<'_> {
                             .ok_or(PersistenceError::Invalid("attempt usage"))?,
                     )
                     .map_err(|_| PersistenceError::Invalid("attempt usage"))?;
-                    let amount = snapshot
-                        .settle(&usage, execution.authorized_minor)
-                        .map_err(|_| PersistenceError::OverAuthorization)?;
+                    let amount = match snapshot.settle(&usage, execution.authorized_minor) {
+                        Ok(amount) => amount,
+                        Err(_) => {
+                            self.transition(
+                                &execution,
+                                "reconciliation_required",
+                                Some("invalid_provider_usage"),
+                                now,
+                                None,
+                                None,
+                                Some("ambiguous"),
+                            )?;
+                            continue;
+                        }
+                    };
                     let receipt = match self.repository.get_receipt_for_execution(execution_id) {
                         Ok(r) => r,
                         Err(PersistenceError::NotFound) => {
@@ -574,6 +586,7 @@ mod tests {
         calls: Cell<u32>,
         error: RefCell<Option<ActivityError>>,
         empty_artifacts: Cell<bool>,
+        image_usage: Cell<i64>,
     }
     impl Default for Provider {
         fn default() -> Self {
@@ -581,6 +594,7 @@ mod tests {
                 calls: Cell::new(0),
                 error: RefCell::new(None),
                 empty_artifacts: Cell::new(false),
+                image_usage: Cell::new(1),
             }
         }
     }
@@ -596,7 +610,7 @@ mod tests {
                 Ok(ProviderSuccess {
                     request_id: "provider-1".into(),
                     usage: NormalizedUsage {
-                        images: Some(1),
+                        images: Some(self.image_usage.get()),
                         ..Default::default()
                     },
                     artifacts: if self.empty_artifacts.get() {
@@ -730,6 +744,38 @@ mod tests {
         };
         assert_eq!(w.run(&e.execution_id, "later").unwrap().status, "succeeded");
         assert_eq!(h.claims.get(), 0);
+    }
+
+    #[test]
+    fn invalid_provider_usage_reconciles_without_settlement_retry() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "invalid-provider-usage");
+        let h = Hubu::default();
+        let p = Provider::default();
+        p.image_usage.set(2);
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+
+        let done = w.run(&e.execution_id, "now").unwrap();
+        assert_eq!(done.status, "reconciliation_required");
+        assert_eq!(done.failure_code.as_deref(), Some("invalid_provider_usage"));
+        assert_eq!(h.settles.get(), 0);
+        assert!(matches!(
+            repo.get_receipt_for_execution(&e.execution_id),
+            Err(PersistenceError::NotFound)
+        ));
+
+        w.run(&e.execution_id, "later").unwrap();
+        assert_eq!(p.calls.get(), 1);
+        assert_eq!(h.settles.get(), 0);
     }
 
     #[test]

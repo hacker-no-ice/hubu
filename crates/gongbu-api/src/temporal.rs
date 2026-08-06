@@ -102,9 +102,17 @@ impl ExecutionActivities {
         _ctx: ActivityContext,
         execution_id: String,
     ) -> Result<String, ActivityError> {
-        self.runner.run_execution(&execution_id).map_err(|message| {
-            ActivityError::application(ApplicationFailure::new(std::io::Error::other(message)))
-        })
+        let runner = Arc::clone(&self.runner);
+        tokio::task::spawn_blocking(move || runner.run_execution(&execution_id))
+            .await
+            .map_err(|error| {
+                ActivityError::application(ApplicationFailure::new(std::io::Error::other(
+                    error.to_string(),
+                )))
+            })?
+            .map_err(|message| {
+                ActivityError::application(ApplicationFailure::new(std::io::Error::other(message)))
+            })
     }
 }
 
@@ -136,15 +144,17 @@ pub trait ExecutionScheduler: Send + Sync + 'static {
 
 #[derive(Clone)]
 pub struct TemporalExecutionScheduler {
-    client: Client,
-    runtime: tokio::runtime::Handle,
+    requests: std::sync::mpsc::SyncSender<ScheduleRequest>,
 }
 
 impl TemporalExecutionScheduler {
-    pub fn new(client: Client, runtime: tokio::runtime::Handle) -> Self {
-        Self { client, runtime }
+    fn new(requests: std::sync::mpsc::SyncSender<ScheduleRequest>) -> Self {
+        Self { requests }
     }
 }
+
+type ScheduleResult = Result<(), String>;
+type ScheduleRequest = (String, std::sync::mpsc::SyncSender<ScheduleResult>);
 
 pub struct StartedTemporalWorker {
     pub scheduler: Arc<TemporalExecutionScheduler>,
@@ -169,39 +179,53 @@ pub fn start_worker(
                 .map_err(|_| std::io::Error::other("worker startup receiver dropped"))?;
             tokio_runtime.block_on(run_worker(&runtime, client, runner))
         })?;
-    let scheduler = Arc::new(TemporalExecutionScheduler::new(
-        scheduler_client,
-        handle_rx.recv()?,
-    ));
+    handle_rx.recv()?;
+    let (request_tx, request_rx) = std::sync::mpsc::sync_channel::<ScheduleRequest>(16);
+    let scheduler_thread = std::thread::Builder::new()
+        .name("gongbu-temporal-scheduler".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let Ok(runtime) = runtime else { return };
+            while let Ok((execution_id, response)) = request_rx.recv() {
+                let result =
+                    runtime.block_on(start_execution(scheduler_client.clone(), execution_id));
+                let _ = response.send(result);
+            }
+        })?;
+    drop(scheduler_thread);
+    let scheduler = Arc::new(TemporalExecutionScheduler::new(request_tx));
     Ok(StartedTemporalWorker { scheduler, thread })
 }
 
 impl ExecutionScheduler for TemporalExecutionScheduler {
     fn schedule(&self, execution_id: &str) -> Result<(), String> {
-        let client = self.client.clone();
-        let execution_id = execution_id.to_owned();
-        let start = async move {
-            client
-                .start_workflow(
-                    DurableExecutionWorkflow::run,
-                    execution_id.clone(),
-                    WorkflowStartOptions::new(
-                        EXECUTION_TASK_QUEUE,
-                        format!("gongbu-execution-{execution_id}"),
-                    )
-                    .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
-                    .build(),
-                )
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        };
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| self.runtime.block_on(start))
-        } else {
-            self.runtime.block_on(start)
-        }
+        let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+        self.requests
+            .send((execution_id.to_owned(), response_tx))
+            .map_err(|_| "Temporal scheduler stopped".to_owned())?;
+        response_rx
+            .recv()
+            .map_err(|_| "Temporal scheduler stopped".to_owned())?
     }
+}
+
+async fn start_execution(client: Client, execution_id: String) -> ScheduleResult {
+    client
+        .start_workflow(
+            DurableExecutionWorkflow::run,
+            execution_id.clone(),
+            WorkflowStartOptions::new(
+                EXECUTION_TASK_QUEUE,
+                format!("gongbu-execution-{execution_id}"),
+            )
+            .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
+            .build(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
