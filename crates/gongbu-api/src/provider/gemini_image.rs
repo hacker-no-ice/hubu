@@ -255,7 +255,13 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
             )
             .map_err(|error| classify_transport(error, secret, false))?;
         if !(200..300).contains(&response.status) {
-            return Err(provider_error("provider_rejected"));
+            return Err(provider_error(if (400..500).contains(&response.status) {
+                "provider_rejected"
+            } else {
+                // Redirects and server errors occur after transmission and do not
+                // prove that Google neither generated nor billed the request.
+                "provider_failure"
+            }));
         }
         let artifacts = extract_artifacts(
             &response.body,
@@ -281,7 +287,13 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
             }),
             provider_amount_minor: None,
             provider_currency: None,
-            provider_request_id: response.request_id,
+            provider_request_id: response.request_id.or_else(|| {
+                response
+                    .body
+                    .get("responseId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            }),
             provider_operation_id: response.operation_id,
             artifacts,
         })
@@ -581,6 +593,34 @@ mod tests {
         assert_eq!(outcome.artifacts[0].bytes, bytes);
     }
     #[test]
+    fn response_id_body_field_is_used_when_headers_are_absent() {
+        let bytes = png();
+        let (adapter, calls) = adapter(
+            json!({"responseId":"body-response-1","candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":STANDARD.encode(&bytes)}}]}}]}),
+            200,
+        );
+        {
+            let mut response = adapter.transport.response.lock().unwrap();
+            let response = response.as_mut().unwrap().as_mut().unwrap();
+            response.request_id = None;
+            response.operation_id = None;
+        }
+        let outcome = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"draw a cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), 1);
+        assert_eq!(
+            outcome.provider_request_id.as_deref(),
+            Some("body-response-1")
+        );
+        assert_eq!(outcome.provider_operation_id, None);
+    }
+    #[test]
     fn referenced_output_requires_approved_host() {
         let (approved_adapter, _) = adapter(
             json!({"candidates":[{"content":{"parts":[{"fileData":{"mimeType":"image/png","fileUri":"https://storage.googleapis.com/output.png"}}]}}]}),
@@ -655,6 +695,20 @@ mod tests {
             assert!(!error.to_string().contains("secret-canary"));
             assert!(!error.to_string().contains("sensitive-project"));
         }
+    }
+    #[test]
+    fn server_error_after_transmission_is_not_a_proven_rejection() {
+        let (adapter, calls) = adapter(json!({"error":{"message":"internal"}}), 503);
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(error, ContractError::Provider { code } if code == "provider_failure"));
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
     #[test]
     fn rejects_retry_and_invalid_normalized_input_before_network() {
