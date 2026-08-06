@@ -99,6 +99,19 @@ impl ExecutionWorkflow<'_> {
     pub fn run(&self, execution_id: &str, now: &str) -> Result<Execution, WorkflowError> {
         loop {
             let execution = self.repository.get_execution(execution_id)?;
+            if execution.status == "reconciliation_required"
+                && matches!(
+                    self.repository.get_reconciliation(execution_id),
+                    Err(PersistenceError::NotFound)
+                )
+            {
+                self.repository.record_reconciliation(
+                    &execution,
+                    "reconciliation_replay",
+                    execution.failure_code.as_deref(),
+                    now,
+                )?;
+            }
             if terminal(&execution.status) {
                 return Ok(execution);
             }
@@ -477,7 +490,7 @@ impl ExecutionWorkflow<'_> {
             if request.action_id.trim().is_empty() || !request.evidence.is_object() {
                 return Ok(execution);
             }
-            if !self.repository.record_operator_action(
+            self.repository.record_operator_action(
                 execution_id,
                 &request.action_id,
                 match request.action {
@@ -487,15 +500,21 @@ impl ExecutionWorkflow<'_> {
                 },
                 &request.evidence,
                 now,
-            )? {
-                return Ok(execution);
-            }
+            )?;
         }
-        let attempt = self
+        let attempt = match self
             .repository
             .get_provider_attempt_for_execution(execution_id)
-            .ok();
-        let receipt = self.repository.get_receipt_for_execution(execution_id).ok();
+        {
+            Ok(value) => Some(value),
+            Err(PersistenceError::NotFound) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let receipt = match self.repository.get_receipt_for_execution(execution_id) {
+            Ok(value) => Some(value),
+            Err(PersistenceError::NotFound) => None,
+            Err(error) => return Err(error.into()),
+        };
         let requested = operator.map(|r| &r.action);
 
         // Ambiguous claim delivery is safely replayable because the immutable
@@ -1335,6 +1354,116 @@ mod tests {
             .unwrap();
         assert_eq!(
             w.recover(&e.execution_id, "timer", None).unwrap().status,
+            "released"
+        );
+        assert_eq!(p.calls.get(), 0);
+        assert_eq!(h.releases.get(), 1);
+    }
+
+    #[test]
+    fn replay_repairs_missing_reconciliation_evidence() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "repair-evidence");
+        let pre = repo
+            .update_execution(
+                &e.execution_id,
+                e.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("now".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "now",
+            )
+            .unwrap();
+        repo.update_execution(
+            &e.execution_id,
+            pre.version,
+            &ExecutionUpdate {
+                status: "reconciliation_required".into(),
+                outcome: Some("ambiguous_claim".into()),
+                started_at: None,
+                completed_at: None,
+                failure_code: Some("ambiguous_claim".into()),
+                failure_message_redacted: None,
+                provider_outcome: None,
+                artifact_outcome: None,
+                settlement_outcome: None,
+            },
+            "crash",
+        )
+        .unwrap();
+        assert!(matches!(
+            repo.get_reconciliation(&e.execution_id),
+            Err(PersistenceError::NotFound)
+        ));
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        }
+        .run(&e.execution_id, "replay")
+        .unwrap();
+        assert_eq!(
+            repo.get_reconciliation(&e.execution_id)
+                .unwrap()
+                .last_confirmed_step,
+            "reconciliation_replay"
+        );
+    }
+
+    #[test]
+    fn received_but_unfinished_operator_action_is_retried() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "retry-operator");
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        h.claim_validation_error
+            .replace(Some(ActivityError::Proven("claim_expired".into())));
+        assert_eq!(
+            w.run(&e.execution_id, "now").unwrap().status,
+            "reconciliation_required"
+        );
+        let request = OperatorReconciliationRequest {
+            action_id: "received-before-crash".into(),
+            action: ReconciliationAction::Release,
+            evidence: json!({"claim":"proven"}),
+        };
+        repo.record_operator_action(
+            &e.execution_id,
+            &request.action_id,
+            "release",
+            &request.evidence,
+            "received",
+        )
+        .unwrap();
+        assert_eq!(
+            w.recover(&e.execution_id, "redelivery", Some(&request))
+                .unwrap()
+                .status,
             "released"
         );
         assert_eq!(p.calls.get(), 0);

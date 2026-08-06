@@ -952,7 +952,11 @@ impl Repository {
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let inserted=tx.execute("INSERT OR IGNORE INTO reconciliation_operator_actions(execution_id,action_id,action,evidence_json,created_at) VALUES(?1,?2,?3,?4,?5)",params![execution_id,action_id,action,j(&redacted_evidence),at])?;
         if inserted == 0 {
-            return Ok(false);
+            let existing:(String,String)=tx.query_row("SELECT action,evidence_json FROM reconciliation_operator_actions WHERE execution_id=?1 AND action_id=?2",params![execution_id,action_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            if existing != (action.to_owned(), j(&redacted_evidence)) {
+                return Err(Error::Invalid("operator action identity"));
+            }
+            return Ok(true);
         }
         let changed=tx.execute("UPDATE reconciliation_records SET last_operator_action_id=?1,last_operator_action=?2,updated_at=?3 WHERE execution_id=?4",params![action_id,action,at,execution_id])?;
         if changed != 1 {

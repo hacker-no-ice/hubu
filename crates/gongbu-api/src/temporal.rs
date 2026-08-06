@@ -135,24 +135,34 @@ impl DurableExecutionWorkflow {
         }
         let delay_count = input.recovery_delays_seconds.len();
         for (index, delay) in input.recovery_delays_seconds.into_iter().enumerate() {
-            temporalio_sdk::workflows::select! {
-                _ = ctx.timer(Duration::from_secs(delay)) => {}
-                _ = ctx.wait_condition(|s: &Self| !s.pending.is_empty()) => {}
-            }
-            let operator = ctx.state_mut(|s| s.pending.pop());
-            status = ctx
-                .execute_activity(
-                    ExecutionActivities::recover_execution,
-                    RecoveryActivityInput {
-                        execution_id: input.execution_id.clone(),
-                        exhausted: operator.is_none() && index + 1 == delay_count,
-                        operator,
-                    },
-                    options.clone(),
-                )
-                .await?;
-            if status != "reconciliation_required" {
-                return Ok(status);
+            let mut timer = ctx.timer(Duration::from_secs(delay));
+            loop {
+                let automatic = temporalio_sdk::workflows::select! {
+                    _ = &mut timer => true,
+                    _ = ctx.wait_condition(|s: &Self| !s.pending.is_empty()) => false,
+                };
+                let operator = if automatic {
+                    None
+                } else {
+                    ctx.state_mut(|s| s.pending.pop())
+                };
+                status = ctx
+                    .execute_activity(
+                        ExecutionActivities::recover_execution,
+                        RecoveryActivityInput {
+                            execution_id: input.execution_id.clone(),
+                            exhausted: automatic && index + 1 == delay_count,
+                            operator,
+                        },
+                        options.clone(),
+                    )
+                    .await?;
+                if status != "reconciliation_required" {
+                    return Ok(status);
+                }
+                if automatic {
+                    break;
+                }
             }
         }
         loop {
