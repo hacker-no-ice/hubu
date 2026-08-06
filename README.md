@@ -1,9 +1,9 @@
 # Gongbu
 
 Gongbu is the execution plane for Hubu-authorized work. The repository currently
-contains the v1 persistence, normalized-artifact foundations, and authenticated
-Execution and Artifact HTTP contract. Execution orchestration and provider
-adapters are intentionally not yet implemented.
+contains the v1 persistence, normalized-artifact foundations, authenticated
+Execution and Artifact HTTP contract, and the first single-provider durable
+execution workflow. Provider-specific adapters remain separate integrations.
 
 ## V1 boundary
 
@@ -17,9 +17,30 @@ operator-supplied artifact root and persists only generated, storage-neutral
 keys. The artifact service accepts PNG and JPEG, validates count and decoded-size
 limits, and never exposes absolute filesystem paths.
 
-The retained Hubu v4 client is a low-level protocol client for future durable
-workflow work. No current production path claims, settles, releases, or invokes a
-provider.
+The workflow drives one persisted execution through preflight, claim, one
+durably recorded provider attempt, normalized artifact persistence, and Hubu
+settlement or safe release. Ambiguous post-boundary outcomes stop in
+`reconciliation_required`; they are never blindly retried or released.
+Artifact validation and durable publication occur while the execution remains
+`executing`; it transitions directly to `settling` only after durability is
+confirmed. The former `persisting` state was never merged, stored by a shipped
+schema, or exposed by a shipped API, so v1 removes it without compatibility
+handling or a cleanup migration.
+
+The runnable application composition in `application::serve` starts Temporal
+before accepting HTTP requests, retains the returned worker thread for process
+lifetime, and passes its `scheduler` to `http::Api::new`. Each accepted or
+replayed pending execution starts the stable
+workflow ID `gongbu-execution-{execution_id}` on `gongbu-executions`; Temporal's
+use-existing conflict policy makes duplicate scheduling safe. Interrupted
+activities are redelivered, while persisted transmission markers prevent
+provider or Hubu side effects from being repeated.
+
+The composition boundary requires an explicit authenticated-principal verifier
+and durable activity implementations. It never installs a caller-selected
+identity or fixture provider implicitly. The first production-shaped provider
+adapter remains HUB-18; its executable host supplies that adapter to
+`PersistedExecutionRunner` and then calls `application::serve`.
 
 ## Service surface
 
@@ -31,10 +52,10 @@ The authoritative v1 routes are:
 - `GET /v1/artifacts/{artifact_id}`
 
 Transport adapters validate authentication before constructing the trusted
-account principal; request bodies cannot override it. There is no cancellation
-route or persisted quote resource. Provider invocation, durable workflow, remote
-artifact fetching, SVG support, retention, and cloud storage remain out of scope
-for the current foundation.
+account principal; request bodies cannot override it. Accepted v1 executions
+run to a terminal outcome; public and in-flight cancellation are deferred to
+HUB-37. Remote artifact fetching, SVG support, retention, cloud storage,
+multi-provider execution, and operator reconciliation remain out of scope.
 
 ## Operator target configuration
 
@@ -110,6 +131,10 @@ contracts. The crate root contains only domain declarations and compatibility
 re-exports that preserve the original public module paths.
 
 ## Development
+
+The official Temporal Rust SDK compiles its protobuf definitions during the
+build, so install `protoc` first (`brew install protobuf` on macOS or
+`apt-get install protobuf-compiler` on Debian/Ubuntu).
 
 ```sh
 cargo test --workspace

@@ -225,7 +225,7 @@ impl PricingSnapshot {
             || self.model.trim().is_empty()
             || self.catalog_version.trim().is_empty()
             || self.pricing_rule_id.trim().is_empty()
-            || digest.map_or(true, |value| {
+            || digest.is_none_or(|value| {
                 value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
             || !SUPPORTED_CURRENCIES.contains(&self.currency.as_str())

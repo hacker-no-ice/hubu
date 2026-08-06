@@ -14,6 +14,7 @@ use crate::{
         PRICING_SNAPSHOT_SCHEMA_VERSION,
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, ProviderTargetConfig},
+    temporal::ExecutionScheduler,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -84,10 +85,13 @@ pub struct ExecutionResponse {
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStatus {
     Pending,
-    Running,
+    Preflighting,
+    Claimed,
+    Executing,
+    Settling,
     Succeeded,
+    Released,
     Failed,
-    Canceled,
     ReconciliationRequired,
 }
 
@@ -193,6 +197,7 @@ pub struct Api {
     artifacts: ArtifactService,
     targets: ProviderTargetConfig,
     pricing: PricingCatalog,
+    scheduler: Arc<dyn ExecutionScheduler>,
     now: Arc<dyn Fn() -> String + Send + Sync>,
 }
 
@@ -202,6 +207,7 @@ impl Api {
         artifacts: ArtifactService,
         targets: ProviderTargetConfig,
         pricing: PricingCatalog,
+        scheduler: Arc<dyn ExecutionScheduler>,
         now: impl Fn() -> String + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -209,6 +215,7 @@ impl Api {
             artifacts,
             targets,
             pricing,
+            scheduler,
             now: Arc::new(now),
         }
     }
@@ -255,6 +262,11 @@ impl Api {
             .get_execution_by_operation(&account.account_id, request.operation_key.trim())
         {
             Ok(existing) if immutable_request_matches(&existing, &request, &normalized_input) => {
+                if existing.status == "pending" {
+                    self.scheduler
+                        .schedule(&existing.execution_id)
+                        .map_err(|_| ApiError::internal())?;
+                }
                 return Ok(json_response(200, &execution_response(existing)?));
             }
             Ok(_) => return Err(ApiError::conflict()),
@@ -329,6 +341,9 @@ impl Api {
         if !immutable_params_match(&execution, &params) {
             return Err(ApiError::conflict());
         }
+        self.scheduler
+            .schedule(&execution.execution_id)
+            .map_err(|_| ApiError::internal())?;
         Ok(json_response(200, &execution_response(execution)?))
     }
 
@@ -517,10 +532,13 @@ fn canonicalize(value: &Value) -> Value {
 fn execution_response(execution: Execution) -> Result<ExecutionResponse, ApiError> {
     let status = match execution.status.as_str() {
         "pending" => ExecutionStatus::Pending,
-        "running" => ExecutionStatus::Running,
+        "preflighting" => ExecutionStatus::Preflighting,
+        "claimed" => ExecutionStatus::Claimed,
+        "executing" => ExecutionStatus::Executing,
+        "settling" => ExecutionStatus::Settling,
         "succeeded" => ExecutionStatus::Succeeded,
         "failed" => ExecutionStatus::Failed,
-        "canceled" => ExecutionStatus::Canceled,
+        "released" => ExecutionStatus::Released,
         "reconciliation_required" => ExecutionStatus::ReconciliationRequired,
         _ => return Err(ApiError::internal()),
     };
@@ -614,12 +632,22 @@ mod tests {
     use std::{io::Cursor, sync::Barrier, thread};
     use tempfile::TempDir;
 
+    #[derive(Default)]
+    struct Scheduler(std::sync::Mutex<Vec<String>>);
+    impl ExecutionScheduler for Scheduler {
+        fn schedule(&self, execution_id: &str) -> Result<(), String> {
+            self.0.lock().unwrap().push(execution_id.into());
+            Ok(())
+        }
+    }
+
     struct Fixture {
         api: Api,
         repository: Repository,
         artifacts: ArtifactService,
         owner: AuthenticatedAccount,
         other: AuthenticatedAccount,
+        scheduler: Arc<Scheduler>,
         _root: TempDir,
     }
 
@@ -659,18 +687,21 @@ mod tests {
             }"#,
         )
         .unwrap();
+        let scheduler = Arc::new(Scheduler::default());
         Fixture {
             api: Api::new(
                 repository.clone(),
                 artifacts.clone(),
                 targets,
                 pricing,
+                scheduler.clone(),
                 || "2026-08-05T20:00:00Z".into(),
             ),
             repository,
             artifacts,
             owner: AuthenticatedAccount::from_verified_claim("account-a").unwrap(),
             other: AuthenticatedAccount::from_verified_claim("account-b").unwrap(),
+            scheduler,
             _root: root,
         }
     }
@@ -728,6 +759,10 @@ mod tests {
         });
         let replay = execution(&call_create(&fixture, &reordered));
         assert_eq!(replay.execution_id, first.execution_id);
+        assert_eq!(
+            fixture.scheduler.0.lock().unwrap().as_slice(),
+            [first.execution_id.as_str(), first.execution_id.as_str()]
+        );
 
         let fetched = fixture.api.handle(
             "GET",
@@ -839,6 +874,7 @@ mod tests {
             fixture.artifacts.clone(),
             disabled_targets,
             changed_pricing,
+            fixture.scheduler.clone(),
             || "2026-08-06T00:00:00Z".into(),
         );
         let replay = restarted.handle(
@@ -880,6 +916,7 @@ mod tests {
             fixture.artifacts.clone(),
             changed_targets,
             changed_pricing,
+            fixture.scheduler.clone(),
             || "2026-08-06T00:00:00Z".into(),
         );
         let barrier = Arc::new(Barrier::new(2));
@@ -930,11 +967,13 @@ mod tests {
             }"#,
         )
         .unwrap();
+        let scheduler = fixture.scheduler.clone();
         let api = Api::new(
             fixture.repository,
             fixture.artifacts,
             targets,
             pricing,
+            scheduler,
             || "2026-08-06T00:00:00Z".into(),
         );
         let mut text_request = request("operation-text");
