@@ -532,22 +532,23 @@ fn execution_response(execution: Execution) -> Result<ExecutionResponse, ApiErro
         "reconciliation_required" => ExecutionStatus::ReconciliationRequired,
         _ => return Err(ApiError::internal()),
     };
-    let failure = execution.failure_code.map(|code| FailureResponse {
+    let failure = execution.failure_code.clone().map(|code| FailureResponse {
         code,
         message: execution
             .failure_message_redacted
+            .clone()
             .unwrap_or_else(|| "execution failed".into()),
     });
     Ok(ExecutionResponse {
         schema_version: SCHEMA_VERSION,
-        execution_id: execution.execution_id,
-        operation_key: execution.operation_key,
+        execution_id: execution.execution_id.clone(),
+        operation_key: execution.operation_key.clone(),
         status,
-        outcome: execution.outcome,
+        outcome: execution.outcome.clone(),
         failure,
         authorization: Money {
             amount_minor: execution.authorized_minor,
-            currency: execution.authorization_currency,
+            currency: execution.authorization_currency.clone(),
         },
         created_at: execution.created_at,
         updated_at: execution.updated_at,

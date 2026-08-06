@@ -790,7 +790,10 @@ mod tests {
         };
         let done = w.run(&e.execution_id, "now").unwrap();
         assert_eq!(done.status, "reconciliation_required");
-        assert_eq!(done.artifact_outcome.as_deref(), Some("failed"));
+        assert_eq!(
+            done.artifact_outcome,
+            Some(crate::execution::LifecycleOutcome::Failed)
+        );
         assert_eq!(h.settles.get(), 0);
     }
 
