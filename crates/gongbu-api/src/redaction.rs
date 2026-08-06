@@ -25,8 +25,12 @@ impl Redactor {
             .filter(|v| !v.is_empty())
             .flat_map(|value| {
                 let json = serde_json::to_string(value).expect("string serialization cannot fail");
-                let escaped = json[1..json.len() - 1].to_owned();
-                [value.to_owned(), escaped]
+                let debug = format!("{value:?}");
+                [
+                    value.to_owned(),
+                    json[1..json.len() - 1].to_owned(),
+                    debug[1..debug.len() - 1].to_owned(),
+                ]
             })
             .collect();
         exact.sort_by_key(|value| std::cmp::Reverse(value.len()));
@@ -163,6 +167,15 @@ mod tests {
             &serde_json::to_string(secret).unwrap()
                 [1..serde_json::to_string(secret).unwrap().len() - 1]
         );
+        let value = Redactor::new([secret.as_bytes()]).redact(&rendered);
+        assert!(!value.contains("canary"));
+        assert!(value.contains(REDACTED));
+    }
+
+    #[test]
+    fn rust_debug_control_character_renderings_are_redacted() {
+        let secret = "canary-\0-\u{1b}-secret";
+        let rendered = format!("SDK error: {secret:?}");
         let value = Redactor::new([secret.as_bytes()]).redact(&rendered);
         assert!(!value.contains("canary"));
         assert!(value.contains(REDACTED));
