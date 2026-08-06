@@ -15,6 +15,7 @@ use crate::{
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, ProviderTargetConfig},
     temporal::ExecutionScheduler,
+    workflow::{OperatorReconciliationRequest, ReconciliationAction},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -64,6 +65,15 @@ pub struct CreateExecutionRequest {
 pub struct Money {
     pub amount_minor: i64,
     pub currency: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconciliationRequest {
+    pub schema_version: u32,
+    pub action_id: String,
+    pub action: ReconciliationAction,
+    pub evidence: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -236,6 +246,9 @@ impl Api {
                     ("GET", ["v1", "executions", execution_id]) => {
                         self.get_execution(account, execution_id)
                     }
+                    ("POST", ["v1", "executions", execution_id, "reconciliation"]) => {
+                        self.reconcile(account, execution_id, body)
+                    }
                     ("GET", ["v1", "executions", execution_id, "artifacts"]) => {
                         self.list_artifacts(account, execution_id)
                     }
@@ -360,6 +373,37 @@ impl Api {
             return Err(ApiError::forbidden());
         }
         Ok(execution)
+    }
+
+    fn reconcile(
+        &self,
+        account: &AuthenticatedAccount,
+        execution_id: &str,
+        body: &[u8],
+    ) -> Result<HttpResponse, ApiError> {
+        let execution = self.authorized_execution(account, execution_id)?;
+        if execution.status != "reconciliation_required" {
+            return Err(ApiError::validation());
+        }
+        let request: ReconciliationRequest =
+            serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
+        if request.schema_version != SCHEMA_VERSION
+            || request.action_id.trim().is_empty()
+            || !request.evidence.is_object()
+        {
+            return Err(ApiError::validation());
+        }
+        self.scheduler
+            .reconcile(
+                execution_id,
+                OperatorReconciliationRequest {
+                    action_id: request.action_id,
+                    action: request.action,
+                    evidence: request.evidence,
+                },
+            )
+            .map_err(|_| ApiError::internal())?;
+        Ok(json_response(202, &execution_response(execution)?))
     }
 
     fn get_execution(
@@ -639,6 +683,17 @@ mod tests {
             self.0.lock().unwrap().push(execution_id.into());
             Ok(())
         }
+        fn reconcile(
+            &self,
+            execution_id: &str,
+            _: OperatorReconciliationRequest,
+        ) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("reconcile:{execution_id}"));
+            Ok(())
+        }
     }
 
     struct Fixture {
@@ -771,6 +826,97 @@ mod tests {
             &[],
         );
         assert_eq!(execution(&fetched), first);
+    }
+
+    #[test]
+    fn authenticated_operator_reconciliation_signals_stable_execution() {
+        let fixture = fixture();
+        let created: ExecutionResponse = serde_json::from_slice(
+            &fixture
+                .api
+                .handle(
+                    "POST",
+                    "/v1/executions",
+                    Some(&fixture.owner),
+                    &serde_json::to_vec(&request("operator-signal")).unwrap(),
+                )
+                .body,
+        )
+        .unwrap();
+        let pending = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        let pre = fixture
+            .repository
+            .update_execution(
+                &pending.execution_id,
+                pending.version,
+                &crate::execution::ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("now".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "now",
+            )
+            .unwrap();
+        fixture
+            .repository
+            .update_execution(
+                &pre.execution_id,
+                pre.version,
+                &crate::execution::ExecutionUpdate {
+                    status: "reconciliation_required".into(),
+                    outcome: Some("ambiguous".into()),
+                    started_at: None,
+                    completed_at: None,
+                    failure_code: Some("ambiguous".into()),
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "later",
+            )
+            .unwrap();
+        let body=serde_json::to_vec(&json!({"schema_version":1,"action_id":"op-1","action":"reinspect","evidence":{"source":"operator"}})).unwrap();
+        assert_eq!(
+            fixture
+                .api
+                .handle(
+                    "POST",
+                    &format!("/v1/executions/{}/reconciliation", created.execution_id),
+                    Some(&fixture.other),
+                    &body
+                )
+                .status,
+            403
+        );
+        assert_eq!(
+            fixture
+                .api
+                .handle(
+                    "POST",
+                    &format!("/v1/executions/{}/reconciliation", created.execution_id),
+                    Some(&fixture.owner),
+                    &body
+                )
+                .status,
+            202
+        );
+        assert!(fixture
+            .scheduler
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v == &format!("reconcile:{}", created.execution_id)));
     }
 
     #[test]

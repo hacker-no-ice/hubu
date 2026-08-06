@@ -269,6 +269,19 @@ pub struct Receipt {
     pub settled_at: Option<String>,
     pub hubu_settlement_id: Option<String>,
 }
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReconciliationRecord {
+    pub execution_id: String,
+    pub evidence: Value,
+    pub last_confirmed_step: String,
+    pub entered_at: String,
+    pub updated_at: String,
+    pub automatic_attempts: i64,
+    pub last_automatic_attempt_at: Option<String>,
+    pub automatic_attempts_exhausted: bool,
+    pub last_operator_action_id: Option<String>,
+    pub last_operator_action: Option<String>,
+}
 #[derive(Clone)]
 pub struct Repository(Arc<Mutex<Connection>>, Arc<Redactor>);
 impl Repository {
@@ -440,6 +453,20 @@ impl Repository {
         let c = self.0.lock().unwrap();
         let changed = c.execute("UPDATE executions SET status='claimed',updated_at=?1,version=version+1 WHERE execution_id=?2 AND version=?3 AND status='preflighting' AND hubu_claim_id IS NOT NULL", params![at,id,expected])?;
         if changed == 0 {
+            return Err(Error::Stale);
+        }
+        query_id(&c, id)
+    }
+    pub fn set_reconciliation_claim(
+        &self,
+        id: &str,
+        expected: i64,
+        claim_id: &str,
+        at: &str,
+    ) -> Result<Execution> {
+        let c = self.0.lock().unwrap();
+        let changed=c.execute("UPDATE executions SET hubu_claim_id=?1,updated_at=?2,version=version+1 WHERE execution_id=?3 AND version=?4 AND status='reconciliation_required' AND hubu_claim_id IS NULL",params![claim_id,at,id,expected])?;
+        if changed != 1 {
             return Err(Error::Stale);
         }
         query_id(&c, id)
@@ -862,6 +889,78 @@ impl Repository {
             Err(Error::Stale)
         }
     }
+    pub fn record_reconciliation(
+        &self,
+        execution: &Execution,
+        last_confirmed_step: &str,
+        redacted_error: Option<&str>,
+        at: &str,
+    ) -> Result<ReconciliationRecord> {
+        let attempt = self
+            .get_provider_attempt_for_execution(&execution.execution_id)
+            .ok();
+        let receipt = self.get_receipt_for_execution(&execution.execution_id).ok();
+        let artifacts = self.count_artifacts_for_execution(&execution.execution_id)?;
+        let evidence = serde_json::json!({
+            "execution_id": execution.execution_id,
+            "provider_attempt_id": attempt.as_ref().map(|a| &a.provider_attempt_id),
+            "provider_request_id": attempt.as_ref().and_then(|a| a.provider_request_id.as_ref()),
+            "provider_operation_id": attempt.as_ref().and_then(|a| a.provider_operation_id.as_ref()),
+            "timestamps": {"created_at": execution.created_at, "updated_at": at, "started_at": execution.started_at, "attempt_started_at": attempt.as_ref().map(|a| &a.started_at), "transmission_started_at": attempt.as_ref().and_then(|a| a.transmission_started_at.as_ref()), "attempt_completed_at": attempt.as_ref().and_then(|a| a.completed_at.as_ref())},
+            "last_confirmed_step": last_confirmed_step,
+            "redacted_error": redacted_error.map(|v| self.1.redact(v)),
+            "pricing_snapshot": execution.pricing_snapshot,
+            "authorization": {"account_id": execution.account_id, "operation_key": execution.operation_key, "authorization_id": execution.hubu_authorization_id, "claim_id": execution.hubu_claim_id, "authorized_minor": execution.authorized_minor, "currency": execution.authorization_currency},
+            "provider_outcome": attempt.as_ref().map(|a| &a.outcome),
+            "usage": attempt.as_ref().and_then(|a| a.usage.as_ref()),
+            "receipt": receipt.as_ref().map(|r| serde_json::json!({"receipt_id":r.receipt_id,"settlement_minor":r.settlement_minor,"currency":r.currency,"transmission_started_at":r.transmission_started_at,"settled_at":r.settled_at,"hubu_settlement_id":r.hubu_settlement_id})),
+            "artifact_count": artifacts
+        });
+        self.reject_registered_json([&evidence])?;
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT INTO reconciliation_records(execution_id,evidence_json,evidence_schema_version,last_confirmed_step,entered_at,updated_at) VALUES(?1,?2,1,?3,?4,?4) ON CONFLICT(execution_id) DO UPDATE SET evidence_json=excluded.evidence_json,last_confirmed_step=excluded.last_confirmed_step,updated_at=excluded.updated_at", params![execution.execution_id,j(&evidence),last_confirmed_step,at])?;
+        drop(c);
+        self.get_reconciliation(&execution.execution_id)
+    }
+    pub fn get_reconciliation(&self, execution_id: &str) -> Result<ReconciliationRecord> {
+        self.0.lock().unwrap().query_row("SELECT execution_id,evidence_json,last_confirmed_step,entered_at,updated_at,automatic_attempts,last_automatic_attempt_at,automatic_attempts_exhausted,last_operator_action_id,last_operator_action FROM reconciliation_records WHERE execution_id=?1",[execution_id],|r| { let evidence:String=r.get(1)?; Ok(ReconciliationRecord { execution_id:r.get(0)?, evidence:serde_json::from_str(&evidence).map_err(|e| rusqlite::Error::FromSqlConversionFailure(evidence.len(),rusqlite::types::Type::Text,Box::new(e)))?, last_confirmed_step:r.get(2)?,entered_at:r.get(3)?,updated_at:r.get(4)?,automatic_attempts:r.get(5)?,last_automatic_attempt_at:r.get(6)?,automatic_attempts_exhausted:r.get::<_,i64>(7)? != 0,last_operator_action_id:r.get(8)?,last_operator_action:r.get(9)? }) }).optional()?.ok_or(Error::NotFound)
+    }
+    pub fn mark_recovery_attempt(
+        &self,
+        execution_id: &str,
+        at: &str,
+        exhausted: bool,
+    ) -> Result<ReconciliationRecord> {
+        let changed=self.0.lock().unwrap().execute("UPDATE reconciliation_records SET automatic_attempts=automatic_attempts+1,last_automatic_attempt_at=?1,automatic_attempts_exhausted=?2,updated_at=?1 WHERE execution_id=?3",params![at,i64::from(exhausted),execution_id])?;
+        if changed != 1 {
+            return Err(Error::NotFound);
+        }
+        self.get_reconciliation(execution_id)
+    }
+    pub fn record_operator_action(
+        &self,
+        execution_id: &str,
+        action_id: &str,
+        action: &str,
+        evidence: &Value,
+        at: &str,
+    ) -> Result<bool> {
+        let redacted_evidence = self.1.redact(&j(evidence));
+        let redacted_evidence: Value = serde_json::from_str(&redacted_evidence)
+            .map_err(|_| Error::Invalid("operator evidence"))?;
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let inserted=tx.execute("INSERT OR IGNORE INTO reconciliation_operator_actions(execution_id,action_id,action,evidence_json,created_at) VALUES(?1,?2,?3,?4,?5)",params![execution_id,action_id,action,j(&redacted_evidence),at])?;
+        if inserted == 0 {
+            return Ok(false);
+        }
+        let changed=tx.execute("UPDATE reconciliation_records SET last_operator_action_id=?1,last_operator_action=?2,updated_at=?3 WHERE execution_id=?4",params![action_id,action,at,execution_id])?;
+        if changed != 1 {
+            return Err(Error::NotFound);
+        }
+        tx.commit()?;
+        Ok(true)
+    }
     #[cfg(test)]
     fn count(&self, t: &str) -> i64 {
         self.0
@@ -1130,14 +1229,8 @@ fn status(s: &str) -> Result<()> {
         Err(Error::Invalid("status"))
     }
 }
-fn terminal(status: &str) -> bool {
-    matches!(
-        status,
-        "succeeded" | "released" | "failed" | "reconciliation_required"
-    )
-}
 fn allowed_transition(from: &str, to: &str) -> bool {
-    if terminal(from) {
+    if matches!(from, "succeeded" | "released" | "failed") {
         return false;
     }
     matches!(
@@ -1155,6 +1248,9 @@ fn allowed_transition(from: &str, to: &str) -> bool {
             | ("executing", "reconciliation_required")
             | ("settling", "succeeded")
             | ("settling", "reconciliation_required")
+            | ("reconciliation_required", "succeeded")
+            | ("reconciliation_required", "released")
+            | ("reconciliation_required", "settling")
     )
 }
 fn j(v: &Value) -> String {

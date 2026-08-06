@@ -20,8 +20,14 @@ limits, and never exposes absolute filesystem paths.
 
 The workflow drives one persisted execution through preflight, claim, one
 durably recorded provider attempt, normalized artifact persistence, and Hubu
-settlement or safe release. Ambiguous post-boundary outcomes stop in
-`reconciliation_required`; they are never blindly retried or released.
+settlement or safe release. Ambiguous post-boundary outcomes enter
+`reconciliation_required`; they are never blindly retried or released. Temporal
+retains the workflow and performs only bounded same-identity Hubu observation
+or finalization after durable timers. The default recovery delays are 30, 120,
+and 600 seconds and may be replaced at workflow start with
+`GONGBU_RECONCILIATION_DELAYS_SECONDS` (a comma-separated positive list). After
+the schedule is exhausted, the workflow remains alive for authenticated
+operator signals and the recovery path never invokes the provider.
 Artifact validation and durable publication occur while the execution remains
 `executing`; it transitions directly to `settling` only after durability is
 confirmed. The former `persisting` state was never merged, stored by a shipped
@@ -54,7 +60,13 @@ The authoritative v1 routes are:
 - `POST /v1/executions`
 - `GET /v1/executions/{execution_id}`
 - `GET /v1/executions/{execution_id}/artifacts`
+- `POST /v1/executions/{execution_id}/reconciliation`
 - `GET /v1/artifacts/{artifact_id}`
+
+The reconciliation route accepts an idempotent `action_id`, an action of
+`reinspect`, `settle`, or `release`, and an evidence object. It only signals the
+stable Temporal workflow. Settlement or release proceeds only when persisted
+execution evidence proves that finalization is safe.
 
 Transport adapters validate authentication before constructing the trusted
 account principal; request bodies cannot override it. Accepted v1 executions

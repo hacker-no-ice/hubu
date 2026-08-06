@@ -30,3 +30,14 @@ CREATE TABLE IF NOT EXISTS receipts(
  provider_attempt_id TEXT NOT NULL UNIQUE REFERENCES provider_attempts ON DELETE RESTRICT, settlement_minor INTEGER NOT NULL CHECK(settlement_minor>=0),
  currency TEXT NOT NULL CHECK(length(currency)=3), pricing_catalog_version TEXT NOT NULL, created_at TEXT NOT NULL, transmission_started_at TEXT, settled_at TEXT, hubu_settlement_id TEXT UNIQUE);
 CREATE INDEX IF NOT EXISTS receipts_settlement ON receipts(hubu_settlement_id) WHERE hubu_settlement_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS reconciliation_records(
+ execution_id TEXT PRIMARY KEY REFERENCES executions ON DELETE CASCADE,
+ evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)), evidence_schema_version INTEGER NOT NULL CHECK(evidence_schema_version>0),
+ last_confirmed_step TEXT NOT NULL, entered_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ automatic_attempts INTEGER NOT NULL DEFAULT 0 CHECK(automatic_attempts>=0),
+ last_automatic_attempt_at TEXT, automatic_attempts_exhausted INTEGER NOT NULL DEFAULT 0 CHECK(automatic_attempts_exhausted IN (0,1)),
+ last_operator_action_id TEXT, last_operator_action TEXT);
+CREATE TABLE IF NOT EXISTS reconciliation_operator_actions(
+ execution_id TEXT NOT NULL REFERENCES reconciliation_records ON DELETE CASCADE,
+ action_id TEXT NOT NULL, action TEXT NOT NULL, evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)), created_at TEXT NOT NULL,
+ PRIMARY KEY(execution_id,action_id));

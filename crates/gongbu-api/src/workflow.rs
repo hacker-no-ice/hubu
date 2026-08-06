@@ -9,6 +9,7 @@ use crate::{
     },
     provider_contract::{NormalizedUsage, PricingSnapshot},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::to_value;
 use thiserror::Error;
 
@@ -77,6 +78,21 @@ pub struct ExecutionWorkflow<'a> {
     pub hubu: &'a dyn HubuActivities,
     pub provider: &'a dyn ProviderActivities,
     pub artifacts: &'a dyn ArtifactActivities,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationAction {
+    Reinspect,
+    Settle,
+    Release,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OperatorReconciliationRequest {
+    pub action_id: String,
+    pub action: ReconciliationAction,
+    pub evidence: serde_json::Value,
 }
 
 impl ExecutionWorkflow<'_> {
@@ -447,6 +463,129 @@ impl ExecutionWorkflow<'_> {
             }
         }
     }
+    pub fn recover(
+        &self,
+        execution_id: &str,
+        now: &str,
+        operator: Option<&OperatorReconciliationRequest>,
+    ) -> Result<Execution, WorkflowError> {
+        let mut execution = self.repository.get_execution(execution_id)?;
+        if execution.status != "reconciliation_required" {
+            return Ok(execution);
+        }
+        if let Some(request) = operator {
+            if request.action_id.trim().is_empty() || !request.evidence.is_object() {
+                return Ok(execution);
+            }
+            if !self.repository.record_operator_action(
+                execution_id,
+                &request.action_id,
+                match request.action {
+                    ReconciliationAction::Reinspect => "reinspect",
+                    ReconciliationAction::Settle => "settle",
+                    ReconciliationAction::Release => "release",
+                },
+                &request.evidence,
+                now,
+            )? {
+                return Ok(execution);
+            }
+        }
+        let attempt = self
+            .repository
+            .get_provider_attempt_for_execution(execution_id)
+            .ok();
+        let receipt = self.repository.get_receipt_for_execution(execution_id).ok();
+        let requested = operator.map(|r| &r.action);
+
+        // Ambiguous claim delivery is safely replayable because the immutable
+        // account/operation/authorization identity is preserved. A recovered
+        // claim is persisted before any release is attempted.
+        if attempt.is_none() && execution.hubu_claim_id.is_none() {
+            match self.hubu.claim(&execution) {
+                Ok(claim_id) => {
+                    execution = self.repository.set_reconciliation_claim(
+                        execution_id,
+                        execution.version,
+                        &claim_id,
+                        now,
+                    )?;
+                    self.repository.record_reconciliation(
+                        &execution,
+                        "claim_recovered",
+                        None,
+                        now,
+                    )?;
+                }
+                Err(_) => return Ok(execution),
+            }
+        }
+
+        // A durable succeeded attempt, durable artifacts, frozen usage/cost, and stable
+        // receipt prove that replaying the same Hubu settlement cannot create provider work.
+        if !matches!(requested, Some(ReconciliationAction::Release)) {
+            if let (Some(attempt), Some(receipt)) = (&attempt, &receipt) {
+                if attempt.outcome == "succeeded"
+                    && attempt.usage.is_some()
+                    && self
+                        .repository
+                        .count_artifacts_for_attempt(&attempt.provider_attempt_id)?
+                        > 0
+                {
+                    match self.hubu.settle(
+                        &execution,
+                        &receipt.receipt_id,
+                        receipt.settlement_minor,
+                    ) {
+                        Ok(settlement_id) => {
+                            if receipt.settled_at.is_none() {
+                                self.repository.complete_receipt(
+                                    &receipt.receipt_id,
+                                    &settlement_id,
+                                    now,
+                                )?;
+                            }
+                            return self.transition(
+                                &execution,
+                                "succeeded",
+                                Some("succeeded"),
+                                now,
+                                Some("succeeded"),
+                                Some("succeeded"),
+                                Some("succeeded"),
+                            );
+                        }
+                        Err(_) => return Ok(execution),
+                    }
+                }
+            }
+        }
+
+        // Release is proven safe only before provider transmission, or after a
+        // completed proven provider failure. Ambiguous/transmitted work is held.
+        let safe_release = match &attempt {
+            None => execution.hubu_claim_id.is_some(),
+            Some(a) => {
+                a.transmission_started_at.is_none()
+                    || (a.outcome == "failed" && a.completed_at.is_some())
+            }
+        };
+        if safe_release
+            && !matches!(requested, Some(ReconciliationAction::Settle))
+            && self.hubu.release(&execution).is_ok()
+        {
+            return self.transition(
+                &execution,
+                "released",
+                Some("recovered_release"),
+                now,
+                attempt.as_ref().map(|_| "failed"),
+                None,
+                Some("released"),
+            );
+        }
+        Ok(execution)
+    }
     fn preflight(&self, e: &Execution) -> Result<(), ActivityError> {
         self.hubu.preflight(e)?;
         self.provider.preflight(e)?;
@@ -592,14 +731,14 @@ impl ExecutionWorkflow<'_> {
         artifact: Option<&str>,
         settlement: Option<&str>,
     ) -> Result<Execution, WorkflowError> {
-        Ok(self.repository.update_execution(
+        let updated = self.repository.update_execution(
             &e.execution_id,
             e.version,
             &ExecutionUpdate {
                 status: status.into(),
                 outcome: outcome.map(str::to_owned),
                 started_at: Some(now.into()),
-                completed_at: terminal(status).then(|| now.into()),
+                completed_at: final_terminal(status).then(|| now.into()),
                 failure_code: outcome
                     .filter(|_| matches!(status, "failed" | "reconciliation_required"))
                     .map(str::to_owned),
@@ -609,7 +748,12 @@ impl ExecutionWorkflow<'_> {
                 settlement_outcome: settlement.map(typed_outcome),
             },
             now,
-        )?)
+        )?;
+        if status == "reconciliation_required" {
+            self.repository
+                .record_reconciliation(&updated, e.status.as_str(), outcome, now)?;
+        }
+        Ok(updated)
     }
 }
 fn typed_outcome(value: &str) -> crate::execution::LifecycleOutcome {
@@ -642,6 +786,9 @@ fn terminal(s: &str) -> bool {
         s,
         "succeeded" | "released" | "failed" | "reconciliation_required"
     )
+}
+fn final_terminal(s: &str) -> bool {
+    matches!(s, "succeeded" | "released" | "failed")
 }
 
 #[cfg(test)]
@@ -1020,6 +1167,178 @@ mod tests {
             "reconciliation_required"
         );
         assert_eq!(h.settles.get(), 1);
+    }
+
+    #[test]
+    fn lost_hubu_finalization_response_converges_with_same_receipt() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "recover-settle");
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        h.panic_on_settle.set(true);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            w.run(&e.execution_id, "now")
+        }));
+        assert_eq!(
+            w.run(&e.execution_id, "restart").unwrap().status,
+            "reconciliation_required"
+        );
+        let receipt_id = repo
+            .get_receipt_for_execution(&e.execution_id)
+            .unwrap()
+            .receipt_id;
+        let done = w.recover(&e.execution_id, "timer", None).unwrap();
+        assert_eq!(done.status, "succeeded");
+        assert_eq!(h.settles.get(), 2);
+        assert_eq!(
+            repo.get_receipt_for_execution(&e.execution_id)
+                .unwrap()
+                .receipt_id,
+            receipt_id
+        );
+        assert_eq!(p.calls.get(), 1);
+    }
+
+    #[test]
+    fn transmitted_ambiguity_remains_signalable_without_provider_or_release() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "hold-ambiguous");
+        let h = Hubu::default();
+        let p = Provider::default();
+        p.error.replace(Some(ActivityError::AmbiguousWithEvidence {
+            code: "timeout".into(),
+            request_id: Some("req-1".into()),
+            operation_id: Some("op-1".into()),
+        }));
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        assert_eq!(
+            w.run(&e.execution_id, "now").unwrap().status,
+            "reconciliation_required"
+        );
+        for n in 0..3 {
+            assert_eq!(
+                w.recover(&e.execution_id, &format!("timer-{n}"), None)
+                    .unwrap()
+                    .status,
+                "reconciliation_required"
+            );
+        }
+        let request = OperatorReconciliationRequest {
+            action_id: "action-1".into(),
+            action: ReconciliationAction::Release,
+            evidence: json!({"provider_outcome":"unknown"}),
+        };
+        w.recover(&e.execution_id, "operator", Some(&request))
+            .unwrap();
+        let second = OperatorReconciliationRequest {
+            action_id: "action-2".into(),
+            action: ReconciliationAction::Reinspect,
+            evidence: json!({"provider_outcome":"unknown"}),
+        };
+        w.recover(&e.execution_id, "operator-second", Some(&second))
+            .unwrap();
+        w.recover(&e.execution_id, "operator-duplicate", Some(&request))
+            .unwrap();
+        assert_eq!(p.calls.get(), 1);
+        assert_eq!(h.releases.get(), 0);
+        assert_eq!(
+            repo.get_reconciliation(&e.execution_id)
+                .unwrap()
+                .last_operator_action_id
+                .as_deref(),
+            Some("action-2")
+        );
+        let evidence = repo.get_reconciliation(&e.execution_id).unwrap().evidence;
+        assert_eq!(evidence["provider_request_id"], "req-1");
+        assert_eq!(evidence["provider_operation_id"], "op-1");
+        assert!(evidence["pricing_snapshot"].is_object());
+        assert!(evidence["authorization"].is_object());
+    }
+
+    #[test]
+    fn pre_transmission_crash_releases_without_provider_work() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "before-send");
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        let pre = repo
+            .update_execution(
+                &e.execution_id,
+                e.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("now".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "now",
+            )
+            .unwrap();
+        let claimed = repo
+            .set_claim(&e.execution_id, pre.version, "claim-1", "now")
+            .unwrap();
+        repo.start_provider_attempt(&claimed, "now").unwrap();
+        let executing = repo.get_execution(&e.execution_id).unwrap();
+        let held = repo
+            .update_execution(
+                &e.execution_id,
+                executing.version,
+                &ExecutionUpdate {
+                    status: "reconciliation_required".into(),
+                    outcome: Some("worker_lost_before_send".into()),
+                    started_at: None,
+                    completed_at: None,
+                    failure_code: Some("worker_lost_before_send".into()),
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "later",
+            )
+            .unwrap();
+        repo.record_reconciliation(&held, "executing", Some("worker_lost_before_send"), "later")
+            .unwrap();
+        assert_eq!(
+            w.recover(&e.execution_id, "timer", None).unwrap().status,
+            "released"
+        );
+        assert_eq!(p.calls.get(), 0);
+        assert_eq!(h.releases.get(), 1);
     }
     #[test]
     fn empty_provider_artifacts_reconcile_without_settlement() {

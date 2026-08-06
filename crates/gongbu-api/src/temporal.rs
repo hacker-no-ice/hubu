@@ -6,23 +6,33 @@
 
 use crate::{
     execution::Repository,
-    workflow::{ArtifactActivities, ExecutionWorkflow, HubuActivities, ProviderActivities},
+    workflow::{
+        ArtifactActivities, ExecutionWorkflow, HubuActivities, OperatorReconciliationRequest,
+        ProviderActivities,
+    },
 };
 use futures::{channel::oneshot, future::poll_fn, Future};
+use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
-use temporalio_client::{Client, WorkflowStartOptions};
+use temporalio_client::{Client, WorkflowSignalOptions, WorkflowStartOptions};
 use temporalio_common_wasm::protos::temporal::api::enums::v1::WorkflowIdConflictPolicy;
 use temporalio_macros::{activities, workflow, workflow_methods};
 use temporalio_sdk::{
     activities::{ActivityContext, ActivityError},
-    ActivityOptions, ApplicationFailure, Runtime, Worker, WorkerOptions, WorkflowContext,
-    WorkflowResult,
+    ActivityOptions, ApplicationFailure, Runtime, SyncWorkflowContext, Worker, WorkerOptions,
+    WorkflowContext, WorkflowContextView, WorkflowResult,
 };
 
 pub const EXECUTION_TASK_QUEUE: &str = "gongbu-executions";
 
 pub trait DurableExecutionRunner: Send + Sync + 'static {
     fn run_execution(&self, execution_id: &str) -> Result<String, String>;
+    fn recover_execution(
+        &self,
+        execution_id: &str,
+        operator: Option<&OperatorReconciliationRequest>,
+        exhausted: bool,
+    ) -> Result<String, String>;
 }
 
 pub struct PersistedExecutionRunner {
@@ -63,24 +73,120 @@ impl DurableExecutionRunner for PersistedExecutionRunner {
         .map(|execution| execution.status)
         .map_err(|error| error.to_string())
     }
+    fn recover_execution(
+        &self,
+        execution_id: &str,
+        operator: Option<&OperatorReconciliationRequest>,
+        exhausted: bool,
+    ) -> Result<String, String> {
+        if operator.is_none() {
+            self.repository
+                .mark_recovery_attempt(execution_id, &(self.now)(), exhausted)
+                .map_err(|e| e.to_string())?;
+        }
+        ExecutionWorkflow {
+            repository: &self.repository,
+            hubu: self.hubu.as_ref(),
+            provider: self.provider.as_ref(),
+            artifacts: self.artifacts.as_ref(),
+        }
+        .recover(execution_id, &(self.now)(), operator)
+        .map(|e| e.status)
+        .map_err(|e| e.to_string())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ExecutionWorkflowInput {
+    pub execution_id: String,
+    pub recovery_delays_seconds: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RecoveryActivityInput {
+    pub execution_id: String,
+    pub operator: Option<OperatorReconciliationRequest>,
+    pub exhausted: bool,
 }
 
 #[workflow]
 #[derive(Default)]
-pub struct DurableExecutionWorkflow;
+pub struct DurableExecutionWorkflow {
+    pending: Vec<OperatorReconciliationRequest>,
+}
 
 #[workflow_methods]
 impl DurableExecutionWorkflow {
     #[run]
     pub async fn run(
         ctx: &mut WorkflowContext<Self>,
-        execution_id: String,
+        input: ExecutionWorkflowInput,
     ) -> WorkflowResult<String> {
         let options = ActivityOptions::start_to_close_timeout(Duration::from_secs(300));
-        let status = ctx
-            .execute_activity(ExecutionActivities::run_execution, execution_id, options)
+        let mut status = ctx
+            .execute_activity(
+                ExecutionActivities::run_execution,
+                input.execution_id.clone(),
+                options.clone(),
+            )
             .await?;
-        Ok(status)
+        if status != "reconciliation_required" {
+            return Ok(status);
+        }
+        let delay_count = input.recovery_delays_seconds.len();
+        for (index, delay) in input.recovery_delays_seconds.into_iter().enumerate() {
+            temporalio_sdk::workflows::select! {
+                _ = ctx.timer(Duration::from_secs(delay)) => {}
+                _ = ctx.wait_condition(|s: &Self| !s.pending.is_empty()) => {}
+            }
+            let operator = ctx.state_mut(|s| s.pending.pop());
+            status = ctx
+                .execute_activity(
+                    ExecutionActivities::recover_execution,
+                    RecoveryActivityInput {
+                        execution_id: input.execution_id.clone(),
+                        exhausted: operator.is_none() && index + 1 == delay_count,
+                        operator,
+                    },
+                    options.clone(),
+                )
+                .await?;
+            if status != "reconciliation_required" {
+                return Ok(status);
+            }
+        }
+        loop {
+            ctx.wait_condition(|s: &Self| !s.pending.is_empty()).await;
+            let operator = ctx.state_mut(|s| s.pending.pop());
+            status = ctx
+                .execute_activity(
+                    ExecutionActivities::recover_execution,
+                    RecoveryActivityInput {
+                        execution_id: input.execution_id.clone(),
+                        operator,
+                        exhausted: false,
+                    },
+                    options.clone(),
+                )
+                .await?;
+            if status != "reconciliation_required" {
+                return Ok(status);
+            }
+        }
+    }
+
+    #[signal]
+    pub fn reconcile(
+        &mut self,
+        _ctx: &mut SyncWorkflowContext<Self>,
+        request: OperatorReconciliationRequest,
+    ) {
+        self.pending.push(request);
+    }
+
+    #[query]
+    pub fn pending_reconciliation_actions(&self, _ctx: &WorkflowContextView) -> usize {
+        self.pending.len()
     }
 }
 
@@ -97,6 +203,28 @@ impl ExecutionActivities {
 
 #[activities]
 impl ExecutionActivities {
+    #[activity]
+    pub async fn recover_execution(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        input: RecoveryActivityInput,
+    ) -> Result<String, ActivityError> {
+        let runner = Arc::clone(&self.runner);
+        tokio::task::spawn_blocking(move || {
+            runner.recover_execution(
+                &input.execution_id,
+                input.operator.as_ref(),
+                input.exhausted,
+            )
+        })
+        .await
+        .map_err(|e| {
+            ActivityError::application(ApplicationFailure::new(std::io::Error::other(
+                e.to_string(),
+            )))
+        })?
+        .map_err(|m| ActivityError::application(ApplicationFailure::new(std::io::Error::other(m))))
+    }
     #[activity]
     pub async fn run_execution(
         self: Arc<Self>,
@@ -141,6 +269,11 @@ pub async fn run_worker(
 
 pub trait ExecutionScheduler: Send + Sync + 'static {
     fn schedule(&self, execution_id: &str) -> Result<(), String>;
+    fn reconcile(
+        &self,
+        execution_id: &str,
+        request: OperatorReconciliationRequest,
+    ) -> Result<(), String>;
 }
 
 #[derive(Clone)]
@@ -155,7 +288,14 @@ impl TemporalExecutionScheduler {
 }
 
 type ScheduleResult = Result<(), String>;
-type ScheduleRequest = (String, std::sync::mpsc::SyncSender<ScheduleResult>);
+enum SchedulerCommand {
+    Start(String),
+    Reconcile(String, OperatorReconciliationRequest),
+}
+type ScheduleRequest = (
+    SchedulerCommand,
+    std::sync::mpsc::SyncSender<ScheduleResult>,
+);
 
 pub struct StartedTemporalWorker {
     pub scheduler: Arc<TemporalExecutionScheduler>,
@@ -240,9 +380,18 @@ pub fn start_worker(
                 .enable_all()
                 .build();
             let Ok(runtime) = runtime else { return };
-            while let Ok((execution_id, response)) = request_rx.recv() {
-                let result =
-                    runtime.block_on(start_execution(scheduler_client.clone(), execution_id));
+            while let Ok((command, response)) = request_rx.recv() {
+                let result = runtime.block_on(async {
+                    match command {
+                        SchedulerCommand::Start(execution_id) => {
+                            start_execution(scheduler_client.clone(), execution_id).await
+                        }
+                        SchedulerCommand::Reconcile(execution_id, request) => {
+                            signal_reconciliation(scheduler_client.clone(), execution_id, request)
+                                .await
+                        }
+                    }
+                });
                 let _ = response.send(result);
             }
         })?;
@@ -261,19 +410,53 @@ impl ExecutionScheduler for TemporalExecutionScheduler {
     fn schedule(&self, execution_id: &str) -> Result<(), String> {
         let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
         self.requests
-            .send((execution_id.to_owned(), response_tx))
+            .send((
+                SchedulerCommand::Start(execution_id.to_owned()),
+                response_tx,
+            ))
             .map_err(|_| "Temporal scheduler stopped".to_owned())?;
         response_rx
             .recv()
             .map_err(|_| "Temporal scheduler stopped".to_owned())?
     }
+    fn reconcile(
+        &self,
+        execution_id: &str,
+        request: OperatorReconciliationRequest,
+    ) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.requests
+            .send((
+                SchedulerCommand::Reconcile(execution_id.to_owned(), request),
+                tx,
+            ))
+            .map_err(|_| "Temporal scheduler stopped".to_owned())?;
+        rx.recv()
+            .map_err(|_| "Temporal scheduler stopped".to_owned())?
+    }
+}
+
+fn recovery_delays_seconds() -> Vec<u64> {
+    std::env::var("GONGBU_RECONCILIATION_DELAYS_SECONDS")
+        .ok()
+        .and_then(|v| {
+            let parsed: Option<Vec<u64>> = v
+                .split(',')
+                .map(|p| p.trim().parse::<u64>().ok().filter(|n| *n > 0))
+                .collect();
+            parsed.filter(|v| !v.is_empty() && v.len() <= 8)
+        })
+        .unwrap_or_else(|| vec![30, 120, 600])
 }
 
 async fn start_execution(client: Client, execution_id: String) -> ScheduleResult {
     client
         .start_workflow(
             DurableExecutionWorkflow::run,
-            execution_id.clone(),
+            ExecutionWorkflowInput {
+                execution_id: execution_id.clone(),
+                recovery_delays_seconds: recovery_delays_seconds(),
+            },
             WorkflowStartOptions::new(
                 EXECUTION_TASK_QUEUE,
                 format!("gongbu-execution-{execution_id}"),
@@ -286,6 +469,22 @@ async fn start_execution(client: Client, execution_id: String) -> ScheduleResult
         .map_err(|error| error.to_string())
 }
 
+async fn signal_reconciliation(
+    client: Client,
+    execution_id: String,
+    request: OperatorReconciliationRequest,
+) -> ScheduleResult {
+    client
+        .get_workflow_handle::<DurableExecutionWorkflow>(format!("gongbu-execution-{execution_id}"))
+        .signal(
+            DurableExecutionWorkflow::reconcile,
+            request,
+            WorkflowSignalOptions::default(),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +493,14 @@ mod tests {
     impl DurableExecutionRunner for Runner {
         fn run_execution(&self, _: &str) -> Result<String, String> {
             Ok("succeeded".into())
+        }
+        fn recover_execution(
+            &self,
+            _: &str,
+            _: Option<&OperatorReconciliationRequest>,
+            _: bool,
+        ) -> Result<String, String> {
+            Ok("reconciliation_required".into())
         }
     }
 
