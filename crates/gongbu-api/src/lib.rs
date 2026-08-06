@@ -1,5 +1,6 @@
 //! Gongbu API domain modules.
 
+pub mod application;
 pub mod artifact;
 pub mod config;
 pub mod execution;

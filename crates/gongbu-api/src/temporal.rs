@@ -149,6 +149,13 @@ impl TemporalExecutionScheduler {
 pub struct StartedTemporalWorker {
     pub scheduler: Arc<TemporalExecutionScheduler>,
     pub thread: std::thread::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    shutdown: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl StartedTemporalWorker {
+    pub fn shutdown(&self) {
+        (self.shutdown)();
+    }
 }
 
 pub fn start_worker(
@@ -157,23 +164,34 @@ pub fn start_worker(
     runner: Arc<dyn DurableExecutionRunner>,
 ) -> Result<StartedTemporalWorker, Box<dyn std::error::Error + Send + Sync>> {
     let scheduler_client = client.clone();
-    let (handle_tx, handle_rx) = std::sync::mpsc::sync_channel(1);
+    let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
     let thread = std::thread::Builder::new()
         .name("gongbu-temporal-worker".into())
         .spawn(move || {
             let tokio_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            handle_tx
-                .send(tokio_runtime.handle().clone())
+            let mut worker = Worker::new(&runtime, client, worker_options(runner))
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let shutdown: Arc<dyn Fn() + Send + Sync> = Arc::new(worker.shutdown_handle());
+            startup_tx
+                .send((tokio_runtime.handle().clone(), shutdown))
                 .map_err(|_| std::io::Error::other("worker startup receiver dropped"))?;
-            tokio_runtime.block_on(run_worker(&runtime, client, runner))
+            tokio_runtime.block_on(async move {
+                worker
+                    .run()
+                    .await
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                Ok(())
+            })
         })?;
-    let scheduler = Arc::new(TemporalExecutionScheduler::new(
-        scheduler_client,
-        handle_rx.recv()?,
-    ));
-    Ok(StartedTemporalWorker { scheduler, thread })
+    let (runtime, shutdown) = startup_rx.recv()?;
+    let scheduler = Arc::new(TemporalExecutionScheduler::new(scheduler_client, runtime));
+    Ok(StartedTemporalWorker {
+        scheduler,
+        thread,
+        shutdown,
+    })
 }
 
 impl ExecutionScheduler for TemporalExecutionScheduler {
