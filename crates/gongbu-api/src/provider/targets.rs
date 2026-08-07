@@ -185,6 +185,14 @@ impl ProviderTargetConfig {
             target
                 .secret_reference()
                 .map_err(|_| Error::InvalidSecretReference)?;
+            if target.provider == "google"
+                && !matches!(
+                    target.adapter.as_str(),
+                    "gemini_image" | "gemini_developer_image"
+                )
+            {
+                return Err(Error::EmptyIdentifier);
+            }
             if target.adapter == "gemini_image" {
                 let Some(gemini) = &target.gemini_image else {
                     return Err(Error::EmptyIdentifier);
@@ -496,5 +504,13 @@ mod tests {
             .headers
             .insert("x-goog-api-key".into(), "must-not-live-in-json".into());
         assert!(invalid.validate().is_err());
+
+        let unsupported = parse(
+            r#"{"provider_configs":[{"provider_config_version":"google-unsupported-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_imag","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google-ai-studio","secret_account":"local"}]}"#,
+        );
+        assert!(matches!(
+            unsupported.validate(),
+            Err(Error::EmptyIdentifier)
+        ));
     }
 }

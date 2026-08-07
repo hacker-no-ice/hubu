@@ -572,12 +572,16 @@ fn map_gemini_invoke_error(
             operation_id,
         };
     }
-    match code.as_str() {
-        "provider_rejected"
-        | "provider_pre_send_failure"
-        | "invalid_request"
-        | "retry_not_supported" => WorkflowActivityError::Proven(code),
-        _ => WorkflowActivityError::Ambiguous(code),
+    if code == "provider_rejected"
+        || code.starts_with("provider_rejected_http_")
+        || matches!(
+            code.as_str(),
+            "provider_pre_send_failure" | "invalid_request" | "retry_not_supported"
+        )
+    {
+        WorkflowActivityError::Proven(code)
+    } else {
+        WorkflowActivityError::Ambiguous(code)
     }
 }
 
@@ -1144,6 +1148,12 @@ mod tests {
                 code: "provider_rejected".into()
             }),
             WorkflowActivityError::Proven("provider_rejected".into())
+        );
+        assert_eq!(
+            map_gemini_invoke_error(ContractError::Provider {
+                code: "provider_rejected_http_401".into()
+            }),
+            WorkflowActivityError::Proven("provider_rejected_http_401".into())
         );
         assert_eq!(
             map_gemini_invoke_error(ContractError::Provider {
