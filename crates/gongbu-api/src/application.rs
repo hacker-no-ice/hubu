@@ -14,6 +14,10 @@ use crate::{
             enforce_cost, NormalizedRequest, OutcomeKind, PricingCatalog, PricingSnapshot,
             PricingUnit, ProviderAdapter,
         },
+        gemini_developer_image::{
+            GeminiDeveloperImageAdapter, GeminiDeveloperTransport, ReqwestGeminiDeveloperTransport,
+            ADAPTER_ID as GEMINI_DEVELOPER_ADAPTER_ID, PROVIDER_ID as GEMINI_DEVELOPER_PROVIDER_ID,
+        },
         gemini_image::{
             GeminiImageAdapter, GeminiTransport, ReqwestGeminiTransport, ADAPTER_ID, PROVIDER_ID,
         },
@@ -188,6 +192,170 @@ impl ProviderActivities for GeminiProviderActivities {
             ));
         }
         if outcome.provider_request_id.is_none() && outcome.provider_operation_id.is_none() {
+            return Err(WorkflowActivityError::Ambiguous(
+                "missing_provider_identifier".into(),
+            ));
+        }
+        Ok(ProviderSuccess {
+            request_id: outcome.provider_request_id,
+            operation_id: outcome.provider_operation_id,
+            usage: outcome
+                .usage
+                .ok_or_else(|| WorkflowActivityError::Ambiguous("missing_provider_usage".into()))?,
+            artifacts: outcome
+                .artifacts
+                .into_iter()
+                .map(|artifact| ProviderArtifact {
+                    media_type: artifact.media_type,
+                    bytes: artifact.bytes,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// Production bridge for the API-key-authenticated Gemini Developer API.
+pub struct GeminiDeveloperProviderActivities {
+    targets: ProviderTargetConfig,
+    secrets: Arc<dyn SecretProvider>,
+    transport: Arc<dyn GeminiDeveloperTransport>,
+}
+
+impl GeminiDeveloperProviderActivities {
+    pub fn production(targets: ProviderTargetConfig) -> Self {
+        Self::new(
+            targets,
+            Arc::new(MacOsKeychain),
+            Arc::new(ReqwestGeminiDeveloperTransport),
+        )
+    }
+
+    pub fn new(
+        targets: ProviderTargetConfig,
+        secrets: Arc<dyn SecretProvider>,
+        transport: Arc<dyn GeminiDeveloperTransport>,
+    ) -> Self {
+        Self {
+            targets,
+            secrets,
+            transport,
+        }
+    }
+
+    fn selected<'a>(
+        &'a self,
+        execution: &Execution,
+    ) -> Result<
+        (
+            &'a crate::provider_targets::ProviderConfigVersion,
+            NormalizedRequest,
+        ),
+        WorkflowActivityError,
+    > {
+        if execution.provider != GEMINI_DEVELOPER_PROVIDER_ID
+            || execution.adapter != GEMINI_DEVELOPER_ADAPTER_ID
+        {
+            return Err(WorkflowActivityError::Proven(
+                "provider_target_mismatch".into(),
+            ));
+        }
+        let target = self
+            .targets
+            .resolve(
+                &execution.workload_type,
+                &execution.provider,
+                &execution.adapter,
+                &execution.model,
+            )
+            .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
+        if target.provider_config_version != execution.provider_config_version {
+            return Err(WorkflowActivityError::Proven(
+                "provider_config_changed".into(),
+            ));
+        }
+        let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
+            .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
+        if snapshot.unit != PricingUnit::Image {
+            return Err(WorkflowActivityError::Proven(
+                "pricing_snapshot_invalid".into(),
+            ));
+        }
+        enforce_cost(
+            &snapshot,
+            execution.authorized_minor,
+            &execution.authorization_currency,
+        )
+        .map_err(|_| WorkflowActivityError::Proven("authorization_invalid".into()))?;
+        Ok((
+            target,
+            NormalizedRequest {
+                provider: snapshot.provider,
+                model: snapshot.model,
+                image_count: Some(snapshot.quantity),
+                input_tokens: None,
+                max_output_tokens: None,
+            },
+        ))
+    }
+}
+
+impl ProviderActivities for GeminiDeveloperProviderActivities {
+    fn preflight(&self, execution: &Execution) -> Result<(), WorkflowActivityError> {
+        let (target, request) = self.selected(execution)?;
+        let adapter = GeminiDeveloperImageAdapter::new(
+            target
+                .gemini_developer_image
+                .clone()
+                .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
+            target.model.clone(),
+            Arc::clone(&self.transport),
+        )
+        .map_err(map_gemini_error)?;
+        adapter
+            .validate_request(&request)
+            .map_err(map_gemini_error)?;
+        self.secrets
+            .resolve(
+                &target
+                    .secret_reference()
+                    .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?,
+            )
+            .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
+        Ok(())
+    }
+
+    fn invoke(
+        &self,
+        execution: &Execution,
+        _attempt_id: &str,
+    ) -> Result<ProviderSuccess, WorkflowActivityError> {
+        let (target, request) = self.selected(execution)?;
+        let adapter = GeminiDeveloperImageAdapter::new(
+            target
+                .gemini_developer_image
+                .clone()
+                .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
+            target.model.clone(),
+            Arc::clone(&self.transport),
+        )
+        .map_err(map_gemini_error)?;
+        let secret = self
+            .secrets
+            .resolve(
+                &target
+                    .secret_reference()
+                    .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?,
+            )
+            .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
+        let outcome = adapter
+            .invoke(&request, &execution.normalized_input, &secret, None)
+            .map_err(map_gemini_invoke_error)?;
+        if outcome.outcome != OutcomeKind::Succeeded {
+            return Err(WorkflowActivityError::Ambiguous(
+                "provider_unknown_outcome".into(),
+            ));
+        }
+        if outcome.provider_request_id.is_none() {
             return Err(WorkflowActivityError::Ambiguous(
                 "missing_provider_identifier".into(),
             ));
@@ -468,6 +636,24 @@ pub fn gemini_execution_runner(
         repository,
         hubu,
         Arc::new(GeminiProviderActivities::production(targets)),
+        Arc::new(ArtifactServiceActivities::new(artifacts, artifact_now)),
+        now,
+    ))
+}
+
+/// Compose the Gemini Developer API and artifact activities into the durable runner.
+pub fn gemini_developer_execution_runner(
+    repository: Repository,
+    hubu: Arc<dyn HubuActivities + Send + Sync>,
+    artifacts: ArtifactService,
+    targets: ProviderTargetConfig,
+    now: impl Fn() -> String + Send + Sync + Clone + 'static,
+) -> Arc<dyn DurableExecutionRunner> {
+    let artifact_now = now.clone();
+    Arc::new(PersistedExecutionRunner::new(
+        repository,
+        hubu,
+        Arc::new(GeminiDeveloperProviderActivities::production(targets)),
         Arc::new(ArtifactServiceActivities::new(artifacts, artifact_now)),
         now,
     ))

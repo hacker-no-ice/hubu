@@ -58,6 +58,8 @@ pub struct ProviderConfigVersion {
     #[serde(default)]
     pub gemini_image: Option<GeminiImageConfig>,
     #[serde(default)]
+    pub gemini_developer_image: Option<GeminiDeveloperImageConfig>,
+    #[serde(default)]
     pub flux2_api: Option<Flux2ApiConfig>,
     #[serde(default)]
     pub ideogram_image: Option<IdeogramImageConfig>,
@@ -77,6 +79,18 @@ pub struct GeminiImageConfig {
     pub max_retries: u32,
     #[serde(default)]
     pub approved_artifact_hosts: Vec<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GeminiDeveloperImageConfig {
+    pub endpoint: String,
+    pub api_version: String,
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub max_retries: u32,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
 }
@@ -171,7 +185,7 @@ impl ProviderTargetConfig {
             target
                 .secret_reference()
                 .map_err(|_| Error::InvalidSecretReference)?;
-            if target.provider == "google" || target.adapter == "gemini_image" {
+            if target.adapter == "gemini_image" {
                 let Some(gemini) = &target.gemini_image else {
                     return Err(Error::EmptyIdentifier);
                 };
@@ -197,6 +211,27 @@ impl ProviderTargetConfig {
                     return Err(Error::EmptyIdentifier);
                 }
             } else if target.gemini_image.is_some() {
+                return Err(Error::EmptyIdentifier);
+            }
+            if target.adapter == "gemini_developer_image" {
+                let Some(gemini) = &target.gemini_developer_image else {
+                    return Err(Error::EmptyIdentifier);
+                };
+                if target.provider != "google"
+                    || gemini.endpoint.trim().is_empty()
+                    || gemini.api_version.trim().is_empty()
+                    || gemini.timeout_ms == 0
+                    || gemini.max_retries != 0
+                    || gemini.headers.iter().any(|(name, value)| {
+                        name.trim().is_empty()
+                            || value.contains(['\r', '\n'])
+                            || name.eq_ignore_ascii_case("authorization")
+                            || name.eq_ignore_ascii_case("x-goog-api-key")
+                    })
+                {
+                    return Err(Error::EmptyIdentifier);
+                }
+            } else if target.gemini_developer_image.is_some() {
                 return Err(Error::EmptyIdentifier);
             }
             if target.provider == "flux" || target.adapter == "flux2_api" {
@@ -436,5 +471,30 @@ mod tests {
         flux.max_retries = 0;
         flux.idempotency_header = Some("X-CLIENT".into());
         assert!(idempotency_collision.validate().is_err());
+    }
+
+    #[test]
+    fn validates_developer_api_without_vertex_fields_and_rejects_secret_headers() {
+        let config = parse(
+            r#"{"provider_configs":[{"provider_config_version":"google-dev-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google-ai-studio","secret_account":"local","gemini_developer_image":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":120000}}]}"#,
+        );
+        config.validate().unwrap();
+        assert!(config
+            .resolve(
+                "image_generation",
+                "google",
+                "gemini_image",
+                "gemini-3.1-flash-lite-image"
+            )
+            .is_err());
+
+        let mut invalid = config;
+        invalid.provider_configs[0]
+            .gemini_developer_image
+            .as_mut()
+            .unwrap()
+            .headers
+            .insert("x-goog-api-key".into(), "must-not-live-in-json".into());
+        assert!(invalid.validate().is_err());
     }
 }

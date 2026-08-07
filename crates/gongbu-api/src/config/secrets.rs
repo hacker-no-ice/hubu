@@ -143,6 +143,7 @@ mod tests {
             secret_service: "gongbu.vendor".into(),
             secret_account: "production".into(),
             gemini_image: None,
+            gemini_developer_image: None,
             flux2_api: None,
             ideogram_image: None,
             enabled: true,
