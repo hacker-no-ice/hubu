@@ -1,10 +1,5 @@
 //! Frozen operator pricing and the normalized provider billing boundary.
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
 use crate::{
     provider_targets::ProviderConfigVersion,
@@ -14,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-pub const PRICING_SNAPSHOT_SCHEMA_VERSION: i64 = 1;
+pub const PRICING_SNAPSHOT_SCHEMA_VERSION: i64 = 2;
 const SUPPORTED_CURRENCIES: &[&str] = &["USD"];
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -62,11 +57,31 @@ pub struct PricingRule {
     pub provider: String,
     pub model: String,
     pub currency: String,
-    pub unit: PricingUnit,
-    pub unit_amount_minor: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<PricingSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<PricingUnit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_amount_minor: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<PriceComponent>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct PricingSelector {
+    pub image_size: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PriceComponent {
+    pub unit: PricingUnit,
+    pub rate_numerator_minor: i64,
+    pub rate_denominator: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingUnit {
     Image,
@@ -81,7 +96,8 @@ pub struct PricingCatalog(Arc<FrozenCatalog>);
 struct FrozenCatalog {
     version: String,
     digest: String,
-    rules: BTreeMap<(String, String), PricingRule>,
+    schema_version: u32,
+    rules: Vec<PricingRule>,
 }
 
 impl PricingCatalog {
@@ -93,7 +109,9 @@ impl PricingCatalog {
     pub fn from_json(bytes: &[u8]) -> Result<Self> {
         let mut doc: CatalogDocument =
             serde_json::from_slice(bytes).map_err(|e| ContractError::Malformed(e.to_string()))?;
-        if doc.schema_version != 1 || doc.catalog_version.trim().is_empty() || doc.rules.is_empty()
+        if !matches!(doc.schema_version, 1 | 2)
+            || doc.catalog_version.trim().is_empty()
+            || doc.rules.is_empty()
         {
             return Err(ContractError::Malformed(
                 "unsupported schema, empty version, or no rules".into(),
@@ -105,12 +123,16 @@ impl PricingCatalog {
             rule.provider = normalized(&rule.provider, "provider")?;
             rule.model = normalized(&rule.model, "model")?;
             rule.currency = rule.currency.trim().to_ascii_uppercase();
+            if let Some(selector) = &mut rule.selector {
+                selector.image_size = normalize_image_size(&selector.image_size)?;
+            }
+            rule.components.sort_by_key(|component| component.unit);
         }
         doc.rules.sort_by(|a, b| {
             (&a.provider, &a.model, &a.rule_id).cmp(&(&b.provider, &b.model, &b.rule_id))
         });
         let mut ids = BTreeSet::new();
-        let mut rules = BTreeMap::new();
+        let mut selectors = BTreeSet::new();
         for rule in &doc.rules {
             if !ids.insert(rule.rule_id.clone()) {
                 return Err(ContractError::Malformed("duplicate rule_id".into()));
@@ -118,12 +140,54 @@ impl PricingCatalog {
             if !SUPPORTED_CURRENCIES.contains(&rule.currency.as_str()) {
                 return Err(ContractError::Malformed("unsupported currency".into()));
             }
-            if rule.unit_amount_minor < 0 {
-                return Err(ContractError::Malformed("negative unit amount".into()));
+            let legacy = rule.unit.zip(rule.unit_amount_minor);
+            if doc.schema_version == 1 {
+                if rule.selector.is_some() || !rule.components.is_empty() || legacy.is_none() {
+                    return Err(ContractError::Malformed("invalid v1 rule shape".into()));
+                }
+            } else if legacy.is_some()
+                || rule.unit.is_some()
+                || rule.unit_amount_minor.is_some()
+                || rule.components.is_empty()
+            {
+                return Err(ContractError::Malformed("invalid v2 rule shape".into()));
             }
-            if rules
-                .insert((rule.provider.clone(), rule.model.clone()), rule.clone())
-                .is_some()
+            if legacy.is_some_and(|(_, amount)| amount < 0)
+                || rule
+                    .components
+                    .iter()
+                    .any(|c| c.rate_numerator_minor < 0 || c.rate_denominator <= 0)
+            {
+                return Err(ContractError::Malformed("invalid rate".into()));
+            }
+            let mut units = BTreeSet::new();
+            if rule.components.iter().any(|c| !units.insert(c.unit)) {
+                return Err(ContractError::Malformed("duplicate price component".into()));
+            }
+            if rule.selector.is_some()
+                && (rule.components.len() != 1 || rule.components[0].unit != PricingUnit::Image)
+            {
+                return Err(ContractError::Malformed(
+                    "image selector requires one image component".into(),
+                ));
+            }
+            let key = (
+                rule.provider.clone(),
+                rule.model.clone(),
+                rule.selector.clone(),
+            );
+            if !selectors.insert(key) {
+                return Err(ContractError::AmbiguousRule);
+            }
+        }
+        for rule in &doc.rules {
+            if rule.selector.is_none()
+                && doc
+                    .rules
+                    .iter()
+                    .filter(|other| other.provider == rule.provider && other.model == rule.model)
+                    .count()
+                    > 1
             {
                 return Err(ContractError::AmbiguousRule);
             }
@@ -134,34 +198,103 @@ impl PricingCatalog {
         Ok(Self(Arc::new(FrozenCatalog {
             version: doc.catalog_version,
             digest,
-            rules,
+            schema_version: doc.schema_version,
+            rules: doc.rules,
         })))
     }
 
     pub fn snapshot(&self, request: &NormalizedRequest) -> Result<PricingSnapshot> {
         request.validate()?;
-        let rule = self
+        let candidates: Vec<_> = self
             .0
             .rules
-            .get(&(request.provider.clone(), request.model.clone()))
+            .iter()
+            .filter(|rule| {
+                rule.provider == request.provider
+                    && rule.model == request.model
+                    && match &rule.selector {
+                        Some(s) => request.image_size.as_ref() == Some(&s.image_size),
+                        None => true,
+                    }
+            })
+            .collect();
+        if candidates.len() > 1 {
+            return Err(ContractError::AmbiguousRule);
+        }
+        let rule = candidates
+            .first()
+            .copied()
             .ok_or(ContractError::UnsupportedTarget)?;
-        let quantity = request.quantity_for(rule.unit)?;
-        let estimated_amount_minor = rule
-            .unit_amount_minor
-            .checked_mul(quantity)
-            .ok_or(ContractError::IndeterminableCost)?;
+        if self.0.rules.iter().any(|r| {
+            r.provider == request.provider && r.model == request.model && r.selector.is_some()
+        }) && rule.selector.is_none()
+        {
+            return Err(ContractError::IndeterminableCost);
+        }
+        let components = if let Some((unit, amount)) = rule.unit.zip(rule.unit_amount_minor) {
+            vec![PriceComponent {
+                unit,
+                rate_numerator_minor: amount,
+                rate_denominator: 1,
+            }]
+        } else {
+            rule.components.clone()
+        };
+        let mut exact = Rational::zero();
+        let mut frozen = Vec::new();
+        for component in components {
+            let quantity = request.quantity_for(component.unit)?;
+            exact = exact.add(
+                Rational::new(component.rate_numerator_minor, component.rate_denominator)?
+                    .mul(quantity)?,
+            )?;
+            frozen.push(FrozenPriceComponent {
+                unit: component.unit,
+                rate_numerator_minor: component.rate_numerator_minor,
+                rate_denominator: component.rate_denominator,
+                quantity,
+            });
+        }
+        let estimated_amount_minor = exact.ceil_i64()?;
+        let legacy = self.0.schema_version == 1;
+        let legacy_component = frozen.first().cloned();
         Ok(PricingSnapshot {
+            schema_version: self.0.schema_version,
             provider: request.provider.clone(),
             model: request.model.clone(),
             catalog_version: self.0.version.clone(),
             catalog_digest: self.0.digest.clone(),
             pricing_rule_id: rule.rule_id.clone(),
-            unit: rule.unit,
-            unit_amount_minor: rule.unit_amount_minor,
-            quantity,
+            selector: rule.selector.clone(),
+            components: if legacy { Vec::new() } else { frozen },
+            exact_estimate_numerator: if legacy {
+                String::new()
+            } else {
+                exact.n.to_string()
+            },
+            exact_estimate_denominator: if legacy {
+                String::new()
+            } else {
+                exact.d.to_string()
+            },
             estimated_amount_minor,
             currency: rule.currency.clone(),
+            unit: legacy_component.as_ref().filter(|_| legacy).map(|c| c.unit),
+            unit_amount_minor: legacy_component
+                .as_ref()
+                .filter(|_| legacy)
+                .map(|c| c.rate_numerator_minor),
+            quantity: legacy_component.filter(|_| legacy).map(|c| c.quantity),
         })
+    }
+}
+
+fn normalize_image_size(value: &str) -> Result<String> {
+    let value = value.trim().to_ascii_lowercase();
+    if matches!(value.as_str(), "1k" | "2k" | "4k") {
+        Ok(value)
+    } else {
+        Err(ContractError::Malformed("invalid image_size".into()))
     }
 }
 
@@ -181,6 +314,8 @@ pub struct NormalizedRequest {
     pub image_count: Option<i64>,
     pub input_tokens: Option<i64>,
     pub max_output_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_size: Option<String>,
 }
 
 impl NormalizedRequest {
@@ -193,6 +328,11 @@ impl NormalizedRequest {
             .flatten()
         {
             if value < 0 {
+                return Err(ContractError::IndeterminableCost);
+            }
+        }
+        if let Some(size) = &self.image_size {
+            if normalize_image_size(size).map_err(|_| ContractError::IndeterminableCost)? != *size {
                 return Err(ContractError::IndeterminableCost);
             }
         }
@@ -209,22 +349,152 @@ impl NormalizedRequest {
     }
 }
 
+pub fn validate_image_size_input(
+    request: &NormalizedRequest,
+    input: &serde_json::Value,
+) -> Result<()> {
+    let supplied = input.get("image_size").and_then(serde_json::Value::as_str);
+    if supplied != request.image_size.as_deref() {
+        return Err(ContractError::IndeterminableCost);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PricingSnapshot {
+    #[serde(default = "legacy_snapshot_version")]
+    pub schema_version: u32,
     pub provider: String,
     pub model: String,
     pub catalog_version: String,
     pub catalog_digest: String,
     pub pricing_rule_id: String,
-    pub unit: PricingUnit,
-    pub unit_amount_minor: i64,
-    pub quantity: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<PricingSelector>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<FrozenPriceComponent>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub exact_estimate_numerator: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub exact_estimate_denominator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<PricingUnit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_amount_minor: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<i64>,
     pub estimated_amount_minor: i64,
     pub currency: String,
 }
 
+const fn legacy_snapshot_version() -> u32 {
+    1
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenPriceComponent {
+    pub unit: PricingUnit,
+    pub rate_numerator_minor: i64,
+    pub rate_denominator: i64,
+    pub quantity: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Rational {
+    n: i128,
+    d: i128,
+}
+impl Rational {
+    fn zero() -> Self {
+        Self { n: 0, d: 1 }
+    }
+    fn new(n: i64, d: i64) -> Result<Self> {
+        if n < 0 || d <= 0 {
+            return Err(ContractError::IndeterminableCost);
+        }
+        Ok(Self {
+            n: i128::from(n),
+            d: i128::from(d),
+        })
+    }
+    fn mul(self, quantity: i64) -> Result<Self> {
+        if quantity < 0 {
+            return Err(ContractError::IndeterminableCost);
+        }
+        Ok(Self {
+            n: self
+                .n
+                .checked_mul(i128::from(quantity))
+                .ok_or(ContractError::IndeterminableCost)?,
+            d: self.d,
+        })
+    }
+    fn add(self, other: Self) -> Result<Self> {
+        let n = self
+            .n
+            .checked_mul(other.d)
+            .and_then(|a| other.n.checked_mul(self.d).and_then(|b| a.checked_add(b)))
+            .ok_or(ContractError::IndeterminableCost)?;
+        let d = self
+            .d
+            .checked_mul(other.d)
+            .ok_or(ContractError::IndeterminableCost)?;
+        let g = gcd(n, d);
+        Ok(Self { n: n / g, d: d / g })
+    }
+    fn ceil_i64(self) -> Result<i64> {
+        i64::try_from(
+            self.n
+                .checked_add(self.d - 1)
+                .ok_or(ContractError::IndeterminableCost)?
+                / self.d,
+        )
+        .map_err(|_| ContractError::IndeterminableCost)
+    }
+    // Settlement rounds the aggregate exact amount once, half up to currency minor units.
+    fn round_i64(self) -> Result<i64> {
+        i64::try_from(
+            self.n
+                .checked_mul(2)
+                .and_then(|n| n.checked_add(self.d))
+                .ok_or(ContractError::IndeterminableCost)?
+                / self
+                    .d
+                    .checked_mul(2)
+                    .ok_or(ContractError::IndeterminableCost)?,
+        )
+        .map_err(|_| ContractError::IndeterminableCost)
+    }
+}
+fn gcd(mut a: i128, mut b: i128) -> i128 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a.abs().max(1)
+}
+
 impl PricingSnapshot {
+    pub fn has_unit(&self, unit: PricingUnit) -> bool {
+        self.unit == Some(unit)
+            || self
+                .components
+                .iter()
+                .any(|component| component.unit == unit)
+    }
+    pub fn estimated_quantity(&self, unit: PricingUnit) -> Option<i64> {
+        if self.unit == Some(unit) {
+            self.quantity
+        } else {
+            self.components
+                .iter()
+                .find(|component| component.unit == unit)
+                .map(|component| component.quantity)
+        }
+    }
     pub fn validate_integrity(&self) -> Result<()> {
         let digest = self.catalog_digest.strip_prefix("sha256:");
         if self.provider.trim().is_empty()
@@ -235,11 +505,29 @@ impl PricingSnapshot {
                 value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
             || !SUPPORTED_CURRENCIES.contains(&self.currency.as_str())
-            || self.unit_amount_minor < 0
-            || self.quantity <= 0
-            || self.unit_amount_minor.checked_mul(self.quantity)
-                != Some(self.estimated_amount_minor)
+            || self.estimated_amount_minor < 0
         {
+            return Err(ContractError::IndeterminableCost);
+        }
+        if self.selector.as_ref().is_some_and(|selector| {
+            normalize_image_size(&selector.image_size).ok().as_ref() != Some(&selector.image_size)
+        }) {
+            return Err(ContractError::IndeterminableCost);
+        }
+        let components = self.effective_components()?;
+        let mut units = BTreeSet::new();
+        if components.iter().any(|component| {
+            component.rate_numerator_minor < 0
+                || component.rate_denominator <= 0
+                || component.quantity <= 0
+                || !units.insert(component.unit)
+        }) || (self.selector.is_some()
+            && (components.len() != 1 || components[0].unit != PricingUnit::Image))
+        {
+            return Err(ContractError::IndeterminableCost);
+        }
+        let exact = self.exact_estimate()?;
+        if exact.ceil_i64()? != self.estimated_amount_minor {
             return Err(ContractError::IndeterminableCost);
         }
         Ok(())
@@ -257,21 +545,81 @@ impl PricingSnapshot {
     }
     pub fn settle(&self, usage: &NormalizedUsage, authorized_minor: i64) -> Result<i64> {
         self.validate_integrity()?;
-        let quantity = usage
-            .quantity_for(self.unit)
-            .ok_or(ContractError::IndeterminableCost)?;
-        let amount = self
-            .unit_amount_minor
-            .checked_mul(quantity)
-            .ok_or(ContractError::IndeterminableCost)?;
-        if quantity > self.quantity
-            || amount < 0
-            || amount > self.estimated_amount_minor
-            || amount > authorized_minor
-        {
+        let mut exact = Rational::zero();
+        for component in self.effective_components()? {
+            let quantity = usage
+                .quantity_for(component.unit)
+                .ok_or(ContractError::IndeterminableCost)?;
+            if quantity > component.quantity {
+                return Err(ContractError::SettlementOverage);
+            }
+            exact = exact.add(
+                Rational::new(component.rate_numerator_minor, component.rate_denominator)?
+                    .mul(quantity)?,
+            )?;
+        }
+        let amount = exact.round_i64()?;
+        if amount > self.estimated_amount_minor || amount > authorized_minor {
             return Err(ContractError::SettlementOverage);
         }
         Ok(amount)
+    }
+
+    fn effective_components(&self) -> Result<Vec<FrozenPriceComponent>> {
+        if self.schema_version == 1 {
+            let (unit, rate, quantity) = self
+                .unit
+                .zip(self.unit_amount_minor)
+                .zip(self.quantity)
+                .map(|((a, b), c)| (a, b, c))
+                .ok_or(ContractError::IndeterminableCost)?;
+            if rate < 0 || quantity <= 0 || !self.components.is_empty() {
+                return Err(ContractError::IndeterminableCost);
+            }
+            Ok(vec![FrozenPriceComponent {
+                unit,
+                rate_numerator_minor: rate,
+                rate_denominator: 1,
+                quantity,
+            }])
+        } else if self.schema_version == 2
+            && self.unit.is_none()
+            && self.unit_amount_minor.is_none()
+            && self.quantity.is_none()
+            && !self.components.is_empty()
+        {
+            Ok(self.components.clone())
+        } else {
+            Err(ContractError::IndeterminableCost)
+        }
+    }
+    fn exact_estimate(&self) -> Result<Rational> {
+        if self.schema_version == 1 {
+            let c = self.effective_components()?.remove(0);
+            Rational::new(c.rate_numerator_minor, c.rate_denominator)?.mul(c.quantity)
+        } else {
+            let n = self
+                .exact_estimate_numerator
+                .parse::<i128>()
+                .map_err(|_| ContractError::IndeterminableCost)?;
+            let d = self
+                .exact_estimate_denominator
+                .parse::<i128>()
+                .map_err(|_| ContractError::IndeterminableCost)?;
+            if n < 0 || d <= 0 {
+                return Err(ContractError::IndeterminableCost);
+            }
+            let mut recomputed = Rational::zero();
+            for c in self.effective_components()? {
+                recomputed = recomputed.add(
+                    Rational::new(c.rate_numerator_minor, c.rate_denominator)?.mul(c.quantity)?,
+                )?;
+            }
+            if recomputed != (Rational { n, d }) {
+                return Err(ContractError::IndeterminableCost);
+            }
+            Ok(recomputed)
+        }
     }
 }
 
@@ -428,6 +776,7 @@ mod tests {
             image_count: Some(2),
             input_tokens: None,
             max_output_tokens: None,
+            image_size: None,
         }
     }
     #[test]
@@ -497,6 +846,108 @@ mod tests {
                 1_000
             ),
             Err(ContractError::SettlementOverage)
+        );
+    }
+    #[test]
+    fn v2_resolution_tiers_are_selected_and_frozen() {
+        let catalog = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"1k","provider":"vendor","model":"image-v2","currency":"USD","selector":{"image_size":"1K"},"components":[{"unit":"image","rate_numerator_minor":10,"rate_denominator":1}]},{"rule_id":"2k","provider":"vendor","model":"image-v2","currency":"USD","selector":{"image_size":"2k"},"components":[{"unit":"image","rate_numerator_minor":20,"rate_denominator":1}]},{"rule_id":"4k","provider":"vendor","model":"image-v2","currency":"USD","selector":{"image_size":"4k"},"components":[{"unit":"image","rate_numerator_minor":40,"rate_denominator":1}]}]}"#).unwrap();
+        let mut request = request();
+        request.model = "image-v2".into();
+        request.image_size = Some("2k".into());
+        let snapshot = catalog.snapshot(&request).unwrap();
+        assert_eq!(snapshot.selector.unwrap().image_size, "2k");
+        assert_eq!(snapshot.estimated_amount_minor, 40);
+        request.image_size = None;
+        assert_eq!(
+            catalog.snapshot(&request),
+            Err(ContractError::UnsupportedTarget)
+        );
+    }
+
+    #[test]
+    fn v2_digest_canonicalizes_rule_component_and_selector_formatting() {
+        let a = br#"{"schema_version":2,"catalog_version":" v2 ","rules":[{"rule_id":" text ","provider":" vendor ","model":" model ","currency":" usd ","components":[{"unit":"output_token","rate_numerator_minor":2,"rate_denominator":1000000},{"unit":"input_token","rate_numerator_minor":1,"rate_denominator":1000000}]},{"rule_id":" image ","provider":" vendor ","model":" image ","currency":" usd ","selector":{"image_size":" 2K "},"components":[{"unit":"image","rate_numerator_minor":3,"rate_denominator":1}]}]}"#;
+        let b = br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"image","provider":"vendor","model":"image","currency":"USD","selector":{"image_size":"2k"},"components":[{"unit":"image","rate_numerator_minor":3,"rate_denominator":1}]},{"rule_id":"text","provider":"vendor","model":"model","currency":"USD","components":[{"unit":"input_token","rate_numerator_minor":1,"rate_denominator":1000000},{"unit":"output_token","rate_numerator_minor":2,"rate_denominator":1000000}]}]}"#;
+        assert_eq!(
+            PricingCatalog::from_json(a).unwrap().0.digest,
+            PricingCatalog::from_json(b).unwrap().0.digest
+        );
+    }
+
+    #[test]
+    fn compound_token_rates_are_exact_and_round_once() {
+        let catalog = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"tokens","rules":[{"rule_id":"text","provider":"vendor","model":"text-v1","currency":"USD","components":[{"unit":"input_token","rate_numerator_minor":100,"rate_denominator":1000000},{"unit":"output_token","rate_numerator_minor":300,"rate_denominator":1000000}]}]}"#).unwrap();
+        let request = NormalizedRequest {
+            provider: "vendor".into(),
+            model: "text-v1".into(),
+            image_count: None,
+            input_tokens: Some(2_500),
+            max_output_tokens: Some(2_500),
+            image_size: None,
+        };
+        let snapshot = catalog.snapshot(&request).unwrap();
+        assert_eq!(snapshot.exact_estimate_numerator, "1");
+        assert_eq!(snapshot.exact_estimate_denominator, "1");
+        assert_eq!(snapshot.estimated_amount_minor, 1);
+        let usage = NormalizedUsage {
+            images: None,
+            input_tokens: Some(2_500),
+            output_tokens: Some(2_500),
+        };
+        assert_eq!(snapshot.settle(&usage, 1).unwrap(), 1);
+        let serialized = serde_json::to_vec(&snapshot).unwrap();
+        let replayed: PricingSnapshot = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(replayed.settle(&usage, 1).unwrap(), 1);
+    }
+
+    #[test]
+    fn fractional_components_round_only_at_aggregate_and_authorize_by_ceiling() {
+        let catalog = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"fractions","rules":[{"rule_id":"text","provider":"vendor","model":"text-v1","currency":"USD","components":[{"unit":"input_token","rate_numerator_minor":1,"rate_denominator":4},{"unit":"output_token","rate_numerator_minor":1,"rate_denominator":4}]}]}"#).unwrap();
+        let request = NormalizedRequest {
+            provider: "vendor".into(),
+            model: "text-v1".into(),
+            image_count: None,
+            input_tokens: Some(1),
+            max_output_tokens: Some(1),
+            image_size: None,
+        };
+        let snapshot = catalog.snapshot(&request).unwrap();
+        assert_eq!(snapshot.estimated_amount_minor, 1);
+        assert_eq!(
+            snapshot
+                .settle(
+                    &NormalizedUsage {
+                        images: None,
+                        input_tokens: Some(1),
+                        output_tokens: Some(1)
+                    },
+                    1
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            snapshot.check_authorization(0, "USD"),
+            Err(ContractError::InsufficientAuthorization)
+        );
+    }
+
+    #[test]
+    fn v2_rejects_bad_denominators_overlap_and_overflow() {
+        let bad = br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"bad","provider":"v","model":"m","currency":"USD","components":[{"unit":"input_token","rate_numerator_minor":1,"rate_denominator":0}]}]}"#;
+        assert!(PricingCatalog::from_json(bad).is_err());
+        let overlap = br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"flat","provider":"v","model":"m","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"tier","provider":"v","model":"m","currency":"USD","selector":{"image_size":"1k"},"components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]}]}"#;
+        assert_eq!(
+            PricingCatalog::from_json(overlap).unwrap_err(),
+            ContractError::AmbiguousRule
+        );
+        assert_eq!(
+            Rational::new(i64::MAX, 1)
+                .unwrap()
+                .mul(i64::MAX)
+                .unwrap()
+                .mul(i64::MAX),
+            Err(ContractError::IndeterminableCost)
         );
     }
     #[test]

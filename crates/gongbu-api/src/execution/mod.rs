@@ -1170,11 +1170,17 @@ fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
     }
     safe_json(&n.normalized_input)?;
     safe_json(&n.pricing_snapshot)?;
-    if n.pricing_schema_version != PRICING_SNAPSHOT_SCHEMA_VERSION {
+    if !matches!(
+        n.pricing_schema_version,
+        1 | PRICING_SNAPSHOT_SCHEMA_VERSION
+    ) {
         return Err(Error::Invalid("pricing schema version"));
     }
     let snapshot: PricingSnapshot = serde_json::from_value(n.pricing_snapshot.clone())
         .map_err(|_| Error::Invalid("pricing snapshot"))?;
+    if i64::from(snapshot.schema_version) != n.pricing_schema_version {
+        return Err(Error::Invalid("pricing schema version"));
+    }
     snapshot
         .check_authorization(n.authorized_minor, &n.authorization_currency)
         .map_err(|_| Error::Invalid("pricing snapshot authorization"))?;

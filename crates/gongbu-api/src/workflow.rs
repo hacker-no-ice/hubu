@@ -626,7 +626,7 @@ impl ExecutionWorkflow<'_> {
         }
         let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
             .map_err(|_| PersistenceError::Invalid("pricing snapshot"))?;
-        if snapshot.unit == crate::provider_contract::PricingUnit::Image {
+        if snapshot.has_unit(crate::provider_contract::PricingUnit::Image) {
             if let Some(images) = success
                 .usage
                 .images

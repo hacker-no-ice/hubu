@@ -256,6 +256,8 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
         secret: &ProviderSecret,
     ) -> Result<AdapterOutcome> {
         self.validate_request(request)?;
+        crate::provider_contract::validate_image_size_input(request, input)
+            .map_err(|_| provider_error("invalid_request"))?;
         if request.provider != PROVIDER_ID
             || request.model != self.model
             || request.image_count != Some(1)
@@ -268,10 +270,13 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
             .map(str::trim)
             .filter(|value| !value.is_empty() && value.len() <= 32_000)
             .ok_or_else(|| provider_error("invalid_request"))?;
-        let body = json!({
+        let mut body = json!({
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"responseModalities": ["IMAGE"]}
         });
+        if let Some(size) = &request.image_size {
+            body["generationConfig"]["imageConfig"] = json!({"imageSize": size});
+        }
         let timeout = Duration::from_millis(self.config.timeout_ms);
         let response = self
             .transport
@@ -604,6 +609,7 @@ mod tests {
             image_count: Some(1),
             input_tokens: None,
             max_output_tokens: None,
+            image_size: None,
         }
     }
     fn adapter(
@@ -1158,6 +1164,7 @@ mod tests {
             image_count: Some(1),
             input_tokens: None,
             max_output_tokens: None,
+            image_size: None,
         };
         let snapshot = PricingCatalog::load(pricing_path)
             .unwrap()

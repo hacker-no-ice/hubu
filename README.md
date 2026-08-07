@@ -119,11 +119,20 @@ memory. A bundled mock catalog is available for local development; production
 startup code should load the operator path once and retain that catalog for the
 process lifetime.
 
-Each execution persists a typed pricing snapshot containing the provider and
-model, catalog version and digest, rule ID, unit amount, bounded quantity,
-conservative estimate, and currency. Persistence rejects malformed snapshots,
-target mismatches, insufficient authorization, and receipts above either the
-authorization or frozen estimate.
+Catalog schema v2 permits resolution-qualified image rules selected from the
+normalized request `image_size` (`1k`, `2k`, or `4k`) and compound input/output
+token components. Rates are exact `rate_numerator_minor / rate_denominator`
+values, so per-million-token prices use a denominator of `1000000` without
+floating point. The frozen v2 snapshot records the selector, every exact rate
+and bounded quantity, and the reduced exact aggregate estimate.
+
+Authorization uses the ceiling of that exact estimate at the integer currency
+minor-unit boundary. Settlement recomputes all components exactly and performs
+one round-half-up operation on the aggregate; components and intermediates are
+never rounded. Existing schema-v1 flat image catalogs and persisted v1 snapshots
+remain accepted and replay with their original integer semantics. Persistence
+rejects malformed snapshots, target mismatches, insufficient authorization, and
+receipts above either the authorization or frozen estimate.
 
 The provider boundary exposes normalized request, usage, outcome, capability,
 retry, redaction, and opaque idempotency-key contracts. Retries require an

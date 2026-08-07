@@ -277,6 +277,8 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
             return Err(provider_error("retry_not_supported"));
         }
         self.validate_request(request)?;
+        crate::provider_contract::validate_image_size_input(request, input)
+            .map_err(|_| provider_error("invalid_request"))?;
         let prompt = input
             .get("prompt")
             .and_then(Value::as_str)
@@ -286,7 +288,7 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
         if input.as_object().is_none_or(|object| {
             object
                 .keys()
-                .any(|key| key != "prompt" && key != "image_count")
+                .any(|key| key != "prompt" && key != "image_count" && key != "image_size")
         }) {
             return Err(provider_error("invalid_request"));
         }
@@ -297,7 +299,10 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
                 secret.expose(),
                 Duration::from_millis(self.config.timeout_ms),
                 &self.config.headers,
-                &json!({"prompt": prompt}),
+                &match &request.image_size {
+                    Some(size) => json!({"prompt": prompt, "image_size": size}),
+                    None => json!({"prompt": prompt}),
+                },
             )
             .map_err(|error| classify_transport(error, secret, false))?;
         let request_id = response
@@ -542,6 +547,7 @@ mod tests {
             image_count: Some(1),
             input_tokens: None,
             max_output_tokens: None,
+            image_size: None,
         }
     }
     fn adapter(

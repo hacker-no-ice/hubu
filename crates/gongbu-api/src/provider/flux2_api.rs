@@ -290,6 +290,8 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome> {
         self.validate_request(request)?;
+        crate::provider_contract::validate_image_size_input(request, input)
+            .map_err(|_| provider_error("invalid_request"))?;
         let prompt = input
             .get("prompt")
             .and_then(Value::as_str)
@@ -297,6 +299,9 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             .filter(|p| !p.is_empty() && p.len() <= 32_000)
             .ok_or_else(|| provider_error("invalid_request"))?;
         let mut body = json!({"prompt": prompt});
+        if let Some(size) = &request.image_size {
+            body["image_size"] = json!(size);
+        }
         let options = input.get("options").and_then(Value::as_object);
         for field in [
             "width",
@@ -722,6 +727,7 @@ mod tests {
             image_count: Some(1),
             input_tokens: None,
             max_output_tokens: None,
+            image_size: None,
         }
     }
     fn fixture(polls: Vec<Value>) -> (Flux2ApiAdapter<Fixture>, Arc<Mutex<u32>>) {

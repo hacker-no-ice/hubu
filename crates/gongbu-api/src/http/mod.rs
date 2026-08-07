@@ -11,7 +11,6 @@ use crate::{
     },
     provider_contract::{
         ContractError, NormalizedRequest, PricingCatalog, PricingSnapshot, PricingUnit,
-        PRICING_SNAPSHOT_SCHEMA_VERSION,
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, ProviderTargetConfig},
     temporal::ExecutionScheduler,
@@ -311,15 +310,20 @@ impl Api {
                 image_count,
                 input_tokens: input_quantity(&normalized_input, "input_tokens")?,
                 max_output_tokens: input_quantity(&normalized_input, "max_output_tokens")?,
+                image_size: normalized_input
+                    .get("image_size")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
             })
             .map_err(map_pricing_error)?;
         // Tokenization belongs to provider-bound request normalization, which is
         // not part of this HTTP/persistence milestone. Fail closed rather than
         // accepting a caller-asserted token count that could underfund execution.
-        if pricing_snapshot.unit != PricingUnit::Image {
+        if !pricing_snapshot.has_unit(PricingUnit::Image) {
             return Err(ApiError::validation());
         }
         let input_hash = immutable_hash(&request, resolved, &pricing_snapshot, &normalized_input)?;
+        let pricing_schema_version = i64::from(pricing_snapshot.schema_version);
         let params = CreateExecutionParams {
             account_id: account.account_id.clone(),
             operation_key: request.operation_key.trim().to_owned(),
@@ -344,7 +348,7 @@ impl Api {
             provider_config_version: resolved.provider_config_version.clone(),
             pricing_snapshot: serde_json::to_value(pricing_snapshot)
                 .map_err(|_| ApiError::internal())?,
-            pricing_schema_version: PRICING_SNAPSHOT_SCHEMA_VERSION,
+            pricing_schema_version,
             created_at: (self.now)(),
         };
         let execution = self
@@ -550,7 +554,7 @@ fn immutable_hash(
         "model": resolved.model,
         "provider_config_version": resolved.provider_config_version,
         "pricing_snapshot": pricing_snapshot,
-        "pricing_schema_version": PRICING_SNAPSHOT_SCHEMA_VERSION,
+        "pricing_schema_version": pricing_snapshot.schema_version,
     });
     let bytes = serde_json::to_vec(&canonicalize(&scope)).map_err(|_| ApiError::validation())?;
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
