@@ -7,8 +7,8 @@
 use super::{
     contract::{
         canonical_image_media_type, AdapterCapabilities, AdapterOutcome, ContractError,
-        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutcomeKind, ProviderAdapter,
-        Result, RetryPolicy,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter, ProviderFailure,
+        ProviderPhase, Result, RetryPolicy,
     },
     targets::{GeminiDeveloperImageConfig, ProviderConfigVersion},
 };
@@ -220,19 +220,23 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
         input: &Value,
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
-    ) -> Result<AdapterOutcome> {
-        self.validate_request(request)?;
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        self.validate_request(request)
+            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         crate::provider_contract::validate_image_size_input(request, input)
-            .map_err(|_| provider_error("invalid_request"))?;
+            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         if vendor_idempotency_key.is_some() || self.config.max_retries != 0 {
-            return Err(provider_error("retry_not_supported"));
+            return Err(ProviderFailure::release(
+                "retry_not_supported",
+                ProviderPhase::PreSend,
+            ));
         }
         let prompt = input
             .get("prompt")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty() && value.len() <= 32_000)
-            .ok_or_else(|| provider_error("invalid_request"))?;
+            .ok_or_else(|| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         let mut body = json!({
             "model": self.model,
             "input": [{"type": "text", "text": prompt}],
@@ -244,7 +248,9 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
         let response = self
             .transport
             .create_interaction(
-                &endpoint_url(&self.config)?,
+                &endpoint_url(&self.config).map_err(|_| {
+                    ProviderFailure::release("config_invalid", ProviderPhase::PreSend)
+                })?,
                 secret.expose(),
                 Duration::from_millis(self.config.timeout_ms),
                 &self.config.headers,
@@ -260,28 +266,26 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
         });
         if !(200..300).contains(&response.status) {
             if (400..500).contains(&response.status) {
-                return Err(provider_error(&format!(
-                    "provider_rejected_http_{}",
-                    response.status
-                )));
+                return Err(ProviderFailure::release(
+                    format!("provider_rejected_http_{}", response.status),
+                    ProviderPhase::Submission,
+                ));
             }
-            return Err(ContractError::ProviderWithEvidence {
-                code: "provider_failure".into(),
-                request_id,
-                operation_id: None,
-            });
+            return Err(
+                ProviderFailure::reconcile("provider_failure", ProviderPhase::Submission)
+                    .with_evidence(request_id, None),
+            );
         }
-        let artifact = extract_artifact(&response.body).map_err(|error| match error {
-            ContractError::Provider { code } => ContractError::ProviderWithEvidence {
-                code,
-                request_id: request_id.clone(),
-                operation_id: None,
-            },
-            other => other,
+        let artifact = extract_artifact(&response.body).map_err(|error| {
+            let code = match error {
+                ContractError::Provider { code } => code,
+                _ => "provider_contract_failure".into(),
+            };
+            ProviderFailure::reconcile(code, ProviderPhase::Artifact)
+                .with_evidence(request_id.clone(), None)
         })?;
         let usage = response.body.get("usage");
         Ok(AdapterOutcome {
-            outcome: OutcomeKind::Succeeded,
             usage: Some(NormalizedUsage {
                 images: Some(1),
                 input_tokens: usage
@@ -368,16 +372,17 @@ fn extract_artifact(body: &Value) -> Result<NormalizedArtifact> {
 fn classify_transport(
     error: Box<dyn StdError + Send + Sync>,
     secret: &ProviderSecret,
-) -> ContractError {
+) -> ProviderFailure {
     let _ = Redactor::new([secret.expose()]).error_chain(error.as_ref());
     match error.downcast_ref::<HttpFailure>() {
-        Some(HttpFailure::BeforeSend) => provider_error("provider_pre_send_failure"),
-        Some(HttpFailure::UnknownOutcome { request_id }) => ContractError::ProviderWithEvidence {
-            code: "timeout_unknown_outcome".into(),
-            request_id: request_id.clone(),
-            operation_id: None,
-        },
-        None => provider_error("provider_failure"),
+        Some(HttpFailure::BeforeSend) => {
+            ProviderFailure::release("provider_pre_send_failure", ProviderPhase::PreSend)
+        }
+        Some(HttpFailure::UnknownOutcome { request_id }) => {
+            ProviderFailure::reconcile("timeout_unknown_outcome", ProviderPhase::Submission)
+                .with_evidence(request_id.clone(), None)
+        }
+        None => ProviderFailure::reconcile("provider_failure", ProviderPhase::Submission),
     }
 }
 
@@ -548,7 +553,7 @@ mod tests {
             200,
         );
         assert!(
-            matches!(adapter.invoke(&request(), &json!({"prompt":"cat"}), &secret_for_test("key"), None), Err(ContractError::ProviderWithEvidence { code, .. }) if code == "artifact_policy_failure")
+            matches!(adapter.invoke(&request(), &json!({"prompt":"cat"}), &secret_for_test("key"), None), Err(ProviderFailure { code, .. }) if code == "artifact_policy_failure")
         );
         let mut invalid = config();
         invalid
@@ -699,7 +704,7 @@ mod tests {
             input["image_size"] = json!(size);
         }
         let outcome = adapter.invoke(&request, &input, &secret, None).unwrap();
-        assert_eq!(outcome.outcome, OutcomeKind::Succeeded);
+        outcome.validate().unwrap();
         assert_eq!(outcome.artifacts.len(), 1);
         image::load_from_memory(&outcome.artifacts[0].bytes)
             .expect("Google returned a decodable image");

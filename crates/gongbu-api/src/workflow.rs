@@ -23,6 +23,9 @@ pub struct ProviderSuccess {
     pub request_id: Option<String>,
     pub operation_id: Option<String>,
     pub usage: NormalizedUsage,
+    /// Provider-reported billing evidence. Settlement remains catalog-derived.
+    pub provider_amount_minor: Option<i64>,
+    pub provider_currency: Option<String>,
     pub artifacts: Vec<ProviderArtifact>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -238,8 +241,8 @@ impl ExecutionWorkflow<'_> {
                                     completed_at: now.into(),
                                     usage: usage_value(&success.usage),
                                     usage_schema_version: 1,
-                                    provider_amount_minor: None,
-                                    provider_currency: None,
+                                    provider_amount_minor: success.provider_amount_minor,
+                                    provider_currency: success.provider_currency.clone(),
                                     failure_code: None,
                                     failure_message_redacted: None,
                                     provider_request_id: success.request_id.clone(),
@@ -923,6 +926,8 @@ mod tests {
                         images: Some(self.image_usage.get()),
                         ..Default::default()
                     },
+                    provider_amount_minor: Some(999),
+                    provider_currency: Some("USD".into()),
                     artifacts: if self.empty_artifacts.get() {
                         vec![]
                     } else {
@@ -1005,6 +1010,16 @@ mod tests {
             .unwrap()
             .settled_at
             .is_some());
+        let attempt = repo
+            .get_provider_attempt_for_execution(&e.execution_id)
+            .unwrap();
+        assert_eq!(attempt.provider_amount_minor, Some(999));
+        assert_eq!(
+            repo.get_receipt_for_execution(&e.execution_id)
+                .unwrap()
+                .settlement_minor,
+            100
+        );
         w.run(&e.execution_id, "later").unwrap();
         assert_eq!(
             (

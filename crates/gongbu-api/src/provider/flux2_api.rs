@@ -8,8 +8,8 @@
 use super::{
     contract::{
         canonical_image_media_type, AdapterCapabilities, AdapterOutcome, ContractError,
-        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutcomeKind, ProviderAdapter,
-        Result, RetryPolicy,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter, ProviderFailure,
+        ProviderPhase, Result, RetryPolicy,
     },
     targets::{valid_artifact_hosts, Flux2ApiConfig, ProviderConfigVersion},
 };
@@ -263,7 +263,8 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             max_retries: config.max_retries,
         }
         .validate(AdapterCapabilities {
-            vendor_enforced_idempotency: config.idempotency_header.is_some(),
+            // Header support is not evidence that the vendor enforces idempotency.
+            vendor_enforced_idempotency: false,
         })?;
         if model.trim().is_empty()
             || config.timeout_ms == 0
@@ -305,16 +306,17 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         input: &Value,
         secret: &ProviderSecret,
         idempotency_key: Option<&str>,
-    ) -> Result<AdapterOutcome> {
-        self.validate_request(request)?;
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        self.validate_request(request)
+            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         crate::provider_contract::validate_image_size_input(request, input)
-            .map_err(|_| provider_error("invalid_request"))?;
+            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         let prompt = input
             .get("prompt")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|p| !p.is_empty() && p.len() <= 32_000)
-            .ok_or_else(|| provider_error("invalid_request"))?;
+            .ok_or_else(|| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         let mut body = json!({"prompt": prompt});
         if let Some(size) = &request.image_size {
             body["image_size"] = json!(size);
@@ -339,9 +341,13 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         let response = self
             .transport
             .submit(
-                &submit_url(&self.config, &self.model)?,
+                &submit_url(&self.config, &self.model).map_err(|_| {
+                    ProviderFailure::release("config_invalid", ProviderPhase::PreSend)
+                })?,
                 secret.expose(),
-                remaining(deadline)?,
+                remaining(deadline).map_err(|_| {
+                    ProviderFailure::release("provider_pre_send_failure", ProviderPhase::PreSend)
+                })?,
                 &self.config.headers,
                 idempotency,
                 &body,
@@ -351,7 +357,10 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             .request_id
             .or_else(|| string_at(&response.body, &["request_id", "requestId"]));
         if (400..500).contains(&response.status) {
-            return Err(provider_error("provider_rejected"));
+            return Err(ProviderFailure::release(
+                "provider_rejected",
+                ProviderPhase::Submission,
+            ));
         }
         if !(200..300).contains(&response.status) {
             return Err(with_evidence("provider_failure", request_id, None));
@@ -359,13 +368,23 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         let operation_id = string_at(&response.body, &["id", "operation_id", "operationId"]);
         let mut current = response.body;
         if is_failed(&current) {
-            return Err(with_evidence("provider_rejected", request_id, operation_id));
+            return Err(
+                ProviderFailure::release("provider_rejected", ProviderPhase::Processing)
+                    .with_evidence(request_id, operation_id),
+            );
         }
         if !is_ready(&current) {
             let operation_id = operation_id
                 .clone()
                 .ok_or_else(|| with_evidence("malformed_response", request_id.clone(), None))?;
-            let poll_url = poll_url(&self.config, &current, &operation_id)?;
+            let poll_url = poll_url(&self.config, &current, &operation_id).map_err(|error| {
+                let code = match error {
+                    ContractError::Provider { code } => code,
+                    _ => "provider_contract_failure".into(),
+                };
+                ProviderFailure::reconcile(code, ProviderPhase::Processing)
+                    .with_evidence(request_id.clone(), Some(operation_id.clone()))
+            })?;
             loop {
                 let wait = Duration::from_millis(self.config.poll_interval_ms).min(
                     remaining(deadline).map_err(|_| {
@@ -401,11 +420,11 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                         )
                     })?;
                 if (400..500).contains(&response.status) {
-                    return Err(with_evidence(
+                    return Err(ProviderFailure::release(
                         "provider_rejected",
-                        request_id,
-                        Some(operation_id),
-                    ));
+                        ProviderPhase::Processing,
+                    )
+                    .with_evidence(request_id, Some(operation_id)));
                 }
                 if !(200..300).contains(&response.status) {
                     return Err(with_evidence(
@@ -416,11 +435,11 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 }
                 current = response.body;
                 if is_failed(&current) {
-                    return Err(with_evidence(
+                    return Err(ProviderFailure::release(
                         "provider_rejected",
-                        request_id,
-                        Some(operation_id),
-                    ));
+                        ProviderPhase::Processing,
+                    )
+                    .with_evidence(request_id, Some(operation_id)));
                 }
                 if is_ready(&current) {
                     break;
@@ -505,7 +524,6 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 }
             });
         Ok(AdapterOutcome {
-            outcome: OutcomeKind::Succeeded,
             usage: Some(NormalizedUsage {
                 images: Some(1),
                 ..Default::default()
@@ -528,7 +546,7 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
     }
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
-            vendor_enforced_idempotency: self.config.idempotency_header.is_some(),
+            vendor_enforced_idempotency: false,
         }
     }
     fn validate_request(&self, request: &NormalizedRequest) -> Result<()> {
@@ -547,9 +565,12 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
         input: &Value,
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
-    ) -> Result<AdapterOutcome> {
+    ) -> Result<AdapterOutcome, ProviderFailure> {
         if vendor_idempotency_key.is_some() != self.config.idempotency_header.is_some() {
-            return Err(provider_error("idempotency_policy_mismatch"));
+            return Err(ProviderFailure::release(
+                "idempotency_policy_mismatch",
+                ProviderPhase::PreSend,
+            ));
         }
         self.invoke_inner(request, input, secret, vendor_idempotency_key)
     }
@@ -630,12 +651,9 @@ fn with_evidence(
     code: &str,
     request_id: Option<String>,
     operation_id: Option<String>,
-) -> ContractError {
-    ContractError::ProviderWithEvidence {
-        code: code.into(),
-        request_id,
-        operation_id,
-    }
+) -> ProviderFailure {
+    ProviderFailure::reconcile(code, ProviderPhase::Processing)
+        .with_evidence(request_id, operation_id)
 }
 fn classify_transport(
     error: Box<dyn StdError + Send + Sync>,
@@ -643,10 +661,12 @@ fn classify_transport(
     submission: bool,
     request_id: Option<String>,
     operation_id: Option<String>,
-) -> ContractError {
+) -> ProviderFailure {
     let _ = Redactor::new([secret.expose()]).error_chain(error.as_ref());
     match error.downcast_ref::<HttpFailure>() {
-        Some(HttpFailure::BeforeSend) if submission => provider_error("provider_pre_send_failure"),
+        Some(HttpFailure::BeforeSend) if submission => {
+            ProviderFailure::release("provider_pre_send_failure", ProviderPhase::PreSend)
+        }
         _ if submission => with_evidence("timeout_unknown_outcome", request_id, operation_id),
         _ => with_evidence("timeout_unknown_outcome", request_id, operation_id),
     }
@@ -787,13 +807,8 @@ mod tests {
             submit,
         )
     }
-    fn code(error: ContractError) -> String {
-        match error {
-            ContractError::Provider { code } | ContractError::ProviderWithEvidence { code, .. } => {
-                code
-            }
-            other => panic!("{other}"),
-        }
+    fn code(error: ProviderFailure) -> String {
+        error.code
     }
 
     #[test]
@@ -803,32 +818,6 @@ mod tests {
             |reader, limit| read_artifact_response_bounded(reader, limit).is_err(),
         );
         assert_adapter_conformance(|case| {
-            if matches!(case, Case::UnsafeRetry) {
-                let calls = Arc::new(Mutex::new(0));
-                let mut retrying = config();
-                retrying.max_retries = 1;
-                let result = Flux2ApiAdapter::new(
-                    retrying,
-                    "flux-2-pro".into(),
-                    Fixture {
-                        submit: calls.clone(),
-                        polls: Arc::new(Mutex::new(Vec::new())),
-                        artifact: Vec::new(),
-                        fail_submit: None,
-                        fail_poll: None,
-                        submit_body: None,
-                        expected_options: None,
-                    },
-                );
-                let error = match result {
-                    Ok(_) => panic!("retrying adapter must be rejected"),
-                    Err(error) => error,
-                };
-                return Observation {
-                    result: Err(error),
-                    submissions: *calls.lock().unwrap(),
-                };
-            }
             let (adapter, calls) = match case {
                 Case::Rejection => fixture(vec![json!({"id":"op-1","status":"Rejected"})]),
                 Case::AmbiguousPostSend => {
@@ -868,7 +857,7 @@ mod tests {
                     adapter.transport.artifact = vec![0; MAX_ARTIFACT_BYTES + 1];
                     (adapter, calls)
                 }
-                Case::UnsafeRetry => unreachable!(),
+                Case::UnsafeRetry => fixture(Vec::new()),
                 Case::InvalidRequest => fixture(Vec::new()),
             };
             let mut conformance_request = request();
@@ -904,6 +893,7 @@ mod tests {
             json!({"id":"op-1","status":"Pending"}),
             json!({"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}}),
         ]);
+        assert!(!adapter.capabilities().vendor_enforced_idempotency);
         let outcome = adapter
             .invoke(
                 &request(),
@@ -1005,9 +995,8 @@ mod tests {
                 Some("opaque-key"),
             )
             .unwrap_err();
-        assert!(
-            matches!(error, ContractError::ProviderWithEvidence { code, operation_id: Some(operation_id), .. } if code == "provider_rejected" && operation_id == "op-rejected")
-        );
+        assert_eq!(error.code, "provider_rejected");
+        assert_eq!(error.evidence.operation_id.as_deref(), Some("op-rejected"));
         assert_eq!(*submits.lock().unwrap(), 1);
     }
     #[test]

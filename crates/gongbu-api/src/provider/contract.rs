@@ -30,17 +30,85 @@ pub enum ContractError {
     UnsafeRetry,
     #[error("provider error ({code})")]
     Provider { code: String },
-    #[error("provider error ({code})")]
-    ProviderWithEvidence {
-        code: String,
-        request_id: Option<String>,
-        operation_id: Option<String>,
-    },
     #[error("I/O: {0}")]
     Io(String),
 }
 
-pub type Result<T> = std::result::Result<T, ContractError>;
+pub type Result<T, E = ContractError> = std::result::Result<T, E>;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderPhase {
+    PreSend,
+    Submission,
+    Processing,
+    Artifact,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendDisposition {
+    Release,
+    Reconcile,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderEvidence {
+    pub request_id: Option<String>,
+    pub operation_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderFailure {
+    /// Stable, persisted machine code. Never contains raw vendor text.
+    pub code: String,
+    pub phase: ProviderPhase,
+    pub spend_disposition: SpendDisposition,
+    #[serde(default)]
+    pub evidence: ProviderEvidence,
+}
+
+impl ProviderFailure {
+    pub fn release(code: impl Into<String>, phase: ProviderPhase) -> Self {
+        Self {
+            code: code.into(),
+            phase,
+            spend_disposition: SpendDisposition::Release,
+            evidence: ProviderEvidence::default(),
+        }
+    }
+
+    pub fn reconcile(code: impl Into<String>, phase: ProviderPhase) -> Self {
+        Self {
+            code: code.into(),
+            phase,
+            spend_disposition: SpendDisposition::Reconcile,
+            evidence: ProviderEvidence::default(),
+        }
+    }
+
+    pub fn with_evidence(
+        mut self,
+        request_id: Option<String>,
+        operation_id: Option<String>,
+    ) -> Self {
+        self.evidence = ProviderEvidence {
+            request_id,
+            operation_id,
+        };
+        self
+    }
+}
+
+impl std::fmt::Display for ProviderFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "provider error ({})", self.code)
+    }
+}
+
+impl std::error::Error for ProviderFailure {}
 
 /// Return the canonical media type only when the bytes are a supported image
 /// and, when supplied, the provider declaration agrees with the content.
@@ -670,7 +738,6 @@ impl NormalizedUsage {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AdapterOutcome {
-    pub outcome: OutcomeKind,
     pub usage: Option<NormalizedUsage>,
     pub provider_amount_minor: Option<i64>,
     pub provider_currency: Option<String>,
@@ -690,15 +757,24 @@ impl AdapterOutcome {
         {
             return Err(ContractError::IndeterminableCost);
         }
+        if self.usage.is_none()
+            || self.artifacts.is_empty()
+            || (self.provider_request_id.is_none() && self.provider_operation_id.is_none())
+            || self
+                .provider_request_id
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || self
+                .provider_operation_id
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(ContractError::Provider {
+                code: "invalid_provider_success".into(),
+            });
+        }
         Ok(())
     }
-}
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OutcomeKind {
-    Succeeded,
-    Failed,
-    Ambiguous,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdapterCapabilities {
@@ -730,7 +806,7 @@ pub trait ProviderAdapter {
         normalized_input: &serde_json::Value,
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
-    ) -> Result<AdapterOutcome>;
+    ) -> Result<AdapterOutcome, ProviderFailure>;
     fn redact_error(&self, _error: &(dyn std::error::Error + 'static)) -> ContractError {
         ContractError::Provider {
             code: "provider_failure".into(),
@@ -1041,7 +1117,7 @@ mod tests {
                 _: &serde_json::Value,
                 _: &ProviderSecret,
                 _: Option<&str>,
-            ) -> Result<AdapterOutcome> {
+            ) -> Result<AdapterOutcome, ProviderFailure> {
                 unreachable!()
             }
         }
@@ -1082,11 +1158,10 @@ mod tests {
                 _: &serde_json::Value,
                 secret: &ProviderSecret,
                 _: Option<&str>,
-            ) -> Result<AdapterOutcome> {
+            ) -> Result<AdapterOutcome, ProviderFailure> {
                 assert_eq!(secret.expose(), b"selected-canary");
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(AdapterOutcome {
-                    outcome: OutcomeKind::Succeeded,
                     usage: None,
                     provider_amount_minor: None,
                     provider_currency: None,

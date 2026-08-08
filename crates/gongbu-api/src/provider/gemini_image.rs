@@ -6,8 +6,8 @@
 use super::{
     contract::{
         canonical_image_media_type, AdapterCapabilities, AdapterOutcome, ContractError,
-        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutcomeKind, ProviderAdapter,
-        Result, RetryPolicy,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter, ProviderFailure,
+        ProviderPhase, Result, RetryPolicy,
     },
     targets::{valid_artifact_hosts, GeminiImageConfig, ProviderConfigVersion},
 };
@@ -272,22 +272,26 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
         request: &NormalizedRequest,
         input: &Value,
         secret: &ProviderSecret,
-    ) -> Result<AdapterOutcome> {
-        self.validate_request(request)?;
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        self.validate_request(request)
+            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         crate::provider_contract::validate_image_size_input(request, input)
-            .map_err(|_| provider_error("invalid_request"))?;
+            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         if request.provider != PROVIDER_ID
             || request.model != self.model
             || request.image_count != Some(1)
         {
-            return Err(provider_error("invalid_request"));
+            return Err(ProviderFailure::release(
+                "invalid_request",
+                ProviderPhase::PreSend,
+            ));
         }
         let prompt = input
             .get("prompt")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty() && value.len() <= 32_000)
-            .ok_or_else(|| provider_error("invalid_request"))?;
+            .ok_or_else(|| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         let mut body = json!({
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"responseModalities": ["IMAGE"]}
@@ -300,7 +304,9 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
         let response = self
             .transport
             .generate(
-                &endpoint_url(&self.config, &self.model)?,
+                &endpoint_url(&self.config, &self.model).map_err(|_| {
+                    ProviderFailure::release("config_invalid", ProviderPhase::PreSend)
+                })?,
                 secret.expose(),
                 timeout,
                 &self.config.headers,
@@ -317,15 +323,17 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
         let operation_id = response.operation_id;
         if !(200..300).contains(&response.status) {
             if (400..500).contains(&response.status) {
-                return Err(provider_error("provider_rejected"));
+                return Err(ProviderFailure::release(
+                    "provider_rejected",
+                    ProviderPhase::Submission,
+                ));
             }
             // Redirects and server errors occur after transmission and do not
             // prove that Google neither generated nor billed the request.
-            return Err(ContractError::ProviderWithEvidence {
-                code: "provider_failure".into(),
-                request_id,
-                operation_id,
-            });
+            return Err(
+                ProviderFailure::reconcile("provider_failure", ProviderPhase::Submission)
+                    .with_evidence(request_id, operation_id),
+            );
         }
         let artifacts = extract_artifacts(
             &response.body,
@@ -334,24 +342,22 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
             secret,
             timeout,
         )
-        .map_err(|error| match error {
-            ContractError::Provider { code } => ContractError::ProviderWithEvidence {
-                code,
-                request_id: request_id.clone(),
-                operation_id: operation_id.clone(),
-            },
-            other => other,
+        .map_err(|error| {
+            let code = match error {
+                ContractError::Provider { code } => code,
+                _ => "provider_contract_failure".into(),
+            };
+            ProviderFailure::reconcile(code, ProviderPhase::Artifact)
+                .with_evidence(request_id.clone(), operation_id.clone())
         })?;
         if artifacts.is_empty() {
-            return Err(ContractError::ProviderWithEvidence {
-                code: "missing_image".into(),
-                request_id,
-                operation_id,
-            });
+            return Err(
+                ProviderFailure::reconcile("missing_image", ProviderPhase::Processing)
+                    .with_evidence(request_id, operation_id),
+            );
         }
         let usage = response.body.get("usageMetadata");
         Ok(AdapterOutcome {
-            outcome: OutcomeKind::Succeeded,
             usage: Some(NormalizedUsage {
                 images: Some(artifacts.len() as i64),
                 input_tokens: usage
@@ -395,9 +401,12 @@ impl<T: GeminiTransport> ProviderAdapter for GeminiImageAdapter<T> {
         input: &Value,
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
-    ) -> Result<AdapterOutcome> {
+    ) -> Result<AdapterOutcome, ProviderFailure> {
         if vendor_idempotency_key.is_some() || self.config.max_retries != 0 {
-            return Err(provider_error("retry_not_supported"));
+            return Err(ProviderFailure::release(
+                "retry_not_supported",
+                ProviderPhase::PreSend,
+            ));
         }
         self.invoke_inner(request, input, secret)
     }
@@ -511,7 +520,10 @@ fn extract_artifacts<T: GeminiTransport>(
             }
             let bytes = transport
                 .fetch_artifact(&url, secret.expose(), timeout)
-                .map_err(|error| classify_transport(error, secret, true))?;
+                .map_err(|error| {
+                    let _ = classify_transport(error, secret, true);
+                    provider_error("artifact_policy_failure")
+                })?;
             if bytes.len() > MAX_ARTIFACT_BYTES {
                 return Err(provider_error("artifact_policy_failure"));
             }
@@ -529,7 +541,7 @@ fn classify_transport(
     error: Box<dyn StdError + Send + Sync>,
     secret: &ProviderSecret,
     artifact: bool,
-) -> ContractError {
+) -> ProviderFailure {
     let redactor = Redactor::new([secret.expose()]);
     let _redacted_evidence = redactor.error_chain(error.as_ref());
     let unknown = error
@@ -546,17 +558,14 @@ fn classify_transport(
         Some(HttpFailure::BeforeSend)
     );
     if before_send && !artifact {
-        provider_error("provider_pre_send_failure")
+        ProviderFailure::release("provider_pre_send_failure", ProviderPhase::PreSend)
     } else if let Some((request_id, operation_id)) = unknown.filter(|_| !artifact) {
-        ContractError::ProviderWithEvidence {
-            code: "timeout_unknown_outcome".into(),
-            request_id,
-            operation_id,
-        }
+        ProviderFailure::reconcile("timeout_unknown_outcome", ProviderPhase::Submission)
+            .with_evidence(request_id, operation_id)
     } else if artifact {
-        provider_error("artifact_policy_failure")
+        ProviderFailure::reconcile("artifact_policy_failure", ProviderPhase::Artifact)
     } else {
-        provider_error("provider_failure")
+        ProviderFailure::reconcile("provider_failure", ProviderPhase::Submission)
     }
 }
 
@@ -572,6 +581,7 @@ mod tests {
             assert_adapter_conformance, assert_body_and_artifact_bounds, assert_redirect_blocked,
             Case, Observation,
         },
+        provider_contract::SpendDisposition,
         secrets::secret_for_test,
     };
     use image::{DynamicImage, ImageOutputFormat, RgbaImage};
@@ -716,11 +726,7 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ContractError::ProviderWithEvidence { code, .. }
-                if code == "artifact_policy_failure"
-        ));
+        assert_eq!(error.code, "artifact_policy_failure");
         assert_eq!(*calls.lock().unwrap(), 1);
     }
 
@@ -739,7 +745,7 @@ mod tests {
                     &secret_for_test("secret-canary"),
                     None,
                 ),
-                Err(ContractError::ProviderWithEvidence { code, .. })
+                Err(ProviderFailure { code, .. })
                     if code == "artifact_policy_failure"
             ));
         }
@@ -847,16 +853,9 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ContractError::ProviderWithEvidence {
-                code,
-                request_id: Some(request_id),
-                operation_id: Some(operation_id),
-            } if code == "missing_image"
-                && request_id == "request-1"
-                && operation_id == "operation-1"
-        ));
+        assert_eq!(error.code, "missing_image");
+        assert_eq!(error.evidence.request_id.as_deref(), Some("request-1"));
+        assert_eq!(error.evidence.operation_id.as_deref(), Some("operation-1"));
         assert_eq!(*calls.lock().unwrap(), 1);
     }
     #[test]
@@ -883,7 +882,7 @@ mod tests {
             200,
         );
         assert!(
-            matches!(rejected_adapter.invoke(&request(), &json!({"prompt":"cat"}), &secret_for_test("secret-canary"), None), Err(ContractError::ProviderWithEvidence { code, .. }) if code == "artifact_policy_failure")
+            matches!(rejected_adapter.invoke(&request(), &json!({"prompt":"cat"}), &secret_for_test("secret-canary"), None), Err(ProviderFailure { code, .. }) if code == "artifact_policy_failure")
         );
 
         let (multiple_adapter, _) = adapter(
@@ -900,7 +899,7 @@ mod tests {
                 &secret_for_test("secret-canary"),
                 None
             ),
-            Err(ContractError::ProviderWithEvidence { code, .. }) if code == "artifact_policy_failure"
+            Err(ProviderFailure { code, .. }) if code == "artifact_policy_failure"
         ));
     }
     #[test]
@@ -927,12 +926,7 @@ mod tests {
                     None,
                 )
                 .unwrap_err();
-            let actual = match &error {
-                ContractError::Provider { code }
-                | ContractError::ProviderWithEvidence { code, .. } => code,
-                _ => panic!("unexpected contract error"),
-            };
-            assert_eq!(actual, code);
+            assert_eq!(error.code, code);
             assert_eq!(*calls.lock().unwrap(), 1);
             assert!(!error.to_string().contains("secret-canary"));
             assert!(!error.to_string().contains("sensitive-project"));
@@ -949,16 +943,9 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ContractError::ProviderWithEvidence {
-                code,
-                request_id: Some(request_id),
-                operation_id: Some(operation_id),
-            } if code == "provider_failure"
-                && request_id == "request-1"
-                && operation_id == "operation-1"
-        ));
+        assert_eq!(error.code, "provider_failure");
+        assert_eq!(error.evidence.request_id.as_deref(), Some("request-1"));
+        assert_eq!(error.evidence.operation_id.as_deref(), Some("operation-1"));
         assert_eq!(*calls.lock().unwrap(), 1);
     }
     #[test]
@@ -1032,14 +1019,8 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ContractError::ProviderWithEvidence {
-                code,
-                request_id: None,
-                operation_id: None,
-            } if code == "timeout_unknown_outcome"
-        ));
+        assert_eq!(error.code, "timeout_unknown_outcome");
+        assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
         assert_eq!(*calls.lock().unwrap(), 1);
     }
 
@@ -1053,16 +1034,12 @@ mod tests {
             &secret_for_test("secret-canary"),
             false,
         );
-        assert!(matches!(
-            error,
-            ContractError::ProviderWithEvidence {
-                code,
-                request_id: Some(request_id),
-                operation_id: Some(operation_id),
-            } if code == "timeout_unknown_outcome"
-                && request_id == "request-header"
-                && operation_id == "operation-header"
-        ));
+        assert_eq!(error.code, "timeout_unknown_outcome");
+        assert_eq!(error.evidence.request_id.as_deref(), Some("request-header"));
+        assert_eq!(
+            error.evidence.operation_id.as_deref(),
+            Some("operation-header")
+        );
     }
 
     #[test]
@@ -1083,9 +1060,8 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(
-            matches!(error, ContractError::Provider { code } if code == "provider_pre_send_failure")
-        );
+        assert_eq!(error.code, "provider_pre_send_failure");
+        assert_eq!(error.spend_disposition, SpendDisposition::Release);
         assert_eq!(*calls.lock().unwrap(), 1);
     }
 
@@ -1134,11 +1110,7 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ContractError::ProviderWithEvidence { code, .. }
-                if code == "artifact_policy_failure"
-        ));
+        assert_eq!(error.code, "artifact_policy_failure");
         assert_eq!(*calls.lock().unwrap(), 1);
     }
 
@@ -1304,7 +1276,7 @@ mod tests {
             input["image_size"] = json!(size);
         }
         let outcome = adapter.invoke(&request, &input, &secret, None).unwrap();
-        assert_eq!(outcome.outcome, OutcomeKind::Succeeded);
+        outcome.validate().unwrap();
         assert_eq!(outcome.artifacts.len(), 1);
         image::load_from_memory(&outcome.artifacts[0].bytes)
             .expect("Google returned a decodable image");
