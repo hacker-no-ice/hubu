@@ -134,21 +134,13 @@ mod tests {
     #[test]
     fn resolves_only_the_selected_operator_reference() {
         let provider = RecordingProvider(Default::default());
-        let target = crate::provider_targets::ProviderConfigVersion {
-            provider_config_version: "v1".into(),
-            workload_type: "image_generation".into(),
-            provider: "vendor".into(),
-            adapter: "adapter".into(),
-            model: "model".into(),
-            secret_service: "gongbu.vendor".into(),
-            secret_account: "production".into(),
-            gemini_image: None,
-            gemini_developer_image: None,
-            flux2_api: None,
-            ideogram_image: None,
-            enabled: true,
-        };
-        let secret = resolve_selected(&provider, &target).unwrap();
+        let catalog: crate::provider_targets::ProviderTargetConfig = serde_json::from_str(
+            r#"{"provider_configs":[{"provider_config_version":"v1","workload_type":"image_generation","provider":"vendor","adapter":"adapter","model":"model","secret_service":"gongbu.vendor","secret_account":"production"}]}"#,
+        ).unwrap();
+        let target = catalog
+            .resolve("image_generation", "vendor", "adapter", "model")
+            .unwrap();
+        let secret = resolve_selected(&provider, target).unwrap();
         assert_eq!(secret.expose(), b"canary");
         assert_eq!(
             provider.0.lock().unwrap().as_slice(),

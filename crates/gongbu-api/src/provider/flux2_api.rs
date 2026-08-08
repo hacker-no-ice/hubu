@@ -249,8 +249,8 @@ impl Flux2ApiAdapter<ReqwestFlux2Transport> {
         }
         Self::new(
             target
-                .flux2_api
-                .clone()
+                .flux2_api()
+                .cloned()
                 .ok_or_else(|| provider_error("config_invalid"))?,
             target.model.clone(),
             ReqwestFlux2Transport,
@@ -1226,6 +1226,7 @@ mod tests {
                 adapter: "flux2_api".into(),
                 model: "flux-2-pro".into(),
                 provider_config_version: "pcv".into(),
+                provider_config_digest: format!("sha256:{}", "a".repeat(64)),
                 pricing_snapshot: serde_json::to_value(snapshot).unwrap(),
                 pricing_schema_version: 1,
                 created_at: "now".into(),

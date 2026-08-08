@@ -97,20 +97,21 @@ impl GeminiProviderActivities {
                 "provider_target_mismatch".into(),
             ));
         }
+        let key = crate::provider_targets::TargetKey::new(
+            &execution.workload_type,
+            &execution.provider,
+            &execution.adapter,
+            &execution.model,
+        )
+        .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
         let target = self
             .targets
-            .resolve(
-                &execution.workload_type,
-                &execution.provider,
-                &execution.adapter,
-                &execution.model,
+            .resolve_revision(
+                &key,
+                &execution.provider_config_version,
+                &execution.provider_config_digest,
             )
             .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
-        if target.provider_config_version != execution.provider_config_version {
-            return Err(WorkflowActivityError::Proven(
-                "provider_config_changed".into(),
-            ));
-        }
         let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
             .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
         if !snapshot.has_unit(PricingUnit::Image) {
@@ -144,8 +145,8 @@ impl ProviderActivities for GeminiProviderActivities {
         let (target, request, _) = self.selected(execution)?;
         let adapter = GeminiImageAdapter::new(
             target
-                .gemini_image
-                .clone()
+                .gemini_image()
+                .cloned()
                 .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
             target.model.clone(),
             Arc::clone(&self.transport),
@@ -172,8 +173,8 @@ impl ProviderActivities for GeminiProviderActivities {
         let (target, request, _) = self.selected(execution)?;
         let adapter = GeminiImageAdapter::new(
             target
-                .gemini_image
-                .clone()
+                .gemini_image()
+                .cloned()
                 .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
             target.model.clone(),
             Arc::clone(&self.transport),
@@ -239,20 +240,21 @@ impl GeminiDeveloperProviderActivities {
                 "provider_target_mismatch".into(),
             ));
         }
+        let key = crate::provider_targets::TargetKey::new(
+            &execution.workload_type,
+            &execution.provider,
+            &execution.adapter,
+            &execution.model,
+        )
+        .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
         let target = self
             .targets
-            .resolve(
-                &execution.workload_type,
-                &execution.provider,
-                &execution.adapter,
-                &execution.model,
+            .resolve_revision(
+                &key,
+                &execution.provider_config_version,
+                &execution.provider_config_digest,
             )
             .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
-        if target.provider_config_version != execution.provider_config_version {
-            return Err(WorkflowActivityError::Proven(
-                "provider_config_changed".into(),
-            ));
-        }
         let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
             .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
         if !snapshot.is_image_only() {
@@ -288,8 +290,8 @@ impl ProviderActivities for GeminiDeveloperProviderActivities {
         let (target, request) = self.selected(execution)?;
         let adapter = GeminiDeveloperImageAdapter::new(
             target
-                .gemini_developer_image
-                .clone()
+                .gemini_developer_image()
+                .cloned()
                 .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
             target.model.clone(),
             Arc::clone(&self.transport),
@@ -316,8 +318,8 @@ impl ProviderActivities for GeminiDeveloperProviderActivities {
         let (target, request) = self.selected(execution)?;
         let adapter = GeminiDeveloperImageAdapter::new(
             target
-                .gemini_developer_image
-                .clone()
+                .gemini_developer_image()
+                .cloned()
                 .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
             target.model.clone(),
             Arc::clone(&self.transport),
@@ -383,20 +385,21 @@ impl IdeogramProviderActivities {
                 "provider_target_mismatch".into(),
             ));
         }
+        let key = crate::provider_targets::TargetKey::new(
+            &execution.workload_type,
+            &execution.provider,
+            &execution.adapter,
+            &execution.model,
+        )
+        .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
         let target = self
             .targets
-            .resolve(
-                &execution.workload_type,
-                &execution.provider,
-                &execution.adapter,
-                &execution.model,
+            .resolve_revision(
+                &key,
+                &execution.provider_config_version,
+                &execution.provider_config_digest,
             )
             .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
-        if target.provider_config_version != execution.provider_config_version {
-            return Err(WorkflowActivityError::Proven(
-                "provider_config_changed".into(),
-            ));
-        }
         let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
             .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
         if !snapshot.has_unit(PricingUnit::Image) {
@@ -430,8 +433,8 @@ impl ProviderActivities for IdeogramProviderActivities {
         let (target, request, _) = self.selected(execution)?;
         let adapter = IdeogramImageAdapter::new(
             target
-                .ideogram_image
-                .clone()
+                .ideogram_image()
+                .cloned()
                 .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
             target.model.clone(),
             Arc::clone(&self.transport),
@@ -458,8 +461,8 @@ impl ProviderActivities for IdeogramProviderActivities {
         let (target, request, _) = self.selected(execution)?;
         let adapter = IdeogramImageAdapter::new(
             target
-                .ideogram_image
-                .clone()
+                .ideogram_image()
+                .cloned()
                 .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
             target.model.clone(),
             Arc::clone(&self.transport),
@@ -818,12 +821,13 @@ mod tests {
         impl GeminiTransport for FixtureTransport {
             fn generate(
                 &self,
-                _: &reqwest::Url,
+                endpoint: &reqwest::Url,
                 _: &[u8],
                 _: Duration,
                 _: &std::collections::BTreeMap<String, String>,
                 _: &serde_json::Value,
             ) -> Result<TransportResponse, Box<dyn std::error::Error + Send + Sync>> {
+                assert_eq!(endpoint.host_str(), Some("v1.googleapis.example"));
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(TransportResponse {
                     status: 200,
@@ -842,13 +846,17 @@ mod tests {
             }
         }
         #[derive(Default)]
-        struct FixtureHubu(AtomicUsize);
+        struct FixtureHubu {
+            claims: AtomicUsize,
+            settlements: AtomicUsize,
+        }
         impl HubuActivities for FixtureHubu {
             fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
                 Ok(())
             }
             fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
-                unreachable!("fixture supplies claim")
+                self.claims.fetch_add(1, Ordering::SeqCst);
+                Ok("claim".into())
             }
             fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
                 Ok(())
@@ -860,7 +868,7 @@ mod tests {
                 amount_minor: i64,
             ) -> Result<String, WorkflowActivityError> {
                 assert_eq!(amount_minor, 25);
-                self.0.fetch_add(1, Ordering::SeqCst);
+                self.settlements.fetch_add(1, Ordering::SeqCst);
                 Ok("hubu-settlement-1".into())
             }
             fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
@@ -873,14 +881,45 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
             .unwrap();
         let calls = Arc::new(FixtureTransport(AtomicUsize::new(0), png.clone()));
-        let targets: ProviderTargetConfig = serde_json::from_value(json!({"provider_configs":[{
-            "provider_config_version":"google-pcv-1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"fixture","gemini_image":{"endpoint":"https://us-central1-aiplatform.googleapis.com","api_version":"v1","project":"sensitive-project","location":"us-central1","timeout_ms":1000,"max_retries":0}
-        }]})).unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({"schema_version":2,"provider_configs":[
+          {"provider_config_version":"google-pcv-1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"fixture-v1","active":false,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://v1.googleapis.example","api_version":"v1","project":"sensitive-project","location":"us-central1","timeout_ms":1000,"max_retries":0}}},
+          {"provider_config_version":"google-pcv-2","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"fixture-v2","active":true,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://v2.googleapis.example","api_version":"v1","project":"sensitive-project","location":"us-central1","timeout_ms":1000,"max_retries":0}}}
+        ]})).unwrap();
         targets.validate().unwrap();
         let repository = Repository::in_memory().unwrap();
-        let execution = repository.create_execution(&CreateExecutionParams {
-            account_id:"account".into(), operation_key:"gemini-workflow".into(), hubu_authorization_id:"auth".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:25, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"google/gemini-image-v1".into(), config_version:"cfg".into(), workload_type:"image_generation".into(), provider:"google".into(), adapter:"gemini_image".into(), model:"gemini-image-v1".into(), provider_config_version:"google-pcv-1".into(), pricing_snapshot:json!({"provider":"google","model":"gemini-image-v1","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-image","unit":"image","unit_amount_minor":25,"quantity":1,"estimated_amount_minor":25,"currency":"USD"}), pricing_schema_version:1, created_at:"now".into()
-        }).unwrap();
+        let params = CreateExecutionParams {
+            account_id: "account".into(),
+            operation_key: "gemini-workflow".into(),
+            hubu_authorization_id: "auth".into(),
+            hubu_claim_id: None,
+            hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
+            authorized_minor: 25,
+            authorization_currency: "USD".into(),
+            normalized_input: json!({"prompt":"draw a cat","image_count":1}),
+            input_hash: "hash".into(),
+            input_schema_version: 1,
+            target: "google/gemini-image-v1".into(),
+            config_version: "cfg".into(),
+            workload_type: "image_generation".into(),
+            provider: "google".into(),
+            adapter: "gemini_image".into(),
+            model: "gemini-image-v1".into(),
+            provider_config_version: "google-pcv-1".into(),
+            provider_config_digest: targets
+                .revisions()
+                .find(|revision| revision.provider_config_version == "google-pcv-1")
+                .unwrap()
+                .digest()
+                .to_owned(),
+            pricing_snapshot: json!({"provider":"google","model":"gemini-image-v1","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-image","unit":"image","unit_amount_minor":25,"quantity":1,"estimated_amount_minor":25,"currency":"USD"}),
+            pricing_schema_version: 1,
+            created_at: "now".into(),
+        };
+        let mut mismatched = params.clone();
+        mismatched.operation_key = "gemini-digest-mismatch".into();
+        mismatched.provider_config_digest = format!("sha256:{}", "b".repeat(64));
+        let execution = repository.create_execution(&params).unwrap();
+        let mismatched = repository.create_execution(&mismatched).unwrap();
         let root = tempdir().unwrap();
         let artifact_service = ArtifactService::new(
             repository.clone(),
@@ -907,7 +946,8 @@ mod tests {
             "succeeded"
         );
         assert_eq!(calls.0.load(Ordering::SeqCst), 1);
-        assert_eq!(hubu.0.load(Ordering::SeqCst), 1);
+        assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
+        assert_eq!(hubu.settlements.load(Ordering::SeqCst), 1);
         let attempt = repository
             .get_provider_attempt_for_execution(&execution.execution_id)
             .unwrap();
@@ -937,6 +977,12 @@ mod tests {
                 .settlement_minor,
             25
         );
+        assert_eq!(
+            runner.run_execution(&mismatched.execution_id).unwrap(),
+            "failed"
+        );
+        assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.0.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1026,7 +1072,7 @@ mod tests {
         targets.validate().unwrap();
         let repository = Repository::in_memory().unwrap();
         let execution = repository.create_execution(&CreateExecutionParams {
-            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"auth".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:30, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"ideogram/ideogram-v3".into(), config_version:"cfg".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), pricing_snapshot:json!({"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","unit":"image","unit_amount_minor":30,"quantity":1,"estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:1, created_at:"now".into()
+            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"auth".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:30, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"ideogram/ideogram-v3".into(), config_version:"cfg".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","unit":"image","unit_amount_minor":30,"quantity":1,"estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:1, created_at:"now".into()
         }).unwrap();
         let root = tempdir().unwrap();
         let artifacts = ArtifactService::new(

@@ -84,6 +84,7 @@ never chooses, orders, optimizes, or falls back between targets.
 
 ```json
 {
+  "schema_version": 2,
   "provider_configs": [{
     "provider_config_version": "example-image-2026-08-05",
     "workload_type": "image_generation",
@@ -92,16 +93,26 @@ never chooses, orders, optimizes, or falls back between targets.
     "model": "image-v1",
     "secret_service": "gongbu.example",
     "secret_account": "local",
-    "enabled": true
+    "active": true,
+    "execution_enabled": true,
+    "settings": { "type": "fixture" }
   }]
 }
 ```
 
-The immutable version and resolved selector are stored on each `Execution`.
-Duplicate selectors or versions, unknown fields, an unavailable adapter, and a
-missing provider secret fail closed. Endpoints, credentials, headers, account
-identifiers, timeouts, and retry settings remain operator configuration and are
-not accepted from callers.
+Schema v2 permits multiple immutable revisions for one selector. Exactly one
+may be `active` for new executions; inactive revisions remain available to
+finish frozen work unless `execution_enabled` is set to `false` as an emergency
+stop. Adapter settings are tagged by `type`, and each execution stores the
+selected revision plus its canonical SHA-256 configuration digest.
+
+Existing schema-v1 files (no `schema_version`, legacy adapter-specific setting
+field, and optional `enabled`) are migrated while loading. `enabled` maps to
+both v2 gates, and serializing the validated catalog emits schema v2. Reusing a
+version with changed content, multiple active revisions, unknown fields, an
+unavailable adapter, and a missing provider secret fail closed. Endpoints,
+credentials, headers, account identifiers, deadlines, and retry settings remain
+operator configuration and are not accepted from callers.
 
 See [Local Keychain secrets](docs/local-keychain-secrets.md) for setup and
 manual credential replacement. The deliberately opt-in live check is documented
