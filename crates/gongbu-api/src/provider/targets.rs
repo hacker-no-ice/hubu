@@ -16,6 +16,7 @@ use thiserror::Error;
 const PROVIDER_CONFIG_ENV: &str = "GONGBU_PROVIDER_CONFIG";
 const CURRENT_SCHEMA_VERSION: u32 = 2;
 const MAX_DEADLINE_MS: u64 = 15 * 60 * 1_000;
+pub const LEGACY_UNRESOLVED_DIGEST: &str = "legacy-unresolved";
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -284,9 +285,14 @@ impl ProviderTargetConfig {
     }
     pub fn resolve_active(&self, key: &TargetKey) -> Result<&ProviderConfigVersion> {
         let version = self.active.get(key).ok_or(Error::NotSelectable)?;
-        self.revisions
+        let revision = self
+            .revisions
             .get(&(key.clone(), version.clone()))
-            .ok_or(Error::NotConfigured)
+            .ok_or(Error::NotConfigured)?;
+        if !revision.execution_enabled {
+            return Err(Error::ExecutionDisabled);
+        }
+        Ok(revision)
     }
     pub fn resolve_revision(
         &self,
@@ -305,6 +311,27 @@ impl ProviderTargetConfig {
             return Err(Error::ExecutionDisabled);
         }
         Ok(revision)
+    }
+
+    /// Resolve rows created before provider configuration digests were stored.
+    /// This compatibility path is unreachable for newly validated executions.
+    pub fn resolve_persisted_revision(
+        &self,
+        key: &TargetKey,
+        version: &str,
+        digest: &str,
+    ) -> Result<&ProviderConfigVersion> {
+        if digest == LEGACY_UNRESOLVED_DIGEST {
+            let revision = self
+                .revisions
+                .get(&(key.clone(), version.to_owned()))
+                .ok_or(Error::NotConfigured)?;
+            if !revision.execution_enabled {
+                return Err(Error::ExecutionDisabled);
+            }
+            return Ok(revision);
+        }
+        self.resolve_revision(key, version, digest)
     }
 }
 
@@ -780,6 +807,29 @@ mod tests {
             c.resolve_revision(&key, "v1", &digest),
             Err(Error::ExecutionDisabled)
         ));
+
+        let active_disabled = catalog(
+            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"v1","workload_type":"image_generation","provider":"a","adapter":"fixture","model":"m","secret_service":"svc","secret_account":"one","active":true,"execution_enabled":false,"settings":{"type":"fixture"}}]}"#,
+        );
+        assert!(matches!(
+            active_disabled.resolve_active(&key),
+            Err(Error::ExecutionDisabled)
+        ));
+        assert!(matches!(
+            active_disabled.resolve_persisted_revision(&key, "v1", LEGACY_UNRESOLVED_DIGEST),
+            Err(Error::ExecutionDisabled)
+        ));
+
+        let enabled = catalog(
+            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"v1","workload_type":"image_generation","provider":"a","adapter":"fixture","model":"m","secret_service":"svc","secret_account":"one","active":false,"execution_enabled":true,"settings":{"type":"fixture"}}]}"#,
+        );
+        assert_eq!(
+            enabled
+                .resolve_persisted_revision(&key, "v1", LEGACY_UNRESOLVED_DIGEST)
+                .unwrap()
+                .provider_config_version,
+            "v1"
+        );
     }
 
     #[test]

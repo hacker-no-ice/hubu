@@ -1373,10 +1373,27 @@ mod tests {
             ", provider_config_digest TEXT NOT NULL CHECK(provider_config_digest GLOB 'sha256:*' AND length(provider_config_digest)=71)",
             "",
         );
-        Connection::open(&path)
-            .unwrap()
-            .execute_batch(&legacy)
-            .unwrap();
+        let legacy_connection = Connection::open(&path).unwrap();
+        legacy_connection.execute_batch(&legacy).unwrap();
+        for column in [
+            "workload_type",
+            "provider",
+            "adapter",
+            "model",
+            "provider_config_version",
+        ] {
+            legacy_connection
+                .execute(
+                    &format!("ALTER TABLE executions ADD COLUMN {column} TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim({column})<>'')"),
+                    [],
+                )
+                .unwrap();
+        }
+        legacy_connection.execute(
+            "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES('legacy-execution','legacy','in-flight','auth','token-ref',100,'USD','{}','hash',1,'image_generation/example/fixture/image-v1','pcv-1','image_generation','example','fixture','image-v1','pcv-1','{}',1,'pending','now','now',0)",
+            [],
+        ).unwrap();
+        drop(legacy_connection);
 
         let repository = Repository::open(&path, Redactor::default()).unwrap();
         let columns: BTreeSet<String> = repository
@@ -1390,6 +1407,13 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(columns.contains("provider_config_digest"));
+        assert_eq!(
+            repository
+                .get_execution("legacy-execution")
+                .unwrap()
+                .provider_config_digest,
+            crate::provider_targets::LEGACY_UNRESOLVED_DIGEST
+        );
 
         let created = repository
             .create_execution(&new("migration", "digest"))

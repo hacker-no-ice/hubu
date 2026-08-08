@@ -106,7 +106,7 @@ impl GeminiProviderActivities {
         .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
         let target = self
             .targets
-            .resolve_revision(
+            .resolve_persisted_revision(
                 &key,
                 &execution.provider_config_version,
                 &execution.provider_config_digest,
@@ -249,7 +249,7 @@ impl GeminiDeveloperProviderActivities {
         .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
         let target = self
             .targets
-            .resolve_revision(
+            .resolve_persisted_revision(
                 &key,
                 &execution.provider_config_version,
                 &execution.provider_config_digest,
@@ -394,7 +394,7 @@ impl IdeogramProviderActivities {
         .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
         let target = self
             .targets
-            .resolve_revision(
+            .resolve_persisted_revision(
                 &key,
                 &execution.provider_config_version,
                 &execution.provider_config_digest,

@@ -114,6 +114,11 @@ unavailable adapter, and a missing provider secret fail closed. Endpoints,
 credentials, headers, account identifiers, deadlines, and retry settings remain
 operator configuration and are not accepted from callers.
 
+Database rows created before configuration digests existed retain their exact
+target key and revision and use a narrowly scoped `legacy-unresolved` lookup so
+in-flight work survives the upgrade. Every newly accepted execution requires
+and stores a canonical digest; the legacy path cannot be selected by new work.
+
 See [Local Keychain secrets](docs/local-keychain-secrets.md) for setup and
 manual credential replacement. The deliberately opt-in live check is documented
 in [Gemini image E2E](docs/gemini-image-e2e.md); CI uses fixtures only. The
