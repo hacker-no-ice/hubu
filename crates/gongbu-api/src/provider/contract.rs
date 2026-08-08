@@ -214,7 +214,7 @@ impl PricingCatalog {
                     && rule.model == request.model
                     && match &rule.selector {
                         Some(s) => request.image_size.as_ref() == Some(&s.image_size),
-                        None => true,
+                        None => request.image_size.is_none(),
                     }
             })
             .collect();
@@ -478,6 +478,13 @@ fn gcd(mut a: i128, mut b: i128) -> i128 {
 }
 
 impl PricingSnapshot {
+    pub fn is_image_only(&self) -> bool {
+        match self.schema_version {
+            1 => self.unit == Some(PricingUnit::Image),
+            2 => self.components.len() == 1 && self.components[0].unit == PricingUnit::Image,
+            _ => false,
+        }
+    }
     pub fn has_unit(&self, unit: PricingUnit) -> bool {
         self.unit == Some(unit)
             || self
@@ -860,6 +867,14 @@ mod tests {
         request.image_size = None;
         assert_eq!(
             catalog.snapshot(&request),
+            Err(ContractError::UnsupportedTarget)
+        );
+
+        let flat = PricingCatalog::from_json(CATALOG.as_bytes()).unwrap();
+        request.model = "image-v1".into();
+        request.image_size = Some("4k".into());
+        assert_eq!(
+            flat.snapshot(&request),
             Err(ContractError::UnsupportedTarget)
         );
     }

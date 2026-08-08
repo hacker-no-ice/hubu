@@ -9,9 +9,7 @@ use crate::{
         Artifact, CreateExecutionParams, Error as PersistenceError, Execution, HubuTokenReference,
         Repository,
     },
-    provider_contract::{
-        ContractError, NormalizedRequest, PricingCatalog, PricingSnapshot, PricingUnit,
-    },
+    provider_contract::{ContractError, NormalizedRequest, PricingCatalog, PricingSnapshot},
     provider_targets::{Error as TargetError, ProviderConfigVersion, ProviderTargetConfig},
     temporal::ExecutionScheduler,
     workflow::{OperatorReconciliationRequest, ReconciliationAction},
@@ -319,7 +317,7 @@ impl Api {
         // Tokenization belongs to provider-bound request normalization, which is
         // not part of this HTTP/persistence milestone. Fail closed rather than
         // accepting a caller-asserted token count that could underfund execution.
-        if !pricing_snapshot.has_unit(PricingUnit::Image) {
+        if !pricing_snapshot.is_image_only() {
             return Err(ApiError::validation());
         }
         let input_hash = immutable_hash(&request, resolved, &pricing_snapshot, &normalized_input)?;
@@ -1135,6 +1133,53 @@ mod tests {
             "/v1/executions",
             Some(&fixture.owner),
             &serde_json::to_vec(&text_request).unwrap(),
+        );
+        assert_eq!(response.status, 400);
+    }
+
+    #[test]
+    fn mixed_image_and_caller_token_pricing_fails_closed() {
+        let fixture = fixture();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "provider_configs": [{
+                "provider_config_version": "mixed-v1",
+                "workload_type": "image_generation",
+                "provider": "example",
+                "adapter": "fixture",
+                "model": "mixed-v1",
+                "secret_service": "gongbu.example",
+                "secret_account": "local"
+            }]
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            br#"{
+                "schema_version":2,"catalog_version":"prices-v2",
+                "rules":[{"rule_id":"mixed","provider":"example",
+                "model":"mixed-v1","currency":"USD","components":[
+                {"unit":"image","rate_numerator_minor":1,"rate_denominator":1},
+                {"unit":"input_token","rate_numerator_minor":1,"rate_denominator":1000000},
+                {"unit":"output_token","rate_numerator_minor":1,"rate_denominator":1000000}]}]
+            }"#,
+        )
+        .unwrap();
+        let api = Api::new(
+            fixture.repository,
+            fixture.artifacts,
+            targets,
+            pricing,
+            fixture.scheduler,
+            || "2026-08-06T00:00:00Z".into(),
+        );
+        let mut mixed = request("operation-mixed");
+        mixed["model"] = json!("mixed-v1");
+        mixed["input"]["input_tokens"] = json!(1);
+        mixed["input"]["max_output_tokens"] = json!(1);
+        let response = api.handle(
+            "POST",
+            "/v1/executions",
+            Some(&fixture.owner),
+            &serde_json::to_vec(&mixed).unwrap(),
         );
         assert_eq!(response.status, 400);
     }

@@ -1138,7 +1138,7 @@ mod tests {
             provider::targets::ProviderTargetConfig,
             secrets::MacOsKeychain,
         };
-        use std::{env, path::Path};
+        use std::{env, fs, path::Path};
         assert_eq!(
             env::var("GONGBU_LIVE_GEMINI_CONFIRM").as_deref(),
             Ok("I_ACCEPT_GOOGLE_CHARGES")
@@ -1146,6 +1146,10 @@ mod tests {
         let config_path =
             env::var("GONGBU_PROVIDER_CONFIG").expect("operator target config is required");
         let pricing_path = env::var("GONGBU_PRICING_CATALOG").expect("pricing catalog is required");
+        let output_dir = env::var("GONGBU_LIVE_GEMINI_OUTPUT_DIR")
+            .expect("existing output directory is required");
+        let output_dir = Path::new(&output_dir);
+        assert!(output_dir.is_dir(), "output directory must already exist");
         let max_spend: i64 = env::var("GONGBU_LIVE_GEMINI_MAX_MINOR")
             .expect("explicit spend guard is required")
             .parse()
@@ -1185,6 +1189,13 @@ mod tests {
         assert_eq!(outcome.artifacts.len(), 1);
         image::load_from_memory(&outcome.artifacts[0].bytes)
             .expect("Google returned a decodable image");
+        let output_path = output_dir.join(format!(
+            "gemini-live-{}.png",
+            request.image_size.as_deref().unwrap_or("default")
+        ));
+        fs::write(&output_path, &outcome.artifacts[0].bytes)
+            .expect("write generated image to output directory");
+        eprintln!("wrote {}", output_path.display());
         assert_eq!(
             snapshot
                 .settle(outcome.usage.as_ref().unwrap(), max_spend)

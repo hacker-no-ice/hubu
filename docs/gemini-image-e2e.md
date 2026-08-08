@@ -97,14 +97,22 @@ For example, run the single ignored test at 4K with a USD-minor-unit ceiling no
 lower than the selected 4K rule:
 
 ```sh
+mkdir -p /absolute/path/gemini-output
+
 GONGBU_PROVIDER_CONFIG=/absolute/path/provider-targets.json \
 GONGBU_PRICING_CATALOG=/absolute/path/pricing.json \
+GONGBU_LIVE_GEMINI_OUTPUT_DIR=/absolute/path/gemini-output \
 GONGBU_LIVE_GEMINI_MAX_MINOR=16 \
 GONGBU_LIVE_GEMINI_IMAGE_SIZE=4k \
 GONGBU_LIVE_GEMINI_CONFIRM=I_ACCEPT_GOOGLE_CHARGES \
 GONGBU_LIVE_GEMINI_PROMPT='Draw one small blue circle on white.' \
 cargo test -p gongbu-api provider::gemini_image::tests::live_gemini_e2e_requires_explicit_spend_guard_and_never_uses_fixture -- --ignored --exact
 ```
+
+The test requires the output directory to exist before any provider work and
+writes the validated artifact as `gemini-live-4k.png` (or
+`gemini-live-default.png` for a legacy flat rule). Choose a directory outside
+the repository if you do not want live artifacts to appear as untracked files.
 
 With the illustrative `16`-cent 4K rule above,
 `GONGBU_LIVE_GEMINI_MAX_MINOR` must be at least `16`. Set the ceiling from your
