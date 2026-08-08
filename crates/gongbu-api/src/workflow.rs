@@ -31,6 +31,11 @@ pub struct ProviderSuccess {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivityError {
     Proven(String),
+    ProvenWithEvidence {
+        code: String,
+        request_id: Option<String>,
+        operation_id: Option<String>,
+    },
     Ambiguous(String),
     AmbiguousWithEvidence {
         code: String,
@@ -144,7 +149,8 @@ impl ExecutionWorkflow<'_> {
                                 now,
                             )?;
                         }
-                        Err(ActivityError::Proven(code)) => {
+                        Err(ActivityError::Proven(code))
+                        | Err(ActivityError::ProvenWithEvidence { code, .. }) => {
                             self.transition(
                                 &execution,
                                 "failed",
@@ -183,7 +189,9 @@ impl ExecutionWorkflow<'_> {
                     Ok(()) => {
                         self.repository.start_provider_attempt(&execution, now)?;
                     }
-                    Err(ActivityError::Proven(code)) | Err(ActivityError::Ambiguous(code)) => {
+                    Err(ActivityError::Proven(code))
+                    | Err(ActivityError::ProvenWithEvidence { code, .. })
+                    | Err(ActivityError::Ambiguous(code)) => {
                         self.transition(
                             &execution,
                             "reconciliation_required",
@@ -295,6 +303,7 @@ impl ExecutionWorkflow<'_> {
                                     )?;
                                 }
                                 Err(ActivityError::Proven(code))
+                                | Err(ActivityError::ProvenWithEvidence { code, .. })
                                 | Err(ActivityError::Ambiguous(code)) => {
                                     self.transition(
                                         &execution,
@@ -323,6 +332,20 @@ impl ExecutionWorkflow<'_> {
                             self.repository.complete_provider_attempt(
                                 &attempt.provider_attempt_id,
                                 &attempt_failure("failed", &code, now),
+                            )?;
+                            self.release_or_reconcile(&execution, &code, now)?;
+                        }
+                        Err(ActivityError::ProvenWithEvidence {
+                            code,
+                            request_id,
+                            operation_id,
+                        }) => {
+                            let mut failure = attempt_failure("failed", &code, now);
+                            failure.provider_request_id = request_id;
+                            failure.provider_operation_id = operation_id;
+                            self.repository.complete_provider_attempt(
+                                &attempt.provider_attempt_id,
+                                &failure,
                             )?;
                             self.release_or_reconcile(&execution, &code, now)?;
                         }
@@ -451,7 +474,9 @@ impl ExecutionWorkflow<'_> {
                                 Some("succeeded"),
                             )?;
                         }
-                        Err(ActivityError::Proven(code)) | Err(ActivityError::Ambiguous(code)) => {
+                        Err(ActivityError::Proven(code))
+                        | Err(ActivityError::ProvenWithEvidence { code, .. })
+                        | Err(ActivityError::Ambiguous(code)) => {
                             self.transition(
                                 &execution,
                                 "reconciliation_required",
@@ -647,7 +672,9 @@ impl ExecutionWorkflow<'_> {
         now: &str,
     ) -> Result<(), WorkflowError> {
         let code = match error {
-            ActivityError::Proven(c) | ActivityError::Ambiguous(c) => c,
+            ActivityError::Proven(c)
+            | ActivityError::ProvenWithEvidence { code: c, .. }
+            | ActivityError::Ambiguous(c) => c,
             ActivityError::AmbiguousWithEvidence { code, .. } => code,
         };
         self.transition(e, "failed", Some(&code), now, None, None, None)
@@ -686,7 +713,9 @@ impl ExecutionWorkflow<'_> {
                     Some("released"),
                 )?;
             }
-            Err(ActivityError::Proven(c)) | Err(ActivityError::Ambiguous(c)) => {
+            Err(ActivityError::Proven(c))
+            | Err(ActivityError::ProvenWithEvidence { code: c, .. })
+            | Err(ActivityError::Ambiguous(c)) => {
                 self.transition(
                     &marked,
                     "reconciliation_required",
@@ -1664,6 +1693,43 @@ mod tests {
         assert_eq!(attempt.outcome, "ambiguous");
         assert_eq!(p.calls.get(), 1);
         assert_eq!(h.releases.get(), 0);
+    }
+
+    #[test]
+    fn proven_provider_evidence_is_persisted_before_release() {
+        let repo = Repository::in_memory().unwrap();
+        let e = execution(&repo, "proven-evidence");
+        let h = Hubu::default();
+        let p = Provider::default();
+        p.error.replace(Some(ActivityError::ProvenWithEvidence {
+            code: "provider_rejected".into(),
+            request_id: Some("request-rejected".into()),
+            operation_id: Some("operation-rejected".into()),
+        }));
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        assert_eq!(w.run(&e.execution_id, "now").unwrap().status, "released");
+        let attempt = repo
+            .get_provider_attempt_for_execution(&e.execution_id)
+            .unwrap();
+        assert_eq!(attempt.outcome, "failed");
+        assert_eq!(
+            attempt.provider_request_id.as_deref(),
+            Some("request-rejected")
+        );
+        assert_eq!(
+            attempt.provider_operation_id.as_deref(),
+            Some("operation-rejected")
+        );
+        assert_eq!(h.releases.get(), 1);
     }
     #[test]
     fn interrupted_transmission_reconciles_without_second_invoke_or_attempt() {

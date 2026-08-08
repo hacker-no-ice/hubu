@@ -420,11 +420,11 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                         )
                     })?;
                 if (400..500).contains(&response.status) {
-                    return Err(ProviderFailure::release(
+                    return Err(with_evidence(
                         "provider_rejected",
-                        ProviderPhase::Processing,
-                    )
-                    .with_evidence(request_id, Some(operation_id)));
+                        request_id,
+                        Some(operation_id),
+                    ));
                 }
                 if !(200..300).contains(&response.status) {
                     return Err(with_evidence(
@@ -680,6 +680,7 @@ mod tests {
             assert_adapter_conformance, assert_body_and_artifact_bounds, assert_redirect_blocked,
             Case, Observation,
         },
+        provider_contract::SpendDisposition,
         secrets::secret_for_test,
     };
     use image::{DynamicImage, ImageOutputFormat, RgbaImage};
@@ -752,7 +753,11 @@ mod tests {
             }
             let body = self.polls.lock().unwrap().remove(0);
             Ok(TransportResponse {
-                status: 200,
+                status: body
+                    .get("_http_status")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u16::try_from(value).ok())
+                    .unwrap_or(200),
                 request_id: Some("poll-1".into()),
                 body,
             })
@@ -1084,6 +1089,20 @@ mod tests {
             "provider error (timeout_unknown_outcome)"
         );
         assert!(!error.to_string().contains("secret-canary"));
+        assert_eq!(*submits.lock().unwrap(), 1);
+
+        let (adapter, submits) = fixture(vec![json!({"_http_status":401})]);
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "provider_rejected");
+        assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
+        assert_eq!(error.evidence.operation_id.as_deref(), Some("op-1"));
         assert_eq!(*submits.lock().unwrap(), 1);
     }
     #[test]

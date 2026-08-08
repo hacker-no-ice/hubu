@@ -490,6 +490,15 @@ fn map_contract_error(error: crate::provider_contract::ContractError) -> Workflo
 
 fn map_provider_failure(failure: ProviderFailure) -> WorkflowActivityError {
     match failure.spend_disposition {
+        SpendDisposition::Release
+            if failure.evidence.request_id.is_some() || failure.evidence.operation_id.is_some() =>
+        {
+            WorkflowActivityError::ProvenWithEvidence {
+                code: failure.code,
+                request_id: failure.evidence.request_id,
+                operation_id: failure.evidence.operation_id,
+            }
+        }
         SpendDisposition::Release => WorkflowActivityError::Proven(failure.code),
         SpendDisposition::Reconcile
             if failure.evidence.request_id.is_some() || failure.evidence.operation_id.is_some() =>
@@ -507,9 +516,13 @@ fn map_provider_failure(failure: ProviderFailure) -> WorkflowActivityError {
 fn normalize_provider_success(
     outcome: AdapterOutcome,
 ) -> Result<ProviderSuccess, WorkflowActivityError> {
-    outcome
-        .validate()
-        .map_err(|_| WorkflowActivityError::Ambiguous("invalid_provider_success".into()))?;
+    if outcome.validate().is_err() {
+        return Err(WorkflowActivityError::AmbiguousWithEvidence {
+            code: "invalid_provider_success".into(),
+            request_id: outcome.provider_request_id,
+            operation_id: outcome.provider_operation_id,
+        });
+    }
     Ok(ProviderSuccess {
         request_id: outcome.provider_request_id,
         operation_id: outcome.provider_operation_id,
@@ -1092,7 +1105,11 @@ mod tests {
                 ProviderFailure::release("provider_rejected", ProviderPhase::Submission,)
                     .with_evidence(Some("request-1".into()), None)
             ),
-            WorkflowActivityError::Proven("provider_rejected".into())
+            WorkflowActivityError::ProvenWithEvidence {
+                code: "provider_rejected".into(),
+                request_id: Some("request-1".into()),
+                operation_id: None,
+            }
         );
         assert_eq!(
             map_provider_failure(ProviderFailure::release(
@@ -1108,5 +1125,27 @@ mod tests {
             )),
             WorkflowActivityError::Proven("provider_pre_send_failure".into())
         );
+
+        let invalid_success = AdapterOutcome {
+            usage: Some(Default::default()),
+            provider_amount_minor: Some(10),
+            provider_currency: None,
+            provider_request_id: Some("request-2".into()),
+            provider_operation_id: Some("operation-2".into()),
+            artifacts: vec![crate::provider_contract::NormalizedArtifact {
+                media_type: "image/png".into(),
+                bytes: vec![1],
+            }],
+        };
+        assert!(matches!(
+            normalize_provider_success(invalid_success),
+            Err(WorkflowActivityError::AmbiguousWithEvidence {
+                code,
+                request_id: Some(request_id),
+                operation_id: Some(operation_id),
+            }) if code == "invalid_provider_success"
+                && request_id == "request-2"
+                && operation_id == "operation-2"
+        ));
     }
 }
