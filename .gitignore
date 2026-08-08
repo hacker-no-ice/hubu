@@ -1,4 +1,4 @@
 /target/
 .config/
 .rustc_info.json
-debug/
+/debug/
