@@ -387,6 +387,15 @@ impl PricingCatalog {
         }
         self.snapshot(request)
     }
+
+    /// Whether the frozen catalog contains at least one rule for this target.
+    /// Selector-specific request validation still occurs when a snapshot is made.
+    pub fn supports_target(&self, target: &TargetKey) -> bool {
+        self.0
+            .rules
+            .iter()
+            .any(|rule| rule.provider == target.provider && rule.model == target.model)
+    }
 }
 
 fn normalize_image_size(value: &str) -> Result<String> {
@@ -457,6 +466,18 @@ pub fn validate_image_size_input(
     if supplied != request.image_size.as_deref() {
         return Err(ContractError::IndeterminableCost);
     }
+    Ok(())
+}
+
+pub fn validate_image_input(request: &NormalizedRequest, input: &serde_json::Value) -> Result<()> {
+    request.validate()?;
+    validate_image_size_input(request, input)?;
+    input
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty() && prompt.len() <= 32_000)
+        .ok_or(ContractError::IndeterminableCost)?;
     Ok(())
 }
 
@@ -806,11 +827,18 @@ impl RetryPolicy {
     }
 }
 
-pub trait ProviderAdapter {
+pub trait ProviderAdapter: Send + Sync {
     fn adapter_id(&self) -> &str;
     fn capabilities(&self) -> AdapterCapabilities;
     fn validate_request(&self, request: &NormalizedRequest) -> Result<()> {
         request.validate()
+    }
+    fn preflight_input(
+        &self,
+        request: &NormalizedRequest,
+        _normalized_input: &serde_json::Value,
+    ) -> Result<()> {
+        self.validate_request(request)
     }
     fn invoke(
         &self,

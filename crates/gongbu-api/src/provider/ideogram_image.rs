@@ -282,6 +282,18 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
         }
         Ok(())
     }
+    fn preflight_input(&self, request: &NormalizedRequest, input: &Value) -> Result<()> {
+        self.validate_request(request)?;
+        crate::provider_contract::validate_image_input(request, input)?;
+        if input.as_object().is_none_or(|object| {
+            object
+                .keys()
+                .any(|key| key != "prompt" && key != "image_count" && key != "image_size")
+        }) {
+            return Err(provider_error("invalid_request"));
+        }
+        Ok(())
+    }
     fn invoke(
         &self,
         request: &NormalizedRequest,

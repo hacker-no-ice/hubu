@@ -11,21 +11,10 @@ use crate::{
     http::{Api, AuthenticatedAccount, HttpResponse},
     provider::{
         contract::{
-            enforce_cost, AdapterOutcome, NormalizedRequest, PricingCatalog, PricingSnapshot,
-            PricingUnit, ProviderAdapter, ProviderFailure, SpendDisposition,
+            enforce_cost, vendor_idempotency_key, AdapterOutcome, NormalizedRequest,
+            PricingSnapshot, PricingUnit, ProviderFailure, SpendDisposition,
         },
-        gemini_developer_image::{
-            GeminiDeveloperImageAdapter, GeminiDeveloperTransport, ReqwestGeminiDeveloperTransport,
-            ADAPTER_ID as GEMINI_DEVELOPER_ADAPTER_ID, PROVIDER_ID as GEMINI_DEVELOPER_PROVIDER_ID,
-        },
-        gemini_image::{
-            GeminiImageAdapter, GeminiTransport, ReqwestGeminiTransport, ADAPTER_ID, PROVIDER_ID,
-        },
-        ideogram_image::{
-            IdeogramImageAdapter, IdeogramTransport, ReqwestIdeogramTransport,
-            ADAPTER_ID as IDEOGRAM_ADAPTER_ID, PROVIDER_ID as IDEOGRAM_PROVIDER_ID,
-        },
-        targets::ProviderTargetConfig,
+        registry::ValidatedProviderCatalog,
     },
     secrets::{MacOsKeychain, SecretProvider},
     temporal::{
@@ -51,34 +40,21 @@ use thiserror::Error;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
-/// Production bridge from a persisted execution to the selected Gemini adapter.
-/// It resolves only the execution's frozen target and credential reference and
-/// never retries or falls back to another provider.
-pub struct GeminiProviderActivities {
-    targets: ProviderTargetConfig,
+/// Generic bridge from a frozen execution to its startup-bound adapter.
+/// Selection is exact: this dispatcher never routes, falls back, or invokes a
+/// second provider for one execution.
+pub struct GenericProviderActivities {
+    providers: ValidatedProviderCatalog,
     secrets: Arc<dyn SecretProvider>,
-    transport: Arc<dyn GeminiTransport>,
 }
 
-impl GeminiProviderActivities {
-    pub fn production(targets: ProviderTargetConfig) -> Self {
-        Self::new(
-            targets,
-            Arc::new(MacOsKeychain),
-            Arc::new(ReqwestGeminiTransport),
-        )
+impl GenericProviderActivities {
+    pub fn production(providers: ValidatedProviderCatalog) -> Self {
+        Self::new(providers, Arc::new(MacOsKeychain))
     }
 
-    pub fn new(
-        targets: ProviderTargetConfig,
-        secrets: Arc<dyn SecretProvider>,
-        transport: Arc<dyn GeminiTransport>,
-    ) -> Self {
-        Self {
-            targets,
-            secrets,
-            transport,
-        }
+    pub fn new(providers: ValidatedProviderCatalog, secrets: Arc<dyn SecretProvider>) -> Self {
+        Self { providers, secrets }
     }
 
     fn selected<'a>(
@@ -87,16 +63,11 @@ impl GeminiProviderActivities {
     ) -> Result<
         (
             &'a crate::provider_targets::ProviderConfigVersion,
+            &'a crate::provider::registry::BoundAdapter,
             NormalizedRequest,
-            PricingSnapshot,
         ),
         WorkflowActivityError,
     > {
-        if execution.provider != PROVIDER_ID || execution.adapter != ADAPTER_ID {
-            return Err(WorkflowActivityError::Proven(
-                "provider_target_mismatch".into(),
-            ));
-        }
         let key = crate::provider_targets::TargetKey::new(
             &execution.workload_type,
             &execution.provider,
@@ -104,152 +75,16 @@ impl GeminiProviderActivities {
             &execution.model,
         )
         .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
-        let target = self
-            .targets
-            .resolve_persisted_revision(
-                &key,
-                &execution.provider_config_version,
-                &execution.provider_config_digest,
-            )
-            .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
-        let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
-            .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
-        if !snapshot.has_unit(PricingUnit::Image) {
-            return Err(WorkflowActivityError::Proven(
-                "pricing_snapshot_invalid".into(),
-            ));
-        }
-        enforce_cost(
-            &snapshot,
-            execution.authorized_minor,
-            &execution.authorization_currency,
-        )
-        .map_err(|_| WorkflowActivityError::Proven("authorization_invalid".into()))?;
-        let request = NormalizedRequest {
-            provider: snapshot.provider.clone(),
-            model: snapshot.model.clone(),
-            image_count: snapshot.estimated_quantity(PricingUnit::Image),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size: snapshot
-                .selector
-                .as_ref()
-                .map(|selector| selector.image_size.clone()),
-        };
-        Ok((target, request, snapshot))
-    }
-}
-
-impl ProviderActivities for GeminiProviderActivities {
-    fn preflight(&self, execution: &Execution) -> Result<(), WorkflowActivityError> {
-        let (target, request, _) = self.selected(execution)?;
-        let adapter = GeminiImageAdapter::new(
-            target
-                .gemini_image()
-                .cloned()
-                .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
-            target.model.clone(),
-            Arc::clone(&self.transport),
-        )
-        .map_err(map_contract_error)?;
-        adapter
-            .validate_request(&request)
-            .map_err(map_contract_error)?;
-        self.secrets
-            .resolve(
-                &target
-                    .secret_reference()
-                    .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?,
-            )
-            .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
-        Ok(())
-    }
-
-    fn invoke(
-        &self,
-        execution: &Execution,
-        _attempt_id: &str,
-    ) -> Result<ProviderSuccess, WorkflowActivityError> {
-        let (target, request, _) = self.selected(execution)?;
-        let adapter = GeminiImageAdapter::new(
-            target
-                .gemini_image()
-                .cloned()
-                .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
-            target.model.clone(),
-            Arc::clone(&self.transport),
-        )
-        .map_err(map_contract_error)?;
-        let secret = self
-            .secrets
-            .resolve(
-                &target
-                    .secret_reference()
-                    .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?,
-            )
-            .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
-        let outcome = adapter
-            .invoke(&request, &execution.normalized_input, &secret, None)
-            .map_err(map_provider_failure)?;
-        normalize_provider_success(outcome)
-    }
-}
-
-/// Production bridge for the API-key-authenticated Gemini Developer API.
-pub struct GeminiDeveloperProviderActivities {
-    targets: ProviderTargetConfig,
-    secrets: Arc<dyn SecretProvider>,
-    transport: Arc<dyn GeminiDeveloperTransport>,
-}
-
-impl GeminiDeveloperProviderActivities {
-    pub fn production(targets: ProviderTargetConfig) -> Self {
-        Self::new(
-            targets,
-            Arc::new(MacOsKeychain),
-            Arc::new(ReqwestGeminiDeveloperTransport),
-        )
-    }
-
-    pub fn new(
-        targets: ProviderTargetConfig,
-        secrets: Arc<dyn SecretProvider>,
-        transport: Arc<dyn GeminiDeveloperTransport>,
-    ) -> Self {
-        Self {
-            targets,
-            secrets,
-            transport,
-        }
-    }
-
-    fn selected<'a>(
-        &'a self,
-        execution: &Execution,
-    ) -> Result<
-        (
-            &'a crate::provider_targets::ProviderConfigVersion,
-            NormalizedRequest,
-        ),
-        WorkflowActivityError,
-    > {
-        if execution.provider != GEMINI_DEVELOPER_PROVIDER_ID
-            || execution.adapter != GEMINI_DEVELOPER_ADAPTER_ID
+        if execution.target != key.canonical_name()
+            || execution.config_version != execution.provider_config_version
         {
             return Err(WorkflowActivityError::Proven(
                 "provider_target_mismatch".into(),
             ));
         }
-        let key = crate::provider_targets::TargetKey::new(
-            &execution.workload_type,
-            &execution.provider,
-            &execution.adapter,
-            &execution.model,
-        )
-        .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
-        let target = self
-            .targets
-            .resolve_persisted_revision(
+        let (target, adapter) = self
+            .providers
+            .resolve_persisted(
                 &key,
                 &execution.provider_config_version,
                 &execution.provider_config_digest,
@@ -257,152 +92,11 @@ impl GeminiDeveloperProviderActivities {
             .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
         let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
             .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
-        if !snapshot.is_image_only() {
-            return Err(WorkflowActivityError::Proven(
-                "pricing_snapshot_invalid".into(),
-            ));
-        }
-        enforce_cost(
-            &snapshot,
-            execution.authorized_minor,
-            &execution.authorization_currency,
-        )
-        .map_err(|_| WorkflowActivityError::Proven("authorization_invalid".into()))?;
-        Ok((
-            target,
-            NormalizedRequest {
-                provider: snapshot.provider.clone(),
-                model: snapshot.model.clone(),
-                image_count: snapshot.estimated_quantity(PricingUnit::Image),
-                input_tokens: None,
-                max_output_tokens: None,
-                image_size: snapshot
-                    .selector
-                    .as_ref()
-                    .map(|selector| selector.image_size.clone()),
-            },
-        ))
-    }
-}
-
-impl ProviderActivities for GeminiDeveloperProviderActivities {
-    fn preflight(&self, execution: &Execution) -> Result<(), WorkflowActivityError> {
-        let (target, request) = self.selected(execution)?;
-        let adapter = GeminiDeveloperImageAdapter::new(
-            target
-                .gemini_developer_image()
-                .cloned()
-                .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
-            target.model.clone(),
-            Arc::clone(&self.transport),
-        )
-        .map_err(map_contract_error)?;
-        adapter
-            .validate_request(&request)
-            .map_err(map_contract_error)?;
-        self.secrets
-            .resolve(
-                &target
-                    .secret_reference()
-                    .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?,
-            )
-            .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
-        Ok(())
-    }
-
-    fn invoke(
-        &self,
-        execution: &Execution,
-        _attempt_id: &str,
-    ) -> Result<ProviderSuccess, WorkflowActivityError> {
-        let (target, request) = self.selected(execution)?;
-        let adapter = GeminiDeveloperImageAdapter::new(
-            target
-                .gemini_developer_image()
-                .cloned()
-                .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
-            target.model.clone(),
-            Arc::clone(&self.transport),
-        )
-        .map_err(map_contract_error)?;
-        let secret = self
-            .secrets
-            .resolve(
-                &target
-                    .secret_reference()
-                    .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?,
-            )
-            .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
-        let outcome = adapter
-            .invoke(&request, &execution.normalized_input, &secret, None)
-            .map_err(map_provider_failure)?;
-        normalize_provider_success(outcome)
-    }
-}
-
-/// Production bridge from a frozen Ideogram target to the shared durable
-/// execution lifecycle. It never retries, recovers, or falls back.
-pub struct IdeogramProviderActivities {
-    targets: ProviderTargetConfig,
-    secrets: Arc<dyn SecretProvider>,
-    transport: Arc<dyn IdeogramTransport>,
-}
-
-impl IdeogramProviderActivities {
-    pub fn production(targets: ProviderTargetConfig) -> Self {
-        Self::new(
-            targets,
-            Arc::new(MacOsKeychain),
-            Arc::new(ReqwestIdeogramTransport),
-        )
-    }
-
-    pub fn new(
-        targets: ProviderTargetConfig,
-        secrets: Arc<dyn SecretProvider>,
-        transport: Arc<dyn IdeogramTransport>,
-    ) -> Self {
-        Self {
-            targets,
-            secrets,
-            transport,
-        }
-    }
-
-    fn selected<'a>(
-        &'a self,
-        execution: &Execution,
-    ) -> Result<
-        (
-            &'a crate::provider_targets::ProviderConfigVersion,
-            NormalizedRequest,
-            PricingSnapshot,
-        ),
-        WorkflowActivityError,
-    > {
-        if execution.provider != IDEOGRAM_PROVIDER_ID || execution.adapter != IDEOGRAM_ADAPTER_ID {
-            return Err(WorkflowActivityError::Proven(
-                "provider_target_mismatch".into(),
-            ));
-        }
-        let key = crate::provider_targets::TargetKey::new(
-            &execution.workload_type,
-            &execution.provider,
-            &execution.adapter,
-            &execution.model,
-        )
-        .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
-        let target = self
-            .targets
-            .resolve_persisted_revision(
-                &key,
-                &execution.provider_config_version,
-                &execution.provider_config_digest,
-            )
-            .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
-        let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
-            .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
-        if !snapshot.has_unit(PricingUnit::Image) {
+        if !snapshot.is_image_only()
+            || snapshot.provider != target.provider
+            || snapshot.model != target.model
+            || i64::from(snapshot.schema_version) != execution.pricing_schema_version
+        {
             return Err(WorkflowActivityError::Proven(
                 "pricing_snapshot_invalid".into(),
             ));
@@ -424,24 +118,15 @@ impl IdeogramProviderActivities {
                 .as_ref()
                 .map(|selector| selector.image_size.clone()),
         };
-        Ok((target, request, snapshot))
+        Ok((target, adapter, request))
     }
 }
 
-impl ProviderActivities for IdeogramProviderActivities {
+impl ProviderActivities for GenericProviderActivities {
     fn preflight(&self, execution: &Execution) -> Result<(), WorkflowActivityError> {
-        let (target, request, _) = self.selected(execution)?;
-        let adapter = IdeogramImageAdapter::new(
-            target
-                .ideogram_image()
-                .cloned()
-                .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
-            target.model.clone(),
-            Arc::clone(&self.transport),
-        )
-        .map_err(map_contract_error)?;
+        let (target, adapter, request) = self.selected(execution)?;
         adapter
-            .validate_request(&request)
+            .preflight_input(&request, &execution.normalized_input)
             .map_err(map_contract_error)?;
         self.secrets
             .resolve(
@@ -458,16 +143,7 @@ impl ProviderActivities for IdeogramProviderActivities {
         execution: &Execution,
         _attempt_id: &str,
     ) -> Result<ProviderSuccess, WorkflowActivityError> {
-        let (target, request, _) = self.selected(execution)?;
-        let adapter = IdeogramImageAdapter::new(
-            target
-                .ideogram_image()
-                .cloned()
-                .ok_or_else(|| WorkflowActivityError::Proven("provider_config_invalid".into()))?,
-            target.model.clone(),
-            Arc::clone(&self.transport),
-        )
-        .map_err(map_contract_error)?;
+        let (target, adapter, request) = self.selected(execution)?;
         let secret = self
             .secrets
             .resolve(
@@ -476,8 +152,24 @@ impl ProviderActivities for IdeogramProviderActivities {
                     .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?,
             )
             .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
+        let idempotency_key = ValidatedProviderCatalog::needs_stable_idempotency_key(target)
+            .then(|| {
+                vendor_idempotency_key(
+                    &target.provider,
+                    &target.model,
+                    &execution.account_id,
+                    &execution.operation_key,
+                )
+            })
+            .transpose()
+            .map_err(map_contract_error)?;
         let outcome = adapter
-            .invoke(&request, &execution.normalized_input, &secret, None)
+            .invoke(
+                &request,
+                &execution.normalized_input,
+                &secret,
+                idempotency_key.as_deref(),
+            )
             .map_err(map_provider_failure)?;
         normalize_provider_success(outcome)
     }
@@ -587,58 +279,40 @@ impl ArtifactActivities for ArtifactServiceActivities {
     }
 }
 
-/// Compose the production Gemini and artifact activities into the durable runner.
-pub fn gemini_execution_runner(
+/// Compose every startup-bound provider and artifact activities into one runner.
+pub fn provider_execution_runner(
     repository: Repository,
     hubu: Arc<dyn HubuActivities + Send + Sync>,
     artifacts: ArtifactService,
-    targets: ProviderTargetConfig,
+    providers: ValidatedProviderCatalog,
+    secrets: Arc<dyn SecretProvider>,
     now: impl Fn() -> String + Send + Sync + Clone + 'static,
 ) -> Arc<dyn DurableExecutionRunner> {
     let artifact_now = now.clone();
     Arc::new(PersistedExecutionRunner::new(
         repository,
         hubu,
-        Arc::new(GeminiProviderActivities::production(targets)),
+        Arc::new(GenericProviderActivities::new(providers, secrets)),
         Arc::new(ArtifactServiceActivities::new(artifacts, artifact_now)),
         now,
     ))
 }
 
-/// Compose the Gemini Developer API and artifact activities into the durable runner.
-pub fn gemini_developer_execution_runner(
+pub fn production_provider_execution_runner(
     repository: Repository,
     hubu: Arc<dyn HubuActivities + Send + Sync>,
     artifacts: ArtifactService,
-    targets: ProviderTargetConfig,
+    providers: ValidatedProviderCatalog,
     now: impl Fn() -> String + Send + Sync + Clone + 'static,
 ) -> Arc<dyn DurableExecutionRunner> {
-    let artifact_now = now.clone();
-    Arc::new(PersistedExecutionRunner::new(
+    provider_execution_runner(
         repository,
         hubu,
-        Arc::new(GeminiDeveloperProviderActivities::production(targets)),
-        Arc::new(ArtifactServiceActivities::new(artifacts, artifact_now)),
+        artifacts,
+        providers,
+        Arc::new(MacOsKeychain),
         now,
-    ))
-}
-
-/// Compose Ideogram and Gongbu artifact activities into the durable runner.
-pub fn ideogram_execution_runner(
-    repository: Repository,
-    hubu: Arc<dyn HubuActivities + Send + Sync>,
-    artifacts: ArtifactService,
-    targets: ProviderTargetConfig,
-    now: impl Fn() -> String + Send + Sync + Clone + 'static,
-) -> Arc<dyn DurableExecutionRunner> {
-    let artifact_now = now.clone();
-    Arc::new(PersistedExecutionRunner::new(
-        repository,
-        hubu,
-        Arc::new(IdeogramProviderActivities::production(targets)),
-        Arc::new(ArtifactServiceActivities::new(artifacts, artifact_now)),
-        now,
-    ))
+    )
 }
 
 pub trait Authenticator: Send + Sync + 'static {
@@ -656,11 +330,11 @@ pub struct AuthenticationError;
 pub struct ApplicationDependencies {
     pub repository: Repository,
     pub artifacts: ArtifactService,
-    pub targets: ProviderTargetConfig,
-    pub pricing: PricingCatalog,
+    pub providers: ValidatedProviderCatalog,
+    pub hubu: Arc<dyn HubuActivities + Send + Sync>,
+    pub secrets: Arc<dyn SecretProvider>,
     pub temporal_runtime: Arc<Runtime>,
     pub temporal_client: Client,
-    pub execution_runner: Arc<dyn DurableExecutionRunner>,
     pub authenticator: Arc<dyn Authenticator>,
     pub now: Arc<dyn Fn() -> String + Send + Sync>,
 }
@@ -683,16 +357,26 @@ pub async fn serve<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    let execution_runner = provider_execution_runner(
+        dependencies.repository.clone(),
+        dependencies.hubu,
+        dependencies.artifacts.clone(),
+        dependencies.providers.clone(),
+        dependencies.secrets,
+        {
+            let now = dependencies.now.clone();
+            move || now()
+        },
+    );
     let mut worker = start_worker(
         dependencies.temporal_runtime,
         dependencies.temporal_client,
-        dependencies.execution_runner,
+        execution_runner,
     )?;
     let api = Api::new(
         dependencies.repository,
         dependencies.artifacts,
-        dependencies.targets,
-        dependencies.pricing,
+        dependencies.providers,
         worker.scheduler.clone(),
         move || (dependencies.now)(),
     );
@@ -759,6 +443,15 @@ pub fn listener_address(listener: &tokio::net::TcpListener) -> std::io::Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        provider::{
+            contract::PricingCatalog,
+            gemini_image::{GeminiImageAdapter, GeminiTransport},
+            ideogram_image::{IdeogramImageAdapter, IdeogramTransport},
+            registry::ProviderRegistry,
+        },
+        provider_targets::ProviderTargetConfig,
+    };
 
     #[test]
     fn preserves_domain_http_response_at_transport_boundary() {
@@ -898,8 +591,8 @@ mod tests {
             normalized_input: json!({"prompt":"draw a cat","image_count":1}),
             input_hash: "hash".into(),
             input_schema_version: 1,
-            target: "google/gemini-image-v1".into(),
-            config_version: "cfg".into(),
+            target: "image_generation/google/gemini_image/gemini-image-v1".into(),
+            config_version: "google-pcv-1".into(),
             workload_type: "image_generation".into(),
             provider: "google".into(),
             adapter: "gemini_image".into(),
@@ -927,13 +620,23 @@ mod tests {
             ArtifactLimits::default(),
         );
         let hubu = Arc::new(FixtureHubu::default());
+        let mut registry = ProviderRegistry::new();
+        let fixture_calls = calls.clone();
+        registry.register("google", "gemini_image", move |target| {
+            Ok(Arc::new(GeminiImageAdapter::new(
+                target.gemini_image().cloned().unwrap(),
+                target.model.clone(),
+                fixture_calls.clone(),
+            )?))
+        });
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"prices-v1","rules":[{"rule_id":"gemini-image","provider":"google","model":"gemini-image-v1","currency":"USD","unit":"image","unit_amount_minor":25}]}"#).unwrap();
+        let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
         let runner = PersistedExecutionRunner::new(
             repository.clone(),
             hubu.clone(),
-            Arc::new(GeminiProviderActivities::new(
-                targets,
+            Arc::new(GenericProviderActivities::new(
+                providers,
                 Arc::new(FixtureSecrets),
-                calls.clone(),
             )),
             Arc::new(ArtifactServiceActivities::new(
                 artifact_service.clone(),
@@ -1072,7 +775,7 @@ mod tests {
         targets.validate().unwrap();
         let repository = Repository::in_memory().unwrap();
         let execution = repository.create_execution(&CreateExecutionParams {
-            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"auth".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:30, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"ideogram/ideogram-v3".into(), config_version:"cfg".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","unit":"image","unit_amount_minor":30,"quantity":1,"estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:1, created_at:"now".into()
+            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"auth".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:30, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"image_generation/ideogram/ideogram_image/ideogram-v3".into(), config_version:"ideogram-pcv-1".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","unit":"image","unit_amount_minor":30,"quantity":1,"estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:1, created_at:"now".into()
         }).unwrap();
         let root = tempdir().unwrap();
         let artifacts = ArtifactService::new(
@@ -1081,14 +784,21 @@ mod tests {
             ArtifactLimits::default(),
         );
         let hubu = Arc::new(Hubu::default());
+        let mut registry = ProviderRegistry::new();
+        let fixture_transport = transport.clone();
+        registry.register("ideogram", "ideogram_image", move |target| {
+            Ok(Arc::new(IdeogramImageAdapter::new(
+                target.ideogram_image().cloned().unwrap(),
+                target.model.clone(),
+                fixture_transport.clone(),
+            )?))
+        });
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"prices-v1","rules":[{"rule_id":"ideogram-image","provider":"ideogram","model":"ideogram-v3","currency":"USD","unit":"image","unit_amount_minor":30}]}"#).unwrap();
+        let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
         let runner = PersistedExecutionRunner::new(
             repository.clone(),
             hubu.clone(),
-            Arc::new(IdeogramProviderActivities::new(
-                targets,
-                Arc::new(Secrets),
-                transport.clone(),
-            )),
+            Arc::new(GenericProviderActivities::new(providers, Arc::new(Secrets))),
             Arc::new(ArtifactServiceActivities::new(artifacts.clone(), || {
                 "now".into()
             })),
@@ -1128,6 +838,299 @@ mod tests {
                 .unwrap()
                 .settlement_minor,
             30
+        );
+    }
+
+    #[test]
+    fn mixed_provider_dispatch_is_isolated_replay_safe_and_durable() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::contract::{
+                AdapterCapabilities, AdapterOutcome, NormalizedArtifact, NormalizedUsage,
+                ProviderAdapter, ProviderFailure, ProviderPhase,
+            },
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use serde_json::json;
+        use std::{
+            collections::BTreeMap,
+            io::Cursor,
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Mutex,
+            },
+        };
+        use tempfile::tempdir;
+
+        struct Secrets;
+        impl SecretProvider for Secrets {
+            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                Ok(crate::secrets::secret_for_test("mixed-provider-secret"))
+            }
+        }
+
+        #[derive(Default)]
+        struct Calls {
+            counts: Mutex<BTreeMap<String, usize>>,
+            flux_keys: Mutex<Vec<Option<String>>>,
+        }
+        struct Adapter {
+            id: &'static str,
+            ambiguous: bool,
+            calls: Arc<Calls>,
+            png: Vec<u8>,
+        }
+        impl ProviderAdapter for Adapter {
+            fn adapter_id(&self) -> &str {
+                self.id
+            }
+            fn capabilities(&self) -> AdapterCapabilities {
+                AdapterCapabilities {
+                    vendor_enforced_idempotency: false,
+                }
+            }
+            fn invoke(
+                &self,
+                _: &NormalizedRequest,
+                _: &serde_json::Value,
+                _: &ProviderSecret,
+                key: Option<&str>,
+            ) -> Result<AdapterOutcome, ProviderFailure> {
+                *self
+                    .calls
+                    .counts
+                    .lock()
+                    .unwrap()
+                    .entry(self.id.into())
+                    .or_default() += 1;
+                if self.id == "flux2_api" {
+                    self.calls
+                        .flux_keys
+                        .lock()
+                        .unwrap()
+                        .push(key.map(str::to_owned));
+                }
+                if self.ambiguous {
+                    return Err(ProviderFailure::reconcile(
+                        "timeout_unknown_outcome",
+                        ProviderPhase::Processing,
+                    ));
+                }
+                Ok(AdapterOutcome {
+                    provider_request_id: Some(format!("{}-request", self.id)),
+                    provider_operation_id: None,
+                    usage: Some(NormalizedUsage {
+                        images: Some(1),
+                        input_tokens: None,
+                        output_tokens: None,
+                    }),
+                    provider_amount_minor: None,
+                    provider_currency: None,
+                    artifacts: vec![NormalizedArtifact {
+                        media_type: "image/png".into(),
+                        bytes: self.png.clone(),
+                    }],
+                })
+            }
+        }
+
+        #[derive(Default)]
+        struct Hubu(AtomicUsize);
+        impl HubuActivities for Hubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                Ok("claim".into())
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                _: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(format!("settlement-{n}"))
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+        }
+
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": [
+                {"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://google.example","api_version":"v1","project":"project","location":"us","timeout_ms":1000}}},
+                {"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}},
+                {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://flux.example","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["flux.example"]}}}
+            ]
+        })).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"mixed-v1","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","unit":"image","unit_amount_minor":25},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","unit":"image","unit_amount_minor":30},{"rule_id":"f","provider":"flux","model":"flux-2-pro","currency":"USD","unit":"image","unit_amount_minor":45}]}"#).unwrap();
+        let mut png = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
+            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .unwrap();
+        let calls = Arc::new(Calls::default());
+        let mut registry = ProviderRegistry::new();
+        for (provider, id, ambiguous) in [
+            ("google", "gemini_image", false),
+            ("ideogram", "ideogram_image", true),
+            ("flux", "flux2_api", false),
+        ] {
+            let calls = calls.clone();
+            let png = png.clone();
+            registry.register(provider, id, move |_| {
+                Ok(Arc::new(Adapter {
+                    id,
+                    ambiguous,
+                    calls: calls.clone(),
+                    png: png.clone(),
+                }))
+            });
+        }
+        let providers =
+            ValidatedProviderCatalog::bind(targets.clone(), pricing.clone(), &registry).unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let create = |provider: &str, adapter: &str, model: &str, version: &str, amount: i64| {
+            let target = targets
+                .resolve("image_generation", provider, adapter, model)
+                .unwrap();
+            let request = NormalizedRequest {
+                provider: provider.into(),
+                model: model.into(),
+                image_count: Some(1),
+                input_tokens: None,
+                max_output_tokens: None,
+                image_size: None,
+            };
+            let snapshot = pricing
+                .snapshot_for_target(&target.target_key(), &request)
+                .unwrap();
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: "account".into(),
+                    operation_key: format!("mixed-{provider}"),
+                    hubu_authorization_id: format!("auth-{provider}"),
+                    hubu_claim_id: Some(format!("claim-{provider}")),
+                    hubu_token_reference: HubuTokenReference::new(format!("token-{provider}"))
+                        .unwrap(),
+                    authorized_minor: amount,
+                    authorization_currency: "USD".into(),
+                    normalized_input: json!({"prompt":"draw a cat","image_count":1}),
+                    input_hash: format!("hash-{provider}"),
+                    input_schema_version: 1,
+                    target: target.target_key().canonical_name(),
+                    config_version: version.into(),
+                    workload_type: "image_generation".into(),
+                    provider: provider.into(),
+                    adapter: adapter.into(),
+                    model: model.into(),
+                    provider_config_version: version.into(),
+                    provider_config_digest: target.digest().into(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: i64::from(snapshot.schema_version),
+                    created_at: "now".into(),
+                })
+                .unwrap()
+        };
+        let gemini = create("google", "gemini_image", "gemini-image-v1", "google-v1", 25);
+        let ideogram = create(
+            "ideogram",
+            "ideogram_image",
+            "ideogram-v3",
+            "ideogram-v1",
+            30,
+        );
+        let flux = create("flux", "flux2_api", "flux-2-pro", "flux-v1", 45);
+        let root = tempdir().unwrap();
+        let artifacts = ArtifactService::new(
+            repository.clone(),
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let hubu = Arc::new(Hubu::default());
+        let runner = provider_execution_runner(
+            repository.clone(),
+            hubu.clone(),
+            artifacts.clone(),
+            providers,
+            Arc::new(Secrets),
+            || "now".into(),
+        );
+
+        assert_eq!(
+            runner.run_execution(&gemini.execution_id).unwrap(),
+            "succeeded"
+        );
+        assert_eq!(
+            runner.run_execution(&ideogram.execution_id).unwrap(),
+            "reconciliation_required"
+        );
+        assert_eq!(
+            runner.run_execution(&flux.execution_id).unwrap(),
+            "succeeded"
+        );
+        assert_eq!(
+            runner.run_execution(&gemini.execution_id).unwrap(),
+            "succeeded"
+        );
+        assert_eq!(
+            runner.run_execution(&ideogram.execution_id).unwrap(),
+            "reconciliation_required"
+        );
+        assert_eq!(
+            runner.run_execution(&flux.execution_id).unwrap(),
+            "succeeded"
+        );
+
+        let counts = calls.counts.lock().unwrap();
+        assert_eq!(counts.get("gemini_image"), Some(&1));
+        assert_eq!(counts.get("ideogram_image"), Some(&1));
+        assert_eq!(counts.get("flux2_api"), Some(&1));
+        drop(counts);
+        let expected_key =
+            vendor_idempotency_key("flux", "flux-2-pro", "account", "mixed-flux").unwrap();
+        assert_eq!(
+            calls.flux_keys.lock().unwrap().as_slice(),
+            &[Some(expected_key)]
+        );
+        assert_eq!(hubu.0.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            artifacts
+                .list_for_account(&gemini.execution_id, "account")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            artifacts
+                .list_for_account(&flux.execution_id, "account")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(artifacts
+            .list_for_account(&ideogram.execution_id, "account")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            repository
+                .get_receipt_for_execution(&gemini.execution_id)
+                .unwrap()
+                .settlement_minor,
+            25
+        );
+        assert_eq!(
+            repository
+                .get_receipt_for_execution(&flux.execution_id)
+                .unwrap()
+                .settlement_minor,
+            45
         );
     }
 

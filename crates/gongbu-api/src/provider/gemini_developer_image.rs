@@ -214,6 +214,10 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
         }
         Ok(())
     }
+    fn preflight_input(&self, request: &NormalizedRequest, input: &Value) -> Result<()> {
+        self.validate_request(request)?;
+        crate::provider_contract::validate_image_input(request, input)
+    }
     fn invoke(
         &self,
         request: &NormalizedRequest,

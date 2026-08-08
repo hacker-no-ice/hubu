@@ -5,6 +5,7 @@ pub mod flux2_api;
 pub mod gemini_developer_image;
 pub mod gemini_image;
 pub mod ideogram_image;
+pub mod registry;
 pub mod targets;
 
 #[cfg(test)]
