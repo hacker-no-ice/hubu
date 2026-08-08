@@ -760,9 +760,31 @@ mod tests {
         .unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = vec![0; 8192];
-            let count = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..count]);
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0, "request ended before its declared body");
+                request.extend_from_slice(&buffer[..count]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .expect("multipart request declares content length");
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
             let lowercase = request.to_ascii_lowercase();
             assert!(lowercase.contains("content-type: multipart/form-data; boundary="));
             assert!(request.contains("name=\"prompt\""));
