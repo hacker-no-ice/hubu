@@ -1099,27 +1099,27 @@ mod tests {
         );
 
         assert_eq!(
-            runner.run_execution(&gemini.execution_id).unwrap(),
+            runner.run_execution(&gemini.execution_id, None).unwrap(),
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&ideogram.execution_id).unwrap(),
+            runner.run_execution(&ideogram.execution_id, None).unwrap(),
             "reconciliation_required"
         );
         assert_eq!(
-            runner.run_execution(&flux.execution_id).unwrap(),
+            runner.run_execution(&flux.execution_id, None).unwrap(),
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&gemini.execution_id).unwrap(),
+            runner.run_execution(&gemini.execution_id, None).unwrap(),
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&ideogram.execution_id).unwrap(),
+            runner.run_execution(&ideogram.execution_id, None).unwrap(),
             "reconciliation_required"
         );
         assert_eq!(
-            runner.run_execution(&flux.execution_id).unwrap(),
+            runner.run_execution(&flux.execution_id, None).unwrap(),
             "succeeded"
         );
 

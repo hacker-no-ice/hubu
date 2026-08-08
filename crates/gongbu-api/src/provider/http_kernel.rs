@@ -11,10 +11,11 @@ use reqwest::{
     Url,
 };
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     io::Read,
     sync::OnceLock,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use thiserror::Error;
 
@@ -26,12 +27,52 @@ pub const MAX_PROVIDER_DEADLINE: Duration = Duration::from_secs(270);
 #[derive(Clone, Copy, Debug)]
 pub struct InvocationDeadline(Instant);
 
+thread_local! {
+    static ACTIVITY_PROVIDER_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Installs the Temporal activity's provider-safe deadline on the blocking
+/// activity thread. Adapter deadlines are capped by this value, so work done
+/// before provider transmission consumes the same activity-wide budget.
+pub struct ActivityDeadlineGuard(Option<Instant>);
+
+impl ActivityDeadlineGuard {
+    pub fn enter(activity_deadline: Option<SystemTime>) -> Result<Self, HttpKernelError> {
+        let provider_deadline = activity_deadline
+            .map(|deadline| {
+                deadline
+                    .duration_since(SystemTime::now())
+                    .map_err(|_| HttpKernelError::DeadlineExceeded)?
+                    .checked_sub(ACTIVITY_OPERATIONAL_HEADROOM)
+                    .filter(|remaining| !remaining.is_zero())
+                    .map(|remaining| Instant::now() + remaining)
+                    .ok_or(HttpKernelError::DeadlineExceeded)
+            })
+            .transpose()?;
+        let previous = ACTIVITY_PROVIDER_DEADLINE.with(|slot| slot.replace(provider_deadline));
+        Ok(Self(previous))
+    }
+}
+
+impl Drop for ActivityDeadlineGuard {
+    fn drop(&mut self) {
+        ACTIVITY_PROVIDER_DEADLINE.with(|slot| slot.set(self.0));
+    }
+}
+
 impl InvocationDeadline {
     pub fn from_timeout(timeout: Duration) -> Result<Self, HttpKernelError> {
         if timeout.is_zero() || timeout > MAX_PROVIDER_DEADLINE {
             return Err(HttpKernelError::InvalidDeadline);
         }
-        Ok(Self(Instant::now() + timeout))
+        let configured = Instant::now() + timeout;
+        let deadline = ACTIVITY_PROVIDER_DEADLINE
+            .with(|slot| slot.get())
+            .map_or(configured, |activity| configured.min(activity));
+        if deadline <= Instant::now() {
+            return Err(HttpKernelError::DeadlineExceeded);
+        }
+        Ok(Self(deadline))
     }
 
     pub fn remaining(self) -> Result<Duration, HttpKernelError> {
@@ -249,6 +290,16 @@ mod tests {
         );
         assert!(valid_provider_deadline_ms(270_000));
         assert!(!valid_provider_deadline_ms(270_001));
+    }
+
+    #[test]
+    fn activity_remaining_time_caps_adapter_deadlines() {
+        let _guard = ActivityDeadlineGuard::enter(Some(
+            SystemTime::now() + ACTIVITY_OPERATIONAL_HEADROOM + Duration::from_millis(40),
+        ))
+        .unwrap();
+        let deadline = InvocationDeadline::from_timeout(Duration::from_secs(1)).unwrap();
+        assert!(deadline.remaining().unwrap() <= Duration::from_millis(40));
     }
 
     #[test]

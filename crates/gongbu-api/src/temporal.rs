@@ -14,6 +14,7 @@ use crate::{
 };
 use futures::{channel::oneshot, future::poll_fn, Future};
 use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
 use std::{sync::Arc, time::Duration};
 use temporalio_client::{Client, WorkflowSignalOptions, WorkflowStartOptions};
 use temporalio_common_wasm::protos::temporal::api::enums::v1::{
@@ -29,7 +30,11 @@ use temporalio_sdk::{
 pub const EXECUTION_TASK_QUEUE: &str = "gongbu-executions";
 
 pub trait DurableExecutionRunner: Send + Sync + 'static {
-    fn run_execution(&self, execution_id: &str) -> Result<String, String>;
+    fn run_execution(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<String, String>;
     fn recover_execution(
         &self,
         execution_id: &str,
@@ -62,10 +67,22 @@ impl PersistedExecutionRunner {
             now: Arc::new(now),
         }
     }
+
+    /// Direct/local execution has no Temporal activity deadline to inherit.
+    pub fn run_execution(&self, execution_id: &str) -> Result<String, String> {
+        <Self as DurableExecutionRunner>::run_execution(self, execution_id, None)
+    }
 }
 
 impl DurableExecutionRunner for PersistedExecutionRunner {
-    fn run_execution(&self, execution_id: &str) -> Result<String, String> {
+    fn run_execution(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<String, String> {
+        let _deadline =
+            crate::provider::http_kernel::ActivityDeadlineGuard::enter(activity_deadline)
+                .map_err(|error| error.to_string())?;
         ExecutionWorkflow {
             repository: &self.repository,
             hubu: self.hubu.as_ref(),
@@ -260,11 +277,12 @@ impl ExecutionActivities {
     #[activity]
     pub async fn run_execution(
         self: Arc<Self>,
-        _ctx: ActivityContext,
+        ctx: ActivityContext,
         execution_id: String,
     ) -> Result<String, ActivityError> {
         let runner = Arc::clone(&self.runner);
-        tokio::task::spawn_blocking(move || runner.run_execution(&execution_id))
+        let activity_deadline = ctx.info().deadline;
+        tokio::task::spawn_blocking(move || runner.run_execution(&execution_id, activity_deadline))
             .await
             .map_err(|error| {
                 ActivityError::application(ApplicationFailure::new(std::io::Error::other(
@@ -531,7 +549,7 @@ mod tests {
 
     struct Runner;
     impl DurableExecutionRunner for Runner {
-        fn run_execution(&self, _: &str) -> Result<String, String> {
+        fn run_execution(&self, _: &str, _: Option<SystemTime>) -> Result<String, String> {
             Ok("succeeded".into())
         }
         fn recover_execution(
