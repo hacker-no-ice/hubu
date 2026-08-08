@@ -126,6 +126,28 @@ values, so per-million-token prices use a denominator of `1000000` without
 floating point. The frozen v2 snapshot records the selector, every exact rate
 and bounded quantity, and the reduced exact aggregate estimate.
 
+For example, a 4K image rule priced at 16 USD cents per image is:
+
+```json
+{
+  "rule_id": "gemini-image-4k",
+  "provider": "google",
+  "model": "OPERATOR_APPROVED_MODEL_VERSION",
+  "currency": "USD",
+  "selector": { "image_size": "4k" },
+  "components": [{
+    "unit": "image",
+    "rate_numerator_minor": 16,
+    "rate_denominator": 1
+  }]
+}
+```
+
+This rule belongs inside a catalog with `"schema_version": 2`. The normalized
+request must contain `"image_size": "4k"`; missing or unsupported values fail
+before provider invocation. See [Gemini image E2E](docs/gemini-image-e2e.md) for
+a complete three-tier catalog and live invocation example.
+
 Authorization uses the ceiling of that exact estimate at the integer currency
 minor-unit boundary. Settlement recomputes all components exactly and performs
 one round-half-up operation on the aggregate; components and intermediates are

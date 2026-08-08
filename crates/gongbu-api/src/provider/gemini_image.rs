@@ -275,7 +275,8 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
             "generationConfig": {"responseModalities": ["IMAGE"]}
         });
         if let Some(size) = &request.image_size {
-            body["generationConfig"]["imageConfig"] = json!({"imageSize": size});
+            body["generationConfig"]["imageConfig"] =
+                json!({"imageSize": size.to_ascii_uppercase()});
         }
         let timeout = Duration::from_millis(self.config.timeout_ms);
         let response = self
@@ -1158,13 +1159,14 @@ mod tests {
                 target.provider == PROVIDER_ID && target.adapter == ADAPTER_ID && target.enabled
             })
             .expect("one enabled Gemini image target is required");
+        let image_size = env::var("GONGBU_LIVE_GEMINI_IMAGE_SIZE").ok();
         let request = NormalizedRequest {
             provider: PROVIDER_ID.into(),
             model: target.model.clone(),
             image_count: Some(1),
             input_tokens: None,
             max_output_tokens: None,
-            image_size: None,
+            image_size: image_size.clone(),
         };
         let snapshot = PricingCatalog::load(pricing_path)
             .unwrap()
@@ -1174,9 +1176,11 @@ mod tests {
         let adapter = GeminiImageAdapter::from_target(target).unwrap();
         let secret = preflight_selected_secret(&adapter, &MacOsKeychain, target, &request).unwrap();
         let prompt = env::var("GONGBU_LIVE_GEMINI_PROMPT").expect("explicit prompt is required");
-        let outcome = adapter
-            .invoke(&request, &json!({"prompt": prompt}), &secret, None)
-            .unwrap();
+        let mut input = json!({"prompt": prompt});
+        if let Some(size) = image_size {
+            input["image_size"] = json!(size);
+        }
+        let outcome = adapter.invoke(&request, &input, &secret, None).unwrap();
         assert_eq!(outcome.outcome, OutcomeKind::Succeeded);
         assert_eq!(outcome.artifacts.len(), 1);
         image::load_from_memory(&outcome.artifacts[0].bytes)
