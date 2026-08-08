@@ -1,8 +1,8 @@
-use crate::secrets::{SecretError, SecretReference};
-use reqwest::{
-    header::{HeaderName, HeaderValue},
-    Url,
+use super::http_kernel::{
+    valid_provider_deadline_ms, validate_https_origin, validate_safe_headers,
 };
+use crate::secrets::{SecretError, SecretReference};
+use reqwest::{header::HeaderName, Url};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -15,7 +15,6 @@ use thiserror::Error;
 
 const PROVIDER_CONFIG_ENV: &str = "GONGBU_PROVIDER_CONFIG";
 const CURRENT_SCHEMA_VERSION: u32 = 2;
-const MAX_DEADLINE_MS: u64 = 15 * 60 * 1_000;
 pub const LEGACY_UNRESOLVED_DIGEST: &str = "legacy-unresolved";
 
 #[derive(Debug, Error)]
@@ -122,6 +121,7 @@ pub struct GeminiImageConfig {
     pub api_version: String,
     pub project: String,
     pub location: String,
+    /// Overall invocation budget shared by submit and referenced-artifact fetch.
     pub timeout_ms: u64,
     #[serde(default)]
     pub max_retries: u32,
@@ -136,6 +136,7 @@ pub struct GeminiImageConfig {
 pub struct GeminiDeveloperImageConfig {
     pub endpoint: String,
     pub api_version: String,
+    /// Overall invocation budget for the complete inline-image request.
     pub timeout_ms: u64,
     #[serde(default)]
     pub max_retries: u32,
@@ -148,6 +149,7 @@ pub struct GeminiDeveloperImageConfig {
 pub struct Flux2ApiConfig {
     pub endpoint: String,
     pub api_version: String,
+    /// Overall invocation budget shared by submit, every poll, and artifact fetch.
     pub timeout_ms: u64,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
@@ -166,6 +168,7 @@ pub struct Flux2ApiConfig {
 pub struct IdeogramImageConfig {
     pub endpoint: String,
     pub api_version: String,
+    /// Overall invocation budget shared by submit and artifact fetch.
     pub timeout_ms: u64,
     #[serde(default)]
     pub max_retries: u32,
@@ -648,26 +651,11 @@ fn validate_transport(
     forbidden: &[&str],
 ) -> Result<()> {
     let url = Url::parse(endpoint).map_err(|_| Error::InvalidTransportSettings)?;
-    if url.scheme() != "https"
-        || url.username() != ""
-        || url.password().is_some()
-        || url.port().is_some()
-        || url.host_str().is_none()
-        || !matches!(url.path(), "" | "/")
-        || url.query().is_some()
-        || url.fragment().is_some()
+    if validate_https_origin(&url, None).is_err()
         || !valid_identifier(api_version)
-        || timeout_ms == 0
-        || timeout_ms > MAX_DEADLINE_MS
+        || !valid_provider_deadline_ms(timeout_ms)
         || max_retries != 0
-        || !case_insensitive_unique(headers.keys())
-        || headers.iter().any(|(name, value)| {
-            !valid_header_name(name)
-                || value.is_empty()
-                || value.contains(['\r', '\n'])
-                || value.parse::<HeaderValue>().is_err()
-                || forbidden.iter().any(|v| name.eq_ignore_ascii_case(v))
-        })
+        || validate_safe_headers(headers, forbidden).is_err()
     {
         return Err(Error::InvalidTransportSettings);
     }
@@ -676,10 +664,6 @@ fn validate_transport(
 
 fn valid_header_name(name: &str) -> bool {
     name.parse::<HeaderName>().is_ok()
-}
-fn case_insensitive_unique<'a>(mut names: impl Iterator<Item = &'a String>) -> bool {
-    let mut unique = BTreeSet::new();
-    names.all(|name| unique.insert(name.to_ascii_lowercase()))
 }
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
@@ -846,7 +830,7 @@ mod tests {
                 Value::String(endpoint.into());
             invalid.push(value);
         }
-        for timeout in [0, 1_000_000] {
+        for timeout in [0, 270_001] {
             let mut value = base();
             value["provider_configs"][0]["settings"]["config"]["timeout_ms"] = Value::from(timeout);
             invalid.push(value);
@@ -858,5 +842,8 @@ mod tests {
         for raw in invalid {
             assert!(serde_json::from_value::<ProviderTargetConfig>(raw).is_err());
         }
+        let mut maximum = base();
+        maximum["provider_configs"][0]["settings"]["config"]["timeout_ms"] = Value::from(270_000);
+        assert!(serde_json::from_value::<ProviderTargetConfig>(maximum).is_ok());
     }
 }

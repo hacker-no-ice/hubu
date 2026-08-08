@@ -6,6 +6,7 @@
 
 use crate::{
     execution::Repository,
+    provider::http_kernel::TEMPORAL_ACTIVITY_TIMEOUT,
     workflow::{
         ArtifactActivities, ExecutionWorkflow, HubuActivities, OperatorReconciliationRequest,
         ProviderActivities,
@@ -143,7 +144,7 @@ impl DurableExecutionWorkflow {
         input: ExecutionWorkflowInput,
     ) -> WorkflowResult<String> {
         let (execution_id, recovery_delays_seconds) = input.into_parts();
-        let options = ActivityOptions::start_to_close_timeout(Duration::from_secs(300));
+        let options = ActivityOptions::start_to_close_timeout(TEMPORAL_ACTIVITY_TIMEOUT);
         let mut status = ctx
             .execute_activity(
                 ExecutionActivities::run_execution,

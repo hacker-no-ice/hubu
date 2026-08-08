@@ -12,6 +12,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const LOCAL_FS_BACKEND: &str = "local_fs";
+pub const DEFAULT_MAX_ENCODED_BYTES: u64 = 20 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct ArtifactLimits {
@@ -28,7 +29,7 @@ impl Default for ArtifactLimits {
             // Four outputs covers the intended v1 image-generation fan-out while
             // bounding storage and decode work before per-target configuration lands.
             max_artifacts_per_execution: 4,
-            max_encoded_bytes: 20 * 1024 * 1024,
+            max_encoded_bytes: DEFAULT_MAX_ENCODED_BYTES,
             // This is the maximum normalized RGBA allocation, not the compressed
             // file size. Keep it independently configurable for operator tuning.
             max_decoded_bytes: 100 * 1024 * 1024,
