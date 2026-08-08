@@ -279,7 +279,7 @@ impl GeminiDeveloperProviderActivities {
         }
         let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
             .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
-        if snapshot.unit != PricingUnit::Image {
+        if !snapshot.is_image_only() {
             return Err(WorkflowActivityError::Proven(
                 "pricing_snapshot_invalid".into(),
             ));
@@ -293,11 +293,15 @@ impl GeminiDeveloperProviderActivities {
         Ok((
             target,
             NormalizedRequest {
-                provider: snapshot.provider,
-                model: snapshot.model,
-                image_count: Some(snapshot.quantity),
+                provider: snapshot.provider.clone(),
+                model: snapshot.model.clone(),
+                image_count: snapshot.estimated_quantity(PricingUnit::Image),
                 input_tokens: None,
                 max_output_tokens: None,
+                image_size: snapshot
+                    .selector
+                    .as_ref()
+                    .map(|selector| selector.image_size.clone()),
             },
         ))
     }

@@ -221,6 +221,8 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
         vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome> {
         self.validate_request(request)?;
+        crate::provider_contract::validate_image_size_input(request, input)
+            .map_err(|_| provider_error("invalid_request"))?;
         if vendor_idempotency_key.is_some() || self.config.max_retries != 0 {
             return Err(provider_error("retry_not_supported"));
         }
@@ -230,11 +232,14 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
             .map(str::trim)
             .filter(|value| !value.is_empty() && value.len() <= 32_000)
             .ok_or_else(|| provider_error("invalid_request"))?;
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "input": [{"type": "text", "text": prompt}],
             "response_format": {"type": "image"}
         });
+        if let Some(size) = &request.image_size {
+            body["response_format"]["image_size"] = json!(size.to_ascii_uppercase());
+        }
         let response = self
             .transport
             .create_interaction(
@@ -423,6 +428,7 @@ mod tests {
             image_count: Some(1),
             input_tokens: None,
             max_output_tokens: None,
+            image_size: None,
         }
     }
     fn adapter(
@@ -477,6 +483,40 @@ mod tests {
         assert_eq!(outcome.usage.unwrap().input_tokens, Some(4));
         assert_eq!(outcome.artifacts.len(), 1);
         image::load_from_memory(&outcome.artifacts[0].bytes).unwrap();
+    }
+
+    #[test]
+    fn normalized_resolution_is_validated_and_transmitted() {
+        let response: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/gemini_developer_interaction_success.json"
+        ))
+        .unwrap();
+        let (sized_adapter, calls) = adapter(response.clone(), 200);
+        let mut sized = request();
+        sized.image_size = Some("4k".into());
+        sized_adapter
+            .invoke(
+                &sized,
+                &json!({"prompt":"draw a cat","image_size":"4k"}),
+                &secret_for_test("api-key-canary"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            calls.lock().unwrap()[0].2["response_format"]["image_size"],
+            "4K"
+        );
+
+        let (adapter, calls) = adapter(response, 200);
+        assert!(adapter
+            .invoke(
+                &sized,
+                &json!({"prompt":"draw a cat","image_size":"2k"}),
+                &secret_for_test("api-key-canary"),
+                None,
+            )
+            .is_err());
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -617,12 +657,14 @@ mod tests {
                 target.provider == PROVIDER_ID && target.adapter == ADAPTER_ID && target.enabled
             })
             .expect("one enabled Developer API image target is required");
+        let image_size = env::var("GONGBU_LIVE_GEMINI_DEVELOPER_IMAGE_SIZE").ok();
         let request = NormalizedRequest {
             provider: PROVIDER_ID.into(),
             model: target.model.clone(),
             image_count: Some(1),
             input_tokens: None,
             max_output_tokens: None,
+            image_size: image_size.clone(),
         };
         let snapshot = PricingCatalog::load(
             env::var("GONGBU_PRICING_CATALOG").expect("pricing catalog is required"),
@@ -650,9 +692,11 @@ mod tests {
             !output_path.exists(),
             "output image path must not already exist"
         );
-        let outcome = adapter
-            .invoke(&request, &json!({"prompt":prompt}), &secret, None)
-            .unwrap();
+        let mut input = json!({"prompt":prompt});
+        if let Some(size) = image_size {
+            input["image_size"] = json!(size);
+        }
+        let outcome = adapter.invoke(&request, &input, &secret, None).unwrap();
         assert_eq!(outcome.outcome, OutcomeKind::Succeeded);
         assert_eq!(outcome.artifacts.len(), 1);
         image::load_from_memory(&outcome.artifacts[0].bytes)

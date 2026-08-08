@@ -33,29 +33,35 @@ Create an operator-owned target file:
 }]}
 ```
 
-Create an operator-owned pricing catalog with an exact `google` +
-`gemini-3.1-flash-lite-image` image rule:
+Create an operator-owned schema-v2 pricing catalog with an exact `google` +
+`gemini-3.1-flash-lite-image` image rule for a resolution supported by that
+model. This example selects 4K:
 
 ```json
 {
-  "schema_version": 1,
-  "catalog_version": "google-gemini-developer-local-v1",
+  "schema_version": 2,
+  "catalog_version": "google-gemini-developer-local-v2",
   "rules": [
     {
-      "rule_id": "google-gemini-3.1-flash-lite-image",
+      "rule_id": "google-gemini-3.1-flash-lite-image-4k",
       "provider": "google",
       "model": "gemini-3.1-flash-lite-image",
       "currency": "USD",
-      "unit": "image",
-      "unit_amount_minor": 4
+      "selector": { "image_size": "4k" },
+      "components": [{
+        "unit": "image",
+        "rate_numerator_minor": 4,
+        "rate_denominator": 1
+      }]
     }
   ]
 }
 ```
 
-`unit_amount_minor` is the frozen amount Gongbu will authorize and settle per
-image, expressed in USD cents. The example value is a local test ceiling, not a
-statement of Google's current price; verify and update it before a live run.
+The component rate is the frozen amount Gongbu will authorize and settle per
+image, expressed as exact USD minor units. The example value is a local test
+ceiling, not a statement of Google's current price; verify and update it before
+a live run. Add separate selector-qualified rules for any other enabled tiers.
 
 Then explicitly confirm the charge and set the USD-minor-unit ceiling at least
 as high as the catalog rule:
@@ -64,6 +70,7 @@ as high as the catalog rule:
 export GONGBU_PROVIDER_CONFIG=/absolute/path/provider-targets.json
 export GONGBU_PRICING_CATALOG=/absolute/path/pricing.json
 export GONGBU_LIVE_GEMINI_DEVELOPER_MAX_MINOR=4
+export GONGBU_LIVE_GEMINI_DEVELOPER_IMAGE_SIZE=4k
 export GONGBU_LIVE_GEMINI_DEVELOPER_CONFIRM=I_ACCEPT_GOOGLE_CHARGES
 export GONGBU_LIVE_GEMINI_DEVELOPER_PROMPT='Draw one small blue circle on white.'
 export GONGBU_LIVE_GEMINI_DEVELOPER_OUTPUT=/absolute/path/gemini-live-output.png
@@ -74,6 +81,11 @@ cargo test -p gongbu-api provider::gemini_developer_image::tests::live_developer
 The adapter reads the selected Keychain secret and sends it only in the
 `x-goog-api-key` header to
 `https://generativelanguage.googleapis.com/v1beta/interactions`.
+
+`GONGBU_LIVE_GEMINI_DEVELOPER_IMAGE_SIZE` must use normalized lowercase `1k`,
+`2k`, or `4k` and must match a catalog selector. The adapter validates that
+selection against the frozen snapshot and transmits the corresponding vendor
+value (`1K`, `2K`, or `4K`) before generation.
 
 On success, the test validates the returned image and writes its exact bytes to
 `GONGBU_LIVE_GEMINI_DEVELOPER_OUTPUT`. The path must be absolute, its parent
