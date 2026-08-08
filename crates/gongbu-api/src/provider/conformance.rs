@@ -67,12 +67,13 @@ pub(super) fn assert_adapter_conformance(mut run: impl FnMut(Case) -> Observatio
 }
 
 pub(super) fn assert_body_and_artifact_bounds(
-    mut rejects: impl FnMut(&mut Cursor<Vec<u8>>, usize) -> bool,
+    mut provider_body_rejected: impl FnMut(&mut Cursor<Vec<u8>>, usize) -> bool,
+    mut artifact_body_rejected: impl FnMut(&mut Cursor<Vec<u8>>, usize) -> bool,
 ) {
-    for _boundary in ["provider_body", "artifact_body"] {
-        assert!(!rejects(&mut Cursor::new(vec![0; 8]), 8));
-        assert!(rejects(&mut Cursor::new(vec![0; 9]), 8));
-    }
+    assert!(!provider_body_rejected(&mut Cursor::new(vec![0; 8]), 8));
+    assert!(provider_body_rejected(&mut Cursor::new(vec![0; 9]), 8));
+    assert!(!artifact_body_rejected(&mut Cursor::new(vec![0; 8]), 8));
+    assert!(artifact_body_rejected(&mut Cursor::new(vec![0; 9]), 8));
 }
 
 pub(super) fn assert_redirect_blocked(fetch_rejected: impl FnOnce(&Url) -> bool) {

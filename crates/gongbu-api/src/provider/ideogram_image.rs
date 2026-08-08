@@ -128,12 +128,13 @@ impl IdeogramTransport for ReqwestIdeogramTransport {
                 body: Value::Null,
             });
         }
-        let bytes = read_bounded(&mut response, MAX_PROVIDER_RESPONSE_BYTES).map_err(|_| {
-            Box::new(HttpFailure::UnknownOutcome {
-                request_id: request_id.clone(),
-                operation_id: operation_id.clone(),
-            }) as Box<dyn StdError + Send + Sync>
-        })?;
+        let bytes = read_provider_response_bounded(&mut response, MAX_PROVIDER_RESPONSE_BYTES)
+            .map_err(|_| {
+                Box::new(HttpFailure::UnknownOutcome {
+                    request_id: request_id.clone(),
+                    operation_id: operation_id.clone(),
+                }) as Box<dyn StdError + Send + Sync>
+            })?;
         let body = serde_json::from_slice(&bytes).map_err(|_| {
             Box::new(HttpFailure::UnknownOutcome {
                 request_id: request_id.clone(),
@@ -165,8 +166,22 @@ impl IdeogramTransport for ReqwestIdeogramTransport {
                 operation_id: None,
             }));
         }
-        read_bounded(&mut response, MAX_ARTIFACT_BYTES)
+        read_artifact_response_bounded(&mut response, MAX_ARTIFACT_BYTES)
     }
+}
+
+fn read_provider_response_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+    read_bounded(reader, limit)
+}
+
+fn read_artifact_response_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+    read_bounded(reader, limit)
 }
 
 fn read_bounded(
@@ -583,7 +598,10 @@ mod tests {
 
     #[test]
     fn cross_adapter_conformance_matrix() {
-        assert_body_and_artifact_bounds(|reader, limit| read_bounded(reader, limit).is_err());
+        assert_body_and_artifact_bounds(
+            |reader, limit| read_provider_response_bounded(reader, limit).is_err(),
+            |reader, limit| read_artifact_response_bounded(reader, limit).is_err(),
+        );
         assert_adapter_conformance(|case| {
             let (adapter, calls) = match case {
                 Case::Rejection => adapter(json!({}), 403, Ok(Vec::new())),

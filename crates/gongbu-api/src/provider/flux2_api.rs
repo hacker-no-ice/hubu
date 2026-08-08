@@ -138,9 +138,10 @@ impl ReqwestFlux2Transport {
                 body: Value::Null,
             });
         }
-        let bytes = read_bounded(&mut response, MAX_RESPONSE_BYTES).map_err(|_| {
-            Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
-        })?;
+        let bytes =
+            read_provider_response_bounded(&mut response, MAX_RESPONSE_BYTES).map_err(|_| {
+                Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+            })?;
         let body = serde_json::from_slice(&bytes).map_err(|_| {
             Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
         })?;
@@ -206,8 +207,22 @@ impl Flux2Transport for ReqwestFlux2Transport {
         if !response.status().is_success() {
             return Err(Box::new(HttpFailure::UnknownOutcome));
         }
-        read_bounded(&mut response, MAX_ARTIFACT_BYTES)
+        read_artifact_response_bounded(&mut response, MAX_ARTIFACT_BYTES)
     }
+}
+
+fn read_provider_response_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+    read_bounded(reader, limit)
+}
+
+fn read_artifact_response_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+    read_bounded(reader, limit)
 }
 
 fn read_bounded(
@@ -783,7 +798,10 @@ mod tests {
 
     #[test]
     fn cross_adapter_conformance_matrix() {
-        assert_body_and_artifact_bounds(|reader, limit| read_bounded(reader, limit).is_err());
+        assert_body_and_artifact_bounds(
+            |reader, limit| read_provider_response_bounded(reader, limit).is_err(),
+            |reader, limit| read_artifact_response_bounded(reader, limit).is_err(),
+        );
         assert_adapter_conformance(|case| {
             if matches!(case, Case::UnsafeRetry) {
                 let calls = Arc::new(Mutex::new(0));
