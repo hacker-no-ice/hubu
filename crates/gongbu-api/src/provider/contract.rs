@@ -42,6 +42,26 @@ pub enum ContractError {
 
 pub type Result<T> = std::result::Result<T, ContractError>;
 
+/// Return the canonical media type only when the bytes are a supported image
+/// and, when supplied, the provider declaration agrees with the content.
+pub fn canonical_image_media_type(declared: Option<&str>, bytes: &[u8]) -> Result<&'static str> {
+    let actual = match image::guess_format(bytes).ok() {
+        Some(image::ImageFormat::Png) => "image/png",
+        Some(image::ImageFormat::Jpeg) => "image/jpeg",
+        _ => {
+            return Err(ContractError::Provider {
+                code: "artifact_policy_failure".into(),
+            });
+        }
+    };
+    if declared.is_some_and(|value| value != actual) {
+        return Err(ContractError::Provider {
+            code: "artifact_policy_failure".into(),
+        });
+    }
+    Ok(actual)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CatalogDocument {

@@ -5,10 +5,11 @@
 
 use super::{
     contract::{
-        AdapterCapabilities, AdapterOutcome, ContractError, NormalizedArtifact, NormalizedRequest,
-        NormalizedUsage, OutcomeKind, ProviderAdapter, Result, RetryPolicy,
+        canonical_image_media_type, AdapterCapabilities, AdapterOutcome, ContractError,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutcomeKind, ProviderAdapter,
+        Result, RetryPolicy,
     },
-    targets::{GeminiImageConfig, ProviderConfigVersion},
+    targets::{valid_artifact_hosts, GeminiImageConfig, ProviderConfigVersion},
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -233,7 +234,10 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
         .validate(AdapterCapabilities {
             vendor_enforced_idempotency: false,
         })?;
-        if model.trim().is_empty() || config.timeout_ms == 0 {
+        if model.trim().is_empty()
+            || config.timeout_ms == 0
+            || !valid_artifact_hosts(&config.approved_artifact_hosts, false)
+        {
             return Err(provider_error("config_invalid"));
         }
         for (name, value) in &config.headers {
@@ -412,13 +416,21 @@ fn extract_artifacts<T: GeminiTransport>(
     secret: &ProviderSecret,
     timeout: Duration,
 ) -> Result<Vec<NormalizedArtifact>> {
-    let parts = body
+    let candidates = body
         .get("candidates")
         .and_then(Value::as_array)
-        .and_then(|c| c.first())
-        .and_then(|c| c.pointer("/content/parts"))
-        .and_then(Value::as_array)
         .ok_or_else(|| provider_error("malformed_response"))?;
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut parts = Vec::new();
+    for candidate in candidates {
+        let candidate_parts = candidate
+            .pointer("/content/parts")
+            .and_then(Value::as_array)
+            .ok_or_else(|| provider_error("malformed_response"))?;
+        parts.extend(candidate_parts);
+    }
     let image_parts = parts
         .iter()
         .filter(|part| {
@@ -455,6 +467,10 @@ fn extract_artifacts<T: GeminiTransport>(
             let bytes = STANDARD
                 .decode(data)
                 .map_err(|_| provider_error("malformed_response"))?;
+            if bytes.len() > MAX_ARTIFACT_BYTES {
+                return Err(provider_error("artifact_policy_failure"));
+            }
+            let media_type = canonical_image_media_type(Some(media_type), &bytes)?;
             artifacts.push(NormalizedArtifact {
                 media_type: media_type.into(),
                 bytes,
@@ -482,6 +498,10 @@ fn extract_artifacts<T: GeminiTransport>(
             let bytes = transport
                 .fetch_artifact(&url, secret.expose(), timeout)
                 .map_err(|error| classify_transport(error, secret, true))?;
+            if bytes.len() > MAX_ARTIFACT_BYTES {
+                return Err(provider_error("artifact_policy_failure"));
+            }
+            let media_type = canonical_image_media_type(Some(media_type), &bytes)?;
             artifacts.push(NormalizedArtifact {
                 media_type: media_type.into(),
                 bytes,
@@ -533,7 +553,13 @@ fn provider_error(code: &str) -> ContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secrets::secret_for_test;
+    use crate::{
+        provider::conformance::{
+            assert_adapter_conformance, assert_body_and_artifact_bounds, assert_redirect_blocked,
+            Case, Observation,
+        },
+        secrets::secret_for_test,
+    };
     use image::{DynamicImage, ImageOutputFormat, RgbaImage};
     use std::{
         io::Cursor,
@@ -656,6 +682,111 @@ mod tests {
         );
         assert_eq!(outcome.usage.unwrap().images, Some(1));
         assert_eq!(outcome.artifacts[0].bytes, bytes);
+    }
+
+    #[test]
+    fn exact_cardinality_is_enforced_across_all_candidates() {
+        let bytes = png();
+        let (adapter, calls) = adapter(
+            json!({"candidates":[
+                {"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":STANDARD.encode(&bytes)}}]}},
+                {"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":STANDARD.encode(&bytes)}}]}}
+            ]}),
+            200,
+        );
+        let error = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ContractError::ProviderWithEvidence { code, .. }
+                if code == "artifact_policy_failure"
+        ));
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn declared_media_type_must_match_inline_and_referenced_content() {
+        let bytes = png();
+        for body in [
+            json!({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/jpeg","data":STANDARD.encode(&bytes)}}]}}]}),
+            json!({"candidates":[{"content":{"parts":[{"fileData":{"mimeType":"image/jpeg","fileUri":"https://storage.googleapis.com/output.jpg"}}]}}]}),
+        ] {
+            let (adapter, _) = adapter(body, 200);
+            assert!(matches!(
+                adapter.invoke(
+                    &request(),
+                    &json!({"prompt":"cat"}),
+                    &secret_for_test("secret-canary"),
+                    None,
+                ),
+                Err(ContractError::ProviderWithEvidence { code, .. })
+                    if code == "artifact_policy_failure"
+            ));
+        }
+    }
+
+    #[test]
+    fn cross_adapter_conformance_matrix() {
+        assert_body_and_artifact_bounds(|reader, limit| read_bounded(reader, limit).is_err());
+        assert_adapter_conformance(|case| {
+            let (adapter, calls) = match case {
+                Case::Rejection => adapter(json!({"error":"rejected"}), 403),
+                Case::AmbiguousPostSend => {
+                    let calls = Arc::new(Mutex::new(0));
+                    (
+                        GeminiImageAdapter::new(
+                            config(),
+                            "gemini-image-v1".into(),
+                            FixtureTransport {
+                                response: Arc::new(Mutex::new(Some(Err("timeout".into())))),
+                                calls: calls.clone(),
+                                referenced: Vec::new(),
+                            },
+                        )
+                        .unwrap(),
+                        calls,
+                    )
+                }
+                Case::EvidenceRetention => adapter(
+                    json!({"candidates":[{"content":{"parts":[{"fileData":{"mimeType":"image/jpeg","fileUri":"https://storage.googleapis.com/out.jpg"}}]}}]}),
+                    200,
+                ),
+                Case::HostPolicy => adapter(
+                    json!({"candidates":[{"content":{"parts":[{"fileData":{"mimeType":"image/png","fileUri":"https://evil.example/out.png"}}]}}]}),
+                    200,
+                ),
+                Case::ArtifactBound => {
+                    let (mut adapter, calls) = adapter(
+                        json!({"candidates":[{"content":{"parts":[{"fileData":{"mimeType":"image/png","fileUri":"https://storage.googleapis.com/out.png"}}]}}]}),
+                        200,
+                    );
+                    adapter.transport.referenced = vec![0; MAX_ARTIFACT_BYTES + 1];
+                    (adapter, calls)
+                }
+                Case::UnsafeRetry | Case::InvalidRequest => adapter(json!({}), 200),
+            };
+            let mut conformance_request = request();
+            if matches!(case, Case::InvalidRequest) {
+                conformance_request.image_count = Some(2);
+            }
+            let result = adapter.invoke(
+                &conformance_request,
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                matches!(case, Case::UnsafeRetry).then_some("unsafe-key"),
+            );
+            let submissions = *calls.lock().unwrap();
+            Observation {
+                result,
+                submissions,
+            }
+        });
     }
     #[test]
     fn response_id_body_field_is_used_when_headers_are_absent() {
@@ -996,40 +1127,11 @@ mod tests {
 
     #[test]
     fn referenced_artifact_transport_never_follows_redirects() {
-        use std::{
-            io::{Read, Write},
-            net::TcpListener,
-            thread,
-        };
-        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
-        destination.set_nonblocking(true).unwrap();
-        let destination_url = format!("http://{}/secret", destination.local_addr().unwrap());
-        let redirector = TcpListener::bind("127.0.0.1:0").unwrap();
-        let redirect_url = Url::parse(&format!(
-            "http://{}/artifact",
-            redirector.local_addr().unwrap()
-        ))
-        .unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = redirector.accept().unwrap();
-            let mut request = [0; 1024];
-            let _ = stream.read(&mut request).unwrap();
-            write!(
-                stream,
-                "HTTP/1.1 302 Found\r\nLocation: {destination_url}\r\nContent-Length: 0\r\n\r\n"
-            )
-            .unwrap();
+        assert_redirect_blocked(|url| {
+            ReqwestGeminiTransport
+                .fetch_artifact(url, b"credential", Duration::from_secs(2))
+                .is_err()
         });
-        let result = ReqwestGeminiTransport.fetch_artifact(
-            &redirect_url,
-            b"credential",
-            Duration::from_secs(2),
-        );
-        server.join().unwrap();
-        assert!(result.is_err());
-        assert!(
-            matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
-        );
     }
 
     #[test]

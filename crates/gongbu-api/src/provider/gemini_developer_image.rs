@@ -6,8 +6,9 @@
 
 use super::{
     contract::{
-        AdapterCapabilities, AdapterOutcome, ContractError, NormalizedArtifact, NormalizedRequest,
-        NormalizedUsage, OutcomeKind, ProviderAdapter, Result, RetryPolicy,
+        canonical_image_media_type, AdapterCapabilities, AdapterOutcome, ContractError,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutcomeKind, ProviderAdapter,
+        Result, RetryPolicy,
     },
     targets::{GeminiDeveloperImageConfig, ProviderConfigVersion},
 };
@@ -357,6 +358,7 @@ fn extract_artifact(body: &Value) -> Result<NormalizedArtifact> {
     if bytes.len() > MAX_ARTIFACT_BYTES {
         return Err(provider_error("artifact_policy_failure"));
     }
+    let media_type = canonical_image_media_type(Some(media_type), &bytes)?;
     Ok(NormalizedArtifact {
         media_type: media_type.into(),
         bytes,
