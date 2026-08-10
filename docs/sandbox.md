@@ -83,6 +83,15 @@ either mock boundary.
 | Real | Mock | real Hubu traffic with deterministic provider output |
 | Real | Real | guarded release dogfood |
 
+> [!IMPORTANT]
+> Real-Hubu integration testing is not yet fully supported end to end. The
+> sandbox can connect Gongbu to an explicitly configured external Hubu
+> endpoint, but it does not yet download a pinned Hubu release, start Hubu,
+> provision isolated test fixtures, or verify the Hubu product and executor
+> contract versions. Until that managed workflow is delivered, operators must
+> set up and validate Hubu separately; use real-Hubu modes for exploratory
+> manual testing rather than as a reproducible compatibility test.
+
 The selected implementation is wired through the same `HubuActivities` and
 `ProviderActivities` interfaces as the durable production workflow. Modes do
 not change persistence, artifact, replay, or settlement invariants.
@@ -334,6 +343,8 @@ new `--image-size`, and ensure the spend ceiling covers that tier.
 ## Real Hubu + mock provider
 
 Use this mode to validate Hubu protocol traffic without provider spend.
+This is currently a partial, externally managed integration: the sandbox
+connects to Hubu but does not install, start, version-pin, or provision it.
 
 1. Create a profile based on `examples/sandbox.mock.json`. Set `hubu.mode` to
    `real`, add the loopback or allowlisted `endpoint`,
@@ -359,8 +370,10 @@ Use this mode to validate Hubu protocol traffic without provider spend.
 ## Real Hubu + real provider
 
 This is guarded release-level dogfood: both financial and provider traffic are
-real. Complete the real-Hubu setup above and the real-provider target, pricing,
-Keychain, and acknowledgement setup from the Gemini section.
+real. Real-Hubu setup is still externally managed and not yet a reproducible
+released-version integration test. Complete the real-Hubu setup above and the
+real-provider target, pricing, Keychain, and acknowledgement setup from the
+Gemini section.
 
 1. Create one combined profile with both boundaries set to `real`.
 2. Confirm the Hubu authorization amount, mock-independent provider ceiling,
