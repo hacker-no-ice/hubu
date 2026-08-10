@@ -483,7 +483,13 @@ fn immutable_request_matches(
     normalized_input: &Value,
 ) -> bool {
     execution.hubu_authorization_id == request.hubu_authorization_id
-        && execution.hubu_claim_id == request.hubu_claim_id
+        // A null request claim delegates claim creation to Gongbu. The durable
+        // workflow subsequently records that claim on the execution, so an
+        // otherwise identical replay must not conflict with that mutation.
+        && request
+            .hubu_claim_id
+            .as_ref()
+            .is_none_or(|claim_id| execution.hubu_claim_id.as_ref() == Some(claim_id))
         && execution.hubu_token_reference.as_str() == request.hubu_token_reference.trim()
         && execution.authorized_minor == request.authorization.amount_minor
         && execution
@@ -872,6 +878,26 @@ mod tests {
             &[],
         );
         assert_eq!(execution(&fetched), first);
+    }
+
+    #[test]
+    fn replay_with_gongbu_managed_claim_matches_after_claim_is_recorded() {
+        let fixture = fixture();
+        let mut submitted = request("managed-claim-replay");
+        submitted["hubu_claim_id"] = Value::Null;
+        let created = execution(&call_create(&fixture, &submitted));
+        let mut persisted = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        persisted.hubu_claim_id = Some("claim-created-by-workflow".into());
+        let decoded: CreateExecutionRequest = serde_json::from_value(submitted).unwrap();
+
+        assert!(immutable_request_matches(
+            &persisted,
+            &decoded,
+            &canonicalize(&decoded.input)
+        ));
     }
 
     #[test]

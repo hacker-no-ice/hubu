@@ -3,6 +3,8 @@
 //! The sandbox changes only boundary implementations. Both mock and real modes
 //! implement the same activity traits consumed by the durable workflow.
 
+pub mod runtime;
+
 use crate::{
     application::GenericProviderActivities,
     artifact::ArtifactLimits,
@@ -12,12 +14,15 @@ use crate::{
         HubuClient, PriceModelSnapshot, ProviderReceipt,
     },
     provider::{
-        contract::PricingCatalog,
+        contract::{
+            AdapterCapabilities, AdapterOutcome, NormalizedRequest, PricingCatalog,
+            ProviderAdapter, ProviderFailure,
+        },
         registry::{ProviderRegistry, ValidatedProviderCatalog},
         targets::{AdapterSettings, ProviderTargetConfig, TargetKey},
     },
     provider_contract::NormalizedUsage,
-    secrets::{MacOsKeychain, SecretProvider, SecretReference},
+    secrets::{MacOsKeychain, ProviderSecret, SecretProvider, SecretReference},
     workflow::{
         ActivityError, ArtifactActivities, HubuActivities, ProviderActivities, ProviderArtifact,
         ProviderSuccess,
@@ -94,7 +99,52 @@ pub struct SandboxConfig {
     pub hubu: HubuConfig,
     pub provider: ProviderConfig,
     #[serde(default)]
+    pub temporal: TemporalConfig,
+    #[serde(default)]
     pub preserve_diagnostics_on_failure: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TemporalMode {
+    #[default]
+    Managed,
+    External,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalConfig {
+    #[serde(default)]
+    pub mode: TemporalMode,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub ui_url: Option<String>,
+    #[serde(default = "default_temporal_namespace")]
+    pub namespace: String,
+    #[serde(default = "default_temporal_binary")]
+    pub binary: String,
+}
+
+impl Default for TemporalConfig {
+    fn default() -> Self {
+        Self {
+            mode: TemporalMode::Managed,
+            address: None,
+            ui_url: None,
+            namespace: default_temporal_namespace(),
+            binary: default_temporal_binary(),
+        }
+    }
+}
+
+fn default_temporal_namespace() -> String {
+    "default".into()
+}
+
+fn default_temporal_binary() -> String {
+    "temporal".into()
 }
 
 fn default_seed() -> u64 {
@@ -269,6 +319,29 @@ impl SandboxConfig {
                 }
             }
             BoundaryMode::Real => self.validate_real_provider()?,
+        }
+        match self.temporal.mode {
+            TemporalMode::Managed => {
+                if self.temporal.address.is_some() || self.temporal.ui_url.is_some() {
+                    return invalid("managed Temporal assigns its own address and UI URL");
+                }
+                if self.temporal.binary.trim().is_empty() {
+                    return invalid("managed Temporal requires a CLI binary name or path");
+                }
+            }
+            TemporalMode::External => {
+                let address = self.temporal.address.as_deref().unwrap_or_default();
+                if !address.starts_with("http://") || address.contains('@') {
+                    return invalid("external Temporal requires an explicit safe http:// address");
+                }
+                let ui = self.temporal.ui_url.as_deref().unwrap_or_default();
+                if !ui.starts_with("http://") || ui.contains('@') {
+                    return invalid("external Temporal requires an explicit safe UI URL");
+                }
+            }
+        }
+        if self.temporal.namespace.trim().is_empty() {
+            return invalid("Temporal namespace cannot be empty");
         }
         Ok(())
     }
@@ -458,14 +531,14 @@ fn parse_http_endpoint(endpoint: &str) -> Result<(String, u16), SandboxError> {
     Ok((host.into(), port))
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ReadinessCheck {
     pub component: String,
     pub ready: bool,
     pub detail: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RunManifest {
     pub schema_version: u32,
     pub run_id: String,
@@ -480,6 +553,14 @@ pub struct RunManifest {
     pub commit_sha: String,
     pub process_version: String,
     pub maximum_spend_minor: Option<i64>,
+    pub gongbu_url: String,
+    pub temporal_address: String,
+    pub temporal_ui_url: String,
+    pub temporal_namespace: String,
+    pub temporal_task_queue: String,
+    pub provider_target: ProviderSelection,
+    pub authorization_currency: String,
+    pub authorization_amount_minor: i64,
     pub database_path: String,
     pub artifact_root: String,
     pub workflow_root: String,
@@ -491,7 +572,7 @@ pub struct SandboxRun {
     root: Option<TempDir>,
     manifest_path: PathBuf,
     manifest: RunManifest,
-    _reserved_ports: Vec<TcpListener>,
+    reserved_ports: BTreeMap<String, TcpListener>,
 }
 
 impl SandboxRun {
@@ -509,7 +590,7 @@ impl SandboxRun {
     fn start_inner(
         config: &SandboxConfig,
         secrets: &dyn SecretProvider,
-        assigned_ports: Option<[u16; 2]>,
+        assigned_ports: Option<[u16; 3]>,
     ) -> Result<Self, SandboxError> {
         config.validate()?;
         probe_credentials(config, secrets)?;
@@ -525,18 +606,24 @@ impl SandboxRun {
         fs::create_dir_all(&log_root)?;
         fs::write(&database_path, [])?;
         let (listeners, selected_ports) = if let Some(ports) = assigned_ports {
-            (Vec::new(), ports)
+            (BTreeMap::new(), ports)
         } else {
-            let listeners = vec![reserve_loopback_port()?, reserve_loopback_port()?];
+            let listeners = BTreeMap::from([
+                ("gongbu".into(), reserve_loopback_port()?),
+                ("temporal".into(), reserve_loopback_port()?),
+                ("temporal_ui".into(), reserve_loopback_port()?),
+            ]);
             let ports = [
-                listeners[0].local_addr()?.port(),
-                listeners[1].local_addr()?.port(),
+                listeners["gongbu"].local_addr()?.port(),
+                listeners["temporal"].local_addr()?.port(),
+                listeners["temporal_ui"].local_addr()?.port(),
             ];
             (listeners, ports)
         };
         let ports = BTreeMap::from([
             ("gongbu".into(), selected_ports[0]),
-            ("mock_boundary".into(), selected_ports[1]),
+            ("temporal".into(), selected_ports[1]),
+            ("temporal_ui".into(), selected_ports[2]),
         ]);
         let run_id = format!("sandbox-{}-{}", config.seed, unix_seconds());
         let manifest = RunManifest {
@@ -552,7 +639,7 @@ impl SandboxRun {
                 .endpoint
                 .as_deref()
                 .map(redact_endpoint)
-                .unwrap_or_else(|| format!("http://127.0.0.1:{}", ports["mock_boundary"])),
+                .unwrap_or_else(|| "in-process://mock-hubu".into()),
             provider_target_digest: file_or_mock_digest(
                 config.provider.target_config.as_deref(),
                 b"gongbu-sandbox-mock-provider-v1",
@@ -564,6 +651,29 @@ impl SandboxRun {
             commit_sha: option_env!("GONGBU_COMMIT_SHA").unwrap_or("unknown").into(),
             process_version: env!("CARGO_PKG_VERSION").into(),
             maximum_spend_minor: config.provider.maximum_spend_minor,
+            gongbu_url: format!("http://127.0.0.1:{}", ports["gongbu"]),
+            temporal_address: config
+                .temporal
+                .address
+                .clone()
+                .unwrap_or_else(|| format!("http://127.0.0.1:{}", ports["temporal"])),
+            temporal_ui_url: config
+                .temporal
+                .ui_url
+                .clone()
+                .unwrap_or_else(|| format!("http://127.0.0.1:{}", ports["temporal_ui"])),
+            temporal_namespace: config.temporal.namespace.clone(),
+            temporal_task_queue: crate::temporal::EXECUTION_TASK_QUEUE.into(),
+            provider_target: config
+                .provider
+                .target
+                .clone()
+                .unwrap_or_else(mock_provider_selection),
+            authorization_currency: config.hubu.currency.clone(),
+            authorization_amount_minor: config
+                .provider
+                .maximum_spend_minor
+                .unwrap_or(config.hubu.maximum_authorization_minor.min(100)),
             database_path: database_path.display().to_string(),
             artifact_root: artifact_root.display().to_string(),
             workflow_root: workflow_root.display().to_string(),
@@ -576,13 +686,13 @@ impl SandboxRun {
             root: Some(root),
             manifest_path,
             manifest,
-            _reserved_ports: listeners,
+            reserved_ports: listeners,
         })
     }
 
     #[cfg(test)]
     fn start_for_test(config: &SandboxConfig) -> Result<Self, SandboxError> {
-        Self::start_inner(config, &MacOsKeychain, Some([45100, 45101]))
+        Self::start_inner(config, &MacOsKeychain, Some([45100, 45101, 45102]))
     }
 
     pub fn root(&self) -> &Path {
@@ -595,15 +705,68 @@ impl SandboxRun {
         &self.manifest
     }
 
+    pub fn take_listener(&mut self, name: &str) -> Result<TcpListener, SandboxError> {
+        self.reserved_ports
+            .remove(name)
+            .ok_or_else(|| SandboxError::Invalid(format!("sandbox port is not reserved: {name}")))
+    }
+
+    pub fn release_listener(&mut self, name: &str) {
+        self.reserved_ports.remove(name);
+    }
+
+    pub fn rewrite_manifest(&self) -> Result<(), SandboxError> {
+        fs::write(
+            &self.manifest_path,
+            serde_json::to_vec_pretty(&self.manifest)?,
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_ready(&mut self, component: &str, detail: &str) -> Result<(), SandboxError> {
+        if let Some(check) = self
+            .manifest
+            .readiness
+            .iter_mut()
+            .find(|check| check.component == component)
+        {
+            check.ready = true;
+            check.detail = detail.into();
+        } else {
+            self.manifest.readiness.push(ReadinessCheck {
+                component: component.into(),
+                ready: true,
+                detail: detail.into(),
+            });
+        }
+        self.rewrite_manifest()
+    }
+
     pub fn preserve(mut self, destination: impl AsRef<Path>) -> Result<PathBuf, SandboxError> {
-        let root = self.root.take().expect("run root retained");
-        let source = root.keep();
         let destination = destination.as_ref();
         if destination.exists() {
             return invalid("diagnostics destination already exists");
         }
+        let root = self.root.take().expect("run root retained");
+        let source = root.keep();
         fs::rename(&source, destination)?;
+        self.manifest.database_path = destination.join("gongbu.sqlite3").display().to_string();
+        self.manifest.artifact_root = destination.join("artifacts").display().to_string();
+        self.manifest.workflow_root = destination.join("workflow").display().to_string();
+        self.manifest_path = destination.join("run-manifest.json");
+        fs::write(
+            &self.manifest_path,
+            serde_json::to_vec_pretty(&self.manifest)?,
+        )?;
         Ok(destination.to_path_buf())
+    }
+
+    pub fn preserve_in_place(mut self) -> Result<PathBuf, SandboxError> {
+        let root = self.root.take().expect("run root retained");
+        let destination = root.keep();
+        self.manifest_path = destination.join("run-manifest.json");
+        self.rewrite_manifest()?;
+        Ok(destination)
     }
 }
 
@@ -683,6 +846,15 @@ fn ready(component: &str, detail: String) -> ReadinessCheck {
 
 fn reserve_loopback_port() -> Result<TcpListener, std::io::Error> {
     TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+}
+
+fn mock_provider_selection() -> ProviderSelection {
+    ProviderSelection {
+        workload_type: "image_generation".into(),
+        provider: "sandbox".into(),
+        adapter: "fixture".into(),
+        model: "deterministic-image-v1".into(),
+    }
 }
 
 fn redact_endpoint(endpoint: &str) -> String {
@@ -1134,6 +1306,12 @@ pub struct DeterministicProvider {
     calls: Mutex<BTreeMap<String, Result<ProviderSuccess, ActivityError>>>,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct SafeProviderCall {
+    pub attempt_id_digest: String,
+    pub outcome: String,
+}
+
 pub struct FaultInjectingArtifacts {
     delegate: Arc<dyn ArtifactActivities + Send + Sync>,
     fault: BoundaryFault,
@@ -1197,6 +1375,26 @@ impl DeterministicProvider {
     }
     pub fn invocation_count(&self) -> usize {
         self.calls.lock().expect("provider calls").len()
+    }
+    pub fn safe_calls(&self) -> Vec<SafeProviderCall> {
+        self.calls
+            .lock()
+            .expect("provider calls")
+            .iter()
+            .map(|(attempt_id, outcome)| SafeProviderCall {
+                attempt_id_digest: format!("sha256:{:x}", Sha256::digest(attempt_id.as_bytes())),
+                outcome: match outcome {
+                    Ok(_) => "succeeded",
+                    Err(ActivityError::Proven(_) | ActivityError::ProvenWithEvidence { .. }) => {
+                        "proven_failure"
+                    }
+                    Err(
+                        ActivityError::Ambiguous(_) | ActivityError::AmbiguousWithEvidence { .. },
+                    ) => "ambiguous",
+                }
+                .into(),
+            })
+            .collect()
     }
     fn outcome(&self, attempt_id: &str) -> Result<ProviderSuccess, ActivityError> {
         if self.fault == BoundaryFault::ProvenBeforeMutation
@@ -1339,6 +1537,7 @@ impl ProviderActivities for SpendCappedProvider {
 pub struct SandboxWiring {
     pub hubu: HubuWiring,
     pub provider: ProviderWiring,
+    pub providers: ValidatedProviderCatalog,
     artifact_fault: BoundaryFault,
 }
 
@@ -1360,9 +1559,13 @@ impl SandboxWiring {
                 HubuWiring::Real(Arc::new(RealHubuActivities::new(&config.hubu)?))
             }
         };
-        let provider = match config.provider.mode {
+        let (provider, providers) = match config.provider.mode {
             BoundaryMode::Mock => {
-                ProviderWiring::Mock(Arc::new(DeterministicProvider::new(&config.provider)?))
+                let providers = mock_provider_catalog()?;
+                (
+                    ProviderWiring::Mock(Arc::new(DeterministicProvider::new(&config.provider)?)),
+                    providers,
+                )
             }
             BoundaryMode::Real => {
                 let targets = ProviderTargetConfig::from_path(
@@ -1387,21 +1590,89 @@ impl SandboxWiring {
                     &ProviderRegistry::production(&ArtifactLimits::default()),
                 )
                 .map_err(|e| SandboxError::Invalid(format!("real provider wiring failed: {e}")))?;
-                ProviderWiring::Real {
+                (
+                    ProviderWiring::Real {
+                        catalog: catalog.clone(),
+                        maximum_spend_minor: config
+                            .provider
+                            .maximum_spend_minor
+                            .expect("validated spend ceiling"),
+                    },
                     catalog,
-                    maximum_spend_minor: config
-                        .provider
-                        .maximum_spend_minor
-                        .expect("validated spend ceiling"),
-                }
+                )
             }
         };
         Ok(Self {
             hubu,
             provider,
+            providers,
             artifact_fault: config.provider.artifact_fault,
         })
     }
+}
+
+struct CatalogFixtureAdapter;
+
+impl ProviderAdapter for CatalogFixtureAdapter {
+    fn adapter_id(&self) -> &str {
+        "fixture"
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities {
+            vendor_enforced_idempotency: false,
+        }
+    }
+
+    fn invoke(
+        &self,
+        _: &NormalizedRequest,
+        _: &serde_json::Value,
+        _: &ProviderSecret,
+        _: Option<&str>,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        unreachable!("sandbox mock provider activities bypass catalog adapters")
+    }
+}
+
+fn mock_provider_catalog() -> Result<ValidatedProviderCatalog, SandboxError> {
+    let targets: ProviderTargetConfig = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "provider_configs": [{
+            "provider_config_version": "sandbox-fixture-v1",
+            "workload_type": "image_generation",
+            "provider": "sandbox",
+            "adapter": "fixture",
+            "model": "deterministic-image-v1",
+            "secret_service": "gongbu.sandbox",
+            "secret_account": "mock",
+            "active": true,
+            "execution_enabled": true,
+            "settings": {"type": "fixture"}
+        }]
+    }))
+    .map_err(|error| SandboxError::Invalid(format!("mock provider targets: {error}")))?;
+    let pricing = PricingCatalog::from_json(
+        br#"{
+          "schema_version":1,
+          "catalog_version":"sandbox-mock-v1",
+          "rules":[{
+            "rule_id":"sandbox-image",
+            "provider":"sandbox",
+            "model":"deterministic-image-v1",
+            "currency":"USD",
+            "unit":"image",
+            "unit_amount_minor":1
+          }]
+        }"#,
+    )
+    .map_err(|error| SandboxError::Invalid(format!("mock provider pricing: {error}")))?;
+    let mut registry = ProviderRegistry::new();
+    registry.register("sandbox", "fixture", |_| {
+        Ok(Arc::new(CatalogFixtureAdapter))
+    });
+    ValidatedProviderCatalog::bind(targets, pricing, &registry)
+        .map_err(|error| SandboxError::Invalid(format!("mock provider wiring: {error}")))
 }
 
 #[cfg(test)]
@@ -1456,6 +1727,7 @@ mod tests {
                 execution_fault: BoundaryFault::None,
                 artifact_fault: BoundaryFault::None,
             },
+            temporal: TemporalConfig::default(),
             preserve_diagnostics_on_failure: false,
         }
     }
@@ -1494,6 +1766,49 @@ mod tests {
             run.root().to_path_buf()
         };
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn preserved_run_manifest_points_at_preserved_state() {
+        let config = mock_config(BoundaryMode::Mock, BoundaryMode::Mock);
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("preserved");
+        let run = SandboxRun::start_for_test(&config).unwrap();
+        run.preserve(&destination).unwrap();
+        let manifest: RunManifest =
+            serde_json::from_slice(&fs::read(destination.join("run-manifest.json")).unwrap())
+                .unwrap();
+
+        assert_eq!(
+            manifest.database_path,
+            destination.join("gongbu.sqlite3").display().to_string()
+        );
+        assert_eq!(
+            manifest.artifact_root,
+            destination.join("artifacts").display().to_string()
+        );
+        assert_eq!(
+            manifest.workflow_root,
+            destination.join("workflow").display().to_string()
+        );
+    }
+
+    #[test]
+    fn temporal_mode_requires_a_complete_managed_or_external_configuration() {
+        let mut config = mock_config(BoundaryMode::Mock, BoundaryMode::Mock);
+        config.temporal.binary.clear();
+        assert!(config.validate().is_err());
+
+        config.temporal = TemporalConfig {
+            mode: TemporalMode::External,
+            address: Some("http://127.0.0.1:7233".into()),
+            ui_url: None,
+            namespace: "default".into(),
+            binary: "temporal".into(),
+        };
+        assert!(config.validate().is_err());
+        config.temporal.ui_url = Some("http://127.0.0.1:8233".into());
+        assert!(config.validate().is_ok());
     }
 
     #[test]

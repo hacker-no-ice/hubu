@@ -1,21 +1,30 @@
 # Gongbu sandbox
 
-The sandbox is the single startup path for choosing Hubu and provider
-boundaries independently. It validates the complete profile before creating
-run state or allowing a real provider transmission.
+The sandbox is a long-running manual-test environment. It starts an isolated
+Gongbu API, a Temporal worker, and (by default) a local Temporal development
+server and UI. Hubu and provider boundaries are selected independently, so the
+same operator workflow can exercise deterministic mocks or guarded real
+traffic.
+
+Install the Temporal CLI before the first managed run (`brew install temporal`
+on macOS). In terminal 1, start the sandbox:
 
 ```sh
-cargo run -p gongbu-api --bin gongbu-sandbox -- \
+cargo run -p gongbu-api --bin gongbu-sandbox -- start \
   --config examples/sandbox.mock.json \
   --hubu-mode mock \
   --provider-mode mock
 ```
 
-The command prints the redacted run manifest and readiness checks. Each run
-gets a temporary SQLite path, artifact root, workflow root, log root, and two
-loopback-only reserved ports. These are deleted when the command exits. Pass
-`--preserve /absolute/new/diagnostics-directory` to retain the manifest and
-isolated state for diagnosis; the destination must not already exist.
+Wait for every readiness entry to report `ready: true`. The command prints the
+run directory, Gongbu URL, Temporal UI URL, and a ready-to-copy submit command,
+then stays running until Ctrl+C. Keep terminal 1 open.
+
+Each run gets an operator token, SQLite database, artifact root, Temporal data,
+logs, and three loopback-only ports. State is deleted after shutdown unless
+`--preserve /absolute/new/directory` is supplied. The destination must not
+already exist; preserved manifest paths are rewritten to the destination so
+they remain usable.
 
 ## Configuration precedence
 
@@ -29,7 +38,7 @@ For interactive use, prefer CLI parameters because the selected modes remain
 visible in shell history and do not persist into later shell commands:
 
 ```sh
-cargo run -p gongbu-api --bin gongbu-sandbox -- \
+cargo run -p gongbu-api --bin gongbu-sandbox -- start \
   --config examples/sandbox.mock.json \
   --hubu-mode mock \
   --provider-mode mock
@@ -49,57 +58,80 @@ Unknown JSON fields, unknown mode values, and mock modes combined with real
 endpoint or credential fields fail at startup. A `production` profile rejects
 either mock boundary.
 
-## After running the command
+## Manual execution workflow
 
-The current command is a bounded startup and readiness check, not a long-running
-Gongbu HTTP server. It constructs and validates the selected dependency wiring,
-creates isolated run state, prints the manifest and readiness results, and then
-exits. Temporary state is removed on exit.
-
-For a quick manual check, confirm that every readiness entry is `ready: true`
-and that `hubu_mode` and `provider_mode` match the CLI parameters. To inspect the
-generated state after exit, preserve it to a new directory:
+Copy the temporary run directory from terminal 1 (the path ending in
+`gongbu-sandbox-...`). In terminal 2, submit a real API request. `submit` waits
+for a terminal state and prints both the execution ID and its Temporal UI URL:
 
 ```sh
-cargo run -p gongbu-api --bin gongbu-sandbox -- \
-  --config examples/sandbox.mock.json \
-  --hubu-mode mock \
-  --provider-mode mock \
-  --preserve /tmp/gongbu-sandbox-debug
+cargo run -p gongbu-api --bin gongbu-sandbox -- submit \
+  --run-dir /tmp/gongbu-sandbox-EXAMPLE \
+  --operation-key manual-1 \
+  --prompt "Draw a blue circle"
 ```
 
-To exercise an actual mock/mock execution through Gongbu's durable workflow,
-SQLite persistence, artifact normalization, Hubu settlement, and replay guards:
+Open the printed Temporal URL to inspect workflow and activity history. Query
+the aggregate, list and download artifacts, and inspect safe mock-side-effect
+summaries with:
 
 ```sh
-cargo test -p gongbu-api \
-  sandbox::tests::mock_mock_runs_the_durable_workflow_and_replay_has_no_second_side_effect \
-  -- --exact --nocapture
+cargo run -p gongbu-api --bin gongbu-sandbox -- status \
+  --run-dir /tmp/gongbu-sandbox-EXAMPLE \
+  --execution-id EXECUTION_ID
+
+cargo run -p gongbu-api --bin gongbu-sandbox -- artifacts \
+  --run-dir /tmp/gongbu-sandbox-EXAMPLE \
+  --execution-id EXECUTION_ID \
+  --download-dir /tmp/gongbu-artifacts
+
+cargo run -p gongbu-api --bin gongbu-sandbox -- inspect \
+  --run-dir /tmp/gongbu-sandbox-EXAMPLE
 ```
 
-Run all focused sandbox validation and fault tests with:
+Run `submit` again with the same operation key and prompt to validate replay.
+It must return the same execution ID; in mock mode, `inspect` must still report
+one provider invocation and no duplicate financial mutation.
+
+Press Ctrl+C in terminal 1 when finished. The sandbox supervises and stops its
+managed Temporal child. Add `--preserve /tmp/gongbu-sandbox-debug` to `start`
+when you want to retain the database, artifacts, Temporal data, logs, manifest,
+and mock-side-effect summary after shutdown or startup failure.
+
+Automated tests are complementary: they validate the scenario matrix and
+failure invariants without requiring a manually running sandbox:
 
 ```sh
 cargo test -p gongbu-api sandbox::
 ```
 
-The reusable `SandboxRun` and `SandboxWiring` library types are the integration
-surface for the HUB-40 real-Gemini test and HUB-41 Hubu compatibility harness.
-Those harnesses retain the run object for their lifetime, execute against its
-isolated state, and let it clean up on drop.
 
 ## Mode matrix
 
 | Hubu | Provider | Intended use |
 | --- | --- | --- |
 | Mock | Mock | deterministic local development and ordinary CI |
-| Mock | Real | bounded provider validation |
-| Real | Mock | Hubu protocol compatibility |
+| Mock | Real | real provider traffic with deterministic Hubu accounting |
+| Real | Mock | real Hubu traffic with deterministic provider output |
 | Real | Real | guarded release dogfood |
 
 The selected implementation is wired through the same `HubuActivities` and
 `ProviderActivities` interfaces as the durable production workflow. Modes do
 not change persistence, artifact, replay, or settlement invariants.
+
+Managed Temporal is the default and requires no profile fields. To use an
+already-running Temporal environment instead, add an explicit configuration:
+
+```json
+{
+  "temporal": {
+    "mode": "external",
+    "address": "http://127.0.0.1:7233",
+    "ui_url": "http://127.0.0.1:8233",
+    "namespace": "default"
+  }
+}
+```
 
 ## Real-boundary gates
 
@@ -149,7 +181,9 @@ durable workflow.
 ## Diagnostics and secrets
 
 The manifest contains modes, seed, redacted endpoint, file digests, process
-version, optional build commit, isolated paths and ports, spend ceiling, and
-readiness results. Query strings are removed from endpoints. Raw credentials,
-credential references, authorization tokens, prompts, account identifiers, and
-provider responses are not serialized to the manifest or safe mock call log.
+version, optional build commit, isolated paths and ports, Gongbu and Temporal
+URLs, selected provider target, spend ceiling, and readiness results. Query
+strings are removed from endpoints. The operator token is stored separately
+with owner-only permissions. Raw credentials, credential references, prompts,
+account identifiers, and provider responses are not serialized to the manifest
+or safe mock call log.

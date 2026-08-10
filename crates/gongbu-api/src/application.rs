@@ -339,6 +339,8 @@ pub struct ApplicationDependencies {
     pub providers: ValidatedProviderCatalog,
     pub hubu: Arc<dyn HubuActivities + Send + Sync>,
     pub secrets: Arc<dyn SecretProvider>,
+    pub provider_activities: Option<Arc<dyn ProviderActivities + Send + Sync>>,
+    pub artifact_activities: Option<Arc<dyn ArtifactActivities + Send + Sync>>,
     pub temporal_runtime: Arc<Runtime>,
     pub temporal_client: Client,
     pub authenticator: Arc<dyn Authenticator>,
@@ -363,17 +365,30 @@ pub async fn serve<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let execution_runner = provider_execution_runner(
-        dependencies.repository.clone(),
-        dependencies.hubu,
-        dependencies.artifacts.clone(),
-        dependencies.providers.clone(),
-        dependencies.secrets,
-        {
-            let now = dependencies.now.clone();
-            move || now()
-        },
-    );
+    let provider = dependencies.provider_activities.unwrap_or_else(|| {
+        Arc::new(GenericProviderActivities::new(
+            dependencies.providers.clone(),
+            dependencies.secrets,
+        ))
+    });
+    let artifacts = dependencies.artifact_activities.unwrap_or_else(|| {
+        let now = dependencies.now.clone();
+        Arc::new(ArtifactServiceActivities::new(
+            dependencies.artifacts.clone(),
+            move || now(),
+        ))
+    });
+    let execution_runner: Arc<dyn DurableExecutionRunner> =
+        Arc::new(PersistedExecutionRunner::new(
+            dependencies.repository.clone(),
+            dependencies.hubu,
+            provider,
+            artifacts,
+            {
+                let now = dependencies.now.clone();
+                move || now()
+            },
+        ));
     let mut worker = start_worker(
         dependencies.temporal_runtime,
         dependencies.temporal_client,
