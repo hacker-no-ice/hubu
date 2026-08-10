@@ -352,6 +352,7 @@ mod tests {
                 adapter: "test".into(),
                 model: "model".into(),
                 provider_config_version: "v1".into(),
+                provider_config_digest: format!("sha256:{}", "a".repeat(64)),
                 pricing_snapshot: json!({
                     "provider": "provider",
                     "model": "model",

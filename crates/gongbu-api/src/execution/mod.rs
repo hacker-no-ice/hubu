@@ -71,6 +71,7 @@ pub struct CreateExecutionParams {
     pub adapter: String,
     pub model: String,
     pub provider_config_version: String,
+    pub provider_config_digest: String,
     pub pricing_snapshot: Value,
     pub pricing_schema_version: i64,
     pub created_at: String,
@@ -95,6 +96,7 @@ pub struct Execution {
     pub adapter: String,
     pub model: String,
     pub provider_config_version: String,
+    pub provider_config_digest: String,
     pub pricing_snapshot: Value,
     pub pricing_schema_version: i64,
     pub status: String,
@@ -322,6 +324,7 @@ impl Repository {
             n.adapter.as_str(),
             n.model.as_str(),
             n.provider_config_version.as_str(),
+            n.provider_config_digest.as_str(),
             n.created_at.as_str(),
             id.as_str(),
             "pending",
@@ -338,7 +341,7 @@ impl Repository {
         self.reject_registered_secrets([normalized_input.as_str(), pricing_snapshot.as_str()])?;
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,'pending',?21,?21,0)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,n.authorized_minor,n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,j(&n.pricing_snapshot),n.pricing_schema_version,n.created_at])?;
+        tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,'pending',?22,?22,0)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,n.authorized_minor,n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,n.provider_config_digest,j(&n.pricing_snapshot),n.pricing_schema_version,n.created_at])?;
         let e = query_key(&tx, &n.account_id, &n.operation_key)?;
         tx.commit()?;
         Ok(e)
@@ -1053,6 +1056,7 @@ fn migrate_resolved_target_columns(c: &Connection) -> rusqlite::Result<()> {
         "adapter",
         "model",
         "provider_config_version",
+        "provider_config_digest",
     ] {
         if !existing.contains(column) {
             c.execute(
@@ -1104,10 +1108,10 @@ fn query_id(c: &Connection, id: &str) -> Result<Execution> {
     .optional()?
     .ok_or(Error::NotFound)
 }
-const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,release_transmission_started_at,version FROM executions";
+const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,release_transmission_started_at,version FROM executions";
 fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
     let i: String = r.get(8)?;
-    let p: String = r.get(18)?;
+    let p: String = r.get(19)?;
     Ok(Execution {
         execution_id: r.get(0)?,
         account_id: r.get(1)?,
@@ -1127,21 +1131,22 @@ fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
         adapter: r.get(15)?,
         model: r.get(16)?,
         provider_config_version: r.get(17)?,
+        provider_config_digest: r.get(18)?,
         pricing_snapshot: serde_json::from_str(&p).unwrap(),
-        pricing_schema_version: r.get(19)?,
-        status: r.get(20)?,
-        outcome: r.get(21)?,
-        provider_outcome: map_lifecycle_outcome(r.get(22)?)?,
-        artifact_outcome: map_lifecycle_outcome(r.get(23)?)?,
-        settlement_outcome: map_lifecycle_outcome(r.get(24)?)?,
-        failure_code: r.get(25)?,
-        failure_message_redacted: r.get(26)?,
-        created_at: r.get(27)?,
-        updated_at: r.get(28)?,
-        started_at: r.get(29)?,
-        completed_at: r.get(30)?,
-        release_transmission_started_at: r.get(31)?,
-        version: r.get(32)?,
+        pricing_schema_version: r.get(20)?,
+        status: r.get(21)?,
+        outcome: r.get(22)?,
+        provider_outcome: map_lifecycle_outcome(r.get(23)?)?,
+        artifact_outcome: map_lifecycle_outcome(r.get(24)?)?,
+        settlement_outcome: map_lifecycle_outcome(r.get(25)?)?,
+        failure_code: r.get(26)?,
+        failure_message_redacted: r.get(27)?,
+        created_at: r.get(28)?,
+        updated_at: r.get(29)?,
+        started_at: r.get(30)?,
+        completed_at: r.get(31)?,
+        release_transmission_started_at: r.get(32)?,
+        version: r.get(33)?,
     })
 }
 
@@ -1162,11 +1167,18 @@ fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
             &n.adapter,
             &n.model,
             &n.provider_config_version,
+            &n.provider_config_digest,
         ]
         .iter()
         .any(|value| value.trim().is_empty())
     {
         return Err(Error::Invalid("execution"));
+    }
+    let digest = n.provider_config_digest.strip_prefix("sha256:");
+    if digest.is_none_or(|value| {
+        value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err(Error::Invalid("provider config digest"));
     }
     safe_json(&n.normalized_input)?;
     safe_json(&n.pricing_snapshot)?;
@@ -1271,7 +1283,7 @@ fn j(v: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::{sync::Barrier, thread};
+    use std::{collections::BTreeSet, sync::Barrier, thread};
     fn new(a: &str, k: &str) -> CreateExecutionParams {
         CreateExecutionParams {
             account_id: a.into(),
@@ -1291,6 +1303,7 @@ mod tests {
             adapter: "mock".into(),
             model: "image-v1".into(),
             provider_config_version: "pcv-1".into(),
+            provider_config_digest: format!("sha256:{}", "a".repeat(64)),
             pricing_snapshot: json!({
                 "provider":"example","model":"image-v1",
                 "catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),
@@ -1350,6 +1363,74 @@ mod tests {
         assert_eq!(a.normalized_input, b.normalized_input);
         assert_eq!(a.pricing_snapshot, b.pricing_snapshot);
         assert_ne!(a.execution_id, c.execution_id)
+    }
+
+    #[test]
+    fn legacy_database_migrates_provider_digest_column_and_new_rows_freeze_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite3");
+        let legacy = MIGRATION.replace(
+            ", provider_config_digest TEXT NOT NULL CHECK(provider_config_digest GLOB 'sha256:*' AND length(provider_config_digest)=71)",
+            "",
+        );
+        let legacy_connection = Connection::open(&path).unwrap();
+        legacy_connection.execute_batch(&legacy).unwrap();
+        for column in [
+            "workload_type",
+            "provider",
+            "adapter",
+            "model",
+            "provider_config_version",
+        ] {
+            legacy_connection
+                .execute(
+                    &format!("ALTER TABLE executions ADD COLUMN {column} TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim({column})<>'')"),
+                    [],
+                )
+                .unwrap();
+        }
+        legacy_connection.execute(
+            "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES('legacy-execution','legacy','in-flight','auth','token-ref',100,'USD','{}','hash',1,'image_generation/example/fixture/image-v1','pcv-1','image_generation','example','fixture','image-v1','pcv-1','{}',1,'pending','now','now',0)",
+            [],
+        ).unwrap();
+        drop(legacy_connection);
+
+        let repository = Repository::open(&path, Redactor::default()).unwrap();
+        let columns: BTreeSet<String> = repository
+            .0
+            .lock()
+            .unwrap()
+            .prepare("PRAGMA table_info(executions)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(columns.contains("provider_config_digest"));
+        assert_eq!(
+            repository
+                .get_execution("legacy-execution")
+                .unwrap()
+                .provider_config_digest,
+            crate::provider_targets::LEGACY_UNRESOLVED_DIGEST
+        );
+
+        let created = repository
+            .create_execution(&new("migration", "digest"))
+            .unwrap();
+        assert_eq!(
+            created.provider_config_digest,
+            format!("sha256:{}", "a".repeat(64))
+        );
+        drop(repository);
+        let restarted = Repository::open(&path, Redactor::default()).unwrap();
+        assert_eq!(
+            restarted
+                .get_execution(&created.execution_id)
+                .unwrap()
+                .provider_config_digest,
+            created.provider_config_digest
+        );
     }
     #[test]
     fn concurrent_create_returns_one() {

@@ -300,19 +300,20 @@ impl Api {
         }) {
             return Err(ApiError::validation());
         }
+        let pricing_request = NormalizedRequest {
+            provider: resolved.provider.clone(),
+            model: resolved.model.clone(),
+            image_count,
+            input_tokens: input_quantity(&normalized_input, "input_tokens")?,
+            max_output_tokens: input_quantity(&normalized_input, "max_output_tokens")?,
+            image_size: normalized_input
+                .get("image_size")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+        };
         let pricing_snapshot = self
             .pricing
-            .snapshot(&NormalizedRequest {
-                provider: resolved.provider.clone(),
-                model: resolved.model.clone(),
-                image_count,
-                input_tokens: input_quantity(&normalized_input, "input_tokens")?,
-                max_output_tokens: input_quantity(&normalized_input, "max_output_tokens")?,
-                image_size: normalized_input
-                    .get("image_size")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_owned),
-            })
+            .snapshot_for_target(&resolved.target_key(), &pricing_request)
             .map_err(map_pricing_error)?;
         // Tokenization belongs to provider-bound request normalization, which is
         // not part of this HTTP/persistence milestone. Fail closed rather than
@@ -344,6 +345,7 @@ impl Api {
             adapter: resolved.adapter.clone(),
             model: resolved.model.clone(),
             provider_config_version: resolved.provider_config_version.clone(),
+            provider_config_digest: resolved.digest().to_owned(),
             pricing_snapshot: serde_json::to_value(pricing_snapshot)
                 .map_err(|_| ApiError::internal())?,
             pricing_schema_version,
@@ -551,6 +553,7 @@ fn immutable_hash(
         "adapter": resolved.adapter,
         "model": resolved.model,
         "provider_config_version": resolved.provider_config_version,
+        "provider_config_digest": resolved.digest(),
         "pricing_snapshot": pricing_snapshot,
         "pricing_schema_version": pricing_snapshot.schema_version,
     });
@@ -645,9 +648,10 @@ fn map_artifact_error(error: ArtifactError) -> ApiError {
 
 fn map_target_error(error: TargetError) -> ApiError {
     match error {
-        TargetError::Disabled | TargetError::NotConfigured | TargetError::Ambiguous => {
-            ApiError::validation()
-        }
+        TargetError::NotSelectable
+        | TargetError::ExecutionDisabled
+        | TargetError::NotConfigured
+        | TargetError::DigestMismatch => ApiError::validation(),
         _ => ApiError::internal(),
     }
 }

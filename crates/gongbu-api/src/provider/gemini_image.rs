@@ -233,8 +233,8 @@ impl GeminiImageAdapter<ReqwestGeminiTransport> {
             return Err(provider_error("target_mismatch"));
         }
         let config = target
-            .gemini_image
-            .clone()
+            .gemini_image()
+            .cloned()
             .ok_or_else(|| provider_error("config_invalid"))?;
         Self::new(config, target.model.clone(), ReqwestGeminiTransport)
     }
@@ -1183,7 +1183,7 @@ mod tests {
             .unwrap();
         let repository = Repository::in_memory().unwrap();
         let execution = repository.create_execution(&CreateExecutionParams {
-            account_id: "account".into(), operation_key: "gemini-fixture".into(), hubu_authorization_id: "auth".into(), hubu_claim_id: Some("claim".into()), hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(), authorized_minor: 25, authorization_currency: "USD".into(), normalized_input: json!({"prompt":"cat","image_count":1}), input_hash: "hash".into(), input_schema_version: 1, target: "google/gemini-image-v1".into(), config_version: "cfg".into(), workload_type: "image_generation".into(), provider: "google".into(), adapter: "gemini_image".into(), model: "gemini-image-v1".into(), provider_config_version: "pcv".into(), pricing_snapshot: json!({"provider":"google","model":"gemini-image-v1","catalog_version":"prices","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-image","unit":"image","unit_amount_minor":25,"quantity":1,"estimated_amount_minor":25,"currency":"USD"}), pricing_schema_version: 1, created_at: "now".into()
+            account_id: "account".into(), operation_key: "gemini-fixture".into(), hubu_authorization_id: "auth".into(), hubu_claim_id: Some("claim".into()), hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(), authorized_minor: 25, authorization_currency: "USD".into(), normalized_input: json!({"prompt":"cat","image_count":1}), input_hash: "hash".into(), input_schema_version: 1, target: "google/gemini-image-v1".into(), config_version: "cfg".into(), workload_type: "image_generation".into(), provider: "google".into(), adapter: "gemini_image".into(), model: "gemini-image-v1".into(), provider_config_version: "pcv".into(), provider_config_digest: format!("sha256:{}", "a".repeat(64)), pricing_snapshot: json!({"provider":"google","model":"gemini-image-v1","catalog_version":"prices","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-image","unit":"image","unit_amount_minor":25,"quantity":1,"estimated_amount_minor":25,"currency":"USD"}), pricing_schema_version: 1, created_at: "now".into()
         }).unwrap();
         let root = tempdir().unwrap();
         let service = ArtifactService::new(
@@ -1248,10 +1248,9 @@ mod tests {
         assert!(max_spend > 0);
         let targets = ProviderTargetConfig::from_path(Path::new(&config_path)).unwrap();
         let target = targets
-            .provider_configs
-            .iter()
+            .revisions()
             .find(|target| {
-                target.provider == PROVIDER_ID && target.adapter == ADAPTER_ID && target.enabled
+                target.provider == PROVIDER_ID && target.adapter == ADAPTER_ID && target.is_active()
             })
             .expect("one enabled Gemini image target is required");
         let image_size = env::var("GONGBU_LIVE_GEMINI_IMAGE_SIZE").ok();

@@ -223,8 +223,8 @@ impl IdeogramImageAdapter<ReqwestIdeogramTransport> {
         }
         Self::new(
             target
-                .ideogram_image
-                .clone()
+                .ideogram_image()
+                .cloned()
                 .ok_or_else(|| provider_error("config_invalid"))?,
             target.model.clone(),
             ReqwestIdeogramTransport,

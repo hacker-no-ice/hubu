@@ -2,7 +2,7 @@
 use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
 use crate::{
-    provider_targets::ProviderConfigVersion,
+    provider_targets::{ProviderConfigVersion, TargetKey},
     secrets::{resolve_selected, ProviderSecret, SecretProvider},
 };
 use serde::{Deserialize, Serialize};
@@ -374,6 +374,18 @@ impl PricingCatalog {
                 .map(|c| c.rate_numerator_minor),
             quantity: legacy_component.filter(|_| legacy).map(|c| c.quantity),
         })
+    }
+
+    /// Price only a request already bound to a validated provider target key.
+    pub fn snapshot_for_target(
+        &self,
+        target: &TargetKey,
+        request: &NormalizedRequest,
+    ) -> Result<PricingSnapshot> {
+        if request.provider != target.provider || request.model != target.model {
+            return Err(ContractError::UnsupportedTarget);
+        }
+        self.snapshot(request)
     }
 }
 
@@ -1171,27 +1183,19 @@ mod tests {
                 })
             }
         }
-        let target = ProviderConfigVersion {
-            provider_config_version: "v1".into(),
-            workload_type: "image_generation".into(),
-            provider: "vendor".into(),
-            adapter: "a".into(),
-            model: "image-v1".into(),
-            secret_service: "gongbu.vendor".into(),
-            secret_account: "local".into(),
-            gemini_image: None,
-            gemini_developer_image: None,
-            flux2_api: None,
-            ideogram_image: None,
-            enabled: true,
-        };
+        let catalog: crate::provider_targets::ProviderTargetConfig = serde_json::from_str(
+            r#"{"provider_configs":[{"provider_config_version":"v1","workload_type":"image_generation","provider":"vendor","adapter":"a","model":"image-v1","secret_service":"gongbu.vendor","secret_account":"local"}]}"#,
+        ).unwrap();
+        let target = catalog
+            .resolve("image_generation", "vendor", "a", "image-v1")
+            .unwrap();
         let adapter = Adapter(AtomicUsize::new(0));
         assert!(
-            matches!(preflight_selected_secret(&adapter, &Secrets(false), &target, &request()), Err(ContractError::Provider { code }) if code == "secret_unavailable")
+            matches!(preflight_selected_secret(&adapter, &Secrets(false), target, &request()), Err(ContractError::Provider { code }) if code == "secret_unavailable")
         );
         assert_eq!(adapter.0.load(Ordering::SeqCst), 0);
         let secret =
-            preflight_selected_secret(&adapter, &Secrets(true), &target, &request()).unwrap();
+            preflight_selected_secret(&adapter, &Secrets(true), target, &request()).unwrap();
         assert_eq!(adapter.0.load(Ordering::SeqCst), 0);
         adapter
             .invoke(&request(), &serde_json::json!({}), &secret, None)
@@ -1201,7 +1205,7 @@ mod tests {
         let mut wrong_request = request();
         wrong_request.provider = "other".into();
         assert!(
-            matches!(preflight_selected_secret(&adapter, &Secrets(true), &target, &wrong_request), Err(ContractError::Provider { code }) if code == "target_mismatch")
+            matches!(preflight_selected_secret(&adapter, &Secrets(true), target, &wrong_request), Err(ContractError::Provider { code }) if code == "target_mismatch")
         );
     }
 }
