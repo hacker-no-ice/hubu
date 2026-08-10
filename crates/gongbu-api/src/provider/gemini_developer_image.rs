@@ -10,21 +10,22 @@ use super::{
         NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter, ProviderFailure,
         ProviderPhase, Result, RetryPolicy,
     },
+    http_kernel::{
+        provider_request_id, read_bounded, shared_client, validate_https_origin, InvocationDeadline,
+    },
     targets::{GeminiDeveloperImageConfig, ProviderConfigVersion},
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::{
-    blocking::Client,
     header::{HeaderName, HeaderValue},
     Url,
 };
 use serde_json::{json, Value};
-use std::{error::Error as StdError, fmt, io::Read, time::Duration};
+use std::{error::Error as StdError, fmt, time::Duration};
 
 pub const PROVIDER_ID: &str = "google";
 pub const ADAPTER_ID: &str = "gemini_developer_image";
-const MAX_ARTIFACT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 30 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -83,12 +84,11 @@ impl GeminiDeveloperTransport for ReqwestGeminiDeveloperTransport {
     ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
         let api_key = std::str::from_utf8(api_key)
             .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
-        let client = Client::builder()
+        let mut request = shared_client()
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?
+            .post(url.clone())
             .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
-        let mut request = client.post(url.clone()).header("x-goog-api-key", api_key);
+            .header("x-goog-api-key", api_key);
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -97,12 +97,8 @@ impl GeminiDeveloperTransport for ReqwestGeminiDeveloperTransport {
                 as Box<dyn StdError + Send + Sync>
         })?;
         let status = response.status().as_u16();
-        let request_id = response
-            .headers()
-            .get("x-goog-request-id")
-            .or_else(|| response.headers().get("x-request-id"))
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
+        let request_id =
+            provider_request_id(response.headers(), &["x-goog-request-id", "x-request-id"]);
         if (400..500).contains(&status) {
             return Ok(TransportResponse {
                 status,
@@ -129,51 +125,64 @@ impl GeminiDeveloperTransport for ReqwestGeminiDeveloperTransport {
     }
 }
 
-fn read_bounded(
-    reader: &mut impl Read,
-    limit: usize,
-) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
-    reader.take((limit as u64) + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > limit {
-        return Err(Box::new(std::io::Error::other(
-            "provider body limit exceeded",
-        )));
-    }
-    Ok(bytes)
-}
-
 pub struct GeminiDeveloperImageAdapter<T = ReqwestGeminiDeveloperTransport> {
     config: GeminiDeveloperImageConfig,
     model: String,
     transport: T,
+    max_artifact_bytes: usize,
 }
 
 impl GeminiDeveloperImageAdapter<ReqwestGeminiDeveloperTransport> {
     pub fn from_target(target: &ProviderConfigVersion) -> Result<Self> {
+        Self::from_target_with_artifact_limit(target, crate::artifact::DEFAULT_MAX_ENCODED_BYTES)
+    }
+
+    pub fn from_target_with_artifact_limit(
+        target: &ProviderConfigVersion,
+        max_artifact_bytes: u64,
+    ) -> Result<Self> {
         if target.provider != PROVIDER_ID || target.adapter != ADAPTER_ID {
             return Err(provider_error("target_mismatch"));
         }
-        Self::new(
+        Self::new_with_artifact_limit(
             target
                 .gemini_developer_image()
                 .cloned()
                 .ok_or_else(|| provider_error("config_invalid"))?,
             target.model.clone(),
             ReqwestGeminiDeveloperTransport,
+            max_artifact_bytes,
         )
     }
 }
 
 impl<T: GeminiDeveloperTransport> GeminiDeveloperImageAdapter<T> {
     pub fn new(config: GeminiDeveloperImageConfig, model: String, transport: T) -> Result<Self> {
+        Self::new_with_artifact_limit(
+            config,
+            model,
+            transport,
+            crate::artifact::DEFAULT_MAX_ENCODED_BYTES,
+        )
+    }
+
+    pub fn new_with_artifact_limit(
+        config: GeminiDeveloperImageConfig,
+        model: String,
+        transport: T,
+        max_artifact_bytes: u64,
+    ) -> Result<Self> {
         RetryPolicy {
             max_retries: config.max_retries,
         }
         .validate(AdapterCapabilities {
             vendor_enforced_idempotency: false,
         })?;
-        if model.trim().is_empty() || config.timeout_ms == 0 {
+        if model.trim().is_empty()
+            || config.timeout_ms == 0
+            || max_artifact_bytes == 0
+            || max_artifact_bytes > usize::MAX as u64
+        {
             return Err(provider_error("config_invalid"));
         }
         for (name, value) in &config.headers {
@@ -191,6 +200,7 @@ impl<T: GeminiDeveloperTransport> GeminiDeveloperImageAdapter<T> {
             config,
             model,
             transport,
+            max_artifact_bytes: max_artifact_bytes as usize,
         })
     }
 }
@@ -216,7 +226,11 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
     }
     fn preflight_input(&self, request: &NormalizedRequest, input: &Value) -> Result<()> {
         self.validate_request(request)?;
-        crate::provider_contract::validate_image_input(request, input)
+        crate::provider_contract::validate_image_input(request, input)?;
+        if input.get("options").is_some() {
+            return Err(provider_error("invalid_request"));
+        }
+        Ok(())
     }
     fn invoke(
         &self,
@@ -225,9 +239,7 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome, ProviderFailure> {
-        self.validate_request(request)
-            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
-        crate::provider_contract::validate_image_size_input(request, input)
+        self.preflight_input(request, input)
             .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         if vendor_idempotency_key.is_some() || self.config.max_retries != 0 {
             return Err(ProviderFailure::release(
@@ -249,6 +261,9 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
         if let Some(size) = &request.image_size {
             body["response_format"]["image_size"] = json!(size.to_ascii_uppercase());
         }
+        let deadline =
+            InvocationDeadline::from_timeout(Duration::from_millis(self.config.timeout_ms))
+                .map_err(|_| ProviderFailure::release("config_invalid", ProviderPhase::PreSend))?;
         let response = self
             .transport
             .create_interaction(
@@ -256,7 +271,9 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
                     ProviderFailure::release("config_invalid", ProviderPhase::PreSend)
                 })?,
                 secret.expose(),
-                Duration::from_millis(self.config.timeout_ms),
+                deadline.remaining().map_err(|_| {
+                    ProviderFailure::release("provider_pre_send_failure", ProviderPhase::PreSend)
+                })?,
                 &self.config.headers,
                 &body,
             )
@@ -280,14 +297,15 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
                     .with_evidence(request_id, None),
             );
         }
-        let artifact = extract_artifact(&response.body).map_err(|error| {
-            let code = match error {
-                ContractError::Provider { code } => code,
-                _ => "provider_contract_failure".into(),
-            };
-            ProviderFailure::reconcile(code, ProviderPhase::Artifact)
-                .with_evidence(request_id.clone(), None)
-        })?;
+        let artifact =
+            extract_artifact(&response.body, self.max_artifact_bytes).map_err(|error| {
+                let code = match error {
+                    ContractError::Provider { code } => code,
+                    _ => "provider_contract_failure".into(),
+                };
+                ProviderFailure::reconcile(code, ProviderPhase::Artifact)
+                    .with_evidence(request_id.clone(), None)
+            })?;
         let usage = response.body.get("usage");
         Ok(AdapterOutcome {
             usage: Some(NormalizedUsage {
@@ -314,13 +332,7 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
 
 fn endpoint_url(config: &GeminiDeveloperImageConfig) -> Result<Url> {
     let mut base = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
-    if base.scheme() != "https"
-        || base.host_str() != Some("generativelanguage.googleapis.com")
-        || base.port().is_some()
-        || base.query().is_some()
-        || base.fragment().is_some()
-        || base.path() != "/"
-    {
+    if validate_https_origin(&base, Some("generativelanguage.googleapis.com")).is_err() {
         return Err(provider_error("config_invalid"));
     }
     base.set_path(&format!(
@@ -330,7 +342,7 @@ fn endpoint_url(config: &GeminiDeveloperImageConfig) -> Result<Url> {
     Ok(base)
 }
 
-fn extract_artifact(body: &Value) -> Result<NormalizedArtifact> {
+fn extract_artifact(body: &Value, max_artifact_bytes: usize) -> Result<NormalizedArtifact> {
     let images: Vec<_> = body
         .get("steps")
         .and_then(Value::as_array)
@@ -357,13 +369,13 @@ fn extract_artifact(body: &Value) -> Result<NormalizedArtifact> {
         .get("data")
         .and_then(Value::as_str)
         .ok_or_else(|| provider_error("malformed_response"))?;
-    if data.len() > MAX_ARTIFACT_BYTES.saturating_mul(4).div_ceil(3) {
+    if data.len() > max_artifact_bytes.saturating_mul(4).div_ceil(3) {
         return Err(provider_error("artifact_policy_failure"));
     }
     let bytes = STANDARD
         .decode(data)
         .map_err(|_| provider_error("malformed_response"))?;
-    if bytes.len() > MAX_ARTIFACT_BYTES {
+    if bytes.len() > max_artifact_bytes {
         return Err(provider_error("artifact_policy_failure"));
     }
     let media_type = canonical_image_media_type(Some(media_type), &bytes)?;

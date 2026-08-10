@@ -10,11 +10,14 @@ use super::{
         NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter, ProviderFailure,
         ProviderPhase, Result, RetryPolicy,
     },
+    http_kernel::{
+        provider_request_id, read_bounded, shared_client, validate_https_origin,
+        ArtifactDownloadPolicy, CredentialForwarding, InvocationDeadline,
+    },
     targets::{valid_artifact_hosts, IdeogramImageConfig, ProviderConfigVersion},
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
 use reqwest::{
-    blocking::Client,
     header::{HeaderName, HeaderValue},
     Url,
 };
@@ -23,7 +26,8 @@ use std::{error::Error as StdError, fmt, io::Read, time::Duration};
 
 pub const PROVIDER_ID: &str = "ideogram";
 pub const ADAPTER_ID: &str = "ideogram_image";
-const MAX_ARTIFACT_BYTES: usize = 20 * 1024 * 1024;
+#[cfg(test)]
+const MAX_ARTIFACT_BYTES: usize = crate::artifact::DEFAULT_MAX_ENCODED_BYTES as usize;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug)]
@@ -62,6 +66,7 @@ pub trait IdeogramTransport: Send + Sync {
         &self,
         url: &Url,
         timeout: Duration,
+        max_bytes: usize,
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>>;
 }
 
@@ -80,8 +85,9 @@ impl<T: IdeogramTransport + ?Sized> IdeogramTransport for std::sync::Arc<T> {
         &self,
         url: &Url,
         timeout: Duration,
+        max_bytes: usize,
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-        self.as_ref().fetch_artifact(url, timeout)
+        self.as_ref().fetch_artifact(url, timeout, max_bytes)
     }
 }
 
@@ -97,12 +103,11 @@ impl IdeogramTransport for ReqwestIdeogramTransport {
     ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
         let api_key = std::str::from_utf8(api_key)
             .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
-        let client = Client::builder()
+        let mut request = shared_client()
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?
+            .post(url.clone())
             .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
-        let mut request = client.post(url.clone()).header("Api-Key", api_key);
+            .header("Api-Key", api_key);
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -118,8 +123,9 @@ impl IdeogramTransport for ReqwestIdeogramTransport {
             }) as Box<dyn StdError + Send + Sync>
         })?;
         let status = response.status().as_u16();
-        let request_id = header(&response, &["x-request-id", "request-id"]);
-        let operation_id = header(&response, &["x-operation-id", "generation-id"]);
+        let request_id = provider_request_id(response.headers(), &["x-request-id", "request-id"]);
+        let operation_id =
+            provider_request_id(response.headers(), &["x-operation-id", "generation-id"]);
         if (400..500).contains(&status) {
             return Ok(TransportResponse {
                 status,
@@ -153,20 +159,16 @@ impl IdeogramTransport for ReqwestIdeogramTransport {
         &self,
         url: &Url,
         timeout: Duration,
+        max_bytes: usize,
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-        let mut response = Client::builder()
-            .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?
-            .get(url.clone())
-            .send()?;
+        let mut response = shared_client()?.get(url.clone()).timeout(timeout).send()?;
         if !response.status().is_success() {
             return Err(Box::new(HttpFailure::UnknownOutcome {
                 request_id: None,
                 operation_id: None,
             }));
         }
-        read_artifact_response_bounded(&mut response, MAX_ARTIFACT_BYTES)
+        read_artifact_response_bounded(&mut response, max_bytes)
     }
 }
 
@@ -174,66 +176,63 @@ fn read_provider_response_bounded(
     reader: &mut impl Read,
     limit: usize,
 ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-    read_bounded(reader, limit)
+    read_bounded(reader, limit).map_err(|error| Box::new(error) as _)
 }
 
 fn read_artifact_response_bounded(
     reader: &mut impl Read,
     limit: usize,
 ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-    read_bounded(reader, limit)
-}
-
-fn read_bounded(
-    reader: &mut impl Read,
-    limit: usize,
-) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
-    reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > limit {
-        return Err(Box::new(HttpFailure::UnknownOutcome {
-            request_id: None,
-            operation_id: None,
-        }));
-    }
-    Ok(bytes)
-}
-
-fn header(response: &reqwest::blocking::Response, names: &[&str]) -> Option<String> {
-    names.iter().find_map(|name| {
-        response
-            .headers()
-            .get(*name)?
-            .to_str()
-            .ok()
-            .map(str::to_owned)
-    })
+    read_bounded(reader, limit).map_err(|error| Box::new(error) as _)
 }
 
 pub struct IdeogramImageAdapter<T = ReqwestIdeogramTransport> {
     config: IdeogramImageConfig,
     model: String,
     transport: T,
+    max_artifact_bytes: usize,
 }
 
 impl IdeogramImageAdapter<ReqwestIdeogramTransport> {
     pub fn from_target(target: &ProviderConfigVersion) -> Result<Self> {
+        Self::from_target_with_artifact_limit(target, crate::artifact::DEFAULT_MAX_ENCODED_BYTES)
+    }
+
+    pub fn from_target_with_artifact_limit(
+        target: &ProviderConfigVersion,
+        max_artifact_bytes: u64,
+    ) -> Result<Self> {
         if target.provider != PROVIDER_ID || target.adapter != ADAPTER_ID {
             return Err(provider_error("target_mismatch"));
         }
-        Self::new(
+        Self::new_with_artifact_limit(
             target
                 .ideogram_image()
                 .cloned()
                 .ok_or_else(|| provider_error("config_invalid"))?,
             target.model.clone(),
             ReqwestIdeogramTransport,
+            max_artifact_bytes,
         )
     }
 }
 
 impl<T: IdeogramTransport> IdeogramImageAdapter<T> {
     pub fn new(config: IdeogramImageConfig, model: String, transport: T) -> Result<Self> {
+        Self::new_with_artifact_limit(
+            config,
+            model,
+            transport,
+            crate::artifact::DEFAULT_MAX_ENCODED_BYTES,
+        )
+    }
+
+    pub fn new_with_artifact_limit(
+        config: IdeogramImageConfig,
+        model: String,
+        transport: T,
+        max_artifact_bytes: u64,
+    ) -> Result<Self> {
         RetryPolicy {
             max_retries: config.max_retries,
         }
@@ -243,6 +242,8 @@ impl<T: IdeogramTransport> IdeogramImageAdapter<T> {
         if model.trim().is_empty()
             || config.timeout_ms == 0
             || !valid_artifact_hosts(&config.approved_artifact_hosts, true)
+            || max_artifact_bytes == 0
+            || max_artifact_bytes > usize::MAX as u64
         {
             return Err(provider_error("config_invalid"));
         }
@@ -259,6 +260,7 @@ impl<T: IdeogramTransport> IdeogramImageAdapter<T> {
             config,
             model,
             transport,
+            max_artifact_bytes: max_artifact_bytes as usize,
         })
     }
 }
@@ -307,9 +309,7 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
                 ProviderPhase::PreSend,
             ));
         }
-        self.validate_request(request)
-            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
-        crate::provider_contract::validate_image_size_input(request, input)
+        self.preflight_input(request, input)
             .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         let prompt = input
             .get("prompt")
@@ -327,6 +327,9 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
                 ProviderPhase::PreSend,
             ));
         }
+        let deadline =
+            InvocationDeadline::from_timeout(Duration::from_millis(self.config.timeout_ms))
+                .map_err(|_| ProviderFailure::release("config_invalid", ProviderPhase::PreSend))?;
         let response = self
             .transport
             .generate(
@@ -334,7 +337,9 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
                     ProviderFailure::release("config_invalid", ProviderPhase::PreSend)
                 })?,
                 secret.expose(),
-                Duration::from_millis(self.config.timeout_ms),
+                deadline.remaining().map_err(|_| {
+                    ProviderFailure::release("provider_pre_send_failure", ProviderPhase::PreSend)
+                })?,
                 &self.config.headers,
                 &match &request.image_size {
                     Some(size) => json!({"prompt": prompt, "image_size": size}),
@@ -381,13 +386,13 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
             .ok_or_else(|| with_evidence("missing_image", &request_id, &operation_id))?;
         let url = Url::parse(raw_url)
             .map_err(|_| with_evidence("artifact_policy_failure", &request_id, &operation_id))?;
-        if url.scheme() != "https"
-            || !self
-                .config
-                .approved_artifact_hosts
-                .iter()
-                .any(|host| Some(host.as_str()) == url.host_str())
-        {
+        let artifact_policy = ArtifactDownloadPolicy::new(
+            &self.config.approved_artifact_hosts,
+            self.max_artifact_bytes as u64,
+            CredentialForwarding::Prohibited,
+        )
+        .map_err(|_| with_evidence("artifact_policy_failure", &request_id, &operation_id))?;
+        if artifact_policy.validate_url(&url).is_err() {
             return Err(with_evidence(
                 "artifact_policy_failure",
                 &request_id,
@@ -396,12 +401,18 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
         }
         let bytes = self
             .transport
-            .fetch_artifact(&url, Duration::from_millis(self.config.timeout_ms))
+            .fetch_artifact(
+                &url,
+                deadline.remaining().map_err(|_| {
+                    with_evidence("artifact_policy_failure", &request_id, &operation_id)
+                })?,
+                self.max_artifact_bytes,
+            )
             .map_err(|error| {
                 let _ = classify_transport(error, secret, true);
                 with_evidence("artifact_policy_failure", &request_id, &operation_id)
             })?;
-        if bytes.len() > MAX_ARTIFACT_BYTES {
+        if bytes.len() > self.max_artifact_bytes {
             return Err(with_evidence(
                 "artifact_policy_failure",
                 &request_id,
@@ -441,7 +452,7 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
 
 fn endpoint_url(config: &IdeogramImageConfig, model: &str) -> Result<Url> {
     let mut base = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
-    if base.scheme() != "https" || base.host_str().is_none() || base.query().is_some() {
+    if validate_https_origin(&base, None).is_err() {
         return Err(provider_error("config_invalid"));
     }
     base.set_path(&format!(
@@ -550,6 +561,7 @@ mod tests {
             &self,
             _: &Url,
             _: Duration,
+            _: usize,
         ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
             self.artifact.clone().map_err(|message| {
                 Box::new(NestedError(message)) as Box<dyn StdError + Send + Sync>
@@ -667,7 +679,7 @@ mod tests {
     fn conformance_artifact_redirect_is_blocked() {
         assert_redirect_blocked(|url| {
             ReqwestIdeogramTransport
-                .fetch_artifact(url, Duration::from_secs(2))
+                .fetch_artifact(url, Duration::from_secs(2), MAX_ARTIFACT_BYTES)
                 .is_err()
         });
     }

@@ -125,6 +125,12 @@ impl GenericProviderActivities {
 impl ProviderActivities for GenericProviderActivities {
     fn preflight(&self, execution: &Execution) -> Result<(), WorkflowActivityError> {
         let (target, adapter, request) = self.selected(execution)?;
+        crate::provider_contract::validate_image_input_versioned(
+            &request,
+            &execution.normalized_input,
+            execution.input_schema_version,
+        )
+        .map_err(map_contract_error)?;
         adapter
             .preflight_input(&request, &execution.normalized_input)
             .map_err(map_contract_error)?;
@@ -532,8 +538,9 @@ mod tests {
             fn fetch_artifact(
                 &self,
                 _: &reqwest::Url,
-                _: &[u8],
+                _: Option<&[u8]>,
                 _: Duration,
+                _: usize,
             ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
                 unreachable!("inline fixture must not fetch a reference")
             }
@@ -613,6 +620,22 @@ mod tests {
         mismatched.provider_config_digest = format!("sha256:{}", "b".repeat(64));
         let execution = repository.create_execution(&params).unwrap();
         let mismatched = repository.create_execution(&mismatched).unwrap();
+        let invalid = [
+            (
+                "gemini-invalid-prompt",
+                json!({"prompt":"   ","image_count":1}),
+            ),
+            (
+                "gemini-invalid-options",
+                json!({"prompt":"cat","image_count":1,"options":{"seed":1}}),
+            ),
+        ]
+        .map(|(operation_key, normalized_input)| {
+            let mut invalid = params.clone();
+            invalid.operation_key = operation_key.into();
+            invalid.normalized_input = normalized_input;
+            repository.create_execution(&invalid).unwrap()
+        });
         let root = tempdir().unwrap();
         let artifact_service = ArtifactService::new(
             repository.clone(),
@@ -686,6 +709,17 @@ mod tests {
         );
         assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
         assert_eq!(calls.0.load(Ordering::SeqCst), 1);
+        for invalid in invalid {
+            assert_eq!(
+                runner.run_execution(&invalid.execution_id).unwrap(),
+                "failed"
+            );
+            assert!(repository
+                .get_provider_attempt_for_execution(&invalid.execution_id)
+                .is_err());
+        }
+        assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.0.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -733,6 +767,7 @@ mod tests {
                 &self,
                 _: &reqwest::Url,
                 _: Duration,
+                _: usize,
             ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
                 Ok(self.1.clone())
             }
@@ -1064,27 +1099,27 @@ mod tests {
         );
 
         assert_eq!(
-            runner.run_execution(&gemini.execution_id).unwrap(),
+            runner.run_execution(&gemini.execution_id, None).unwrap(),
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&ideogram.execution_id).unwrap(),
+            runner.run_execution(&ideogram.execution_id, None).unwrap(),
             "reconciliation_required"
         );
         assert_eq!(
-            runner.run_execution(&flux.execution_id).unwrap(),
+            runner.run_execution(&flux.execution_id, None).unwrap(),
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&gemini.execution_id).unwrap(),
+            runner.run_execution(&gemini.execution_id, None).unwrap(),
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&ideogram.execution_id).unwrap(),
+            runner.run_execution(&ideogram.execution_id, None).unwrap(),
             "reconciliation_required"
         );
         assert_eq!(
-            runner.run_execution(&flux.execution_id).unwrap(),
+            runner.run_execution(&flux.execution_id, None).unwrap(),
             "succeeded"
         );
 

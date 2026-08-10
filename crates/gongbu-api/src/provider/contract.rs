@@ -469,16 +469,44 @@ pub fn validate_image_size_input(
     Ok(())
 }
 
-pub fn validate_image_input(request: &NormalizedRequest, input: &serde_json::Value) -> Result<()> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageGenerationInputV1 {
+    prompt: String,
+    #[serde(default)]
+    image_count: Option<i64>,
+    #[serde(default)]
+    image_size: Option<String>,
+    #[serde(default)]
+    options: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+pub fn validate_image_input_versioned(
+    request: &NormalizedRequest,
+    input: &serde_json::Value,
+    schema_version: i64,
+) -> Result<()> {
+    if schema_version != 1 {
+        return Err(ContractError::IndeterminableCost);
+    }
     request.validate()?;
-    validate_image_size_input(request, input)?;
-    input
-        .get("prompt")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|prompt| !prompt.is_empty() && prompt.len() <= 32_000)
-        .ok_or(ContractError::IndeterminableCost)?;
+    let typed: ImageGenerationInputV1 =
+        serde_json::from_value(input.clone()).map_err(|_| ContractError::IndeterminableCost)?;
+    if typed.prompt.trim().is_empty()
+        || typed.prompt.len() > 32_000
+        || typed
+            .image_count
+            .is_some_and(|count| Some(count) != request.image_count)
+        || typed.image_size.as_deref() != request.image_size.as_deref()
+    {
+        return Err(ContractError::IndeterminableCost);
+    }
+    let _ = typed.options;
     Ok(())
+}
+
+pub fn validate_image_input(request: &NormalizedRequest, input: &serde_json::Value) -> Result<()> {
+    validate_image_input_versioned(request, input, 1)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -9,12 +9,15 @@ use super::{
         NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter, ProviderFailure,
         ProviderPhase, Result, RetryPolicy,
     },
+    http_kernel::{
+        provider_request_id, read_bounded, shared_client, validate_https_origin,
+        ArtifactDownloadPolicy, CredentialForwarding, InvocationDeadline,
+    },
     targets::{valid_artifact_hosts, GeminiImageConfig, ProviderConfigVersion},
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::{
-    blocking::Client,
     header::{HeaderName, HeaderValue},
     Url,
 };
@@ -23,7 +26,8 @@ use std::{error::Error as StdError, fmt, io::Read, time::Duration};
 
 pub const PROVIDER_ID: &str = "google";
 pub const ADAPTER_ID: &str = "gemini_image";
-const MAX_ARTIFACT_BYTES: usize = 20 * 1024 * 1024;
+#[cfg(test)]
+const MAX_ARTIFACT_BYTES: usize = crate::artifact::DEFAULT_MAX_ENCODED_BYTES as usize;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 30 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -48,8 +52,9 @@ pub trait GeminiTransport: Send + Sync {
     fn fetch_artifact(
         &self,
         url: &Url,
-        bearer: &[u8],
+        credential: Option<&[u8]>,
         timeout: Duration,
+        max_bytes: usize,
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>>;
 }
 
@@ -68,10 +73,12 @@ impl<T: GeminiTransport + ?Sized> GeminiTransport for std::sync::Arc<T> {
     fn fetch_artifact(
         &self,
         url: &Url,
-        bearer: &[u8],
+        credential: Option<&[u8]>,
         timeout: Duration,
+        max_bytes: usize,
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-        self.as_ref().fetch_artifact(url, bearer, timeout)
+        self.as_ref()
+            .fetch_artifact(url, credential, timeout, max_bytes)
     }
 }
 
@@ -110,12 +117,11 @@ impl GeminiTransport for ReqwestGeminiTransport {
     ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
         let token = std::str::from_utf8(bearer)
             .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
-        let client = Client::builder()
+        let mut request = shared_client()
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?
+            .post(url.clone())
             .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
-        let mut request = client.post(url.clone()).bearer_auth(token);
+            .bearer_auth(token);
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -128,8 +134,9 @@ impl GeminiTransport for ReqwestGeminiTransport {
             }) as Box<dyn StdError + Send + Sync>
         })?;
         let status = response.status().as_u16();
-        let request_id = header(&response, &["x-goog-request-id", "x-request-id"]);
-        let operation_id = header(&response, &["x-goog-operation-id"]);
+        let request_id =
+            provider_request_id(response.headers(), &["x-goog-request-id", "x-request-id"]);
+        let operation_id = provider_request_id(response.headers(), &["x-goog-operation-id"]);
         if (400..500).contains(&status) {
             return Ok(TransportResponse {
                 status,
@@ -162,23 +169,24 @@ impl GeminiTransport for ReqwestGeminiTransport {
     fn fetch_artifact(
         &self,
         url: &Url,
-        bearer: &[u8],
+        credential: Option<&[u8]>,
         timeout: Duration,
+        max_bytes: usize,
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-        let token =
-            std::str::from_utf8(bearer).map_err(|_| MessageError("credential encoding".into()))?;
-        let mut response = Client::builder()
-            .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
+        let mut request = shared_client()
             .map_err(|_| MessageError("artifact client failure".into()))?
             .get(url.clone())
-            .bearer_auth(token)
-            .send()?;
+            .timeout(timeout);
+        if let Some(credential) = credential {
+            let token = std::str::from_utf8(credential)
+                .map_err(|_| MessageError("credential encoding".into()))?;
+            request = request.bearer_auth(token);
+        }
+        let mut response = request.send()?;
         if !response.status().is_success() {
             return Err(Box::new(MessageError("artifact fetch rejected".into())));
         }
-        read_artifact_response_bounded(&mut response, MAX_ARTIFACT_BYTES)
+        read_artifact_response_bounded(&mut response, max_bytes)
     }
 }
 
@@ -186,49 +194,32 @@ fn read_provider_response_bounded(
     reader: &mut impl Read,
     limit: usize,
 ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-    read_bounded(reader, limit)
+    read_bounded(reader, limit).map_err(|error| Box::new(error) as _)
 }
 
 fn read_artifact_response_bounded(
     reader: &mut impl Read,
     limit: usize,
 ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-    read_bounded(reader, limit)
-}
-
-fn read_bounded(
-    reader: &mut impl Read,
-    limit: usize,
-) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
-    reader.take((limit as u64) + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > limit {
-        return Err(Box::new(MessageError(
-            "provider body limit exceeded".into(),
-        )));
-    }
-    Ok(bytes)
-}
-
-fn header(response: &reqwest::blocking::Response, names: &[&str]) -> Option<String> {
-    names.iter().find_map(|name| {
-        response
-            .headers()
-            .get(*name)?
-            .to_str()
-            .ok()
-            .map(str::to_owned)
-    })
+    read_bounded(reader, limit).map_err(|error| Box::new(error) as _)
 }
 
 pub struct GeminiImageAdapter<T = ReqwestGeminiTransport> {
     config: GeminiImageConfig,
     model: String,
     transport: T,
+    max_artifact_bytes: usize,
 }
 
 impl GeminiImageAdapter<ReqwestGeminiTransport> {
     pub fn from_target(target: &ProviderConfigVersion) -> Result<Self> {
+        Self::from_target_with_artifact_limit(target, crate::artifact::DEFAULT_MAX_ENCODED_BYTES)
+    }
+
+    pub fn from_target_with_artifact_limit(
+        target: &ProviderConfigVersion,
+        max_artifact_bytes: u64,
+    ) -> Result<Self> {
         if target.provider != PROVIDER_ID || target.adapter != ADAPTER_ID {
             return Err(provider_error("target_mismatch"));
         }
@@ -236,12 +227,31 @@ impl GeminiImageAdapter<ReqwestGeminiTransport> {
             .gemini_image()
             .cloned()
             .ok_or_else(|| provider_error("config_invalid"))?;
-        Self::new(config, target.model.clone(), ReqwestGeminiTransport)
+        Self::new_with_artifact_limit(
+            config,
+            target.model.clone(),
+            ReqwestGeminiTransport,
+            max_artifact_bytes,
+        )
     }
 }
 
 impl<T: GeminiTransport> GeminiImageAdapter<T> {
     pub fn new(config: GeminiImageConfig, model: String, transport: T) -> Result<Self> {
+        Self::new_with_artifact_limit(
+            config,
+            model,
+            transport,
+            crate::artifact::DEFAULT_MAX_ENCODED_BYTES,
+        )
+    }
+
+    pub fn new_with_artifact_limit(
+        config: GeminiImageConfig,
+        model: String,
+        transport: T,
+        max_artifact_bytes: u64,
+    ) -> Result<Self> {
         RetryPolicy {
             max_retries: config.max_retries,
         }
@@ -251,6 +261,8 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
         if model.trim().is_empty()
             || config.timeout_ms == 0
             || !valid_artifact_hosts(&config.approved_artifact_hosts, false)
+            || max_artifact_bytes == 0
+            || max_artifact_bytes > usize::MAX as u64
         {
             return Err(provider_error("config_invalid"));
         }
@@ -264,6 +276,7 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
             config,
             model,
             transport,
+            max_artifact_bytes: max_artifact_bytes as usize,
         })
     }
 
@@ -273,9 +286,7 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
         input: &Value,
         secret: &ProviderSecret,
     ) -> Result<AdapterOutcome, ProviderFailure> {
-        self.validate_request(request)
-            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
-        crate::provider_contract::validate_image_size_input(request, input)
+        self.preflight_input(request, input)
             .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         if request.provider != PROVIDER_ID
             || request.model != self.model
@@ -300,7 +311,9 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
             body["generationConfig"]["imageConfig"] =
                 json!({"imageSize": size.to_ascii_uppercase()});
         }
-        let timeout = Duration::from_millis(self.config.timeout_ms);
+        let deadline =
+            InvocationDeadline::from_timeout(Duration::from_millis(self.config.timeout_ms))
+                .map_err(|_| ProviderFailure::release("config_invalid", ProviderPhase::PreSend))?;
         let response = self
             .transport
             .generate(
@@ -308,7 +321,9 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
                     ProviderFailure::release("config_invalid", ProviderPhase::PreSend)
                 })?,
                 secret.expose(),
-                timeout,
+                deadline.remaining().map_err(|_| {
+                    ProviderFailure::release("provider_pre_send_failure", ProviderPhase::PreSend)
+                })?,
                 &self.config.headers,
                 &body,
             )
@@ -340,7 +355,10 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
             &self.config,
             &self.transport,
             secret,
-            timeout,
+            deadline.remaining().map_err(|_| {
+                ProviderFailure::reconcile("artifact_policy_failure", ProviderPhase::Artifact)
+            })?,
+            self.max_artifact_bytes,
         )
         .map_err(|error| {
             let code = match error {
@@ -397,7 +415,11 @@ impl<T: GeminiTransport> ProviderAdapter for GeminiImageAdapter<T> {
     }
     fn preflight_input(&self, request: &NormalizedRequest, input: &Value) -> Result<()> {
         self.validate_request(request)?;
-        crate::provider_contract::validate_image_input(request, input)
+        crate::provider_contract::validate_image_input(request, input)?;
+        if input.get("options").is_some() {
+            return Err(provider_error("invalid_request"));
+        }
+        Ok(())
     }
     fn invoke(
         &self,
@@ -422,7 +444,7 @@ impl<T: GeminiTransport> ProviderAdapter for GeminiImageAdapter<T> {
 
 fn endpoint_url(config: &GeminiImageConfig, model: &str) -> Result<Url> {
     let mut base = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
-    if base.scheme() != "https" || base.host_str().is_none() || base.query().is_some() {
+    if validate_https_origin(&base, None).is_err() {
         return Err(provider_error("config_invalid"));
     }
     let path = format!(
@@ -442,6 +464,7 @@ fn extract_artifacts<T: GeminiTransport>(
     transport: &T,
     secret: &ProviderSecret,
     timeout: Duration,
+    max_artifact_bytes: usize,
 ) -> Result<Vec<NormalizedArtifact>> {
     let candidates = body
         .get("candidates")
@@ -488,13 +511,13 @@ fn extract_artifacts<T: GeminiTransport>(
                 .ok_or_else(|| provider_error("malformed_response"))?;
             // Reject before allocating the decoded image. Base64 expands input
             // by 4/3, so this is a conservative bound for the artifact limit.
-            if data.len() > MAX_ARTIFACT_BYTES.saturating_mul(4).div_ceil(3) {
+            if data.len() > max_artifact_bytes.saturating_mul(4).div_ceil(3) {
                 return Err(provider_error("artifact_policy_failure"));
             }
             let bytes = STANDARD
                 .decode(data)
                 .map_err(|_| provider_error("malformed_response"))?;
-            if bytes.len() > MAX_ARTIFACT_BYTES {
+            if bytes.len() > max_artifact_bytes {
                 return Err(provider_error("artifact_policy_failure"));
             }
             let media_type = canonical_image_media_type(Some(media_type), &bytes)?;
@@ -514,21 +537,23 @@ fn extract_artifacts<T: GeminiTransport>(
                 .and_then(Value::as_str)
                 .ok_or_else(|| provider_error("malformed_response"))?;
             let url = Url::parse(uri).map_err(|_| provider_error("artifact_policy_failure"))?;
-            if url.scheme() != "https"
-                || !config
-                    .approved_artifact_hosts
-                    .iter()
-                    .any(|host| Some(host.as_str()) == url.host_str())
-            {
+            let policy = ArtifactDownloadPolicy::new(
+                &config.approved_artifact_hosts,
+                max_artifact_bytes as u64,
+                CredentialForwarding::Prohibited,
+            )
+            .map_err(|_| provider_error("artifact_policy_failure"))?;
+            if policy.validate_url(&url).is_err() {
                 return Err(provider_error("artifact_policy_failure"));
             }
+            let credential = policy.permits_credentials().then(|| secret.expose());
             let bytes = transport
-                .fetch_artifact(&url, secret.expose(), timeout)
+                .fetch_artifact(&url, credential, timeout, max_artifact_bytes)
                 .map_err(|error| {
                     let _ = classify_transport(error, secret, true);
                     provider_error("artifact_policy_failure")
                 })?;
-            if bytes.len() > MAX_ARTIFACT_BYTES {
+            if bytes.len() > max_artifact_bytes {
                 return Err(provider_error("artifact_policy_failure"));
             }
             let media_type = canonical_image_media_type(Some(media_type), &bytes)?;
@@ -632,9 +657,11 @@ mod tests {
         fn fetch_artifact(
             &self,
             _: &Url,
-            _: &[u8],
+            credential: Option<&[u8]>,
             _: Duration,
+            _: usize,
         ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+            assert!(credential.is_none());
             Ok(self.referenced.clone())
         }
     }
@@ -1122,7 +1149,12 @@ mod tests {
     fn referenced_artifact_transport_never_follows_redirects() {
         assert_redirect_blocked(|url| {
             ReqwestGeminiTransport
-                .fetch_artifact(url, b"credential", Duration::from_secs(2))
+                .fetch_artifact(
+                    url,
+                    Some(b"credential"),
+                    Duration::from_secs(2),
+                    MAX_ARTIFACT_BYTES,
+                )
                 .is_err()
         });
     }

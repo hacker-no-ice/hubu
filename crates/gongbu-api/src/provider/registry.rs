@@ -16,6 +16,7 @@ use super::{
     },
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
 };
+use crate::artifact::ArtifactLimits;
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
 
@@ -46,21 +47,36 @@ impl ProviderRegistry {
         Self::default()
     }
 
-    pub fn production() -> Self {
+    pub fn production(artifact_limits: &ArtifactLimits) -> Self {
+        let max_artifact_bytes = artifact_limits.max_encoded_bytes;
         let mut registry = Self::new();
-        registry.register(GEMINI_PROVIDER_ID, GEMINI_ADAPTER_ID, |target| {
-            Ok(Arc::new(GeminiImageAdapter::from_target(target)?))
+        registry.register(GEMINI_PROVIDER_ID, GEMINI_ADAPTER_ID, move |target| {
+            Ok(Arc::new(
+                GeminiImageAdapter::from_target_with_artifact_limit(target, max_artifact_bytes)?,
+            ))
         });
         registry.register(
             GEMINI_DEVELOPER_PROVIDER_ID,
             GEMINI_DEVELOPER_ADAPTER_ID,
-            |target| Ok(Arc::new(GeminiDeveloperImageAdapter::from_target(target)?)),
+            move |target| {
+                Ok(Arc::new(
+                    GeminiDeveloperImageAdapter::from_target_with_artifact_limit(
+                        target,
+                        max_artifact_bytes,
+                    )?,
+                ))
+            },
         );
-        registry.register(IDEOGRAM_PROVIDER_ID, IDEOGRAM_ADAPTER_ID, |target| {
-            Ok(Arc::new(IdeogramImageAdapter::from_target(target)?))
+        registry.register(IDEOGRAM_PROVIDER_ID, IDEOGRAM_ADAPTER_ID, move |target| {
+            Ok(Arc::new(
+                IdeogramImageAdapter::from_target_with_artifact_limit(target, max_artifact_bytes)?,
+            ))
         });
-        registry.register(FLUX_PROVIDER_ID, FLUX_ADAPTER_ID, |target| {
-            Ok(Arc::new(Flux2ApiAdapter::from_target(target)?))
+        registry.register(FLUX_PROVIDER_ID, FLUX_ADAPTER_ID, move |target| {
+            Ok(Arc::new(Flux2ApiAdapter::from_target_with_artifact_limit(
+                target,
+                max_artifact_bytes,
+            )?))
         });
         registry
     }
@@ -263,9 +279,12 @@ mod tests {
             ]
         })).unwrap();
         let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"v1","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","unit":"image","unit_amount_minor":1},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","unit":"image","unit_amount_minor":1},{"rule_id":"f","provider":"flux","model":"flux-2-pro","currency":"USD","unit":"image","unit_amount_minor":1}]}"#).unwrap();
-        let catalog =
-            ValidatedProviderCatalog::bind(targets, pricing, &ProviderRegistry::production())
-                .unwrap();
+        let catalog = ValidatedProviderCatalog::bind(
+            targets,
+            pricing,
+            &ProviderRegistry::production(&ArtifactLimits::default()),
+        )
+        .unwrap();
         for (provider, adapter, model) in [
             ("google", "gemini_image", "gemini-image-v1"),
             ("ideogram", "ideogram_image", "ideogram-v3"),

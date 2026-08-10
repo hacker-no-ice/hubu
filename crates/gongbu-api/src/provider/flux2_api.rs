@@ -11,27 +11,24 @@ use super::{
         NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter, ProviderFailure,
         ProviderPhase, Result, RetryPolicy,
     },
+    http_kernel::{
+        provider_request_id, read_bounded, shared_client, validate_https_origin,
+        ArtifactDownloadPolicy, CredentialForwarding, InvocationDeadline,
+    },
     targets::{valid_artifact_hosts, Flux2ApiConfig, ProviderConfigVersion},
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
 use reqwest::{
-    blocking::Client,
     header::{HeaderName, HeaderValue},
     Url,
 };
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    error::Error as StdError,
-    fmt,
-    io::Read,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, error::Error as StdError, fmt, io::Read, thread, time::Duration};
 
 pub const PROVIDER_ID: &str = "flux";
 pub const ADAPTER_ID: &str = "flux2_api";
-const MAX_ARTIFACT_BYTES: usize = 20 * 1024 * 1024;
+#[cfg(test)]
+const MAX_ARTIFACT_BYTES: usize = crate::artifact::DEFAULT_MAX_ENCODED_BYTES as usize;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -62,6 +59,7 @@ pub trait Flux2Transport: Send + Sync {
         &self,
         url: &Url,
         timeout: Duration,
+        max_bytes: usize,
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>>;
 }
 
@@ -91,8 +89,9 @@ impl<T: Flux2Transport + ?Sized> Flux2Transport for std::sync::Arc<T> {
         &self,
         url: &Url,
         timeout: Duration,
+        max_bytes: usize,
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-        self.as_ref().fetch_artifact(url, timeout)
+        self.as_ref().fetch_artifact(url, timeout, max_bytes)
     }
 }
 
@@ -110,27 +109,12 @@ impl StdError for HttpFailure {}
 
 pub struct ReqwestFlux2Transport;
 impl ReqwestFlux2Transport {
-    fn client(timeout: Duration) -> std::result::Result<Client, Box<dyn StdError + Send + Sync>> {
-        Client::builder()
-            .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| Box::new(HttpFailure::BeforeSend) as _)
-    }
     fn response(
         mut response: reqwest::blocking::Response,
     ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
         let status = response.status().as_u16();
-        let request_id = ["x-request-id", "x-bfl-request-id"]
-            .iter()
-            .find_map(|name| {
-                response
-                    .headers()
-                    .get(*name)?
-                    .to_str()
-                    .ok()
-                    .map(str::to_owned)
-            });
+        let request_id =
+            provider_request_id(response.headers(), &["x-request-id", "x-bfl-request-id"]);
         if (400..500).contains(&status) {
             return Ok(TransportResponse {
                 status,
@@ -164,8 +148,10 @@ impl Flux2Transport for ReqwestFlux2Transport {
     ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
         let credential = std::str::from_utf8(credential)
             .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
-        let mut request = Self::client(timeout)?
+        let mut request = shared_client()
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?
             .post(url.clone())
+            .timeout(timeout)
             .header("x-key", credential)
             .json(body);
         for (name, value) in headers {
@@ -188,8 +174,10 @@ impl Flux2Transport for ReqwestFlux2Transport {
     ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
         let credential = std::str::from_utf8(credential)
             .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?;
-        let mut request = Self::client(timeout)?
+        let mut request = shared_client()
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?
             .get(url.clone())
+            .timeout(timeout)
             .header("x-key", credential);
         for (name, value) in headers {
             request = request.header(name, value);
@@ -202,12 +190,17 @@ impl Flux2Transport for ReqwestFlux2Transport {
         &self,
         url: &Url,
         timeout: Duration,
+        max_bytes: usize,
     ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-        let mut response = Self::client(timeout)?.get(url.clone()).send()?;
+        let mut response = shared_client()
+            .map_err(|_| Box::new(HttpFailure::BeforeSend) as Box<dyn StdError + Send + Sync>)?
+            .get(url.clone())
+            .timeout(timeout)
+            .send()?;
         if !response.status().is_success() {
             return Err(Box::new(HttpFailure::UnknownOutcome));
         }
-        read_artifact_response_bounded(&mut response, MAX_ARTIFACT_BYTES)
+        read_artifact_response_bounded(&mut response, max_bytes)
     }
 }
 
@@ -215,50 +208,61 @@ fn read_provider_response_bounded(
     reader: &mut impl Read,
     limit: usize,
 ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-    read_bounded(reader, limit)
+    read_bounded(reader, limit).map_err(|error| Box::new(error) as _)
 }
 
 fn read_artifact_response_bounded(
     reader: &mut impl Read,
     limit: usize,
 ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-    read_bounded(reader, limit)
-}
-
-fn read_bounded(
-    reader: &mut impl Read,
-    limit: usize,
-) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
-    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
-    reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > limit {
-        return Err(Box::new(HttpFailure::UnknownOutcome));
-    }
-    Ok(bytes)
+    read_bounded(reader, limit).map_err(|error| Box::new(error) as _)
 }
 
 pub struct Flux2ApiAdapter<T = ReqwestFlux2Transport> {
     config: Flux2ApiConfig,
     model: String,
     transport: T,
+    max_artifact_bytes: usize,
 }
 impl Flux2ApiAdapter<ReqwestFlux2Transport> {
     pub fn from_target(target: &ProviderConfigVersion) -> Result<Self> {
+        Self::from_target_with_artifact_limit(target, crate::artifact::DEFAULT_MAX_ENCODED_BYTES)
+    }
+
+    pub fn from_target_with_artifact_limit(
+        target: &ProviderConfigVersion,
+        max_artifact_bytes: u64,
+    ) -> Result<Self> {
         if target.provider != PROVIDER_ID || target.adapter != ADAPTER_ID {
             return Err(provider_error("target_mismatch"));
         }
-        Self::new(
+        Self::new_with_artifact_limit(
             target
                 .flux2_api()
                 .cloned()
                 .ok_or_else(|| provider_error("config_invalid"))?,
             target.model.clone(),
             ReqwestFlux2Transport,
+            max_artifact_bytes,
         )
     }
 }
 impl<T: Flux2Transport> Flux2ApiAdapter<T> {
     pub fn new(config: Flux2ApiConfig, model: String, transport: T) -> Result<Self> {
+        Self::new_with_artifact_limit(
+            config,
+            model,
+            transport,
+            crate::artifact::DEFAULT_MAX_ENCODED_BYTES,
+        )
+    }
+
+    pub fn new_with_artifact_limit(
+        config: Flux2ApiConfig,
+        model: String,
+        transport: T,
+        max_artifact_bytes: u64,
+    ) -> Result<Self> {
         RetryPolicy {
             max_retries: config.max_retries,
         }
@@ -271,6 +275,8 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             || config.poll_interval_ms == 0
             || config.max_retries != 0
             || !valid_artifact_hosts(&config.approved_artifact_hosts, true)
+            || max_artifact_bytes == 0
+            || max_artifact_bytes > usize::MAX as u64
         {
             return Err(provider_error("config_invalid"));
         }
@@ -297,6 +303,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             config,
             model,
             transport,
+            max_artifact_bytes: max_artifact_bytes as usize,
         })
     }
 
@@ -307,9 +314,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         secret: &ProviderSecret,
         idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome, ProviderFailure> {
-        self.validate_request(request)
-            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
-        crate::provider_contract::validate_image_size_input(request, input)
+        self.preflight_input(request, input)
             .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         let prompt = input
             .get("prompt")
@@ -333,7 +338,9 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 body[field] = value.clone();
             }
         }
-        let deadline = Instant::now() + Duration::from_millis(self.config.timeout_ms);
+        let deadline =
+            InvocationDeadline::from_timeout(Duration::from_millis(self.config.timeout_ms))
+                .map_err(|_| ProviderFailure::release("config_invalid", ProviderPhase::PreSend))?;
         let idempotency = match (&self.config.idempotency_header, idempotency_key) {
             (Some(name), Some(key)) => Some((name.as_str(), key)),
             _ => None,
@@ -345,7 +352,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                     ProviderFailure::release("config_invalid", ProviderPhase::PreSend)
                 })?,
                 secret.expose(),
-                remaining(deadline).map_err(|_| {
+                deadline.remaining().map_err(|_| {
                     ProviderFailure::release("provider_pre_send_failure", ProviderPhase::PreSend)
                 })?,
                 &self.config.headers,
@@ -387,7 +394,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             })?;
             loop {
                 let wait = Duration::from_millis(self.config.poll_interval_ms).min(
-                    remaining(deadline).map_err(|_| {
+                    deadline.remaining().map_err(|_| {
                         with_evidence(
                             "timeout_unknown_outcome",
                             request_id.clone(),
@@ -401,7 +408,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                     .poll(
                         &poll_url,
                         secret.expose(),
-                        remaining(deadline).map_err(|_| {
+                        deadline.remaining().map_err(|_| {
                             with_evidence(
                                 "timeout_unknown_outcome",
                                 request_id.clone(),
@@ -466,13 +473,19 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 operation_id.clone(),
             )
         })?;
-        if artifact_url.scheme() != "https"
-            || !self
-                .config
-                .approved_artifact_hosts
-                .iter()
-                .any(|host| artifact_url.host_str() == Some(host))
-        {
+        let artifact_policy = ArtifactDownloadPolicy::new(
+            &self.config.approved_artifact_hosts,
+            self.max_artifact_bytes as u64,
+            CredentialForwarding::Prohibited,
+        )
+        .map_err(|_| {
+            with_evidence(
+                "artifact_policy_failure",
+                request_id.clone(),
+                operation_id.clone(),
+            )
+        })?;
+        if artifact_policy.validate_url(&artifact_url).is_err() {
             return Err(with_evidence(
                 "artifact_policy_failure",
                 request_id,
@@ -483,13 +496,14 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             .transport
             .fetch_artifact(
                 &artifact_url,
-                remaining(deadline).map_err(|_| {
+                deadline.remaining().map_err(|_| {
                     with_evidence(
                         "artifact_policy_failure",
                         request_id.clone(),
                         operation_id.clone(),
                     )
                 })?,
+                self.max_artifact_bytes,
             )
             .map_err(|error| {
                 let _ = Redactor::new([secret.expose()]).error_chain(error.as_ref());
@@ -499,7 +513,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                     operation_id.clone(),
                 )
             })?;
-        if bytes.len() > MAX_ARTIFACT_BYTES {
+        if bytes.len() > self.max_artifact_bytes {
             return Err(with_evidence(
                 "artifact_policy_failure",
                 request_id,
@@ -561,7 +575,8 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
     }
     fn preflight_input(&self, request: &NormalizedRequest, input: &Value) -> Result<()> {
         self.validate_request(request)?;
-        crate::provider_contract::validate_image_input(request, input)
+        crate::provider_contract::validate_image_input(request, input)?;
+        validate_flux_options(input)
     }
     fn invoke(
         &self,
@@ -584,9 +599,47 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
     }
 }
 
+fn validate_flux_options(input: &Value) -> Result<()> {
+    let Some(options) = input.get("options") else {
+        return Ok(());
+    };
+    let options = options
+        .as_object()
+        .ok_or_else(|| provider_error("invalid_request"))?;
+    if options.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "width" | "height" | "seed" | "safety_tolerance" | "output_format"
+        )
+    }) {
+        return Err(provider_error("invalid_request"));
+    }
+    for dimension in ["width", "height"] {
+        if options
+            .get(dimension)
+            .is_some_and(|value| !matches!(value.as_u64(), Some(64..=4096)))
+        {
+            return Err(provider_error("invalid_request"));
+        }
+    }
+    if options
+        .get("seed")
+        .is_some_and(|value| value.as_u64().is_none())
+        || options
+            .get("safety_tolerance")
+            .is_some_and(|value| !matches!(value.as_u64(), Some(0..=6)))
+        || options
+            .get("output_format")
+            .is_some_and(|value| !matches!(value.as_str(), Some("png" | "jpeg")))
+    {
+        return Err(provider_error("invalid_request"));
+    }
+    Ok(())
+}
+
 fn submit_url(config: &Flux2ApiConfig, model: &str) -> Result<Url> {
     let mut url = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
-    if url.scheme() != "https" || url.host_str().is_none() || url.query().is_some() {
+    if validate_https_origin(&url, None).is_err() {
         return Err(provider_error("config_invalid"));
     }
     url.set_path(&format!(
@@ -613,12 +666,6 @@ fn poll_url(config: &Flux2ApiConfig, body: &Value, operation_id: &str) -> Result
         return Err(provider_error("artifact_policy_failure"));
     }
     Ok(url)
-}
-fn remaining(deadline: Instant) -> Result<Duration> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .filter(|value| !value.is_zero())
-        .ok_or_else(|| provider_error("timeout_unknown_outcome"))
 }
 fn string_at(body: &Value, names: &[&str]) -> Option<String> {
     names
@@ -770,6 +817,7 @@ mod tests {
             &self,
             _: &Url,
             _: Duration,
+            _: usize,
         ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
             Ok(self.artifact.clone())
         }
@@ -891,7 +939,7 @@ mod tests {
     fn conformance_artifact_redirect_is_blocked() {
         assert_redirect_blocked(|url| {
             ReqwestFlux2Transport
-                .fetch_artifact(url, Duration::from_secs(2))
+                .fetch_artifact(url, Duration::from_secs(2), MAX_ARTIFACT_BYTES)
                 .is_err()
         });
     }
@@ -1007,6 +1055,31 @@ mod tests {
         assert_eq!(error.code, "provider_rejected");
         assert_eq!(error.evidence.operation_id.as_deref(), Some("op-rejected"));
         assert_eq!(*submits.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn invalid_options_are_rejected_before_submission() {
+        for options in [
+            json!({"unknown":1}),
+            json!({"width":63}),
+            json!({"seed":-1}),
+            json!({"safety_tolerance":7}),
+            json!({"output_format":"gif"}),
+        ] {
+            let (adapter, submits) = fixture(Vec::new());
+            assert!(adapter
+                .preflight_input(&request(), &json!({"prompt":"cat","options":options}))
+                .is_err());
+            assert!(adapter
+                .invoke(
+                    &request(),
+                    &json!({"prompt":"cat","options":options}),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .is_err());
+            assert_eq!(*submits.lock().unwrap(), 0);
+        }
     }
     #[test]
     fn stable_rejection_malformed_missing_image_and_artifact_policy_failures() {
