@@ -6,7 +6,9 @@ run state or allowing a real provider transmission.
 
 ```sh
 cargo run -p gongbu-api --bin gongbu-sandbox -- \
-  --config examples/sandbox.mock.json
+  --config examples/sandbox.mock.json \
+  --hubu-mode mock \
+  --provider-mode mock
 ```
 
 The command prints the redacted run manifest and readiness checks. Each run
@@ -17,17 +19,74 @@ isolated state for diagnosis; the destination must not already exist.
 
 ## Configuration precedence
 
-The JSON profile is loaded first. These narrowly scoped environment overrides
-are then applied, and the resulting configuration is validated as one unit:
+Configuration is applied in this order, with later values winning:
 
-1. `GONGBU_SANDBOX_HUBU_MODE` (`mock` or `real`)
-2. `GONGBU_SANDBOX_PROVIDER_MODE` (`mock` or `real`)
-3. `GONGBU_SANDBOX_MAX_SPEND_MINOR`
-4. `GONGBU_SANDBOX_LIVE_SPEND_ACK`
+1. JSON profile
+2. environment variables
+3. CLI parameters
+
+For interactive use, prefer CLI parameters because the selected modes remain
+visible in shell history and do not persist into later shell commands:
+
+```sh
+cargo run -p gongbu-api --bin gongbu-sandbox -- \
+  --config examples/sandbox.mock.json \
+  --hubu-mode mock \
+  --provider-mode mock
+```
+
+The available CLI overrides are `--hubu-mode`, `--provider-mode`,
+`--max-spend-minor`, and `--live-spend-ack`.
+
+Environment variables remain useful for CI and automation:
+
+- `GONGBU_SANDBOX_HUBU_MODE` (`mock` or `real`)
+- `GONGBU_SANDBOX_PROVIDER_MODE` (`mock` or `real`)
+- `GONGBU_SANDBOX_MAX_SPEND_MINOR`
+- `GONGBU_SANDBOX_LIVE_SPEND_ACK`
 
 Unknown JSON fields, unknown mode values, and mock modes combined with real
 endpoint or credential fields fail at startup. A `production` profile rejects
 either mock boundary.
+
+## After running the command
+
+The current command is a bounded startup and readiness check, not a long-running
+Gongbu HTTP server. It constructs and validates the selected dependency wiring,
+creates isolated run state, prints the manifest and readiness results, and then
+exits. Temporary state is removed on exit.
+
+For a quick manual check, confirm that every readiness entry is `ready: true`
+and that `hubu_mode` and `provider_mode` match the CLI parameters. To inspect the
+generated state after exit, preserve it to a new directory:
+
+```sh
+cargo run -p gongbu-api --bin gongbu-sandbox -- \
+  --config examples/sandbox.mock.json \
+  --hubu-mode mock \
+  --provider-mode mock \
+  --preserve /tmp/gongbu-sandbox-debug
+```
+
+To exercise an actual mock/mock execution through Gongbu's durable workflow,
+SQLite persistence, artifact normalization, Hubu settlement, and replay guards:
+
+```sh
+cargo test -p gongbu-api \
+  sandbox::tests::mock_mock_runs_the_durable_workflow_and_replay_has_no_second_side_effect \
+  -- --exact --nocapture
+```
+
+Run all focused sandbox validation and fault tests with:
+
+```sh
+cargo test -p gongbu-api sandbox::
+```
+
+The reusable `SandboxRun` and `SandboxWiring` library types are the integration
+surface for the HUB-40 real-Gemini test and HUB-41 Hubu compatibility harness.
+Those harnesses retain the run object for their lifetime, execute against its
+isolated state, and let it clean up on drop.
 
 ## Mode matrix
 

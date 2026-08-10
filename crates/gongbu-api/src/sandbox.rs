@@ -32,6 +32,7 @@ use std::{
     io::Cursor,
     net::{IpAddr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
+    str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -48,6 +49,14 @@ pub const LIVE_SPEND_ACKNOWLEDGEMENT: &str = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
 pub enum BoundaryMode {
     Mock,
     Real,
+}
+
+impl FromStr for BoundaryMode {
+    type Err = SandboxError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_mode(value)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -186,8 +195,12 @@ pub enum SandboxError {
 }
 
 impl SandboxConfig {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, SandboxError> {
+        Ok(serde_json::from_slice(&fs::read(path)?)?)
+    }
+
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, SandboxError> {
-        let mut value: Self = serde_json::from_slice(&fs::read(path)?)?;
+        let mut value = Self::load(path)?;
         value.apply_environment_overrides()?;
         value.validate()?;
         Ok(value)
@@ -1485,6 +1498,8 @@ mod tests {
 
     #[test]
     fn production_rejects_mock_boundaries_and_mock_rejects_real_fields() {
+        assert_eq!("mock".parse::<BoundaryMode>().unwrap(), BoundaryMode::Mock);
+        assert!("fixture".parse::<BoundaryMode>().is_err());
         let mut config = mock_config(BoundaryMode::Mock, BoundaryMode::Mock);
         config.profile = ProfileKind::Production;
         assert!(config
