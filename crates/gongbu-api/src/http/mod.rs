@@ -9,8 +9,11 @@ use crate::{
         Artifact, CreateExecutionParams, Error as PersistenceError, Execution, HubuTokenReference,
         Repository,
     },
-    provider_contract::{ContractError, NormalizedRequest, PricingCatalog, PricingSnapshot},
-    provider_targets::{Error as TargetError, ProviderConfigVersion, ProviderTargetConfig},
+    provider::{
+        contract::{ContractError, NormalizedRequest, PricingSnapshot},
+        registry::ValidatedProviderCatalog,
+    },
+    provider_targets::{Error as TargetError, ProviderConfigVersion, TargetKey},
     temporal::ExecutionScheduler,
     workflow::{OperatorReconciliationRequest, ReconciliationAction},
 };
@@ -202,8 +205,7 @@ impl ApiError {
 pub struct Api {
     repository: Repository,
     artifacts: ArtifactService,
-    targets: ProviderTargetConfig,
-    pricing: PricingCatalog,
+    providers: ValidatedProviderCatalog,
     scheduler: Arc<dyn ExecutionScheduler>,
     now: Arc<dyn Fn() -> String + Send + Sync>,
 }
@@ -212,16 +214,14 @@ impl Api {
     pub fn new(
         repository: Repository,
         artifacts: ArtifactService,
-        targets: ProviderTargetConfig,
-        pricing: PricingCatalog,
+        providers: ValidatedProviderCatalog,
         scheduler: Arc<dyn ExecutionScheduler>,
         now: impl Fn() -> String + Send + Sync + 'static,
     ) -> Self {
         Self {
             repository,
             artifacts,
-            targets,
-            pricing,
+            providers,
             scheduler,
             now: Arc::new(now),
         }
@@ -283,15 +283,17 @@ impl Api {
             Err(PersistenceError::NotFound) => {}
             Err(error) => return Err(map_persistence(error)),
         }
+        let target_key = TargetKey::new(
+            &request.workload_type,
+            &request.provider,
+            &request.adapter,
+            &request.model,
+        )
+        .map_err(map_target_error)?;
         let resolved = self
-            .targets
-            .resolve(
-                &request.workload_type,
-                &request.provider,
-                &request.adapter,
-                &request.model,
-            )
-            .map_err(map_target_error)?;
+            .providers
+            .resolve_active(&target_key)
+            .map_err(|_| ApiError::validation())?;
         let image_count = input_quantity(&normalized_input, "image_count")?;
         if image_count.is_some_and(|count| {
             u64::try_from(count).map_or(true, |count| {
@@ -312,7 +314,8 @@ impl Api {
                 .map(str::to_owned),
         };
         let pricing_snapshot = self
-            .pricing
+            .providers
+            .pricing()
             .snapshot_for_target(&resolved.target_key(), &pricing_request)
             .map_err(map_pricing_error)?;
         // Tokenization belongs to provider-bound request normalization, which is
@@ -676,11 +679,49 @@ fn json_response(status: u16, body: &impl Serialize) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifacts::{ArtifactLimits, LocalFsStorage};
+    use crate::{
+        artifacts::{ArtifactLimits, LocalFsStorage},
+        provider::{
+            contract::{
+                AdapterCapabilities, AdapterOutcome, PricingCatalog, ProviderAdapter,
+                ProviderFailure,
+            },
+            registry::ProviderRegistry,
+        },
+        provider_targets::ProviderTargetConfig,
+        secrets::ProviderSecret,
+    };
     use image::{DynamicImage, ImageOutputFormat, RgbaImage};
     use serde_json::json;
     use std::{io::Cursor, sync::Barrier, thread};
     use tempfile::TempDir;
+
+    struct AdmissionAdapter;
+    impl ProviderAdapter for AdmissionAdapter {
+        fn adapter_id(&self) -> &str {
+            "fixture"
+        }
+        fn capabilities(&self) -> AdapterCapabilities {
+            AdapterCapabilities {
+                vendor_enforced_idempotency: false,
+            }
+        }
+        fn invoke(
+            &self,
+            _: &NormalizedRequest,
+            _: &Value,
+            _: &ProviderSecret,
+            _: Option<&str>,
+        ) -> Result<AdapterOutcome, ProviderFailure> {
+            unreachable!("HTTP admission does not invoke providers")
+        }
+    }
+
+    fn catalog(targets: ProviderTargetConfig, pricing: PricingCatalog) -> ValidatedProviderCatalog {
+        let mut registry = ProviderRegistry::new();
+        registry.register("example", "fixture", |_| Ok(Arc::new(AdmissionAdapter)));
+        ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap()
+    }
 
     #[derive(Default)]
     struct Scheduler(std::sync::Mutex<Vec<String>>);
@@ -753,8 +794,7 @@ mod tests {
             api: Api::new(
                 repository.clone(),
                 artifacts.clone(),
-                targets,
-                pricing,
+                catalog(targets, pricing),
                 scheduler.clone(),
                 || "2026-08-05T20:00:00Z".into(),
             ),
@@ -1024,8 +1064,7 @@ mod tests {
         let restarted = Api::new(
             fixture.repository.clone(),
             fixture.artifacts.clone(),
-            disabled_targets,
-            changed_pricing,
+            catalog(disabled_targets, changed_pricing),
             fixture.scheduler.clone(),
             || "2026-08-06T00:00:00Z".into(),
         );
@@ -1066,8 +1105,7 @@ mod tests {
         let changed_api = Api::new(
             fixture.repository.clone(),
             fixture.artifacts.clone(),
-            changed_targets,
-            changed_pricing,
+            catalog(changed_targets, changed_pricing),
             fixture.scheduler.clone(),
             || "2026-08-06T00:00:00Z".into(),
         );
@@ -1123,8 +1161,7 @@ mod tests {
         let api = Api::new(
             fixture.repository,
             fixture.artifacts,
-            targets,
-            pricing,
+            catalog(targets, pricing),
             scheduler,
             || "2026-08-06T00:00:00Z".into(),
         );
@@ -1170,8 +1207,7 @@ mod tests {
         let api = Api::new(
             fixture.repository,
             fixture.artifacts,
-            targets,
-            pricing,
+            catalog(targets, pricing),
             fixture.scheduler,
             || "2026-08-06T00:00:00Z".into(),
         );
