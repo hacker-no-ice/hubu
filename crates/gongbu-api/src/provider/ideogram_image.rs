@@ -7,8 +7,8 @@
 use super::{
     contract::{
         canonical_image_media_type, AdapterCapabilities, AdapterOutcome, ContractError,
-        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutcomeKind, ProviderAdapter,
-        Result, RetryPolicy,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter, ProviderFailure,
+        ProviderPhase, Result, RetryPolicy,
     },
     targets::{valid_artifact_hosts, IdeogramImageConfig, ProviderConfigVersion},
 };
@@ -288,30 +288,39 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
         input: &Value,
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
-    ) -> Result<AdapterOutcome> {
+    ) -> Result<AdapterOutcome, ProviderFailure> {
         if vendor_idempotency_key.is_some() || self.config.max_retries != 0 {
-            return Err(provider_error("retry_not_supported"));
+            return Err(ProviderFailure::release(
+                "retry_not_supported",
+                ProviderPhase::PreSend,
+            ));
         }
-        self.validate_request(request)?;
+        self.validate_request(request)
+            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         crate::provider_contract::validate_image_size_input(request, input)
-            .map_err(|_| provider_error("invalid_request"))?;
+            .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         let prompt = input
             .get("prompt")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty() && value.len() <= 32_000)
-            .ok_or_else(|| provider_error("invalid_request"))?;
+            .ok_or_else(|| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         if input.as_object().is_none_or(|object| {
             object
                 .keys()
                 .any(|key| key != "prompt" && key != "image_count" && key != "image_size")
         }) {
-            return Err(provider_error("invalid_request"));
+            return Err(ProviderFailure::release(
+                "invalid_request",
+                ProviderPhase::PreSend,
+            ));
         }
         let response = self
             .transport
             .generate(
-                &endpoint_url(&self.config, &self.model)?,
+                &endpoint_url(&self.config, &self.model).map_err(|_| {
+                    ProviderFailure::release("config_invalid", ProviderPhase::PreSend)
+                })?,
                 secret.expose(),
                 Duration::from_millis(self.config.timeout_ms),
                 &self.config.headers,
@@ -329,13 +338,15 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
             .or_else(|| string_field(&response.body, "generation_id"));
         if !(200..300).contains(&response.status) {
             if (400..500).contains(&response.status) {
-                return Err(provider_error("provider_rejected"));
+                return Err(ProviderFailure::release(
+                    "provider_rejected",
+                    ProviderPhase::Submission,
+                ));
             }
-            return Err(ContractError::ProviderWithEvidence {
-                code: "provider_failure".into(),
-                request_id,
-                operation_id,
-            });
+            return Err(
+                ProviderFailure::reconcile("provider_failure", ProviderPhase::Submission)
+                    .with_evidence(request_id, operation_id),
+            );
         }
         let data = response
             .body
@@ -388,7 +399,6 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
         let media_type = canonical_image_media_type(None, &bytes)
             .map_err(|_| with_evidence("artifact_policy_failure", &request_id, &operation_id))?;
         Ok(AdapterOutcome {
-            outcome: OutcomeKind::Succeeded,
             usage: Some(NormalizedUsage {
                 images: Some(1),
                 input_tokens: None,
@@ -438,35 +448,31 @@ fn with_evidence(
     code: &str,
     request_id: &Option<String>,
     operation_id: &Option<String>,
-) -> ContractError {
-    ContractError::ProviderWithEvidence {
-        code: code.into(),
-        request_id: request_id.clone(),
-        operation_id: operation_id.clone(),
-    }
+) -> ProviderFailure {
+    ProviderFailure::reconcile(code, ProviderPhase::Processing)
+        .with_evidence(request_id.clone(), operation_id.clone())
 }
 
 fn classify_transport(
     error: Box<dyn StdError + Send + Sync>,
     secret: &ProviderSecret,
     artifact: bool,
-) -> ContractError {
+) -> ProviderFailure {
     let redactor = Redactor::new([secret.expose()]);
     let _ = redactor.error_chain(error.as_ref());
     if artifact {
-        return provider_error("artifact_policy_failure");
+        return ProviderFailure::reconcile("artifact_policy_failure", ProviderPhase::Artifact);
     }
     match error.downcast_ref::<HttpFailure>() {
-        Some(HttpFailure::BeforeSend) => provider_error("provider_pre_send_failure"),
+        Some(HttpFailure::BeforeSend) => {
+            ProviderFailure::release("provider_pre_send_failure", ProviderPhase::PreSend)
+        }
         Some(HttpFailure::UnknownOutcome {
             request_id,
             operation_id,
-        }) => ContractError::ProviderWithEvidence {
-            code: "timeout_unknown_outcome".into(),
-            request_id: request_id.clone(),
-            operation_id: operation_id.clone(),
-        },
-        None => provider_error("provider_failure"),
+        }) => ProviderFailure::reconcile("timeout_unknown_outcome", ProviderPhase::Submission)
+            .with_evidence(request_id.clone(), operation_id.clone()),
+        None => ProviderFailure::reconcile("provider_failure", ProviderPhase::Submission),
     }
 }
 
@@ -713,12 +719,7 @@ mod tests {
                     None,
                 )
                 .unwrap_err();
-            let code = match error {
-                ContractError::Provider { code }
-                | ContractError::ProviderWithEvidence { code, .. } => code,
-                _ => panic!(),
-            };
-            assert_eq!(code, expected);
+            assert_eq!(error.code, expected);
             assert_eq!(*calls.lock().unwrap(), 1);
         }
     }
@@ -738,16 +739,9 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ContractError::ProviderWithEvidence {
-                code,
-                request_id: Some(request_id),
-                operation_id: Some(operation_id),
-            } if code == "artifact_policy_failure"
-                && request_id == "request-1"
-                && operation_id == "generation-1"
-        ));
+        assert_eq!(error.code, "artifact_policy_failure");
+        assert_eq!(error.evidence.request_id.as_deref(), Some("request-1"));
+        assert_eq!(error.evidence.operation_id.as_deref(), Some("generation-1"));
         assert_eq!(*calls.lock().unwrap(), 1);
     }
 
@@ -766,9 +760,31 @@ mod tests {
         .unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = vec![0; 8192];
-            let count = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..count]);
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0, "request ended before its declared body");
+                request.extend_from_slice(&buffer[..count]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .expect("multipart request declares content length");
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
             let lowercase = request.to_ascii_lowercase();
             assert!(lowercase.contains("content-type: multipart/form-data; boundary="));
             assert!(request.contains("name=\"prompt\""));
@@ -811,9 +827,7 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        assert!(
-            matches!(error, ContractError::ProviderWithEvidence { code, .. } if code == "timeout_unknown_outcome")
-        );
+        assert_eq!(error.code, "timeout_unknown_outcome");
         assert_eq!(*calls.lock().unwrap(), 1);
 
         let (adapter, calls) = adapter(json!({}), 200, Ok(png()));

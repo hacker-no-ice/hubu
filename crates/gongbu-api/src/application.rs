@@ -11,8 +11,8 @@ use crate::{
     http::{Api, AuthenticatedAccount, HttpResponse},
     provider::{
         contract::{
-            enforce_cost, NormalizedRequest, OutcomeKind, PricingCatalog, PricingSnapshot,
-            PricingUnit, ProviderAdapter,
+            enforce_cost, AdapterOutcome, NormalizedRequest, PricingCatalog, PricingSnapshot,
+            PricingUnit, ProviderAdapter, ProviderFailure, SpendDisposition,
         },
         gemini_developer_image::{
             GeminiDeveloperImageAdapter, GeminiDeveloperTransport, ReqwestGeminiDeveloperTransport,
@@ -150,10 +150,10 @@ impl ProviderActivities for GeminiProviderActivities {
             target.model.clone(),
             Arc::clone(&self.transport),
         )
-        .map_err(map_gemini_error)?;
+        .map_err(map_contract_error)?;
         adapter
             .validate_request(&request)
-            .map_err(map_gemini_error)?;
+            .map_err(map_contract_error)?;
         self.secrets
             .resolve(
                 &target
@@ -178,7 +178,7 @@ impl ProviderActivities for GeminiProviderActivities {
             target.model.clone(),
             Arc::clone(&self.transport),
         )
-        .map_err(map_gemini_error)?;
+        .map_err(map_contract_error)?;
         let secret = self
             .secrets
             .resolve(
@@ -189,32 +189,8 @@ impl ProviderActivities for GeminiProviderActivities {
             .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
         let outcome = adapter
             .invoke(&request, &execution.normalized_input, &secret, None)
-            .map_err(map_gemini_invoke_error)?;
-        if outcome.outcome != OutcomeKind::Succeeded {
-            return Err(WorkflowActivityError::Ambiguous(
-                "provider_unknown_outcome".into(),
-            ));
-        }
-        if outcome.provider_request_id.is_none() && outcome.provider_operation_id.is_none() {
-            return Err(WorkflowActivityError::Ambiguous(
-                "missing_provider_identifier".into(),
-            ));
-        }
-        Ok(ProviderSuccess {
-            request_id: outcome.provider_request_id,
-            operation_id: outcome.provider_operation_id,
-            usage: outcome
-                .usage
-                .ok_or_else(|| WorkflowActivityError::Ambiguous("missing_provider_usage".into()))?,
-            artifacts: outcome
-                .artifacts
-                .into_iter()
-                .map(|artifact| ProviderArtifact {
-                    media_type: artifact.media_type,
-                    bytes: artifact.bytes,
-                })
-                .collect(),
-        })
+            .map_err(map_provider_failure)?;
+        normalize_provider_success(outcome)
     }
 }
 
@@ -318,10 +294,10 @@ impl ProviderActivities for GeminiDeveloperProviderActivities {
             target.model.clone(),
             Arc::clone(&self.transport),
         )
-        .map_err(map_gemini_error)?;
+        .map_err(map_contract_error)?;
         adapter
             .validate_request(&request)
-            .map_err(map_gemini_error)?;
+            .map_err(map_contract_error)?;
         self.secrets
             .resolve(
                 &target
@@ -346,7 +322,7 @@ impl ProviderActivities for GeminiDeveloperProviderActivities {
             target.model.clone(),
             Arc::clone(&self.transport),
         )
-        .map_err(map_gemini_error)?;
+        .map_err(map_contract_error)?;
         let secret = self
             .secrets
             .resolve(
@@ -357,32 +333,8 @@ impl ProviderActivities for GeminiDeveloperProviderActivities {
             .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
         let outcome = adapter
             .invoke(&request, &execution.normalized_input, &secret, None)
-            .map_err(map_gemini_invoke_error)?;
-        if outcome.outcome != OutcomeKind::Succeeded {
-            return Err(WorkflowActivityError::Ambiguous(
-                "provider_unknown_outcome".into(),
-            ));
-        }
-        if outcome.provider_request_id.is_none() {
-            return Err(WorkflowActivityError::Ambiguous(
-                "missing_provider_identifier".into(),
-            ));
-        }
-        Ok(ProviderSuccess {
-            request_id: outcome.provider_request_id,
-            operation_id: outcome.provider_operation_id,
-            usage: outcome
-                .usage
-                .ok_or_else(|| WorkflowActivityError::Ambiguous("missing_provider_usage".into()))?,
-            artifacts: outcome
-                .artifacts
-                .into_iter()
-                .map(|artifact| ProviderArtifact {
-                    media_type: artifact.media_type,
-                    bytes: artifact.bytes,
-                })
-                .collect(),
-        })
+            .map_err(map_provider_failure)?;
+        normalize_provider_success(outcome)
     }
 }
 
@@ -484,10 +436,10 @@ impl ProviderActivities for IdeogramProviderActivities {
             target.model.clone(),
             Arc::clone(&self.transport),
         )
-        .map_err(map_gemini_error)?;
+        .map_err(map_contract_error)?;
         adapter
             .validate_request(&request)
-            .map_err(map_gemini_error)?;
+            .map_err(map_contract_error)?;
         self.secrets
             .resolve(
                 &target
@@ -512,7 +464,7 @@ impl ProviderActivities for IdeogramProviderActivities {
             target.model.clone(),
             Arc::clone(&self.transport),
         )
-        .map_err(map_gemini_error)?;
+        .map_err(map_contract_error)?;
         let secret = self
             .secrets
             .resolve(
@@ -523,78 +475,71 @@ impl ProviderActivities for IdeogramProviderActivities {
             .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
         let outcome = adapter
             .invoke(&request, &execution.normalized_input, &secret, None)
-            .map_err(map_gemini_invoke_error)?;
-        if outcome.outcome != OutcomeKind::Succeeded {
-            return Err(WorkflowActivityError::Ambiguous(
-                "provider_unknown_outcome".into(),
-            ));
-        }
-        if outcome.provider_request_id.is_none() && outcome.provider_operation_id.is_none() {
-            return Err(WorkflowActivityError::Ambiguous(
-                "missing_provider_identifier".into(),
-            ));
-        }
-        Ok(ProviderSuccess {
-            request_id: outcome.provider_request_id,
-            operation_id: outcome.provider_operation_id,
-            usage: outcome
-                .usage
-                .ok_or_else(|| WorkflowActivityError::Ambiguous("missing_provider_usage".into()))?,
-            artifacts: outcome
-                .artifacts
-                .into_iter()
-                .map(|artifact| ProviderArtifact {
-                    media_type: artifact.media_type,
-                    bytes: artifact.bytes,
-                })
-                .collect(),
-        })
+            .map_err(map_provider_failure)?;
+        normalize_provider_success(outcome)
     }
 }
 
-fn map_gemini_error(error: crate::provider_contract::ContractError) -> WorkflowActivityError {
+fn map_contract_error(error: crate::provider_contract::ContractError) -> WorkflowActivityError {
     let code = match error {
         crate::provider_contract::ContractError::Provider { code } => code,
-        crate::provider_contract::ContractError::ProviderWithEvidence { code, .. } => code,
         _ => "provider_contract_failure".into(),
     };
-    if code == "timeout_unknown_outcome" {
-        WorkflowActivityError::Ambiguous(code)
-    } else {
-        WorkflowActivityError::Proven(code)
+    WorkflowActivityError::Proven(code)
+}
+
+fn map_provider_failure(failure: ProviderFailure) -> WorkflowActivityError {
+    match failure.spend_disposition {
+        SpendDisposition::Release
+            if failure.evidence.request_id.is_some() || failure.evidence.operation_id.is_some() =>
+        {
+            WorkflowActivityError::ProvenWithEvidence {
+                code: failure.code,
+                request_id: failure.evidence.request_id,
+                operation_id: failure.evidence.operation_id,
+            }
+        }
+        SpendDisposition::Release => WorkflowActivityError::Proven(failure.code),
+        SpendDisposition::Reconcile
+            if failure.evidence.request_id.is_some() || failure.evidence.operation_id.is_some() =>
+        {
+            WorkflowActivityError::AmbiguousWithEvidence {
+                code: failure.code,
+                request_id: failure.evidence.request_id,
+                operation_id: failure.evidence.operation_id,
+            }
+        }
+        SpendDisposition::Reconcile => WorkflowActivityError::Ambiguous(failure.code),
     }
 }
 
-fn map_gemini_invoke_error(
-    error: crate::provider_contract::ContractError,
-) -> WorkflowActivityError {
-    let (code, evidence) = match error {
-        crate::provider_contract::ContractError::Provider { code } => (code, None),
-        crate::provider_contract::ContractError::ProviderWithEvidence {
-            code,
-            request_id,
-            operation_id,
-        } => (code, Some((request_id, operation_id))),
-        _ => ("provider_contract_failure".into(), None),
-    };
-    if let Some((request_id, operation_id)) = evidence {
-        return WorkflowActivityError::AmbiguousWithEvidence {
-            code,
-            request_id,
-            operation_id,
-        };
+fn normalize_provider_success(
+    outcome: AdapterOutcome,
+) -> Result<ProviderSuccess, WorkflowActivityError> {
+    if outcome.validate().is_err() {
+        return Err(WorkflowActivityError::AmbiguousWithEvidence {
+            code: "invalid_provider_success".into(),
+            request_id: outcome.provider_request_id,
+            operation_id: outcome.provider_operation_id,
+        });
     }
-    if code == "provider_rejected"
-        || code.starts_with("provider_rejected_http_")
-        || matches!(
-            code.as_str(),
-            "provider_pre_send_failure" | "invalid_request" | "retry_not_supported"
-        )
-    {
-        WorkflowActivityError::Proven(code)
-    } else {
-        WorkflowActivityError::Ambiguous(code)
-    }
+    Ok(ProviderSuccess {
+        request_id: outcome.provider_request_id,
+        operation_id: outcome.provider_operation_id,
+        usage: outcome
+            .usage
+            .ok_or_else(|| WorkflowActivityError::Ambiguous("invalid_provider_success".into()))?,
+        provider_amount_minor: outcome.provider_amount_minor,
+        provider_currency: outcome.provider_currency,
+        artifacts: outcome
+            .artifacts
+            .into_iter()
+            .map(|artifact| ProviderArtifact {
+                media_type: artifact.media_type,
+                bytes: artifact.bytes,
+            })
+            .collect(),
+    })
 }
 
 pub struct ArtifactServiceActivities {
@@ -1141,8 +1086,8 @@ mod tests {
     }
 
     #[test]
-    fn post_invoke_gemini_failures_do_not_authorize_release() {
-        use crate::provider_contract::ContractError;
+    fn typed_spend_disposition_controls_release_independently_of_evidence() {
+        use crate::provider_contract::{ProviderFailure, ProviderPhase};
         for code in [
             "timeout_unknown_outcome",
             "provider_failure",
@@ -1151,27 +1096,56 @@ mod tests {
             "artifact_policy_failure",
         ] {
             assert_eq!(
-                map_gemini_invoke_error(ContractError::Provider { code: code.into() }),
+                map_provider_failure(ProviderFailure::reconcile(code, ProviderPhase::Processing)),
                 WorkflowActivityError::Ambiguous(code.into())
             );
         }
         assert_eq!(
-            map_gemini_invoke_error(ContractError::Provider {
-                code: "provider_rejected".into()
-            }),
-            WorkflowActivityError::Proven("provider_rejected".into())
+            map_provider_failure(
+                ProviderFailure::release("provider_rejected", ProviderPhase::Submission,)
+                    .with_evidence(Some("request-1".into()), None)
+            ),
+            WorkflowActivityError::ProvenWithEvidence {
+                code: "provider_rejected".into(),
+                request_id: Some("request-1".into()),
+                operation_id: None,
+            }
         );
         assert_eq!(
-            map_gemini_invoke_error(ContractError::Provider {
-                code: "provider_rejected_http_401".into()
-            }),
+            map_provider_failure(ProviderFailure::release(
+                "provider_rejected_http_401",
+                ProviderPhase::Submission,
+            )),
             WorkflowActivityError::Proven("provider_rejected_http_401".into())
         );
         assert_eq!(
-            map_gemini_invoke_error(ContractError::Provider {
-                code: "provider_pre_send_failure".into()
-            }),
+            map_provider_failure(ProviderFailure::release(
+                "provider_pre_send_failure",
+                ProviderPhase::PreSend,
+            )),
             WorkflowActivityError::Proven("provider_pre_send_failure".into())
         );
+
+        let invalid_success = AdapterOutcome {
+            usage: Some(Default::default()),
+            provider_amount_minor: Some(10),
+            provider_currency: None,
+            provider_request_id: Some("request-2".into()),
+            provider_operation_id: Some("operation-2".into()),
+            artifacts: vec![crate::provider_contract::NormalizedArtifact {
+                media_type: "image/png".into(),
+                bytes: vec![1],
+            }],
+        };
+        assert!(matches!(
+            normalize_provider_success(invalid_success),
+            Err(WorkflowActivityError::AmbiguousWithEvidence {
+                code,
+                request_id: Some(request_id),
+                operation_id: Some(operation_id),
+            }) if code == "invalid_provider_success"
+                && request_id == "request-2"
+                && operation_id == "operation-2"
+        ));
     }
 }
