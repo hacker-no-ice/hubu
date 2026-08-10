@@ -202,6 +202,11 @@ re-exports that preserve the original public module paths.
 
 ## Development
 
+Use the configurable [Gongbu sandbox](docs/sandbox.md) for deterministic local
+runs, bounded live-provider checks, Hubu compatibility, and guarded dogfood.
+Hubu and provider modes are selected independently and validated before any
+execution boundary becomes ready.
+
 The official Temporal Rust SDK compiles its protobuf definitions during the
 build, so install `protoc` first (`brew install protobuf` on macOS or
 `apt-get install protobuf-compiler` on Debian/Ubuntu).

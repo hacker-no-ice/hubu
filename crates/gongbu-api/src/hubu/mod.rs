@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 mod transport;
 
-use self::transport::{self as simple_http, HttpClientError};
+use self::transport as simple_http;
+pub use self::transport::HttpClientError;
 
 #[derive(Debug, Clone)]
 pub struct HubuClient {

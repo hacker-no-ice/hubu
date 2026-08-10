@@ -7,6 +7,7 @@ pub mod execution;
 pub mod http;
 pub mod hubu;
 pub mod provider;
+pub mod sandbox;
 pub mod temporal;
 pub mod workflow;
 
