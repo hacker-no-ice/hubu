@@ -398,10 +398,12 @@ pub fn start_worker(
             let tokio_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            let mut worker = Worker::new(&runtime, client, worker_options(runner))
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            let shutdown: Arc<dyn Fn() + Send + Sync> = Arc::new(worker.shutdown_handle());
             let run_result = tokio_runtime.block_on(async move {
+                // Worker construction starts Tokio tasks in newer SDK releases,
+                // so it must happen after entering this thread's runtime.
+                let mut worker = Worker::new(&runtime, client, worker_options(runner))
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let shutdown: Arc<dyn Fn() + Send + Sync> = Arc::new(worker.shutdown_handle());
                 let mut run = Box::pin(worker.run());
                 let mut readiness = Some((startup_tx, shutdown));
                 poll_fn(move |cx| match run.as_mut().poll(cx) {

@@ -19,7 +19,7 @@ Create an operator-owned target file:
   "workload_type":"image_generation",
   "provider":"google",
   "adapter":"gemini_developer_image",
-  "model":"gemini-3.1-flash-lite-image",
+  "model":"gemini-3.1-flash-image",
   "secret_service":"gongbu.google-ai-studio",
   "secret_account":"local-e2e",
   "gemini_developer_image":{
@@ -34,7 +34,7 @@ Create an operator-owned target file:
 ```
 
 Create an operator-owned schema-v2 pricing catalog with an exact `google` +
-`gemini-3.1-flash-lite-image` image rule for a resolution supported by that
+`gemini-3.1-flash-image` image rule for a resolution supported by that
 model. This example selects 4K:
 
 ```json
@@ -43,15 +43,15 @@ model. This example selects 4K:
   "catalog_version": "google-gemini-developer-local-v2",
   "rules": [
     {
-      "rule_id": "google-gemini-3.1-flash-lite-image-4k",
+      "rule_id": "google-gemini-3.1-flash-image-4k",
       "provider": "google",
-      "model": "gemini-3.1-flash-lite-image",
+      "model": "gemini-3.1-flash-image",
       "currency": "USD",
       "selector": { "image_size": "4k" },
       "components": [{
         "unit": "image",
-        "rate_numerator_minor": 4,
-        "rate_denominator": 1
+        "rate_numerator_minor": 151,
+        "rate_denominator": 10
       }]
     }
   ]
@@ -69,7 +69,7 @@ as high as the catalog rule:
 ```sh
 export GONGBU_PROVIDER_CONFIG=/absolute/path/provider-targets.json
 export GONGBU_PRICING_CATALOG=/absolute/path/pricing.json
-export GONGBU_LIVE_GEMINI_DEVELOPER_MAX_MINOR=4
+export GONGBU_LIVE_GEMINI_DEVELOPER_MAX_MINOR=16
 export GONGBU_LIVE_GEMINI_DEVELOPER_IMAGE_SIZE=4k
 export GONGBU_LIVE_GEMINI_DEVELOPER_CONFIRM=I_ACCEPT_GOOGLE_CHARGES
 export GONGBU_LIVE_GEMINI_DEVELOPER_PROMPT='Draw one small blue circle on white.'
