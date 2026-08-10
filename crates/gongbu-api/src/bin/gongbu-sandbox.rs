@@ -20,12 +20,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut args = env::args().skip(1).collect::<Vec<_>>();
-    let command = if args.first().is_some_and(|value| !value.starts_with('-')) {
-        args.remove(0)
-    } else {
-        "start".into()
-    };
+    let (command, args) = split_command(env::args().skip(1).collect());
     match command.as_str() {
         "start" => start(args).await,
         "submit" => submit(args).await,
@@ -38,6 +33,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         _ => Err(format!("unknown command: {command}").into()),
     }
+}
+
+fn split_command(mut args: Vec<String>) -> (String, Vec<String>) {
+    let command = match args.first().map(String::as_str) {
+        Some("--help" | "-h") => {
+            args.remove(0);
+            "help".into()
+        }
+        Some(value) if !value.starts_with('-') => args.remove(0),
+        _ => "start".into(),
+    };
+    (command, args)
 }
 
 async fn start(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -413,6 +420,18 @@ mod tests {
         assert_eq!(
             select_hubu_token_reference(BoundaryMode::Mock, None).unwrap(),
             "sandbox-hubu-authorization"
+        );
+    }
+
+    #[test]
+    fn top_level_help_is_not_treated_as_start() {
+        assert_eq!(
+            split_command(vec!["--help".into()]),
+            ("help".into(), Vec::new())
+        );
+        assert_eq!(
+            split_command(vec!["submit".into(), "--run-dir".into(), "run".into()]),
+            ("submit".into(), vec!["--run-dir".into(), "run".into()])
         );
     }
 }

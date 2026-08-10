@@ -106,7 +106,7 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
     println!("{}", serde_json::to_string_pretty(run.manifest())?);
     eprintln!("\nSandbox is running. Keep this terminal open.");
     eprintln!(
-        "Submit from another terminal with:\n  cargo run -p gongbu-api --bin gongbu-sandbox -- submit --run-dir {} --operation-key manual-1 --prompt 'Draw a blue circle'",
+        "Submit from another terminal with:\n  gongbu-sandbox submit --run-dir {} --operation-key manual-1 --prompt 'Draw a blue circle'",
         run.root().display()
     );
     eprintln!("Temporal UI: {}", run.manifest().temporal_ui_url);

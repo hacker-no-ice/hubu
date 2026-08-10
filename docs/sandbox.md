@@ -7,10 +7,23 @@ same operator workflow can exercise deterministic mocks or guarded real
 traffic.
 
 Install the Temporal CLI before the first managed run (`brew install temporal`
-on macOS). In terminal 1, start the sandbox:
+on macOS). Then install the sandbox CLI once from the repository root:
 
 ```sh
-cargo run -p gongbu-api --bin gongbu-sandbox -- start \
+cargo install --locked --force \
+  --path crates/gongbu-api \
+  --bin gongbu-sandbox
+```
+
+This places `gongbu-sandbox` in Cargo's binary directory, normally
+`$HOME/.cargo/bin`. Ensure that directory is on `PATH`. Re-run the install
+command after updating or switching the sandbox branch so the command matches
+the checked-out code.
+
+In terminal 1, start the sandbox:
+
+```sh
+gongbu-sandbox start \
   --config examples/sandbox.mock.json \
   --hubu-mode mock \
   --provider-mode mock
@@ -38,7 +51,7 @@ For interactive use, prefer CLI parameters because the selected modes remain
 visible in shell history and do not persist into later shell commands:
 
 ```sh
-cargo run -p gongbu-api --bin gongbu-sandbox -- start \
+gongbu-sandbox start \
   --config examples/sandbox.mock.json \
   --hubu-mode mock \
   --provider-mode mock
@@ -98,16 +111,16 @@ execution ID and a direct Temporal UI URL.
 After submitting, use these commands in every mode:
 
 ```sh
-cargo run -p gongbu-api --bin gongbu-sandbox -- status \
+gongbu-sandbox status \
   --run-dir "$RUN_DIR" \
   --execution-id "$EXECUTION_ID"
 
-cargo run -p gongbu-api --bin gongbu-sandbox -- artifacts \
+gongbu-sandbox artifacts \
   --run-dir "$RUN_DIR" \
   --execution-id "$EXECUTION_ID" \
   --download-dir /tmp/gongbu-artifacts
 
-cargo run -p gongbu-api --bin gongbu-sandbox -- inspect \
+gongbu-sandbox inspect \
   --run-dir "$RUN_DIR"
 ```
 
@@ -118,9 +131,9 @@ HUB-51 is implemented, the execution phases appear inside one coarse
 Replay by running the identical `submit` command with the same operation key,
 prompt, image size, and Hubu token reference. It must return the same execution
 ID. For each mocked boundary, `inspect` must show no additional provider
-invocation or Hubu financial mutation. If a real-provider request times out or enters
-`reconciliation_required`, do not submit a new operation key: the provider may
-already have accepted a billable request.
+invocation or Hubu financial mutation. If a real-provider request times out or
+enters `reconciliation_required`, do not submit a new operation key: the
+provider may already have accepted a billable request.
 
 Press Ctrl+C in the first terminal to stop. Add
 `--preserve /tmp/gongbu-sandbox-debug` to `start` to retain the database,
@@ -135,7 +148,7 @@ or spend.
 1. Start the sandbox:
 
    ```sh
-   cargo run -p gongbu-api --bin gongbu-sandbox -- start \
+   gongbu-sandbox start \
      --config examples/sandbox.mock.json \
      --hubu-mode mock \
      --provider-mode mock
@@ -144,7 +157,7 @@ or spend.
 2. Submit from a second terminal:
 
    ```sh
-   cargo run -p gongbu-api --bin gongbu-sandbox -- submit \
+   gongbu-sandbox submit \
      --run-dir "$RUN_DIR" \
      --operation-key mock-mock-1 \
      --prompt "Draw a blue circle"
@@ -293,7 +306,7 @@ Choose a ceiling at least as large as the selected pricing tier. This 4K example
 uses a 16-cent ceiling and the exact acknowledgement required by the sandbox:
 
 ```sh
-cargo run -p gongbu-api --bin gongbu-sandbox -- start \
+gongbu-sandbox start \
   --config /absolute/path/sandbox.mock-real.json \
   --hubu-mode mock \
   --provider-mode real \
@@ -305,7 +318,7 @@ cargo run -p gongbu-api --bin gongbu-sandbox -- start \
 From a second terminal:
 
 ```sh
-cargo run -p gongbu-api --bin gongbu-sandbox -- submit \
+gongbu-sandbox submit \
   --run-dir "$RUN_DIR" \
   --operation-key mock-real-gemini-4k-1 \
   --prompt "Draw one small blue circle on a white background" \
@@ -331,7 +344,7 @@ Use this mode to validate Hubu protocol traffic without provider spend.
 3. Submit with the isolated Hubu-issued spend authorization token ID:
 
    ```sh
-   cargo run -p gongbu-api --bin gongbu-sandbox -- submit \
+   gongbu-sandbox submit \
      --run-dir "$RUN_DIR" \
      --operation-key real-mock-1 \
      --prompt "Draw a blue circle" \
