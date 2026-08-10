@@ -45,7 +45,10 @@ cargo run -p gongbu-api --bin gongbu-sandbox -- start \
 ```
 
 The available CLI overrides are `--hubu-mode`, `--provider-mode`,
-`--max-spend-minor`, and `--live-spend-ack`.
+`--max-spend-minor`, and `--live-spend-ack`. The `submit` command accepts
+`--image-size 1k|2k|4k`; this value selects the matching schema-v2 pricing rule
+and is transmitted to adapters that support resolution selection. Real-Hubu
+submissions additionally require `--hubu-token-reference`.
 
 Environment variables remain useful for CI and automation:
 
@@ -57,54 +60,6 @@ Environment variables remain useful for CI and automation:
 Unknown JSON fields, unknown mode values, and mock modes combined with real
 endpoint or credential fields fail at startup. A `production` profile rejects
 either mock boundary.
-
-## Manual execution workflow
-
-Copy the temporary run directory from terminal 1 (the path ending in
-`gongbu-sandbox-...`). In terminal 2, submit a real API request. `submit` waits
-for a terminal state and prints both the execution ID and its Temporal UI URL:
-
-```sh
-cargo run -p gongbu-api --bin gongbu-sandbox -- submit \
-  --run-dir /tmp/gongbu-sandbox-EXAMPLE \
-  --operation-key manual-1 \
-  --prompt "Draw a blue circle"
-```
-
-Open the printed Temporal URL to inspect workflow and activity history. Query
-the aggregate, list and download artifacts, and inspect safe mock-side-effect
-summaries with:
-
-```sh
-cargo run -p gongbu-api --bin gongbu-sandbox -- status \
-  --run-dir /tmp/gongbu-sandbox-EXAMPLE \
-  --execution-id EXECUTION_ID
-
-cargo run -p gongbu-api --bin gongbu-sandbox -- artifacts \
-  --run-dir /tmp/gongbu-sandbox-EXAMPLE \
-  --execution-id EXECUTION_ID \
-  --download-dir /tmp/gongbu-artifacts
-
-cargo run -p gongbu-api --bin gongbu-sandbox -- inspect \
-  --run-dir /tmp/gongbu-sandbox-EXAMPLE
-```
-
-Run `submit` again with the same operation key and prompt to validate replay.
-It must return the same execution ID; in mock mode, `inspect` must still report
-one provider invocation and no duplicate financial mutation.
-
-Press Ctrl+C in terminal 1 when finished. The sandbox supervises and stops its
-managed Temporal child. Add `--preserve /tmp/gongbu-sandbox-debug` to `start`
-when you want to retain the database, artifacts, Temporal data, logs, manifest,
-and mock-side-effect summary after shutdown or startup failure.
-
-Automated tests are complementary: they validate the scenario matrix and
-failure invariants without requiring a manually running sandbox:
-
-```sh
-cargo test -p gongbu-api sandbox::
-```
-
 
 ## Mode matrix
 
@@ -131,6 +86,283 @@ already-running Temporal environment instead, add an explicit configuration:
     "namespace": "default"
   }
 }
+```
+
+## Common inspection and cleanup
+
+Every `start` command prints a temporary run directory ending in
+`gongbu-sandbox-...`. Copy that exact path into `RUN_DIR` in a second terminal.
+Every `submit` waits for a terminal or reconciliation state and prints the
+execution ID and a direct Temporal UI URL.
+
+After submitting, use these commands in every mode:
+
+```sh
+cargo run -p gongbu-api --bin gongbu-sandbox -- status \
+  --run-dir "$RUN_DIR" \
+  --execution-id "$EXECUTION_ID"
+
+cargo run -p gongbu-api --bin gongbu-sandbox -- artifacts \
+  --run-dir "$RUN_DIR" \
+  --execution-id "$EXECUTION_ID" \
+  --download-dir /tmp/gongbu-artifacts
+
+cargo run -p gongbu-api --bin gongbu-sandbox -- inspect \
+  --run-dir "$RUN_DIR"
+```
+
+Open the Temporal URL and inspect workflow status and activity attempts. Until
+HUB-51 is implemented, the execution phases appear inside one coarse
+`run_execution` activity.
+
+Replay by running the identical `submit` command with the same operation key,
+prompt, image size, and Hubu token reference. It must return the same execution
+ID. For each mocked boundary, `inspect` must show no additional provider
+invocation or Hubu financial mutation. If a real-provider request times out or enters
+`reconciliation_required`, do not submit a new operation key: the provider may
+already have accepted a billable request.
+
+Press Ctrl+C in the first terminal to stop. Add
+`--preserve /tmp/gongbu-sandbox-debug` to `start` to retain the database,
+artifacts, Temporal data, logs, manifest, and safe mock summaries. The preserve
+destination must not already exist.
+
+## Mock Hubu + mock provider
+
+Use this mode for a deterministic full-pipeline check with no external traffic
+or spend.
+
+1. Start the sandbox:
+
+   ```sh
+   cargo run -p gongbu-api --bin gongbu-sandbox -- start \
+     --config examples/sandbox.mock.json \
+     --hubu-mode mock \
+     --provider-mode mock
+   ```
+
+2. Submit from a second terminal:
+
+   ```sh
+   cargo run -p gongbu-api --bin gongbu-sandbox -- submit \
+     --run-dir "$RUN_DIR" \
+     --operation-key mock-mock-1 \
+     --prompt "Draw a blue circle"
+   ```
+
+3. Run the common inspection commands. Expect `succeeded`, one normalized
+   one-pixel PNG, one provider invocation, and two Hubu financial mutations
+   (claim and settle). Replay and confirm those counts do not increase.
+
+## Mock Hubu + real Gemini provider
+
+This mode sends real, potentially billable provider traffic while keeping Hubu
+accounting deterministic. The examples use the Gemini Developer API adapter.
+The spend ceiling guards Gongbu's frozen estimate; it is not a Google account
+billing cap. Verify current model availability and pricing before every run.
+
+### 1. Store the API key
+
+Store the key in macOS Keychain rather than JSON, environment variables, or
+shell history:
+
+```sh
+security add-generic-password -U \
+  -s gongbu.google-ai-studio \
+  -a local-e2e \
+  -w
+```
+
+### 2. Create a schema-v2 provider target
+
+Create `/absolute/path/gemini-targets.json` with exactly one active execution
+target. `gemini-3.1-flash-image` supports the 1K, 2K, and 4K selector example;
+if you select a different model, include only sizes that model supports.
+
+```json
+{
+  "schema_version": 2,
+  "provider_configs": [{
+    "provider_config_version": "google-gemini-developer-manual-v1",
+    "workload_type": "image_generation",
+    "provider": "google",
+    "adapter": "gemini_developer_image",
+    "model": "gemini-3.1-flash-image",
+    "secret_service": "gongbu.google-ai-studio",
+    "secret_account": "local-e2e",
+    "active": true,
+    "execution_enabled": true,
+    "settings": {
+      "type": "gemini_developer_image",
+      "config": {
+        "endpoint": "https://generativelanguage.googleapis.com",
+        "api_version": "v1beta",
+        "timeout_ms": 120000,
+        "max_retries": 0,
+        "headers": {}
+      }
+    }
+  }]
+}
+```
+
+### 3. Create a schema-v2 pricing catalog
+
+Create `/absolute/path/gemini-pricing.json`. The rates below are an example of
+exact rational USD-minor-unit rates; verify them against Google's current
+pricing and your billing arrangement before use. Gongbu rounds the authorization
+ceiling upward, so the corresponding maximum estimates are 7, 11, and 16 cents.
+
+```json
+{
+  "schema_version": 2,
+  "catalog_version": "gemini-image-manual-v1",
+  "rules": [
+    {
+      "rule_id": "gemini-image-1k",
+      "provider": "google",
+      "model": "gemini-3.1-flash-image",
+      "currency": "USD",
+      "selector": {"image_size": "1k"},
+      "components": [{
+        "unit": "image",
+        "rate_numerator_minor": 67,
+        "rate_denominator": 10
+      }]
+    },
+    {
+      "rule_id": "gemini-image-2k",
+      "provider": "google",
+      "model": "gemini-3.1-flash-image",
+      "currency": "USD",
+      "selector": {"image_size": "2k"},
+      "components": [{
+        "unit": "image",
+        "rate_numerator_minor": 101,
+        "rate_denominator": 10
+      }]
+    },
+    {
+      "rule_id": "gemini-image-4k",
+      "provider": "google",
+      "model": "gemini-3.1-flash-image",
+      "currency": "USD",
+      "selector": {"image_size": "4k"},
+      "components": [{
+        "unit": "image",
+        "rate_numerator_minor": 151,
+        "rate_denominator": 10
+      }]
+    }
+  ]
+}
+```
+
+### 4. Create the sandbox profile
+
+Create `/absolute/path/sandbox.mock-real.json`:
+
+```json
+{
+  "profile": "development",
+  "seed": 48,
+  "hubu": {
+    "mode": "mock",
+    "currency": "USD",
+    "maximum_authorization_minor": 100,
+    "authorization_expires_at": "2099-01-01T00:00:00Z"
+  },
+  "provider": {
+    "mode": "real",
+    "target": {
+      "workload_type": "image_generation",
+      "provider": "google",
+      "adapter": "gemini_developer_image",
+      "model": "gemini-3.1-flash-image"
+    },
+    "target_config": "/absolute/path/gemini-targets.json",
+    "pricing_catalog": "/absolute/path/gemini-pricing.json",
+    "credential_reference": "gongbu.google-ai-studio:local-e2e"
+  }
+}
+```
+
+### 5. Start and submit
+
+Choose a ceiling at least as large as the selected pricing tier. This 4K example
+uses a 16-cent ceiling and the exact acknowledgement required by the sandbox:
+
+```sh
+cargo run -p gongbu-api --bin gongbu-sandbox -- start \
+  --config /absolute/path/sandbox.mock-real.json \
+  --hubu-mode mock \
+  --provider-mode real \
+  --max-spend-minor 16 \
+  --live-spend-ack I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND \
+  --preserve /tmp/gongbu-gemini-manual
+```
+
+From a second terminal:
+
+```sh
+cargo run -p gongbu-api --bin gongbu-sandbox -- submit \
+  --run-dir "$RUN_DIR" \
+  --operation-key mock-real-gemini-4k-1 \
+  --prompt "Draw one small blue circle on a white background" \
+  --image-size 4k
+```
+
+Run the common inspection commands. Expect a non-fixture image artifact and
+mock Hubu claim and settle calls. Real-provider calls do not appear in the mock
+provider invocation count; correlate the execution with the provider account's
+usage/billing view. To test another size, choose a new operation key, pass the
+new `--image-size`, and ensure the spend ceiling covers that tier.
+
+## Real Hubu + mock provider
+
+Use this mode to validate Hubu protocol traffic without provider spend.
+
+1. Create a profile based on `examples/sandbox.mock.json`. Set `hubu.mode` to
+   `real`, add the loopback or allowlisted `endpoint`,
+   `scoped_credential_reference`, `isolated_test_account`, and the expected
+   `agent_id`; keep `provider.mode` as `mock`. Store the scoped Hubu credential
+   in Keychain under the referenced `service:account`.
+2. Start with `--hubu-mode real --provider-mode mock`.
+3. Submit with the isolated Hubu-issued spend authorization token ID:
+
+   ```sh
+   cargo run -p gongbu-api --bin gongbu-sandbox -- submit \
+     --run-dir "$RUN_DIR" \
+     --operation-key real-mock-1 \
+     --prompt "Draw a blue circle" \
+     --hubu-token-reference HUBU_TEST_SPEND_AUTH_TOKEN_ID
+   ```
+
+4. Run the common inspection commands and inspect Hubu's claim and settlement
+   records. The downloaded artifact is the deterministic one-pixel mock PNG.
+   Replay the identical submission and verify Hubu did not create a second
+   claim or settlement.
+
+## Real Hubu + real provider
+
+This is guarded release-level dogfood: both financial and provider traffic are
+real. Complete the real-Hubu setup above and the real-provider target, pricing,
+Keychain, and acknowledgement setup from the Gemini section.
+
+1. Create one combined profile with both boundaries set to `real`.
+2. Confirm the Hubu authorization amount, mock-independent provider ceiling,
+   pricing currency, provider account, model, and image size before startup.
+3. Start with both explicit real modes, the spend ceiling, acknowledgement, and
+   a new diagnostics destination.
+4. Submit with both `--image-size` and `--hubu-token-reference`.
+5. Inspect Temporal, Gongbu status/artifacts, Hubu claim/settlement state, and
+   provider billing. If any outcome is ambiguous, stop and reconcile the same
+   execution rather than creating a new operation key.
+
+Run focused automated sandbox tests separately; they never opt into live spend:
+
+```sh
+cargo test -p gongbu-api sandbox::
 ```
 
 ## Real-boundary gates

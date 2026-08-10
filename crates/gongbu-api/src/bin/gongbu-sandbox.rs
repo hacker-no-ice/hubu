@@ -77,20 +77,25 @@ async fn submit(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Sen
     let run_dir = args.required_path("--run-dir")?;
     let operation_key = args.required("--operation-key")?;
     let prompt = args.required("--prompt")?;
+    let image_size = args.optional("--image-size")?;
+    let hubu_token_reference = args.optional("--hubu-token-reference")?;
     args.finish()?;
     let context = OperatorContext::load(&run_dir)?;
     let target = &context.manifest.provider_target;
+    let input = submission_input(prompt, image_size)?;
+    let hubu_token_reference =
+        select_hubu_token_reference(context.manifest.hubu_mode, hubu_token_reference)?;
     let request = json!({
         "schema_version": 1,
         "operation_key": operation_key,
         "hubu_authorization_id": format!("sandbox-auth-{operation_key}"),
         "hubu_claim_id": null,
-        "hubu_token_reference": "sandbox-hubu-authorization",
+        "hubu_token_reference": hubu_token_reference,
         "authorization": {
             "amount_minor": context.manifest.authorization_amount_minor,
             "currency": context.manifest.authorization_currency,
         },
-        "input": {"prompt": prompt, "image_count": 1},
+        "input": input,
         "input_schema_version": 1,
         "workload_type": target.workload_type,
         "provider": target.provider,
@@ -117,6 +122,34 @@ async fn submit(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Sen
     let final_status = poll_execution(&client, &context, &execution_id).await?;
     println!("{}", serde_json::to_string_pretty(&final_status)?);
     Ok(())
+}
+
+fn select_hubu_token_reference(
+    mode: BoundaryMode,
+    reference: Option<String>,
+) -> Result<String, String> {
+    match (mode, reference) {
+        (BoundaryMode::Real, None) => {
+            Err("--hubu-token-reference is required with real Hubu".into())
+        }
+        (_, Some(value)) if value.trim().is_empty() => {
+            Err("--hubu-token-reference cannot be empty".into())
+        }
+        (_, Some(value)) => Ok(value),
+        (BoundaryMode::Mock, None) => Ok("sandbox-hubu-authorization".into()),
+    }
+}
+
+fn submission_input(prompt: String, image_size: Option<String>) -> Result<Value, String> {
+    let mut input = json!({"prompt": prompt, "image_count": 1});
+    if let Some(image_size) = image_size {
+        let image_size = image_size.trim().to_ascii_lowercase();
+        if !matches!(image_size.as_str(), "1k" | "2k" | "4k") {
+            return Err("--image-size must be 1k, 2k, or 4k".into());
+        }
+        input["image_size"] = Value::String(image_size);
+    }
+    Ok(input)
 }
 
 async fn status(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -321,9 +354,65 @@ fn print_help() {
     println!(
         "gongbu-sandbox commands:\n\
          \n  start --config PROFILE [--hubu-mode mock|real] [--provider-mode mock|real] [--preserve DIR]\
-         \n  submit --run-dir DIR --operation-key KEY --prompt TEXT\
+         \n  submit --run-dir DIR --operation-key KEY --prompt TEXT [--image-size 1k|2k|4k] [--hubu-token-reference ID]\
          \n  status --run-dir DIR --execution-id ID\
          \n  artifacts --run-dir DIR --execution-id ID [--download-dir DIR]\
          \n  inspect --run-dir DIR"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gongbu_api::provider_contract::{NormalizedRequest, PricingCatalog};
+
+    #[test]
+    fn submission_input_supports_v2_image_size_selectors() {
+        assert_eq!(
+            submission_input("circle".into(), Some(" 2K ".into())).unwrap(),
+            json!({"prompt":"circle", "image_count":1, "image_size":"2k"})
+        );
+        assert_eq!(
+            submission_input("circle".into(), None).unwrap(),
+            json!({"prompt":"circle", "image_count":1})
+        );
+        assert_eq!(
+            submission_input("circle".into(), Some("8k".into())).unwrap_err(),
+            "--image-size must be 1k, 2k, or 4k"
+        );
+    }
+
+    #[test]
+    fn submitted_image_size_selects_the_matching_v2_price() {
+        let input = submission_input("circle".into(), Some("2k".into())).unwrap();
+        let catalog = PricingCatalog::from_json(
+            br#"{"schema_version":2,"catalog_version":"manual","rules":[{"rule_id":"1k","provider":"google","model":"image","currency":"USD","selector":{"image_size":"1k"},"components":[{"unit":"image","rate_numerator_minor":67,"rate_denominator":10}]},{"rule_id":"2k","provider":"google","model":"image","currency":"USD","selector":{"image_size":"2k"},"components":[{"unit":"image","rate_numerator_minor":101,"rate_denominator":10}]}]}"#,
+        )
+        .unwrap();
+        let snapshot = catalog
+            .snapshot(&NormalizedRequest {
+                provider: "google".into(),
+                model: "image".into(),
+                image_count: input["image_count"].as_i64(),
+                input_tokens: None,
+                max_output_tokens: None,
+                image_size: input["image_size"].as_str().map(str::to_owned),
+            })
+            .unwrap();
+
+        assert_eq!(snapshot.selector.unwrap().image_size, "2k");
+        assert_eq!(snapshot.estimated_amount_minor, 11);
+    }
+
+    #[test]
+    fn real_hubu_requires_an_explicit_token_reference() {
+        assert_eq!(
+            select_hubu_token_reference(BoundaryMode::Real, None).unwrap_err(),
+            "--hubu-token-reference is required with real Hubu"
+        );
+        assert_eq!(
+            select_hubu_token_reference(BoundaryMode::Mock, None).unwrap(),
+            "sandbox-hubu-authorization"
+        );
+    }
 }
