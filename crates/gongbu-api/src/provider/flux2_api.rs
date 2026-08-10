@@ -7,10 +7,11 @@
 
 use super::{
     contract::{
-        AdapterCapabilities, AdapterOutcome, ContractError, NormalizedArtifact, NormalizedRequest,
-        NormalizedUsage, OutcomeKind, ProviderAdapter, Result, RetryPolicy,
+        canonical_image_media_type, AdapterCapabilities, AdapterOutcome, ContractError,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutcomeKind, ProviderAdapter,
+        Result, RetryPolicy,
     },
-    targets::{Flux2ApiConfig, ProviderConfigVersion},
+    targets::{valid_artifact_hosts, Flux2ApiConfig, ProviderConfigVersion},
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
 use reqwest::{
@@ -137,9 +138,10 @@ impl ReqwestFlux2Transport {
                 body: Value::Null,
             });
         }
-        let bytes = read_bounded(&mut response, MAX_RESPONSE_BYTES).map_err(|_| {
-            Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
-        })?;
+        let bytes =
+            read_provider_response_bounded(&mut response, MAX_RESPONSE_BYTES).map_err(|_| {
+                Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
+            })?;
         let body = serde_json::from_slice(&bytes).map_err(|_| {
             Box::new(HttpFailure::UnknownOutcome) as Box<dyn StdError + Send + Sync>
         })?;
@@ -205,8 +207,22 @@ impl Flux2Transport for ReqwestFlux2Transport {
         if !response.status().is_success() {
             return Err(Box::new(HttpFailure::UnknownOutcome));
         }
-        read_bounded(&mut response, MAX_ARTIFACT_BYTES)
+        read_artifact_response_bounded(&mut response, MAX_ARTIFACT_BYTES)
     }
+}
+
+fn read_provider_response_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+    read_bounded(reader, limit)
+}
+
+fn read_artifact_response_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+    read_bounded(reader, limit)
 }
 
 fn read_bounded(
@@ -253,6 +269,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             || config.timeout_ms == 0
             || config.poll_interval_ms == 0
             || config.max_retries != 0
+            || !valid_artifact_hosts(&config.approved_artifact_hosts, true)
         {
             return Err(provider_error("config_invalid"));
         }
@@ -412,22 +429,17 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         }
         let operation_id =
             operation_id.or_else(|| string_at(&current, &["id", "operation_id", "operationId"]));
-        let artifact_url = current
-            .pointer("/result/sample")
-            .or_else(|| current.pointer("/result/image/url"))
-            .or_else(|| current.get("sample"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                with_evidence(
-                    if current.get("result").is_some() {
-                        "missing_image"
-                    } else {
-                        "malformed_response"
-                    },
-                    request_id.clone(),
-                    operation_id.clone(),
-                )
-            })?;
+        let artifact_url = artifact_url(&current).ok_or_else(|| {
+            with_evidence(
+                if current.get("result").is_some() {
+                    "missing_image"
+                } else {
+                    "malformed_response"
+                },
+                request_id.clone(),
+                operation_id.clone(),
+            )
+        })?;
         let artifact_url = Url::parse(artifact_url).map_err(|_| {
             with_evidence(
                 "artifact_policy_failure",
@@ -475,12 +487,13 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 operation_id,
             ));
         }
-        let media_type =
-            if artifact_url.path().ends_with(".jpg") || artifact_url.path().ends_with(".jpeg") {
-                "image/jpeg"
-            } else {
-                "image/png"
-            };
+        let media_type = canonical_image_media_type(None, &bytes).map_err(|_| {
+            with_evidence(
+                "artifact_policy_failure",
+                request_id.clone(),
+                operation_id.clone(),
+            )
+        })?;
         let provider_amount_minor = current
             .pointer("/result/cost")
             .and_then(Value::as_f64)
@@ -592,11 +605,17 @@ fn status(body: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(|s| s.to_ascii_lowercase())
 }
+fn artifact_url(body: &Value) -> Option<&str> {
+    body.pointer("/result/sample")
+        .or_else(|| body.pointer("/result/image/url"))
+        .or_else(|| body.get("sample"))
+        .and_then(Value::as_str)
+}
 fn is_ready(body: &Value) -> bool {
     matches!(
         status(body).as_deref(),
         Some("ready" | "succeeded" | "completed")
-    ) || body.pointer("/result/sample").is_some()
+    ) || artifact_url(body).is_some()
 }
 fn is_failed(body: &Value) -> bool {
     matches!(
@@ -636,8 +655,26 @@ fn classify_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secrets::secret_for_test;
-    use std::sync::{Arc, Mutex};
+    use crate::{
+        provider::conformance::{
+            assert_adapter_conformance, assert_body_and_artifact_bounds, assert_redirect_blocked,
+            Case, Observation,
+        },
+        secrets::secret_for_test,
+    };
+    use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+    use std::{
+        io::Cursor,
+        sync::{Arc, Mutex},
+    };
+
+    fn png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])))
+            .write_to(&mut Cursor::new(&mut bytes), ImageOutputFormat::Png)
+            .unwrap();
+        bytes
+    }
 
     #[derive(Clone)]
     struct Fixture {
@@ -739,7 +776,7 @@ mod tests {
                 Fixture {
                     submit: submit.clone(),
                     polls: Arc::new(Mutex::new(polls)),
-                    artifact: vec![1, 2, 3],
+                    artifact: png(),
                     fail_submit: None,
                     fail_poll: None,
                     submit_body: None,
@@ -757,6 +794,108 @@ mod tests {
             }
             other => panic!("{other}"),
         }
+    }
+
+    #[test]
+    fn cross_adapter_conformance_matrix() {
+        assert_body_and_artifact_bounds(
+            |reader, limit| read_provider_response_bounded(reader, limit).is_err(),
+            |reader, limit| read_artifact_response_bounded(reader, limit).is_err(),
+        );
+        assert_adapter_conformance(|case| {
+            if matches!(case, Case::UnsafeRetry) {
+                let calls = Arc::new(Mutex::new(0));
+                let mut retrying = config();
+                retrying.max_retries = 1;
+                let result = Flux2ApiAdapter::new(
+                    retrying,
+                    "flux-2-pro".into(),
+                    Fixture {
+                        submit: calls.clone(),
+                        polls: Arc::new(Mutex::new(Vec::new())),
+                        artifact: Vec::new(),
+                        fail_submit: None,
+                        fail_poll: None,
+                        submit_body: None,
+                        expected_options: None,
+                    },
+                );
+                let error = match result {
+                    Ok(_) => panic!("retrying adapter must be rejected"),
+                    Err(error) => error,
+                };
+                return Observation {
+                    result: Err(error),
+                    submissions: *calls.lock().unwrap(),
+                };
+            }
+            let (adapter, calls) = match case {
+                Case::Rejection => fixture(vec![json!({"id":"op-1","status":"Rejected"})]),
+                Case::AmbiguousPostSend => {
+                    let calls = Arc::new(Mutex::new(0));
+                    (
+                        Flux2ApiAdapter::new(
+                            config(),
+                            "flux-2-pro".into(),
+                            Fixture {
+                                submit: calls.clone(),
+                                polls: Arc::new(Mutex::new(vec![])),
+                                artifact: Vec::new(),
+                                fail_submit: Some("secret-canary".into()),
+                                fail_poll: None,
+                                submit_body: None,
+                                expected_options: None,
+                            },
+                        )
+                        .unwrap(),
+                        calls,
+                    )
+                }
+                Case::EvidenceRetention => {
+                    let (mut adapter, calls) = fixture(vec![
+                        json!({"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}}),
+                    ]);
+                    adapter.transport.artifact = vec![0];
+                    (adapter, calls)
+                }
+                Case::HostPolicy => fixture(vec![
+                    json!({"id":"op-1","status":"Ready","result":{"sample":"https://evil.example/out.png"}}),
+                ]),
+                Case::ArtifactBound => {
+                    let (mut adapter, calls) = fixture(vec![
+                        json!({"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}}),
+                    ]);
+                    adapter.transport.artifact = vec![0; MAX_ARTIFACT_BYTES + 1];
+                    (adapter, calls)
+                }
+                Case::UnsafeRetry => unreachable!(),
+                Case::InvalidRequest => fixture(Vec::new()),
+            };
+            let mut conformance_request = request();
+            if matches!(case, Case::InvalidRequest) {
+                conformance_request.image_count = Some(2);
+            }
+            let result = adapter.invoke(
+                &conformance_request,
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                (!matches!(case, Case::UnsafeRetry)).then_some("opaque-key"),
+            );
+            let submissions = *calls.lock().unwrap();
+            Observation {
+                result,
+                submissions,
+            }
+        });
+    }
+
+    #[test]
+    fn conformance_artifact_redirect_is_blocked() {
+        assert_redirect_blocked(|url| {
+            ReqwestFlux2Transport
+                .fetch_artifact(url, Duration::from_secs(2))
+                .is_err()
+        });
     }
 
     #[test]
@@ -778,7 +917,66 @@ mod tests {
         assert_eq!(outcome.provider_request_id.as_deref(), Some("req-1"));
         assert_eq!(outcome.provider_amount_minor, None);
         assert_eq!(outcome.usage.unwrap().images, Some(1));
-        assert_eq!(outcome.artifacts[0].bytes, vec![1, 2, 3]);
+        assert_eq!(outcome.artifacts[0].bytes, png());
+    }
+
+    #[test]
+    fn synchronous_readiness_matches_every_supported_artifact_result_shape() {
+        for body in [
+            json!({"id":"op-1","result":{"sample":"https://cdn.bfl.ai/out.png"}}),
+            json!({"id":"op-1","result":{"image":{"url":"https://cdn.bfl.ai/out.png"}}}),
+            json!({"id":"op-1","sample":"https://cdn.bfl.ai/out.png"}),
+        ] {
+            let submits = Arc::new(Mutex::new(0));
+            let adapter = Flux2ApiAdapter::new(
+                config(),
+                "flux-2-pro".into(),
+                Fixture {
+                    submit: submits.clone(),
+                    polls: Arc::new(Mutex::new(vec![])),
+                    artifact: png(),
+                    fail_submit: None,
+                    fail_poll: None,
+                    submit_body: Some(body),
+                    expected_options: None,
+                },
+            )
+            .unwrap();
+            let outcome = adapter
+                .invoke(
+                    &request(),
+                    &json!({"prompt":"cat"}),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap();
+            assert_eq!(outcome.artifacts[0].media_type, "image/png");
+            assert_eq!(*submits.lock().unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn invalid_artifact_allowlist_rejects_adapter_before_submission() {
+        for hosts in [vec![], vec!["https://cdn.bfl.ai".into()]] {
+            let submits = Arc::new(Mutex::new(0));
+            let mut invalid = config();
+            invalid.approved_artifact_hosts = hosts;
+            assert!(Flux2ApiAdapter::new(
+                invalid,
+                "flux-2-pro".into(),
+                Fixture {
+                    submit: submits.clone(),
+                    polls: Arc::new(Mutex::new(vec![])),
+                    artifact: png(),
+                    fail_submit: None,
+                    fail_poll: None,
+                    submit_body: None,
+                    expected_options: None,
+                }
+            )
+            .is_err());
+            assert_eq!(*submits.lock().unwrap(), 0);
+        }
     }
     #[test]
     fn maps_v1_options_and_rejects_terminal_submission_without_polling() {
@@ -963,14 +1161,9 @@ mod tests {
             execution::{CreateExecutionParams, HubuTokenReference, Repository},
             provider::contract::PricingCatalog,
         };
-        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
-        use std::io::Cursor;
         use tempfile::tempdir;
 
-        let mut png = Vec::new();
-        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])))
-            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
-            .unwrap();
+        let png = png();
         let submits = Arc::new(Mutex::new(0));
         let adapter = Flux2ApiAdapter::new(
             config(),

@@ -6,10 +6,11 @@
 
 use super::{
     contract::{
-        AdapterCapabilities, AdapterOutcome, ContractError, NormalizedArtifact, NormalizedRequest,
-        NormalizedUsage, OutcomeKind, ProviderAdapter, Result, RetryPolicy,
+        canonical_image_media_type, AdapterCapabilities, AdapterOutcome, ContractError,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutcomeKind, ProviderAdapter,
+        Result, RetryPolicy,
     },
-    targets::{IdeogramImageConfig, ProviderConfigVersion},
+    targets::{valid_artifact_hosts, IdeogramImageConfig, ProviderConfigVersion},
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
 use reqwest::{
@@ -127,12 +128,13 @@ impl IdeogramTransport for ReqwestIdeogramTransport {
                 body: Value::Null,
             });
         }
-        let bytes = read_bounded(&mut response, MAX_PROVIDER_RESPONSE_BYTES).map_err(|_| {
-            Box::new(HttpFailure::UnknownOutcome {
-                request_id: request_id.clone(),
-                operation_id: operation_id.clone(),
-            }) as Box<dyn StdError + Send + Sync>
-        })?;
+        let bytes = read_provider_response_bounded(&mut response, MAX_PROVIDER_RESPONSE_BYTES)
+            .map_err(|_| {
+                Box::new(HttpFailure::UnknownOutcome {
+                    request_id: request_id.clone(),
+                    operation_id: operation_id.clone(),
+                }) as Box<dyn StdError + Send + Sync>
+            })?;
         let body = serde_json::from_slice(&bytes).map_err(|_| {
             Box::new(HttpFailure::UnknownOutcome {
                 request_id: request_id.clone(),
@@ -164,8 +166,22 @@ impl IdeogramTransport for ReqwestIdeogramTransport {
                 operation_id: None,
             }));
         }
-        read_bounded(&mut response, MAX_ARTIFACT_BYTES)
+        read_artifact_response_bounded(&mut response, MAX_ARTIFACT_BYTES)
     }
+}
+
+fn read_provider_response_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+    read_bounded(reader, limit)
+}
+
+fn read_artifact_response_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+    read_bounded(reader, limit)
 }
 
 fn read_bounded(
@@ -226,7 +242,7 @@ impl<T: IdeogramTransport> IdeogramImageAdapter<T> {
         })?;
         if model.trim().is_empty()
             || config.timeout_ms == 0
-            || config.approved_artifact_hosts.is_empty()
+            || !valid_artifact_hosts(&config.approved_artifact_hosts, true)
         {
             return Err(provider_error("config_invalid"));
         }
@@ -362,13 +378,15 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
                 let _ = classify_transport(error, secret, true);
                 with_evidence("artifact_policy_failure", &request_id, &operation_id)
             })?;
-        let media_type = if url.path().to_ascii_lowercase().ends_with(".jpg")
-            || url.path().to_ascii_lowercase().ends_with(".jpeg")
-        {
-            "image/jpeg"
-        } else {
-            "image/png"
-        };
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(with_evidence(
+                "artifact_policy_failure",
+                &request_id,
+                &operation_id,
+            ));
+        }
+        let media_type = canonical_image_media_type(None, &bytes)
+            .map_err(|_| with_evidence("artifact_policy_failure", &request_id, &operation_id))?;
         Ok(AdapterOutcome {
             outcome: OutcomeKind::Succeeded,
             usage: Some(NormalizedUsage {
@@ -459,7 +477,13 @@ fn provider_error(code: &str) -> ContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secrets::secret_for_test;
+    use crate::{
+        provider::conformance::{
+            assert_adapter_conformance, assert_body_and_artifact_bounds, assert_redirect_blocked,
+            Case, Observation,
+        },
+        secrets::secret_for_test,
+    };
     use image::{DynamicImage, ImageOutputFormat, RgbaImage};
     use std::{
         io::Cursor,
@@ -570,6 +594,64 @@ mod tests {
             IdeogramImageAdapter::new(config(), "ideogram-v3".into(), transport).unwrap(),
             calls,
         )
+    }
+
+    #[test]
+    fn cross_adapter_conformance_matrix() {
+        assert_body_and_artifact_bounds(
+            |reader, limit| read_provider_response_bounded(reader, limit).is_err(),
+            |reader, limit| read_artifact_response_bounded(reader, limit).is_err(),
+        );
+        assert_adapter_conformance(|case| {
+            let (adapter, calls) = match case {
+                Case::Rejection => adapter(json!({}), 403, Ok(Vec::new())),
+                Case::AmbiguousPostSend => {
+                    let (adapter, calls) = adapter(json!({}), 200, Ok(Vec::new()));
+                    *adapter.transport.response.lock().unwrap() = Some(Err("timeout".into()));
+                    (adapter, calls)
+                }
+                Case::EvidenceRetention => adapter(
+                    json!({"data":[{"url":"https://ideogram.ai/out.png"}]}),
+                    200,
+                    Err("secret-canary artifact error".into()),
+                ),
+                Case::HostPolicy => adapter(
+                    json!({"data":[{"url":"https://evil.example/out.png"}]}),
+                    200,
+                    Ok(png()),
+                ),
+                Case::ArtifactBound => adapter(
+                    json!({"data":[{"url":"https://ideogram.ai/out.png"}]}),
+                    200,
+                    Ok(vec![0; MAX_ARTIFACT_BYTES + 1]),
+                ),
+                Case::UnsafeRetry | Case::InvalidRequest => adapter(json!({}), 200, Ok(Vec::new())),
+            };
+            let mut conformance_request = request();
+            if matches!(case, Case::InvalidRequest) {
+                conformance_request.image_count = Some(2);
+            }
+            let result = adapter.invoke(
+                &conformance_request,
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                matches!(case, Case::UnsafeRetry).then_some("unsafe-key"),
+            );
+            let submissions = *calls.lock().unwrap();
+            Observation {
+                result,
+                submissions,
+            }
+        });
+    }
+
+    #[test]
+    fn conformance_artifact_redirect_is_blocked() {
+        assert_redirect_blocked(|url| {
+            ReqwestIdeogramTransport
+                .fetch_artifact(url, Duration::from_secs(2))
+                .is_err()
+        });
     }
 
     #[test]

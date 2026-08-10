@@ -1,4 +1,5 @@
 use crate::secrets::{SecretError, SecretReference};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -209,6 +210,7 @@ impl ProviderTargetConfig {
                     .any(|value| value.trim().is_empty())
                     || gemini.timeout_ms == 0
                     || gemini.max_retries != 0
+                    || !valid_artifact_hosts(&gemini.approved_artifact_hosts, false)
                     || gemini.headers.iter().any(|(name, value)| {
                         name.trim().is_empty()
                             || value.contains(['\r', '\n'])
@@ -253,6 +255,7 @@ impl ProviderTargetConfig {
                     || flux.timeout_ms == 0
                     || flux.poll_interval_ms == 0
                     || flux.max_retries != 0
+                    || !valid_artifact_hosts(&flux.approved_artifact_hosts, true)
                     || flux.idempotency_header.as_ref().is_some_and(|idempotency| {
                         idempotency.eq_ignore_ascii_case("x-key")
                             || idempotency.eq_ignore_ascii_case("authorization")
@@ -284,7 +287,7 @@ impl ProviderTargetConfig {
                         .any(|value| value.trim().is_empty())
                     || ideogram.timeout_ms == 0
                     || ideogram.max_retries != 0
-                    || ideogram.approved_artifact_hosts.is_empty()
+                    || !valid_artifact_hosts(&ideogram.approved_artifact_hosts, true)
                     || ideogram.headers.iter().any(|(name, value)| {
                         name.trim().is_empty()
                             || value.contains(['\r', '\n'])
@@ -336,6 +339,29 @@ impl ProviderTargetConfig {
             _ => Err(Error::Ambiguous),
         }
     }
+}
+
+pub(crate) fn valid_artifact_hosts(hosts: &[String], required: bool) -> bool {
+    if required && hosts.is_empty() {
+        return false;
+    }
+    let mut unique = BTreeSet::new();
+    hosts.iter().all(|host| {
+        if host.is_empty() || host.trim() != host || !unique.insert(host) {
+            return false;
+        }
+        let Ok(url) = Url::parse(&format!("https://{host}/")) else {
+            return false;
+        };
+        url.scheme() == "https"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_none()
+            && url.host_str() == Some(host.as_str())
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
 }
 
 impl ProviderConfigVersion {
@@ -479,6 +505,31 @@ mod tests {
         flux.max_retries = 0;
         flux.idempotency_header = Some("X-CLIENT".into());
         assert!(idempotency_collision.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_empty_or_invalid_flux_artifact_hosts_during_config_validation() {
+        let valid = parse(
+            r#"{"provider_configs":[{"provider_config_version":"flux-pcv-1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"local","flux2_api":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":30000,"poll_interval_ms":500,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["cdn.bfl.ai"]}}]}"#,
+        );
+        for hosts in [
+            vec![],
+            vec!["".into()],
+            vec![" cdn.bfl.ai".into()],
+            vec!["https://cdn.bfl.ai".into()],
+            vec!["cdn.bfl.ai/path".into()],
+            vec!["cdn.bfl.ai:443".into()],
+            vec!["cdn.bfl.ai?next=evil.example".into()],
+            vec!["cdn.bfl.ai".into(), "cdn.bfl.ai".into()],
+        ] {
+            let mut invalid = valid.clone();
+            invalid.provider_configs[0]
+                .flux2_api
+                .as_mut()
+                .unwrap()
+                .approved_artifact_hosts = hosts;
+            assert!(matches!(invalid.validate(), Err(Error::EmptyIdentifier)));
+        }
     }
 
     #[test]
