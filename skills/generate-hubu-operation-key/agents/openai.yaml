@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hubu Operation Keys"
+  short_description: "Generate and reuse stable Hubu operation keys"
+  default_prompt: "Use $generate-hubu-operation-key to create and safely reuse an operation key for this spend workflow."
