@@ -24,6 +24,8 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
 - [benchmarking.md](benchmarking.md): local benchmark usage and current MVP
   performance notes
 - [demo.md](demo.md): scripted local walkthrough and CLI reference
+- [releases.md](releases.md): immutable prereleases, stable promotion,
+  supported targets, verification, rollback, and retention
 
 ## Working Notes
 

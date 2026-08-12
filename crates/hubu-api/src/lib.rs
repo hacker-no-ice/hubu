@@ -17,6 +17,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Months, Utc};
 use hubu_common::{
+    build::{build_info, EXECUTOR_CONTRACT},
     ids::{
         AgentId, AgentSessionId, BudgetId, SpendAuthTokenId, SpendExecutorClaimId,
         SpendingTargetId, UserId,
@@ -1147,6 +1148,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         .map(String::as_str);
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
+        ("GET", "/version") => serde_json::to_value(build_info()).map_err(Into::into),
         ("GET", "/registration/guidance")
         | ("GET", "/.well-known/hubu-agent-registration.json") => Ok(registration_guidance()),
         ("GET", "/user") => current_user(state).map(to_json),
@@ -1221,6 +1223,7 @@ fn is_public_route(request: &HttpRequest) -> bool {
     matches!(
         (request.method.as_str(), request.path.as_str()),
         ("GET", "/health")
+            | ("GET", "/version")
             | ("GET", "/registration/guidance")
             | ("GET", "/.well-known/hubu-agent-registration.json")
             | ("GET", "/spend/executor/guidance")
@@ -1302,7 +1305,7 @@ fn authenticate_reconciliation_capability(
 
 fn spend_executor_guidance(state: &ServerState) -> Value {
     json!({
-        "protocol_version": "hubu-spend-executor-v4",
+        "protocol_version": EXECUTOR_CONTRACT,
         "role_boundary": {
             "hubu": [
                 "register agents and owners",
@@ -4177,6 +4180,27 @@ mod tests {
                 .iter()
                 .any(|field| field == "identity_fingerprint"));
         }
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn version_metadata_is_public_and_complete() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-version-info-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+
+        let response = route(public_request("GET", "/version"), &state);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body["product_version"],
+            build_info().product_version
+        );
+        assert_eq!(response.body["executor_contract"], "hubu-spend-executor-v4");
+        assert!(response.body["source_commit"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
 
         std::fs::remove_file(path).ok();
     }

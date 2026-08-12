@@ -244,6 +244,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "hubu-common",
  "hubu-core",
  "serde",
  "serde_json",

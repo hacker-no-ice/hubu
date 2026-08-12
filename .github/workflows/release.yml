@@ -1,0 +1,244 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable SemVer tag (for example, v0.1.0)
+        required: true
+        type: string
+      source_commit:
+        description: Exact 40-character commit SHA from main to promote
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve:
+    name: Resolve immutable release identity
+    runs-on: ubuntu-latest
+    outputs:
+      source_commit: ${{ steps.release.outputs.source_commit }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: release
+        name: Validate version and source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_COMMIT: ${{ github.sha }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ ! "${INPUT_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Stable version must match vMAJOR.MINOR.PATCH" >&2
+              exit 1
+            fi
+            if [[ ! "${INPUT_SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "source_commit must be an exact 40-character lowercase commit SHA" >&2
+              exit 1
+            fi
+            git fetch origin main
+            git cat-file -e "${INPUT_SOURCE_COMMIT}^{commit}"
+            git merge-base --is-ancestor "${INPUT_SOURCE_COMMIT}" origin/main
+            source_commit="${INPUT_SOURCE_COMMIT}"
+            version="${INPUT_VERSION}"
+            tag="${INPUT_VERSION}"
+            prerelease=false
+          else
+            source_commit="${PUSH_COMMIT}"
+            short_commit="${source_commit:0:12}"
+            base_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "hubu-api") | .version')"
+            version="${base_version}-main.${short_commit}"
+            tag="main-${source_commit}"
+            prerelease=true
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Refusing to mutate existing release tag ${tag}" >&2
+            exit 1
+          fi
+
+          {
+            echo "source_commit=${source_commit}"
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "prerelease=${prerelease}"
+          } >> "${GITHUB_OUTPUT}"
+
+  checks:
+    name: Required release checks
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+      - name: Run core integration flow
+        run: ./scripts/integration-core-flow.sh
+
+      - name: Verify locked release build
+        env:
+          HUBU_PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
+          HUBU_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+        run: cargo build --release --locked --bin hubu --bin hubu-server
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [resolve, checks]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+
+      - name: Build locked release binaries
+        env:
+          HUBU_PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
+          HUBU_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+        run: cargo build --release --locked --target "${{ matrix.target }}" --bin hubu --bin hubu-server
+
+      - name: Package binaries and provenance
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          TARGET: ${{ matrix.target }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          package="hubu-${RELEASE_VERSION}-${TARGET}"
+          mkdir -p "dist/${package}"
+          cp "target/${TARGET}/release/hubu" "dist/${package}/hubu"
+          cp "target/${TARGET}/release/hubu-server" "dist/${package}/hubu-server"
+          jq -n \
+            --arg product_version "${RELEASE_VERSION}" \
+            --arg source_commit "${SOURCE_COMMIT}" \
+            --arg executor_contract "hubu-spend-executor-v4" \
+            --arg target "${TARGET}" \
+            --arg repository "${REPOSITORY}" \
+            --arg workflow_run "https://github.com/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}" \
+            '{product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, repository: $repository, workflow_run: $workflow_run, dependencies: "Cargo.lock"}' \
+            > "dist/${package}/PROVENANCE.json"
+          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hubu-package-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish immutable GitHub release
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ needs.resolve.outputs.tag }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hubu-package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        run: cd dist && sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          prerelease_flag=()
+          channel_note="Stable release. Consumers may pin this exact tag and checksum."
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            prerelease_flag+=(--prerelease)
+            channel_note="Commit-addressed canary prerelease. Pin this exact tag and checksum; do not depend on a rolling newest build."
+          fi
+          notes=$(printf 'Hubu product version: `%s`\n\nSource commit: `%s`\n\n%s' "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${channel_note}")
+          gh release create "${RELEASE_TAG}" \
+            dist/*.tar.gz dist/SHA256SUMS \
+            --target "${SOURCE_COMMIT}" \
+            --title "Hubu ${RELEASE_VERSION}" \
+            --notes "${notes}" \
+            "${prerelease_flag[@]}"
+
+  smoke:
+    name: Smoke ${{ matrix.os }} release
+    needs: [resolve, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+
+      - name: Download, verify, and start published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          ./scripts/release-smoke-test.sh
+          "${{ needs.resolve.outputs.tag }}"
+          "hubu-${{ needs.resolve.outputs.version }}-${{ matrix.target }}.tar.gz"
+          "${{ needs.resolve.outputs.version }}"
+          "${{ needs.resolve.outputs.source_commit }}"
