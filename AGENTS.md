@@ -1,5 +1,19 @@
 # Gongbu Agent Conventions
 
+## GitHub operations
+
+For GitHub remote operations such as creating or updating pull requests,
+reading PR metadata, requesting reviews, or adding PR comments:
+
+- Prefer the GitHub connector / GitHub app tools.
+- Do not use `gh` CLI for GitHub API operations.
+- Local `git` commands are fine for status, diff, commit, branch, fetch, and push.
+- When publishing a PR:
+  1. verify and commit locally with git;
+  2. push the branch with git;
+  3. create/update the PR using the GitHub connector.
+- Do not ask me to re-authenticate `gh` if the GitHub connector is available.
+
 ## Pull Request Review Comments
 
 GitHub connector actions may post through the user's authenticated identity.
