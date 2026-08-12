@@ -1,0 +1,23 @@
+{
+  "profile": "development",
+  "seed": 53,
+  "hubu": {
+    "mode": "real",
+    "release": {
+      "version": "v0.1.0",
+      "repository": "hacker-no-ice/hubu"
+    },
+    "agent_id": "gongbu-sandbox",
+    "currency": "USD",
+    "maximum_authorization_minor": 1000
+  },
+  "provider": {
+    "mode": "mock"
+  },
+  "temporal": {
+    "mode": "managed",
+    "namespace": "default",
+    "binary": "temporal"
+  },
+  "preserve_diagnostics_on_failure": true
+}

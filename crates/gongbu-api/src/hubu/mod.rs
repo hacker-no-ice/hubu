@@ -5,16 +5,45 @@ mod transport;
 use self::transport as simple_http;
 pub use self::transport::HttpClientError;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HubuClient {
     base_url: String,
+    bearer_token: Option<BearerToken>,
+}
+
+#[derive(Clone)]
+struct BearerToken(Vec<u8>);
+
+impl Drop for BearerToken {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+impl std::fmt::Debug for HubuClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HubuClient")
+            .field("base_url", &self.base_url)
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl HubuClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: trim_trailing_slash(base_url.into()),
+            bearer_token: None,
         }
+    }
+
+    pub fn with_bearer_token(mut self, token: impl Into<Vec<u8>>) -> Self {
+        self.bearer_token = Some(BearerToken(token.into()));
+        self
     }
 
     pub fn base_url(&self) -> &str {
@@ -44,7 +73,10 @@ impl HubuClient {
             self.base_url,
             percent_encode_query(claim_id)
         );
-        simple_http::get_json(&url)
+        match self.bearer_token.as_ref().map(|token| token.0.as_slice()) {
+            Some(token) => simple_http::get_json_authenticated(&url, Some(token)),
+            None => simple_http::get_json(&url),
+        }
     }
 
     pub fn settle(
@@ -67,7 +99,10 @@ impl HubuClient {
         R: for<'de> Deserialize<'de>,
     {
         let url = format!("{}{}", self.base_url, path);
-        simple_http::post_json(&url, body)
+        match self.bearer_token.as_ref().map(|token| token.0.as_slice()) {
+            Some(token) => simple_http::post_json_authenticated(&url, body, Some(token)),
+            None => simple_http::post_json(&url, body),
+        }
     }
 }
 

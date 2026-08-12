@@ -1,4 +1,6 @@
-use gongbu_api::sandbox::{runtime, BoundaryMode, RunManifest, SandboxConfig};
+use gongbu_api::sandbox::{
+    hubu_release::HubuReleaseConfig, runtime, BoundaryMode, RunManifest, SandboxConfig,
+};
 use reqwest::header::AUTHORIZATION;
 use serde_json::{json, Value};
 use std::{
@@ -52,6 +54,7 @@ async fn start(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send
     let config_path = args.required_path("--config")?;
     let preserve = args.optional_path("--preserve")?;
     let hubu_mode = args.optional("--hubu-mode")?;
+    let hubu_version = args.optional("--hubu-version")?;
     let provider_mode = args.optional("--provider-mode")?;
     let maximum_spend_minor = args.optional("--max-spend-minor")?;
     let live_spend_acknowledgement = args.optional("--live-spend-ack")?;
@@ -61,6 +64,12 @@ async fn start(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send
     config.apply_environment_overrides()?;
     if let Some(mode) = hubu_mode {
         config.hubu.mode = mode.parse::<BoundaryMode>()?;
+    }
+    if let Some(version) = hubu_version {
+        match config.hubu.release.as_mut() {
+            Some(release) => release.version = version,
+            None => config.hubu.release = Some(HubuReleaseConfig::pinned(version)),
+        }
     }
     if let Some(mode) = provider_mode {
         config.provider.mode = mode.parse::<BoundaryMode>()?;
@@ -90,12 +99,18 @@ async fn submit(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Sen
     let context = OperatorContext::load(&run_dir)?;
     let target = &context.manifest.provider_target;
     let input = submission_input(prompt, image_size)?;
-    let hubu_token_reference =
-        select_hubu_token_reference(context.manifest.hubu_mode, hubu_token_reference)?;
+    let hubu_token_reference = if context.manifest.hubu_release_version.is_some() {
+        if hubu_token_reference.is_some() {
+            return Err("--hubu-token-reference cannot be used with managed Hubu".into());
+        }
+        authorize_managed_hubu(&run_dir, &context.manifest, &operation_key)?
+    } else {
+        select_hubu_token_reference(context.manifest.hubu_mode, hubu_token_reference)?
+    };
     let request = json!({
         "schema_version": 1,
         "operation_key": operation_key,
-        "hubu_authorization_id": format!("sandbox-auth-{operation_key}"),
+        "hubu_authorization_id": hubu_token_reference,
         "hubu_claim_id": null,
         "hubu_token_reference": hubu_token_reference,
         "authorization": {
@@ -129,6 +144,56 @@ async fn submit(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Sen
     let final_status = poll_execution(&client, &context, &execution_id).await?;
     println!("{}", serde_json::to_string_pretty(&final_status)?);
     Ok(())
+}
+
+fn authorize_managed_hubu(
+    run_dir: &Path,
+    manifest: &RunManifest,
+    operation_key: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let context: runtime::ManagedHubuContext =
+        serde_json::from_slice(&fs::read(run_dir.join("hubu-context.json"))?)?;
+    let amount = format!(
+        "{}.{:02}",
+        manifest.authorization_amount_minor / 100,
+        manifest.authorization_amount_minor.abs() % 100
+    );
+    let output = std::process::Command::new(&context.cli_binary)
+        .args([
+            "--url",
+            &context.endpoint,
+            "spend",
+            "authorize",
+            "--operation-key",
+            operation_key,
+            "--account-id",
+            &context.account_id,
+            "--amount",
+            &amount,
+            "--reason",
+            operation_key,
+            "--merchant",
+            "gongbu.sandbox",
+            "--workload-profile",
+            "default",
+        ])
+        .env("HUBU_AUTH_TOKEN_FILE", &context.auth_token_file)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "Hubu authorization failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    let output = String::from_utf8(output.stdout)?;
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("auth_token_id:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "Hubu authorization output omitted auth_token_id".into())
 }
 
 fn select_hubu_token_reference(
@@ -360,7 +425,7 @@ impl Args {
 fn print_help() {
     println!(
         "gongbu-sandbox commands:\n\
-         \n  start --config PROFILE [--hubu-mode mock|real] [--provider-mode mock|real] [--preserve DIR]\
+         \n  start --config PROFILE [--hubu-mode mock|real] [--hubu-version vX.Y.Z] [--provider-mode mock|real] [--preserve DIR]\
          \n  submit --run-dir DIR --operation-key KEY --prompt TEXT [--image-size 1k|2k|4k] [--hubu-token-reference ID]\
          \n  status --run-dir DIR --execution-id ID\
          \n  artifacts --run-dir DIR --execution-id ID [--download-dir DIR]\

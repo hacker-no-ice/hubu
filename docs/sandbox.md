@@ -6,8 +6,9 @@ server and UI. Hubu and provider boundaries are selected independently, so the
 same operator workflow can exercise deterministic mocks or guarded real
 traffic.
 
-Install the Temporal CLI before the first managed run (`brew install temporal`
-on macOS). Then install the sandbox CLI once from the repository root:
+Install the Temporal and GitHub CLIs before the first managed run (`brew install
+temporal gh` on macOS), and authenticate `gh` to the Hubu release repository.
+Then install the sandbox CLI once from the repository root:
 
 ```sh
 cargo install --locked --force \
@@ -34,7 +35,8 @@ run directory, Gongbu URL, Temporal UI URL, and a ready-to-copy submit command,
 then stays running until Ctrl+C. Keep terminal 1 open.
 
 Each run gets an operator token, SQLite database, artifact root, Temporal data,
-logs, and three loopback-only ports. State is deleted after shutdown unless
+logs, and loopback-only ports. A managed Hubu run adds its own isolated port and
+database. State is deleted after shutdown unless
 `--preserve /absolute/new/directory` is supplied. The destination must not
 already exist; preserved manifest paths are rewritten to the destination so
 they remain usable.
@@ -57,11 +59,12 @@ gongbu-sandbox start \
   --provider-mode mock
 ```
 
-The available CLI overrides are `--hubu-mode`, `--provider-mode`,
+The available CLI overrides are `--hubu-mode`, `--hubu-version`, `--provider-mode`,
 `--max-spend-minor`, and `--live-spend-ack`. The `submit` command accepts
 `--image-size 1k|2k|4k`; this value selects the matching schema-v2 pricing rule
-and is transmitted to adapters that support resolution selection. Real-Hubu
-submissions additionally require `--hubu-token-reference`.
+and is transmitted to adapters that support resolution selection. A managed
+Hubu release provisions and supplies scoped authorization automatically; an
+externally managed Hubu still requires `--hubu-token-reference`.
 
 Environment variables remain useful for CI and automation:
 
@@ -83,14 +86,11 @@ either mock boundary.
 | Real | Mock | real Hubu traffic with deterministic provider output |
 | Real | Real | guarded release dogfood |
 
-> [!IMPORTANT]
-> Real-Hubu integration testing is not yet fully supported end to end. The
-> sandbox can connect Gongbu to an explicitly configured external Hubu
-> endpoint, but it does not yet download a pinned Hubu release, start Hubu,
-> provision isolated test fixtures, or verify the Hubu product and executor
-> contract versions. Until that managed workflow is delivered, operators must
-> set up and validate Hubu separately; use real-Hubu modes for exploratory
-> manual testing rather than as a reproducible compatibility test.
+The required real-Hubu compatibility profile uses an exact immutable release.
+Mutable aliases such as `latest` and `main` are rejected. The sandbox selects
+the current platform archive, verifies its published `SHA256SUMS` entry,
+validates packaged provenance and `hubu-spend-executor-v4`, and checks the
+binary's reported product/source/contract tuple before readiness.
 
 The selected implementation is wired through the same `HubuActivities` and
 `ProviderActivities` interfaces as the durable production workflow. Modes do
@@ -361,45 +361,55 @@ new `--image-size`, and ensure the spend ceiling covers that tier.
 
 ## Real Hubu + mock provider
 
-Use this mode to validate Hubu protocol traffic without provider spend.
-This is currently a partial, externally managed integration: the sandbox
-connects to Hubu but does not install, start, version-pin, or provision it.
+Use this mode to exercise real Hubu claim and settlement without provider
+spend. One command resolves the pinned release, starts Hubu, Gongbu, Temporal,
+and the deterministic mock provider, and provisions a fresh human, agent,
+account, policy, and budget:
 
-1. Create a profile based on `examples/sandbox.mock.json`. Set `hubu.mode` to
-   `real`, add the loopback or allowlisted `endpoint`,
-   `scoped_credential_reference`, `isolated_test_account`, and the expected
-   `agent_id`; keep `provider.mode` as `mock`. Store the scoped Hubu credential
-   in Keychain under the referenced `service:account`.
-2. Start with `--hubu-mode real --provider-mode mock`.
-3. Submit with the isolated Hubu-issued spend authorization token ID:
+```sh
+gongbu-sandbox start \
+  --config examples/sandbox.hubu-v0.1.0.json \
+  --hubu-mode real \
+  --hubu-version v0.1.0 \
+  --provider-mode mock
+```
 
-   ```sh
-   gongbu-sandbox submit \
-     --run-dir "$RUN_DIR" \
-     --operation-key real-mock-1 \
-     --prompt "Draw a blue circle" \
-     --hubu-token-reference HUBU_TEST_SPEND_AUTH_TOKEN_ID
-   ```
+In another terminal, submit without an externally supplied Hubu token:
 
-4. Run the common inspection commands and inspect Hubu's claim and settlement
-   records. The downloaded artifact is the deterministic one-pixel mock PNG.
-   Replay the identical submission and verify Hubu did not create a second
-   claim or settlement.
+```sh
+gongbu-sandbox submit \
+  --run-dir "$RUN_DIR" \
+  --operation-key real-mock-1 \
+  --prompt "Draw a blue circle"
+```
+
+The submit command authorizes the exact operation against the isolated fixture;
+Gongbu then claims and settles it through the real executor protocol. The
+provider output remains the deterministic one-pixel PNG. Replay the identical
+submission and inspect `hubu/hubu.sqlite3`, `logs/hubu.jsonl`, and
+`mock-side-effects.json` to verify there is one Hubu financial outcome and one
+provider invocation.
+
+Release archives are cached by exact version and platform under
+`$XDG_CACHE_HOME/gongbu/hubu` or `$HOME/.cache/gongbu/hubu`. Cached provenance
+and binary digests are revalidated before reuse, so an existing version is
+never silently replaced. Once cached, the profile works offline. Upgrade by
+selecting a different exact tag; cleanup removes per-run state but retains the
+verified release cache. Use `--preserve /absolute/new/path` to retain a
+self-consistent diagnostics run directory.
 
 ## Real Hubu + real provider
 
 This is guarded release-level dogfood: both financial and provider traffic are
-real. Real-Hubu setup is still externally managed and not yet a reproducible
-released-version integration test. Complete the real-Hubu setup above and the
-real-provider target, pricing, Keychain, and acknowledgement setup from the
-Gemini section.
+real. Use the pinned-release setup above together with the real-provider target,
+pricing, Keychain, and acknowledgement setup from the Gemini section.
 
 1. Create one combined profile with both boundaries set to `real`.
 2. Confirm the Hubu authorization amount, mock-independent provider ceiling,
    pricing currency, provider account, model, and image size before startup.
 3. Start with both explicit real modes, the spend ceiling, acknowledgement, and
    a new diagnostics destination.
-4. Submit with both `--image-size` and `--hubu-token-reference`.
+4. Submit with `--image-size`; managed Hubu authorization is automatic.
 5. Inspect Temporal, Gongbu status/artifacts, Hubu claim/settlement state, and
    provider billing. If any outcome is ambiguous, stop and reconcile the same
    execution rather than creating a new operation key.
@@ -412,10 +422,11 @@ cargo test -p gongbu-api sandbox::
 
 ## Real-boundary gates
 
-Real Hubu requires an explicit `http://` endpoint. The host must be loopback or
-appear exactly in `allowlisted_hosts`; it also requires an opaque scoped
-credential reference and an isolated non-production account name. Credentials
-are references only and never appear in the run manifest.
+Real Hubu requires either a managed `release` with an exact version tag, or an
+explicit external `http://` endpoint. External hosts must be loopback or appear
+exactly in `allowlisted_hosts`, and external mode also requires an opaque scoped
+credential reference and an isolated non-production account name. Managed and
+external settings cannot be mixed.
 
 Real provider mode requires:
 
@@ -459,8 +470,10 @@ durable workflow.
 
 The manifest contains modes, seed, redacted endpoint, file digests, process
 version, optional build commit, isolated paths and ports, Gongbu and Temporal
-URLs, selected provider target, spend ceiling, and readiness results. Query
-strings are removed from endpoints. The operator token is stored separately
-with owner-only permissions. Raw credentials, credential references, prompts,
-account identifiers, and provider responses are not serialized to the manifest
-or safe mock call log.
+URLs, selected provider target, spend ceiling, and readiness results. Managed
+runs also record the exact Hubu version, source commit, artifact checksum,
+executor contract, platform target, and public isolated fixture identifiers.
+Query strings are removed from endpoints. Operator and Hubu tokens are stored
+separately with owner-only permissions. Raw credentials, credential references,
+prompts, and provider responses are not serialized to the manifest or safe mock
+call log.
