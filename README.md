@@ -24,28 +24,17 @@ and MCP transport adapter.
 
 ## What Hubu Does Today
 
-- Registers agents with stable identity, version, account, and session records
-- Evaluates spend requests through deterministic policy rules
-- Issues spend authorization tokens for allowed requests
-- Can authorize spend and freeze agent-budget capacity without executing payment,
-  then give an external executor an exclusive, workload-timed claim before vendor work
-- Uses one immutable agent-scoped operation key across authorization, claim, and
-  finalization so identical retries return the original workflow state
-- Creates advisory user spending targets and single or recurring budgets owned by one agent
-- Warns when concurrent agent budget allocations exceed a user's spending target
-- Reserves one agent-budget hold before payment, then settles or releases it
-  from the payment result
-- Persists executor claims, extends claimed holds beyond the original authorization
-  deadline, keeps expired claims frozen, and exposes claim lookup plus
-  human-gated billed/not-billed reconciliation with durable evidence
-- Orchestrates mock payments after spend authorization
-- Records successful payments in an immutable double-entry SQLite ledger
-- Exposes a local `hubu-server`, human-facing `hubu` CLI, and MCP tools that
-  agents can discover through configured MCP clients
-- Protects local write APIs with a bearer token and separates agent-callable
-  spend tools from human-gated setup, policy, budget, and reconciliation changes
-- Publishes commit-addressed macOS and Linux releases with checksums and build
-  provenance so compatibility consumers can pin immutable artifacts
+- **Agent identity:** Registers stable agent identities, versions, accounts, and sessions
+- **Policy and budgets:** Applies deterministic spend rules, advisory spending targets,
+  and per-agent single or recurring budgets
+- **Reliable authorization:** Issues spend tokens, reserves budget capacity, and makes
+  authorization, claim, and finalization retries idempotent
+- **Safe execution:** Grants exclusive executor claims and supports human-gated
+  billed/not-billed reconciliation with durable evidence
+- **Payments and accounting:** Orchestrates mock payments and records successful ones
+  in an immutable double-entry SQLite ledger
+- **Secure integrations:** Exposes local HTTP, CLI, and MCP interfaces with bearer-token
+  protection and clear human-versus-agent permission boundaries
 
 ## Crates
 
