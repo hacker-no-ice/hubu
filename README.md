@@ -153,12 +153,13 @@ or `hubu_client_approval_profile`; see
 
 ## Releases
 
-Successful eligible `main` builds publish immutable canary prereleases tied to
-the full source commit. Stable SemVer releases are promoted intentionally from
-a validated `main` revision. Consumers should pin an exact release and checksum,
-not a rolling newest build. See [docs/releases.md](docs/releases.md) for the
-supported targets, verification and installation steps, promotion workflow,
-and rollback/retention policy.
+A daily workflow checks `main` at 10:00 America/Los_Angeles and publishes an
+immutable canary prerelease tied to the full source commit only when that commit
+does not already have a canary. Stable SemVer releases are promoted
+intentionally from a validated `main` revision. Consumers should pin an exact
+release and checksum, not a rolling newest build. See
+[docs/releases.md](docs/releases.md) for the supported targets, verification
+and installation steps, promotion workflow, and rollback/retention policy.
 
 Both binaries expose safe build metadata locally, and the server publishes the
 same metadata without authentication:
