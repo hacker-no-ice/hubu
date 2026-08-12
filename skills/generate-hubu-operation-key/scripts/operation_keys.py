@@ -171,18 +171,27 @@ def transition(
     record_id: str,
     target: str,
 ) -> Any:
-    row = fetch_record(connection, record_id)
-    if row["status"] == target:
-        return row_payload(row, database)
-    if row["status"] != "active":
-        raise OperationKeyError(f"cannot change {row['status']} operation to {target}")
-
     connection.execute("BEGIN IMMEDIATE")
     try:
-        connection.execute(
-            "UPDATE operations SET status = ?, updated_at = ? WHERE record_id = ?",
+        row = fetch_record(connection, record_id)
+        if row["status"] == target:
+            connection.commit()
+            return row_payload(row, database)
+        if row["status"] != "active":
+            raise OperationKeyError(
+                f"cannot change {row['status']} operation to {target}"
+            )
+
+        cursor = connection.execute(
+            """
+            UPDATE operations
+            SET status = ?, updated_at = ?
+            WHERE record_id = ? AND status = 'active'
+            """,
             (target, utc_now(), record_id),
         )
+        if cursor.rowcount != 1:
+            raise OperationKeyError("operation status changed concurrently")
         connection.commit()
     except Exception:
         connection.rollback()
