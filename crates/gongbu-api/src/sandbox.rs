@@ -3,6 +3,7 @@
 //! The sandbox changes only boundary implementations. Both mock and real modes
 //! implement the same activity traits consumed by the durable workflow.
 
+pub mod hubu_release;
 pub mod runtime;
 
 use crate::{
@@ -46,6 +47,8 @@ use std::{
 };
 use tempfile::TempDir;
 use thiserror::Error;
+
+use self::hubu_release::{HubuRelease, HubuReleaseConfig};
 
 pub const LIVE_SPEND_ACKNOWLEDGEMENT: &str = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND";
 
@@ -156,6 +159,10 @@ fn default_seed() -> u64 {
 pub struct HubuConfig {
     pub mode: BoundaryMode,
     #[serde(default)]
+    pub release: Option<HubuReleaseConfig>,
+    #[serde(skip)]
+    runtime_bearer_token: Option<RuntimeSecret>,
+    #[serde(default)]
     pub endpoint: Option<String>,
     #[serde(default)]
     pub allowlisted_hosts: Vec<String>,
@@ -177,6 +184,21 @@ pub struct HubuConfig {
     pub settle_fault: BoundaryFault,
     #[serde(default)]
     pub release_fault: BoundaryFault,
+}
+
+#[derive(Clone, Default)]
+struct RuntimeSecret(Vec<u8>);
+
+impl std::fmt::Debug for RuntimeSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+impl Drop for RuntimeSecret {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
 }
 
 fn default_agent() -> String {
@@ -290,7 +312,8 @@ impl SandboxConfig {
         }
         match self.hubu.mode {
             BoundaryMode::Mock => {
-                if self.hubu.endpoint.is_some()
+                if self.hubu.release.is_some()
+                    || self.hubu.endpoint.is_some()
                     || self.hubu.scoped_credential_reference.is_some()
                     || self.hubu.isolated_test_account.is_some()
                 {
@@ -353,11 +376,20 @@ impl SandboxConfig {
         {
             return invalid("real Hubu cannot select mock fault injection");
         }
-        let endpoint = self
-            .hubu
-            .endpoint
-            .as_deref()
-            .ok_or_else(|| SandboxError::Invalid("real Hubu requires endpoint".into()))?;
+        if let Some(release) = &self.hubu.release {
+            release.validate()?;
+            if self.hubu.endpoint.is_some()
+                || self.hubu.scoped_credential_reference.is_some()
+                || self.hubu.isolated_test_account.is_some()
+                || !self.hubu.allowlisted_hosts.is_empty()
+            {
+                return invalid("managed Hubu release cannot carry external Hubu settings");
+            }
+            return Ok(());
+        }
+        let endpoint = self.hubu.endpoint.as_deref().ok_or_else(|| {
+            SandboxError::Invalid("real Hubu requires a pinned release or external endpoint".into())
+        })?;
         let (host, _) = parse_http_endpoint(endpoint)?;
         let loopback = host
             .parse::<IpAddr>()
@@ -548,6 +580,20 @@ pub struct RunManifest {
     pub seed: u64,
     pub config_digest: String,
     pub hubu_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hubu_release_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hubu_source_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hubu_artifact_checksum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hubu_executor_contract: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hubu_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hubu_fixture_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hubu_fixture_account_id: Option<String>,
     pub provider_target_digest: String,
     pub pricing_digest: String,
     pub commit_sha: String,
@@ -573,6 +619,7 @@ pub struct SandboxRun {
     manifest_path: PathBuf,
     manifest: RunManifest,
     reserved_ports: BTreeMap<String, TcpListener>,
+    managed_hubu: Option<HubuRelease>,
 }
 
 impl SandboxRun {
@@ -593,6 +640,12 @@ impl SandboxRun {
         assigned_ports: Option<[u16; 3]>,
     ) -> Result<Self, SandboxError> {
         config.validate()?;
+        let managed_hubu = config
+            .hubu
+            .release
+            .as_ref()
+            .map(HubuRelease::resolve)
+            .transpose()?;
         probe_credentials(config, secrets)?;
         let root = tempfile::Builder::new()
             .prefix("gongbu-sandbox-")
@@ -608,11 +661,14 @@ impl SandboxRun {
         let (listeners, selected_ports) = if let Some(ports) = assigned_ports {
             (BTreeMap::new(), ports)
         } else {
-            let listeners = BTreeMap::from([
+            let mut listeners = BTreeMap::from([
                 ("gongbu".into(), reserve_loopback_port()?),
                 ("temporal".into(), reserve_loopback_port()?),
                 ("temporal_ui".into(), reserve_loopback_port()?),
             ]);
+            if managed_hubu.is_some() {
+                listeners.insert("hubu".into(), reserve_loopback_port()?);
+            }
             let ports = [
                 listeners["gongbu"].local_addr()?.port(),
                 listeners["temporal"].local_addr()?.port(),
@@ -625,6 +681,10 @@ impl SandboxRun {
             ("temporal".into(), selected_ports[1]),
             ("temporal_ui".into(), selected_ports[2]),
         ]);
+        let mut ports = ports;
+        if let Some(listener) = listeners.get("hubu") {
+            ports.insert("hubu".into(), listener.local_addr()?.port());
+        }
         let run_id = format!("sandbox-{}-{}", config.seed, unix_seconds());
         let manifest = RunManifest {
             schema_version: 1,
@@ -634,12 +694,24 @@ impl SandboxRun {
             provider_mode: config.provider.mode,
             seed: config.seed,
             config_digest: format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(config)?)),
-            hubu_endpoint: config
-                .hubu
-                .endpoint
-                .as_deref()
-                .map(redact_endpoint)
+            hubu_endpoint: managed_hubu
+                .as_ref()
+                .map(|_| format!("http://127.0.0.1:{}", ports["hubu"]))
+                .or_else(|| config.hubu.endpoint.as_deref().map(redact_endpoint))
                 .unwrap_or_else(|| "in-process://mock-hubu".into()),
+            hubu_release_version: managed_hubu.as_ref().map(|release| release.version.clone()),
+            hubu_source_commit: managed_hubu
+                .as_ref()
+                .map(|release| release.source_commit.clone()),
+            hubu_artifact_checksum: managed_hubu
+                .as_ref()
+                .map(|release| release.artifact_checksum.clone()),
+            hubu_executor_contract: managed_hubu
+                .as_ref()
+                .map(|release| release.executor_contract.clone()),
+            hubu_target: managed_hubu.as_ref().map(|release| release.target.clone()),
+            hubu_fixture_agent_id: None,
+            hubu_fixture_account_id: None,
             provider_target_digest: file_or_mock_digest(
                 config.provider.target_config.as_deref(),
                 b"gongbu-sandbox-mock-provider-v1",
@@ -687,6 +759,7 @@ impl SandboxRun {
             manifest_path,
             manifest,
             reserved_ports: listeners,
+            managed_hubu,
         })
     }
 
@@ -709,6 +782,20 @@ impl SandboxRun {
         self.reserved_ports
             .remove(name)
             .ok_or_else(|| SandboxError::Invalid(format!("sandbox port is not reserved: {name}")))
+    }
+
+    pub fn managed_hubu(&self) -> Option<&HubuRelease> {
+        self.managed_hubu.as_ref()
+    }
+
+    pub fn set_hubu_fixture(
+        &mut self,
+        agent_id: String,
+        account_id: String,
+    ) -> Result<(), SandboxError> {
+        self.manifest.hubu_fixture_agent_id = Some(agent_id);
+        self.manifest.hubu_fixture_account_id = Some(account_id);
+        self.rewrite_manifest()
     }
 
     pub fn release_listener(&mut self, name: &str) {
@@ -754,6 +841,7 @@ impl SandboxRun {
         self.manifest.artifact_root = destination.join("artifacts").display().to_string();
         self.manifest.workflow_root = destination.join("workflow").display().to_string();
         self.manifest_path = destination.join("run-manifest.json");
+        rewrite_managed_hubu_context(destination)?;
         fs::write(
             &self.manifest_path,
             serde_json::to_vec_pretty(&self.manifest)?,
@@ -770,11 +858,23 @@ impl SandboxRun {
     }
 }
 
+fn rewrite_managed_hubu_context(root: &Path) -> Result<(), SandboxError> {
+    let path = root.join("hubu-context.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let mut context: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    context["auth_token_file"] =
+        serde_json::Value::String(root.join("hubu/hubu.auth-token").display().to_string());
+    fs::write(path, serde_json::to_vec_pretty(&context)?)?;
+    Ok(())
+}
+
 fn probe_credentials(
     config: &SandboxConfig,
     secrets: &dyn SecretProvider,
 ) -> Result<(), SandboxError> {
-    if config.hubu.mode == BoundaryMode::Real {
+    if config.hubu.mode == BoundaryMode::Real && config.hubu.release.is_none() {
         let reference = parse_secret_reference(
             config
                 .hubu
@@ -805,7 +905,18 @@ fn probe_credentials(
 
 fn readiness(config: &SandboxConfig) -> Vec<ReadinessCheck> {
     vec![
-        ready("hubu", format!("{:?} boundary validated", config.hubu.mode)),
+        ReadinessCheck {
+            component: "hubu".into(),
+            ready: config.hubu.release.is_none(),
+            detail: if let Some(release) = &config.hubu.release {
+                format!(
+                    "pinned release {} verified; process startup pending",
+                    release.version
+                )
+            } else {
+                format!("{:?} boundary validated", config.hubu.mode)
+            },
+        },
         ready(
             "provider",
             format!("{:?} boundary validated", config.provider.mode),
@@ -1204,8 +1315,13 @@ impl RealHubuActivities {
         if config.mode != BoundaryMode::Real {
             return invalid("RealHubuActivities requires real Hubu configuration");
         }
+        let client = HubuClient::new(config.endpoint.clone().expect("validated endpoint"));
+        let client = match &config.runtime_bearer_token {
+            Some(token) => client.with_bearer_token(token.0.clone()),
+            None => client,
+        };
         Ok(Self {
-            client: HubuClient::new(config.endpoint.clone().expect("validated endpoint")),
+            client,
             agent_id: config.agent_id.clone(),
         })
     }
@@ -1213,11 +1329,11 @@ impl RealHubuActivities {
     fn spend(&self, execution: &Execution) -> ExecutorSpendRequest {
         ExecutorSpendRequest {
             spend_auth_token_id: execution.hubu_token_reference.as_str().into(),
-            agent_id: Some(self.agent_id.clone()),
+            agent_id: None,
             account_id: Some(execution.account_id.clone()),
             amount_cents: execution.authorized_minor,
             merchant: Some("gongbu.sandbox".into()),
-            task_id: Some(execution.execution_id.clone()),
+            task_id: Some(execution.operation_key.clone()),
         }
     }
 }
@@ -1244,7 +1360,9 @@ impl HubuActivities for RealHubuActivities {
             .as_deref()
             .ok_or_else(|| ActivityError::Proven("hubu_claim_missing".into()))?;
         let claim = self.client.inspect_claim(id).map_err(map_hubu_error)?;
-        if claim.status == "active" && claim.operation_key == execution.operation_key {
+        if matches!(claim.status.as_str(), "claimed" | "active")
+            && claim.operation_key == execution.operation_key
+        {
             Ok(())
         } else {
             Err(ActivityError::Proven("hubu_claim_not_active".into()))
@@ -1271,7 +1389,7 @@ impl HubuActivities for RealHubuActivities {
                         model: execution.model.clone(),
                         unit_price_cents: snapshot.estimated_amount_minor,
                         pricing_unit: "execution".into(),
-                        currency: execution.authorization_currency.clone(),
+                        currency: execution.authorization_currency.to_ascii_lowercase(),
                     },
                     artifact_reference: format!("gongbu://execution/{}", execution.execution_id),
                 }),
@@ -1703,6 +1821,8 @@ mod tests {
             seed: 48,
             hubu: HubuConfig {
                 mode: hubu,
+                release: None,
+                runtime_bearer_token: None,
                 endpoint: None,
                 allowlisted_hosts: vec![],
                 scoped_credential_reference: None,
@@ -1840,6 +1960,44 @@ mod tests {
         assert!(config.validate().is_err());
         config.hubu.allowlisted_hosts.push("hubu.example".into());
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn managed_hubu_requires_an_exact_release_and_no_external_settings() {
+        let mut config = mock_config(BoundaryMode::Real, BoundaryMode::Mock);
+        config.hubu.release = Some(HubuReleaseConfig::pinned("latest"));
+        assert!(config.validate().unwrap_err().to_string().contains("exact"));
+
+        config.hubu.release = Some(HubuReleaseConfig::pinned("v0.1.0"));
+        assert!(config.validate().is_ok());
+        config.hubu.endpoint = Some("http://127.0.0.1:8787".into());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("cannot carry external"));
+    }
+
+    #[test]
+    fn real_hubu_v4_scope_uses_account_and_stable_operation_key() {
+        let mut config = mock_config(BoundaryMode::Real, BoundaryMode::Mock);
+        config.hubu.endpoint = Some("http://127.0.0.1:8787".into());
+        config.hubu.scoped_credential_reference = Some("keychain:hubu-sandbox".into());
+        config.hubu.isolated_test_account = Some("aga_sandbox".into());
+        config.hubu.agent_id = "agt_sandbox".into();
+        let activities = RealHubuActivities::new(&config.hubu).unwrap();
+        let execution = execution();
+        let request = activities.spend(&execution);
+
+        assert_eq!(request.agent_id, None);
+        assert_eq!(
+            request.account_id.as_deref(),
+            Some(execution.account_id.as_str())
+        );
+        assert_eq!(
+            request.task_id.as_deref(),
+            Some(execution.operation_key.as_str())
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::{
 };
 use axum::http::{header, HeaderMap};
 use chrono::SecondsFormat;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io,
@@ -31,9 +31,15 @@ use uuid::Uuid;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-pub async fn serve(config: SandboxConfig, preserve: Option<PathBuf>) -> Result<(), BoxError> {
+pub async fn serve(mut config: SandboxConfig, preserve: Option<PathBuf>) -> Result<(), BoxError> {
     let mut run = SandboxRun::start(&config)?;
-    let result = serve_started(&config, &mut run).await;
+    let mut hubu_child = None;
+    let result = async {
+        hubu_child = start_managed_hubu(&mut config, &mut run).await?;
+        prepare_external_hubu_auth(&mut config)?;
+        serve_started(&config, &mut run).await
+    }
+    .await;
     if let Some(destination) = preserve {
         let destination = run.preserve(destination)?;
         eprintln!(
@@ -49,7 +55,27 @@ pub async fn serve(config: SandboxConfig, preserve: Option<PathBuf>) -> Result<(
     } else {
         eprintln!("Sandbox stopped; temporary state cleaned up.");
     }
+    drop(hubu_child.take());
     result
+}
+
+fn prepare_external_hubu_auth(config: &mut SandboxConfig) -> Result<(), BoxError> {
+    if config.hubu.mode != super::BoundaryMode::Real || config.hubu.runtime_bearer_token.is_some() {
+        return Ok(());
+    }
+    let reference = super::parse_secret_reference(
+        config
+            .hubu
+            .scoped_credential_reference
+            .as_deref()
+            .ok_or_else(|| io::Error::other("real Hubu credential reference is missing"))?,
+        "real Hubu scoped credential reference",
+    )?;
+    let secret = MacOsKeychain
+        .resolve(&reference)
+        .map_err(|_| io::Error::other("real Hubu scoped credential is unavailable"))?;
+    config.hubu.runtime_bearer_token = Some(super::RuntimeSecret(secret.expose().to_vec()));
+    Ok(())
 }
 
 async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(), BoxError> {
@@ -122,7 +148,14 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
         artifact_activities: Some(artifact_activities),
         temporal_runtime,
         temporal_client,
-        authenticator: Arc::new(SandboxAuthenticator { token }),
+        authenticator: Arc::new(SandboxAuthenticator {
+            token,
+            account_id: config
+                .hubu
+                .isolated_test_account
+                .clone()
+                .unwrap_or_else(|| "sandbox-account".into()),
+        }),
         now,
     };
     let result = application::serve(listener, dependencies, async {
@@ -140,6 +173,7 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
 
 struct SandboxAuthenticator {
     token: String,
+    account_id: String,
 }
 
 impl Authenticator for SandboxAuthenticator {
@@ -155,7 +189,7 @@ impl Authenticator for SandboxAuthenticator {
         {
             return Err(AuthenticationError);
         }
-        crate::http::AuthenticatedAccount::from_verified_claim("sandbox-account")
+        crate::http::AuthenticatedAccount::from_verified_claim(&self.account_id)
             .map_err(|_| AuthenticationError)
     }
 }
@@ -178,6 +212,242 @@ impl Drop for ManagedChild {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ManagedHubuContext {
+    pub cli_binary: String,
+    pub endpoint: String,
+    pub auth_token_file: String,
+    pub agent_id: String,
+    pub account_id: String,
+}
+
+async fn start_managed_hubu(
+    config: &mut SandboxConfig,
+    run: &mut SandboxRun,
+) -> Result<Option<ManagedChild>, BoxError> {
+    let Some(release) = run.managed_hubu().cloned() else {
+        return Ok(None);
+    };
+    run.release_listener("hubu");
+    let hubu_root = run.root().join("hubu");
+    fs::create_dir_all(&hubu_root)?;
+    let database = hubu_root.join("hubu.sqlite3");
+    let auth_token = hubu_root.join("hubu.auth-token");
+    let reconciliation_token = hubu_root.join("hubu.reconciliation-token");
+    let log_path = run.root().join("logs/hubu.jsonl");
+    let stdout = File::create(run.root().join("logs/hubu-process.log"))?;
+    let stderr = stdout.try_clone()?;
+    let endpoint = run.manifest().hubu_endpoint.clone();
+    let address = endpoint.trim_start_matches("http://");
+    let child = Command::new(&release.server_binary)
+        .arg(address)
+        .env("HUBU_DB_PATH", &database)
+        .env("HUBU_AUTH_TOKEN_FILE", &auth_token)
+        .env("HUBU_RECONCILIATION_TOKEN_FILE", &reconciliation_token)
+        .env("HUBU_LOG_FILE", &log_path)
+        .env("HUBU_LOG_STDERR", "0")
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()?;
+    let mut child = ManagedChild(child);
+    wait_for_hubu(&endpoint, &mut child, Duration::from_secs(15)).await?;
+
+    let reported: serde_json::Value = serde_json::from_slice(&run_hubu_cli(
+        &release.cli_binary,
+        None,
+        None,
+        &["version"],
+    )?)?;
+    if reported
+        .get("product_version")
+        .and_then(|value| value.as_str())
+        != Some(release.version.as_str())
+        || reported
+            .get("source_commit")
+            .and_then(|value| value.as_str())
+            != Some(release.source_commit.as_str())
+        || reported
+            .get("executor_contract")
+            .and_then(|value| value.as_str())
+            != Some(release.executor_contract.as_str())
+    {
+        return Err(
+            io::Error::other("Hubu binary version metadata does not match provenance").into(),
+        );
+    }
+    run_hubu_cli(
+        &release.cli_binary,
+        Some(&endpoint),
+        Some(&auth_token),
+        &["health"],
+    )?;
+    run_hubu_cli(
+        &release.cli_binary,
+        Some(&endpoint),
+        Some(&auth_token),
+        &[
+            "register",
+            "human",
+            "--username",
+            "gongbu-sandbox",
+            "--display-name",
+            "Gongbu Sandbox",
+        ],
+    )?;
+    let registration = run_hubu_cli(
+        &release.cli_binary,
+        Some(&endpoint),
+        Some(&auth_token),
+        &[
+            "register",
+            "agent",
+            "--name",
+            "gongbu-sandbox",
+            "--version",
+            &release.version,
+        ],
+    )?;
+    let registration = String::from_utf8(registration)?;
+    let agent_id = output_field(&registration, "agent_id")?;
+    let account_id = output_field(&registration, "account_id")?;
+    let budget = cents_as_amount(config.hubu.maximum_authorization_minor);
+    run_hubu_cli(
+        &release.cli_binary,
+        Some(&endpoint),
+        Some(&auth_token),
+        &[
+            "budget",
+            "create",
+            "--agent-id",
+            &agent_id,
+            "--amount",
+            &budget,
+        ],
+    )?;
+    let policy = hubu_root.join("sandbox-policy.yaml");
+    fs::write(
+        &policy,
+        "id: gongbu_sandbox_policy\nversion: v1\ndefault_effect: deny\nrules:\n  - id: allow_sandbox\n    effect: allow\n    reason: deterministic Gongbu compatibility fixture\n    when:\n      op: lte\n      field: amount\n      value:\n        money_cents: 10000\n",
+    )?;
+    run_hubu_cli(
+        &release.cli_binary,
+        Some(&endpoint),
+        Some(&auth_token),
+        &["policy", "add", "--path", &policy.display().to_string()],
+    )?;
+
+    let context = ManagedHubuContext {
+        cli_binary: release.cli_binary.display().to_string(),
+        endpoint: endpoint.clone(),
+        auth_token_file: auth_token.display().to_string(),
+        agent_id: agent_id.clone(),
+        account_id: account_id.clone(),
+    };
+    write_private_json(&run.root().join("hubu-context.json"), &context)?;
+    config.hubu.release = None;
+    config.hubu.endpoint = Some(endpoint);
+    config.hubu.scoped_credential_reference = Some("managed:hubu-sandbox".into());
+    config.hubu.isolated_test_account = Some(account_id.clone());
+    config.hubu.agent_id = agent_id.clone();
+    let mut token = fs::read(&auth_token)?;
+    while token
+        .last()
+        .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+    {
+        token.pop();
+    }
+    config.hubu.runtime_bearer_token = Some(super::RuntimeSecret(token));
+    run.set_hubu_fixture(agent_id, account_id)?;
+    run.mark_ready(
+        "hubu",
+        &format!(
+            "{} ({}) / {} is healthy with isolated fixture",
+            release.version, release.source_commit, release.executor_contract
+        ),
+    )?;
+    Ok(Some(child))
+}
+
+async fn wait_for_hubu(
+    endpoint: &str,
+    child: &mut ManagedChild,
+    timeout: Duration,
+) -> Result<(), BoxError> {
+    let url = reqwest::Url::parse(endpoint)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| io::Error::other("Hubu endpoint has no host"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| io::Error::other("Hubu endpoint has no port"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if TcpStream::connect((host, port)).await.is_ok() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(
+                io::Error::other(format!("Hubu exited before readiness with {status}")).into(),
+            );
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("Hubu readiness timed out").into());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn run_hubu_cli(
+    binary: &Path,
+    endpoint: Option<&str>,
+    auth_token: Option<&Path>,
+    args: &[&str],
+) -> Result<Vec<u8>, BoxError> {
+    let mut command = Command::new(binary);
+    if let Some(endpoint) = endpoint {
+        command.args(["--url", endpoint]);
+    }
+    command.args(args);
+    if let Some(auth_token) = auth_token {
+        command.env("HUBU_AUTH_TOKEN_FILE", auth_token);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "Hubu CLI failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+        .into());
+    }
+    Ok(output.stdout)
+}
+
+fn output_field(output: &str, name: &str) -> Result<String, BoxError> {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&format!("{name}:")))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other(format!("Hubu CLI output omitted {name}")).into())
+}
+
+fn cents_as_amount(cents: i64) -> String {
+    format!("{}.{:02}", cents / 100, cents.abs() % 100)
+}
+
+fn write_private_json(path: &Path, value: &impl Serialize) -> Result<(), BoxError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    serde_json::to_writer_pretty(options.open(path)?, value)?;
+    Ok(())
 }
 
 fn start_temporal(
