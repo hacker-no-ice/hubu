@@ -14,6 +14,8 @@ repo="${GH_REPO:?GH_REPO must name the GitHub owner/repository}"
 smoke_dir="$(mktemp -d)"
 server_pid=""
 port=18787
+curl_connect_timeout_seconds=2
+curl_max_time_seconds=5
 
 cleanup() {
   if [[ -n "${server_pid}" ]]; then
@@ -51,8 +53,11 @@ HUBU_RECONCILIATION_TOKEN_FILE="${smoke_dir}/hubu.reconciliation-token" \
   "${package_dir}/hubu-server" "127.0.0.1:${port}" >"${smoke_dir}/server.log" 2>&1 &
 server_pid="$!"
 
-for _ in {1..30}; do
-  if curl --fail --silent "http://127.0.0.1:${port}/health" >/dev/null; then
+for _ in {1..12}; do
+  if curl --fail --silent \
+    --connect-timeout "${curl_connect_timeout_seconds}" \
+    --max-time "${curl_max_time_seconds}" \
+    "http://127.0.0.1:${port}/health" >/dev/null; then
     break
   fi
   if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
@@ -62,8 +67,14 @@ for _ in {1..30}; do
   sleep 1
 done
 
-curl --fail --silent "http://127.0.0.1:${port}/health" | grep -F '"status":"ok"' >/dev/null
-reported_version="$(curl --fail --silent "http://127.0.0.1:${port}/version")"
+curl --fail --silent \
+  --connect-timeout "${curl_connect_timeout_seconds}" \
+  --max-time "${curl_max_time_seconds}" \
+  "http://127.0.0.1:${port}/health" | grep -F '"status":"ok"' >/dev/null
+reported_version="$(curl --fail --silent \
+  --connect-timeout "${curl_connect_timeout_seconds}" \
+  --max-time "${curl_max_time_seconds}" \
+  "http://127.0.0.1:${port}/version")"
 grep -F "\"product_version\":\"${product_version}\"" <<<"${reported_version}" >/dev/null
 grep -F "\"source_commit\":\"${source_commit}\"" <<<"${reported_version}" >/dev/null
 grep -F '"executor_contract":"hubu-spend-executor-v4"' <<<"${reported_version}" >/dev/null

@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration as StdDuration, Instant},
 };
 
 #[cfg(unix)]
@@ -84,6 +84,9 @@ const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
 const RECONCILIATION_CAPABILITY_HEADER: &str = "x-hubu-reconciliation-capability";
 const SPEND_TIMING_CONFIG_ENV: &str = "HUBU_SPEND_TIMING_CONFIG";
+const HTTP_READ_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 #[cfg(test)]
 const TEST_AUTH_TOKEN: &str = "test-local-auth-token";
 #[cfg(test)]
@@ -1079,8 +1082,10 @@ struct LedgerEntryHttpResponse {
 fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     let started_at = Instant::now();
     let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw)?;
+    stream
+        .set_read_timeout(Some(HTTP_READ_TIMEOUT))
+        .context("set HTTP request read timeout")?;
+    let raw = read_http_request(&mut stream)?;
     if raw.is_empty() {
         log_event(
             "debug",
@@ -1121,6 +1126,76 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
         }),
     );
     Ok(())
+}
+
+fn read_http_request(reader: &mut impl Read) -> Result<String> {
+    let mut raw = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let header_end = loop {
+        if let Some(boundary) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            let header_end = boundary + 4;
+            if header_end > MAX_HTTP_HEADER_BYTES {
+                return Err(anyhow!("HTTP request headers exceed size limit"));
+            }
+            break header_end;
+        }
+        if raw.len() >= MAX_HTTP_HEADER_BYTES {
+            return Err(anyhow!("HTTP request headers exceed size limit"));
+        }
+
+        let bytes_read = reader.read(&mut chunk)?;
+        if bytes_read == 0 {
+            if raw.is_empty() {
+                return Ok(String::new());
+            }
+            return Err(anyhow!("incomplete HTTP request headers"));
+        }
+        raw.extend_from_slice(&chunk[..bytes_read]);
+    };
+
+    let head = std::str::from_utf8(&raw[..header_end - 4])
+        .context("HTTP request headers are not valid UTF-8")?;
+    let content_length = declared_content_length(head)?;
+    if content_length > MAX_HTTP_BODY_BYTES {
+        return Err(anyhow!("HTTP request body exceeds size limit"));
+    }
+
+    let request_len = header_end + content_length;
+    if raw.len() < request_len {
+        let bytes_already_read = raw.len();
+        raw.resize(request_len, 0);
+        reader
+            .read_exact(&mut raw[bytes_already_read..request_len])
+            .context("incomplete HTTP request body")?;
+    } else {
+        raw.truncate(request_len);
+    }
+
+    String::from_utf8(raw).context("HTTP request is not valid UTF-8")
+}
+
+fn declared_content_length(head: &str) -> Result<usize> {
+    let mut content_length = None;
+    for line in head.split("\r\n").skip(1) {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| anyhow!("malformed HTTP header"))?;
+        if name.trim().eq_ignore_ascii_case("transfer-encoding") {
+            return Err(anyhow!("Transfer-Encoding is not supported"));
+        }
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                return Err(anyhow!("duplicate Content-Length header"));
+            }
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .context("invalid Content-Length header")?,
+            );
+        }
+    }
+    Ok(content_length.unwrap_or(0))
 }
 
 fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
@@ -3984,21 +4059,39 @@ fn parse_request(raw: &str) -> Result<HttpRequest> {
     let (head, body) = raw
         .split_once("\r\n\r\n")
         .ok_or_else(|| anyhow!("invalid HTTP request"))?;
-    let mut request_line = head.lines().next().unwrap_or_default().split_whitespace();
+    let mut request_line = head
+        .split("\r\n")
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
     let method = request_line
         .next()
         .ok_or_else(|| anyhow!("missing method"))?
         .to_string();
     let target = request_line.next().ok_or_else(|| anyhow!("missing path"))?;
+    let version = request_line
+        .next()
+        .ok_or_else(|| anyhow!("missing HTTP version"))?;
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return Err(anyhow!("unsupported HTTP version"));
+    }
+    if request_line.next().is_some() {
+        return Err(anyhow!("malformed HTTP request line"));
+    }
     let (path, query) = split_path_and_query(target);
-    let headers = head
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
-        })
-        .collect();
+    let mut headers = HashMap::new();
+    for line in head.split("\r\n").skip(1) {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| anyhow!("malformed HTTP header"))?;
+        let name = name.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            return Err(anyhow!("empty HTTP header name"));
+        }
+        if headers.insert(name, value.trim().to_string()).is_some() {
+            return Err(anyhow!("duplicate HTTP header"));
+        }
+    }
 
     Ok(HttpRequest {
         method,
@@ -4053,6 +4146,104 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_exact_declared_body_without_waiting_for_eof() {
+        let request =
+            b"POST /init HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}trailing";
+        let raw = read_http_request(&mut request.as_slice()).expect("request should be framed");
+
+        assert_eq!(
+            raw,
+            "POST /init HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}"
+        );
+        assert_eq!(
+            parse_request(&raw).expect("request should parse").body,
+            "{}"
+        );
+    }
+
+    #[test]
+    fn preserves_body_bytes_read_with_the_headers() {
+        let first = b"POST /init HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{";
+        let second = b"}";
+        let mut request = first.as_slice().chain(second.as_slice());
+
+        let raw = read_http_request(&mut request).expect("chunked request should be framed");
+
+        assert_eq!(
+            parse_request(&raw).expect("request should parse").body,
+            "{}"
+        );
+    }
+
+    #[test]
+    fn standard_client_receives_response_without_half_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should have an address");
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-standard-client-{}.sqlite", UserId::new()));
+        let server_path = path.clone();
+        let server = std::thread::spawn(move || {
+            let state = ServerState::new_with_db_path(&server_path)
+                .expect("server state should initialize");
+            let (stream, _) = listener.accept().expect("server should accept client");
+            handle_connection(stream, &state)
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .expect("client timeout should be set");
+        client
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("client should send request");
+        let mut response = String::new();
+        let read_result = client.read_to_string(&mut response);
+        drop(client);
+
+        server
+            .join()
+            .expect("server thread should finish")
+            .expect("server should handle request");
+        read_result.expect("client should receive response without closing its write side");
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with("{\"status\":\"ok\"}"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rejects_incomplete_malformed_and_oversized_requests() {
+        let incomplete = b"GET /health HTTP/1.1\r\nHost: localhost\r\n";
+        assert!(read_http_request(&mut incomplete.as_slice()).is_err());
+
+        let incomplete_body =
+            b"POST /init HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{";
+        assert!(read_http_request(&mut incomplete_body.as_slice()).is_err());
+
+        let malformed_length =
+            b"POST /init HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n";
+        assert!(read_http_request(&mut malformed_length.as_slice()).is_err());
+
+        let unsupported_transfer_encoding =
+            b"POST /init HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n";
+        assert!(read_http_request(&mut unsupported_transfer_encoding.as_slice()).is_err());
+
+        let oversized_body = format!(
+            "POST /init HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            MAX_HTTP_BODY_BYTES + 1
+        );
+        assert!(read_http_request(&mut oversized_body.as_bytes()).is_err());
+
+        let mut oversized_headers = b"GET /health HTTP/1.1\r\nX-Large: ".to_vec();
+        oversized_headers.resize(oversized_headers.len() + MAX_HTTP_HEADER_BYTES, b'a');
+        assert!(read_http_request(&mut oversized_headers.as_slice()).is_err());
+
+        let malformed_header = "GET /health HTTP/1.1\r\nnot-a-header\r\n\r\n";
+        assert!(parse_request(malformed_header).is_err());
+    }
 
     fn settlement_receipt_json(actual_vendor_cost_cents: i64) -> Value {
         json!({

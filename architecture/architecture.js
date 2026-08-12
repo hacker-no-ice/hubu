@@ -122,6 +122,7 @@ const components = {
     copy:
       "The local server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, resolves public IDs, and leaves spend approval, payment, and claim state transitions to core app services.",
     responsibilities: [
+      "Frames each request at CRLF-CRLF, validates Content-Length, reads exactly the declared body, and bounds header size, body size, and socket read time.",
       "Keeps health and guidance public while requiring a local bearer token for protected routes and a second human capability for reconciliation mutations.",
       "Uses the local token and current user context for protected workflow authority, while refusing to treat executor possession of that token as human reconciliation approval.",
       "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
@@ -132,7 +133,7 @@ const components = {
     ],
     links: [sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, sharedLinks.telemetry],
     nodes: [
-      { id: "routes", label: "Routes", sub: "GET/POST JSON", x: 72, y: 92, w: 190, h: 90, tone: "agent" },
+      { id: "routes", label: "HTTP framing + routes", sub: "bounded GET/POST JSON", x: 72, y: 92, w: 220, h: 90, tone: "agent" },
       { id: "auth", label: "Local auth", sub: "bearer + human cap", x: 410, y: 76, w: 220, h: 92, tone: "core" },
       { id: "state", label: "ServerState", sub: "shared managers", x: 410, y: 250, w: 220, h: 96, tone: "core" },
       { id: "app", label: "App services", sub: "approval + claims", x: 410, y: 432, w: 220, h: 92, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },

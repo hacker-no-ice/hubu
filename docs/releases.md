@@ -87,6 +87,8 @@ the locked workspace tests, the core integration flow, and a locked release
 build before creating platform artifacts. After publication, clean GitHub
 runners download the release, verify `SHA256SUMS`, start an isolated
 `hubu-server`, and check `/health`, `/version`, and local `--version` metadata.
+HTTP probes use bounded connection and total-request timeouts so an unavailable
+or non-responsive server fails the smoke job promptly.
 
 ## Rollback, deprecation, and retention
 
