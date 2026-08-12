@@ -467,15 +467,9 @@ impl ExecutionWorkflow<'_> {
                 None,
             );
         }
-        self.transition(
-            &execution,
-            "settling",
-            None,
-            now,
-            Some("succeeded"),
-            Some("succeeded"),
-            None,
-        )
+        self.repository
+            .complete_artifact_persistence(&execution, &attempt.provider_attempt_id, now)
+            .map_err(Into::into)
     }
 
     pub fn release_phase(&self, execution_id: &str, now: &str) -> Result<Execution, WorkflowError> {
@@ -1251,6 +1245,15 @@ mod tests {
             .artifact_phase(&execution.execution_id, "artifacts-response-lost")
             .unwrap();
         assert_eq!(artifacts.calls.get(), 1);
+        assert!(repo
+            .get_staged_provider_artifacts(
+                &repo
+                    .get_provider_attempt_for_execution(&execution.execution_id)
+                    .unwrap()
+                    .provider_attempt_id
+            )
+            .unwrap()
+            .is_empty());
 
         assert_eq!(
             workflow

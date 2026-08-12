@@ -678,6 +678,36 @@ impl Repository {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(artifacts)
     }
+    pub fn complete_artifact_persistence(
+        &self,
+        execution: &Execution,
+        provider_attempt_id: &str,
+        at: &str,
+    ) -> Result<Execution> {
+        self.reject_registered_secrets([
+            execution.execution_id.as_str(),
+            provider_attempt_id,
+            at,
+            "settling",
+            "succeeded",
+        ])?;
+        self.reject_registered_numbers([execution.version.saturating_add(1)])?;
+        let mut connection = self.0.lock().unwrap();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE executions SET status='settling',outcome=NULL,started_at=COALESCE(started_at,?1),completed_at=NULL,failure_code=NULL,failure_message_redacted=NULL,updated_at=?1,provider_outcome='succeeded',artifact_outcome='succeeded',version=version+1 WHERE execution_id=?2 AND version=?3 AND status='executing' AND EXISTS(SELECT 1 FROM provider_attempts WHERE provider_attempt_id=?4 AND execution_id=?2 AND outcome='succeeded' AND completed_at IS NOT NULL)",
+            params![at, execution.execution_id, execution.version, provider_attempt_id],
+        )?;
+        if changed != 1 {
+            return Err(Error::Stale);
+        }
+        transaction.execute(
+            "DELETE FROM staged_provider_artifacts WHERE provider_attempt_id=?1",
+            [provider_attempt_id],
+        )?;
+        transaction.commit()?;
+        query_id(&connection, &execution.execution_id)
+    }
     pub fn get_provider_attempt_for_execution(
         &self,
         execution_id: &str,
