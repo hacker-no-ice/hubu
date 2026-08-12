@@ -1,15 +1,15 @@
 //! Temporal registration for the durable execution workflow.
 //!
-//! Temporal redelivers one durable activity per workflow. The activity runs
-//! the persisted state machine in [`crate::workflow`], whose durable boundaries
-//! make duplicate workflow/activity delivery side-effect safe.
+//! Executions expose each durable phase as a separate activity. The workflow
+//! uses the persisted state machine in [`crate::workflow`] to make duplicate
+//! activity delivery side-effect safe.
 
 use crate::{
     execution::Repository,
     provider::http_kernel::TEMPORAL_ACTIVITY_TIMEOUT,
     workflow::{
-        ArtifactActivities, ExecutionWorkflow, HubuActivities, OperatorReconciliationRequest,
-        ProviderActivities,
+        ArtifactActivities, ExecutionPhaseResult, ExecutionWorkflow, HubuActivities,
+        OperatorReconciliationRequest, ProviderActivities, ProviderPhaseOutcome,
     },
 };
 use futures::{channel::oneshot, future::poll_fn, Future};
@@ -41,6 +41,41 @@ pub trait DurableExecutionRunner: Send + Sync + 'static {
         operator: Option<&OperatorReconciliationRequest>,
         exhausted: bool,
     ) -> Result<String, String>;
+    fn preflight_execution(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String>;
+    fn claim_authorization(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String>;
+    fn validate_claim(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String>;
+    fn execute_provider(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ProviderPhaseOutcome, String>;
+    fn persist_artifacts(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String>;
+    fn release_authorization(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String>;
+    fn settle_spend(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String>;
 }
 
 pub struct PersistedExecutionRunner {
@@ -72,6 +107,27 @@ impl PersistedExecutionRunner {
     pub fn run_execution(&self, execution_id: &str) -> Result<String, String> {
         <Self as DurableExecutionRunner>::run_execution(self, execution_id, None)
     }
+    fn workflow(&self) -> ExecutionWorkflow<'_> {
+        ExecutionWorkflow {
+            repository: &self.repository,
+            hubu: self.hubu.as_ref(),
+            provider: self.provider.as_ref(),
+            artifacts: self.artifacts.as_ref(),
+        }
+    }
+    fn with_deadline<T>(
+        &self,
+        activity_deadline: Option<SystemTime>,
+        operation: impl FnOnce(
+            &ExecutionWorkflow<'_>,
+            &str,
+        ) -> Result<T, crate::workflow::WorkflowError>,
+    ) -> Result<T, String> {
+        let _deadline =
+            crate::provider::http_kernel::ActivityDeadlineGuard::enter(activity_deadline)
+                .map_err(|error| error.to_string())?;
+        operation(&self.workflow(), &(self.now)()).map_err(|error| error.to_string())
+    }
 }
 
 impl DurableExecutionRunner for PersistedExecutionRunner {
@@ -83,15 +139,10 @@ impl DurableExecutionRunner for PersistedExecutionRunner {
         let _deadline =
             crate::provider::http_kernel::ActivityDeadlineGuard::enter(activity_deadline)
                 .map_err(|error| error.to_string())?;
-        ExecutionWorkflow {
-            repository: &self.repository,
-            hubu: self.hubu.as_ref(),
-            provider: self.provider.as_ref(),
-            artifacts: self.artifacts.as_ref(),
-        }
-        .run(execution_id, &(self.now)())
-        .map(|execution| execution.status)
-        .map_err(|error| error.to_string())
+        self.workflow()
+            .run(execution_id, &(self.now)())
+            .map(|execution| execution.status)
+            .map_err(|error| error.to_string())
     }
     fn recover_execution(
         &self,
@@ -104,40 +155,82 @@ impl DurableExecutionRunner for PersistedExecutionRunner {
                 .mark_recovery_attempt(execution_id, &(self.now)(), exhausted)
                 .map_err(|e| e.to_string())?;
         }
-        ExecutionWorkflow {
-            repository: &self.repository,
-            hubu: self.hubu.as_ref(),
-            provider: self.provider.as_ref(),
-            artifacts: self.artifacts.as_ref(),
-        }
-        .recover(execution_id, &(self.now)(), operator)
-        .map(|e| e.status)
-        .map_err(|e| e.to_string())
+        self.workflow()
+            .recover(execution_id, &(self.now)(), operator)
+            .map(|e| e.status)
+            .map_err(|e| e.to_string())
+    }
+    fn preflight_execution(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String> {
+        self.with_deadline(activity_deadline, |workflow, now| {
+            workflow.preflight_phase(execution_id, now).map(Into::into)
+        })
+    }
+    fn claim_authorization(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String> {
+        self.with_deadline(activity_deadline, |workflow, now| {
+            workflow.claim_phase(execution_id, now).map(Into::into)
+        })
+    }
+    fn validate_claim(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String> {
+        self.with_deadline(activity_deadline, |workflow, now| {
+            workflow
+                .validate_claim_phase(execution_id, now)
+                .map(Into::into)
+        })
+    }
+    fn execute_provider(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ProviderPhaseOutcome, String> {
+        self.with_deadline(activity_deadline, |workflow, now| {
+            workflow.provider_phase(execution_id, now)
+        })
+    }
+    fn persist_artifacts(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String> {
+        self.with_deadline(activity_deadline, |workflow, now| {
+            workflow.artifact_phase(execution_id, now).map(Into::into)
+        })
+    }
+    fn release_authorization(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String> {
+        self.with_deadline(activity_deadline, |workflow, now| {
+            workflow.release_phase(execution_id, now).map(Into::into)
+        })
+    }
+    fn settle_spend(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ExecutionPhaseResult, String> {
+        self.with_deadline(activity_deadline, |workflow, now| {
+            workflow.settlement_phase(execution_id, now).map(Into::into)
+        })
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum ExecutionWorkflowInput {
-    Legacy(String),
-    Bounded {
-        execution_id: String,
-        recovery_delays_seconds: Vec<u64>,
-    },
-}
-
-impl ExecutionWorkflowInput {
-    fn into_parts(self) -> (String, Vec<u64>) {
-        match self {
-            // Legacy histories never captured operator configuration. Fixed
-            // defaults keep their replay deterministic across deployments.
-            Self::Legacy(execution_id) => (execution_id, vec![30, 120, 600]),
-            Self::Bounded {
-                execution_id,
-                recovery_delays_seconds,
-            } => (execution_id, recovery_delays_seconds),
-        }
-    }
+pub struct ExecutionWorkflowInput {
+    pub execution_id: String,
+    pub recovery_delays_seconds: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -149,45 +242,112 @@ pub struct RecoveryActivityInput {
 
 #[workflow]
 #[derive(Default)]
-pub struct DurableExecutionWorkflow {
+pub struct GranularExecutionWorkflow {
     pending: Vec<OperatorReconciliationRequest>,
 }
 
 #[workflow_methods]
-impl DurableExecutionWorkflow {
+impl GranularExecutionWorkflow {
     #[run]
     pub async fn run(
         ctx: &mut WorkflowContext<Self>,
         input: ExecutionWorkflowInput,
     ) -> WorkflowResult<String> {
-        let (execution_id, recovery_delays_seconds) = input.into_parts();
+        let ExecutionWorkflowInput {
+            execution_id,
+            recovery_delays_seconds,
+        } = input;
         let options = ActivityOptions::start_to_close_timeout(TEMPORAL_ACTIVITY_TIMEOUT);
         let mut status = ctx
             .execute_activity(
-                ExecutionActivities::run_execution,
+                GranularExecutionActivities::preflight_execution,
                 execution_id.clone(),
                 options.clone(),
             )
-            .await?;
+            .await?
+            .status;
+        if status == "preflighting" {
+            status = ctx
+                .execute_activity(
+                    GranularExecutionActivities::claim_authorization,
+                    execution_id.clone(),
+                    options.clone(),
+                )
+                .await?
+                .status;
+        }
+        if status == "claimed" {
+            status = ctx
+                .execute_activity(
+                    GranularExecutionActivities::validate_claim,
+                    execution_id.clone(),
+                    options.clone(),
+                )
+                .await?
+                .status;
+        }
+        if status == "executing" {
+            match ctx
+                .execute_activity(
+                    GranularExecutionActivities::execute_provider,
+                    execution_id.clone(),
+                    options.clone(),
+                )
+                .await?
+            {
+                ProviderPhaseOutcome::PersistArtifacts => {
+                    status = ctx
+                        .execute_activity(
+                            GranularExecutionActivities::persist_artifacts,
+                            execution_id.clone(),
+                            options.clone(),
+                        )
+                        .await?
+                        .status;
+                }
+                ProviderPhaseOutcome::ReleaseAuthorization => {
+                    status = ctx
+                        .execute_activity(
+                            GranularExecutionActivities::release_authorization,
+                            execution_id.clone(),
+                            options.clone(),
+                        )
+                        .await?
+                        .status;
+                }
+                ProviderPhaseOutcome::Complete(completed) => status = completed.status,
+            }
+        }
+        if status == "settling" {
+            status = ctx
+                .execute_activity(
+                    GranularExecutionActivities::settle_spend,
+                    execution_id.clone(),
+                    options.clone(),
+                )
+                .await?
+                .status;
+        }
         if status != "reconciliation_required" {
             return Ok(status);
         }
+
         let delay_count = recovery_delays_seconds.len();
         for (index, delay) in recovery_delays_seconds.into_iter().enumerate() {
             let mut timer = ctx.timer(Duration::from_secs(delay));
             loop {
                 let automatic = temporalio_sdk::workflows::select! {
                     _ = &mut timer => true,
-                    _ = ctx.wait_condition(|s: &Self| !s.pending.is_empty()) => false,
+                    _ = ctx.wait_condition(|state: &Self| !state.pending.is_empty()) => false,
                 };
                 let operator = if automatic {
                     None
                 } else {
-                    ctx.state_mut(|s| s.pending.pop())
+                    ctx.state_mut(|state| state.pending.pop())
                 };
                 status = ctx
                     .execute_activity(
-                        ExecutionActivities::recover_execution,
+                        GranularExecutionActivities::perform_reconciliation,
                         RecoveryActivityInput {
                             execution_id: execution_id.clone(),
                             exhausted: automatic && index + 1 == delay_count,
@@ -205,11 +365,12 @@ impl DurableExecutionWorkflow {
             }
         }
         loop {
-            ctx.wait_condition(|s: &Self| !s.pending.is_empty()).await;
-            let operator = ctx.state_mut(|s| s.pending.pop());
+            ctx.wait_condition(|state: &Self| !state.pending.is_empty())
+                .await;
+            let operator = ctx.state_mut(|state| state.pending.pop());
             status = ctx
                 .execute_activity(
-                    ExecutionActivities::recover_execution,
+                    GranularExecutionActivities::perform_reconciliation,
                     RecoveryActivityInput {
                         execution_id: execution_id.clone(),
                         operator,
@@ -240,20 +401,124 @@ impl DurableExecutionWorkflow {
 }
 
 #[derive(Clone)]
-pub struct ExecutionActivities {
+pub struct GranularExecutionActivities {
     runner: Arc<dyn DurableExecutionRunner>,
 }
 
-impl ExecutionActivities {
+impl GranularExecutionActivities {
     pub fn new(runner: Arc<dyn DurableExecutionRunner>) -> Self {
         Self { runner }
     }
 }
 
+fn activity_failure(message: impl ToString) -> ActivityError {
+    ActivityError::application(ApplicationFailure::new(std::io::Error::other(
+        message.to_string(),
+    )))
+}
+
 #[activities]
-impl ExecutionActivities {
+impl GranularExecutionActivities {
     #[activity]
-    pub async fn recover_execution(
+    pub async fn preflight_execution(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        execution_id: String,
+    ) -> Result<ExecutionPhaseResult, ActivityError> {
+        let runner = Arc::clone(&self.runner);
+        let deadline = ctx.info().deadline;
+        tokio::task::spawn_blocking(move || runner.preflight_execution(&execution_id, deadline))
+            .await
+            .map_err(activity_failure)?
+            .map_err(activity_failure)
+    }
+
+    #[activity]
+    pub async fn claim_authorization(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        execution_id: String,
+    ) -> Result<ExecutionPhaseResult, ActivityError> {
+        let runner = Arc::clone(&self.runner);
+        let deadline = ctx.info().deadline;
+        tokio::task::spawn_blocking(move || runner.claim_authorization(&execution_id, deadline))
+            .await
+            .map_err(activity_failure)?
+            .map_err(activity_failure)
+    }
+
+    #[activity]
+    pub async fn validate_claim(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        execution_id: String,
+    ) -> Result<ExecutionPhaseResult, ActivityError> {
+        let runner = Arc::clone(&self.runner);
+        let deadline = ctx.info().deadline;
+        tokio::task::spawn_blocking(move || runner.validate_claim(&execution_id, deadline))
+            .await
+            .map_err(activity_failure)?
+            .map_err(activity_failure)
+    }
+
+    #[activity]
+    pub async fn execute_provider(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        execution_id: String,
+    ) -> Result<ProviderPhaseOutcome, ActivityError> {
+        let runner = Arc::clone(&self.runner);
+        let deadline = ctx.info().deadline;
+        tokio::task::spawn_blocking(move || runner.execute_provider(&execution_id, deadline))
+            .await
+            .map_err(activity_failure)?
+            .map_err(activity_failure)
+    }
+
+    #[activity]
+    pub async fn persist_artifacts(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        execution_id: String,
+    ) -> Result<ExecutionPhaseResult, ActivityError> {
+        let runner = Arc::clone(&self.runner);
+        let deadline = ctx.info().deadline;
+        tokio::task::spawn_blocking(move || runner.persist_artifacts(&execution_id, deadline))
+            .await
+            .map_err(activity_failure)?
+            .map_err(activity_failure)
+    }
+
+    #[activity]
+    pub async fn release_authorization(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        execution_id: String,
+    ) -> Result<ExecutionPhaseResult, ActivityError> {
+        let runner = Arc::clone(&self.runner);
+        let deadline = ctx.info().deadline;
+        tokio::task::spawn_blocking(move || runner.release_authorization(&execution_id, deadline))
+            .await
+            .map_err(activity_failure)?
+            .map_err(activity_failure)
+    }
+
+    #[activity]
+    pub async fn settle_spend(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        execution_id: String,
+    ) -> Result<ExecutionPhaseResult, ActivityError> {
+        let runner = Arc::clone(&self.runner);
+        let deadline = ctx.info().deadline;
+        tokio::task::spawn_blocking(move || runner.settle_spend(&execution_id, deadline))
+            .await
+            .map_err(activity_failure)?
+            .map_err(activity_failure)
+    }
+
+    #[activity]
+    pub async fn perform_reconciliation(
         self: Arc<Self>,
         _ctx: ActivityContext,
         input: RecoveryActivityInput,
@@ -267,39 +532,16 @@ impl ExecutionActivities {
             )
         })
         .await
-        .map_err(|e| {
-            ActivityError::application(ApplicationFailure::new(std::io::Error::other(
-                e.to_string(),
-            )))
-        })?
-        .map_err(|m| ActivityError::application(ApplicationFailure::new(std::io::Error::other(m))))
-    }
-    #[activity]
-    pub async fn run_execution(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        execution_id: String,
-    ) -> Result<String, ActivityError> {
-        let runner = Arc::clone(&self.runner);
-        let activity_deadline = ctx.info().deadline;
-        tokio::task::spawn_blocking(move || runner.run_execution(&execution_id, activity_deadline))
-            .await
-            .map_err(|error| {
-                ActivityError::application(ApplicationFailure::new(std::io::Error::other(
-                    error.to_string(),
-                )))
-            })?
-            .map_err(|message| {
-                ActivityError::application(ApplicationFailure::new(std::io::Error::other(message)))
-            })
+        .map_err(activity_failure)?
+        .map_err(activity_failure)
     }
 }
 
 pub fn worker_options(runner: Arc<dyn DurableExecutionRunner>) -> WorkerOptions {
     WorkerOptions::new(EXECUTION_TASK_QUEUE)
-        .register_workflow::<DurableExecutionWorkflow>()
-        .expect("durable execution workflow registration is valid")
-        .register_activities(ExecutionActivities::new(runner))
+        .register_workflow::<GranularExecutionWorkflow>()
+        .expect("granular execution workflow registration is valid")
+        .register_activities(GranularExecutionActivities::new(runner))
         .build()
 }
 
@@ -504,8 +746,8 @@ fn recovery_delays_seconds() -> Vec<u64> {
 async fn start_execution(client: Client, execution_id: String) -> ScheduleResult {
     client
         .start_workflow(
-            DurableExecutionWorkflow::run,
-            ExecutionWorkflowInput::Bounded {
+            GranularExecutionWorkflow::run,
+            ExecutionWorkflowInput {
                 execution_id: execution_id.clone(),
                 recovery_delays_seconds: recovery_delays_seconds(),
             },
@@ -535,9 +777,11 @@ async fn signal_reconciliation(
     // when a pre-HUB-19 workflow with this stable ID already completed.
     start_execution(client.clone(), execution_id.clone()).await?;
     client
-        .get_workflow_handle::<DurableExecutionWorkflow>(format!("gongbu-execution-{execution_id}"))
+        .get_workflow_handle::<GranularExecutionWorkflow>(format!(
+            "gongbu-execution-{execution_id}"
+        ))
         .signal(
-            DurableExecutionWorkflow::reconcile,
+            GranularExecutionWorkflow::reconcile,
             request,
             WorkflowSignalOptions::default(),
         )
@@ -562,6 +806,62 @@ mod tests {
         ) -> Result<String, String> {
             Ok("reconciliation_required".into())
         }
+        fn preflight_execution(
+            &self,
+            _: &str,
+            _: Option<SystemTime>,
+        ) -> Result<ExecutionPhaseResult, String> {
+            Ok(phase("preflighting"))
+        }
+        fn claim_authorization(
+            &self,
+            _: &str,
+            _: Option<SystemTime>,
+        ) -> Result<ExecutionPhaseResult, String> {
+            Ok(phase("claimed"))
+        }
+        fn validate_claim(
+            &self,
+            _: &str,
+            _: Option<SystemTime>,
+        ) -> Result<ExecutionPhaseResult, String> {
+            Ok(phase("executing"))
+        }
+        fn execute_provider(
+            &self,
+            _: &str,
+            _: Option<SystemTime>,
+        ) -> Result<ProviderPhaseOutcome, String> {
+            Ok(ProviderPhaseOutcome::PersistArtifacts)
+        }
+        fn persist_artifacts(
+            &self,
+            _: &str,
+            _: Option<SystemTime>,
+        ) -> Result<ExecutionPhaseResult, String> {
+            Ok(phase("settling"))
+        }
+        fn release_authorization(
+            &self,
+            _: &str,
+            _: Option<SystemTime>,
+        ) -> Result<ExecutionPhaseResult, String> {
+            Ok(phase("released"))
+        }
+        fn settle_spend(
+            &self,
+            _: &str,
+            _: Option<SystemTime>,
+        ) -> Result<ExecutionPhaseResult, String> {
+            Ok(phase("succeeded"))
+        }
+    }
+
+    fn phase(status: &str) -> ExecutionPhaseResult {
+        ExecutionPhaseResult {
+            status: status.into(),
+            failure_code: None,
+        }
     }
 
     #[test]
@@ -571,14 +871,14 @@ mod tests {
     }
 
     #[test]
-    fn workflow_input_accepts_legacy_and_bounded_histories() {
-        let legacy: ExecutionWorkflowInput = serde_json::from_str("\"execution-1\"").unwrap();
-        assert_eq!(legacy.into_parts().0, "execution-1");
-        let bounded: ExecutionWorkflowInput = serde_json::from_value(serde_json::json!({
+    fn workflow_input_requires_granular_configuration() {
+        assert!(serde_json::from_str::<ExecutionWorkflowInput>("\"execution-1\"").is_err());
+        let input: ExecutionWorkflowInput = serde_json::from_value(serde_json::json!({
             "execution_id":"execution-2", "recovery_delays_seconds":[1,2,3]
         }))
         .unwrap();
-        assert_eq!(bounded.into_parts(), ("execution-2".into(), vec![1, 2, 3]));
+        assert_eq!(input.execution_id, "execution-2");
+        assert_eq!(input.recovery_delays_seconds, vec![1, 2, 3]);
     }
 
     #[test]

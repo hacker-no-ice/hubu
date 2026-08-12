@@ -133,9 +133,28 @@ gongbu-sandbox inspect \
   --run-dir "$RUN_DIR"
 ```
 
-Open the Temporal URL and inspect workflow status and activity attempts. Until
-HUB-51 is implemented, the execution phases appear inside one coarse
-`run_execution` activity.
+Open the Temporal URL and inspect workflow status and activity attempts. New
+executions use `GranularExecutionWorkflow`; a successful history shows these
+operator-visible boundaries in order:
+
+1. `preflight_execution`
+2. `claim_authorization`
+3. `validate_claim`
+4. `execute_provider`
+5. `persist_artifacts`
+6. `settle_spend`
+
+Proven provider failures use `release_authorization` instead of artifact and
+settlement work. Ambiguous outcomes use `perform_reconciliation` after the
+configured bounded recovery timer or an operator signal. Select an activity in
+Temporal UI to inspect its duration and retry attempts. Inputs contain only the
+execution ID; prompts, credentials, provider responses, account identifiers,
+and raw authorization material are loaded from Gongbu persistence inside the
+activity and never appear in Temporal payloads.
+
+`GranularExecutionWorkflow` is the sole registered execution workflow. Gongbu
+has not shipped a release with the earlier coarse workflow, so there is no
+legacy workflow history or compatibility registration to retain.
 
 Replay by running the identical `submit` command with the same operation key,
 prompt, image size, and Hubu token reference. It must return the same execution

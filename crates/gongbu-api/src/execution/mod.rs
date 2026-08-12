@@ -216,6 +216,11 @@ pub struct AttemptResult {
     pub provider_request_id: Option<String>,
     pub provider_operation_id: Option<String>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagedProviderArtifact {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
 #[derive(Clone, Debug)]
 pub struct CreateArtifactParams {
     pub artifact_id: String,
@@ -600,6 +605,78 @@ impl Repository {
         } else {
             Err(Error::NotFound)
         }
+    }
+    pub fn complete_provider_attempt_with_artifacts(
+        &self,
+        id: &str,
+        r: &AttemptResult,
+        artifacts: &[StagedProviderArtifact],
+    ) -> Result<()> {
+        if artifacts.is_empty() {
+            return Err(Error::Invalid("staged provider artifacts"));
+        }
+        safe_usage_json(&r.usage)?;
+        if r.outcome != "succeeded"
+            || r.usage_schema_version < 1
+            || r.provider_amount_minor.is_some() != r.provider_currency.is_some()
+            || r.provider_amount_minor.is_some_and(|value| value < 0)
+            || artifacts
+                .iter()
+                .any(|artifact| artifact.media_type.trim().is_empty())
+        {
+            return Err(Error::Invalid("attempt result"));
+        }
+        let usage = j(&r.usage);
+        self.reject_registered_numbers(
+            [Some(r.usage_schema_version), r.provider_amount_minor]
+                .into_iter()
+                .flatten(),
+        )?;
+        self.reject_registered_json([&r.usage])?;
+        self.reject_registered_secrets([
+            r.outcome.as_str(),
+            r.completed_at.as_str(),
+            usage.as_str(),
+            r.provider_currency.as_deref().unwrap_or(""),
+            r.provider_request_id.as_deref().unwrap_or(""),
+            r.provider_operation_id.as_deref().unwrap_or(""),
+            id,
+        ])?;
+        let mut connection = self.0.lock().unwrap();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=NULL,failure_message_redacted=NULL,provider_request_id=?7,provider_operation_id=?8 WHERE provider_attempt_id=?9 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",
+            params![r.outcome,r.completed_at,usage,r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.provider_request_id,r.provider_operation_id,id],
+        )?;
+        if changed != 1 {
+            return Err(Error::NotFound);
+        }
+        for (ordinal, artifact) in artifacts.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO staged_provider_artifacts(provider_attempt_id,ordinal,media_type,bytes) VALUES(?1,?2,?3,?4)",
+                params![id, i64::try_from(ordinal).map_err(|_| Error::Limit("staged artifact count"))?, artifact.media_type, artifact.bytes],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+    pub fn get_staged_provider_artifacts(
+        &self,
+        provider_attempt_id: &str,
+    ) -> Result<Vec<StagedProviderArtifact>> {
+        let connection = self.0.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT media_type,bytes FROM staged_provider_artifacts WHERE provider_attempt_id=?1 ORDER BY ordinal",
+        )?;
+        let artifacts = statement
+            .query_map([provider_attempt_id], |row| {
+                Ok(StagedProviderArtifact {
+                    media_type: row.get(0)?,
+                    bytes: row.get(1)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(artifacts)
     }
     pub fn get_provider_attempt_for_execution(
         &self,

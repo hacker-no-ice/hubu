@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS provider_attempts(
  started_at TEXT NOT NULL, transmission_started_at TEXT, completed_at TEXT, CHECK((usage_json IS NULL)=(usage_schema_version IS NULL)), CHECK((provider_amount_minor IS NULL)=(provider_currency IS NULL)));
 CREATE INDEX IF NOT EXISTS attempts_execution_started ON provider_attempts(execution_id,started_at);
 CREATE UNIQUE INDEX IF NOT EXISTS attempts_provider_request ON provider_attempts(provider,provider_request_id) WHERE provider_request_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS staged_provider_artifacts(
+ provider_attempt_id TEXT NOT NULL REFERENCES provider_attempts ON DELETE CASCADE,
+ ordinal INTEGER NOT NULL CHECK(ordinal>=0), media_type TEXT NOT NULL CHECK(trim(media_type)<>''), bytes BLOB NOT NULL,
+ PRIMARY KEY(provider_attempt_id,ordinal));
 CREATE TABLE IF NOT EXISTS artifacts(
  artifact_id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions ON DELETE CASCADE, provider_attempt_id TEXT REFERENCES provider_attempts ON DELETE SET NULL,
  kind TEXT NOT NULL, storage_backend TEXT NOT NULL, media_type TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL CHECK(size_bytes>=0), sha256 TEXT NOT NULL,
