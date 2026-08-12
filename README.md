@@ -6,6 +6,10 @@ Execution and Artifact HTTP contract, and the first single-provider durable
 execution workflow, plus operator-selected Google Gemini and Ideogram image
 adapters.
 
+The separate `gongbu-mcp` crate exposes the authenticated HTTP contract to local
+agent platforms over MCP stdio. See [docs/mcp.md](docs/mcp.md) for operator
+configuration, tool examples, and its opt-in integration test.
+
 ## V1 boundary
 
 `Execution` is the persisted aggregate root and is unique by

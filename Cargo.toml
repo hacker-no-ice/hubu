@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gongbu-api"]
+members = ["crates/gongbu-api", "crates/gongbu-mcp"]
 resolver = "2"
 
 [workspace.package]
