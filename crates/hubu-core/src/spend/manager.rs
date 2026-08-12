@@ -785,12 +785,30 @@ mod tests {
         assert_eq!(manager.decisions.len(), 1);
         assert_eq!(manager.tokens.len(), 1);
 
-        let mut changed = request;
-        changed.amount_cents += 1;
-        let conflict = manager
-            .evaluate_spend(&user_context(), "stable-job-1", changed, &policy)
-            .expect_err("same operation with changed scope must be rejected");
-        assert!(matches!(conflict, SpendError::OperationKeyConflict));
+        let mut changed_account = request.clone();
+        changed_account.agent_account_id = AgentAccountId::new();
+        let mut changed_amount = request.clone();
+        changed_amount.amount_cents += 1;
+        let mut changed_merchant = request.clone();
+        changed_merchant.merchant = Some("Different Merchant".to_string());
+        let mut changed_reason = request.clone();
+        changed_reason.task_id = Some("different reason".to_string());
+        let mut changed_profile = request;
+        changed_profile.workload_profile = "batch".to_string();
+
+        for (field, changed) in [
+            ("account", changed_account),
+            ("amount", changed_amount),
+            ("merchant", changed_merchant),
+            ("reason", changed_reason),
+            ("workload profile", changed_profile),
+        ] {
+            let message = format!("same operation with changed {field} must fail");
+            let conflict = manager
+                .evaluate_spend(&user_context(), "stable-job-1", changed, &policy)
+                .expect_err(&message);
+            assert!(matches!(conflict, SpendError::OperationKeyConflict));
+        }
         assert_eq!(manager.decisions.len(), 1);
         assert_eq!(manager.tokens.len(), 1);
     }

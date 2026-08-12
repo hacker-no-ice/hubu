@@ -119,9 +119,12 @@ hubu budget list
 hubu ledger list
 ```
 
-The agent platform supplies a stable, namespaced operation key. Hubu stores the
-authoritative workflow state under `(agent_id, operation_key)`, so replaying
-authorization, claim, or finalization recovers the same result.
+The agent platform owns a durable logical invocation identity. The MCP adapter
+maps trusted client invocation metadata to a stable opaque operation key and
+injects it outside model control; manual CLI/HTTP callers supply the key
+directly. Hubu stores authoritative workflow state under
+`(agent_id, operation_key)`, so replaying authorization, claim, or finalization
+recovers the same result.
 
 Codex is one supported MCP harness, not a Hubu requirement. To make Hubu tools
 discoverable to Codex agents, initialize the Codex MCP config:
@@ -135,9 +138,11 @@ hubu-server
 
 If the server from step 1 is already running with a different token file,
 restart it with the same auth and reconciliation token files before restarting Codex. Codex
-should then be able to discover Hubu MCP tools and call spend tools without
-holding wallet credentials. For other MCP clients, use Hubu's tool annotations
-or `hubu_client_approval_profile`; see
+should then be able to discover Hubu MCP tools without holding wallet
+credentials. Spend calls additionally require the client to inject durable
+`hubu.dev/platform-invocation` metadata outside model arguments; clients that
+do not support that extension fail closed for spend. For other MCP clients, use
+Hubu's tool annotations or `hubu_client_approval_profile`; see
 [docs/mcp-transport.md](docs/mcp-transport.md).
 
 ## Releases

@@ -86,14 +86,20 @@ hubu init codex
 
 The command writes a managed `[mcp_servers.hubu]` block to
 `~/.codex/config.toml` by default, points it at the local `hubu-mcp-server`
-executable, creates or reuses a Hubu auth token file, and renders Hubu's generic
-approval profile into Codex per-tool approval overrides. `hubu_authorize_spend`
-and `hubu_submit_spend` can run without an extra Codex approval prompt; Hubu
-policy still returns `needs_approval` without executing payment when review is
-required.
+executable, creates or reuses a Hubu auth token file, configures the durable MCP
+registry path, and renders Hubu's generic approval profile into Codex per-tool
+approval overrides. `hubu_authorize_spend` and `hubu_submit_spend` can run
+without an extra Codex approval prompt; Hubu policy still returns
+`needs_approval` without executing payment when review is required.
 Restart Codex after running the command. Start `hubu-server` with the
 `HUBU_AUTH_TOKEN_FILE` path printed by the command so the server and MCP adapter
 share the same bearer token.
+
+Spend also requires client support for the trusted
+`params._meta["hubu.dev/platform-invocation"]` extension described below. MCP
+server configuration alone cannot manufacture a durable logical invocation
+identity. A client that does not provide the extension can still use read and
+protected administrative tools, but Hubu spend tools fail closed before HTTP.
 
 After Codex can discover Hubu tools, human-initiated actions have two paths:
 run `hubu` CLI commands directly, or ask the agent to perform the same
@@ -223,11 +229,37 @@ the client platform or orchestrator, not invented by the model. Hubu durably
 stores workflow state under that key; identical retries recover the original
 workflow and changed scope is rejected.
 
-The current MCP transport exposes `operation_key` as an explicit tool argument
-and forwards it unchanged. It does not yet derive the key from trusted platform
-invocation metadata. Until a platform adapter is added, the client harness must
-inject and retain a stable key; model-generated keys are not a reliable
-idempotency boundary.
+The MCP transport keeps `operation_key` out of both spend tool input schemas.
+For every spend call, the client harness attaches trusted invocation metadata
+outside model-authored `arguments`:
+
+```json
+{
+  "name": "hubu_authorize_spend",
+  "arguments": {
+    "account_id": "aga_example",
+    "amount_cents": 500,
+    "reason": "generate-logo",
+    "merchant": "gongbu.image",
+    "workload_profile": "image_generation"
+  },
+  "_meta": {
+    "hubu.dev/platform-invocation": {
+      "platform": "codex",
+      "installation_id": "install_7f3a",
+      "invocation_id": "provider-call-01K2AZNQ"
+    }
+  }
+}
+```
+
+The adapter maps that identity to an opaque namespaced key in its durable
+SQLite registry and injects the key into the HTTP request. Configure the
+registry with `HUBU_MCP_STATE_PATH`; `hubu init codex` writes a default path
+beside the Hubu token file. Repeating the identity reuses the key across
+transport retries and adapter restarts, while a distinct provider invocation ID
+receives a distinct key. Missing trusted metadata and any `operation_key`
+inside model-authored `arguments` are rejected before Hubu is contacted.
 
 ## Tool Mapping
 

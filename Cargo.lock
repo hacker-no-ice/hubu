@@ -282,8 +282,10 @@ name = "hubu-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rusqlite",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

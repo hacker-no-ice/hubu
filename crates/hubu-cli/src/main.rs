@@ -21,6 +21,8 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const MCP_STATE_FILE_ENV: &str = "HUBU_MCP_STATE_PATH";
+const DEFAULT_MCP_STATE_FILE: &str = "hubu-mcp.sqlite3";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
@@ -110,6 +112,9 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let reconciliation_token_file = take_value(&mut args, "--reconciliation-token-file")
         .map(PathBuf::from)
         .unwrap_or_else(|| default_codex_reconciliation_token_file_path(&token_file));
+    let mcp_state_file = take_value(&mut args, "--mcp-state-file")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_codex_mcp_state_file_path(&token_file));
     let force = take_flag(&mut args, "--force");
     let dry_run = take_flag(&mut args, "--dry-run");
     let trust_client_approval = take_flag(&mut args, "--trust-client-approval");
@@ -134,11 +139,13 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
             )
         })?
     };
+    let mcp_state_file = absolute_path(&mcp_state_file)?;
     let block = codex_mcp_config_block(
         &mcp_server,
         base_url,
         &token_file,
         &reconciliation_token_file,
+        &mcp_state_file,
         trust_client_approval,
     );
 
@@ -159,6 +166,7 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "  reconciliation_token_file: {}",
         reconciliation_token_file.display()
     );
+    println!("  mcp_state_file: {}", mcp_state_file.display());
     println!("  next: restart Codex, then use /mcp or ask Codex to list Hubu tools");
     println!(
         "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
@@ -166,7 +174,7 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
         reconciliation_token_file.display()
     );
     println!(
-        "  spend_tools: Codex pre-approves Hubu spend tool calls; Hubu still returns needs_approval without payment when policy requires review"
+        "  spend_tools: require trusted hubu.dev/platform-invocation metadata from the client; Hubu policy still returns needs_approval without payment when review is required"
     );
     if trust_client_approval {
         println!("  approval_tools: enabled because --trust-client-approval was set");
@@ -208,6 +216,17 @@ fn default_codex_reconciliation_token_file_path(auth_token_file: &Path) -> PathB
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .join(DEFAULT_RECONCILIATION_TOKEN_FILE)
+}
+
+fn default_codex_mcp_state_file_path(auth_token_file: &Path) -> PathBuf {
+    if let Ok(path) = env::var(MCP_STATE_FILE_ENV) {
+        return PathBuf::from(path);
+    }
+    auth_token_file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(DEFAULT_MCP_STATE_FILE)
 }
 
 fn hubu_home() -> PathBuf {
@@ -360,6 +379,7 @@ fn codex_mcp_config_block(
     base_url: &str,
     token_file: &Path,
     reconciliation_token_file: &Path,
+    mcp_state_file: &Path,
     trust_client_approval: bool,
 ) -> String {
     let mut block = format!(
@@ -371,11 +391,13 @@ fn codex_mcp_config_block(
          [mcp_servers.hubu.env]\n\
          HUBU_URL = \"{}\"\n\
          {AUTH_TOKEN_FILE_ENV} = \"{}\"\n\
-         {RECONCILIATION_TOKEN_FILE_ENV} = \"{}\"\n",
+         {RECONCILIATION_TOKEN_FILE_ENV} = \"{}\"\n\
+         {MCP_STATE_FILE_ENV} = \"{}\"\n",
         toml_basic_string(&mcp_server.display().to_string()),
         toml_basic_string(base_url),
         toml_basic_string(&token_file.display().to_string()),
-        toml_basic_string(&reconciliation_token_file.display().to_string())
+        toml_basic_string(&reconciliation_token_file.display().to_string()),
+        toml_basic_string(&mcp_state_file.display().to_string())
     );
     if trust_client_approval {
         let _ = writeln!(block, "HUBU_MCP_TRUST_CLIENT_APPROVAL = \"1\"");
@@ -2293,7 +2315,7 @@ fn print_init_help() {
 
 Usage:
   hubu init [--policy FILE] [--force]
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--reconciliation-token-file FILE] [--force] [--dry-run]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
@@ -2314,7 +2336,7 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--reconciliation-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--force] [--dry-run] [--trust-client-approval]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
@@ -2322,12 +2344,14 @@ Options:
   --token-file FILE         Hubu auth token file (default: $HUBU_AUTH_TOKEN_FILE, ./hubu.auth-token, or ~/.hubu/hubu.auth-token)
   --reconciliation-token-file FILE
                              Separate human reconciliation capability file (default: beside --token-file)
+  --mcp-state-file FILE      Durable trusted invocation registry (default: $HUBU_MCP_STATE_PATH or beside --token-file)
   --force                   Replace an existing unmanaged [mcp_servers.hubu] config block
   --dry-run                 Print the managed Codex config block without writing files
   --trust-client-approval   Enable MCP setup/admin tools when the Codex client prompts for destructive tool approval
 
 Notes:
   Hubu spend tools are pre-approved in Codex; Hubu policy still controls needs_approval outcomes.
+  Spend calls fail closed unless the client injects durable hubu.dev/platform-invocation metadata outside model arguments.
   Keep --trust-client-approval off for normal agent spend workflows.
   Use --trust-client-approval only when you want to ask Codex to perform setup/admin actions behind a human approval prompt.
   Start hubu-server with the same HUBU_AUTH_TOKEN_FILE and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
@@ -2512,6 +2536,7 @@ mod tests {
             "http://127.0.0.1:8787",
             Path::new("/tmp/hubu\\token"),
             Path::new("/tmp/hubu\\reconciliation-token"),
+            Path::new("/tmp/hubu\\mcp-state.sqlite3"),
             false,
         );
 
@@ -2520,6 +2545,7 @@ mod tests {
         assert!(block.contains("HUBU_AUTH_TOKEN_FILE = \"/tmp/hubu\\\\token\""));
         assert!(block
             .contains("HUBU_RECONCILIATION_TOKEN_FILE = \"/tmp/hubu\\\\reconciliation-token\""));
+        assert!(block.contains("HUBU_MCP_STATE_PATH = \"/tmp/hubu\\\\mcp-state.sqlite3\""));
         assert!(block.contains("[mcp_servers.hubu.tools.hubu_authorize_spend]"));
         assert!(block.contains("[mcp_servers.hubu.tools.hubu_submit_spend]"));
         assert!(block.contains("approval_mode = \"approve\""));
@@ -2534,6 +2560,7 @@ mod tests {
             "http://127.0.0.1:8787",
             Path::new("/tmp/hubu.auth-token"),
             Path::new("/tmp/hubu.reconciliation-token"),
+            Path::new("/tmp/hubu-mcp.sqlite3"),
             true,
         );
 

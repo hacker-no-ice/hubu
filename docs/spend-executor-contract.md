@@ -128,11 +128,13 @@ profiles:
 
 ## Operation Key Generation and Storage
 
-The agent platform or orchestrator—not the language model—owns the operation
-key lifecycle. It should use a durable platform operation ID with a namespace,
-for example `codex:tool-call:01J...`. If the platform has no suitable ID, its
-adapter should generate and persist an opaque key before the first attempt.
-Operation keys are compared case-sensitively after trimming whitespace.
+The agent platform or orchestrator—not the language model—owns the logical
+invocation identity. Before the first authorization attempt, the Hubu platform
+adapter resolves that trusted identity through its durable operation-key
+registry. The registry allocates an opaque namespaced key such as
+`hubu:v1:codex:550e8400e29b41d4a716446655440000` and reuses it whenever the
+platform repeats the same logical invocation. Operation keys are compared
+case-sensitively after trimming whitespace.
 
 Hubu is the authoritative store for workflow state under the agent-scoped key.
 Replaying authorization with the same agent, operation key, and scope recovers
@@ -144,10 +146,15 @@ a retry loop, or ask the model to invent or remember it. A reusable skill can
 teach the protocol, but enforcement belongs in the platform adapter or SDK and
 Hubu's database constraints.
 
-The current Hubu MCP transport accepts this key as an explicit input but does
-not yet derive it from trusted platform invocation metadata. That adapter is a
-separate integration layer; this contract defines the server-side invariant it
-must satisfy.
+The Hubu MCP adapter removes `operation_key` from model-visible spend tool
+schemas. Its client must attach a durable `platform`, `installation_id`, and
+`invocation_id` under trusted
+`params._meta["hubu.dev/platform-invocation"]`. The adapter persists the
+identity-to-key mapping in `HUBU_MCP_STATE_PATH`, injects the resolved key into
+the Hubu HTTP request, and rejects missing metadata or a model-authored
+`operation_key`. A second provider candidate must receive a new invocation ID;
+a transport retry or process recovery for the same candidate must reuse its
+existing invocation ID.
 
 Hubu rejects unknown profiles and non-positive durations during startup or
 authorization. The effective timing configuration is published in executor
@@ -469,8 +476,9 @@ with only the normal bearer are rejected.
 ## Safety Rules
 
 - Executors must claim before irreversible work; validation alone is insufficient.
-- Agent platforms must supply one stable operation key and reuse it for
-  authorization, claim, finalization, and every retry.
+- Agent platforms must supply one durable logical invocation identity; their
+  Hubu adapter must resolve it to one stable operation key and reuse that key
+  for authorization, claim, finalization, and every retry.
 - Executors must settle after irreversible billable work succeeds.
 - Settlement must report actual vendor cost and immutable provider receipt
   metadata; actual cost cannot exceed the authorized maximum.

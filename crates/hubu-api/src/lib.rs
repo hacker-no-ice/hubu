@@ -1441,13 +1441,13 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "operation_key"
             ],
             "generation": {
-                "preferred": "reuse the platform's durable tool-call, run-step, or operation id with a platform prefix",
-                "fallback": "the platform adapter generates and persists an opaque operation key before the first authorization attempt",
+                "preferred": "resolve trusted platform, installation, and logical invocation ids through a durable adapter registry before the first authorization attempt",
+                "format": "the adapter allocates an opaque namespaced operation key such as hubu:v1:codex:<uuid>",
                 "comparison": "case-sensitive after trimming surrounding whitespace"
             },
             "persistence": [
                 "Hubu is the authoritative store for workflow state under the agent-scoped operation_key",
-                "the client must reuse its stable operation_key for authorization, claim, finalization, and retries",
+                "the adapter must durably reuse the operation_key for the same trusted logical invocation across retries and process recovery",
                 "do not rely on model conversation memory for the operation_key"
             ],
             "prohibited": [
