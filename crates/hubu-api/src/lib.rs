@@ -1082,10 +1082,7 @@ struct LedgerEntryHttpResponse {
 fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     let started_at = Instant::now();
     let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    stream
-        .set_read_timeout(Some(HTTP_READ_TIMEOUT))
-        .context("set HTTP request read timeout")?;
-    let raw = read_http_request(&mut stream)?;
+    let raw = read_http_request(&mut stream, started_at + HTTP_READ_TIMEOUT)?;
     if raw.is_empty() {
         log_event(
             "debug",
@@ -1128,7 +1125,22 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     Ok(())
 }
 
-fn read_http_request(reader: &mut impl Read) -> Result<String> {
+fn read_http_request(stream: &mut TcpStream, deadline: Instant) -> Result<String> {
+    read_http_request_with_guard(stream, |stream| {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| anyhow!("HTTP request read deadline exceeded"))?;
+        stream
+            .set_read_timeout(Some(remaining))
+            .context("set remaining HTTP request read timeout")
+    })
+}
+
+fn read_http_request_with_guard<R: Read>(
+    reader: &mut R,
+    mut prepare_read: impl FnMut(&mut R) -> Result<()>,
+) -> Result<String> {
     let mut raw = Vec::new();
     let mut chunk = [0_u8; 8192];
     let header_end = loop {
@@ -1143,6 +1155,7 @@ fn read_http_request(reader: &mut impl Read) -> Result<String> {
             return Err(anyhow!("HTTP request headers exceed size limit"));
         }
 
+        prepare_read(reader)?;
         let bytes_read = reader.read(&mut chunk)?;
         if bytes_read == 0 {
             if raw.is_empty() {
@@ -1161,15 +1174,19 @@ fn read_http_request(reader: &mut impl Read) -> Result<String> {
     }
 
     let request_len = header_end + content_length;
-    if raw.len() < request_len {
-        let bytes_already_read = raw.len();
-        raw.resize(request_len, 0);
-        reader
-            .read_exact(&mut raw[bytes_already_read..request_len])
-            .context("incomplete HTTP request body")?;
-    } else {
-        raw.truncate(request_len);
+    while raw.len() < request_len {
+        prepare_read(reader)?;
+        let remaining = request_len - raw.len();
+        let read_capacity = remaining.min(chunk.len());
+        let bytes_read = reader
+            .read(&mut chunk[..read_capacity])
+            .context("read HTTP request body")?;
+        if bytes_read == 0 {
+            return Err(anyhow!("incomplete HTTP request body"));
+        }
+        raw.extend_from_slice(&chunk[..bytes_read]);
     }
+    raw.truncate(request_len);
 
     String::from_utf8(raw).context("HTTP request is not valid UTF-8")
 }
@@ -4147,11 +4164,15 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 mod tests {
     use super::*;
 
+    fn read_test_request(reader: &mut impl Read) -> Result<String> {
+        read_http_request_with_guard(reader, |_| Ok(()))
+    }
+
     #[test]
     fn reads_exact_declared_body_without_waiting_for_eof() {
         let request =
             b"POST /init HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}trailing";
-        let raw = read_http_request(&mut request.as_slice()).expect("request should be framed");
+        let raw = read_test_request(&mut request.as_slice()).expect("request should be framed");
 
         assert_eq!(
             raw,
@@ -4169,12 +4190,41 @@ mod tests {
         let second = b"}";
         let mut request = first.as_slice().chain(second.as_slice());
 
-        let raw = read_http_request(&mut request).expect("chunked request should be framed");
+        let raw = read_test_request(&mut request).expect("chunked request should be framed");
 
         assert_eq!(
             parse_request(&raw).expect("request should parse").body,
             "{}"
         );
+    }
+
+    #[test]
+    fn checks_the_absolute_deadline_before_every_read() {
+        struct OneByteReader<'a>(&'a [u8]);
+
+        impl Read for OneByteReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() || buffer.is_empty() {
+                    return Ok(0);
+                }
+                buffer[0] = self.0[0];
+                self.0 = &self.0[1..];
+                Ok(1)
+            }
+        }
+
+        let mut request = OneByteReader(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let mut reads_allowed = 3;
+        let error = read_http_request_with_guard(&mut request, |_| {
+            if reads_allowed == 0 {
+                return Err(anyhow!("HTTP request read deadline exceeded"));
+            }
+            reads_allowed -= 1;
+            Ok(())
+        })
+        .expect_err("slow-drip request should exceed the absolute deadline");
+
+        assert_eq!(error.to_string(), "HTTP request read deadline exceeded");
     }
 
     #[test]
@@ -4217,29 +4267,29 @@ mod tests {
     #[test]
     fn rejects_incomplete_malformed_and_oversized_requests() {
         let incomplete = b"GET /health HTTP/1.1\r\nHost: localhost\r\n";
-        assert!(read_http_request(&mut incomplete.as_slice()).is_err());
+        assert!(read_test_request(&mut incomplete.as_slice()).is_err());
 
         let incomplete_body =
             b"POST /init HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{";
-        assert!(read_http_request(&mut incomplete_body.as_slice()).is_err());
+        assert!(read_test_request(&mut incomplete_body.as_slice()).is_err());
 
         let malformed_length =
             b"POST /init HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n";
-        assert!(read_http_request(&mut malformed_length.as_slice()).is_err());
+        assert!(read_test_request(&mut malformed_length.as_slice()).is_err());
 
         let unsupported_transfer_encoding =
             b"POST /init HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n";
-        assert!(read_http_request(&mut unsupported_transfer_encoding.as_slice()).is_err());
+        assert!(read_test_request(&mut unsupported_transfer_encoding.as_slice()).is_err());
 
         let oversized_body = format!(
             "POST /init HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
             MAX_HTTP_BODY_BYTES + 1
         );
-        assert!(read_http_request(&mut oversized_body.as_bytes()).is_err());
+        assert!(read_test_request(&mut oversized_body.as_bytes()).is_err());
 
         let mut oversized_headers = b"GET /health HTTP/1.1\r\nX-Large: ".to_vec();
         oversized_headers.resize(oversized_headers.len() + MAX_HTTP_HEADER_BYTES, b'a');
-        assert!(read_http_request(&mut oversized_headers.as_slice()).is_err());
+        assert!(read_test_request(&mut oversized_headers.as_slice()).is_err());
 
         let malformed_header = "GET /health HTTP/1.1\r\nnot-a-header\r\n\r\n";
         assert!(parse_request(malformed_header).is_err());
