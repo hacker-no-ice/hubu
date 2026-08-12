@@ -16,9 +16,15 @@ Hubu has two independently visible versions:
   It remains `hubu-spend-executor-v4` and does not change merely because the
   Hubu product version changes.
 
-Every successful eligible `main` workflow creates a prerelease tagged
-`main-<full-40-character-source-commit>`. These releases are canaries for early
-compatibility testing. There is deliberately no mutable `latest-main` asset.
+At 10:00 America/Los_Angeles each day, the release workflow checks the current
+`main` commit. If that commit does not already have a canary, a successful run
+creates a prerelease tagged `main-<full-40-character-source-commit>`. If `main`
+has not advanced since the previous canary, the build and publication jobs are
+skipped. These releases are for early compatibility testing. There is
+deliberately no mutable `latest-main` asset.
+
+The schedule uses GitHub's timezone-aware cron support, which keeps publication
+at 10:00 local time through daylight-saving transitions.
 
 Stable release promotion is an explicit workflow dispatch. Stable and
 prerelease tags are checked before publication and the workflow refuses to

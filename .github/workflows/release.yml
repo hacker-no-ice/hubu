@@ -1,9 +1,9 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
+  schedule:
+    - cron: '0 10 * * *'
+      timezone: America/Los_Angeles
   workflow_dispatch:
     inputs:
       version:
@@ -30,6 +30,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       prerelease: ${{ steps.release.outputs.prerelease }}
+      should_release: ${{ steps.release.outputs.should_release }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,7 +40,6 @@ jobs:
         name: Validate version and source
         env:
           EVENT_NAME: ${{ github.event_name }}
-          PUSH_COMMIT: ${{ github.sha }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
@@ -61,12 +61,19 @@ jobs:
             tag="${INPUT_VERSION}"
             prerelease=false
           else
-            source_commit="${PUSH_COMMIT}"
+            git fetch origin main
+            source_commit="$(git rev-parse origin/main)"
             short_commit="${source_commit:0:12}"
             base_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "hubu-api") | .version')"
             version="${base_version}-main.${short_commit}"
             tag="main-${source_commit}"
             prerelease=true
+
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              echo "No release needed: main is still at already-published ${tag}"
+              echo "should_release=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
           fi
 
           if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
@@ -79,11 +86,13 @@ jobs:
             echo "version=${version}"
             echo "tag=${tag}"
             echo "prerelease=${prerelease}"
+            echo "should_release=true"
           } >> "${GITHUB_OUTPUT}"
 
   checks:
     name: Required release checks
     needs: resolve
+    if: needs.resolve.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
