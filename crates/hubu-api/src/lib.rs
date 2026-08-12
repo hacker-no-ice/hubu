@@ -4235,10 +4235,8 @@ mod tests {
             .expect("listener should have an address");
         let path =
             std::env::temp_dir().join(format!("hubu-api-standard-client-{}.sqlite", UserId::new()));
-        let server_path = path.clone();
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
         let server = std::thread::spawn(move || {
-            let state = ServerState::new_with_db_path(&server_path)
-                .expect("server state should initialize");
             let (stream, _) = listener.accept().expect("server should accept client");
             handle_connection(stream, &state)
         });
