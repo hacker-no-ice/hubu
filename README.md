@@ -44,6 +44,8 @@ and MCP transport adapter.
   agents can discover through configured MCP clients
 - Protects local write APIs with a bearer token and separates agent-callable
   spend tools from human-gated setup, policy, budget, and reconciliation changes
+- Publishes commit-addressed macOS and Linux releases with checksums and build
+  provenance so compatibility consumers can pin immutable artifacts
 
 ## Crates
 
@@ -148,6 +150,27 @@ should then be able to discover Hubu MCP tools and call spend tools without
 holding wallet credentials. For other MCP clients, use Hubu's tool annotations
 or `hubu_client_approval_profile`; see
 [docs/mcp-transport.md](docs/mcp-transport.md).
+
+## Releases
+
+Successful eligible `main` builds publish immutable canary prereleases tied to
+the full source commit. Stable SemVer releases are promoted intentionally from
+a validated `main` revision. Consumers should pin an exact release and checksum,
+not a rolling newest build. See [docs/releases.md](docs/releases.md) for the
+supported targets, verification and installation steps, promotion workflow,
+and rollback/retention policy.
+
+Both binaries expose safe build metadata locally, and the server publishes the
+same metadata without authentication:
+
+```sh
+hubu --version
+hubu-server --version
+curl http://127.0.0.1:8787/version
+```
+
+`product_version` versions Hubu itself, while `executor_contract` remains the
+independently negotiated `hubu-spend-executor-v4` identifier.
 
 ## Local Developer Tools
 

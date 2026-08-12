@@ -23,6 +23,9 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
+      - name: Build release binaries with locked dependencies
+        run: cargo build --release --locked --bin hubu --bin hubu-server
+
       - name: Run core integration flow
         run: ./scripts/integration-core-flow.sh
 

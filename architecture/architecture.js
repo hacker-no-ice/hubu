@@ -27,6 +27,8 @@ const sharedLinks = {
   storage: ["Core SQLite storage", "crates/hubu-core/src/storage.rs"],
   persistence: ["Governance persistence", "crates/hubu-core/src/persistence.rs"],
   telemetry: ["Telemetry", "crates/hubu-core/src/telemetry.rs"],
+  releases: ["Release runbook", "docs/releases.md"],
+  releaseWorkflow: ["Release workflow", ".github/workflows/release.yml"],
 };
 
 const components = {
@@ -45,8 +47,9 @@ const components = {
       "The API handles local HTTP concerns and delegates spend approval, payment, and executor claim lifecycle orchestration to core app services.",
       "Gongbu owns vendor credentials, provider adapters, model calls, artifact contents, and execution retries outside Hubu; Hubu stores only compact provider and artifact references.",
       "SQLite-backed records preserve users, agents, advisory spending targets, budgets, policies, executor claims and receipts, reconciliation evidence, payments, and ledger entries.",
+      "Immutable release archives carry the CLI, server, checksums, source provenance, product version, and independently negotiated executor-contract version to pinned consumers.",
     ],
-    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.spendExecutor, sharedLinks.futureWallet],
+    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.futureWallet],
     zones: [
       { label: "Broader Hubu", x: 292, y: 24, w: 820, h: 704 },
       { label: "Hubu server", x: 570, y: 36, w: 542, h: 692, labelX: 636, labelY: 58 },
@@ -57,6 +60,7 @@ const components = {
       { id: "agent", label: "AI agent", sub: "spend requests", x: 48, y: 330, w: 190, h: 94, tone: "agent" },
       { id: "cli", label: "Hubu CLI", sub: "developer commands", x: 334, y: 82, w: 184, h: 88, tone: "surface" },
       { id: "mcp", label: "MCP adapter", sub: "agent tools", x: 334, y: 330, w: 184, h: 88, tone: "surface" },
+      { id: "release", label: "Release artifacts", sub: "pinned + checksummed", x: 334, y: 526, w: 184, h: 88, tone: "surface" },
       { id: "api", label: "Local HTTP API", sub: "routes + auth", x: 620, y: 184, w: 190, h: 98, tone: "core" },
       { id: "app", label: "App services", sub: "approval + claims", x: 620, y: 360, w: 190, h: 98, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },
       { id: "gongbu", label: "Gongbu", sub: "outside Hubu executor", x: 58, y: 632, w: 204, h: 74, tone: "executor" },
@@ -72,6 +76,7 @@ const components = {
       ["cli", "api", "token", { labelDx: -12, labelDy: -26, labelT: 0.42 }],
       ["mcp", "api", "token", { labelDx: -14, labelDy: 34, labelT: 0.42 }],
       ["agent", "gongbu", "work + token"],
+      ["release", "gongbu", "pinned binaries", { labelDx: -18, labelDy: -22, labelT: 0.48 }],
       ["gongbu", "api", "claim/receipt"],
       ["api", "registration", "register"],
       ["api", "app", "dispatch"],
@@ -80,6 +85,35 @@ const components = {
       ["app", "payment", "submit payment", { labelDx: -20, labelDy: 56, labelT: 0.45 }],
       ["payment", "ledger", "ledger", { labelDx: 54, labelDy: 18, labelT: 0.5 }],
       ["budget", "ledger", "audit", { labelDx: -104, labelDy: 48, labelT: 0.62 }],
+    ],
+  },
+  release: {
+    title: "Immutable Releases",
+    kind: "Component",
+    copy:
+      "The release workflow turns an exact main commit into target-specific Hubu archives. Required checks gate native builds, GitHub Releases preserve immutable tags and assets, and clean runners verify the published download before consumers pin it.",
+    responsibilities: [
+      "Creates a commit-addressed prerelease for each eligible main build and accepts explicit stable SemVer promotion for an exact main revision.",
+      "Runs formatting, Clippy, workspace tests, the core integration flow, and locked release builds before publication.",
+      "Builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, and per-target provenance.",
+      "Publishes SHA-256 checksums without overwriting existing tags or assets, then smoke-tests downloads, startup, readiness, and version reporting.",
+      "Keeps the Hubu product version separate from the hubu-spend-executor-v4 contract identifier so consumers can negotiate compatibility explicitly.",
+    ],
+    links: [sharedLinks.releaseWorkflow, sharedLinks.releases, sharedLinks.common, sharedLinks.api, sharedLinks.cli],
+    nodes: [
+      { id: "source", label: "Exact main commit", sub: "40-character SHA", x: 62, y: 224, w: 210, h: 92, tone: "data" },
+      { id: "checks", label: "Release gates", sub: "fmt + lint + tests", x: 352, y: 224, w: 210, h: 92, tone: "core" },
+      { id: "matrix", label: "Native builds", sub: "macOS + Linux", x: 642, y: 224, w: 210, h: 92, tone: "core" },
+      { id: "published", label: "GitHub Release", sub: "archives + SHA-256", x: 928, y: 112, w: 210, h: 92, tone: "data" },
+      { id: "smoke", label: "Clean smoke", sub: "download + start", x: 928, y: 356, w: 210, h: 92, tone: "agent" },
+      { id: "consumer", label: "Pinned consumer", sub: "tag + checksum", x: 642, y: 510, w: 210, h: 92, tone: "executor" },
+    ],
+    edges: [
+      ["source", "checks", "checkout"],
+      ["checks", "matrix", "gate"],
+      ["matrix", "published", "publish once"],
+      ["published", "smoke", "download"],
+      ["smoke", "consumer", "validated pin"],
     ],
   },
   api: {

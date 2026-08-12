@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Local};
+use hubu_common::build::build_info;
 use hubu_core::policy::{Effect, Policy};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -63,6 +64,7 @@ fn run() -> Result<()> {
         "spend" => spend(&base_url, args),
         "ledger" => ledger(&base_url, args),
         "health" => health(&base_url),
+        "version" | "--version" | "-V" => version(),
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())
@@ -1827,6 +1829,11 @@ fn health(base_url: &str) -> Result<()> {
     Ok(())
 }
 
+fn version() -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&build_info())?);
+    Ok(())
+}
+
 fn request_json(
     base_url: &str,
     method: &str,
@@ -2082,6 +2089,7 @@ Commands:
   spend      Test spend and reconcile uncertain executor claims
   ledger     Read ledger transactions
   health     Check the Hubu server
+  version    Print product, source, and executor-contract versions
 
 Global options:
   --url URL   Hubu server URL (default: http://127.0.0.1:8787)
