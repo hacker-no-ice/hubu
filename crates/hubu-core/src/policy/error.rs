@@ -12,7 +12,7 @@ pub enum PolicyLoadError {
     #[error("failed to parse policy yaml")]
     ParseYaml {
         #[from]
-        source: serde_yaml::Error,
+        source: serde_yaml_ng::Error,
     },
 
     #[error("invalid policy")]

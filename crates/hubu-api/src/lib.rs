@@ -313,8 +313,7 @@ fn load_spend_timing_config() -> Result<SpendTimingConfig> {
         Ok(path) => {
             let contents = fs::read_to_string(&path)
                 .with_context(|| format!("read spend timing config `{path}`"))?;
-            serde_yaml::from_str(&contents)
-                .with_context(|| format!("parse spend timing config `{path}`"))?
+            parse_spend_timing_config(&contents, &path)?
         }
         Err(env::VarError::NotPresent) => SpendTimingConfig::default(),
         Err(error) => return Err(error).context("read spend timing config environment variable"),
@@ -323,6 +322,10 @@ fn load_spend_timing_config() -> Result<SpendTimingConfig> {
         .validate()
         .map_err(|error| anyhow!("invalid spend timing config: {error}"))?;
     Ok(config)
+}
+
+fn parse_spend_timing_config(yaml: &str, path: &str) -> Result<SpendTimingConfig> {
+    serde_yaml_ng::from_str(yaml).with_context(|| format!("parse spend timing config `{path}`"))
 }
 
 /// Local API authority for the current Hubu process.
@@ -4163,6 +4166,60 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_spend_timing_yaml_config() {
+        let config = parse_spend_timing_config(
+            r#"
+default_profile: batch
+profiles:
+  batch:
+    authorization_ttl_seconds: 600
+    claim_ttl_seconds: 1800
+"#,
+            "test-spend-timing.yaml",
+        )
+        .expect("spend timing YAML should parse");
+
+        assert_eq!(config.default_profile, "batch");
+        let batch = config.profiles.get("batch").expect("batch profile");
+        assert_eq!(batch.authorization_ttl_seconds, 600);
+        assert_eq!(batch.claim_ttl_seconds, 1800);
+    }
+
+    #[test]
+    fn spend_timing_yaml_rejects_unknown_fields() {
+        let error = parse_spend_timing_config(
+            r#"
+default_profile: batch
+profiles:
+  batch:
+    authorization_ttl_seconds: 600
+    claim_ttl_seconds: 1800
+    retry_seconds: 10
+"#,
+            "test-spend-timing.yaml",
+        )
+        .expect_err("unknown timing fields should fail");
+
+        assert!(error
+            .to_string()
+            .contains("parse spend timing config `test-spend-timing.yaml`"));
+    }
+
+    #[test]
+    fn spend_timing_yaml_rejects_missing_fields_and_malformed_yaml() {
+        for yaml in [
+            "default_profile: batch\nprofiles:\n  batch:\n    authorization_ttl_seconds: 600\n",
+            "default_profile: [batch\nprofiles: {}\n",
+        ] {
+            let error = parse_spend_timing_config(yaml, "test-spend-timing.yaml")
+                .expect_err("invalid timing YAML should fail");
+            assert!(error
+                .to_string()
+                .contains("parse spend timing config `test-spend-timing.yaml`"));
+        }
+    }
 
     fn read_test_request(reader: &mut impl Read) -> Result<String> {
         read_http_request_with_guard(reader, |_| Ok(()))
