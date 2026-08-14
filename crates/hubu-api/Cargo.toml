@@ -1,10 +1,16 @@
 [package]
 name = "hubu-api"
 version = "0.1.0"
+description = "Local HTTP API and server for Hubu agent spend control"
 edition.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords = ["ai-agents", "budgets", "payments", "policy"]
+categories = ["finance", "web-programming::http-server"]
+publish = false
 
 [dependencies]
 anyhow.workspace = true

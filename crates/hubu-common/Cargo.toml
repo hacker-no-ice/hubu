@@ -1,10 +1,16 @@
 [package]
 name = "hubu-common"
 version = "0.1.0"
+description = "Shared identity, ownership, session, and account models for Hubu"
 edition.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords = ["ai-agents", "identity", "payments", "models"]
+categories = ["data-structures", "finance"]
+publish = false
 
 [dependencies]
 chrono.workspace = true
