@@ -45,8 +45,10 @@ archive:
 
 Every archive includes `PROVENANCE.json` with the product version, full source
 commit, executor contract, Rust target, repository, workflow run, and locked
-dependency declaration. The release also includes `SHA256SUMS` covering every
-archive.
+dependency declaration. It also includes `LICENSE-MIT`, `LICENSE-APACHE`, and
+`THIRD-PARTY-NOTICES.md` and the exact `Cargo.lock` dependency inventory so the
+applicable project licenses and dependency notice material travel with the
+binaries. The release includes `SHA256SUMS` covering every archive.
 
 ## Pin, verify, and install
 
@@ -91,8 +93,9 @@ gh workflow run release.yml \
 The source must be an ancestor of `main`. Promotion reruns formatting, Clippy,
 the locked workspace tests, the core integration flow, and a locked release
 build before creating platform artifacts. After publication, clean GitHub
-runners download the release, verify `SHA256SUMS`, start an isolated
-`hubu-server`, and check `/health`, `/version`, and local `--version` metadata.
+runners download the release, verify `SHA256SUMS`, require the project license
+and third-party notice files, start an isolated `hubu-server`, and check
+`/health`, `/version`, and local `--version` metadata.
 HTTP probes use bounded connection and total-request timeouts so an unavailable
 or non-responsive server fails the smoke job promptly.
 
