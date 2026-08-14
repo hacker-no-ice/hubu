@@ -206,10 +206,10 @@ jobs:
         run: |
           set -euo pipefail
           prerelease_flag=()
-          channel_note="Stable release. Consumers may pin this exact tag and checksum."
+          channel_note="Stable version channel. Experimental, local-first software using a mock payment rail; not approved for real-money production use. Consumers may pin this exact tag and checksum."
           if [[ "${PRERELEASE}" == "true" ]]; then
             prerelease_flag+=(--prerelease)
-            channel_note="Commit-addressed canary prerelease. Pin this exact tag and checksum; do not depend on a rolling newest build."
+            channel_note="Commit-addressed canary prerelease. Experimental, local-first software using a mock payment rail; not approved for real-money production use. Pin this exact tag and checksum; do not depend on a rolling newest build."
           fi
           notes=$(printf 'Hubu product version: `%s`\n\nSource commit: `%s`\n\n%s' "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${channel_note}")
           gh release create "${RELEASE_TAG}" \

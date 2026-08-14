@@ -142,6 +142,14 @@ The bearer token protects the local HTTP API from arbitrary localhost callers;
 the MCP approval gate still protects human-intent workflows from agent-controlled
 tool arguments.
 
+These controls define a local demo trust boundary, not production
+authentication. A same-user process that can read the bearer-token file or
+control an authorized MCP client can act with that client's authority, and the
+server does not issue scoped, short-lived workload credentials. The client-side
+approval gate is useful only when the selected MCP client reliably enforces it;
+it is not a server-side durable approval record. Do not expose this arrangement
+to a network or connect it to a real payment rail.
+
 ## Approval Boundaries
 
 The MCP tool list uses annotations to separate agent-callable reads, protected

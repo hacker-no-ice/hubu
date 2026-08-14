@@ -5,6 +5,12 @@ Gongbu and other compatibility consumers must pin an exact release tag and the
 matching SHA-256 checksum. A moving checkout of `main` is not a supported
 routine integration-test dependency.
 
+All current releases are experimental, local-first builds for the localhost
+demo server and mock payment rail. They are not approved for real-money
+production use. A `stable` SemVer channel means that the artifact has an
+intentional immutable version and passed the listed repository checks; it does
+not mean production security, capacity, or payment-rail readiness.
+
 ## Versions and channels
 
 Hubu has two independently visible versions:
@@ -30,6 +36,11 @@ Stable release promotion is an explicit workflow dispatch. Stable and
 prerelease tags are checked before publication and the workflow refuses to
 replace an existing tag. GitHub Release assets are uploaded without overwrite
 behavior.
+
+Release notes for both channels must retain the experimental/non-production
+status. Checksums and smoke tests establish artifact integrity and basic local
+startup behavior only; they do not validate a production threat model or live
+money movement.
 
 ## Supported binary targets
 
@@ -100,6 +111,11 @@ and third-party notice files, start an isolated `hubu-server`, and check
 `/health`, `/version`, and local `--version` metadata.
 HTTP probes use bounded connection and total-request timeouts so an unavailable
 or non-responsive server fails the smoke job promptly.
+
+Before any real-money deployment, complete the security, authority, payment
+rail, storage, observability, concurrency, reliability, and independent-review
+work listed in the top-level README. Release promotion must not be used as a
+substitute for those deployment gates.
 
 ## Rollback, deprecation, and retention
 

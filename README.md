@@ -2,6 +2,12 @@
 
 Hubu is an open-source spending control plane for AI agents.
 
+> [!WARNING]
+> **Project status: experimental and local-first.** Hubu currently runs a
+> localhost demo server, uses a mock payment rail, and is **not approved for
+> real-money production use**. Its policy, budget, authorization, and ledger
+> boundaries are a foundation to harden, not a claim of money-grade security.
+
 The name comes from `户部`, the Ministry of Revenue in ancient China, which was
 responsible for state revenue, budgeting, household registration, and approving
 government expenditures. Hubu borrows that metaphor for autonomous software:
@@ -31,10 +37,33 @@ and MCP transport adapter.
   authorization, claim, and finalization retries idempotent
 - **Safe execution:** Grants exclusive executor claims and supports human-gated
   billed/not-billed reconciliation with durable evidence
-- **Payments and accounting:** Orchestrates mock payments and records successful ones
-  in an immutable double-entry SQLite ledger
-- **Secure integrations:** Exposes local HTTP, CLI, and MCP interfaces with bearer-token
-  protection and clear human-versus-agent permission boundaries
+- **Payments and accounting:** Orchestrates mock payments and records successful
+  demo transactions in an immutable double-entry SQLite ledger
+- **Local integrations:** Exposes CLI and MCP interfaces through a serialized
+  localhost demo HTTP server. A shared local bearer capability rejects
+  unauthenticated callers, while MCP client approval and a separate
+  reconciliation capability distinguish selected human workflows; these are
+  baseline local boundaries, not money-grade authorization
+
+### Before Real-Money Deployment
+
+Hubu's product direction remains real spend control, but the current build must
+not be connected to a live payment rail. A production deployment needs, at
+minimum:
+
+- a production HTTP runtime with concurrent request handling, deployment-grade
+  transport security, isolation, rate limiting, and operational telemetry
+- scoped, short-lived caller and workload identities backed by a real secrets
+  and key-management system, rather than treating possession of one localhost
+  bearer token as broad authority
+- a server-enforced, durable human approval system for privileged and
+  `needs_approval` actions, independent of agent-controlled arguments
+- audited real-rail adapters with provider idempotency, confirmation, settlement,
+  reconciliation, failure recovery, and credential controls
+- production storage operations, including migrations, backup/restore,
+  availability, concurrency testing, and incident/audit procedures
+- an independent security review and load/reliability validation against the
+  intended deployment and threat model
 
 ## Crates
 
@@ -149,6 +178,8 @@ intentionally from a validated `main` revision. Consumers should pin an exact
 release and checksum, not a rolling newest build. See
 [docs/releases.md](docs/releases.md) for the supported targets, verification
 and installation steps, promotion workflow, and rollback/retention policy.
+Here, "stable" describes the version channel and immutable artifact identity;
+it does not approve Hubu for real-money production use.
 
 Both binaries expose safe build metadata locally, and the server publishes the
 same metadata without authentication:
@@ -215,6 +246,11 @@ On startup the server reads `HUBU_AUTH_TOKEN`, or creates/reads
 client read the same token automatically and send it as a local bearer token for
 protected API routes. Use `HUBU_AUTH_TOKEN_FILE` when the server and clients
 need to share a token file at a different path.
+
+This token is baseline localhost hardening. Any process running as the same OS
+user may be able to read the token or control an already-authorized client, and
+possession grants broad local API authority. It is not a user identity,
+workload identity, or durable human approval for real-money operations.
 
 Human claim reconciliation additionally requires a distinct capability from
 `HUBU_RECONCILIATION_TOKEN` or `HUBU_RECONCILIATION_TOKEN_FILE` (default
