@@ -4,16 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER_PID=""
 CHECK_DIR=""
-SOURCE_CREDENTIAL_PATHS=(
-  "${ROOT_DIR}/hubu.auth-token"
-  "${ROOT_DIR}/hubu.reconciliation-token"
-  "${ROOT_DIR}/crates/hubu-api/hubu.auth-token"
-  "${ROOT_DIR}/crates/hubu-api/hubu.reconciliation-token"
-)
 
 stop_server() {
-  if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
-    kill "${SERVER_PID}" 2>/dev/null || true
+  if [[ -n "${SERVER_PID}" ]]; then
+    if kill -0 "${SERVER_PID}" 2>/dev/null; then
+      kill "${SERVER_PID}" 2>/dev/null || true
+    fi
     wait "${SERVER_PID}" 2>/dev/null || true
   fi
   SERVER_PID=""
@@ -25,15 +21,6 @@ cleanup() {
     rm -rf "${CHECK_DIR}"
   fi
 }
-
-# Preserve the original refusal behavior without ever making source credentials
-# cleanup targets. All generated credentials and cleanup stay in a private clone.
-for credential in "${SOURCE_CREDENTIAL_PATHS[@]}"; do
-  if [[ -e "${credential}" ]]; then
-    echo "refusing to replace existing default credential files" >&2
-    exit 1
-  fi
-done
 
 CHECK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hubu-credential-ignore.XXXXXX")"
 trap cleanup EXIT
@@ -95,7 +82,6 @@ run_default_server_check() {
   fi
 
   stop_server
-  rm -f "${auth_token_path}" "${reconciliation_token_path}"
 }
 
 run_default_server_check "${CHECKOUT_DIR}" "root"

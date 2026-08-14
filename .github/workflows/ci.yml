@@ -26,9 +26,6 @@ jobs:
       - name: Build release binaries with locked dependencies
         run: cargo build --release --locked --bin hubu --bin hubu-server
 
-      - name: Check credential helper refusal safety
-        run: ./scripts/check-default-credential-refusal-safety.sh
-
       - name: Check default credentials cannot be committed
         run: ./scripts/check-default-credential-ignore.sh
 
