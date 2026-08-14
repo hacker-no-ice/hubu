@@ -24,7 +24,7 @@ impl Policy {
     /// Useful for tests, embedded defaults, and API payloads that have already
     /// been read into memory.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, PolicyLoadError> {
-        let policy: Policy = serde_yaml::from_str(yaml)?;
+        let policy: Policy = serde_yaml_ng::from_str(yaml)?;
         validate_policy(&policy)?;
         Ok(policy)
     }
@@ -72,6 +72,9 @@ rules:
 "#
     }
 
+    const STARTER_POLICY_YAML: &str = include_str!("../../../../policies/starter-policy.yaml");
+    const TEST_POLICY_YAML: &str = include_str!("../../../../policies/test-policy.yaml");
+
     fn write_temp_policy_file(contents: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "hubu-policy-{}.yaml",
@@ -97,6 +100,18 @@ rules:
         );
         assert_eq!(policy.default_effect, Effect::NeedsApproval);
         assert_eq!(policy.rules.len(), 2);
+    }
+
+    #[test]
+    fn loads_repository_policy_fixtures() {
+        let starter =
+            Policy::from_yaml_str(STARTER_POLICY_YAML).expect("starter policy should load");
+        assert_eq!(starter.id, "starter_spending_policy");
+        assert_eq!(starter.rules.len(), 2);
+
+        let test = Policy::from_yaml_str(TEST_POLICY_YAML).expect("test policy should load");
+        assert_eq!(test.id, "test_policy");
+        assert_eq!(test.rules.len(), 2);
     }
 
     #[test]
@@ -163,6 +178,21 @@ rules:
     }
 
     #[test]
+    fn rejects_yaml_policy_missing_required_fields() {
+        let error = Policy::from_yaml_str(
+            r#"
+id: missing_version
+default_effect: deny
+rules: []
+"#,
+        )
+        .expect_err("missing version should fail");
+
+        assert!(matches!(error, PolicyLoadError::ParseYaml { .. }));
+        assert_eq!(error.to_string(), "failed to parse policy yaml");
+    }
+
+    #[test]
     fn rejects_unknown_policy_fields() {
         let invalid_yaml = r#"
 id: base_spending_policy
@@ -211,5 +241,6 @@ rules:
             Policy::from_yaml_str("this is not: [valid yaml").expect_err("yaml should fail");
 
         assert!(matches!(error, PolicyLoadError::ParseYaml { .. }));
+        assert_eq!(error.to_string(), "failed to parse policy yaml");
     }
 }
