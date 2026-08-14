@@ -48,4 +48,57 @@ if ! cmp -s "${CHECK_DIR}/expected-auth" "${AUTH_TOKEN_PATH}" || \
   exit 1
 fi
 
-echo "credential helper preserves pre-existing credential contents"
+rm -f "${AUTH_TOKEN_PATH}" "${RECONCILIATION_TOKEN_PATH}"
+
+# Exercise the review-reported race: let preflight finish and the cleanup trap
+# install, then create source credentials while a fake cargo build is blocked.
+mkdir -p "${CHECK_DIR}/bin"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'touch "${HUBU_REFUSAL_TEST_READY}"' \
+  'while [[ ! -e "${HUBU_REFUSAL_TEST_RELEASE}" ]]; do sleep 0.01; done' \
+  'exit 1' \
+  >"${CHECK_DIR}/bin/cargo"
+chmod +x "${CHECK_DIR}/bin/cargo"
+
+PATH="${CHECK_DIR}/bin:${PATH}" \
+  HUBU_REFUSAL_TEST_READY="${CHECK_DIR}/build-ready" \
+  HUBU_REFUSAL_TEST_RELEASE="${CHECK_DIR}/build-release" \
+  "${ROOT_DIR}/scripts/check-default-credential-ignore.sh" \
+  >"${CHECK_DIR}/race.stdout" 2>"${CHECK_DIR}/race.stderr" &
+HELPER_PID=$!
+
+for _ in $(seq 1 100); do
+  if [[ -e "${CHECK_DIR}/build-ready" ]]; then
+    break
+  fi
+  if ! kill -0 "${HELPER_PID}" 2>/dev/null; then
+    echo "credential helper exited before the delayed build" >&2
+    exit 1
+  fi
+  sleep 0.01
+done
+
+if [[ ! -e "${CHECK_DIR}/build-ready" ]]; then
+  echo "credential helper did not reach the delayed build" >&2
+  exit 1
+fi
+
+cp "${CHECK_DIR}/expected-auth" "${AUTH_TOKEN_PATH}"
+cp "${CHECK_DIR}/expected-reconciliation" "${RECONCILIATION_TOKEN_PATH}"
+touch "${CHECK_DIR}/build-release"
+
+if wait "${HELPER_PID}"; then
+  echo "credential helper unexpectedly passed the forced build failure" >&2
+  exit 1
+fi
+
+if [[ ! -f "${AUTH_TOKEN_PATH}" || ! -f "${RECONCILIATION_TOKEN_PATH}" ]] || \
+  ! cmp -s "${CHECK_DIR}/expected-auth" "${AUTH_TOKEN_PATH}" || \
+  ! cmp -s "${CHECK_DIR}/expected-reconciliation" "${RECONCILIATION_TOKEN_PATH}"; then
+  echo "credential helper altered a credential created after preflight" >&2
+  exit 1
+fi
+
+echo "credential helper preserves credentials before and after preflight"

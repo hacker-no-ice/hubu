@@ -2,14 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NESTED_WORK_DIR="${ROOT_DIR}/crates/hubu-api"
 SERVER_PID=""
 CHECK_DIR=""
-CREDENTIAL_PATHS=(
+SOURCE_CREDENTIAL_PATHS=(
   "${ROOT_DIR}/hubu.auth-token"
   "${ROOT_DIR}/hubu.reconciliation-token"
-  "${NESTED_WORK_DIR}/hubu.auth-token"
-  "${NESTED_WORK_DIR}/hubu.reconciliation-token"
+  "${ROOT_DIR}/crates/hubu-api/hubu.auth-token"
+  "${ROOT_DIR}/crates/hubu-api/hubu.reconciliation-token"
 )
 
 stop_server() {
@@ -22,17 +21,14 @@ stop_server() {
 
 cleanup() {
   stop_server
-  for credential in "${CREDENTIAL_PATHS[@]}"; do
-    rm -f "${credential}"
-  done
   if [[ -n "${CHECK_DIR}" ]]; then
     rm -rf "${CHECK_DIR}"
   fi
 }
 
-# Check every cleanup target before installing the trap. From this point on, the
-# helper removes only paths that were absent when this invocation began.
-for credential in "${CREDENTIAL_PATHS[@]}"; do
+# Preserve the original refusal behavior without ever making source credentials
+# cleanup targets. All generated credentials and cleanup stay in a private clone.
+for credential in "${SOURCE_CREDENTIAL_PATHS[@]}"; do
   if [[ -e "${credential}" ]]; then
     echo "refusing to replace existing default credential files" >&2
     exit 1
@@ -43,6 +39,13 @@ CHECK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hubu-credential-ignore.XXXXXX")"
 trap cleanup EXIT
 
 cargo build --locked --bin hubu-server
+
+CHECKOUT_DIR="${CHECK_DIR}/checkout"
+git clone --quiet --no-hardlinks "${ROOT_DIR}" "${CHECKOUT_DIR}"
+# Include the ignore rules under test when the helper runs before they are
+# committed locally. In CI this is identical to the cloned file.
+cp "${ROOT_DIR}/.gitignore" "${CHECKOUT_DIR}/.gitignore"
+NESTED_WORK_DIR="${CHECKOUT_DIR}/crates/hubu-api"
 
 run_default_server_check() {
   local work_dir="$1"
@@ -79,13 +82,13 @@ run_default_server_check() {
       echo "hubu-server did not create a non-empty ${label} $(basename "${credential}")" >&2
       exit 1
     fi
-    if ! git -C "${ROOT_DIR}" check-ignore --quiet -- "${credential}"; then
+    if ! git -C "${CHECKOUT_DIR}" check-ignore --quiet -- "${credential}"; then
       echo "${label} $(basename "${credential}") is not ignored" >&2
       exit 1
     fi
   done
 
-  if [[ -n "$(git -C "${ROOT_DIR}" status --porcelain --untracked-files=all -- \
+  if [[ -n "$(git -C "${CHECKOUT_DIR}" status --porcelain --untracked-files=all -- \
     "${auth_token_path}" "${reconciliation_token_path}")" ]]; then
     echo "a generated ${label} credential file is eligible for commit" >&2
     exit 1
@@ -95,13 +98,13 @@ run_default_server_check() {
   rm -f "${auth_token_path}" "${reconciliation_token_path}"
 }
 
-run_default_server_check "${ROOT_DIR}" "root"
+run_default_server_check "${CHECKOUT_DIR}" "root"
 run_default_server_check "${NESTED_WORK_DIR}" "nested"
 
 for ignored_path in \
-  "${ROOT_DIR}/.hubu/hubu.auth-token" \
-  "${ROOT_DIR}/.hubu/hubu.reconciliation-token"; do
-  if ! git -C "${ROOT_DIR}" check-ignore --quiet -- "${ignored_path}"; then
+  "${CHECKOUT_DIR}/.hubu/hubu.auth-token" \
+  "${CHECKOUT_DIR}/.hubu/hubu.reconciliation-token"; do
+  if ! git -C "${CHECKOUT_DIR}" check-ignore --quiet -- "${ignored_path}"; then
     echo "$(basename "${ignored_path}") in .hubu is not ignored" >&2
     exit 1
   fi
