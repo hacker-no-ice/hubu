@@ -759,6 +759,7 @@ dependencies = [
  "base64",
  "chrono",
  "futures",
+ "gongbu-build-info",
  "image",
  "reqwest",
  "rusqlite",
@@ -778,10 +779,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gongbu-build-info"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "gongbu-mcp"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "gongbu-build-info",
  "reqwest",
  "serde",
  "serde_json",

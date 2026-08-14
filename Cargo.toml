@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gongbu-api", "crates/gongbu-mcp"]
+members = ["crates/gongbu-api", "crates/gongbu-build-info", "crates/gongbu-mcp"]
 resolver = "2"
 
 [workspace.package]
@@ -29,3 +29,4 @@ axum = "0.8"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+gongbu-build-info = { path = "crates/gongbu-build-info" }

@@ -370,6 +370,19 @@ impl Repository {
             .optional()?
             .ok_or(Error::NotFound)
     }
+
+    /// Stable execution IDs that must have a live or restartable Temporal
+    /// workflow after process restart. Rescheduling uses Temporal's UseExisting
+    /// conflict policy and therefore cannot create a second live run.
+    pub fn list_nonterminal_execution_ids(&self) -> Result<Vec<String>> {
+        let connection = self.0.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT execution_id FROM executions WHERE status NOT IN ('succeeded','failed','released') ORDER BY created_at, execution_id",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
     pub fn update_execution(
         &self,
         id: &str,
@@ -1470,6 +1483,44 @@ mod tests {
         assert_eq!(a.normalized_input, b.normalized_input);
         assert_eq!(a.pricing_snapshot, b.pricing_snapshot);
         assert_ne!(a.execution_id, c.execution_id)
+    }
+
+    #[test]
+    fn restart_scan_returns_only_stable_nonterminal_execution_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("gongbu.sqlite3");
+        let repository = Repository::open(&path, Redactor::default()).unwrap();
+        let pending = repository
+            .create_execution(&new("account", "pending"))
+            .unwrap();
+        let failed = repository
+            .create_execution(&new("account", "failed"))
+            .unwrap();
+        repository
+            .update_execution(
+                &failed.execution_id,
+                failed.version,
+                &ExecutionUpdate {
+                    status: "failed".into(),
+                    outcome: Some("rejected".into()),
+                    started_at: None,
+                    completed_at: Some("2026-08-05T20:01:00Z".into()),
+                    failure_code: Some("preflight_failed".into()),
+                    failure_message_redacted: Some("preflight failed".into()),
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-08-05T20:01:00Z",
+            )
+            .unwrap();
+        drop(repository);
+
+        let restarted = Repository::open(&path, Redactor::default()).unwrap();
+        assert_eq!(
+            restarted.list_nonterminal_execution_ids().unwrap(),
+            vec![pending.execution_id]
+        );
     }
 
     #[test]

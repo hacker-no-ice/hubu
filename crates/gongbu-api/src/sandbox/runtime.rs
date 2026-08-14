@@ -10,6 +10,7 @@ use crate::{
     execution::Repository,
     redaction::Redactor,
     secrets::{MacOsKeychain, SecretProvider},
+    temporal::TemporalWorkerConfig,
 };
 use axum::http::{header, HeaderMap};
 use chrono::SecondsFormat;
@@ -148,6 +149,16 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
         artifact_activities: Some(artifact_activities),
         temporal_runtime,
         temporal_client,
+        temporal_worker: TemporalWorkerConfig::default(),
+        temporal_namespace: config.temporal.namespace.clone(),
+        temporal_startup_timeout: Duration::from_secs(30),
+        dependency_check_interval: Duration::from_secs(5),
+        maximum_spend_minor: config
+            .provider
+            .maximum_spend_minor
+            .unwrap_or(config.hubu.maximum_authorization_minor),
+        dependency_checker: None,
+        worker_drain_timeout: Duration::from_secs(30),
         authenticator: Arc::new(SandboxAuthenticator {
             token,
             account_id: config

@@ -1,3 +1,7 @@
+use crate::{
+    execution::Execution,
+    workflow::{ActivityError, HubuActivities},
+};
 use serde::{Deserialize, Serialize};
 
 mod transport;
@@ -48,6 +52,14 @@ impl HubuClient {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    pub fn health(&self) -> Result<serde_json::Value, HttpClientError> {
+        self.get_json("/health")
+    }
+
+    pub fn version(&self) -> Result<HubuVersion, HttpClientError> {
+        self.get_json("/version")
     }
 
     pub fn validate(
@@ -103,6 +115,141 @@ impl HubuClient {
             Some(token) => simple_http::post_json_authenticated(&url, body, Some(token)),
             None => simple_http::post_json(&url, body),
         }
+    }
+
+    fn get_json<R>(&self, path: &str) -> Result<R, HttpClientError>
+    where
+        R: for<'de> Deserialize<'de>,
+    {
+        let url = format!("{}{}", self.base_url, path);
+        match self.bearer_token.as_ref().map(|token| token.0.as_slice()) {
+            Some(token) => simple_http::get_json_authenticated(&url, Some(token)),
+            None => simple_http::get_json(&url),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HubuVersion {
+    pub product_version: String,
+    pub executor_contract: String,
+    #[serde(default)]
+    pub source_commit: Option<String>,
+}
+
+/// Production Hubu activity bridge. It only connects to the operator-provided
+/// Hubu endpoint; it contains no installation, provisioning, or lifecycle code.
+pub struct ProductionHubuActivities {
+    client: HubuClient,
+    agent_id: String,
+}
+
+impl ProductionHubuActivities {
+    pub fn new(client: HubuClient, agent_id: impl Into<String>) -> Result<Self, &'static str> {
+        let agent_id = agent_id.into();
+        if agent_id.trim().is_empty() || agent_id.len() > 255 {
+            return Err("invalid Hubu agent identity");
+        }
+        Ok(Self { client, agent_id })
+    }
+
+    pub(crate) fn spend(&self, execution: &Execution) -> ExecutorSpendRequest {
+        ExecutorSpendRequest {
+            spend_auth_token_id: execution.hubu_token_reference.as_str().into(),
+            agent_id: None,
+            account_id: Some(execution.account_id.clone()),
+            amount_cents: execution.authorized_minor,
+            merchant: Some("gongbu.execution".into()),
+            task_id: Some(execution.operation_key.clone()),
+        }
+    }
+}
+
+impl HubuActivities for ProductionHubuActivities {
+    fn preflight(&self, execution: &Execution) -> Result<(), ActivityError> {
+        self.client
+            .validate(&self.spend(execution))
+            .map(|_| ())
+            .map_err(map_activity_error)
+    }
+
+    fn claim(&self, execution: &Execution) -> Result<String, ActivityError> {
+        self.client
+            .claim(&ExecutorSpendClaimRequest {
+                operation_key: execution.operation_key.clone(),
+                spend: self.spend(execution),
+            })
+            .map(|claim| claim.claim_id)
+            .map_err(map_activity_error)
+    }
+
+    fn validate_claim(&self, execution: &Execution) -> Result<(), ActivityError> {
+        let claim_id = execution
+            .hubu_claim_id
+            .as_deref()
+            .ok_or_else(|| ActivityError::Proven("hubu_claim_missing".into()))?;
+        let claim = self
+            .client
+            .inspect_claim(claim_id)
+            .map_err(map_activity_error)?;
+        if matches!(claim.status.as_str(), "claimed" | "active")
+            && claim.operation_key == execution.operation_key
+            && claim.spend.account_id == execution.account_id
+        {
+            Ok(())
+        } else {
+            Err(ActivityError::Proven("hubu_claim_not_active".into()))
+        }
+    }
+
+    fn settle(
+        &self,
+        execution: &Execution,
+        receipt_id: &str,
+        amount_minor: i64,
+    ) -> Result<String, ActivityError> {
+        let snapshot: crate::provider_contract::PricingSnapshot =
+            serde_json::from_value(execution.pricing_snapshot.clone())
+                .map_err(|_| ActivityError::Proven("pricing_snapshot_invalid".into()))?;
+        self.client
+            .settle(&ExecutorSpendFinalizationRequest {
+                agent_id: self.agent_id.clone(),
+                operation_key: execution.operation_key.clone(),
+                receipt: Some(ProviderReceipt {
+                    actual_vendor_cost_cents: amount_minor,
+                    provider_request_id: receipt_id.into(),
+                    price_model_snapshot: PriceModelSnapshot {
+                        provider: execution.provider.clone(),
+                        model: execution.model.clone(),
+                        unit_price_cents: snapshot.estimated_amount_minor,
+                        pricing_unit: "execution".into(),
+                        currency: execution.authorization_currency.to_ascii_lowercase(),
+                    },
+                    artifact_reference: format!("gongbu://execution/{}", execution.execution_id),
+                }),
+            })
+            .map(|settlement| settlement.settlement_id)
+            .map_err(map_activity_error)
+    }
+
+    fn release(&self, execution: &Execution) -> Result<(), ActivityError> {
+        self.client
+            .release(&ExecutorSpendFinalizationRequest {
+                agent_id: self.agent_id.clone(),
+                operation_key: execution.operation_key.clone(),
+                receipt: None,
+            })
+            .map(|_| ())
+            .map_err(map_activity_error)
+    }
+}
+
+fn map_activity_error(error: HttpClientError) -> ActivityError {
+    match error {
+        HttpClientError::Status { status, .. } if (400..500).contains(&status) => {
+            ActivityError::Proven("hubu_request_rejected".into())
+        }
+        _ => ActivityError::Ambiguous("hubu_transport_ambiguous".into()),
     }
 }
 

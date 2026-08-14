@@ -59,7 +59,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let response = match request.method.as_str() {
             "initialize" => {
-                json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"gongbu-mcp","version":env!("CARGO_PKG_VERSION")}}})
+                json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":gongbu_build_info::MCP_PROTOCOL_VERSION,"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"gongbu-mcp","version":gongbu_build_info::build_info().product_version}}})
             }
             "ping" => json!({"jsonrpc":"2.0","id":id,"result":{}}),
             "tools/list" => {

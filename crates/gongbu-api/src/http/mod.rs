@@ -22,7 +22,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub use gongbu_build_info::API_SCHEMA_VERSION as SCHEMA_VERSION;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthenticatedAccount {
@@ -208,6 +208,7 @@ pub struct Api {
     providers: ValidatedProviderCatalog,
     scheduler: Arc<dyn ExecutionScheduler>,
     now: Arc<dyn Fn() -> String + Send + Sync>,
+    maximum_spend_minor: i64,
 }
 
 impl Api {
@@ -218,12 +219,24 @@ impl Api {
         scheduler: Arc<dyn ExecutionScheduler>,
         now: impl Fn() -> String + Send + Sync + 'static,
     ) -> Self {
+        Self::new_with_maximum_spend(repository, artifacts, providers, scheduler, i64::MAX, now)
+    }
+
+    pub fn new_with_maximum_spend(
+        repository: Repository,
+        artifacts: ArtifactService,
+        providers: ValidatedProviderCatalog,
+        scheduler: Arc<dyn ExecutionScheduler>,
+        maximum_spend_minor: i64,
+        now: impl Fn() -> String + Send + Sync + 'static,
+    ) -> Self {
         Self {
             repository,
             artifacts,
             providers,
             scheduler,
             now: Arc::new(now),
+            maximum_spend_minor,
         }
     }
 
@@ -318,6 +331,11 @@ impl Api {
             .pricing()
             .snapshot_for_target(&resolved.target_key(), &pricing_request)
             .map_err(map_pricing_error)?;
+        if pricing_snapshot.estimated_amount_minor > self.maximum_spend_minor
+            || request.authorization.amount_minor > self.maximum_spend_minor
+        {
+            return Err(ApiError::validation());
+        }
         // Tokenization belongs to provider-bound request normalization, which is
         // not part of this HTTP/persistence milestone. Fail closed rather than
         // accepting a caller-asserted token count that could underfund execution.
@@ -811,6 +829,48 @@ mod tests {
             scheduler,
             _root: root,
         }
+    }
+
+    #[test]
+    fn operator_maximum_spend_rejects_authorization_and_price_before_persistence() {
+        let fixture = fixture();
+        let api = Api::new_with_maximum_spend(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            fixture.api.providers.clone(),
+            fixture.scheduler.clone(),
+            100,
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let response = api.handle(
+            "POST",
+            "/v1/executions",
+            Some(&fixture.owner),
+            &serde_json::to_vec(&request("over-ceiling")).unwrap(),
+        );
+        assert_eq!(response.status, 400);
+        assert!(fixture
+            .repository
+            .get_execution_by_operation("account-a", "over-ceiling")
+            .is_err());
+
+        let api = Api::new_with_maximum_spend(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            fixture.api.providers.clone(),
+            fixture.scheduler.clone(),
+            99,
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let mut request = request("price-over-ceiling");
+        request["authorization"]["amount_minor"] = json!(99);
+        let response = api.handle(
+            "POST",
+            "/v1/executions",
+            Some(&fixture.owner),
+            &serde_json::to_vec(&request).unwrap(),
+        );
+        assert_eq!(response.status, 400);
     }
 
     fn request(operation_key: &str) -> Value {

@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "http": {
+    "listen": "127.0.0.1:8788"
+  },
+  "state": {
+    "database_path": "/absolute/path/to/gongbu/state/gongbu.sqlite3",
+    "artifact_root": "/absolute/path/to/gongbu/state/artifacts"
+  },
+  "temporal": {
+    "mode": "managed_local",
+    "binary_path": "/absolute/path/to/temporal",
+    "expected_cli_version": "1.4.1",
+    "data_path": "/absolute/path/to/gongbu/state/temporal",
+    "rpc_port": 7233,
+    "ui_port": 8233,
+    "namespace": "default",
+    "task_queue": "gongbu-local-executions",
+    "ui_url": "http://127.0.0.1:8233"
+  },
+  "hubu": {
+    "endpoint": "http://127.0.0.1:8787",
+    "allowlisted_hosts": [],
+    "expected_product_version": "v0.1.0",
+    "expected_executor_contract": "hubu-spend-executor-v4",
+    "account_id": "replace-with-hubu-account-id",
+    "agent_id": "replace-with-hubu-agent-id",
+    "credential_reference": {
+      "service": "gongbu.hubu",
+      "account": "local"
+    },
+    "startup_policy": "wait",
+    "startup_timeout_ms": 30000
+  },
+  "authentication": {
+    "caller_account_id": "replace-with-hubu-account-id",
+    "bearer_credential_reference": {
+      "service": "gongbu.caller",
+      "account": "local-mcp"
+    }
+  },
+  "providers": {
+    "target_catalog_path": "/absolute/path/to/provider-targets.json",
+    "pricing_catalog_path": "/absolute/path/to/pricing-catalog.json",
+    "maximum_spend_minor": 100,
+    "live_spend_acknowledgement": "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
+  },
+  "artifacts": {
+    "max_artifacts_per_execution": 4,
+    "max_encoded_bytes": 20971520,
+    "max_decoded_bytes": 104857600,
+    "max_width": 16384,
+    "max_height": 16384
+  },
+  "execution": {
+    "recovery_delays_seconds": [30, 120, 600],
+    "temporal_startup_timeout_ms": 30000,
+    "dependency_check_interval_ms": 5000
+  },
+  "logging": {
+    "level": "info",
+    "format": "text"
+  },
+  "shutdown": {
+    "worker_drain_timeout_ms": 30000
+  }
+}

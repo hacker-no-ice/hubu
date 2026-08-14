@@ -10,10 +10,7 @@ use crate::{
     application::GenericProviderActivities,
     artifact::ArtifactLimits,
     execution::Execution,
-    hubu::{
-        ExecutorSpendClaimRequest, ExecutorSpendFinalizationRequest, ExecutorSpendRequest,
-        HubuClient, PriceModelSnapshot, ProviderReceipt,
-    },
+    hubu::{HubuClient, ProductionHubuActivities},
     provider::{
         contract::{
             AdapterCapabilities, AdapterOutcome, NormalizedRequest, PricingCatalog,
@@ -1305,117 +1302,17 @@ fn deterministic_id(kind: &str, seed: u64, key: &str) -> String {
     format!("{kind}-{short}")
 }
 
-pub struct RealHubuActivities {
-    client: HubuClient,
-    agent_id: String,
-}
-
-impl RealHubuActivities {
-    pub fn new(config: &HubuConfig) -> Result<Self, SandboxError> {
-        if config.mode != BoundaryMode::Real {
-            return invalid("RealHubuActivities requires real Hubu configuration");
-        }
-        let client = HubuClient::new(config.endpoint.clone().expect("validated endpoint"));
-        let client = match &config.runtime_bearer_token {
-            Some(token) => client.with_bearer_token(token.0.clone()),
-            None => client,
-        };
-        Ok(Self {
-            client,
-            agent_id: config.agent_id.clone(),
-        })
+fn real_hubu_activities(config: &HubuConfig) -> Result<ProductionHubuActivities, SandboxError> {
+    if config.mode != BoundaryMode::Real {
+        return invalid("production Hubu activities require real Hubu configuration");
     }
-
-    fn spend(&self, execution: &Execution) -> ExecutorSpendRequest {
-        ExecutorSpendRequest {
-            spend_auth_token_id: execution.hubu_token_reference.as_str().into(),
-            agent_id: None,
-            account_id: Some(execution.account_id.clone()),
-            amount_cents: execution.authorized_minor,
-            merchant: Some("gongbu.sandbox".into()),
-            task_id: Some(execution.operation_key.clone()),
-        }
-    }
-}
-
-impl HubuActivities for RealHubuActivities {
-    fn preflight(&self, execution: &Execution) -> Result<(), ActivityError> {
-        self.client
-            .validate(&self.spend(execution))
-            .map(|_| ())
-            .map_err(map_hubu_error)
-    }
-    fn claim(&self, execution: &Execution) -> Result<String, ActivityError> {
-        self.client
-            .claim(&ExecutorSpendClaimRequest {
-                operation_key: execution.operation_key.clone(),
-                spend: self.spend(execution),
-            })
-            .map(|claim| claim.claim_id)
-            .map_err(map_hubu_error)
-    }
-    fn validate_claim(&self, execution: &Execution) -> Result<(), ActivityError> {
-        let id = execution
-            .hubu_claim_id
-            .as_deref()
-            .ok_or_else(|| ActivityError::Proven("hubu_claim_missing".into()))?;
-        let claim = self.client.inspect_claim(id).map_err(map_hubu_error)?;
-        if matches!(claim.status.as_str(), "claimed" | "active")
-            && claim.operation_key == execution.operation_key
-        {
-            Ok(())
-        } else {
-            Err(ActivityError::Proven("hubu_claim_not_active".into()))
-        }
-    }
-    fn settle(
-        &self,
-        execution: &Execution,
-        receipt_id: &str,
-        amount_minor: i64,
-    ) -> Result<String, ActivityError> {
-        let snapshot: crate::provider_contract::PricingSnapshot =
-            serde_json::from_value(execution.pricing_snapshot.clone())
-                .map_err(|_| ActivityError::Proven("pricing_snapshot_invalid".into()))?;
-        self.client
-            .settle(&ExecutorSpendFinalizationRequest {
-                agent_id: self.agent_id.clone(),
-                operation_key: execution.operation_key.clone(),
-                receipt: Some(ProviderReceipt {
-                    actual_vendor_cost_cents: amount_minor,
-                    provider_request_id: receipt_id.into(),
-                    price_model_snapshot: PriceModelSnapshot {
-                        provider: execution.provider.clone(),
-                        model: execution.model.clone(),
-                        unit_price_cents: snapshot.estimated_amount_minor,
-                        pricing_unit: "execution".into(),
-                        currency: execution.authorization_currency.to_ascii_lowercase(),
-                    },
-                    artifact_reference: format!("gongbu://execution/{}", execution.execution_id),
-                }),
-            })
-            .map(|settlement| settlement.settlement_id)
-            .map_err(map_hubu_error)
-    }
-    fn release(&self, execution: &Execution) -> Result<(), ActivityError> {
-        self.client
-            .release(&ExecutorSpendFinalizationRequest {
-                agent_id: self.agent_id.clone(),
-                operation_key: execution.operation_key.clone(),
-                receipt: None,
-            })
-            .map(|_| ())
-            .map_err(map_hubu_error)
-    }
-}
-
-fn map_hubu_error(error: crate::hubu::HttpClientError) -> ActivityError {
-    match error {
-        crate::hubu::HttpClientError::Status { status, .. } if (400..500).contains(&status) => {
-            ActivityError::Proven("hubu_request_rejected".into())
-        }
-        _ => ActivityError::Ambiguous("hubu_transport_ambiguous".into()),
-    }
+    let client = HubuClient::new(config.endpoint.clone().expect("validated endpoint"));
+    let client = match &config.runtime_bearer_token {
+        Some(token) => client.with_bearer_token(token.0.clone()),
+        None => client,
+    };
+    ProductionHubuActivities::new(client, config.agent_id.clone())
+        .map_err(|error| SandboxError::Invalid(error.into()))
 }
 
 pub struct DeterministicProvider {
@@ -1576,7 +1473,7 @@ fn fixture_png() -> Vec<u8> {
 
 pub enum HubuWiring {
     Mock(Arc<MockHubu>),
-    Real(Arc<RealHubuActivities>),
+    Real(Arc<ProductionHubuActivities>),
 }
 
 impl HubuWiring {
@@ -1673,9 +1570,7 @@ impl SandboxWiring {
             BoundaryMode::Mock => {
                 HubuWiring::Mock(Arc::new(MockHubu::new(config.hubu.clone(), config.seed)?))
             }
-            BoundaryMode::Real => {
-                HubuWiring::Real(Arc::new(RealHubuActivities::new(&config.hubu)?))
-            }
+            BoundaryMode::Real => HubuWiring::Real(Arc::new(real_hubu_activities(&config.hubu)?)),
         };
         let (provider, providers) = match config.provider.mode {
             BoundaryMode::Mock => {
@@ -1985,7 +1880,7 @@ mod tests {
         config.hubu.scoped_credential_reference = Some("keychain:hubu-sandbox".into());
         config.hubu.isolated_test_account = Some("aga_sandbox".into());
         config.hubu.agent_id = "agt_sandbox".into();
-        let activities = RealHubuActivities::new(&config.hubu).unwrap();
+        let activities = real_hubu_activities(&config.hubu).unwrap();
         let execution = execution();
         let request = activities.spend(&execution);
 
