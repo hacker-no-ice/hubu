@@ -221,6 +221,12 @@ CLI only updates the client binary. To start over with clean local state:
 ./scripts/reset-local-state.sh --yes
 ```
 
+The reset is a dry run unless `--yes` is passed. Credential deletion is always
+separately opt-in: add `--include-auth-token`,
+`--include-reconciliation-token`, or both. The script respects
+`HUBU_AUTH_TOKEN_FILE` and `HUBU_RECONCILIATION_TOKEN_FILE` when showing and
+removing those files.
+
 ## CLI
 
 Install the local CLI so `hubu ...` works from your shell:
