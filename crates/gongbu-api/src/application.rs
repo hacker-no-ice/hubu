@@ -18,7 +18,8 @@ use crate::{
     },
     secrets::{MacOsKeychain, SecretProvider},
     temporal::{
-        start_worker, DurableExecutionRunner, PersistedExecutionRunner, StartedTemporalWorker,
+        start_worker_with_config, worker_is_polling, DurableExecutionRunner, ExecutionScheduler,
+        PersistedExecutionRunner, StartedTemporalWorker, TemporalWorkerConfig,
     },
     workflow::{
         ActivityError as WorkflowActivityError, ArtifactActivities, HubuActivities,
@@ -33,7 +34,16 @@ use axum::{
     Router,
 };
 use futures::future::{select, Either};
-use std::{future::Future, net::SocketAddr, sync::Arc};
+use serde_json::json;
+use std::{
+    future::Future,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use temporalio_client::Client;
 use temporalio_sdk::Runtime;
 use thiserror::Error;
@@ -343,6 +353,13 @@ pub struct ApplicationDependencies {
     pub artifact_activities: Option<Arc<dyn ArtifactActivities + Send + Sync>>,
     pub temporal_runtime: Arc<Runtime>,
     pub temporal_client: Client,
+    pub temporal_worker: TemporalWorkerConfig,
+    pub temporal_namespace: String,
+    pub temporal_startup_timeout: Duration,
+    pub dependency_check_interval: Duration,
+    pub maximum_spend_minor: i64,
+    pub dependency_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    pub worker_drain_timeout: Duration,
     pub authenticator: Arc<dyn Authenticator>,
     pub now: Arc<dyn Fn() -> String + Send + Sync>,
 }
@@ -351,6 +368,7 @@ pub struct ApplicationDependencies {
 struct ApplicationState {
     api: Api,
     authenticator: Arc<dyn Authenticator>,
+    ready: Arc<AtomicBool>,
 }
 
 /// Bind the v1 HTTP surface and poll the Temporal execution queue until shutdown.
@@ -389,51 +407,182 @@ where
                 move || now()
             },
         ));
-    let mut worker = start_worker(
+    let temporal_client = dependencies.temporal_client.clone();
+    let task_queue = dependencies.temporal_worker.task_queue.clone();
+    let mut worker = start_worker_with_config(
         dependencies.temporal_runtime,
         dependencies.temporal_client,
         execution_runner,
+        dependencies.temporal_worker,
     )?;
-    let api = Api::new(
+    if let Err(error) = wait_for_worker_polling(
+        &temporal_client,
+        &dependencies.temporal_namespace,
+        &task_queue,
+        dependencies.temporal_startup_timeout,
+    )
+    .await
+    {
+        worker.shutdown();
+        worker.join()?;
+        return Err(error);
+    }
+    for execution_id in dependencies.repository.list_nonterminal_execution_ids()? {
+        if let Err(error) = worker.scheduler.schedule(&execution_id) {
+            worker.shutdown();
+            worker.join()?;
+            return Err(std::io::Error::other(error).into());
+        }
+    }
+    let api = Api::new_with_maximum_spend(
         dependencies.repository,
         dependencies.artifacts,
         dependencies.providers,
         worker.scheduler.clone(),
+        dependencies.maximum_spend_minor,
         move || (dependencies.now)(),
     );
+    let ready = Arc::new(AtomicBool::new(true));
     let state = ApplicationState {
         api,
         authenticator: dependencies.authenticator,
+        ready: ready.clone(),
     };
     let completion = worker.take_completion();
-    let supervised_shutdown = wait_for_shutdown(shutdown, completion);
+    let supervised_shutdown = wait_for_shutdown(
+        shutdown,
+        completion,
+        monitor_temporal(
+            temporal_client,
+            dependencies.temporal_namespace,
+            task_queue,
+            dependencies.dependency_check_interval,
+            dependencies.dependency_checker,
+        ),
+        ready.clone(),
+    );
     let result = axum::serve(listener, Router::new().fallback(dispatch).with_state(state))
         .with_graceful_shutdown(supervised_shutdown)
         .await;
-    stop_worker(worker)?;
+    ready.store(false, Ordering::SeqCst);
+    stop_worker(worker, dependencies.worker_drain_timeout).await?;
     result.map_err(Into::into)
 }
 
-async fn wait_for_shutdown<F>(shutdown: F, completion: futures::channel::oneshot::Receiver<()>)
-where
-    F: Future<Output = ()>,
-{
-    match select(Box::pin(shutdown), Box::pin(completion)).await {
-        Either::Left(_) | Either::Right(_) => {}
+async fn wait_for_worker_polling(
+    client: &Client,
+    namespace: &str,
+    task_queue: &str,
+    timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if worker_is_polling(client, namespace, task_queue)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(std::io::Error::other(
+                "Temporal worker did not begin polling before startup deadline",
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-fn stop_worker(
+async fn monitor_temporal(
+    client: Client,
+    namespace: String,
+    task_queue: String,
+    interval: Duration,
+    dependency_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+) {
+    loop {
+        tokio::time::sleep(interval).await;
+        let temporal_ready = worker_is_polling(&client, &namespace, &task_queue)
+            .await
+            .unwrap_or(false);
+        let dependencies_ready = match dependency_checker.as_ref() {
+            Some(checker) => {
+                let checker = checker.clone();
+                tokio::task::spawn_blocking(move || checker())
+                    .await
+                    .unwrap_or(false)
+            }
+            None => true,
+        };
+        if !temporal_ready || !dependencies_ready {
+            return;
+        }
+    }
+}
+
+async fn wait_for_shutdown<F, H>(
+    shutdown: F,
+    completion: futures::channel::oneshot::Receiver<()>,
+    health: H,
+    ready: Arc<AtomicBool>,
+) where
+    F: Future<Output = ()>,
+    H: Future<Output = ()>,
+{
+    let worker_or_health = async {
+        match select(Box::pin(completion), Box::pin(health)).await {
+            Either::Left(_) | Either::Right(_) => {}
+        }
+    };
+    match select(Box::pin(shutdown), Box::pin(worker_or_health)).await {
+        Either::Left(_) | Either::Right(_) => {}
+    };
+    ready.store(false, Ordering::SeqCst);
+}
+
+async fn stop_worker(
     worker: StartedTemporalWorker,
+    timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     worker.shutdown();
-    worker.join()
+    tokio::time::timeout(timeout, tokio::task::spawn_blocking(move || worker.join()))
+        .await
+        .map_err(|_| std::io::Error::other("Temporal worker drain timed out"))?
+        .map_err(|_| std::io::Error::other("Temporal worker join task panicked"))??;
+    Ok(())
 }
 
 async fn dispatch(State(state): State<ApplicationState>, request: Request<Body>) -> Response {
-    let account = state.authenticator.authenticate(request.headers()).ok();
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
+    if method == "GET" && path == "/livez" {
+        return json_transport(StatusCode::OK, json!({"status":"live"}));
+    }
+    if method == "GET" && path == "/readyz" {
+        let is_ready = state.ready.load(Ordering::SeqCst);
+        return json_transport(
+            if is_ready {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            },
+            json!({"status": if is_ready { "ready" } else { "not_ready" }}),
+        );
+    }
+    if method == "GET" && path == "/version" {
+        return json_transport(
+            StatusCode::OK,
+            serde_json::to_value(gongbu_build_info::build_info())
+                .unwrap_or_else(|_| json!({"status":"unavailable"})),
+        );
+    }
+    if method == "POST" && path == "/v1/executions" && !state.ready.load(Ordering::SeqCst) {
+        return json_transport(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"schema_version":crate::http::SCHEMA_VERSION,"error":{"code":"not_ready","message":"execution admission is temporarily unavailable"}}),
+        );
+    }
+    let account = state.authenticator.authenticate(request.headers()).ok();
     let body = match to_bytes(request.into_body(), MAX_REQUEST_BYTES).await {
         Ok(body) => body,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
@@ -445,6 +594,15 @@ async fn dispatch(State(state): State<ApplicationState>, request: Request<Body>)
         Ok(response) => into_axum(response),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+fn json_transport(status: StatusCode, body: serde_json::Value) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_vec(&body).unwrap_or_default(),
+    )
+        .into_response()
 }
 
 fn into_axum(response: HttpResponse) -> Response {
@@ -504,7 +662,12 @@ mod tests {
             .unwrap();
         let (completion_tx, completion_rx) = futures::channel::oneshot::channel();
         completion_tx.send(()).unwrap();
-        runtime.block_on(wait_for_shutdown(futures::future::pending(), completion_rx));
+        runtime.block_on(wait_for_shutdown(
+            futures::future::pending(),
+            completion_rx,
+            futures::future::pending(),
+            Arc::new(AtomicBool::new(true)),
+        ));
     }
 
     #[test]

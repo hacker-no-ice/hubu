@@ -1,5 +1,12 @@
 # Gongbu
 
+For the production-shaped persistent local runtime, use
+`gongbu-server serve --config /absolute/path/gongbu.json`. It connects to an
+independently managed Hubu service, owns its Temporal worker, supports managed
+local or external Temporal, and preserves SQLite/artifact/workflow state across
+restart. See [the persistent server runbook](docs/server.md). The sandbox remains
+a temporary manual-test environment and is not the supported server lifecycle.
+
 Gongbu is the execution plane for Hubu-authorized work. The repository currently
 contains the v1 persistence, normalized-artifact foundations, authenticated
 Execution and Artifact HTTP contract, and the first single-provider durable

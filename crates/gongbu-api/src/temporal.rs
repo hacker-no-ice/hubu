@@ -18,7 +18,10 @@ use std::time::SystemTime;
 use std::{sync::Arc, time::Duration};
 use temporalio_client::{Client, WorkflowSignalOptions, WorkflowStartOptions};
 use temporalio_common_wasm::protos::temporal::api::enums::v1::{
-    WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
+    TaskQueueType, WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
+};
+use temporalio_common_wasm::protos::temporal::api::{
+    taskqueue::v1::TaskQueue, workflowservice::v1::DescribeTaskQueueRequest,
 };
 use temporalio_macros::{activities, workflow, workflow_methods};
 use temporalio_sdk::{
@@ -28,6 +31,62 @@ use temporalio_sdk::{
 };
 
 pub const EXECUTION_TASK_QUEUE: &str = "gongbu-executions";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemporalWorkerConfig {
+    pub task_queue: String,
+    pub recovery_delays_seconds: Vec<u64>,
+}
+
+impl Default for TemporalWorkerConfig {
+    fn default() -> Self {
+        Self {
+            task_queue: EXECUTION_TASK_QUEUE.into(),
+            recovery_delays_seconds: vec![30, 120, 600],
+        }
+    }
+}
+
+impl TemporalWorkerConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.task_queue.trim().is_empty()
+            || self.task_queue.len() > 255
+            || self.recovery_delays_seconds.is_empty()
+            || self.recovery_delays_seconds.len() > 8
+            || self.recovery_delays_seconds.contains(&0)
+        {
+            return Err("invalid Temporal worker configuration");
+        }
+        Ok(())
+    }
+}
+
+/// Ask Temporal for the active workflow pollers on Gongbu's configured queue.
+/// This is used as both the startup polling proof and the runtime fail-closed
+/// dependency check.
+pub async fn worker_is_polling(
+    client: &Client,
+    namespace: &str,
+    task_queue: &str,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    #[allow(deprecated)]
+    let request = DescribeTaskQueueRequest {
+        namespace: namespace.into(),
+        task_queue: Some(TaskQueue {
+            name: task_queue.into(),
+            ..Default::default()
+        }),
+        task_queue_type: TaskQueueType::Workflow as i32,
+        report_pollers: true,
+        ..Default::default()
+    };
+    let response = client
+        .connection()
+        .workflow_service()
+        .describe_task_queue(temporalio_client::tonic::Request::new(request))
+        .await?;
+    Ok(!response.into_inner().pollers.is_empty())
+}
 
 pub trait DurableExecutionRunner: Send + Sync + 'static {
     fn run_execution(
@@ -538,7 +597,14 @@ impl GranularExecutionActivities {
 }
 
 pub fn worker_options(runner: Arc<dyn DurableExecutionRunner>) -> WorkerOptions {
-    WorkerOptions::new(EXECUTION_TASK_QUEUE)
+    worker_options_for(runner, EXECUTION_TASK_QUEUE)
+}
+
+pub fn worker_options_for(
+    runner: Arc<dyn DurableExecutionRunner>,
+    task_queue: &str,
+) -> WorkerOptions {
+    WorkerOptions::new(task_queue)
         .register_workflow::<GranularExecutionWorkflow>()
         .expect("granular execution workflow registration is valid")
         .register_activities(GranularExecutionActivities::new(runner))
@@ -631,6 +697,19 @@ pub fn start_worker(
     client: Client,
     runner: Arc<dyn DurableExecutionRunner>,
 ) -> Result<StartedTemporalWorker, Box<dyn std::error::Error + Send + Sync>> {
+    start_worker_with_config(runtime, client, runner, TemporalWorkerConfig::default())
+}
+
+pub fn start_worker_with_config(
+    runtime: Arc<Runtime>,
+    client: Client,
+    runner: Arc<dyn DurableExecutionRunner>,
+    config: TemporalWorkerConfig,
+) -> Result<StartedTemporalWorker, Box<dyn std::error::Error + Send + Sync>> {
+    config.validate().map_err(std::io::Error::other)?;
+    let worker_task_queue = config.task_queue.clone();
+    let scheduler_task_queue = config.task_queue;
+    let recovery_delays = config.recovery_delays_seconds;
     let scheduler_client = client.clone();
     let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
     let (completion_tx, completion_rx) = oneshot::channel();
@@ -643,8 +722,12 @@ pub fn start_worker(
             let run_result = tokio_runtime.block_on(async move {
                 // Worker construction starts Tokio tasks in newer SDK releases,
                 // so it must happen after entering this thread's runtime.
-                let mut worker = Worker::new(&runtime, client, worker_options(runner))
-                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let mut worker = Worker::new(
+                    &runtime,
+                    client,
+                    worker_options_for(runner, &worker_task_queue),
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
                 let shutdown: Arc<dyn Fn() + Send + Sync> = Arc::new(worker.shutdown_handle());
                 let mut run = Box::pin(worker.run());
                 let mut readiness = Some((startup_tx, shutdown));
@@ -678,11 +761,23 @@ pub fn start_worker(
                 let result = runtime.block_on(async {
                     match command {
                         SchedulerCommand::Start(execution_id) => {
-                            start_execution(scheduler_client.clone(), execution_id).await
+                            start_execution(
+                                scheduler_client.clone(),
+                                execution_id,
+                                &scheduler_task_queue,
+                                &recovery_delays,
+                            )
+                            .await
                         }
                         SchedulerCommand::Reconcile(execution_id, request) => {
-                            signal_reconciliation(scheduler_client.clone(), execution_id, request)
-                                .await
+                            signal_reconciliation(
+                                scheduler_client.clone(),
+                                execution_id,
+                                request,
+                                &scheduler_task_queue,
+                                &recovery_delays,
+                            )
+                            .await
                         }
                     }
                 });
@@ -730,52 +825,49 @@ impl ExecutionScheduler for TemporalExecutionScheduler {
     }
 }
 
-fn recovery_delays_seconds() -> Vec<u64> {
-    std::env::var("GONGBU_RECONCILIATION_DELAYS_SECONDS")
-        .ok()
-        .and_then(|v| {
-            let parsed: Option<Vec<u64>> = v
-                .split(',')
-                .map(|p| p.trim().parse::<u64>().ok().filter(|n| *n > 0))
-                .collect();
-            parsed.filter(|v| !v.is_empty() && v.len() <= 8)
-        })
-        .unwrap_or_else(|| vec![30, 120, 600])
-}
-
-async fn start_execution(client: Client, execution_id: String) -> ScheduleResult {
+async fn start_execution(
+    client: Client,
+    execution_id: String,
+    task_queue: &str,
+    recovery_delays_seconds: &[u64],
+) -> ScheduleResult {
     client
         .start_workflow(
             GranularExecutionWorkflow::run,
             ExecutionWorkflowInput {
                 execution_id: execution_id.clone(),
-                recovery_delays_seconds: recovery_delays_seconds(),
+                recovery_delays_seconds: recovery_delays_seconds.to_vec(),
             },
-            execution_start_options(&execution_id),
+            execution_start_options(&execution_id, task_queue),
         )
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
-fn execution_start_options(execution_id: &str) -> WorkflowStartOptions {
-    WorkflowStartOptions::new(
-        EXECUTION_TASK_QUEUE,
-        format!("gongbu-execution-{execution_id}"),
-    )
-    .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
-    .id_reuse_policy(WorkflowIdReusePolicy::AllowDuplicate)
-    .build()
+fn execution_start_options(execution_id: &str, task_queue: &str) -> WorkflowStartOptions {
+    WorkflowStartOptions::new(task_queue, format!("gongbu-execution-{execution_id}"))
+        .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
+        .id_reuse_policy(WorkflowIdReusePolicy::AllowDuplicate)
+        .build()
 }
 
 async fn signal_reconciliation(
     client: Client,
     execution_id: String,
     request: OperatorReconciliationRequest,
+    task_queue: &str,
+    recovery_delays_seconds: &[u64],
 ) -> ScheduleResult {
     // UseExisting preserves a live workflow; AllowDuplicate starts a new run
     // when a pre-HUB-19 workflow with this stable ID already completed.
-    start_execution(client.clone(), execution_id.clone()).await?;
+    start_execution(
+        client.clone(),
+        execution_id.clone(),
+        task_queue,
+        recovery_delays_seconds,
+    )
+    .await?;
     client
         .get_workflow_handle::<GranularExecutionWorkflow>(format!(
             "gongbu-execution-{execution_id}"
@@ -883,7 +975,7 @@ mod tests {
 
     #[test]
     fn reconciliation_start_reuses_live_ids_and_restarts_closed_ids() {
-        let options = execution_start_options("execution-1");
+        let options = execution_start_options("execution-1", EXECUTION_TASK_QUEUE);
         assert_eq!(options.workflow_id, "gongbu-execution-execution-1");
         assert_eq!(
             options.id_conflict_policy,

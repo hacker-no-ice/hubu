@@ -27,5 +27,6 @@ base64.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
 chrono.workspace = true
+gongbu-build-info.workspace = true
 
 [dev-dependencies]
