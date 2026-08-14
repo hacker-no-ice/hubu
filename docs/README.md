@@ -26,6 +26,8 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
 - [demo.md](demo.md): scripted local walkthrough and CLI reference
 - [releases.md](releases.md): immutable prereleases, stable promotion,
   supported targets, verification, rollback, and retention
+- [repository-security.md](repository-security.md): dependency scanning,
+  immutable action pins, exception review, and post-merge GitHub controls
 
 ## Working Notes
 
