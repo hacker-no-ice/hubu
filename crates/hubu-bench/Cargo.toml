@@ -1,10 +1,16 @@
 [package]
 name = "hubu-bench"
 version = "0.1.0"
+description = "Local throughput and correctness benchmark for Hubu spend approvals"
 edition.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords = ["benchmark", "ai-agents", "payments", "load-testing"]
+categories = ["development-tools::profiling"]
+publish = false
 
 [dependencies]
 anyhow.workspace = true
