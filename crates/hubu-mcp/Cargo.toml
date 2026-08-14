@@ -1,10 +1,16 @@
 [package]
 name = "hubu-mcp"
 version = "0.1.0"
+description = "Model Context Protocol transport adapter for Hubu"
 edition.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords = ["ai-agents", "mcp", "payments", "protocol"]
+categories = ["development-tools"]
+publish = false
 
 [[bin]]
 name = "hubu-mcp-server"

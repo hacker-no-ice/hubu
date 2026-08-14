@@ -1,10 +1,16 @@
 [package]
 name = "hubu-wallet"
 version = "0.1.0"
+description = "Payment orchestration, mock rails, and double-entry ledger for Hubu"
 edition.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords = ["ai-agents", "ledger", "payments", "wallet"]
+categories = ["finance"]
+publish = false
 
 [dependencies]
 chrono.workspace = true

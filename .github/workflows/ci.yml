@@ -29,6 +29,9 @@ jobs:
       - name: Check default credentials cannot be committed
         run: ./scripts/check-default-credential-ignore.sh
 
+      - name: Check public Cargo metadata
+        run: python3 scripts/check-cargo-metadata.py
+
       - name: Run core integration flow
         run: ./scripts/integration-core-flow.sh
 
