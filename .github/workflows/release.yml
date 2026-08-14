@@ -111,6 +111,9 @@ jobs:
       - name: Run core integration flow
         run: ./scripts/integration-core-flow.sh
 
+      - name: Test release packaging
+        run: ./scripts/test-release-packaging.sh
+
       - name: Verify locked release build
         env:
           HUBU_PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
@@ -154,20 +157,14 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          package="hubu-${RELEASE_VERSION}-${TARGET}"
-          mkdir -p "dist/${package}"
-          cp "target/${TARGET}/release/hubu" "dist/${package}/hubu"
-          cp "target/${TARGET}/release/hubu-server" "dist/${package}/hubu-server"
-          jq -n \
-            --arg product_version "${RELEASE_VERSION}" \
-            --arg source_commit "${SOURCE_COMMIT}" \
-            --arg executor_contract "hubu-spend-executor-v4" \
-            --arg target "${TARGET}" \
-            --arg repository "${REPOSITORY}" \
-            --arg workflow_run "https://github.com/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}" \
-            '{product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, repository: $repository, workflow_run: $workflow_run, dependencies: "Cargo.lock"}' \
-            > "dist/${package}/PROVENANCE.json"
-          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+          ./scripts/package-release-archive.sh \
+            "${RELEASE_VERSION}" \
+            "${SOURCE_COMMIT}" \
+            "${TARGET}" \
+            "target/${TARGET}/release" \
+            dist \
+            "${REPOSITORY}" \
+            "https://github.com/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}"
 
       - uses: actions/upload-artifact@v4
         with:

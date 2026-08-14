@@ -162,6 +162,14 @@ curl http://127.0.0.1:8787/version
 `product_version` versions Hubu itself, while `executor_contract` remains the
 independently negotiated `hubu-spend-executor-v4` identifier.
 
+## License
+
+Hubu is dual-licensed under the [MIT License](LICENSE-MIT) or the
+[Apache License 2.0](LICENSE-APACHE), at your option. Binary release archives
+include both project licenses and the applicable
+[third-party notices](THIRD-PARTY-NOTICES.md), including a target-specific
+dependency-license bundle generated from the locked release graph.
+
 ## Local Developer Tools
 
 Hubu also includes local tools for understanding, exercising, and measuring the

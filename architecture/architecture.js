@@ -50,7 +50,7 @@ const components = {
       "The API handles local HTTP concerns and delegates spend approval, payment, and executor claim lifecycle orchestration to core app services.",
       "Gongbu owns vendor credentials, provider adapters, model calls, artifact contents, and execution retries outside Hubu; Hubu stores only compact provider and artifact references.",
       "SQLite-backed records preserve users, agents, advisory spending targets, budgets, policies, executor claims and receipts, reconciliation evidence, payments, and ledger entries.",
-      "Immutable release archives carry the CLI, server, checksums, source provenance, product version, and independently negotiated executor-contract version to pinned consumers.",
+      "Immutable release archives carry the CLI, server, project licenses, third-party notices, checksums, source provenance, product version, and independently negotiated executor-contract version to pinned consumers.",
     ],
     links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.futureWallet],
     zones: [
@@ -100,8 +100,8 @@ const components = {
     responsibilities: [
       "Creates a commit-addressed prerelease for each eligible main build and accepts explicit stable SemVer promotion for an exact main revision.",
       "Runs formatting, Clippy, workspace tests, the core integration flow, and locked release builds before publication.",
-      "Builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, and per-target provenance.",
-      "Publishes SHA-256 checksums without overwriting existing tags or assets, then smoke-tests downloads, startup, readiness, and version reporting.",
+      "Builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, both project licenses, generated dependency-license material, third-party notices, and per-target provenance.",
+      "Publishes SHA-256 checksums without overwriting existing tags or assets, then smoke-tests downloads, required legal files, startup, readiness, and version reporting.",
       "Keeps the Hubu product version separate from the hubu-spend-executor-v4 contract identifier so consumers can negotiate compatibility explicitly.",
     ],
     links: [sharedLinks.releaseWorkflow, sharedLinks.releases, sharedLinks.common, sharedLinks.api, sharedLinks.cli],

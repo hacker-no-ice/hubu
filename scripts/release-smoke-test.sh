@@ -40,6 +40,22 @@ fi
 
 tar -C "${smoke_dir}" -xzf "${smoke_dir}/${asset_name}"
 package_dir="${smoke_dir}/${asset_name%.tar.gz}"
+expected_files=(
+  hubu
+  hubu-server
+  PROVENANCE.json
+  LICENSE-MIT
+  LICENSE-APACHE
+  THIRD-PARTY-NOTICES.md
+  THIRD-PARTY-LICENSES.txt
+  Cargo.lock
+)
+for expected_file in "${expected_files[@]}"; do
+  if [[ ! -s "${package_dir}/${expected_file}" ]]; then
+    echo "release archive is missing non-empty ${expected_file}" >&2
+    exit 1
+  fi
+done
 chmod +x "${package_dir}/hubu" "${package_dir}/hubu-server"
 
 version_output="$("${package_dir}/hubu-server" --version)"
