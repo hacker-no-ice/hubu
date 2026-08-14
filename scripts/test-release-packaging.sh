@@ -8,19 +8,20 @@ trap 'rm -rf "${test_dir}"' EXIT
 mkdir -p "${test_dir}/bin" "${test_dir}/dist" "${test_dir}/unpacked"
 printf '#!/usr/bin/env sh\nexit 0\n' > "${test_dir}/bin/hubu"
 printf '#!/usr/bin/env sh\nexit 0\n' > "${test_dir}/bin/hubu-server"
+target="$(rustc -vV | sed -n 's/^host: //p')"
 
 "${root_dir}/scripts/package-release-archive.sh" \
   "0.0.0-test" \
   "0000000000000000000000000000000000000000" \
-  "test-target" \
+  "${target}" \
   "${test_dir}/bin" \
   "${test_dir}/dist" \
   "hacker-no-ice/hubu" \
   "https://github.com/hacker-no-ice/hubu/actions/runs/1/attempts/1"
 
-archive="${test_dir}/dist/hubu-0.0.0-test-test-target.tar.gz"
+archive="${test_dir}/dist/hubu-0.0.0-test-${target}.tar.gz"
 tar -C "${test_dir}/unpacked" -xzf "${archive}"
-package_dir="${test_dir}/unpacked/hubu-0.0.0-test-test-target"
+package_dir="${test_dir}/unpacked/hubu-0.0.0-test-${target}"
 
 for expected_file in \
   hubu \
@@ -29,15 +30,24 @@ for expected_file in \
   LICENSE-MIT \
   LICENSE-APACHE \
   THIRD-PARTY-NOTICES.md \
+  THIRD-PARTY-LICENSES.txt \
   Cargo.lock; do
   test -s "${package_dir}/${expected_file}"
 done
 
 jq -e \
+  --arg target "${target}" \
   '.product_version == "0.0.0-test" and
    .source_commit == "0000000000000000000000000000000000000000" and
-   .target == "test-target" and
+   .target == $target and
    .repository == "hacker-no-ice/hubu"' \
   "${package_dir}/PROVENANCE.json" >/dev/null
+
+grep -F 'Package: libsqlite3-sys v0.30.1' \
+  "${package_dir}/THIRD-PARTY-LICENSES.txt" >/dev/null
+grep -F 'Package: rusqlite v0.32.1' \
+  "${package_dir}/THIRD-PARTY-LICENSES.txt" >/dev/null
+grep -F 'Permission is hereby granted, free of charge' \
+  "${package_dir}/THIRD-PARTY-LICENSES.txt" >/dev/null
 
 echo "Release packaging test passed"

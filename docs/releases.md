@@ -46,9 +46,11 @@ archive:
 Every archive includes `PROVENANCE.json` with the product version, full source
 commit, executor contract, Rust target, repository, workflow run, and locked
 dependency declaration. It also includes `LICENSE-MIT`, `LICENSE-APACHE`, and
-`THIRD-PARTY-NOTICES.md` and the exact `Cargo.lock` dependency inventory so the
-applicable project licenses and dependency notice material travel with the
-binaries. The release includes `SHA256SUMS` covering every archive.
+`THIRD-PARTY-NOTICES.md`, a target-specific `THIRD-PARTY-LICENSES.txt` bundle,
+and the exact `Cargo.lock` dependency inventory so the applicable project
+licenses and dependency notice material travel with the binaries. Packaging
+fails if any included crate lacks license material. The release includes
+`SHA256SUMS` covering every archive.
 
 ## Pin, verify, and install
 

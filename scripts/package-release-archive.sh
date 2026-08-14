@@ -24,6 +24,9 @@ cp "${root_dir}/LICENSE-MIT" "${package_dir}/LICENSE-MIT"
 cp "${root_dir}/LICENSE-APACHE" "${package_dir}/LICENSE-APACHE"
 cp "${root_dir}/THIRD-PARTY-NOTICES.md" "${package_dir}/THIRD-PARTY-NOTICES.md"
 cp "${root_dir}/Cargo.lock" "${package_dir}/Cargo.lock"
+"${root_dir}/scripts/generate-third-party-licenses.sh" \
+  "${target}" \
+  "${package_dir}/THIRD-PARTY-LICENSES.txt"
 jq -n \
   --arg product_version "${release_version}" \
   --arg source_commit "${source_commit}" \

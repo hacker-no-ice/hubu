@@ -47,6 +47,7 @@ expected_files=(
   LICENSE-MIT
   LICENSE-APACHE
   THIRD-PARTY-NOTICES.md
+  THIRD-PARTY-LICENSES.txt
   Cargo.lock
 )
 for expected_file in "${expected_files[@]}"; do

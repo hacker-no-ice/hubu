@@ -100,7 +100,7 @@ const components = {
     responsibilities: [
       "Creates a commit-addressed prerelease for each eligible main build and accepts explicit stable SemVer promotion for an exact main revision.",
       "Runs formatting, Clippy, workspace tests, the core integration flow, and locked release builds before publication.",
-      "Builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, both project licenses, third-party notices, and per-target provenance.",
+      "Builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, both project licenses, generated dependency-license material, third-party notices, and per-target provenance.",
       "Publishes SHA-256 checksums without overwriting existing tags or assets, then smoke-tests downloads, required legal files, startup, readiness, and version reporting.",
       "Keeps the Hubu product version separate from the hubu-spend-executor-v4 contract identifier so consumers can negotiate compatibility explicitly.",
     ],
