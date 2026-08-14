@@ -28,6 +28,9 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
   supported targets, verification, rollback, and retention
 - [repository-security.md](repository-security.md): dependency scanning,
   immutable action pins, exception review, and post-merge GitHub controls
+- [publication-privacy-decision.md](publication-privacy-decision.md): owner
+  attestation and the durable decision for publishing repository history,
+  planning material, and prior prototypes
 
 ## Working Notes
 
