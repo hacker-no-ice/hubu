@@ -108,6 +108,13 @@ The default load is intentionally conservative to avoid stressing a laptop.
 Step-load runs should increase `HUBU_BENCH_RPS` gradually while watching
 `target/hubu-bench/system-stats.tsv`.
 
+The reported numbers are a single local demo observation, not a capacity claim,
+service-level objective, production load test, or security test. The benchmark
+uses the localhost bearer capability and mock payment rail, and the serialized
+server prevents it from exercising concurrent policy, budget, payment, or
+ledger execution. Results should not be extrapolated to a deployed or
+real-money system.
+
 ## Reliability Assessment
 
 The selected run stayed internally consistent under light load: every spend was
