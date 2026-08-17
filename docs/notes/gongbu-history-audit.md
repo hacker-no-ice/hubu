@@ -167,8 +167,11 @@ workspace prefix. For example, once HUB-80 selects and prepares the destination:
 git remote add gongbu https://github.com/hacker-no-ice/gongbu.git
 git fetch --no-tags gongbu \
   refs/heads/main:refs/remotes/gongbu/audited-main
-test "$(git rev-parse refs/remotes/gongbu/audited-main)" = \
-  b7132f647f14cc0d527384150341e7b42cbed1b4
+if test "$(git rev-parse refs/remotes/gongbu/audited-main)" != \
+  b7132f647f14cc0d527384150341e7b42cbed1b4; then
+  echo "Gongbu main does not match the audited SHA; stop the import." >&2
+  exit 1
+fi
 git subtree add --prefix=<approved-gongbu-prefix> \
   refs/remotes/gongbu/audited-main
 git merge-base --is-ancestor \
