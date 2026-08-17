@@ -9,10 +9,18 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  # Ordinary CI is deliberately unable to opt into external Gongbu or provider traffic.
+  GONGBU_MCP_INTEGRATION: "0"
+  GONGBU_SANDBOX_HUBU_MODE: mock
+  GONGBU_SANDBOX_PROVIDER_MODE: mock
+
 jobs:
   test:
     name: Test workspace
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -29,11 +37,17 @@ jobs:
       - name: Test Gongbu Hubu v4 client recovery
         run: cargo test --workspace --locked 'hubu::tests::'
 
-      - name: Run tests
-        run: cargo test --workspace --locked
+      - name: Run all workspace tests
+        run: cargo test --workspace --all-targets --locked
 
-      - name: Build release binaries with locked dependencies
-        run: cargo build --release --locked --bin hubu --bin hubu-server
+      - name: Build all production binaries with locked dependencies
+        run: >-
+          cargo build --release --locked
+          --bin hubu
+          --bin hubu-server
+          --bin hubu-mcp-server
+          --bin gongbu-server
+          --bin gongbu-mcp
 
       - name: Check default credentials cannot be committed
         run: ./scripts/check-default-credential-ignore.sh
@@ -43,6 +57,9 @@ jobs:
 
       - name: Check Hubu/Gongbu dependency boundary
         run: python3 scripts/check-workspace-boundary.py
+
+      - name: Check ordinary CI cannot enable live provider spend
+        run: python3 scripts/check-ci-provider-safety.py
 
       - name: Run core integration flow
         run: ./scripts/integration-core-flow.sh
@@ -56,6 +73,7 @@ jobs:
   msrv:
     name: Check MSRV (Rust 1.88.0)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,6 +90,7 @@ jobs:
   security:
     name: Security policy
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
