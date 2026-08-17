@@ -47,6 +47,9 @@ jobs:
       - name: Run core integration flow
         run: ./scripts/integration-core-flow.sh
 
+      - name: Run Hubu-to-Gongbu executor E2E
+        run: ./scripts/integration-hubu-gongbu-executor.sh
+
       - name: Build docs
         run: cargo doc --workspace --no-deps --locked
 
