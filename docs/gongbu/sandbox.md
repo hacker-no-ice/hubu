@@ -25,7 +25,7 @@ In terminal 1, start the sandbox:
 
 ```sh
 gongbu-sandbox start \
-  --config examples/sandbox.mock.json \
+  --config examples/gongbu/sandbox.mock.json \
   --hubu-mode mock \
   --provider-mode mock
 ```
@@ -54,7 +54,7 @@ visible in shell history and do not persist into later shell commands:
 
 ```sh
 gongbu-sandbox start \
-  --config examples/sandbox.mock.json \
+  --config examples/gongbu/sandbox.mock.json \
   --hubu-mode mock \
   --provider-mode mock
 ```
@@ -177,7 +177,7 @@ or spend.
 
    ```sh
    gongbu-sandbox start \
-     --config examples/sandbox.mock.json \
+     --config examples/gongbu/sandbox.mock.json \
      --hubu-mode mock \
      --provider-mode mock
    ```
@@ -368,7 +368,7 @@ account, policy, and budget:
 
 ```sh
 gongbu-sandbox start \
-  --config examples/sandbox.hubu-v0.1.0.json \
+  --config examples/gongbu/sandbox.hubu-v0.1.0.json \
   --hubu-mode real \
   --hubu-version v0.1.0 \
   --provider-mode mock

@@ -14,12 +14,14 @@ Build the operator binaries:
 cargo build --release --locked --bin gongbu-server --bin gongbu-mcp
 ```
 
-Copy [the complete configuration example](../examples/gongbu.server.json) to an
-operator-owned absolute path. Every field is required unless marked optional by
-the example. The schema rejects unknown fields. All state and catalog paths and
-the managed Temporal binary must be absolute; state survives ordinary shutdown
-and restart. HTTP and external dependencies are loopback-only unless a Hubu host
-is explicitly allowlisted.
+Copy [the complete configuration example][server-example] to an operator-owned
+absolute path. Every field is required unless marked optional by the example.
+The schema rejects unknown fields. All state and catalog paths and the managed
+Temporal binary must be absolute; state survives ordinary shutdown and restart.
+HTTP and external dependencies are loopback-only unless a Hubu host is explicitly
+allowlisted.
+
+[server-example]: ../../examples/gongbu/gongbu.server.json
 
 The configuration has one source and one precedence rule: the file passed to
 `--config` is authoritative. `gongbu-server` does not apply environment or CLI

@@ -1258,7 +1258,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "explicit live Google spend; see docs/gemini-image-e2e.md"]
+    #[ignore = "explicit live Google spend; see docs/gongbu/gemini-image-e2e.md"]
     fn live_gemini_e2e_requires_explicit_spend_guard_and_never_uses_fixture() {
         use crate::{
             provider::contract::{enforce_cost, preflight_selected_secret, PricingCatalog},

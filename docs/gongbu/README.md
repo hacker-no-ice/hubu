@@ -4,7 +4,7 @@ For the production-shaped persistent local runtime, use
 `gongbu-server serve --config /absolute/path/gongbu.json`. It connects to an
 independently managed Hubu service, owns its Temporal worker, supports managed
 local or external Temporal, and preserves SQLite/artifact/workflow state across
-restart. See [the persistent server runbook](docs/server.md). The sandbox remains
+restart. See [the persistent server runbook](server.md). The sandbox remains
 a temporary manual-test environment and is not the supported server lifecycle.
 
 Gongbu is the execution plane for Hubu-authorized work. The repository currently
@@ -14,7 +14,7 @@ execution workflow, plus operator-selected Google Gemini and Ideogram image
 adapters.
 
 The separate `gongbu-mcp` crate exposes the authenticated HTTP contract to local
-agent platforms over MCP stdio. See [docs/mcp.md](docs/mcp.md) for operator
+agent platforms over MCP stdio. See [mcp.md](mcp.md) for operator
 configuration, tool examples, and its opt-in integration test.
 
 ## V1 boundary
@@ -130,11 +130,11 @@ target key and revision and use a narrowly scoped `legacy-unresolved` lookup so
 in-flight work survives the upgrade. Every newly accepted execution requires
 and stores a canonical digest; the legacy path cannot be selected by new work.
 
-See [Local Keychain secrets](docs/local-keychain-secrets.md) for setup and
+See [Local Keychain secrets](local-keychain-secrets.md) for setup and
 manual credential replacement. The deliberately opt-in live check is documented
-in [Gemini image E2E](docs/gemini-image-e2e.md); CI uses fixtures only. The
+in [Gemini image E2E](gemini-image-e2e.md); CI uses fixtures only. The
 separate Google AI Studio adapter setup is documented in
-[Gemini Developer API image E2E](docs/gemini-developer-image-e2e.md).
+[Gemini Developer API image E2E](gemini-developer-image-e2e.md).
 Ideogram adapter is likewise fixture-backed in CI and has no implicit live-call
 or alternate-provider path.
 
@@ -172,7 +172,7 @@ For example, a 4K image rule priced at 16 USD cents per image is:
 
 This rule belongs inside a catalog with `"schema_version": 2`. The normalized
 request must contain `"image_size": "4k"`; missing or unsupported values fail
-before provider invocation. See [Gemini image E2E](docs/gemini-image-e2e.md) for
+before provider invocation. See [Gemini image E2E](gemini-image-e2e.md) for
 a complete three-tier catalog and live invocation example.
 
 Authorization uses the ceiling of that exact estimate at the integer currency
@@ -213,7 +213,7 @@ re-exports that preserve the original public module paths.
 
 ## Development
 
-Use the configurable [Gongbu sandbox](docs/sandbox.md) for deterministic local
+Use the configurable [Gongbu sandbox](sandbox.md) for deterministic local
 runs, bounded live-provider checks, Hubu compatibility, and guarded dogfood.
 Hubu and provider modes are selected independently and validated before any
 execution boundary becomes ready.
