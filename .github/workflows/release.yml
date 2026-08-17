@@ -99,6 +99,9 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
 
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

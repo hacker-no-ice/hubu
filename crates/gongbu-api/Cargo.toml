@@ -1,10 +1,16 @@
 [package]
 name = "gongbu-api"
 version = "0.1.0"
+description = "Execution-plane API, provider orchestration, and recovery for Gongbu"
 edition.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords = ["ai-agents", "execution", "image-generation", "orchestration"]
+categories = ["web-programming::http-server"]
+publish = false
 
 [dependencies]
 serde.workspace = true

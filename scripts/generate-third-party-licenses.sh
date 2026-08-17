@@ -16,6 +16,9 @@ active_packages="$(
     --target "${target}" \
     -p hubu-cli \
     -p hubu-api \
+    -p hubu-mcp \
+    -p gongbu-api \
+    -p gongbu-mcp \
     --edges normal \
     --prefix none \
     --format '{p}' \
@@ -29,7 +32,7 @@ shopt -s nullglob
   printf '%s\n' 'Hubu Third-Party Dependency Licenses'
   printf '%s\n' '===================================='
   printf '\nTarget: %s\n' "${target}"
-  printf '%s\n' 'Graph: locked normal dependencies of the hubu and hubu-server binaries'
+  printf '%s\n' 'Graph: locked normal dependencies of the five production Hubu and Gongbu binaries'
 
   while IFS=$'\t' read -r package_name package_version declared_license source manifest_path; do
     package_key="${package_name} v${package_version}"
@@ -44,6 +47,22 @@ shopt -s nullglob
       "${package_dir}"/COPYRIGHT*
       "${package_dir}"/NOTICE*
     )
+    if [[ "${#license_files[@]}" -eq 0 ]]; then
+      case "${package_key}" in
+        "objc2-core-foundation v0.3.2"|"objc2-io-kit v0.3.2")
+          license_files=("${root_dir}/third-party-license-material/objc2-0.3.2-LICENSE.md")
+          ;;
+        "pbjson v0.9.0")
+          license_files=("${root_dir}/third-party-license-material/pbjson-0.9.0-LICENSE")
+          ;;
+        "prost-wkt v0.7.1"|"prost-wkt-types v0.7.1")
+          license_files=("${root_dir}/LICENSE-APACHE")
+          ;;
+        "tonic-prost v0.14.6")
+          license_files=("${root_dir}/third-party-license-material/tonic-0.14.6-LICENSE")
+          ;;
+      esac
+    fi
     if [[ "${#license_files[@]}" -eq 0 ]]; then
       echo "no license material found for ${package_key}" >&2
       exit 1

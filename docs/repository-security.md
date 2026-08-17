@@ -42,6 +42,22 @@ license exception only after verifying the upstream license text and recording
 why it is compatible with Hubu's MIT/Apache-2.0 distribution. Never use a broad
 source allow-list exception for an unreviewed Git dependency.
 
+The unified Hubu/Gongbu dependency graph has two exact-version license
+exceptions owned by the Hubu maintainers:
+
+- `option-ext@0.2.0` is available under MPL-2.0 and is used only transitively by
+  Temporal's configuration-directory support. MPL-2.0 is file-level copyleft
+  and does not alter the license of Hubu or Gongbu. Cargo-deny pins the
+  exception to this exact crate version, and the release bundle reproduces the
+  crate's license material. Remove the exception when Temporal no longer
+  selects `option-ext`, or re-review it before 2026-11-17.
+- `webpki-roots@1.0.9` is available under CDLA-Permissive-2.0 and supplies the
+  public Mozilla trust-root data used by Gongbu's Rustls HTTP clients. The
+  exception is exact-version only, Cargo-deny continues to reject unknown
+  sources, and the release bundle reproduces the distributed license material.
+  Remove the exception when the HTTP graph no longer selects this version, or
+  re-review it before 2026-11-17.
+
 ## Audited GitHub baseline
 
 Read-only audit on 2026-08-13 (America/Los_Angeles):
@@ -81,11 +97,12 @@ Record screenshots or API output in the release-readiness evidence.
    protection**, **Validity checks**, and **Non-provider patterns** wherever the
    repository plan exposes them. Resolve any pre-existing findings through the
    Security tab; never paste a detected secret into an issue or PR.
-5. Edit repository ruleset **main branch protection** and add required status
-   check `Security policy` from GitHub Actions (integration ID `15368`). Preserve
-   strict/up-to-date checks, the two existing required checks, deletion and
-   non-fast-forward prevention, the pull-request rule, no bypass actors, and
-   active enforcement.
+5. Edit repository ruleset **main branch protection**, replace the retired
+   `Check MSRV (Rust 1.78.0)` requirement with `Check MSRV (Rust 1.88.0)`, and
+   add required status check `Security policy` from GitHub Actions (integration
+   ID `15368`). Preserve strict/up-to-date checks, the existing `Test workspace`
+   requirement, deletion and non-fast-forward prevention, the pull-request
+   rule, no bypass actors, and active enforcement.
 6. Re-read the settings through the GitHub API and verify private vulnerability
    reporting, Dependabot security updates, secret scanning, and push protection
    all report enabled. Open a test PR to confirm all three required checks block

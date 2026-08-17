@@ -17,11 +17,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Test Gongbu Hubu v4 client recovery
+        run: cargo test --workspace --locked 'hubu::tests::'
 
       - name: Run tests
         run: cargo test --workspace --locked
@@ -35,6 +41,9 @@ jobs:
       - name: Check public Cargo metadata
         run: python3 scripts/check-cargo-metadata.py
 
+      - name: Check Hubu/Gongbu dependency boundary
+        run: python3 scripts/check-workspace-boundary.py
+
       - name: Run core integration flow
         run: ./scripts/integration-core-flow.sh
 
@@ -42,17 +51,20 @@ jobs:
         run: cargo doc --workspace --no-deps --locked
 
   msrv:
-    name: Check MSRV (Rust 1.78.0)
+    name: Check MSRV (Rust 1.88.0)
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
+
       - name: Install MSRV toolchain
-        run: rustup toolchain install 1.78.0 --profile minimal
+        run: rustup toolchain install 1.88.0 --profile minimal
 
       - name: Check workspace with MSRV
-        run: cargo +1.78.0 check --workspace --all-targets --all-features --locked
+        run: cargo +1.88.0 check --workspace --all-targets --all-features --locked
 
   security:
     name: Security policy
