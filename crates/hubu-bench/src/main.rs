@@ -314,7 +314,7 @@ fn submit_spend(
     let agent_index = index as usize % scenario.account_ids.len();
     let merchant = if config
         .fail_every
-        .map(|value| value > 0 && index > 0 && index % value == 0)
+        .map(|value| value > 0 && index > 0 && index.is_multiple_of(value))
         .unwrap_or(false)
     {
         "fail"

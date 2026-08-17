@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate public-facing metadata for every Hubu workspace package."""
+"""Validate public-facing metadata for every unified workspace package."""
 
 import json
 from pathlib import Path
@@ -11,6 +11,19 @@ REPOSITORY = "https://github.com/hacker-no-ice/hubu"
 HOMEPAGE = f"{REPOSITORY}#readme"
 DOCUMENTATION = f"{REPOSITORY}/tree/main/docs"
 PLACEHOLDER_MARKERS = ("your-org", "example.com/hubu", "private/hubu")
+EXPECTED_PACKAGES = {
+    "gongbu-api",
+    "gongbu-build-info",
+    "gongbu-mcp",
+    "hubu-api",
+    "hubu-bench",
+    "hubu-cli",
+    "hubu-common",
+    "hubu-core",
+    "hubu-mcp",
+    "hubu-wallet",
+}
+EXPECTED_RUST_VERSION = "1.88"
 
 
 def fail(message: str) -> None:
@@ -30,6 +43,13 @@ metadata = json.loads(result.stdout)
 
 if not metadata["packages"]:
     fail("workspace contains no packages")
+
+package_names = {package["name"] for package in metadata["packages"]}
+if package_names != EXPECTED_PACKAGES:
+    fail(
+        "workspace package set differs from the unified graph: "
+        f"expected {sorted(EXPECTED_PACKAGES)!r}, got {sorted(package_names)!r}"
+    )
 
 for package in metadata["packages"]:
     name = package["name"]
@@ -52,6 +72,11 @@ for package in metadata["packages"]:
         fail(f"{name} invents or overrides workspace authorship: {package['authors']!r}")
     if package["publish"] != []:
         fail(f"{name} must remain non-publishable, got {package['publish']!r}")
+    if package["rust_version"] != EXPECTED_RUST_VERSION:
+        fail(
+            f"{name} rust-version is {package['rust_version']!r}; "
+            f"expected {EXPECTED_RUST_VERSION!r}"
+        )
 
 for manifest in workspace_root.glob("**/Cargo.toml"):
     if "target" in manifest.parts:

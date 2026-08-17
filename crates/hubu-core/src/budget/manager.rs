@@ -647,10 +647,10 @@ fn log_budget_reservation_rejected(request: &ReserveBudgetRequest, reason: &str)
 fn periods_overlap(left: &TimePeriod, right: &TimePeriod) -> bool {
     let left_starts_before_right_ends = right
         .ending_before
-        .map_or(true, |right_end| left.starting_at < right_end);
+        .is_none_or(|right_end| left.starting_at < right_end);
     let right_starts_before_left_ends = left
         .ending_before
-        .map_or(true, |left_end| right.starting_at < left_end);
+        .is_none_or(|left_end| right.starting_at < left_end);
 
     left_starts_before_right_ends && right_starts_before_left_ends
 }

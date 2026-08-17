@@ -8,13 +8,60 @@ ignore = []
 [licenses]
 confidence-threshold = 0.8
 allow = [
+    "0BSD",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
     "MIT",
     "Unicode-3.0",
+    "Zlib",
 ]
-exceptions = []
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "option-ext@0.2.0" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@1.0.9" },
+]
+
+[[licenses.clarify]]
+crate = "temporalio-client@0.6.0"
+expression = "MIT"
+license-files = [{ path = "LICENSE.txt", hash = 0x16208a82 }]
+
+[[licenses.clarify]]
+crate = "temporalio-common@0.6.0"
+expression = "MIT"
+license-files = [{ path = "LICENSE.txt", hash = 0x16208a82 }]
+
+[[licenses.clarify]]
+crate = "temporalio-common-wasm@0.6.0"
+expression = "MIT"
+license-files = [{ path = "LICENSE.txt", hash = 0x16208a82 }]
+
+[[licenses.clarify]]
+crate = "temporalio-macros@0.6.0"
+expression = "MIT"
+license-files = [{ path = "LICENSE.txt", hash = 0x16208a82 }]
+
+[[licenses.clarify]]
+crate = "temporalio-protos@0.6.0"
+expression = "MIT"
+license-files = [{ path = "LICENSE.txt", hash = 0x16208a82 }]
+
+[[licenses.clarify]]
+crate = "temporalio-sdk@0.6.0"
+expression = "MIT"
+license-files = [{ path = "LICENSE.txt", hash = 0x16208a82 }]
+
+[[licenses.clarify]]
+crate = "temporalio-sdk-core@0.6.0"
+expression = "MIT"
+license-files = [{ path = "LICENSE.txt", hash = 0x16208a82 }]
+
+[[licenses.clarify]]
+crate = "temporalio-workflow@0.6.0"
+expression = "MIT"
+license-files = [{ path = "LICENSE.txt", hash = 0x16208a82 }]
 
 [bans]
 multiple-versions = "warn"

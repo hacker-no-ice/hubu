@@ -34,7 +34,7 @@ impl TimePeriod {
     }
 
     pub fn contains(&self, at: DateTime<Utc>) -> bool {
-        at >= self.starting_at && self.ending_before.map_or(true, |end| at < end)
+        at >= self.starting_at && self.ending_before.is_none_or(|end| at < end)
     }
 
     pub fn is_open_ended(&self) -> bool {
