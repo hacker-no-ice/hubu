@@ -141,12 +141,29 @@ through Hubu's policy and budget controls.
 To smoke-test the agent-initiated spend path from the CLI:
 
 ```sh
-hubu spend authorize --operation-key PLATFORM_OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --reason "Reserve model API credits"
-hubu spend --operation-key PLATFORM_OPERATION_KEY --account-id ACCOUNT_ID --amount 20 --reason "Purchase API credits"
+hubu spend authorize \
+  --operation-key PLATFORM_AUTH_OPERATION_KEY \
+  --account-id ACCOUNT_ID \
+  --amount 5 \
+  --merchant example-model-provider \
+  --reason "Reserve model API credits"
+
+hubu spend \
+  --operation-key PLATFORM_SPEND_OPERATION_KEY \
+  --account-id ACCOUNT_ID \
+  --amount 20 \
+  --merchant example-model-provider \
+  --reason "Purchase API credits"
+
 hubu user spending-target show
 hubu budget list
 hubu ledger list
 ```
+
+CLI `--amount` values are decimal USD amounts in major units, so `5` means
+`$5.00`. Supply `--merchant` explicitly because it is part of the scope
+evaluated by policy. Use a distinct operation key for each materially different
+request; reuse a key only when retrying the exact same scope.
 
 The agent platform supplies a stable, namespaced operation key. Hubu stores the
 authoritative workflow state under `(agent_id, operation_key)`, so replaying

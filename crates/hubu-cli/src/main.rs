@@ -1591,7 +1591,7 @@ fn print_executor_claim(claim: &Value) -> Result<()> {
     println!("  operation_key: {}", string_at(claim, "operation_key")?);
     println!(
         "  claim_expires_at: {}",
-        string_at(claim, "claim_expires_at")?
+        local_timestamp(string_at(claim, "claim_expires_at")?)
     );
     for field in [
         "settlement_id",
@@ -1656,7 +1656,10 @@ fn print_spend_response(response: &Value) -> Result<()> {
         .get("authorization_expires_at")
         .and_then(Value::as_str)
     {
-        println!("  authorization_expires_at: {expires_at}");
+        println!(
+            "  authorization_expires_at: {}",
+            local_timestamp(expires_at)
+        );
     }
     if let Some(reasons) = response.get("reasons").and_then(Value::as_array) {
         for reason in reasons {
@@ -2504,6 +2507,22 @@ Example:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_timestamp_converts_rfc3339_to_the_system_timezone() {
+        let timestamp = "2026-08-14T21:55:43.393178+00:00";
+        let expected = DateTime::parse_from_rfc3339(timestamp)
+            .unwrap()
+            .with_timezone(&Local)
+            .to_rfc3339();
+
+        assert_eq!(local_timestamp(timestamp), expected);
+    }
+
+    #[test]
+    fn local_timestamp_preserves_an_unparseable_value() {
+        assert_eq!(local_timestamp("unknown"), "unknown");
+    }
 
     #[test]
     fn codex_mcp_block_escapes_toml_strings() {

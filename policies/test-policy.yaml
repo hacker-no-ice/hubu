@@ -1,5 +1,5 @@
 id: test_policy
-version: v1
+version: v2
 default_effect: needs_approval
 rules:
   - id: deny_spend_over_one_dollar
@@ -20,3 +20,5 @@ rules:
       values:
         - string: openai
         - string: google
+        - string: gongbu.image
+        - string: gongbu.execution
