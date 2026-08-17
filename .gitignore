@@ -6,3 +6,6 @@
 hubu.auth-token
 hubu.reconciliation-token
 /.hubu/
+/.config/
+/.rustc_info.json
+/debug/

@@ -1,0 +1,18 @@
+{
+  "profile": "development",
+  "seed": 48,
+  "hubu": {
+    "mode": "mock",
+    "currency": "USD",
+    "maximum_authorization_minor": 500,
+    "authorization_expires_at": "2099-01-01T00:00:00Z",
+    "claim_fault": "none",
+    "settle_fault": "none",
+    "release_fault": "none"
+  },
+  "provider": {
+    "mode": "mock",
+    "scenario": "success",
+    "execution_fault": "none"
+  }
+}

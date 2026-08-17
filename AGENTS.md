@@ -48,3 +48,23 @@ friction and the agent flow structured:
   reject mismatches before creating or reusing registration records.
 
 See `docs/agent-registration-protocol.md` for the full protocol draft.
+
+## GitHub operations
+
+For GitHub remote operations such as creating or updating pull requests,
+reading PR metadata, requesting reviews, or adding PR comments:
+
+- Prefer the GitHub connector / GitHub app tools.
+- Do not use `gh` CLI for GitHub API operations when the connector is
+  available.
+- Local `git` commands are fine for status, diff, commit, branch, fetch, and
+  push.
+
+## Pull request review comments
+
+Prefix every agent-authored review reply or PR comment with `🤖 **Codex:**`.
+Use `🤖 **Codex recommendation:**` when presenting a scope recommendation or
+requesting human judgment. Resolve a review thread only after its change is
+verified, committed, pushed, and described in a reply that includes the fix
+commit and verification. Leave ambiguous, conflicting, optional, or
+out-of-scope requests unresolved with concise technical reasoning.

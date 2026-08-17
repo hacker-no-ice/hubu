@@ -1,0 +1,468 @@
+use crate::{
+    execution::Execution,
+    workflow::{ActivityError, HubuActivities},
+};
+use serde::{Deserialize, Serialize};
+
+mod transport;
+
+use self::transport as simple_http;
+pub use self::transport::HttpClientError;
+
+#[derive(Clone)]
+pub struct HubuClient {
+    base_url: String,
+    bearer_token: Option<BearerToken>,
+}
+
+#[derive(Clone)]
+struct BearerToken(Vec<u8>);
+
+impl Drop for BearerToken {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+impl std::fmt::Debug for HubuClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HubuClient")
+            .field("base_url", &self.base_url)
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl HubuClient {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: trim_trailing_slash(base_url.into()),
+            bearer_token: None,
+        }
+    }
+
+    pub fn with_bearer_token(mut self, token: impl Into<Vec<u8>>) -> Self {
+        self.bearer_token = Some(BearerToken(token.into()));
+        self
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn health(&self) -> Result<serde_json::Value, HttpClientError> {
+        self.get_json("/health")
+    }
+
+    pub fn version(&self) -> Result<HubuVersion, HttpClientError> {
+        self.get_json("/version")
+    }
+
+    pub fn validate(
+        &self,
+        request: &ExecutorSpendRequest,
+    ) -> Result<ExecutorSpendResponse, HttpClientError> {
+        self.post_json("/spend/executor/validate", request)
+    }
+
+    pub fn claim(
+        &self,
+        request: &ExecutorSpendClaimRequest,
+    ) -> Result<ExecutorSpendClaimResponse, HttpClientError> {
+        self.post_json("/spend/executor/claim", request)
+    }
+
+    pub fn inspect_claim(
+        &self,
+        claim_id: &str,
+    ) -> Result<ExecutorSpendClaimResponse, HttpClientError> {
+        let url = format!(
+            "{}/spend/executor/claim?claim_id={}",
+            self.base_url,
+            percent_encode_query(claim_id)
+        );
+        match self.bearer_token.as_ref().map(|token| token.0.as_slice()) {
+            Some(token) => simple_http::get_json_authenticated(&url, Some(token)),
+            None => simple_http::get_json(&url),
+        }
+    }
+
+    pub fn settle(
+        &self,
+        request: &ExecutorSpendFinalizationRequest,
+    ) -> Result<ExecutorSpendSettlementResponse, HttpClientError> {
+        self.post_json("/spend/executor/settle", request)
+    }
+
+    pub fn release(
+        &self,
+        request: &ExecutorSpendFinalizationRequest,
+    ) -> Result<ExecutorSpendClaimResponse, HttpClientError> {
+        self.post_json("/spend/executor/release", request)
+    }
+
+    fn post_json<T, R>(&self, path: &str, body: &T) -> Result<R, HttpClientError>
+    where
+        T: Serialize,
+        R: for<'de> Deserialize<'de>,
+    {
+        let url = format!("{}{}", self.base_url, path);
+        match self.bearer_token.as_ref().map(|token| token.0.as_slice()) {
+            Some(token) => simple_http::post_json_authenticated(&url, body, Some(token)),
+            None => simple_http::post_json(&url, body),
+        }
+    }
+
+    fn get_json<R>(&self, path: &str) -> Result<R, HttpClientError>
+    where
+        R: for<'de> Deserialize<'de>,
+    {
+        let url = format!("{}{}", self.base_url, path);
+        match self.bearer_token.as_ref().map(|token| token.0.as_slice()) {
+            Some(token) => simple_http::get_json_authenticated(&url, Some(token)),
+            None => simple_http::get_json(&url),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HubuVersion {
+    pub product_version: String,
+    pub executor_contract: String,
+    #[serde(default)]
+    pub source_commit: Option<String>,
+}
+
+/// Production Hubu activity bridge. It only connects to the operator-provided
+/// Hubu endpoint; it contains no installation, provisioning, or lifecycle code.
+pub struct ProductionHubuActivities {
+    client: HubuClient,
+    agent_id: String,
+}
+
+impl ProductionHubuActivities {
+    pub fn new(client: HubuClient, agent_id: impl Into<String>) -> Result<Self, &'static str> {
+        let agent_id = agent_id.into();
+        if agent_id.trim().is_empty() || agent_id.len() > 255 {
+            return Err("invalid Hubu agent identity");
+        }
+        Ok(Self { client, agent_id })
+    }
+
+    pub(crate) fn spend(&self, execution: &Execution) -> ExecutorSpendRequest {
+        ExecutorSpendRequest {
+            spend_auth_token_id: execution.hubu_token_reference.as_str().into(),
+            agent_id: None,
+            account_id: Some(execution.account_id.clone()),
+            amount_cents: execution.authorized_minor,
+            merchant: Some("gongbu.execution".into()),
+            task_id: Some(execution.operation_key.clone()),
+        }
+    }
+}
+
+impl HubuActivities for ProductionHubuActivities {
+    fn preflight(&self, execution: &Execution) -> Result<(), ActivityError> {
+        self.client
+            .validate(&self.spend(execution))
+            .map(|_| ())
+            .map_err(map_activity_error)
+    }
+
+    fn claim(&self, execution: &Execution) -> Result<String, ActivityError> {
+        self.client
+            .claim(&ExecutorSpendClaimRequest {
+                operation_key: execution.operation_key.clone(),
+                spend: self.spend(execution),
+            })
+            .map(|claim| claim.claim_id)
+            .map_err(map_activity_error)
+    }
+
+    fn validate_claim(&self, execution: &Execution) -> Result<(), ActivityError> {
+        let claim_id = execution
+            .hubu_claim_id
+            .as_deref()
+            .ok_or_else(|| ActivityError::Proven("hubu_claim_missing".into()))?;
+        let claim = self
+            .client
+            .inspect_claim(claim_id)
+            .map_err(map_activity_error)?;
+        if matches!(claim.status.as_str(), "claimed" | "active")
+            && claim.operation_key == execution.operation_key
+            && claim.spend.account_id == execution.account_id
+        {
+            Ok(())
+        } else {
+            Err(ActivityError::Proven("hubu_claim_not_active".into()))
+        }
+    }
+
+    fn settle(
+        &self,
+        execution: &Execution,
+        receipt_id: &str,
+        amount_minor: i64,
+    ) -> Result<String, ActivityError> {
+        let snapshot: crate::provider_contract::PricingSnapshot =
+            serde_json::from_value(execution.pricing_snapshot.clone())
+                .map_err(|_| ActivityError::Proven("pricing_snapshot_invalid".into()))?;
+        self.client
+            .settle(&ExecutorSpendFinalizationRequest {
+                agent_id: self.agent_id.clone(),
+                operation_key: execution.operation_key.clone(),
+                receipt: Some(ProviderReceipt {
+                    actual_vendor_cost_cents: amount_minor,
+                    provider_request_id: receipt_id.into(),
+                    price_model_snapshot: PriceModelSnapshot {
+                        provider: execution.provider.clone(),
+                        model: execution.model.clone(),
+                        unit_price_cents: snapshot.estimated_amount_minor,
+                        pricing_unit: "execution".into(),
+                        currency: execution.authorization_currency.to_ascii_lowercase(),
+                    },
+                    artifact_reference: format!("gongbu://execution/{}", execution.execution_id),
+                }),
+            })
+            .map(|settlement| settlement.settlement_id)
+            .map_err(map_activity_error)
+    }
+
+    fn release(&self, execution: &Execution) -> Result<(), ActivityError> {
+        self.client
+            .release(&ExecutorSpendFinalizationRequest {
+                agent_id: self.agent_id.clone(),
+                operation_key: execution.operation_key.clone(),
+                receipt: None,
+            })
+            .map(|_| ())
+            .map_err(map_activity_error)
+    }
+}
+
+fn map_activity_error(error: HttpClientError) -> ActivityError {
+    match error {
+        HttpClientError::Status { status, .. } if (400..500).contains(&status) => {
+            ActivityError::Proven("hubu_request_rejected".into())
+        }
+        _ => ActivityError::Ambiguous("hubu_transport_ambiguous".into()),
+    }
+}
+
+fn percent_encode_query(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+fn trim_trailing_slash(mut value: String) -> String {
+    while value.ends_with('/') {
+        value.pop();
+    }
+    value
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutorSpendRequest {
+    pub spend_auth_token_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub amount_cents: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merchant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutorSpendClaimRequest {
+    pub operation_key: String,
+    #[serde(flatten)]
+    pub spend: ExecutorSpendRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutorSpendResponse {
+    pub operation_key: String,
+    pub spend_auth_token_id: String,
+    pub decision_id: String,
+    pub account_id: String,
+    pub agent_id: String,
+    pub amount_cents: i64,
+    pub currency: String,
+    pub merchant: Option<String>,
+    pub task_id: Option<String>,
+    pub expires_at: String,
+    pub budget_hold: BudgetHold,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutorSpendClaimResponse {
+    pub operation_key: String,
+    pub claim_id: String,
+    pub workload_profile: String,
+    pub status: String,
+    pub claimed_at: String,
+    pub claim_expires_at: String,
+    pub finalized_at: Option<String>,
+    pub settlement_id: Option<String>,
+    pub reconciliation_required: bool,
+    pub spend: ExecutorSpendResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutorSpendFinalizationRequest {
+    pub agent_id: String,
+    pub operation_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ProviderReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderReceipt {
+    pub actual_vendor_cost_cents: i64,
+    pub provider_request_id: String,
+    pub price_model_snapshot: PriceModelSnapshot,
+    pub artifact_reference: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PriceModelSnapshot {
+    pub provider: String,
+    pub model: String,
+    pub unit_price_cents: i64,
+    pub pricing_unit: String,
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutorSpendSettlementResponse {
+    pub operation_key: String,
+    pub settlement_id: String,
+    pub claim_id: String,
+    pub status: String,
+    pub receipt: serde_json::Value,
+    pub spend: ExecutorSpendResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BudgetHold {
+    pub hold_id: String,
+    pub budget_id: String,
+    pub status: String,
+    pub amount_cents: i64,
+    pub consumed_amount_cents: i64,
+    pub frozen_amount_cents: i64,
+    pub remaining_amount_cents: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{Arc, Mutex},
+        thread,
+    };
+
+    use super::*;
+
+    #[test]
+    fn ambiguous_claim_is_returned_without_retry() {
+        let (client, paths) = fake_hubu(vec![None]);
+        client
+            .claim(&claim_request())
+            .expect_err("ambiguous claim must reach the durable workflow");
+        assert_eq!(
+            paths.lock().expect("paths").clone(),
+            vec!["/spend/executor/claim"]
+        );
+    }
+
+    #[test]
+    fn ambiguous_settlement_is_returned_without_inspection_or_retry() {
+        let (client, paths) = fake_hubu(vec![None]);
+        client
+            .settle(&ExecutorSpendFinalizationRequest {
+                agent_id: "agt_example".to_string(),
+                operation_key: "platform:op-1".to_string(),
+                receipt: Some(ProviderReceipt {
+                    actual_vendor_cost_cents: 500,
+                    provider_request_id: "provider-1".to_string(),
+                    price_model_snapshot: PriceModelSnapshot {
+                        provider: "example".to_string(),
+                        model: "image-v1".to_string(),
+                        unit_price_cents: 500,
+                        pricing_unit: "image".to_string(),
+                        currency: "usd".to_string(),
+                    },
+                    artifact_reference: "artifact://image-1".to_string(),
+                }),
+            })
+            .expect_err("ambiguous settlement must reach the durable workflow");
+        assert_eq!(
+            paths.lock().expect("paths").clone(),
+            vec!["/spend/executor/settle"]
+        );
+    }
+
+    fn claim_request() -> ExecutorSpendClaimRequest {
+        ExecutorSpendClaimRequest {
+            operation_key: "platform:op-1".to_string(),
+            spend: ExecutorSpendRequest {
+                spend_auth_token_id: "token-1".to_string(),
+                agent_id: Some("agt_example".to_string()),
+                account_id: None,
+                amount_cents: 500,
+                merchant: Some("gongbu.image".to_string()),
+                task_id: Some("task-1".to_string()),
+            },
+        }
+    }
+
+    fn fake_hubu(
+        responses: Vec<Option<serde_json::Value>>,
+    ) -> (HubuClient, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Hubu");
+        let addr = listener.local_addr().expect("fake Hubu address");
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let thread_paths = Arc::clone(&paths);
+        thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut raw = String::new();
+                stream.read_to_string(&mut raw).expect("read request");
+                let path = raw
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .expect("request path")
+                    .to_string();
+                thread_paths.lock().expect("paths").push(path);
+                if let Some(body) = response {
+                    let body = body.to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .expect("write response");
+                }
+            }
+        });
+        (HubuClient::new(format!("http://{addr}")), paths)
+    }
+}

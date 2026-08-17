@@ -11,6 +11,8 @@ protocol, architecture, and operator documentation.
   from the earlier image-proxy exploration
 - [gongbu-history-audit.md](gongbu-history-audit.md): HUB-79 full-history
   security, metadata, size, and provenance audit for the proposed public import
+- [gongbu-history-import.md](gongbu-history-import.md): HUB-80 import topology,
+  relocation map, root-collision allowlist, and deferred reconciliation work
 - [future-wallet-and-credit-use-cases.md](future-wallet-and-credit-use-cases.md):
   future wallet and credit-pool modeling ideas
 - [multi-currency-account-budgets.md](multi-currency-account-budgets.md):
