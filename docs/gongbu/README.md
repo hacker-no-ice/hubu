@@ -1,5 +1,9 @@
 # Gongbu
 
+Gongbu is developed, tested, and distributed from the Hubu repository's unified
+Rust workspace. All commands in these runbooks start at the Hubu repository
+root; no separate Gongbu checkout, `Cargo.lock`, or toolchain is required.
+
 For the production-shaped persistent local runtime, use
 `gongbu-server serve --config /absolute/path/gongbu.json`. It connects to an
 independently managed Hubu service, owns its Temporal worker, supports managed
@@ -218,10 +222,17 @@ runs, bounded live-provider checks, Hubu compatibility, and guarded dogfood.
 Hubu and provider modes are selected independently and validated before any
 execution boundary becomes ready.
 
-The official Temporal Rust SDK compiles its protobuf definitions during the
+The workspace MSRV is Rust 1.88 and is checked in CI with the root lockfile. The
+official Temporal Rust SDK compiles its protobuf definitions during the
 build, so install `protoc` first (`brew install protobuf` on macOS or
 `apt-get install protobuf-compiler` on Debian/Ubuntu).
 
 ```sh
-cargo test --workspace
+cargo test -p gongbu-api -p gongbu-build-info -p gongbu-mcp --locked
+cargo build --release --locked --bin gongbu-server --bin gongbu-mcp
 ```
+
+Use `cargo test --workspace --locked` before repository-wide changes. The
+production `gongbu-server` and `gongbu-mcp` binaries ship in the same Hubu
+release archive as the Hubu production binaries, while remaining separate
+runtime processes. `gongbu-sandbox` is a development-only binary.

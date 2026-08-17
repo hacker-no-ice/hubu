@@ -1,8 +1,10 @@
 # Hubu Release Runbook
 
-Hubu publishes immutable GitHub Releases from `.github/workflows/release.yml`.
-Gongbu and other compatibility consumers must pin an exact release tag and the
-matching SHA-256 checksum. A moving checkout of `main` is not a supported
+Hubu publishes one immutable product distribution from
+`.github/workflows/release.yml`. Hubu and Gongbu are built from the same source
+commit and locked workspace, then shipped under one tag, product version,
+checksum set, and provenance identity. Consumers must pin an exact release tag
+and matching SHA-256 checksum; a moving checkout of `main` is not a supported
 routine integration-test dependency.
 
 All current releases are experimental, local-first builds for the localhost
@@ -13,10 +15,10 @@ not mean production security, capacity, or payment-rail readiness.
 
 ## Versions and channels
 
-Hubu has two independently visible versions:
+The distribution has two independently visible versions:
 
-- `product_version` identifies the Hubu binaries. Stable releases use SemVer
-  tags such as `v0.1.0`; `main` builds use
+- `product_version` identifies all Hubu and Gongbu production binaries. Stable
+  releases use SemVer tags such as `v0.1.0`; `main` builds use
   `<cargo-version>-main.<12-character-commit>`.
 - `executor_contract` identifies the negotiated external execution protocol.
   It remains `hubu-spend-executor-v4` and does not change merely because the
@@ -44,8 +46,19 @@ money movement.
 
 ## Supported binary targets
 
-Each release contains the `hubu` CLI and `hubu-server` in a target-specific
-archive:
+Each target-specific archive contains five production binaries:
+
+| Binary | Runtime responsibility |
+| --- | --- |
+| `hubu` | Human/developer control-plane CLI |
+| `hubu-server` | Hubu control-plane HTTP process and governance storage |
+| `hubu-mcp-server` | Hubu's agent-facing MCP adapter |
+| `gongbu-server` | Gongbu execution-plane process, storage, workflow, credentials, providers, and artifacts |
+| `gongbu-mcp` | Gongbu's separate agent-facing MCP adapter |
+
+`hubu-bench` and `gongbu-sandbox` are development tools and are not release
+artifacts. Bundling the production binaries does not merge their processes,
+databases, credentials, provider boundary, failure domain, or MCP surfaces.
 
 | Platform | Target | Asset suffix |
 | --- | --- | --- |
@@ -83,8 +96,15 @@ provenance before installing:
 ```sh
 package=${asset%.tar.gz}
 cat "$package/PROVENANCE.json"
-"$package/hubu-server" --version
-install "$package/hubu" "$package/hubu-server" /usr/local/bin/
+for binary in hubu hubu-server hubu-mcp-server gongbu-server; do
+  "$package/$binary" --version
+done
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  | GONGBU_MCP_ENDPOINT=http://127.0.0.1:8788 \
+    GONGBU_MCP_BEARER_TOKEN=metadata-check \
+    "$package/gongbu-mcp"
+install "$package/hubu" "$package/hubu-server" "$package/hubu-mcp-server" \
+  "$package/gongbu-server" "$package/gongbu-mcp" /usr/local/bin/
 ```
 
 The reported `source_commit` must equal the pinned revision and the reported
@@ -107,8 +127,9 @@ The source must be an ancestor of `main`. Promotion reruns formatting, Clippy,
 the locked workspace tests, the core integration flow, and a locked release
 build before creating platform artifacts. After publication, clean GitHub
 runners download the release, verify `SHA256SUMS`, require the project license
-and third-party notice files, start an isolated `hubu-server`, and check
-`/health`, `/version`, and local `--version` metadata.
+and third-party notice files, verify every binary's local `--version` metadata,
+start isolated Hubu and Gongbu processes without provider spend, and check their
+health/readiness/version surfaces.
 HTTP probes use bounded connection and total-request timeouts so an unavailable
 or non-responsive server fails the smoke job promptly.
 

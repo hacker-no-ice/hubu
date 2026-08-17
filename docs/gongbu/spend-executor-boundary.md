@@ -1,9 +1,10 @@
 # Spend executor boundary
 
-The canonical Hubu protocol remains the
-[Hubu spend executor contract](https://github.com/hacker-no-ice/hubu/blob/main/docs/spend-executor-contract.md).
-Gongbu retains a low-level v4 client, but no current service or orchestration
-path invokes it.
+The canonical Hubu protocol is the in-repository
+[Hubu spend executor contract](../spend-executor-contract.md). Gongbu's
+production Hubu activities implement that v4 HTTP contract for claim,
+inspection, settlement, and release. Sharing a repository and product version
+does not turn this wire boundary into an in-process or shared-database call.
 
 Hubu owns authorization, budget reservation, claims, settlement, release, and
 their audit state. Gongbu owns operator-controlled provider configuration,
@@ -18,7 +19,8 @@ outcome requires reconciliation; it must not trigger a blind retry or release.
 Provider secrets belong to Gongbu's runtime identity. They must not be accepted
 from callers, persisted in repository records, included in fixtures, exposed in
 API responses, or emitted in logs and errors. The production secret-loading
-mechanism will be introduced with the authoritative provider/security work.
+mechanism is the operator-owned Keychain configuration described in
+[Local Keychain secrets](local-keychain-secrets.md).
 
 Artifact bytes are written only through Gongbu's normalized artifact service.
 Providers do not choose final storage keys or write the configured artifact root

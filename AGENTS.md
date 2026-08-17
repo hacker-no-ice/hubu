@@ -14,6 +14,28 @@ Constraints:
 - Summarize the diff, tests run, and any caveats.
 - If a Codex review is requested, address review comments in a follow-up commit.
 
+## Unified workspace discipline
+
+Hubu and Gongbu live in this repository's single Rust workspace. Run Cargo
+commands from the repository root and use package selectors such as
+`-p gongbu-api` for component-focused work. Do not require or document a
+separate Gongbu checkout, lockfile, toolchain, CI workflow, or release version.
+
+The workspace MSRV is Rust 1.88. Keep root `Cargo.toml`, `Cargo.lock`, CI, and
+runbooks consistent when changing dependencies or toolchain requirements.
+Install `protoc` before building Gongbu/Temporal code.
+
+Shared source and packaging do not authorize cross-boundary coupling. Preserve
+separate Hubu and Gongbu processes, databases, credentials, provider execution,
+artifacts, and failure domains. Do not add direct Cargo dependencies across the
+Hubu/Gongbu boundary; communicate through the versioned executor contract.
+Keep `hubu-mcp-server` and `gongbu-mcp` as separate agent-facing surfaces unless
+an explicit protocol redesign says otherwise.
+
+After changing Markdown or the architecture visualizer, run
+`python3 scripts/check-doc-links.py` and search the repository for stale
+operational references to the retired Gongbu repository.
+
 ## Architecture visualization
 
 Hubu includes an interactive sketch-style architecture visualizer at

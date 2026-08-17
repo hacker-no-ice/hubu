@@ -290,7 +290,8 @@ guard. No extra client-supplied `intent_id` is required.
 
 **Consolidates:** DG-001, DG-009
 **Area:** Quick Start, packaging, and execution architecture
-**Status:** Architecture shift proposed
+**Status:** Historical pre-migration analysis; repository and distribution
+consolidation is now implemented, while runtime and MCP boundaries remain.
 
 ### Observed gaps
 
@@ -301,8 +302,9 @@ their resulting binaries and responsibilities:
 - `hubu-api` -> local HTTP `hubu-server`
 - `hubu-mcp` -> agent-facing `hubu-mcp-server`
 
-Hubu and Gongbu also live in separate repositories, produce separate servers,
-and expose separate agent-facing interactions. The service split preserves a
+At the time of this analysis, Hubu and Gongbu lived in separate repositories.
+They still produce separate servers and expose separate agent-facing
+interactions. The service split preserves a
 clean governance-versus-execution boundary, but users must install, configure,
 start, and troubleshoot multiple products. Agents must coordinate Hubu
 authorization with Gongbu invocation and carry security-sensitive workflow
@@ -375,7 +377,8 @@ supervise both processes while exposing only Hubu to the agent.
 
 Bundling must not collapse the domain boundary. Preserve:
 
-- separate repositories, release artifacts, processes, and failure domains
+- one source repository and product release, with separate processes and failure
+  domains
 - separate databases, configuration, data directories, and logs
 - exclusive Gongbu ownership of provider credentials and provider execution
 - no direct cross-service database or credential-file access
