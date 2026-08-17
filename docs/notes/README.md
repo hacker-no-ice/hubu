@@ -9,6 +9,8 @@ protocol, architecture, and operator documentation.
   improvement opportunities
 - [gongbu-carry-forward.md](gongbu-carry-forward.md): Gongbu handoff inventory
   from the earlier image-proxy exploration
+- [gongbu-history-audit.md](gongbu-history-audit.md): HUB-79 full-history
+  security, metadata, size, and provenance audit for the proposed public import
 - [future-wallet-and-credit-use-cases.md](future-wallet-and-credit-use-cases.md):
   future wallet and credit-pool modeling ideas
 - [multi-currency-account-budgets.md](multi-currency-account-budgets.md):
