@@ -13,6 +13,8 @@ protocol, architecture, and operator documentation.
   security, metadata, size, and provenance audit for the proposed public import
 - [gongbu-history-import.md](gongbu-history-import.md): HUB-80 import topology,
   relocation map, root-collision allowlist, and deferred reconciliation work
+- [ci-consolidation.md](ci-consolidation.md): HUB-82 check-by-check mapping from
+  the former Hubu and Gongbu workflows into the unified Rust 1.88 CI surface
 - [future-wallet-and-credit-use-cases.md](future-wallet-and-credit-use-cases.md):
   future wallet and credit-pool modeling ideas
 - [multi-currency-account-budgets.md](multi-currency-account-budgets.md):
