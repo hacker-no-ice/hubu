@@ -49,14 +49,14 @@ const components = {
     kind: "Top level",
     viewBox: "0 0 1200 760",
     copy:
-      "Hubu and Gongbu share one source repository and product distribution. Their binaries remain separate at runtime: Hubu governs spend in the control plane, while Gongbu executes provider work across an authenticated contract.",
+      "Hubu and Gongbu share one source repository and locked workspace. Their binaries remain separate at runtime: Hubu governs spend in the control plane, while Gongbu executes provider work across an authenticated contract. HUB-84 tracks packaging all production binaries in one release archive.",
     responsibilities: [
       "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, review protected actions, and reconcile uncertain expired claims.",
       "Agents discover Hubu through configured MCP tools, while humans use the CLI for setup and administration.",
       "For local dogfooding, a repository Codex skill allocates a model-managed operation key once, binds it to immutable spend scope, and persists recovery state outside the Hubu server.",
       "The CLI and MCP adapter are part of broader Hubu, but they are not the Hubu server.",
       "Local HTTP callers reach the API with the Hubu bearer token before protected routes resolve user authority.",
-      "The unified release carries Hubu and Gongbu production binaries from one source commit, version, checksum set, and locked dependency graph.",
+      "Current release archives contain hubu and hubu-server; HUB-84 owns the five-binary unified archive target.",
       "Gongbu exclusively claims, then settles actual vendor cost with receipt metadata or releases active authorized spend without Hubu performing provider work; expired uncertainty returns to a human decision.",
       "The API handles local HTTP concerns and delegates spend approval, payment, and executor claim lifecycle orchestration to core app services.",
       "Gongbu owns its process, database, Temporal workflow state, vendor credentials, provider adapters, model calls, artifacts, retries, and failure domain; Hubu stores only governance state and compact provider/artifact references.",
@@ -65,7 +65,7 @@ const components = {
     ],
     links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor],
     zones: [
-      { label: "One source repository + product distribution", x: 292, y: 24, w: 820, h: 716 },
+      { label: "One source repository + locked workspace", x: 292, y: 24, w: 820, h: 716 },
       { label: "Hubu control-plane process", x: 570, y: 36, w: 542, h: 692, labelX: 636, labelY: 86 },
       { label: "Gongbu execution-plane process", x: 304, y: 616, w: 248, h: 112, labelY: 642 },
     ],
@@ -92,7 +92,6 @@ const components = {
       ["cli", "api", "token", { labelDx: -12, labelDy: -26, labelT: 0.42 }],
       ["mcp", "api", "token", { labelDx: -14, labelDy: 34, labelT: 0.42 }],
       ["agent", "gongbu", "work + token"],
-      ["release", "gongbu", "same release", { labelDx: -48, labelDy: -4, labelT: 0.56 }],
       ["gongbu", "api", "claim/receipt"],
       ["api", "registration", "register"],
       ["api", "app", "dispatch"],
@@ -107,11 +106,12 @@ const components = {
     title: "Immutable Releases",
     kind: "Component",
     copy:
-      "The release workflow turns one exact main commit and locked workspace into target-specific Hubu product archives containing both Hubu and Gongbu production binaries.",
+      "The current release workflow turns one exact main commit into target-specific archives containing hubu and hubu-server. HUB-84 tracks packaging all five production binaries from the unified workspace.",
     responsibilities: [
       "Creates a commit-addressed prerelease for each eligible main build and accepts explicit stable SemVer promotion for an exact main revision.",
       "Runs formatting, Clippy, workspace tests, the core integration flow, and locked release builds before publication.",
-      "Builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, hubu-mcp-server, gongbu-server, gongbu-mcp, licenses, notices, the lockfile, and per-target provenance.",
+      "Currently builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, licenses, notices, the lockfile, and per-target provenance.",
+      "HUB-84 will add hubu-mcp-server, gongbu-server, and gongbu-mcp while preserving separate runtime boundaries.",
       "Publishes SHA-256 checksums without overwriting existing tags or assets, then smoke-tests downloads, required legal files, startup, readiness, and version reporting.",
       "Keeps the Hubu product version separate from the hubu-spend-executor-v4 contract identifier so consumers can negotiate compatibility explicitly.",
     ],
@@ -351,7 +351,7 @@ const components = {
     kind: "Runtime component",
     viewBox: "0 0 1280 760",
     copy:
-      "Gongbu is in the Hubu source repository and product distribution, but outside the Hubu control-plane process, database, credential boundary, provider execution boundary, and failure domain.",
+      "Gongbu is in the Hubu source repository and unified product model, with archive packaging tracked by HUB-84. It remains outside the Hubu control-plane process, database, credential boundary, provider execution boundary, and failure domain.",
     responsibilities: [
       "Accepts authenticated execution requests through its HTTP API or separate Gongbu MCP adapter; callers cannot override operator-owned account, target, price, endpoint, or credentials.",
       "Persists an immutable execution and provider attempt before crossing billable boundaries, then runs recovery through Gongbu-owned Temporal workflow state.",

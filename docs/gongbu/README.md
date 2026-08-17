@@ -1,8 +1,10 @@
 # Gongbu
 
-Gongbu is developed, tested, and distributed from the Hubu repository's unified
-Rust workspace. All commands in these runbooks start at the Hubu repository
-root; no separate Gongbu checkout, `Cargo.lock`, or toolchain is required.
+Gongbu is developed and tested from the Hubu repository's unified Rust
+workspace. All commands in these runbooks start at the Hubu repository root; no
+separate Gongbu checkout, `Cargo.lock`, or toolchain is required. Until HUB-84
+adds Gongbu to the published Hubu archive, install its binaries from this same
+checkout.
 
 For the production-shaped persistent local runtime, use
 `gongbu-server serve --config /absolute/path/gongbu.json`. It connects to an
@@ -233,6 +235,6 @@ cargo build --release --locked --bin gongbu-server --bin gongbu-mcp
 ```
 
 Use `cargo test --workspace --locked` before repository-wide changes. The
-production `gongbu-server` and `gongbu-mcp` binaries ship in the same Hubu
-release archive as the Hubu production binaries, while remaining separate
-runtime processes. `gongbu-sandbox` is a development-only binary.
+production `gongbu-server` and `gongbu-mcp` binaries remain separate runtime
+processes. HUB-84 tracks adding them to the Hubu release archive;
+`gongbu-sandbox` remains a development-only binary.

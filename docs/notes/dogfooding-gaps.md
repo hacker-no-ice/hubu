@@ -290,8 +290,9 @@ guard. No extra client-supplied `intent_id` is required.
 
 **Consolidates:** DG-001, DG-009
 **Area:** Quick Start, packaging, and execution architecture
-**Status:** Historical pre-migration analysis; repository and distribution
-consolidation is now implemented, while runtime and MCP boundaries remain.
+**Status:** Historical pre-migration analysis; repository consolidation is
+implemented, unified release packaging is tracked by HUB-84, and runtime and
+MCP boundaries remain.
 
 ### Observed gaps
 
@@ -377,8 +378,8 @@ supervise both processes while exposing only Hubu to the agent.
 
 Bundling must not collapse the domain boundary. Preserve:
 
-- one source repository and product release, with separate processes and failure
-  domains
+- one source repository and planned product release, with separate processes
+  and failure domains
 - separate databases, configuration, data directories, and logs
 - exclusive Gongbu ownership of provider credentials and provider execution
 - no direct cross-service database or credential-file access

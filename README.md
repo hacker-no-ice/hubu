@@ -24,11 +24,13 @@ payment through the configured rail and recording successful money movement in
 an audit ledger. The current local rail is intentionally mocked, but the policy,
 budget, authorization, and ledger boundaries are built for real spend control.
 
-This is the single source repository for the Hubu product distribution. Its
-Rust workspace contains Hubu's spending control plane and Gongbu's execution
-plane. They build and release from one locked source revision, but run as
-separate processes with separate storage, credentials, provider boundaries,
-and failure domains.
+This is the single source repository for Hubu and Gongbu. Its Rust workspace
+contains Hubu's spending control plane and Gongbu's execution plane. They build
+from one locked source revision, but run as separate processes with separate
+storage, credentials, provider boundaries, and failure domains. HUB-84 tracks
+shipping all production binaries in one release archive; until that lands,
+published archives contain only `hubu` and `hubu-server` and Gongbu is installed
+from this same checkout.
 
 ## What Hubu Does Today
 
@@ -89,10 +91,12 @@ formatting and lint behavior stays reproducible; CI checks the complete locked
 workspace with Rust 1.88 explicitly. No normal build, test, or runbook requires
 a second Gongbu checkout.
 
-## Product and Runtime Boundaries
+## Source, Distribution, and Runtime Boundaries
 
-Hubu and Gongbu share this source repository, version, and product distribution;
-that packaging boundary does not collapse their runtime responsibilities:
+Hubu and Gongbu share this source repository and product direction. The current
+release archive still contains only the Hubu CLI and server; the five-binary
+unified distribution is tracked by HUB-84. Neither the current source boundary
+nor the planned packaging boundary collapses runtime responsibilities:
 
 - `hubu-server` is the control-plane process. It owns identity, policy, budgets,
   spend authorization, claims, settlement, the governance database, and ledger.
@@ -246,12 +250,13 @@ hubu-server --version
 curl http://127.0.0.1:8787/version
 ```
 
-Release provenance binds all five production binaries to the same product
-version and source commit. The Hubu binaries and `gongbu-server` expose build
-metadata directly; `gongbu-mcp` reports its product version in the MCP
-`initialize` response. `executor_contract` remains the independently negotiated
-`hubu-spend-executor-v4` identifier; sharing a release version does not change
-that wire contract.
+Current published release provenance binds `hubu` and `hubu-server` to one
+product version and source commit. Local builds of the Gongbu production
+binaries expose their own build metadata, and `gongbu-mcp` reports its product
+version in the MCP `initialize` response. HUB-84 will give all five production
+binaries one release provenance identity. `executor_contract` remains the
+independently negotiated `hubu-spend-executor-v4` identifier; sharing source or
+a future release version does not change that wire contract.
 
 ## License
 
