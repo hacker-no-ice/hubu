@@ -1,0 +1,32 @@
+[workspace]
+members = ["crates/gongbu-api", "crates/gongbu-build-info", "crates/gongbu-mcp"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hacker-no-ice/gongbu"
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+image = { version = "0.24.9", default-features = false, features = ["png", "jpeg"] }
+tempfile = "3"
+temporalio-sdk = "0.6"
+temporalio-macros = "0.6"
+temporalio-workflow = "0.6"
+temporalio-common-wasm = "0.6"
+temporalio-common = "0.6"
+futures = "0.3"
+temporalio-client = "0.6"
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "time"] }
+axum = "0.8"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+gongbu-build-info = { path = "crates/gongbu-build-info" }

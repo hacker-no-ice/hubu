@@ -1,0 +1,32 @@
+[package]
+name = "gongbu-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+image.workspace = true
+temporalio-sdk.workspace = true
+temporalio-macros.workspace = true
+temporalio-workflow.workspace = true
+temporalio-common-wasm.workspace = true
+temporalio-common.workspace = true
+futures.workspace = true
+temporalio-client.workspace = true
+tokio.workspace = true
+axum.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+chrono.workspace = true
+gongbu-build-info.workspace = true
+
+[dev-dependencies]
