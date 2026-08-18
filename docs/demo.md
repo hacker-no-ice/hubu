@@ -471,8 +471,8 @@ hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --age
 hubu [--url http://127.0.0.1:8787] budget revoke --budget-id ID
 hubu [--url http://127.0.0.1:8787] budget replace --budget-id ID --amount AMOUNT
 hubu [--url http://127.0.0.1:8787] budget list [--all]
-hubu [--url http://127.0.0.1:8787] spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--merchant NAME]
-hubu [--url http://127.0.0.1:8787] spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--merchant NAME]
+hubu [--url http://127.0.0.1:8787] spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME]
+hubu [--url http://127.0.0.1:8787] spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME]
 hubu [--url http://127.0.0.1:8787] ledger list
 hubu [--url http://127.0.0.1:8787] health
 ```

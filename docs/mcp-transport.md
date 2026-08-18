@@ -229,13 +229,40 @@ to consume a scoped spend authorization without exposing provider credentials to
 the agent. Both tools require a stable, agent-scoped `operation_key` supplied by
 the client platform or orchestrator, not invented by the model. Hubu durably
 stores workflow state under that key; identical retries recover the original
-workflow and changed scope is rejected.
+workflow and changed scope is rejected. An optional `task_id` is a separate
+trusted business correlation, while `reason` remains model-visible descriptive
+audit context.
 
-The current MCP transport exposes `operation_key` as an explicit tool argument
-and forwards it unchanged. It does not yet derive the key from trusted platform
-invocation metadata. Until a platform adapter is added, the client harness must
-inject and retain a stable key; model-generated keys are not a reliable
-idempotency boundary.
+The MCP tool schemas expose `reason` but not `operation_key` or `task_id`.
+For every spend call, the client attaches trusted metadata outside
+model-authored `arguments`:
+
+```json
+{
+  "name": "hubu_authorize_spend",
+  "arguments": {
+    "account_id": "aga_example",
+    "amount_cents": 500,
+    "reason": "Generate the release artwork"
+  },
+  "_meta": {
+    "hubu.dev/platform-invocation": {
+      "platform": "codex",
+      "installation_id": "install_7f3a",
+      "invocation_id": "provider-call-01K2AZNQ",
+      "operation_key": "codex:tool-call:01K2AZNQ",
+      "task_id": "linear:HUB-73"
+    }
+  }
+}
+```
+
+The adapter validates and injects the trusted fields and rejects either field
+inside model-authored arguments. A missing or null trusted `task_id` is
+forwarded as explicit null, preventing the legacy reason-to-task mapping from
+granting model text a trusted identity. The client platform must reuse the same
+metadata for retries. Durable platform-wide allocation and recovery remain the
+responsibility of HUB-31; this adapter does not allocate operation keys.
 
 ## Tool Mapping
 

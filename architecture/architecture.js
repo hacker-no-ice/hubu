@@ -54,7 +54,7 @@ const components = {
       "Hubu and Gongbu share one source repository, locked workspace, and five-binary release archive. Their binaries remain separate at runtime: Hubu governs spend in the control plane, while Gongbu executes provider work across an authenticated contract.",
     responsibilities: [
       "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, review protected actions, and reconcile uncertain expired claims.",
-      "Agents discover Hubu through configured MCP tools, while humans use the CLI for setup and administration.",
+      "Agents discover Hubu through configured MCP tools; trusted client metadata supplies operation and optional task identity outside model-authored arguments, while humans use the CLI for setup and administration.",
       "For local dogfooding, a repository Codex skill allocates a model-managed operation key once, binds it to immutable spend scope, and persists recovery state outside the Hubu server.",
       "The CLI and MCP adapter are part of broader Hubu, but they are not the Hubu server.",
       "Local HTTP callers reach the API with the Hubu bearer token before protected routes resolve user authority.",
@@ -333,7 +333,7 @@ const components = {
     responsibilities: [
       "Rejects malformed amounts, empty idempotency keys, and conflicting idempotency-key replays.",
       "Returns the original response for an identical idempotency replay without revalidating, rerunning the rail, or writing another ledger transaction.",
-      "Validates token, owner, amount, agent, account, complete canonical execution scope, legacy merchant, task, and currency before rail execution.",
+      "Validates token, owner, amount, agent, account, complete canonical execution scope, legacy merchant, and currency before rail execution, then resolves task ID and reason from the stored authorization snapshot.",
       "Persists canonical scope JSON with payment attempts so replay remains exact after restart while legacy rows migrate as nullable scope.",
       "Records successful payments in the immutable double-entry ledger, then marks the spend token used.",
       "Returns failed rail responses without ledger writes or token use; the app service persists attempts and decides whether to release holds or keep them frozen for retry.",
@@ -464,27 +464,29 @@ const components = {
     title: "MCP Adapter",
     kind: "Interface",
     copy:
-      "The MCP stdio adapter exposes Hubu as agent tools that Codex and other MCP clients can discover after configuration. Read-only calls are safe to inspect; protected setup tools require trusted client approval.",
+      "The MCP stdio adapter exposes Hubu as agent tools that Codex and other MCP clients can discover after configuration. Spend identity comes from trusted client metadata outside model arguments; read-only calls are safe to inspect and protected setup tools require trusted client approval.",
     responsibilities: [
       "Implements initialize, tools/list, and tools/call over JSON-RPC stdio.",
       "Can be wired into Codex by `hubu init codex` so agents outside the Hubu repository see Hubu tools at session startup.",
       "Publishes a generic client approval profile so any harness can auto-approve read/spend tools and prompt before setup/admin tools.",
       "Uses Codex per-tool approval overrides as one rendering of that profile while leaving Hubu policy responsible for needs_approval outcomes.",
       "Annotates tools with read-only, destructive, idempotent, open-world, and Hubu approval hints.",
+      "Keeps operation_key and task_id out of model-visible spend schemas, validates trusted platform metadata, and injects those identities into the HTTP request.",
+      "Leaves durable operation-key allocation and recovery to the client platform and HUB-31.",
       "Loads the local Hubu token, forwards tool calls to the HTTP API, and marks needs_approval spend responses for the agent client.",
     ],
     links: [sharedLinks.mcp, ["MCP transport doc", "docs/mcp-transport.md"], sharedLinks.api],
     nodes: [
-      { id: "agent", label: "Agent client", sub: "JSON-RPC stdio", x: 78, y: 134, w: 220, h: 92, tone: "agent" },
-      { id: "tools", label: "Tool catalog", sub: "read/write/approval", x: 430, y: 134, w: 230, h: 92, tone: "core" },
+      { id: "agent", label: "Agent client", sub: "args + trusted metadata", x: 78, y: 134, w: 220, h: 92, tone: "agent" },
+      { id: "tools", label: "Tool catalog", sub: "identity not model-visible", x: 430, y: 134, w: 230, h: 92, tone: "core" },
       { id: "approval", label: "Approval gate", sub: "trusted env flag", x: 430, y: 356, w: 230, h: 92, tone: "human" },
       { id: "api", label: "HTTP forwarder", sub: "bearer + Hubu", x: 802, y: 244, w: 220, h: 92, tone: "core" },
     ],
     edges: [
-      ["agent", "tools", "list/call"],
+      ["agent", "tools", "args + identity"],
       ["tools", "approval", "protected"],
       ["approval", "api", "allowed"],
-      ["tools", "api", "read/spend"],
+      ["tools", "api", "inject + forward"],
     ],
   },
   agent: {
@@ -495,8 +497,8 @@ const components = {
     responsibilities: [
       "Consumes registration guidance instead of guessing protocol fields from prose.",
       "Uses the repository skill to allocate each local-dogfood operation key once and persist its immutable scope in `.hubu/operation-keys.sqlite3` for retry and process recovery.",
-      "Submits structured spend requests with amount, reason, merchant, and agent account identity.",
-      "Reuses one stable operation key throughout the spend workflow and allocates a different key for intentionally distinct work.",
+      "Submits structured spend intent with amount, descriptive reason, merchant, and agent account identity; optional business task correlation remains separate.",
+      "Reuses one platform-owned operation key throughout the spend workflow and allocates a different key for intentionally distinct work.",
       "Receives allow, needs_approval, or deny decisions with traceable reasons.",
     ],
     links: [sharedLinks.mcp, sharedLinks.cli, sharedLinks.spend, sharedLinks.registrationProtocol, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper],

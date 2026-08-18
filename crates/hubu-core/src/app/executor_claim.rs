@@ -317,6 +317,7 @@ impl ExecutorClaimService {
                 "artifact_reference": receipt.receipt.artifact_reference,
                 "merchant": state.decision.request.merchant,
                 "task_id": state.decision.request.task_id,
+                "reason": state.decision.request.reason,
             }),
         );
         Ok(state)
@@ -353,6 +354,7 @@ impl ExecutorClaimService {
                 "amount_cents": state.budget_hold.amount_cents,
                 "merchant": state.decision.request.merchant,
                 "task_id": state.decision.request.task_id,
+                "reason": state.decision.request.reason,
             }),
         );
         Ok(state)
@@ -412,6 +414,9 @@ impl ExecutorClaimService {
             "executor_claim_reconciled",
             json!({
                 "claim_id": state.claim.id.to_string(),
+                "operation_key": state.claim.operation_key,
+                "task_id": state.decision.request.task_id,
+                "reason": state.decision.request.reason,
                 "outcome": request.outcome.as_str(),
                 "provider_reference": state.claim.provider_reference,
                 "reconciled_by_user_id": request.owner_user_id.to_string(),
@@ -619,6 +624,7 @@ mod tests {
                         merchant: Some("vendor.example".to_string()),
                         execution_scope: None,
                         task_id: Some("task-123".to_string()),
+                        reason: "Test executor authorization".to_string(),
                         workload_profile: "default".to_string(),
                     },
                     &policy,

@@ -1874,7 +1874,7 @@ mod tests {
     }
 
     #[test]
-    fn real_hubu_v4_scope_uses_account_and_stable_operation_key() {
+    fn real_hubu_v4_scope_uses_account_operation_key_and_authoritative_task_omission() {
         let mut config = mock_config(BoundaryMode::Real, BoundaryMode::Mock);
         config.hubu.endpoint = Some("http://127.0.0.1:8787".into());
         config.hubu.scoped_credential_reference = Some("keychain:hubu-sandbox".into());
@@ -1889,10 +1889,7 @@ mod tests {
             request.account_id.as_deref(),
             Some(execution.account_id.as_str())
         );
-        assert_eq!(
-            request.task_id.as_deref(),
-            Some(execution.operation_key.as_str())
-        );
+        assert_eq!(request.task_id, None);
     }
 
     #[test]

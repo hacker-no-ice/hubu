@@ -7,6 +7,10 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
+mod trusted_identity;
+
+use trusted_identity::TrustedSpendIdentity;
+
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
@@ -17,7 +21,7 @@ const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
 const RECONCILIATION_CAPABILITY_HEADER: &str = "X-Hubu-Reconciliation-Capability";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const HUBU_APPROVAL_PROFILE_VERSION: &str = "hubu-mcp-client-approval-v1";
-const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Spend calls currently require the client harness to supply a stable, namespaced operation_key; Hubu MCP does not yet derive it from trusted platform metadata, and the model should not invent one. Hubu stores workflow state under that key for authorization, claim, finalization, and retries. Protected setup/admin tools require a human approval prompt before tools/call. Expired-claim reconciliation tools use that prompt gate and a distinct server-verified human reconciliation capability that is never sent on executor requests. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
+const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Every spend call must attach platform-owned operation_key and optional task_id under trusted params._meta['hubu.dev/platform-invocation']; Hubu MCP injects them outside model-authored arguments. The platform remains responsible for stable allocation and retry recovery. Protected setup/admin tools require a human approval prompt before tools/call. Expired-claim reconciliation tools use that prompt gate and a distinct server-verified human reconciliation capability that is never sent on executor requests. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
 const READ_TOOL_NAMES: &[&str] = &[
     "hubu_health",
     "hubu_registration_guidance",
@@ -295,29 +299,27 @@ fn tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "hubu_submit_spend",
-            "Submit an agent spend request using a stable operation key supplied by the agent platform. Human approval is only required when the returned decision is needs_approval.",
+            "Submit an agent spend request. Trusted platform metadata supplies operation and optional task identity outside model arguments. Human approval is only required when the returned decision is needs_approval.",
             json_schema_required(json!({
-                "operation_key": { "type": "string", "description": "Stable, namespaced platform operation id; until a trusted adapter is available, the client harness must supply and reuse it for retries" },
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "execution_scope": execution_scope_input_schema(),
                 "workload_profile": { "type": "string" }
-            }), &["operation_key", "account_id", "amount_cents", "reason"]),
+            }), &["account_id", "amount_cents", "reason"]),
         ),
         write_tool(
             "hubu_authorize_spend",
-            "Authorize an agent spend request using a stable operation key supplied by the agent platform.",
+            "Authorize an agent spend request. Trusted platform metadata supplies operation and optional task identity outside model arguments.",
             json_schema_required(json!({
-                "operation_key": { "type": "string", "description": "Stable, namespaced platform operation id supplied by the client harness and reused throughout the workflow" },
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "execution_scope": execution_scope_input_schema(),
                 "workload_profile": { "type": "string" }
-            }), &["operation_key", "account_id", "amount_cents", "reason"]),
+            }), &["account_id", "amount_cents", "reason"]),
         ),
         read_tool(
             "hubu_list_agents",
@@ -622,10 +624,12 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
             }
         }
         "hubu_submit_spend" => {
+            let arguments = trusted_spend_arguments(&params, arguments)?;
             let response = post_json(base_url, "/spend", arguments)?;
             return Ok(tool_result(spend_response_with_approval_hint(response)));
         }
         "hubu_authorize_spend" => {
+            let arguments = trusted_spend_arguments(&params, arguments)?;
             let response = post_json(base_url, "/spend/authorize", arguments)?;
             return Ok(tool_result(spend_response_with_approval_hint(response)));
         }
@@ -667,6 +671,29 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
     };
 
     Ok(tool_result(response))
+}
+
+fn trusted_spend_arguments(params: &Value, mut arguments: Value) -> Result<Value> {
+    let arguments = arguments
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Hubu spend tool arguments must be an object"))?;
+    for protected in ["operation_key", "task_id"] {
+        if arguments.contains_key(protected) {
+            bail!(
+                "{protected} is trusted platform state and must not be supplied in model-authored arguments"
+            );
+        }
+    }
+    let trusted = TrustedSpendIdentity::from_call_params(params)?;
+    arguments.insert(
+        "operation_key".to_string(),
+        Value::String(trusted.operation_key),
+    );
+    arguments.insert(
+        "task_id".to_string(),
+        trusted.task_id.map_or(Value::Null, Value::String),
+    );
+    Ok(Value::Object(arguments.clone()))
 }
 
 fn policy_inspection_path(action: &str, arguments: &Value) -> Result<String> {
@@ -965,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn spend_tool_schemas_require_operation_key_and_account_id() {
+    fn spend_tool_schemas_keep_trusted_identity_out_of_model_arguments() {
         let tools = tool_definitions();
 
         for tool_name in ["hubu_submit_spend", "hubu_authorize_spend"] {
@@ -979,14 +1006,114 @@ mod tests {
                 .expect("spend tool required fields should be an array");
 
             assert!(properties["account_id"].is_object());
-            assert!(properties["operation_key"].is_object());
+            assert!(properties.get("operation_key").is_none());
+            assert!(properties.get("task_id").is_none());
             assert!(properties.get("job_id").is_none());
             assert!(properties.get("agent_id").is_none());
             assert!(required.iter().any(|field| field == "account_id"));
-            assert!(required.iter().any(|field| field == "operation_key"));
+            assert!(!required.iter().any(|field| field == "operation_key"));
             assert!(required.iter().any(|field| field == "amount_cents"));
             assert!(required.iter().any(|field| field == "reason"));
         }
+    }
+
+    fn spend_call_params(task_id: Value, arguments: Value) -> Value {
+        json!({
+            "name": "hubu_authorize_spend",
+            "arguments": arguments,
+            "_meta": {
+                "hubu.dev/platform-invocation": {
+                    "platform": "codex",
+                    "installation_id": "installation-1",
+                    "invocation_id": "call-1",
+                    "operation_key": "platform:operation-1",
+                    "task_id": task_id
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn trusted_metadata_is_injected_and_stable_for_retry() {
+        let params = spend_call_params(
+            json!("linear:HUB-73"),
+            json!({
+                "account_id": "aga_example",
+                "amount_cents": 500,
+                "reason": "Generate the review artifact"
+            }),
+        );
+        let first = trusted_spend_arguments(&params, params["arguments"].clone()).unwrap();
+        let retry = trusted_spend_arguments(&params, params["arguments"].clone()).unwrap();
+        assert_eq!(retry, first);
+        assert_eq!(first["operation_key"], "platform:operation-1");
+        assert_eq!(first["task_id"], "linear:HUB-73");
+        assert_eq!(first["reason"], "Generate the review artifact");
+    }
+
+    #[test]
+    fn trusted_null_task_id_is_injected_explicitly() {
+        let params = spend_call_params(
+            Value::Null,
+            json!({
+                "account_id": "aga_example",
+                "amount_cents": 500,
+                "reason": "Uncorrelated spend"
+            }),
+        );
+        let forwarded = trusted_spend_arguments(&params, params["arguments"].clone()).unwrap();
+        assert!(forwarded["task_id"].is_null());
+    }
+
+    #[test]
+    fn missing_trusted_task_id_is_normalized_to_explicit_null() {
+        let params = json!({
+            "name": "hubu_authorize_spend",
+            "arguments": {
+                "account_id": "aga_example",
+                "amount_cents": 500,
+                "reason": "Uncorrelated spend"
+            },
+            "_meta": {
+                "hubu.dev/platform-invocation": {
+                    "platform": "codex",
+                    "installation_id": "installation-1",
+                    "invocation_id": "call-1",
+                    "operation_key": "platform:operation-1"
+                }
+            }
+        });
+        let forwarded = trusted_spend_arguments(&params, params["arguments"].clone()).unwrap();
+        assert!(forwarded["task_id"].is_null());
+    }
+
+    #[test]
+    fn model_cannot_spoof_trusted_operation_or_task_identity() {
+        for protected in ["operation_key", "task_id"] {
+            let mut arguments = json!({
+                "account_id": "aga_example",
+                "amount_cents": 500,
+                "reason": "Attempt spoof"
+            });
+            arguments[protected] = json!("spoofed");
+            let params = spend_call_params(json!("linear:HUB-73"), arguments.clone());
+            let error = trusted_spend_arguments(&params, arguments).unwrap_err();
+            assert!(error.to_string().contains("model-authored"));
+        }
+    }
+
+    #[test]
+    fn spend_without_trusted_identity_fails_closed() {
+        let params = json!({
+            "name": "hubu_authorize_spend",
+            "arguments": {
+                "account_id": "aga_example",
+                "amount_cents": 500,
+                "reason": "Missing trusted identity"
+            }
+        });
+        let error = trusted_spend_arguments(&params, params["arguments"].clone()).unwrap_err();
+        assert!(error.to_string().contains("hubu.dev/platform-invocation"));
     }
 
     #[test]

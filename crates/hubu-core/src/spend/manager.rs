@@ -769,6 +769,7 @@ mod tests {
             execution_scope: None,
             category: Some("meals".to_string()),
             task_id: Some("task_123".to_string()),
+            reason: "Team lunch".to_string(),
             workload_profile: "default".to_string(),
         }
     }

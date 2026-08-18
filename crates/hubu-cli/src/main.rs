@@ -1537,6 +1537,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let currency_arg = take_value(&mut args, "--currency");
     let currency = normalize_currency(currency_arg.as_deref().unwrap_or("usd"))?;
     let reason = take_required(&mut args, "--reason")?;
+    let task_id = take_value(&mut args, "--task-id");
     let (merchant, execution_scope) = take_execution_scope(&mut args)?;
     let workload_profile = take_value(&mut args, "--workload-profile");
     ensure_no_args(args)?;
@@ -1555,6 +1556,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "amount_cents": amount_cents,
         "currency": currency_arg.map(|_| currency.to_string()),
         "reason": reason,
+        "task_id": task_id,
         "merchant": merchant,
         "execution_scope": execution_scope,
         "workload_profile": workload_profile,
@@ -1579,6 +1581,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let currency_arg = take_value(&mut args, "--currency");
     let currency = normalize_currency(currency_arg.as_deref().unwrap_or("usd"))?;
     let reason = take_required(&mut args, "--reason")?;
+    let task_id = take_value(&mut args, "--task-id");
     let (merchant, execution_scope) = take_execution_scope(&mut args)?;
     let workload_profile = take_value(&mut args, "--workload-profile");
     ensure_no_args(args)?;
@@ -1597,6 +1600,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "amount_cents": amount_cents,
         "currency": currency_arg.map(|_| currency.to_string()),
         "reason": reason,
+        "task_id": task_id,
         "merchant": merchant,
         "execution_scope": execution_scope,
         "workload_profile": workload_profile,
@@ -2765,8 +2769,8 @@ fn print_spend_help() {
         "Test an agent spend request
 
 Usage:
-  hubu spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
-  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
   hubu spend claim --claim-id ID
   hubu spend reconcile list
   hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-cents CENTS --provider-request-id ID --provider NAME --model NAME --unit-price-cents CENTS --pricing-unit UNIT --artifact-reference REF
@@ -2777,6 +2781,7 @@ Note:
   --amount is a decimal major-unit amount: 5 means USD 5.00 and 0.05 means USD 0.05. USD is the only supported currency; Hubu performs no currency conversion.
   If merchant and typed execution scope are omitted, the CLI shows that omission before submission. Merchant policy conditions then cannot match and the policy may require approval.
   The client harness must supply one immutable agent-scoped operation key before the first request, then reuse it for authorization, claim, finalization, and every retry.
+  --task-id is an optional external business correlation. It is independent of the operation key and descriptive --reason. Omitting it explicitly sends no task id.
 
 Examples:
   hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --currency USD --merchant example-model-provider --reason \"Reserve model API credits\"
@@ -2789,12 +2794,13 @@ fn print_spend_authorize_help() {
         "Authorize spend and reserve budget without executing payment
 
 Usage:
-  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
 
 Note:
   Supply one immutable agent-scoped operation key before the first request; do not generate a new key on retry.
   --amount is a decimal major-unit amount: 5 means USD 5.00 and 0.05 means USD 0.05. USD is the only supported currency; Hubu performs no currency conversion.
   Omitted merchant/scope fields are shown before submission because policies that evaluate those fields will not match them.
+  --task-id is an optional external business correlation. It is independent of the operation key and descriptive --reason. Omitting it explicitly sends no task id.
 
 Example:
   hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --currency USD --merchant example-model-provider --reason \"Reserve model API credits\""
