@@ -42,6 +42,7 @@ const sharedLinks = {
   gongbuProvider: ["Gongbu provider boundary", "crates/gongbu-api/src/provider/mod.rs"],
   gongbuHubu: ["Gongbu Hubu client", "crates/gongbu-api/src/hubu/mod.rs"],
   gongbuMcp: ["Gongbu MCP adapter", "crates/gongbu-mcp/src/lib.rs"],
+  unifiedMcpContract: ["Unified MCP contract", "docs/unified-mcp-contract.md"],
   gongbuConfig: ["Gongbu server example", "examples/gongbu/gongbu.server.json"],
 };
 
@@ -64,9 +65,9 @@ const components = {
       "The API handles local HTTP concerns and delegates spend approval, payment, and executor claim lifecycle orchestration to core app services.",
       "Gongbu owns its process, database, Temporal workflow state, vendor credentials, provider adapters, model calls, artifacts, retries, and failure domain; Hubu stores only governance state and compact provider/artifact references.",
       "SQLite-backed records preserve users, agents, advisory spending targets, budgets, policies, executor claims and receipts, reconciliation evidence, payments, and ledger entries.",
-      "The Hubu and Gongbu MCP adapters remain separate agent-facing surfaces; repository and release consolidation does not redesign their protocols.",
+      "The Hubu and Gongbu MCP adapters remain separate implementations until unified-surface parity and deprecation gates pass; the accepted routing contract preserves their ownership and failure boundaries.",
     ],
-    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.scopeModel],
+    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp, sharedLinks.unifiedMcpContract, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.scopeModel],
     zones: [
       { label: "One source repository + locked workspace", x: 310, y: 24, w: 1070, h: 846 },
       { label: "Hubu control-plane process", x: 650, y: 48, w: 730, h: 802, labelX: 692, labelY: 88 },
@@ -464,12 +465,15 @@ const components = {
     ],
   },
   mcp: {
-    title: "MCP Adapter",
+    title: "MCP Surfaces",
     kind: "Interface",
     copy:
-      "The MCP stdio adapter exposes Hubu as agent tools that Codex and other MCP clients can discover after configuration. Spend identity comes from trusted client metadata outside model arguments; read-only calls are safe to inspect and protected setup tools require trusted client approval.",
+      "The current Hubu and Gongbu stdio adapters stay separate while the accepted unified contract defines a future fail-closed router. Canonical tool names and schemas remain unchanged, and each call still reaches exactly one owning backend.",
     responsibilities: [
-      "Implements initialize, tools/list, and tools/call over JSON-RPC stdio.",
+      "Both current adapters implement initialize, tools/list, and tools/call over JSON-RPC stdio; the planned router adds independent backend capability discovery.",
+      "Keeps all 28 hubu_* and 4 gongbu_* tool names, schemas, response shapes, and owners stable behind one supported surface.",
+      "Fails closed on unknown backend versions or schemas and advertises only tools whose owning backend is compatible and callable.",
+      "Allows the healthy backend to remain usable during the other backend's outage without fallback, queuing, or cross-boundary retries.",
       "Can be wired into Codex by `hubu init codex` so agents outside the Hubu repository see Hubu tools at session startup.",
       "Publishes a generic client approval profile so any harness can auto-approve read/spend tools and prompt before setup/admin tools.",
       "Uses Codex per-tool approval overrides as one rendering of that profile while leaving Hubu policy responsible for needs_approval outcomes.",
@@ -478,18 +482,17 @@ const components = {
       "Leaves durable operation-key allocation and recovery to the client platform and HUB-31.",
       "Loads the local Hubu token, forwards tool calls to the HTTP API, and marks needs_approval spend responses for the agent client.",
     ],
-    links: [sharedLinks.mcp, ["MCP transport doc", "docs/mcp-transport.md"], sharedLinks.api],
+    links: [sharedLinks.mcp, sharedLinks.gongbuMcp, sharedLinks.unifiedMcpContract, ["MCP transport doc", "docs/mcp-transport.md"], sharedLinks.api],
     nodes: [
       { id: "agent", label: "Agent client", sub: "args + trusted metadata", x: 78, y: 134, w: 220, h: 92, tone: "agent" },
-      { id: "tools", label: "Tool catalog", sub: "identity not model-visible", x: 430, y: 134, w: 230, h: 92, tone: "core" },
-      { id: "approval", label: "Approval gate", sub: "trusted env flag", x: 430, y: 356, w: 230, h: 92, tone: "human" },
-      { id: "api", label: "HTTP forwarder", sub: "bearer + Hubu", x: 802, y: 244, w: 220, h: 92, tone: "core" },
+      { id: "tools", label: "Unified router", sub: "planned static routing", x: 430, y: 134, w: 230, h: 92, tone: "core" },
+      { id: "approval", label: "Hubu adapter", sub: "governance + approvals", x: 430, y: 356, w: 230, h: 92, tone: "human" },
+      { id: "api", label: "Gongbu adapter", sub: "execution + artifacts", x: 802, y: 244, w: 220, h: 92, tone: "executor" },
     ],
     edges: [
-      ["agent", "tools", "args + identity"],
-      ["tools", "approval", "protected"],
-      ["approval", "api", "allowed"],
-      ["tools", "api", "inject + forward"],
+      ["agent", "tools", "discover + call"],
+      ["tools", "approval", "hubu_*"],
+      ["tools", "api", "gongbu_*"],
     ],
   },
   agent: {
@@ -617,9 +620,9 @@ const sidebarHighlights = {
     "It exposes policy, budget, spend, ledger, and health workflows.",
   ],
   mcp: [
-    "Agents receive structured spend-control tools.",
-    "Tool calls map to the local Hubu API.",
-    "Protected outcomes remain visible for human approval.",
+    "The accepted unified contract keeps all existing public tool names stable.",
+    "A static routing map sends each call to exactly one owning backend.",
+    "Compatibility and partial availability fail closed without merging failure domains.",
   ],
   agent: [
     "The agent reuses a scope-bound operation key.",
