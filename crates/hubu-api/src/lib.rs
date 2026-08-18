@@ -23,7 +23,7 @@ use hubu_common::{
         EXECUTION_SCOPE_SCHEMA_VERSION,
     },
     ids::{
-        AgentId, AgentSessionId, BudgetId, SpendAuthTokenId, SpendExecutorClaimId,
+        AgentId, AgentSessionId, BudgetId, SpendAuthTokenId, SpendDecisionId, SpendExecutorClaimId,
         SpendingTargetId, UserId,
     },
     models::account::{AccountStatus, AgentAccount},
@@ -39,8 +39,9 @@ use hubu_core::{
         ApprovedSpendAuthorization, AuthorizeSpendRequest, BudgetHoldUpdate,
         ClaimExecutorSpendRequest, ExecutorClaimReconciliationOutcome, ExecutorClaimService,
         ExecutorClaimState, FailedPaymentHoldPolicy, FinalizeExecutorClaimRequest,
-        ReconcileExecutorClaimRequest, RejectedSpendAuthorization, SettleExecutorClaimRequest,
-        SpendApprovalError, SpendApprovalService, SpendAuthorizationOutcome, SpendPaymentSpec,
+        HumanApprovalDecision, ReconcileExecutorClaimRequest, RejectedSpendAuthorization,
+        SettleExecutorClaimRequest, SpendApprovalError, SpendApprovalService,
+        SpendAuthorizationOutcome, SpendPaymentSpec,
     },
     budget::{
         BudgetHold, BudgetHoldStatus, BudgetManager, BudgetRecurrence, BudgetStatus,
@@ -59,9 +60,10 @@ use hubu_core::{
     },
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
     spend::{
-        SpendAttemptAuditRecord, SpendExecutorClaimRecord, SpendExecutorClaimStatus,
-        SpendExecutorPriceModelSnapshot, SpendExecutorSettlementReceipt, SpendManager,
-        SpendPaymentValidationRequest, SpendRetryGuidance, SpendTimingConfig,
+        SpendAttemptAuditRecord, SpendAuthorizationDecision, SpendDecisionRecord,
+        SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendExecutorPriceModelSnapshot,
+        SpendExecutorSettlementReceipt, SpendManager, SpendPaymentValidationRequest,
+        SpendRetryGuidance, SpendTimingConfig,
     },
     spending_target::{
         periods_overlap, CreateSpendingTargetRequest, SpendingTarget, SpendingTargetManager,
@@ -974,6 +976,7 @@ struct SpendHttpResponse {
     reasons: Vec<String>,
     scope_inputs: SpendScopeInputsHttpResponse,
     policy_decision: PolicyDecisionHttpResponse,
+    approval: Option<SpendApprovalHttpResponse>,
     auth_token_id: Option<String>,
     execution_scope: Option<ExecutionScope>,
     workload_profile: String,
@@ -984,6 +987,42 @@ struct SpendHttpResponse {
     idempotent_replay: bool,
     retry_guidance: SpendRetryGuidance,
     attempt_history: Vec<SpendAttemptAuditRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct SpendApprovalHttpResponse {
+    approval_request_id: String,
+    status: String,
+    review: SpendApprovalReviewHttpResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct SpendApprovalReviewHttpResponse {
+    operation_key: String,
+    account_id: String,
+    agent_id: String,
+    amount_cents: i64,
+    currency: String,
+    merchant: Option<String>,
+    execution_scope: Option<ExecutionScope>,
+    workload_profile: String,
+    reason: String,
+    policy_summary: String,
+    policy_reasons: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveSpendApprovalHttpRequest {
+    approval_request_id: String,
+    decision: HumanApprovalHttpDecision,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HumanApprovalHttpDecision {
+    Approve,
+    Deny,
 }
 
 #[derive(Debug, Serialize)]
@@ -1381,6 +1420,14 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("POST", "/budgets/replace") => replace_budget(request.body, state).map(to_json),
         ("GET", "/budgets") => list_budgets(state, query_flag(&request, "all")).map(to_json),
         ("POST", "/spend/authorize") => authorize_spend(request.body, state).map(to_json),
+        ("GET", "/spend/approval") => get_spend_approval(
+            request.query.get("approval_request_id").map(String::as_str),
+            state,
+        )
+        .map(to_json),
+        ("POST", "/spend/approval/resolve") => {
+            resolve_spend_approval(request.body, state).map(to_json)
+        }
         ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
             Ok(spend_executor_guidance(state))
         }
@@ -1557,6 +1604,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
         "executor_flow": [
             "platform supplies one stable operation_key and requests POST /spend/authorize with merchant, task scope, and workload_profile",
             "Hubu durably records the workflow under the agent-scoped operation_key",
+            "when policy returns needs_approval, the client shows approval.review to the human and resolves the approval_request_id as approve or deny before continuing",
             "agent sends the spend_auth_token_id and execution intent to an executor",
             "executor resolves the authoritative authorization through POST /spend/executor/resolve and independently verifies its derived price and scope",
             "executor calls POST /spend/executor/claim with the same operation_key before irreversible work",
@@ -1572,6 +1620,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "claim_status": "GET /spend/executor/claim?claim_id=CLAIM_ID",
             "validate": "POST /spend/executor/validate",
             "resolve": "POST /spend/executor/resolve",
+            "approval_status": "GET /spend/approval?approval_request_id=DECISION_ID",
+            "approval_resolve": "POST /spend/approval/resolve",
             "settle": "POST /spend/executor/settle",
             "release": "POST /spend/executor/release",
             "reconciliation_queue": "GET /spend/executor/reconciliation",
@@ -1626,6 +1676,14 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "workload_profile"
             ],
             "task_id_compatibility": "missing maps reason into task_id for legacy clients; explicit null omits task correlation; an explicit string is preserved independently"
+        },
+        "human_approval": {
+            "statuses": ["pending", "approved", "denied"],
+            "approval_request_id": "the immutable spend decision id returned by needs_approval",
+            "review": "show the complete approval.review object before asking the human to approve or deny",
+            "resolve": "the owner-authenticated client submits approve or deny; approval reserves budget but never invokes a provider",
+            "retry": "replay the exact authorization request or read approval status to recover the durable result",
+            "mcp": "hubu_resolve_spend_approval is protected by the trusted client human-approval gate"
         },
         "claim_request": {
             "required": [
@@ -3075,25 +3133,121 @@ fn replace_budget(body: String, state: &ServerState) -> Result<ReplaceBudgetHttp
 fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let request: SpendHttpRequest = serde_json::from_str(&body)?;
     let authorization = match evaluate_and_reserve_spend(request, state)? {
-        SpendAuthorization::Authorized(authorization) => authorization,
-        SpendAuthorization::Response(response) => return Ok(response),
+        SpendAuthorization::Authorized(authorization) => *authorization,
+        SpendAuthorization::Response(response) => return Ok(*response),
     };
+    Ok(authorized_spend_response(authorization))
+}
+
+fn get_spend_approval(
+    approval_request_id: Option<&str>,
+    state: &ServerState,
+) -> Result<SpendApprovalHttpResponse> {
+    let approval_request_id: SpendDecisionId = approval_request_id
+        .ok_or_else(|| anyhow!("approval_request_id is required"))?
+        .parse()
+        .with_context(|| "parse approval_request_id")?;
+    let user = authenticated_user_context(state)?;
+    let decision = state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend manager lock poisoned"))?
+        .decision_record(&approval_request_id)
+        .ok_or_else(|| anyhow!("unknown spend approval request"))?;
+    if decision.owner_user_id != user.user_id
+        || decision.evaluation.decision != Effect::NeedsApproval
+    {
+        return Err(anyhow!("unknown spend approval request"));
+    }
+    let status = approval_status_for_decision(&decision, state)?;
+    approval_http_response(&decision, status, state)
+}
+
+fn resolve_spend_approval(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
+    reconcile_expired_budget_holds(state)?;
+    let request: ResolveSpendApprovalHttpRequest = serde_json::from_str(&body)?;
+    let approval_request_id: SpendDecisionId = request
+        .approval_request_id
+        .parse()
+        .with_context(|| "parse approval_request_id")?;
+    let user = authenticated_user_context(state)?;
+    let outcome = {
+        let mut spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let mut budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        let mut governance = state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        SpendApprovalService.resolve_human_approval(
+            user,
+            &approval_request_id,
+            match request.decision {
+                HumanApprovalHttpDecision::Approve => HumanApprovalDecision::Approve,
+                HumanApprovalHttpDecision::Deny => HumanApprovalDecision::Deny,
+            },
+            &mut spend_manager,
+            &mut budget_manager,
+            &mut *governance,
+        )?
+    };
+
+    match outcome {
+        SpendAuthorizationOutcome::Approved(approval) => {
+            let (account_pub_id, agent_pub_id) = approval_public_ids(&approval, state)?;
+            let scope_inputs = stored_spend_scope_inputs(&approval);
+            Ok(authorized_spend_response(AuthorizedSpend {
+                account_pub_id,
+                agent_pub_id,
+                approval,
+                scope_inputs,
+            }))
+        }
+        SpendAuthorizationOutcome::Rejected(rejection) => {
+            let (account_pub_id, agent_pub_id) = rejection_public_ids(&rejection, state)?;
+            let scope_inputs = stored_rejection_scope_inputs(&rejection);
+            Ok(spend_rejection_response(
+                rejection,
+                account_pub_id,
+                agent_pub_id,
+                scope_inputs,
+            ))
+        }
+    }
+}
+
+fn authorized_spend_response(authorization: AuthorizedSpend) -> SpendHttpResponse {
     let auth_token_id = authorization.approval.auth_token_id();
     let workload_profile = authorization.approval.workload_profile.clone();
     let authorization_expires_at = authorization.approval.token.expires_at.to_rfc3339();
     let policy_decision = policy_decision_response(&authorization.approval.evaluation.evaluation);
+    let approval = approval_for_approved_spend(
+        &authorization.approval,
+        &authorization.account_pub_id,
+        &authorization.agent_pub_id,
+    );
 
-    Ok(SpendHttpResponse {
+    SpendHttpResponse {
         operation_key: authorization.approval.operation_key.clone(),
         task_id: authorization.approval.task_id.clone(),
         reason: authorization.approval.reason.clone(),
         account_id: authorization.account_pub_id,
         agent_id: authorization.agent_pub_id,
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
-        decision: effect_name(authorization.approval.evaluation.evaluation.decision).to_string(),
+        decision: if approval.is_some() {
+            "allow".to_string()
+        } else {
+            effect_name(authorization.approval.evaluation.evaluation.decision).to_string()
+        },
         reasons: authorization.approval.evaluation.evaluation.reasons.clone(),
         scope_inputs: authorization.scope_inputs,
         policy_decision,
+        approval,
         auth_token_id: Some(auth_token_id),
         execution_scope: authorization.approval.execution_scope.clone(),
         workload_profile,
@@ -3107,7 +3261,219 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
         idempotent_replay: authorization.approval.evaluation.idempotent_replay,
         retry_guidance: authorization.approval.evaluation.retry_guidance.clone(),
         attempt_history: authorization.approval.evaluation.attempt_history.clone(),
+    }
+}
+
+fn approval_status_for_decision(
+    decision: &SpendDecisionRecord,
+    state: &ServerState,
+) -> Result<&'static str> {
+    let history = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .load_spend_attempt_history(&decision.request.agent_id, &decision.operation_key)?;
+    Ok(history
+        .iter()
+        .find(|attempt| attempt.revision == decision.revision)
+        .map_or("pending", |attempt| match attempt.final_decision {
+            SpendAuthorizationDecision::PendingApproval => "pending",
+            SpendAuthorizationDecision::Allowed => "approved",
+            SpendAuthorizationDecision::Denied => "denied",
+        }))
+}
+
+fn approval_http_response(
+    decision: &SpendDecisionRecord,
+    status: &str,
+    state: &ServerState,
+) -> Result<SpendApprovalHttpResponse> {
+    let (account_pub_id, agent_pub_id) = {
+        let registration = state
+            .registration
+            .lock()
+            .map_err(|_| anyhow!("registration manager lock poisoned"))?;
+        let account = registration
+            .account_for_agent(&decision.request.agent_id)?
+            .ok_or_else(|| anyhow!("spend approval account is missing"))?;
+        if account.id != decision.request.agent_account_id
+            || account.owner_user_id != decision.owner_user_id
+        {
+            return Err(anyhow!("spend approval account does not match decision"));
+        }
+        let agent = registration
+            .agent_for_id(&decision.request.agent_id)?
+            .ok_or_else(|| anyhow!("spend approval agent is missing"))?;
+        (account.pub_id, agent.pub_id)
+    };
+    Ok(approval_review_response(
+        decision.id.to_string(),
+        status,
+        decision.operation_key.clone(),
+        account_pub_id,
+        agent_pub_id,
+        &decision.request,
+        policy_decision_response(&decision.evaluation).summary,
+        decision.evaluation.reasons.clone(),
+    ))
+}
+
+fn approval_for_approved_spend(
+    approval: &ApprovedSpendAuthorization,
+    account_pub_id: &str,
+    agent_pub_id: &str,
+) -> Option<SpendApprovalHttpResponse> {
+    (approval.evaluation.evaluation.decision == Effect::NeedsApproval).then(|| {
+        approval_review_response(
+            approval.evaluation.decision_id.to_string(),
+            "approved",
+            approval.operation_key.clone(),
+            account_pub_id.to_string(),
+            agent_pub_id.to_string(),
+            &hubu_core::spend::SpendRequest {
+                amount_cents: approval.amount_cents,
+                currency: approval.currency,
+                owner_user_id: approval.user.user_id.clone(),
+                agent_id: approval.agent_id.clone(),
+                agent_account_id: approval.agent_account_id.clone(),
+                merchant: approval.merchant.clone(),
+                execution_scope: approval.execution_scope.clone(),
+                category: None,
+                task_id: approval.task_id.clone(),
+                reason: approval.reason.clone(),
+                workload_profile: approval.workload_profile.clone(),
+            },
+            policy_decision_response(&approval.evaluation.evaluation).summary,
+            approval.evaluation.evaluation.reasons.clone(),
+        )
     })
+}
+
+fn approval_for_rejected_spend(
+    rejection: &RejectedSpendAuthorization,
+    account_pub_id: &str,
+    agent_pub_id: &str,
+) -> Option<SpendApprovalHttpResponse> {
+    (rejection.evaluation.evaluation.decision == Effect::NeedsApproval).then(|| {
+        let status = if rejection.decision == Effect::Deny {
+            "denied"
+        } else {
+            "pending"
+        };
+        approval_review_response(
+            rejection.evaluation.decision_id.to_string(),
+            status,
+            rejection.operation_key.clone(),
+            account_pub_id.to_string(),
+            agent_pub_id.to_string(),
+            &hubu_core::spend::SpendRequest {
+                amount_cents: rejection.amount_cents,
+                currency: rejection.currency,
+                owner_user_id: rejection.user.user_id.clone(),
+                agent_id: rejection.agent_id.clone(),
+                agent_account_id: rejection.agent_account_id.clone(),
+                merchant: rejection.merchant.clone(),
+                execution_scope: rejection.execution_scope.clone(),
+                category: None,
+                task_id: rejection.task_id.clone(),
+                reason: rejection.reason.clone(),
+                workload_profile: rejection.workload_profile.clone(),
+            },
+            policy_decision_response(&rejection.evaluation.evaluation).summary,
+            rejection.evaluation.evaluation.reasons.clone(),
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn approval_review_response(
+    approval_request_id: String,
+    status: &str,
+    operation_key: String,
+    account_id: String,
+    agent_id: String,
+    request: &hubu_core::spend::SpendRequest,
+    policy_summary: String,
+    policy_reasons: Vec<String>,
+) -> SpendApprovalHttpResponse {
+    SpendApprovalHttpResponse {
+        approval_request_id,
+        status: status.to_string(),
+        review: SpendApprovalReviewHttpResponse {
+            operation_key,
+            account_id,
+            agent_id,
+            amount_cents: request.amount_cents,
+            currency: request.currency.to_string(),
+            merchant: request.merchant.clone(),
+            execution_scope: request.execution_scope.clone(),
+            workload_profile: request.workload_profile.clone(),
+            reason: request.reason.clone(),
+            policy_summary,
+            policy_reasons,
+        },
+    }
+}
+
+fn approval_public_ids(
+    approval: &ApprovedSpendAuthorization,
+    state: &ServerState,
+) -> Result<(String, String)> {
+    public_ids_for_agent_account(&approval.agent_id, &approval.agent_account_id, state)
+}
+
+fn rejection_public_ids(
+    rejection: &RejectedSpendAuthorization,
+    state: &ServerState,
+) -> Result<(String, String)> {
+    public_ids_for_agent_account(&rejection.agent_id, &rejection.agent_account_id, state)
+}
+
+fn public_ids_for_agent_account(
+    agent_id: &AgentId,
+    agent_account_id: &hubu_common::ids::AgentAccountId,
+    state: &ServerState,
+) -> Result<(String, String)> {
+    let registration = state
+        .registration
+        .lock()
+        .map_err(|_| anyhow!("registration manager lock poisoned"))?;
+    let account = registration
+        .account_for_agent(agent_id)?
+        .ok_or_else(|| anyhow!("spend approval account is missing"))?;
+    if &account.id != agent_account_id {
+        return Err(anyhow!("spend approval account does not match decision"));
+    }
+    let agent = registration
+        .agent_for_id(agent_id)?
+        .ok_or_else(|| anyhow!("spend approval agent is missing"))?;
+    Ok((account.pub_id, agent.pub_id))
+}
+
+fn stored_spend_scope_inputs(
+    approval: &ApprovedSpendAuthorization,
+) -> SpendScopeInputsHttpResponse {
+    spend_scope_inputs(
+        approval.amount_cents,
+        approval.currency,
+        true,
+        approval.merchant.as_deref(),
+        None,
+        approval.execution_scope.as_ref(),
+    )
+}
+
+fn stored_rejection_scope_inputs(
+    rejection: &RejectedSpendAuthorization,
+) -> SpendScopeInputsHttpResponse {
+    spend_scope_inputs(
+        rejection.amount_cents,
+        rejection.currency,
+        true,
+        rejection.merchant.as_deref(),
+        None,
+        rejection.execution_scope.as_ref(),
+    )
 }
 
 fn scope_identity(id: &str, display_name: &str) -> ScopeIdentity {
@@ -3169,8 +3535,8 @@ fn legacy_execution_scope(merchant: &str) -> ExecutionScope {
 fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let request: SpendHttpRequest = serde_json::from_str(&body)?;
     let authorization = match evaluate_and_reserve_spend(request, state)? {
-        SpendAuthorization::Authorized(authorization) => authorization,
-        SpendAuthorization::Response(response) => return Ok(response),
+        SpendAuthorization::Authorized(authorization) => *authorization,
+        SpendAuthorization::Response(response) => return Ok(*response),
     };
     if state
         .spend
@@ -3206,6 +3572,11 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let workload_profile = authorization.approval.workload_profile.clone();
     let authorization_expires_at = authorization.approval.token.expires_at.to_rfc3339();
     let policy_decision = policy_decision_response(&authorization.approval.evaluation.evaluation);
+    let approval = approval_for_approved_spend(
+        &authorization.approval,
+        &authorization.account_pub_id,
+        &authorization.agent_pub_id,
+    );
 
     Ok(SpendHttpResponse {
         operation_key: authorization.approval.operation_key.clone(),
@@ -3218,6 +3589,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         reasons: authorization.approval.evaluation.evaluation.reasons.clone(),
         scope_inputs: authorization.scope_inputs,
         policy_decision,
+        approval,
         auth_token_id: Some(auth_token_id),
         execution_scope: authorization.approval.execution_scope.clone(),
         workload_profile,
@@ -3268,7 +3640,7 @@ fn resolve_executor_spend(body: String, state: &ServerState) -> Result<ExecutorS
         let decision = spend
             .decision_record(&token.spend_decision_id)
             .ok_or_else(|| anyhow!("spend decision is missing"))?;
-        if decision.owner_user_id != user.user_id || decision.evaluation.decision != Effect::Allow {
+        if decision.owner_user_id != user.user_id {
             return Err(anyhow!("spend authorization is not active"));
         }
         (token, decision)
@@ -4016,8 +4388,8 @@ struct AuthorizedSpend {
 }
 
 enum SpendAuthorization {
-    Authorized(AuthorizedSpend),
-    Response(SpendHttpResponse),
+    Authorized(Box<AuthorizedSpend>),
+    Response(Box<SpendHttpResponse>),
 }
 
 fn evaluate_and_reserve_spend(
@@ -4133,12 +4505,12 @@ fn evaluate_and_reserve_spend(
                 &approval.evaluation,
                 true,
             );
-            Ok(SpendAuthorization::Authorized(AuthorizedSpend {
+            Ok(SpendAuthorization::Authorized(Box::new(AuthorizedSpend {
                 account_pub_id,
                 agent_pub_id,
                 approval,
                 scope_inputs,
-            }))
+            })))
         }
         SpendAuthorizationOutcome::Rejected(rejection) => {
             log_spend_policy_evaluated(
@@ -4148,11 +4520,8 @@ fn evaluate_and_reserve_spend(
                 &rejection.evaluation,
                 false,
             );
-            Ok(SpendAuthorization::Response(spend_rejection_response(
-                rejection,
-                account_pub_id,
-                agent_pub_id,
-                scope_inputs,
+            Ok(SpendAuthorization::Response(Box::new(
+                spend_rejection_response(rejection, account_pub_id, agent_pub_id, scope_inputs),
             )))
         }
     }
@@ -4190,6 +4559,7 @@ fn spend_rejection_response(
     scope_inputs: SpendScopeInputsHttpResponse,
 ) -> SpendHttpResponse {
     let policy_decision = policy_decision_response(&rejection.evaluation.evaluation);
+    let approval = approval_for_rejected_spend(&rejection, &account_pub_id, &agent_pub_id);
     SpendHttpResponse {
         operation_key: rejection.operation_key,
         task_id: rejection.task_id,
@@ -4201,6 +4571,7 @@ fn spend_rejection_response(
         reasons: rejection.reasons,
         scope_inputs,
         policy_decision,
+        approval,
         auth_token_id: None,
         execution_scope: rejection.execution_scope,
         workload_profile: rejection.workload_profile,
@@ -8127,10 +8498,7 @@ rules: []
             pending.body["attempt_history"][0]["final_decision"],
             "pending_approval"
         );
-        assert_eq!(
-            pending.body["retry_guidance"]["action"],
-            "create_new_operation"
-        );
+        assert_eq!(pending.body["retry_guidance"]["action"], "replay_exactly");
 
         let changed = route(
             authenticated_json_request(
@@ -8150,6 +8518,233 @@ rules: []
             changed.body["retry_guidance"]["action"],
             "create_new_operation"
         );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn pending_approval_can_be_approved_replayed_and_recovered_after_restart() {
+        let (path, state, agent, pending) = setup_pending_approval("approval-resume");
+        assert_eq!(pending.body["decision"], "needs_approval");
+        assert_eq!(pending.body["approval"]["status"], "pending");
+        assert!(pending.body["auth_token_id"].is_null());
+        assert!(pending.body["budget_hold"].is_null());
+        assert_eq!(pending.body["approval"]["review"]["amount_cents"], 600);
+        assert_eq!(
+            pending.body["approval"]["review"]["account_id"],
+            agent.account_id
+        );
+        let approval_request_id = pending.body["approval"]["approval_request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let snapshot = route(
+            authenticated_get_request(&format!(
+                "/spend/approval?approval_request_id={approval_request_id}"
+            )),
+            &state,
+        );
+        assert_eq!(snapshot.status, 200);
+        assert_eq!(snapshot.body["status"], "pending");
+
+        let approved = route(
+            authenticated_json_request(
+                "/spend/approval/resolve",
+                json!({
+                    "approval_request_id": approval_request_id,
+                    "decision": "approve",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(approved.status, 200);
+        assert_eq!(approved.body["decision"], "allow");
+        assert_eq!(approved.body["approval"]["status"], "approved");
+        assert!(approved.body["auth_token_id"].is_string());
+        assert_eq!(approved.body["budget_hold"]["amount_cents"], 600);
+        let auth_token_id = approved.body["auth_token_id"].clone();
+
+        let replay = route(
+            authenticated_json_request(
+                "/spend/authorize",
+                json!({
+                    "operation_key": "approval-resume-operation",
+                    "account_id": agent.account_id,
+                    "amount_cents": 600,
+                    "reason": "requires human approval",
+                    "merchant": "Acme Cafe",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(replay.status, 200);
+        assert_eq!(replay.body["decision"], "allow");
+        assert_eq!(replay.body["approval"]["status"], "approved");
+        assert_eq!(replay.body["auth_token_id"], auth_token_id);
+        assert_eq!(replay.body["idempotent_replay"], true);
+
+        drop(state);
+        let restarted = ServerState::new_with_db_path(&path).unwrap();
+        let recovered = route(
+            authenticated_get_request(&format!(
+                "/spend/approval?approval_request_id={approval_request_id}"
+            )),
+            &restarted,
+        );
+        assert_eq!(recovered.status, 200);
+        assert_eq!(recovered.body["status"], "approved");
+
+        let executor = route(
+            authenticated_json_request(
+                "/spend/executor/resolve",
+                json!({"spend_auth_token_id": auth_token_id}),
+            ),
+            &restarted,
+        );
+        assert_eq!(executor.status, 200);
+        assert_eq!(executor.body["status"], "available");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concurrent_matching_approvals_reuse_one_token_and_hold() {
+        let (path, state, _agent, pending) = setup_pending_approval("approval-concurrent");
+        let approval_request_id = pending.body["approval"]["approval_request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let state = Arc::new(state);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut workers = Vec::new();
+
+        for _ in 0..2 {
+            let state = Arc::clone(&state);
+            let barrier = Arc::clone(&barrier);
+            let approval_request_id = approval_request_id.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                route(
+                    authenticated_json_request(
+                        "/spend/approval/resolve",
+                        json!({
+                            "approval_request_id": approval_request_id,
+                            "decision": "approve",
+                        }),
+                    ),
+                    &state,
+                )
+            }));
+        }
+
+        let responses = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("approval worker should finish"))
+            .collect::<Vec<_>>();
+        assert!(responses.iter().all(|response| response.status == 200));
+        assert_eq!(
+            responses[0].body["auth_token_id"],
+            responses[1].body["auth_token_id"]
+        );
+        assert_eq!(
+            responses[0].body["budget_hold"]["id"],
+            responses[1].body["budget_hold"]["id"]
+        );
+        assert!(responses
+            .iter()
+            .any(|response| response.body["idempotent_replay"] == true));
+
+        drop(state);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn executor_spend_token_cannot_resolve_human_approval() {
+        let (path, state, agent, pending) = setup_pending_approval("approval-auth-boundary");
+        let approval_request_id = pending.body["approval"]["approval_request_id"]
+            .as_str()
+            .unwrap();
+        let executor_authorization = route(
+            authenticated_json_request(
+                "/spend/authorize",
+                json!({
+                    "operation_key": "approval-auth-boundary-executor-operation",
+                    "account_id": agent.account_id,
+                    "amount_cents": 100,
+                    "reason": "executor-scoped credential",
+                    "merchant": "Acme Cafe",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(executor_authorization.status, 200);
+        let executor_token = executor_authorization.body["auth_token_id"]
+            .as_str()
+            .unwrap();
+        let mut request = public_request("POST", "/spend/approval/resolve");
+        request.headers.insert(
+            "authorization".to_string(),
+            format!("Bearer {executor_token}"),
+        );
+        request
+            .headers
+            .insert("content-type".to_string(), "application/json".to_string());
+        request.body = json!({
+            "approval_request_id": approval_request_id,
+            "decision": "approve",
+        })
+        .to_string();
+
+        let response = route(request, &state);
+        assert_eq!(response.status, 401);
+        assert_eq!(response.body["error"], "invalid authorization bearer token");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn denial_is_idempotent_and_conflicting_approval_is_rejected() {
+        let (path, state, _agent, pending) = setup_pending_approval("approval-deny");
+        let approval_request_id = pending.body["approval"]["approval_request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let body = json!({
+            "approval_request_id": approval_request_id,
+            "decision": "deny",
+        });
+
+        let denied = route(
+            authenticated_json_request("/spend/approval/resolve", body.clone()),
+            &state,
+        );
+        assert_eq!(denied.status, 200);
+        assert_eq!(denied.body["decision"], "deny");
+        assert_eq!(denied.body["approval"]["status"], "denied");
+        assert!(denied.body["auth_token_id"].is_null());
+        assert!(denied.body["budget_hold"].is_null());
+
+        let replay = route(
+            authenticated_json_request("/spend/approval/resolve", body),
+            &state,
+        );
+        assert_eq!(replay.status, 200);
+        assert_eq!(replay.body["approval"]["status"], "denied");
+        assert_eq!(replay.body["idempotent_replay"], true);
+
+        let conflict = route(
+            authenticated_json_request(
+                "/spend/approval/resolve",
+                json!({
+                    "approval_request_id": approval_request_id,
+                    "decision": "approve",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(conflict.status, 400);
+        assert!(conflict.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("already denied"));
         std::fs::remove_file(path).ok();
     }
 
@@ -8359,6 +8954,62 @@ rules: []
         let expiration = authorization.authorization_expires_at.unwrap();
         assert!(expiration.ends_with("+00:00") || expiration.ends_with('Z'));
         std::fs::remove_file(path).ok();
+    }
+
+    fn setup_pending_approval(
+        test_name: &str,
+    ) -> (
+        std::path::PathBuf,
+        ServerState,
+        RegisterAgentHttpResponse,
+        HttpResponse,
+    ) {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-{test_name}-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create an explicit user");
+        let agent = register_agent(
+            json!({
+                "name": format!("{test_name}-agent"),
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("agent should register");
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "daily_limit_cents": 500,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("policy should be added");
+        create_test_agent_budget(&state, &agent.agent_id, 1_000);
+        let pending = route(
+            authenticated_json_request(
+                "/spend/authorize",
+                json!({
+                    "operation_key": format!("{test_name}-operation"),
+                    "account_id": agent.account_id,
+                    "amount_cents": 600,
+                    "reason": "requires human approval",
+                    "merchant": "Acme Cafe",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(pending.status, 200);
+        (path, state, agent, pending)
     }
 
     fn setup_executor_authorization(

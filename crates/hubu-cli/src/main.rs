@@ -1524,6 +1524,10 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         args.remove(0);
         return spend_claim_status(base_url, args);
     }
+    if args.first().map(String::as_str) == Some("approval") {
+        args.remove(0);
+        return spend_approval(base_url, args);
+    }
     if args.first().map(String::as_str) == Some("reconcile") {
         args.remove(0);
         return spend_reconcile(base_url, args);
@@ -1623,6 +1627,42 @@ fn spend_claim_status(base_url: &str, mut args: Vec<String>) -> Result<()> {
         &format!("/spend/executor/claim?claim_id={claim_id}"),
     )?;
     print_executor_claim(&response)
+}
+
+fn spend_approval(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_spend_approval_help();
+        return Ok(());
+    }
+    let action = args
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("hubu spend approval requires get, approve, or deny"))?;
+    args.remove(0);
+    let approval_request_id = take_required(&mut args, "--approval-request-id")?;
+    ensure_no_args(args)?;
+
+    match action.as_str() {
+        "get" => {
+            let response = get_json(
+                base_url,
+                &format!("/spend/approval?approval_request_id={approval_request_id}"),
+            )?;
+            print_spend_approval_response(&response)
+        }
+        "approve" | "deny" => {
+            let response = post_json(
+                base_url,
+                "/spend/approval/resolve",
+                json!({
+                    "approval_request_id": approval_request_id,
+                    "decision": action,
+                }),
+            )?;
+            print_spend_response(&response)
+        }
+        _ => bail!("unknown spend approval action `{action}`; use get, approve, or deny"),
+    }
 }
 
 fn take_execution_scope(args: &mut Vec<String>) -> Result<(Option<String>, Option<Value>)> {
@@ -1880,6 +1920,9 @@ fn print_spend_response(response: &Value) -> Result<()> {
     println!("  agent_id: {}", string_at(response, "agent_id")?);
     println!("  decision: {}", string_at(response, "decision")?);
     println!("  decision_id: {}", string_at(response, "decision_id")?);
+    if let Some(approval) = response.get("approval").filter(|value| value.is_object()) {
+        print_spend_approval_response(approval)?;
+    }
     if let Some(inputs) = response.get("scope_inputs").and_then(Value::as_object) {
         println!("  scope_inputs:");
         for field in [
@@ -1996,6 +2039,38 @@ fn print_spend_response(response: &Value) -> Result<()> {
         println!("  consumed: {}", money_at(hold, "consumed_amount_cents")?);
         println!("  frozen: {}", money_at(hold, "frozen_amount_cents")?);
         println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
+    }
+    Ok(())
+}
+
+fn print_spend_approval_response(approval: &Value) -> Result<()> {
+    println!("Spend approval");
+    println!(
+        "  approval_request_id: {}",
+        string_at(approval, "approval_request_id")?
+    );
+    println!("  status: {}", string_at(approval, "status")?);
+    let review = approval
+        .get("review")
+        .ok_or_else(|| anyhow!("server response missing `review`"))?;
+    println!("  operation_key: {}", string_at(review, "operation_key")?);
+    println!("  account_id: {}", string_at(review, "account_id")?);
+    println!("  agent_id: {}", string_at(review, "agent_id")?);
+    println!("  amount: {}", money_at(review, "amount_cents")?);
+    println!(
+        "  workload_profile: {}",
+        string_at(review, "workload_profile")?
+    );
+    println!("  reason: {}", string_at(review, "reason")?);
+    println!("  policy_summary: {}", string_at(review, "policy_summary")?);
+    if let Some(merchant) = review.get("merchant").and_then(Value::as_str) {
+        println!("  merchant: {merchant}");
+    }
+    print_execution_scope(review);
+    if let Some(reasons) = review.get("policy_reasons").and_then(Value::as_array) {
+        for reason in reasons.iter().filter_map(Value::as_str) {
+            println!("  policy_reason: {reason}");
+        }
     }
     Ok(())
 }
@@ -2775,6 +2850,9 @@ fn print_spend_help() {
 Usage:
   hubu spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
   hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend approval get --approval-request-id ID
+  hubu spend approval approve --approval-request-id ID
+  hubu spend approval deny --approval-request-id ID
   hubu spend claim --claim-id ID
   hubu spend reconcile list
   hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-cents CENTS --provider-request-id ID --provider NAME --model NAME --unit-price-cents CENTS --pricing-unit UNIT --artifact-reference REF
@@ -2784,12 +2862,26 @@ Note:
   Spend commands require the agent account id because the account is the spending source. CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
   --amount is a decimal major-unit amount: 5 means USD 5.00 and 0.05 means USD 0.05. USD is the only supported currency; Hubu performs no currency conversion.
   If merchant and typed execution scope are omitted, the CLI shows that omission before submission. Merchant policy conditions then cannot match and the policy may require approval.
+  When authorization returns needs_approval, show the approval review to the human, then use exactly one approval approve or approval deny command with its approval_request_id.
   The client harness must supply one immutable agent-scoped operation key before the first request, then reuse it for authorization, claim, finalization, and every retry.
   --task-id is an optional external business correlation. It is independent of the operation key and descriptive --reason. Omitting it preserves the legacy reason-to-task mapping for retry compatibility.
 
 Examples:
   hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --currency USD --merchant example-model-provider --reason \"Reserve model API credits\"
   hubu spend --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 0.05 --currency USD --merchant example-model-provider --reason \"Purchase API credits\""
+    );
+}
+
+fn print_spend_approval_help() {
+    println!(
+        "Resolve a pending spend request after explicit human review
+
+Usage:
+  hubu spend approval get --approval-request-id ID
+  hubu spend approval approve --approval-request-id ID
+  hubu spend approval deny --approval-request-id ID
+
+The review is immutable. Approving reserves budget and returns an authorization token; it does not invoke a provider. Denial is terminal for that request. Repeating the same decision is idempotent, while a conflicting decision is rejected."
     );
 }
 
@@ -2897,6 +2989,22 @@ mod tests {
             capture_cli_request(|base_url| spend_authorize(base_url, legacy_spend_args()));
         assert_eq!(path, "/spend/authorize");
         assert!(body.get("task_id").is_none());
+    }
+
+    #[test]
+    fn spend_approval_cli_submits_the_explicit_human_decision() {
+        let (path, body) = capture_cli_request(|base_url| {
+            spend_approval(
+                base_url,
+                ["approve", "--approval-request-id", "decision-123"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            )
+        });
+        assert_eq!(path, "/spend/approval/resolve");
+        assert_eq!(body["approval_request_id"], "decision-123");
+        assert_eq!(body["decision"], "approve");
     }
 
     #[test]

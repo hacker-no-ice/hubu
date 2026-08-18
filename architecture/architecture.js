@@ -54,8 +54,8 @@ const components = {
     copy:
       "Hubu and Gongbu share one source repository, locked workspace, and five-binary release archive. Their binaries remain separate at runtime: Hubu governs spend in the control plane, while Gongbu executes provider work across an authenticated contract.",
     responsibilities: [
-      "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, review protected actions, and reconcile uncertain expired claims.",
-      "Agents discover Hubu through configured MCP tools; trusted client metadata supplies operation and optional task identity outside model-authored arguments, while humans use the CLI for setup and administration.",
+      "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, approve or deny pending spend, review protected actions, and reconcile uncertain expired claims.",
+      "Agents discover Hubu through configured MCP tools; trusted client metadata supplies operation and optional task identity outside model-authored arguments, while pending spend waits for a durable human approve-or-deny result.",
       "For local dogfooding, a repository Codex skill allocates a model-managed operation key once, binds it to immutable spend scope, and persists recovery state outside the Hubu server.",
       "The CLI and MCP adapter are part of broader Hubu, but they are not the Hubu server.",
       "Local HTTP callers reach the API with the Hubu bearer token before protected routes resolve user authority.",
@@ -74,7 +74,7 @@ const components = {
       { label: "Gongbu execution-plane process", x: 326, y: 738, w: 292, h: 112, labelY: 766 },
     ],
     nodes: [
-      { id: "human", label: "Human owner", sub: "funds + policy", x: 48, y: 112, w: 212, h: 100, tone: "human" },
+      { id: "human", label: "Human owner", sub: "funds + decisions", x: 48, y: 112, w: 212, h: 100, tone: "human" },
       { id: "agent", label: "AI agent", sub: "spend requests", x: 48, y: 404, w: 212, h: 100, tone: "agent" },
       { id: "cli", label: "Hubu CLI", sub: "developer commands", x: 350, y: 116, w: 218, h: 96, tone: "surface" },
       { id: "operationKeys", label: "Operation-key skill", sub: "local recipe + SQLite", x: 350, y: 306, w: 218, h: 90, tone: "data", path: "skills/generate-hubu-operation-key/SKILL.md" },
@@ -90,7 +90,7 @@ const components = {
       { id: "ledger", label: "SQLite ledger", sub: "double-entry audit", x: 1080, y: 730, w: 244, h: 96, tone: "data" },
     ],
     edges: [
-      ["human", "cli", "cmd/reconcile", { labelDy: -56 }],
+      ["human", "cli", "approve/deny/reconcile", { labelDy: -56 }],
       ["agent", "operationKeys", "begin/reuse", { fromSide: "right", toSide: "left", waypoints: [{ x: 302, y: 454 }, { x: 302, y: 351 }], labelSegment: 1, labelDx: -28 }],
       ["operationKeys", "mcp", "operation key", { labelDx: 176 }],
       ["cli", "api", "token", { fromSide: "right", toSide: "top", waypoints: [{ x: 650, y: 164 }, { x: 650, y: 190 }, { x: 833, y: 190 }], labelSegment: 2 }],
@@ -145,6 +145,7 @@ const components = {
       "Frames each request at CRLF-CRLF, validates Content-Length, reads exactly the declared body, and bounds header size, body size, and socket read time.",
       "Keeps health and guidance public while requiring a local bearer token for protected routes and a second human capability for reconciliation mutations.",
       "Uses the local token and current user context for protected workflow authority, while refusing to treat executor possession of that token as human reconciliation approval.",
+      "Exposes owner-scoped approval lookup and resolve routes; approve and deny are idempotent, while conflicting resolutions are rejected.",
       "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
       "Delegates authorize/payment to `SpendApprovalService` and claim, lookup, queue selection, settle/release, and reconciliation to `ExecutorClaimService` so both workflows are testable without HTTP.",
       "Bridges wallet payment authorization and durable external executor claims through shared spend and budget state.",
@@ -180,7 +181,8 @@ const components = {
       "The core app layer coordinates managers and repositories for use cases that need more than one domain object. Spend approval and executor claim lifecycle services can be tested directly without exercising HTTP routes.",
     responsibilities: [
       "Atomically admits an immutable spend-attempt revision before evaluation; only all-denied, side-effect-free history permits corrected scope.",
-      "Evaluates a spend request against the selected policy and appends its final authorization outcome separately from the raw policy evaluation.",
+      "Evaluates a spend request against the selected policy and records allow or deny as final while preserving needs_approval as a durable pending decision.",
+      "Resolves pending spend exactly once: approval issues the scoped token and budget hold, while denial creates neither.",
       "Reserves exactly one active agent budget for an allowed spend decision.",
       "Persists the spend auth token and frozen budget hold after the budget accepts the request.",
       "Submits wallet payments, persists payment attempts, marks successful tokens used, and settles, releases, or keeps the hold frozen according to the failed-payment retry policy.",
@@ -190,7 +192,7 @@ const components = {
     links: [sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spend, sharedLinks.budget, sharedLinks.persistence, sharedLinks.payment, sharedLinks.paymentAttempt],
     nodes: [
       { id: "input", label: "Use-case input", sub: "internal IDs + policy", x: 78, y: 112, w: 230, h: 92, tone: "core" },
-      { id: "approval", label: "Spend approval", sub: "authorize + payment", x: 410, y: 72, w: 224, h: 92, tone: "core", path: "crates/hubu-core/src/app/spend_approval.rs" },
+      { id: "approval", label: "Spend approval", sub: "wait + resolve + pay", x: 410, y: 72, w: 224, h: 92, tone: "core", path: "crates/hubu-core/src/app/spend_approval.rs" },
       { id: "claims", label: "Executor claims", sub: "claim + reconcile", x: 410, y: 282, w: 224, h: 92, tone: "core", path: "crates/hubu-core/src/app/executor_claim.rs" },
       { id: "managers", label: "Domain managers", sub: "spend + budget", x: 410, y: 492, w: 224, h: 92, tone: "core", path: "crates/hubu-core/src/spend/manager.rs" },
       { id: "persist", label: "Governance store", sub: "claims + receipts", x: 798, y: 188, w: 238, h: 98, tone: "data", path: "crates/hubu-core/src/persistence.rs" },
@@ -445,7 +447,7 @@ const components = {
     copy:
       "The CLI is the human developer surface and setup helper. It prepares registration envelopes, posts JSON to the local API, configures Codex MCP discovery, and prints compact reviews and results.",
     responsibilities: [
-      "Supports init, Codex MCP setup, register, user list and spending-target commands, protocol, declarative policy apply/list/show/export/history/diff, agent list with scoped/all modes, budget, spend, ledger, and health commands.",
+      "Supports init, Codex MCP setup, register, user list and spending-target commands, protocol, declarative policy apply/list/show/export/history/diff, agent list with scoped/all modes, budget, spend approval get/approve/deny, ledger, and health commands.",
       "Writes a managed Codex config block that lets agents in other projects discover Hubu MCP tools without reading the Hubu repo.",
       "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
       "Loads the local Hubu token from env or file and sends it as a bearer header on HTTP JSON requests.",
@@ -475,18 +477,18 @@ const components = {
       "Fails closed on unknown backend versions or schemas and advertises only tools whose owning backend is compatible and callable.",
       "Allows the healthy backend to remain usable during the other backend's outage without fallback, queuing, or cross-boundary retries.",
       "Can be wired into Codex by `hubu init codex` so agents outside the Hubu repository see Hubu tools at session startup.",
-      "Publishes a generic client approval profile so any harness can auto-approve read/spend tools and prompt before setup/admin tools.",
-      "Uses Codex per-tool approval overrides as one rendering of that profile while leaving Hubu policy responsible for needs_approval outcomes.",
+      "Publishes a generic client approval profile so any harness can auto-approve reads and spend submission but prompt before resolving a needs_approval decision.",
+      "Uses Codex per-tool approval overrides as one rendering of that profile while leaving Hubu policy responsible for creating needs_approval outcomes.",
       "Annotates tools with read-only, destructive, idempotent, open-world, and Hubu approval hints.",
       "Keeps operation_key and task_id out of model-visible spend schemas, validates trusted platform metadata, and injects those identities into the HTTP request.",
       "Leaves durable operation-key allocation and recovery to the client platform and HUB-31.",
-      "Loads the local Hubu token, forwards tool calls to the HTTP API, and marks needs_approval spend responses for the agent client.",
+      "Loads the local Hubu token, forwards tool calls to the HTTP API, returns durable approval status, and protects the explicit approve-or-deny mutation behind the trusted client gate.",
     ],
     links: [sharedLinks.mcp, sharedLinks.gongbuMcp, sharedLinks.unifiedMcpContract, ["MCP transport doc", "docs/mcp-transport.md"], sharedLinks.api],
     nodes: [
       { id: "agent", label: "Agent client", sub: "args + trusted metadata", x: 78, y: 134, w: 220, h: 92, tone: "agent" },
       { id: "tools", label: "Unified router", sub: "planned static routing", x: 430, y: 134, w: 230, h: 92, tone: "core" },
-      { id: "approval", label: "Hubu adapter", sub: "governance + approvals", x: 430, y: 356, w: 230, h: 92, tone: "human" },
+      { id: "approval", label: "Hubu adapter", sub: "governance + wait/resume", x: 430, y: 356, w: 230, h: 92, tone: "human" },
       { id: "api", label: "Gongbu adapter", sub: "execution + artifacts", x: 802, y: 244, w: 220, h: 92, tone: "executor" },
     ],
     edges: [
@@ -505,6 +507,7 @@ const components = {
       "Uses the repository skill to allocate each local-dogfood operation key once and persist its immutable scope in `.hubu/operation-keys.sqlite3` for retry and process recovery.",
       "Submits structured spend intent with amount, descriptive reason, merchant, and agent account identity; optional business task correlation remains separate.",
       "Reuses one platform-owned operation key throughout the spend workflow and allocates a different key for intentionally distinct work.",
+      "On needs_approval, shows the compact review, waits, reads or submits the human decision, and resumes from the durable approved or denied state.",
       "Receives allow, needs_approval, or deny decisions with traceable reasons.",
     ],
     links: [sharedLinks.mcp, sharedLinks.cli, sharedLinks.spend, sharedLinks.registrationProtocol, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper],
@@ -513,7 +516,7 @@ const components = {
       { id: "policy", label: "User policy", sub: "human-authored", x: 436, y: 110, w: 220, h: 92, tone: "human" },
       { id: "operation", label: "Operation registry", sub: "scope + stable key", x: 90, y: 336, w: 220, h: 92, tone: "data", path: "skills/generate-hubu-operation-key/scripts/operation_keys.py" },
       { id: "spend", label: "Spend request", sub: "structured intent", x: 436, y: 336, w: 220, h: 92, tone: "agent" },
-      { id: "decision", label: "Decision", sub: "trace + token", x: 806, y: 336, w: 220, h: 92, tone: "core" },
+      { id: "decision", label: "Decision", sub: "wait/allow/deny", x: 806, y: 336, w: 220, h: 92, tone: "core" },
     ],
     edges: [
       ["register", "policy", "inherits"],
@@ -532,6 +535,7 @@ const components = {
       "Registers humans with separate username and display name fields.",
       "Reviews current owner context, agent name/version, and protected setup actions.",
       "Funds governance by creating a user-level policy and agent budget before agent spending, with an optional advisory spending target for aggregate allocations.",
+      "Reviews pending spend context and resolves it explicitly as approve or deny; repeated matching decisions are safe and conflicts are rejected.",
     ],
     links: [sharedLinks.cli, sharedLinks.mcp, sharedLinks.registrationProtocol, sharedLinks.budget],
     nodes: [
@@ -580,7 +584,7 @@ const sidebarHighlights = {
     "Transport concerns stay outside domain orchestration.",
   ],
   app: [
-    "Approval services authorize and reserve spend.",
+    "Approval services persist pending decisions and resolve them once.",
     "Claim services coordinate executor settlement and release.",
     "State transitions are persisted atomically.",
   ],
@@ -623,16 +627,17 @@ const sidebarHighlights = {
     "The accepted unified contract keeps all existing public tool names stable.",
     "A static routing map sends each call to exactly one owning backend.",
     "Compatibility and partial availability fail closed without merging failure domains.",
+    "Pending spend waits for an explicit protected approve or deny.",
   ],
   agent: [
     "The agent reuses a scope-bound operation key.",
-    "Hubu authorizes spend before any billable work.",
+    "The agent waits when Hubu requires a human decision.",
     "Execution finishes by settling or releasing the hold.",
   ],
   human: [
     "The owner initializes and funds the control plane.",
     "Policies and budgets define agent authority.",
-    "Protected actions and uncertain claims return for review.",
+    "Pending spend returns for an explicit approve-or-deny review.",
   ],
 };
 
