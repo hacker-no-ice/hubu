@@ -233,7 +233,7 @@ async fn submit(
     operation_key: &str,
 ) -> ExecutionResponse {
     let response = client
-        .post(format!("{base_url}/v1/executions"))
+        .post(format!("{base_url}/v2/executions"))
         .bearer_auth(CALLER_TOKEN)
         .json(&request(operation_key))
         .send()
@@ -274,7 +274,7 @@ async fn wait_for_terminal(
 
 fn request(operation_key: &str) -> Value {
     json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "spend_auth_token_id": operation_key,
         "input": {"prompt": "cat", "image_count": 1},
         "input_schema_version": 1,

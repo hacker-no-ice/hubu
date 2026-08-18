@@ -1,13 +1,24 @@
 {
   "schema_version": 1,
-  "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
+  "operation_key": "00000000-0000-4000-8000-000000000123",
+  "hubu_authorization_id": "00000000-0000-4000-8000-000000000123",
+  "hubu_claim_id": null,
+  "hubu_token_reference": "00000000-0000-4000-8000-000000000123",
+  "authorization": {"amount_minor": 100, "currency": "USD"},
+  "execution_scope": {
+    "schema_version": 1,
+    "provider": {"id": "provider:local:fixture", "display_name": "Local fixture provider"},
+    "executor": {"id": "executor:gongbu:image", "display_name": "Gongbu image executor"},
+    "capability": {"id": "capability:image:generate", "display_name": "Generate image"},
+    "billing_merchant": {"id": "merchant:local", "display_name": "Local merchant"}
+  },
   "input": {
     "prompt": "A small blue circle",
     "image_count": 1
   },
   "input_schema_version": 1,
   "workload_type": "image_generation",
-  "provider": "google",
-  "adapter": "gemini_image",
-  "model": "gemini-2.5-flash-image"
+  "provider": "example",
+  "adapter": "fixture",
+  "model": "image-v1"
 }

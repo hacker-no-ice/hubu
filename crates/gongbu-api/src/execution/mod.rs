@@ -328,6 +328,7 @@ impl Repository {
         c.pragma_update(None, "foreign_keys", "ON")?;
         c.pragma_update(None, "busy_timeout", 5000)?;
         c.execute_batch(MIGRATION)?;
+        migrate_legacy_authorization_aliases(&c)?;
         migrate_artifact_storage_columns(&c)?;
         migrate_resolved_target_columns(&c)?;
         migrate_execution_scope_column(&c)?;
@@ -354,7 +355,7 @@ impl Repository {
         if authorization.is_some_and(|authorization| {
             authorization.account_id != n.account_id
                 || authorization.operation_key != n.operation_key
-                || authorization.decision_id != n.hubu_authorization_id
+                || authorization.spend_auth_token_id != n.hubu_authorization_id
                 || authorization.spend_auth_token_id != n.hubu_token_reference.as_str()
                 || authorization.amount_minor != n.authorized_minor
                 || !authorization
@@ -1157,7 +1158,7 @@ impl Repository {
             "last_confirmed_step": last_confirmed_step,
             "redacted_error": redacted_error.map(|v| self.1.redact(v)),
             "pricing_snapshot": execution.pricing_snapshot,
-            "authorization": {"account_id": execution.account_id, "operation_key": execution.operation_key, "authorization_id": execution.hubu_authorization_id, "claim_id": execution.hubu_claim_id, "authorized_minor": execution.authorized_minor, "currency": execution.authorization_currency},
+            "authorization": {"account_id": execution.account_id, "operation_key": execution.operation_key, "spend_auth_token_id": execution.hubu_token_reference.as_str(), "claim_id": execution.hubu_claim_id, "authorized_minor": execution.authorized_minor, "currency": execution.authorization_currency},
             "provider_outcome": attempt.as_ref().map(|a| &a.outcome),
             "usage": attempt.as_ref().and_then(|a| a.usage.as_ref()),
             "receipt": receipt.as_ref().map(|r| serde_json::json!({"receipt_id":r.receipt_id,"settlement_minor":r.settlement_minor,"currency":r.currency,"transmission_started_at":r.transmission_started_at,"settled_at":r.settled_at,"hubu_settlement_id":r.hubu_settlement_id})),
@@ -1287,6 +1288,17 @@ fn migrate_artifact_storage_columns(c: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    Ok(())
+}
+fn migrate_legacy_authorization_aliases(c: &Connection) -> rusqlite::Result<()> {
+    // These original v1 columns both meant the opaque Hubu spend-auth token
+    // identifier. A short-lived pre-HUB-70 build wrote decision IDs into the
+    // misleadingly named column; the separately persisted snapshot remains the
+    // sole authoritative decision-ID record.
+    c.execute(
+        "UPDATE executions SET hubu_authorization_id=hubu_token_reference WHERE hubu_authorization_id<>hubu_token_reference",
+        [],
+    )?;
     Ok(())
 }
 fn migrate_resolved_target_columns(c: &Connection) -> rusqlite::Result<()> {
@@ -1427,6 +1439,7 @@ fn map_lifecycle_outcome(value: Option<String>) -> rusqlite::Result<Option<Lifec
 fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
     if n.account_id.trim().is_empty()
         || n.operation_key.trim().is_empty()
+        || n.hubu_authorization_id != n.hubu_token_reference.as_str()
         || n.authorized_minor < 0
         || n.input_schema_version < 1
         || n.pricing_schema_version < 1
@@ -1569,7 +1582,7 @@ mod tests {
         CreateExecutionParams {
             account_id: a.into(),
             operation_key: k.into(),
-            hubu_authorization_id: "auth".into(),
+            hubu_authorization_id: "sha256:abc".into(),
             hubu_claim_id: Some("claim".into()),
             hubu_token_reference: HubuTokenReference::new("sha256:abc").unwrap(),
             authorized_minor: 500,
@@ -1708,6 +1721,97 @@ mod tests {
             restarted.list_nonterminal_execution_ids().unwrap(),
             vec![pending.execution_id]
         );
+    }
+
+    #[test]
+    fn migration_collapses_short_lived_decision_value_without_losing_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hub-72-layout.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(MIGRATION).unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        connection.execute(
+            "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version) VALUES('hub-72-row','account-a','operation','decision-1','token-1',100,'USD','{}','sha256:input',1,'image_generation/example/fixture/image-v1','provider-v1',?1,'{}',1,'{\"schema_version\":1,\"provider\":{\"id\":\"provider:local:fixture\",\"display_name\":\"Local fixture provider\"},\"executor\":{\"id\":\"executor:gongbu:image\",\"display_name\":\"Gongbu image executor\"},\"capability\":{\"id\":\"capability:image:generate\",\"display_name\":\"Generate image\"},\"billing_merchant\":{\"id\":\"merchant:local\",\"display_name\":\"Local merchant\"}}','pending','now','now',0)",
+            [&digest],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,workload_profile,expires_at,authorization_status,reason) VALUES('hub-72-row','account-a','agent-a','operation','decision-1','token-1',100,'USD','{\"schema_version\":1,\"provider\":{\"id\":\"provider:local:fixture\",\"display_name\":\"Local fixture provider\"},\"executor\":{\"id\":\"executor:gongbu:image\",\"display_name\":\"Gongbu image executor\"},\"capability\":{\"id\":\"capability:image:generate\",\"display_name\":\"Generate image\"},\"billing_merchant\":{\"id\":\"merchant:local\",\"display_name\":\"Local merchant\"}}','image_generation','2026-08-05T21:00:00Z','available','migration fixture')",
+            [],
+        ).unwrap();
+        drop(connection);
+
+        let repository = Repository::open(&path, Redactor::default()).unwrap();
+        let execution = repository.get_execution("hub-72-row").unwrap();
+        assert_eq!(execution.hubu_authorization_id, "token-1");
+        assert_eq!(execution.hubu_token_reference.as_str(), "token-1");
+        let snapshot = repository
+            .get_hubu_authorization_snapshot("hub-72-row")
+            .unwrap();
+        assert_eq!(snapshot.decision_id, "decision-1");
+        assert_eq!(snapshot.spend_auth_token_id, "token-1");
+    }
+
+    #[test]
+    fn exact_pre_snapshot_database_migrates_replays_and_preserves_reconciliation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pre-hub-70.sqlite3");
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(include_str!(
+                "../../../../fixtures/gongbu-pre-authorization-snapshot.sql"
+            ))
+            .unwrap();
+        assert_eq!(
+            legacy
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='hubu_authorization_snapshots'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        drop(legacy);
+
+        let repository = Repository::open(&path, Redactor::default()).unwrap();
+        assert_eq!(repository.count("hubu_authorization_snapshots"), 0);
+        let replay = repository
+            .get_execution_by_hubu_token("account-a", "legacy-token")
+            .unwrap();
+        assert_eq!(replay.execution_id, "legacy-reconciliation");
+        let reconciliation = repository
+            .get_reconciliation("legacy-reconciliation")
+            .unwrap();
+        assert_eq!(
+            reconciliation.evidence["provider_request_id"],
+            "provider-before-upgrade"
+        );
+        assert_eq!(reconciliation.automatic_attempts, 2);
+        assert!(reconciliation.automatic_attempts_exhausted);
+        assert!(repository
+            .record_operator_action(
+                "legacy-reconciliation",
+                "operator-confirmed",
+                "release",
+                &json!({"review":"legacy evidence retained"}),
+                "2026-08-05T20:02:00Z",
+            )
+            .unwrap());
+        drop(repository);
+
+        let restarted = Repository::open(&path, Redactor::default()).unwrap();
+        let preserved = restarted
+            .get_reconciliation("legacy-reconciliation")
+            .unwrap();
+        assert_eq!(
+            preserved.evidence["provider_request_id"],
+            "provider-before-upgrade"
+        );
+        assert_eq!(
+            preserved.last_operator_action_id.as_deref(),
+            Some("operator-confirmed")
+        );
+        assert_eq!(preserved.last_operator_action.as_deref(), Some("release"));
     }
 
     #[test]
@@ -2179,6 +2283,7 @@ mod tests {
             Err(Error::Invalid("secret-bearing persistence value"))
         ));
         let mut leaked_reference = new("a", "leaked-reference");
+        leaked_reference.hubu_authorization_id = CANARY.into();
         leaked_reference.hubu_token_reference = HubuTokenReference::new(CANARY).unwrap();
         assert!(matches!(
             r.create_execution(&leaked_reference),

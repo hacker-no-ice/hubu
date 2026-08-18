@@ -143,7 +143,7 @@ impl GongbuClient {
     fn create(&self, arguments: Value) -> Result<ToolResult, ToolError> {
         let request: CreateExecutionRequest = parse_arguments(arguments)?;
         let response: ExecutionResponse =
-            self.json_request(reqwest::Method::POST, "v1/executions", Some(&request))?;
+            self.json_request(reqwest::Method::POST, "v2/executions", Some(&request))?;
         Ok(text_result(&response))
     }
 
@@ -356,7 +356,7 @@ impl ToolError {
         ToolResult {
             content: vec![Content::Text {
                 text: json!({
-                    "schema_version": 1,
+                    "schema_version": gongbu_build_info::MCP_SCHEMA_VERSION,
                     "error": { "code": self.code, "message": self.message }
                 })
                 .to_string(),
@@ -507,7 +507,7 @@ pub enum Content {
 
 pub fn tool_definitions() -> Value {
     let create_properties = json!({
-        "schema_version": {"type":"integer","const":1},
+        "schema_version": {"type":"integer","const":2},
         "spend_auth_token_id": {"type":"string","minLength":1,"maxLength":255},
         "input": {"type":"object"},
         "input_schema_version": {"type":"integer","minimum":1},
@@ -606,10 +606,10 @@ mod tests {
     }
 
     fn create_arguments() -> Value {
-        json!({"schema_version":1,"spend_auth_token_id":"hubu-token-1","input":{"prompt":"circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"example","adapter":"fixture","model":"v1"})
+        json!({"schema_version":2,"spend_auth_token_id":"hubu-token-1","input":{"prompt":"circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"example","adapter":"fixture","model":"v1"})
     }
 
-    const EXECUTION: &str = r#"{"schema_version":1,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":null,"failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
+    const EXECUTION: &str = r#"{"schema_version":2,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":null,"failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
 
     #[test]
     fn create_replay_is_forwarded_once_per_call_and_returns_stable_id() {
@@ -626,7 +626,7 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests.iter().all(|request| {
             let request = request.to_ascii_lowercase();
-            request.matches("post /v1/executions").count() == 1
+            request.matches("post /v2/executions").count() == 1
                 && request.contains("authorization: bearer operator-secret")
                 && !request.contains("account_id")
         }));

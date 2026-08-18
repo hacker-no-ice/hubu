@@ -1810,7 +1810,7 @@ mod tests {
     fn execution_in(repo: &Repository) -> Execution {
         repo.create_execution(&CreateExecutionParams {
             account_id: "sandbox-account".into(), operation_key: "sandbox:op-1".into(),
-            hubu_authorization_id: "auth-1".into(), hubu_claim_id: None,
+            hubu_authorization_id: "sandbox-token-ref".into(), hubu_claim_id: None,
             hubu_token_reference: HubuTokenReference::new("sandbox-token-ref").unwrap(),
             authorized_minor: 100, authorization_currency: "USD".into(),
             normalized_input: json!({"prompt":"circle"}), input_hash: "hash".into(),

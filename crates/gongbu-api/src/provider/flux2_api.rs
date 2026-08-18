@@ -1288,7 +1288,7 @@ mod tests {
             .create_execution(&CreateExecutionParams {
                 account_id: "account".into(),
                 operation_key: "flux-fixture".into(),
-                hubu_authorization_id: "auth".into(),
+                hubu_authorization_id: "token-ref".into(),
                 hubu_claim_id: Some("claim".into()),
                 hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
                 authorized_minor: 45,

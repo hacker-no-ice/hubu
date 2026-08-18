@@ -581,10 +581,18 @@ async fn dispatch(State(state): State<ApplicationState>, request: Request<Body>)
                 .unwrap_or_else(|_| json!({"status":"unavailable"})),
         );
     }
-    if method == "POST" && path == "/v1/executions" && !state.ready.load(Ordering::SeqCst) {
+    if method == "POST"
+        && matches!(path.as_str(), "/v1/executions" | "/v2/executions")
+        && !state.ready.load(Ordering::SeqCst)
+    {
+        let schema_version = if path == "/v1/executions" {
+            crate::http::V1_SCHEMA_VERSION
+        } else {
+            crate::http::SCHEMA_VERSION
+        };
         return json_transport(
             StatusCode::SERVICE_UNAVAILABLE,
-            json!({"schema_version":crate::http::SCHEMA_VERSION,"error":{"code":"not_ready","message":"execution admission is temporarily unavailable"}}),
+            json!({"schema_version":schema_version,"error":{"code":"not_ready","message":"execution admission is temporarily unavailable"}}),
         );
     }
     let account = state.authenticator.authenticate(request.headers()).ok();
@@ -852,7 +860,7 @@ mod tests {
         let params = CreateExecutionParams {
             account_id: "account".into(),
             operation_key: "gemini-workflow".into(),
-            hubu_authorization_id: "auth".into(),
+            hubu_authorization_id: "token-ref".into(),
             hubu_claim_id: None,
             hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
             authorized_minor: 25,
@@ -1073,7 +1081,7 @@ mod tests {
         targets.validate().unwrap();
         let repository = Repository::in_memory().unwrap();
         let execution = repository.create_execution(&CreateExecutionParams {
-            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"auth".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:30, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"image_generation/ideogram/ideogram_image/ideogram-v3".into(), config_version:"ideogram-pcv-1".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","unit":"image","unit_amount_minor":30,"quantity":1,"estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:1, execution_scope:None, created_at:"now".into()
+            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"token-ref".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:30, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"image_generation/ideogram/ideogram_image/ideogram-v3".into(), config_version:"ideogram-pcv-1".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","unit":"image","unit_amount_minor":30,"quantity":1,"estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:1, execution_scope:None, created_at:"now".into()
         }).unwrap();
         let root = tempdir().unwrap();
         let artifacts = ArtifactService::new(
@@ -1313,7 +1321,7 @@ mod tests {
                 .create_execution(&CreateExecutionParams {
                     account_id: "account".into(),
                     operation_key: format!("mixed-{provider}"),
-                    hubu_authorization_id: format!("auth-{provider}"),
+                    hubu_authorization_id: format!("token-{provider}"),
                     hubu_claim_id: Some(format!("claim-{provider}")),
                     hubu_token_reference: HubuTokenReference::new(format!("token-{provider}"))
                         .unwrap(),

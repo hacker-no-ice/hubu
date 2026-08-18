@@ -1,4 +1,4 @@
-//! Version 1 authenticated Execution and Artifact HTTP contract.
+//! Versioned authenticated Execution and Artifact HTTP contract.
 //!
 //! Transport adapters authenticate a request, construct an [`AuthenticatedAccount`],
 //! and pass the method/path/body here. Account identity is deliberately absent from
@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 pub use gongbu_build_info::API_SCHEMA_VERSION as SCHEMA_VERSION;
+pub const V1_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthenticatedAccount {
@@ -48,22 +49,15 @@ impl AuthenticatedAccount {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CreateExecutionRequest {
+pub struct CreateExecutionV1Request {
     pub schema_version: u32,
-    #[serde(default)]
-    pub spend_auth_token_id: Option<String>,
-    /// Version-1 compatibility name. New clients use `spend_auth_token_id`.
-    #[serde(default)]
-    pub hubu_token_reference: Option<String>,
-    /// Input-only compatibility assertions from the original v1 envelope.
-    #[serde(default)]
-    pub operation_key: Option<String>,
-    #[serde(default)]
-    pub hubu_authorization_id: Option<String>,
-    #[serde(default)]
+    pub operation_key: String,
+    /// Historical alias for the Hubu spend authorization token identifier.
+    pub hubu_authorization_id: String,
     pub hubu_claim_id: Option<String>,
-    #[serde(default)]
-    pub authorization: Option<Money>,
+    /// Historical alias for the same token identifier as `hubu_authorization_id`.
+    pub hubu_token_reference: String,
+    pub authorization: Money,
     #[serde(default)]
     pub execution_scope: Option<ExecutionScope>,
     pub input: Value,
@@ -72,6 +66,34 @@ pub struct CreateExecutionRequest {
     pub provider: String,
     pub adapter: String,
     pub model: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateExecutionV2Request {
+    pub schema_version: u32,
+    pub spend_auth_token_id: String,
+    pub input: Value,
+    pub input_schema_version: i64,
+    pub workload_type: String,
+    pub provider: String,
+    pub adapter: String,
+    pub model: String,
+}
+
+#[derive(Clone, Debug)]
+struct CreateExecutionRequest {
+    spend_auth_token_id: String,
+    operation_key: Option<String>,
+    hubu_claim_id: Option<String>,
+    authorization: Option<Money>,
+    execution_scope: Option<ExecutionScope>,
+    input: Value,
+    input_schema_version: i64,
+    workload_type: String,
+    provider: String,
+    adapter: String,
+    model: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -185,6 +207,13 @@ impl ApiError {
     fn validation() -> Self {
         Self::new(400, "invalid_request", "request validation failed")
     }
+    fn legacy_token_alias_mismatch() -> Self {
+        Self::new(
+            400,
+            "legacy_token_alias_mismatch",
+            "v1 Hubu token identifier aliases must be equal",
+        )
+    }
     fn not_found() -> Self {
         Self::new(404, "not_found", "resource not found")
     }
@@ -201,11 +230,11 @@ impl ApiError {
     fn internal() -> Self {
         Self::new(500, "internal_error", "request could not be completed")
     }
-    fn response(&self) -> HttpResponse {
+    fn response(&self, schema_version: u32) -> HttpResponse {
         json_response(
             self.status,
             &ErrorResponse {
-                schema_version: SCHEMA_VERSION,
+                schema_version,
                 error: ErrorBody {
                     code: self.code.into(),
                     message: self.message.into(),
@@ -288,7 +317,8 @@ impl Api {
             .and_then(|account| {
                 let segments: Vec<_> = path.trim_matches('/').split('/').collect();
                 match (method, segments.as_slice()) {
-                    ("POST", ["v1", "executions"]) => self.create(account, body),
+                    ("POST", ["v1", "executions"]) => self.create_v1(account, body),
+                    ("POST", ["v2", "executions"]) => self.create_v2(account, body),
                     ("GET", ["v1", "executions", execution_id]) => {
                         self.get_execution(account, execution_id)
                     }
@@ -304,17 +334,44 @@ impl Api {
                     _ => Err(ApiError::not_found()),
                 }
             });
-        result.unwrap_or_else(|error| error.response())
+        let response_schema_version = if path.starts_with("/v1/") {
+            V1_SCHEMA_VERSION
+        } else {
+            SCHEMA_VERSION
+        };
+        result.unwrap_or_else(|error| error.response(response_schema_version))
+    }
+
+    fn create_v1(
+        &self,
+        account: &AuthenticatedAccount,
+        body: &[u8],
+    ) -> Result<HttpResponse, ApiError> {
+        let request: CreateExecutionV1Request =
+            serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
+        let request = translate_v1(request)?;
+        self.create(account, request, V1_SCHEMA_VERSION)
+    }
+
+    fn create_v2(
+        &self,
+        account: &AuthenticatedAccount,
+        body: &[u8],
+    ) -> Result<HttpResponse, ApiError> {
+        let request: CreateExecutionV2Request =
+            serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
+        let request = translate_v2(request)?;
+        self.create(account, request, SCHEMA_VERSION)
     }
 
     fn create(
         &self,
         account: &AuthenticatedAccount,
-        body: &[u8],
+        request: CreateExecutionRequest,
+        response_schema_version: u32,
     ) -> Result<HttpResponse, ApiError> {
-        let request: CreateExecutionRequest =
-            serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
-        let spend_auth_token_id = validate_create(&request)?;
+        validate_create(&request)?;
+        let spend_auth_token_id = request.spend_auth_token_id.clone();
         let normalized_input = canonicalize(&request.input);
         match self
             .repository
@@ -326,7 +383,10 @@ impl Api {
                         .schedule(&existing.execution_id)
                         .map_err(|_| ApiError::internal())?;
                 }
-                return Ok(json_response(200, &execution_response(existing)?));
+                return Ok(json_response(
+                    200,
+                    &execution_response(existing, response_schema_version)?,
+                ));
             }
             Ok(_) => return Err(ApiError::conflict()),
             Err(PersistenceError::NotFound) => {}
@@ -448,7 +508,10 @@ impl Api {
         let params = CreateExecutionParams {
             account_id: account.account_id.clone(),
             operation_key: authorization.operation_key.trim().to_owned(),
-            hubu_authorization_id: authorization.decision_id,
+            // Both legacy execution columns retain their historical token-ID
+            // meaning. The authoritative decision ID exists only in the
+            // separately named Hubu authorization snapshot.
+            hubu_authorization_id: spend_auth_token_id.clone(),
             hubu_claim_id: None,
             hubu_token_reference: HubuTokenReference::new(spend_auth_token_id)
                 .map_err(|_| ApiError::validation())?,
@@ -484,7 +547,10 @@ impl Api {
         self.scheduler
             .schedule(&execution.execution_id)
             .map_err(|_| ApiError::internal())?;
-        Ok(json_response(200, &execution_response(execution)?))
+        Ok(json_response(
+            200,
+            &execution_response(execution, response_schema_version)?,
+        ))
     }
 
     fn authorized_execution(
@@ -514,7 +580,7 @@ impl Api {
         }
         let request: ReconciliationRequest =
             serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
-        if request.schema_version != SCHEMA_VERSION
+        if request.schema_version != V1_SCHEMA_VERSION
             || request.action_id.trim().is_empty()
             || !request.evidence.is_object()
         {
@@ -530,7 +596,10 @@ impl Api {
                 },
             )
             .map_err(|_| ApiError::internal())?;
-        Ok(json_response(202, &execution_response(execution)?))
+        Ok(json_response(
+            202,
+            &execution_response(execution, V1_SCHEMA_VERSION)?,
+        ))
     }
 
     fn get_execution(
@@ -540,7 +609,10 @@ impl Api {
     ) -> Result<HttpResponse, ApiError> {
         Ok(json_response(
             200,
-            &execution_response(self.authorized_execution(account, execution_id)?)?,
+            &execution_response(
+                self.authorized_execution(account, execution_id)?,
+                V1_SCHEMA_VERSION,
+            )?,
         ))
     }
 
@@ -557,7 +629,7 @@ impl Api {
         Ok(json_response(
             200,
             &ArtifactListResponse {
-                schema_version: SCHEMA_VERSION,
+                schema_version: V1_SCHEMA_VERSION,
                 execution_id: execution_id.into(),
                 artifacts: artifacts.into_iter().map(artifact_response).collect(),
             },
@@ -607,10 +679,6 @@ fn immutable_request_matches(
         .as_ref()
         .is_none_or(|value| execution.operation_key == value.trim())
         && request
-            .hubu_authorization_id
-            .as_ref()
-            .is_none_or(|value| execution.hubu_authorization_id == value.trim())
-        && request
             .hubu_claim_id
             .as_ref()
             .is_none_or(|value| execution.hubu_claim_id.as_deref() == Some(value.trim()))
@@ -648,26 +716,57 @@ fn immutable_params_match(execution: &Execution, params: &CreateExecutionParams)
         && execution.model == params.model
 }
 
-fn validate_create(request: &CreateExecutionRequest) -> Result<String, ApiError> {
-    let spend_auth_token_id = match (
-        request.spend_auth_token_id.as_deref(),
-        request.hubu_token_reference.as_deref(),
-    ) {
-        (Some(current), Some(legacy)) if current.trim() != legacy.trim() => {
-            return Err(ApiError::validation());
-        }
-        (Some(current), _) => current.trim(),
-        (None, Some(legacy)) => legacy.trim(),
-        (None, None) => return Err(ApiError::validation()),
-    };
-    if request.schema_version != SCHEMA_VERSION
-        || spend_auth_token_id.is_empty()
+fn translate_v1(request: CreateExecutionV1Request) -> Result<CreateExecutionRequest, ApiError> {
+    let authorization_id = request.hubu_authorization_id.trim();
+    let token_reference = request.hubu_token_reference.trim();
+    if request.schema_version != V1_SCHEMA_VERSION || authorization_id.is_empty() {
+        return Err(ApiError::validation());
+    }
+    if authorization_id != token_reference {
+        return Err(ApiError::legacy_token_alias_mismatch());
+    }
+    Ok(CreateExecutionRequest {
+        spend_auth_token_id: authorization_id.to_owned(),
+        operation_key: Some(request.operation_key),
+        hubu_claim_id: request.hubu_claim_id,
+        authorization: Some(request.authorization),
+        execution_scope: request.execution_scope,
+        input: request.input,
+        input_schema_version: request.input_schema_version,
+        workload_type: request.workload_type,
+        provider: request.provider,
+        adapter: request.adapter,
+        model: request.model,
+    })
+}
+
+fn translate_v2(request: CreateExecutionV2Request) -> Result<CreateExecutionRequest, ApiError> {
+    if request.schema_version != SCHEMA_VERSION {
+        return Err(ApiError::validation());
+    }
+    Ok(CreateExecutionRequest {
+        spend_auth_token_id: request.spend_auth_token_id,
+        operation_key: None,
+        hubu_claim_id: None,
+        authorization: None,
+        execution_scope: None,
+        input: request.input,
+        input_schema_version: request.input_schema_version,
+        workload_type: request.workload_type,
+        provider: request.provider,
+        adapter: request.adapter,
+        model: request.model,
+    })
+}
+
+fn validate_create(request: &CreateExecutionRequest) -> Result<(), ApiError> {
+    let spend_auth_token_id = request.spend_auth_token_id.trim();
+    if spend_auth_token_id.is_empty()
         || spend_auth_token_id.len() > 255
         || request.input_schema_version < 1
         || !request.input.is_object()
         || [
             request.operation_key.as_deref(),
-            request.hubu_authorization_id.as_deref(),
             request.hubu_claim_id.as_deref(),
         ]
         .into_iter()
@@ -693,7 +792,7 @@ fn validate_create(request: &CreateExecutionRequest) -> Result<String, ApiError>
         return Err(ApiError::validation());
     }
     HubuTokenReference::new(spend_auth_token_id).map_err(|_| ApiError::validation())?;
-    Ok(spend_auth_token_id.to_owned())
+    Ok(())
 }
 
 fn legacy_authorization_matches(
@@ -706,10 +805,6 @@ fn legacy_authorization_matches(
         .operation_key
         .as_ref()
         .is_none_or(|value| authorization.operation_key == value.trim())
-        && request
-            .hubu_authorization_id
-            .as_ref()
-            .is_none_or(|value| authorization.decision_id == value.trim())
         && request.hubu_claim_id.is_none()
         && request.authorization.as_ref().is_none_or(|money| {
             money.amount_minor == authorization.amount_cents
@@ -734,7 +829,7 @@ fn immutable_hash(
 ) -> Result<String, ApiError> {
     let scope = json!({
         "operation_key": authorization.operation_key,
-        "hubu_authorization_id": authorization.decision_id,
+        "decision_id": authorization.decision_id,
         "spend_auth_token_id": authorization.spend_auth_token_id,
         "authorization": {
             "amount_minor": authorization.amount_cents,
@@ -777,7 +872,10 @@ fn canonicalize(value: &Value) -> Value {
     }
 }
 
-fn execution_response(execution: Execution) -> Result<ExecutionResponse, ApiError> {
+fn execution_response(
+    execution: Execution,
+    schema_version: u32,
+) -> Result<ExecutionResponse, ApiError> {
     let status = match execution.status.as_str() {
         "pending" => ExecutionStatus::Pending,
         "preflighting" => ExecutionStatus::Preflighting,
@@ -797,7 +895,7 @@ fn execution_response(execution: Execution) -> Result<ExecutionResponse, ApiErro
             .unwrap_or_else(|| "execution failed".into()),
     });
     Ok(ExecutionResponse {
-        schema_version: SCHEMA_VERSION,
+        schema_version,
         execution_id: execution.execution_id,
         operation_key: execution.operation_key,
         status,
@@ -898,7 +996,14 @@ mod tests {
     };
     use image::{DynamicImage, ImageOutputFormat, RgbaImage};
     use serde_json::json;
-    use std::{io::Cursor, sync::Barrier, thread};
+    use std::{
+        io::Cursor,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Barrier,
+        },
+        thread,
+    };
     use tempfile::TempDir;
 
     struct AdmissionAdapter;
@@ -959,12 +1064,16 @@ mod tests {
         _root: TempDir,
     }
 
-    struct TestResolver;
+    #[derive(Default)]
+    struct TestResolver {
+        calls: AtomicUsize,
+    }
     impl SpendAuthorizationResolver for TestResolver {
         fn resolve_authorization(
             &self,
             spend_auth_token_id: &str,
         ) -> Result<crate::hubu::ExecutorSpendResponse, HttpClientError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             let mut response = crate::hubu::ExecutorSpendResponse {
                 operation_key: spend_auth_token_id.into(),
                 reason: "test execution".into(),
@@ -1046,7 +1155,7 @@ mod tests {
         )
         .unwrap();
         let scheduler = Arc::new(Scheduler::default());
-        let resolver = Arc::new(TestResolver);
+        let resolver = Arc::new(TestResolver::default());
         Fixture {
             api: Api::new_with_authorization_resolver(
                 repository.clone(),
@@ -1081,7 +1190,7 @@ mod tests {
         );
         let response = api.handle(
             "POST",
-            "/v1/executions",
+            "/v2/executions",
             Some(&fixture.owner),
             &serde_json::to_vec(&request("over-ceiling")).unwrap(),
         );
@@ -1094,7 +1203,7 @@ mod tests {
 
     fn request(operation_key: &str) -> Value {
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "spend_auth_token_id": operation_key,
             "input": {
                 "prompt": "cat",
@@ -1111,9 +1220,15 @@ mod tests {
 
     fn legacy_request(operation_key: &str) -> Value {
         let mut request = request(operation_key);
-        request["hubu_token_reference"] = request["spend_auth_token_id"].take();
+        request["schema_version"] = json!(1);
+        let token = request
+            .as_object_mut()
+            .unwrap()
+            .remove("spend_auth_token_id")
+            .unwrap();
+        request["hubu_token_reference"] = token.clone();
+        request["hubu_authorization_id"] = token;
         request["operation_key"] = json!(operation_key);
-        request["hubu_authorization_id"] = json!(format!("decision-{operation_key}"));
         request["hubu_claim_id"] = Value::Null;
         request["authorization"] = json!({"amount_minor": 100, "currency": "USD"});
         request["execution_scope"] =
@@ -1122,19 +1237,46 @@ mod tests {
     }
 
     #[test]
-    fn token_only_create_fixture_matches_v1_schema() {
-        let request: CreateExecutionRequest = serde_json::from_str(include_str!(
-            "../../../../fixtures/gongbu-create-execution-v1.json"
+    fn canonical_create_fixture_matches_v2_schema() {
+        let request: CreateExecutionV2Request = serde_json::from_str(include_str!(
+            "../../../../fixtures/gongbu-create-execution-v2.json"
         ))
         .unwrap();
+        assert_eq!(request.schema_version, 2);
         assert_eq!(
-            request.spend_auth_token_id.as_deref(),
-            Some("00000000-0000-4000-8000-000000000123")
+            request.spend_auth_token_id,
+            "00000000-0000-4000-8000-000000000123"
         );
-        assert!(request.hubu_token_reference.is_none());
+    }
+
+    #[test]
+    fn historical_create_fixture_matches_v1_schema() {
+        let raw = include_str!("../../../../fixtures/gongbu-create-execution-v1.json");
+        let request: CreateExecutionV1Request = serde_json::from_str(raw).unwrap();
+        assert_eq!(request.schema_version, 1);
+        assert_eq!(request.hubu_authorization_id, request.hubu_token_reference);
+        let fixture = fixture();
+        let response = fixture.api.handle(
+            "POST",
+            "/v1/executions",
+            Some(&fixture.owner),
+            raw.as_bytes(),
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 1);
     }
 
     fn call_create(fixture: &Fixture, request: &Value) -> HttpResponse {
+        fixture.api.handle(
+            "POST",
+            "/v2/executions",
+            Some(&fixture.owner),
+            &serde_json::to_vec(request).unwrap(),
+        )
+    }
+
+    fn call_create_v1(fixture: &Fixture, request: &Value) -> HttpResponse {
         fixture.api.handle(
             "POST",
             "/v1/executions",
@@ -1153,7 +1295,7 @@ mod tests {
         let first = call_create(&fixture, &request("operation-1"));
         assert_eq!(first.status, 200);
         let first = execution(&first);
-        assert_eq!(first.schema_version, 1);
+        assert_eq!(first.schema_version, 2);
         assert_eq!(first.status, ExecutionStatus::Pending);
         assert_eq!(first.authorization.amount_minor, 100);
 
@@ -1177,7 +1319,9 @@ mod tests {
             Some(&fixture.owner),
             &[],
         );
-        assert_eq!(execution(&fetched), first);
+        let fetched = execution(&fetched);
+        assert_eq!(fetched.schema_version, 1);
+        assert_eq!(fetched.execution_id, first.execution_id);
     }
 
     #[test]
@@ -1190,7 +1334,7 @@ mod tests {
             .get_execution(&created.execution_id)
             .unwrap();
         persisted.hubu_claim_id = Some("claim-created-by-workflow".into());
-        let decoded: CreateExecutionRequest = serde_json::from_value(submitted).unwrap();
+        let decoded = translate_v2(serde_json::from_value(submitted).unwrap()).unwrap();
 
         assert!(immutable_request_matches(
             &persisted,
@@ -1200,26 +1344,55 @@ mod tests {
     }
 
     #[test]
-    fn v1_legacy_envelope_translates_but_mismatches_fail_closed() {
+    fn v1_historical_envelope_translates_and_alias_mismatch_has_no_side_effects() {
         let fixture = fixture();
         let legacy = legacy_request("legacy-token");
-        assert_eq!(call_create(&fixture, &legacy).status, 200);
+        assert_eq!(call_create_v1(&fixture, &legacy).status, 200);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        let schedules_before = fixture.scheduler.0.lock().unwrap().len();
 
-        let mut unequal = request("current-token");
-        unequal["hubu_token_reference"] = json!("different-legacy-token");
-        assert_eq!(call_create(&fixture, &unequal).status, 400);
+        let mut unequal = legacy_request("unequal-token");
+        unequal["hubu_authorization_id"] = json!("different-token");
+        let rejected = call_create_v1(&fixture, &unequal);
+        assert_eq!(rejected.status, 400);
+        let error: ErrorResponse = serde_json::from_slice(&rejected.body).unwrap();
+        assert_eq!(error.schema_version, 1);
+        assert_eq!(error.error.code, "legacy_token_alias_mismatch");
+        assert!(!error.error.message.contains("unequal-token"));
+        assert!(!error.error.message.contains("different-token"));
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), schedules_before);
         assert!(fixture
             .repository
-            .get_execution_by_hubu_token("account-a", "current-token")
+            .get_execution_by_hubu_token("account-a", "unequal-token")
             .is_err());
+    }
 
-        let mut mismatched_legacy = legacy_request("legacy-mismatch");
-        mismatched_legacy["operation_key"] = json!("caller-substituted-operation");
-        assert_eq!(call_create(&fixture, &mismatched_legacy).status, 400);
-        assert!(fixture
-            .repository
-            .get_execution_by_hubu_token("account-a", "legacy-mismatch")
-            .is_err());
+    #[test]
+    fn every_v1_authority_assertion_fails_closed_when_broadened() {
+        let fixture = fixture();
+        let cases = [
+            ("operation", "/operation_key", json!("caller-operation")),
+            ("amount", "/authorization/amount_minor", json!(101)),
+            ("currency", "/authorization/currency", json!("EUR")),
+            (
+                "scope",
+                "/execution_scope/provider/id",
+                json!("provider:other"),
+            ),
+            ("claim", "/hubu_claim_id", json!("caller-claim")),
+        ];
+        for (name, pointer, value) in cases {
+            let token = format!("legacy-{name}-mismatch");
+            let mut request = legacy_request(&token);
+            *request.pointer_mut(pointer).unwrap() = value;
+            assert_eq!(call_create_v1(&fixture, &request).status, 400, "{name}");
+            assert!(fixture
+                .repository
+                .get_execution_by_hubu_token("account-a", &token)
+                .is_err());
+        }
+        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 0);
     }
 
     #[test]
@@ -1267,6 +1440,37 @@ mod tests {
     }
 
     #[test]
+    fn historical_v1_envelope_replays_same_execution_after_restart() {
+        let fixture = fixture();
+        let submitted = legacy_request("legacy-restart-token");
+        let created = execution(&call_create_v1(&fixture, &submitted));
+        let calls_before = fixture.resolver.calls.load(Ordering::SeqCst);
+        let restarted_repository = Repository::open(
+            fixture._root.path().join("gongbu.sqlite3"),
+            crate::redaction::Redactor::default(),
+        )
+        .unwrap();
+        let restarted = Api::new_with_authorization_resolver(
+            restarted_repository,
+            fixture.artifacts.clone(),
+            fixture.api.providers.clone(),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let replay = restarted.handle(
+            "POST",
+            "/v1/executions",
+            Some(&fixture.owner),
+            &serde_json::to_vec(&submitted).unwrap(),
+        );
+        assert_eq!(replay.status, 200);
+        assert_eq!(execution(&replay).execution_id, created.execution_id);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), calls_before);
+    }
+
+    #[test]
     fn authenticated_operator_reconciliation_signals_stable_execution() {
         let fixture = fixture();
         let created: ExecutionResponse = serde_json::from_slice(
@@ -1274,7 +1478,7 @@ mod tests {
                 .api
                 .handle(
                     "POST",
-                    "/v1/executions",
+                    "/v2/executions",
                     Some(&fixture.owner),
                     &serde_json::to_vec(&request("operator-signal")).unwrap(),
                 )
@@ -1375,7 +1579,7 @@ mod tests {
         assert_eq!(
             fixture
                 .api
-                .handle("POST", "/v1/executions", None, b"{}")
+                .handle("POST", "/v2/executions", None, b"{}")
                 .status,
             401
         );
@@ -1422,6 +1626,36 @@ mod tests {
     }
 
     #[test]
+    fn v2_rejects_every_legacy_authorization_field_before_resolution() {
+        let fixture = fixture();
+        for (field, value) in [
+            ("hubu_authorization_id", json!("token")),
+            ("hubu_token_reference", json!("token")),
+            ("operation_key", json!("operation")),
+            ("hubu_claim_id", Value::Null),
+            (
+                "authorization",
+                json!({"amount_minor":100,"currency":"USD"}),
+            ),
+            (
+                "execution_scope",
+                serde_json::to_value(for_target("example", "fixture").unwrap()).unwrap(),
+            ),
+        ] {
+            let token = format!("v2-legacy-{field}");
+            let mut request = request(&token);
+            request[field] = value;
+            assert_eq!(call_create(&fixture, &request).status, 400, "{field}");
+            assert!(fixture
+                .repository
+                .get_execution_by_hubu_token("account-a", &token)
+                .is_err());
+        }
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 0);
+    }
+
+    #[test]
     fn replay_precedes_changed_operator_target_and_catalog_state() {
         let fixture = fixture();
         let created = execution(&call_create(&fixture, &request("operation-1")));
@@ -1462,7 +1696,7 @@ mod tests {
         );
         let replay = restarted.handle(
             "POST",
-            "/v1/executions",
+            "/v2/executions",
             Some(&fixture.owner),
             &serde_json::to_vec(&request("operation-1")).unwrap(),
         );
@@ -1511,7 +1745,7 @@ mod tests {
                 thread::spawn(move || {
                     let body = serde_json::to_vec(&request("operation-race")).unwrap();
                     barrier.wait();
-                    api.handle("POST", "/v1/executions", Some(&owner), &body)
+                    api.handle("POST", "/v2/executions", Some(&owner), &body)
                 })
             })
             .collect();
@@ -1565,7 +1799,7 @@ mod tests {
         text_request["input"] = json!({"prompt": "very long prompt", "input_tokens": 1});
         let response = api.handle(
             "POST",
-            "/v1/executions",
+            "/v2/executions",
             Some(&fixture.owner),
             &serde_json::to_vec(&text_request).unwrap(),
         );
@@ -1611,7 +1845,7 @@ mod tests {
         mixed["input"]["max_output_tokens"] = json!(1);
         let response = api.handle(
             "POST",
-            "/v1/executions",
+            "/v2/executions",
             Some(&fixture.owner),
             &serde_json::to_vec(&mixed).unwrap(),
         );

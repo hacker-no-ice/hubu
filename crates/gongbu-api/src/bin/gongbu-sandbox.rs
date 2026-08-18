@@ -122,7 +122,7 @@ async fn submit(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Sen
         )?
     };
     let request = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "spend_auth_token_id": spend_auth_token_id,
         "input": input,
         "input_schema_version": 1,
@@ -133,7 +133,7 @@ async fn submit(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Sen
     });
     let client = reqwest::Client::new();
     let response = send_json(
-        client.post(format!("{}/v1/executions", context.manifest.gongbu_url)),
+        client.post(format!("{}/v2/executions", context.manifest.gongbu_url)),
         &context.token,
         &request,
     )

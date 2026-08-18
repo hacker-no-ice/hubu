@@ -22,7 +22,7 @@ The separate `gongbu-mcp` crate exposes the authenticated HTTP contract to local
 agent platforms over MCP stdio. See [mcp.md](mcp.md) for operator
 configuration, tool examples, and its opt-in integration test.
 
-## V1 boundary
+## Versioned execution boundary
 
 `Execution` is the persisted aggregate root and is unique by
 `(account_id, operation_key)`. Provider attempts, artifact metadata, receipts,
@@ -74,9 +74,21 @@ durable workflow for settlement. No provider or fixture fallback is installed.
 
 ## Service surface
 
-The authoritative v1 routes are:
+The canonical creation route is `POST /v2/executions`. Its schema version is
+`2`, and its only Hubu authorization input is `spend_auth_token_id`.
 
-- `POST /v1/executions`
+The original `POST /v1/executions` remains available only as a deprecated
+compatibility boundary. Historical v1 callers must send
+`hubu_authorization_id` and `hubu_token_reference` as equal aliases of the same
+opaque spend-auth token ID. Unequal aliases fail before Hubu resolution. Any
+operation, claim, money, or scope assertion that differs from resolved
+authority fails before persistence, scheduling, or provider work. V1 creation is
+supported for every `0.1.x` release and will be removed in `0.2.0`; operators
+must migrate callers to v2 before upgrading to `0.2.0`.
+
+The remaining retrieval and reconciliation routes retain their v1 response
+schemas:
+
 - `GET /v1/executions/{execution_id}`
 - `GET /v1/executions/{execution_id}/artifacts`
 - `POST /v1/executions/{execution_id}/reconciliation`
@@ -88,7 +100,7 @@ stable Temporal workflow. Settlement or release proceeds only when persisted
 execution evidence proves that finalization is safe.
 
 Transport adapters validate authentication before constructing the trusted
-account principal; request bodies cannot override it. Accepted v1 executions
+account principal; request bodies cannot override it. Accepted executions
 run to a terminal outcome; public and in-flight cancellation are deferred to
 HUB-37. Remote artifact fetching, SVG support, retention, cloud storage,
 multi-provider execution, and operator reconciliation remain out of scope.
