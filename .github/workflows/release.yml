@@ -109,7 +109,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-targets --locked
 
       - name: Run core integration flow
         run: ./scripts/integration-core-flow.sh
@@ -117,11 +117,29 @@ jobs:
       - name: Test release packaging
         run: ./scripts/test-release-packaging.sh
 
+      - name: Check immutable release workflow
+        run: python3 scripts/check-release-workflow.py
+
       - name: Verify locked release build
         env:
           HUBU_PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
           HUBU_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
-        run: cargo build --release --locked --bin hubu --bin hubu-server
+          GONGBU_PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
+          GONGBU_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          GONGBU_BUILD_ID: ${{ github.run_id }}.${{ github.run_attempt }}
+        run: >-
+          cargo build --release --locked
+          --bin hubu
+          --bin hubu-server
+          --bin hubu-mcp-server
+          --bin gongbu-server
+          --bin gongbu-mcp
+
+      - name: Verify deterministic unified archive
+        run: >-
+          ./scripts/test-release-archive-runtime.sh
+          "${{ needs.resolve.outputs.version }}"
+          "${{ needs.resolve.outputs.source_commit }}"
 
   build:
     name: Build ${{ matrix.target }}
@@ -144,11 +162,28 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
 
+      - name: Install protobuf compiler on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
+
+      - name: Install protobuf compiler on macOS
+        if: runner.os == 'macOS'
+        run: brew list protobuf >/dev/null 2>&1 || brew install protobuf
+
       - name: Build locked release binaries
         env:
           HUBU_PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
           HUBU_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
-        run: cargo build --release --locked --target "${{ matrix.target }}" --bin hubu --bin hubu-server
+          GONGBU_PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
+          GONGBU_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+          GONGBU_BUILD_ID: ${{ github.run_id }}.${{ github.run_attempt }}
+        run: >-
+          cargo build --release --locked --target "${{ matrix.target }}"
+          --bin hubu
+          --bin hubu-server
+          --bin hubu-mcp-server
+          --bin gongbu-server
+          --bin gongbu-mcp
 
       - name: Package binaries and provenance
         env:
@@ -214,7 +249,7 @@ jobs:
             prerelease_flag+=(--prerelease)
             channel_note="Commit-addressed canary prerelease. Experimental, local-first software using a mock payment rail; not approved for real-money production use. Pin this exact tag and checksum; do not depend on a rolling newest build."
           fi
-          notes=$(printf 'Hubu product version: `%s`\n\nSource commit: `%s`\n\n%s' "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${channel_note}")
+          notes=$(printf 'Hubu product version: `%s`\n\nSource commit: `%s`\n\nBinaries: `hubu`, `hubu-server`, `hubu-mcp-server`, `gongbu-server`, `gongbu-mcp`\n\nExecutor contract: `hubu-spend-executor-v4`\n\n%s' "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${channel_note}")
           gh release create "${RELEASE_TAG}" \
             dist/*.tar.gz dist/SHA256SUMS \
             --target "${SOURCE_COMMIT}" \
@@ -232,6 +267,12 @@ jobs:
           - os: linux-x86_64
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
           - os: macos-arm64
             runner: macos-15
             target: aarch64-apple-darwin

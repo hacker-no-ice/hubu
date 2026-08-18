@@ -1,12 +1,9 @@
 # Hubu Release Runbook
 
-Hubu publishes immutable releases from `.github/workflows/release.yml`. Today,
-the target-specific archives contain `hubu` and `hubu-server`. Gongbu builds
-from the same source repository and locked workspace but is not yet packaged in
-those published archives; HUB-84 tracks the five-binary unified distribution.
-Consumers of a published archive must pin an exact release tag and matching
-SHA-256 checksum; a moving checkout of `main` is not a supported routine
-integration-test dependency.
+Hubu publishes immutable unified Hubu/Gongbu releases from
+`.github/workflows/release.yml`. Consumers must pin an exact release tag and the
+matching SHA-256 checksum. A moving checkout of `main` is not a supported
+routine integration-test dependency.
 
 All current releases are experimental, local-first builds for the localhost
 demo server and mock payment rail. They are not approved for real-money
@@ -16,10 +13,10 @@ not mean production security, capacity, or payment-rail readiness.
 
 ## Versions and channels
 
-The current Hubu archive has two independently visible versions:
+The distribution has two independently visible versions:
 
-- `product_version` identifies the packaged Hubu binaries. Stable releases use
-  SemVer tags such as `v0.1.0`; `main` builds use
+- `product_version` identifies all five production binaries. Stable releases
+  use SemVer tags such as `v0.1.0`; `main` builds use
   `<cargo-version>-main.<12-character-commit>`.
 - `executor_contract` identifies the negotiated external execution protocol.
   It remains `hubu-spend-executor-v4` and does not change merely because the
@@ -47,31 +44,20 @@ money movement.
 
 ## Supported binary targets
 
-Each current target-specific archive contains two production binaries:
+Each release contains exactly five production binaries in a target-specific
+archive:
 
-| Binary | Runtime responsibility |
+| Binary | Separate runtime responsibility |
 | --- | --- |
 | `hubu` | Human/developer control-plane CLI |
-| `hubu-server` | Hubu control-plane HTTP process and governance storage |
+| `hubu-server` | Hubu control-plane HTTP process, governance database, policy, budgets, claims, settlement, and ledger |
+| `hubu-mcp-server` | Hubu's agent-facing MCP adapter to the control plane |
+| `gongbu-server` | Gongbu execution-plane HTTP process, database, Temporal worker, provider credentials/calls, artifacts, and recovery |
+| `gongbu-mcp` | Gongbu's separate agent-facing MCP adapter to the execution plane |
 
-## Unified archive target (HUB-84)
-
-HUB-84 will extend the archive to five production binaries built from one
-source commit and lockfile under one tag, product version, checksum set, and
-provenance identity:
-
-| Binary | Runtime responsibility |
-| --- | --- |
-| `hubu` | Human/developer control-plane CLI |
-| `hubu-server` | Hubu control-plane HTTP process and governance storage |
-| `hubu-mcp-server` | Hubu's agent-facing MCP adapter |
-| `gongbu-server` | Gongbu execution-plane process, storage, workflow, credentials, providers, and artifacts |
-| `gongbu-mcp` | Gongbu's separate agent-facing MCP adapter |
-
-`hubu-bench` and `gongbu-sandbox` will remain development tools rather than
-release artifacts. Unified packaging must not merge the production binaries'
-processes, databases, credentials, provider boundary, failure domain, or MCP
-surfaces.
+`hubu-bench` and `gongbu-sandbox` are development tools and are explicitly
+excluded. A shared archive does not merge processes, databases, credentials,
+provider execution, failure domains, or MCP surfaces.
 
 | Platform | Target | Asset suffix |
 | --- | --- | --- |
@@ -80,14 +66,16 @@ surfaces.
 | macOS Intel | `x86_64-apple-darwin` | `x86_64-apple-darwin.tar.gz` |
 | macOS Apple silicon | `aarch64-apple-darwin` | `aarch64-apple-darwin.tar.gz` |
 
-Every archive includes `PROVENANCE.json` with the product version, full source
-commit, executor contract, Rust target, repository, workflow run, and locked
-dependency declaration. It also includes `LICENSE-MIT`, `LICENSE-APACHE`, and
+Every archive includes `MANIFEST.json` and `PROVENANCE.json`. Both enumerate the
+five binaries, product version, full source commit, executor contract, and Rust
+target; provenance also records the repository, workflow run, and locked
+dependency declaration. The archive carries its own `SHA256SUMS` for every
+manifested file plus `LICENSE-MIT`, `LICENSE-APACHE`,
 `THIRD-PARTY-NOTICES.md`, a target-specific `THIRD-PARTY-LICENSES.txt` bundle,
-and the exact `Cargo.lock` dependency inventory so the applicable project
-licenses and dependency notice material travel with the binaries. Packaging
-fails if any included crate lacks license material. The release includes
-`SHA256SUMS` covering every archive.
+and the exact `Cargo.lock` dependency inventory. License generation covers the
+locked normal dependency graph of all five production binaries and fails when
+an included third-party crate lacks license material. The GitHub Release also
+publishes a top-level `SHA256SUMS` covering all four target archives.
 
 ## Pin, verify, and install
 
@@ -109,15 +97,24 @@ provenance before installing:
 ```sh
 package=${asset%.tar.gz}
 cat "$package/PROVENANCE.json"
-for binary in hubu hubu-server; do
+cat "$package/MANIFEST.json"
+for binary in hubu hubu-server hubu-mcp-server gongbu-server gongbu-mcp; do
   "$package/$binary" --version
 done
-install "$package/hubu" "$package/hubu-server" /usr/local/bin/
+install \
+  "$package/hubu" \
+  "$package/hubu-server" \
+  "$package/hubu-mcp-server" \
+  "$package/gongbu-server" \
+  "$package/gongbu-mcp" \
+  /usr/local/bin/
 ```
 
-The reported `source_commit` must equal the pinned revision and the reported
-`executor_contract` must be `hubu-spend-executor-v4`. Consumers should record
-the exact tag, asset filename, and checksum in their lock/configuration file.
+Every binary's reported `product_version` and `source_commit` must match the
+archive provenance. Its `executor_contract` (or Gongbu's equivalent
+`hubu_executor_contract` field) must be `hubu-spend-executor-v4`. Consumers
+should record the exact tag, asset filename, and checksum in their
+lock/configuration file.
 
 ## Promote a stable release
 
@@ -132,12 +129,15 @@ gh workflow run release.yml \
 ```
 
 The source must be an ancestor of `main`. Promotion reruns formatting, Clippy,
-the locked workspace tests, the core integration flow, and a locked release
-build before creating platform artifacts. After publication, clean GitHub
-runners download the release, verify `SHA256SUMS`, require the project license
-and third-party notice files, verify both binaries' local `--version` metadata,
-start an isolated `hubu-server`, and check `/health` and `/version`. HUB-84 owns
-the future published-archive smoke coverage for Gongbu.
+the locked all-target workspace tests, the core integration flow, packaging
+negative tests, and a locked five-binary release build before creating platform
+artifacts. Before publication, a deterministic native archive smoke verifies
+the five binaries, starts an isolated `hubu-server`, and initializes the two
+separate MCP adapters without making provider calls or spend requests. After
+publication, native runners for all four supported targets download the release,
+verify both checksum layers, manifests, provenance, licenses, notices, lockfile,
+all five `--version` surfaces, Hubu `/health` and `/version`, and both MCP
+initialization surfaces. No smoke test enables provider credentials or spend.
 HTTP probes use bounded connection and total-request timeouts so an unavailable
 or non-responsive server fails the smoke job promptly.
 

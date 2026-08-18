@@ -49,6 +49,12 @@ jobs:
           --bin gongbu-server
           --bin gongbu-mcp
 
+      - name: Test unified release packaging
+        run: ./scripts/test-release-packaging.sh
+
+      - name: Check immutable release workflow
+        run: python3 scripts/check-release-workflow.py
+
       - name: Check default credentials cannot be committed
         run: ./scripts/check-default-credential-ignore.sh
 

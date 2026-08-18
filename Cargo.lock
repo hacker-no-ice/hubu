@@ -987,6 +987,7 @@ name = "hubu-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hubu-common",
  "serde",
  "serde_json",
 ]
