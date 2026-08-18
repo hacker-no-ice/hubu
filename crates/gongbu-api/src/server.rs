@@ -546,7 +546,8 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         repository,
         artifacts,
         providers,
-        hubu,
+        hubu: hubu.clone(),
+        hubu_authorizations: hubu,
         secrets,
         provider_activities: None,
         artifact_activities: None,
@@ -940,7 +941,7 @@ mod tests {
         let root = tempdir().unwrap();
         config(root.path()).validate().unwrap();
         let mut legacy_contract = config(root.path());
-        legacy_contract.hubu.expected_executor_contract = "hubu-spend-executor-v4".into();
+        legacy_contract.hubu.expected_executor_contract = "hubu-spend-executor-v4.1".into();
         assert!(legacy_contract.validate().is_err());
         let mut value = serde_json::to_value(config(root.path())).unwrap();
         value["mock_hubu"] = serde_json::json!(true);

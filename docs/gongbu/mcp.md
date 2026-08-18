@@ -35,8 +35,10 @@ directory, and the two required environment variables above.
 ## Tools
 
 - `gongbu_create_execution` mirrors `POST /v1/executions`. Retrying a client
-  call with the same operation scope relies on Gongbu's `(account_id,
-  operation_key)` replay guarantee; the adapter itself never retries the POST.
+  call with the same `spend_auth_token_id` and execution intent relies on
+  Gongbu's token-to-authoritative-operation replay guarantee; the adapter itself
+  never retries the POST. Money, scope, account, operation key, task ID, and
+  reason come from Hubu or Gongbu's operator catalog, not MCP arguments.
 - `gongbu_get_execution` takes `execution_id`.
 - `gongbu_list_artifacts` takes `execution_id`.
 - `gongbu_get_artifact` takes `artifact_id` and returns safe metadata plus an MCP
@@ -46,7 +48,7 @@ directory, and the two required environment variables above.
 Example `tools/call` request (one JSON object per stdio line):
 
 ```json
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gongbu_create_execution","arguments":{"schema_version":1,"operation_key":"agent-op-001","hubu_authorization_id":"auth-001","hubu_claim_id":null,"hubu_token_reference":"operator-stored-ref","authorization":{"amount_minor":25,"currency":"USD"},"input":{"prompt":"A small blue circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-2.5-flash-image"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gongbu_create_execution","arguments":{"schema_version":1,"spend_auth_token_id":"00000000-0000-4000-8000-000000000123","input":{"prompt":"A small blue circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-2.5-flash-image"}}}
 ```
 
 Example artifact listing:

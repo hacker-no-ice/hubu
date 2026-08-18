@@ -10,7 +10,10 @@ use crate::{
     application::GenericProviderActivities,
     artifact::ArtifactLimits,
     execution::Execution,
-    hubu::{HubuClient, ProductionHubuActivities},
+    hubu::{
+        BudgetHold, ExecutorSpendResponse, HttpClientError, HubuClient, ProductionHubuActivities,
+        SpendAuthorizationResolver,
+    },
     provider::{
         contract::{
             AdapterCapabilities, AdapterOutcome, NormalizedRequest, PricingCatalog,
@@ -739,10 +742,14 @@ impl SandboxRun {
                 .clone()
                 .unwrap_or_else(mock_provider_selection),
             authorization_currency: config.hubu.currency.clone(),
-            authorization_amount_minor: config
-                .provider
-                .maximum_spend_minor
-                .unwrap_or(config.hubu.maximum_authorization_minor.min(100)),
+            authorization_amount_minor: if config.provider.mode == BoundaryMode::Mock {
+                1
+            } else {
+                config
+                    .provider
+                    .maximum_spend_minor
+                    .unwrap_or(config.hubu.maximum_authorization_minor.min(100))
+            },
             database_path: database_path.display().to_string(),
             artifact_root: artifact_root.display().to_string(),
             workflow_root: workflow_root.display().to_string(),
@@ -1293,6 +1300,47 @@ impl HubuActivities for MockHubu {
     }
 }
 
+impl SpendAuthorizationResolver for MockHubu {
+    fn resolve_authorization(
+        &self,
+        spend_auth_token_id: &str,
+    ) -> Result<ExecutorSpendResponse, HttpClientError> {
+        Ok(ExecutorSpendResponse {
+            operation_key: spend_auth_token_id.to_string(),
+            reason: "deterministic sandbox execution".into(),
+            spend_auth_token_id: spend_auth_token_id.to_string(),
+            decision_id: format!("decision-{spend_auth_token_id}"),
+            account_id: self
+                .config
+                .isolated_test_account
+                .clone()
+                .unwrap_or_else(|| "sandbox-account".into()),
+            agent_id: self.config.agent_id.clone(),
+            amount_cents: 1,
+            currency: self.config.currency.clone(),
+            merchant: None,
+            execution_scope: crate::execution_scope::for_target("sandbox", "fixture"),
+            task_id: None,
+            workload_profile: "image_generation".into(),
+            status: "available".into(),
+            expires_at: self
+                .config
+                .authorization_expires_at
+                .clone()
+                .unwrap_or_else(|| "9999-12-31T23:59:59Z".into()),
+            budget_hold: BudgetHold {
+                hold_id: format!("hold-{spend_auth_token_id}"),
+                budget_id: "sandbox-budget".into(),
+                status: "frozen".into(),
+                amount_cents: 1,
+                consumed_amount_cents: 0,
+                frozen_amount_cents: 1,
+                remaining_amount_cents: 0,
+            },
+        })
+    }
+}
+
 fn deterministic_id(kind: &str, seed: u64, key: &str) -> String {
     let digest = Sha256::digest(format!("{kind}:{seed}:{key}").as_bytes());
     let short = digest[..8]
@@ -1478,6 +1526,13 @@ pub enum HubuWiring {
 
 impl HubuWiring {
     pub fn activities(&self) -> Arc<dyn HubuActivities + Send + Sync> {
+        match self {
+            Self::Mock(value) => value.clone(),
+            Self::Real(value) => value.clone(),
+        }
+    }
+
+    pub fn authorization_resolver(&self) -> Arc<dyn SpendAuthorizationResolver + Send + Sync> {
         match self {
             Self::Mock(value) => value.clone(),
             Self::Real(value) => value.clone(),

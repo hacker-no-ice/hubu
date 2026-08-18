@@ -2,7 +2,7 @@
 
 The canonical Hubu protocol is the in-repository
 [Hubu spend executor contract](../spend-executor-contract.md). Gongbu's
-production Hubu activities implement that v4 HTTP contract for claim,
+production Hubu activities implement that v4.2 HTTP contract for resolution, claim,
 inspection, settlement, and release. Sharing a repository and product version
 does not turn this wire boundary into an in-process or shared-database call.
 
@@ -11,14 +11,22 @@ their audit state. Gongbu owns operator-controlled provider configuration,
 provider credentials, provider execution, normalized artifacts, cost
 calculation, and settlement evidence.
 
-Hubu's stored authorization snapshot is authoritative for `operation_key`, the
-optional external `task_id`, and the descriptive `reason`. Current Gongbu
-compatibility requests carry the persisted execution operation key required by
-the v4 claim route, but omit `task_id`; Hubu resolves and returns the authorized
-task correlation and reason. Gongbu must not derive task identity from its
-operation key or accept a new caller-controlled duplicate. The planned
-token-resolution flow will reduce this further to the token plus execution
-intent, with Gongbu resolving the full Hubu snapshot before admission.
+The caller submits only `spend_auth_token_id` plus execution intent and target.
+Gongbu resolves Hubu's read-only authorization snapshot before admission. Hubu
+is authoritative for account, agent, `operation_key`, optional `task_id`,
+`reason`, amount, currency, workload profile, expiry, status, and typed scope.
+Gongbu independently derives the operator-controlled target, typed scope, and
+catalog price and requires exact agreement before it persists or schedules.
+Resolution never claims; the durable workflow claims only after persistence.
+Any preview remains optional UX for obtaining the right authorization amount;
+admission always recomputes from the active operator catalog and never trusts a
+preview or caller-supplied price.
+The original v1 `hubu_token_reference`, `operation_key`,
+`hubu_authorization_id`, `hubu_claim_id`, `authorization`, and
+`execution_scope` fields remain input-only compatibility assertions. When both
+token names are present they must be equal, and every supplied legacy authority
+field must exactly match Hubu's resolved snapshot and Gongbu's derived price and
+scope before persistence. New callers omit them.
 
 Future execution work must use the persisted `Execution` aggregate. It must
 create a `ProviderAttempt` before irreversible provider transmission and use a

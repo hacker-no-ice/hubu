@@ -45,7 +45,10 @@ pub fn for_target(provider: &str, adapter: &str) -> Option<ExecutionScope> {
             "merchant:ideogram",
             "Ideogram",
         ),
-        ("local-mock", _) | ("mock", "deterministic") => (
+        ("local-mock", _)
+        | ("mock", "deterministic")
+        | ("sandbox", "fixture")
+        | ("example", "fixture") => (
             "provider:local:fixture",
             "Local fixture provider",
             "merchant:local",

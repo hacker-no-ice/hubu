@@ -80,6 +80,22 @@ pub struct CreateExecutionParams {
     pub execution_scope: Option<ExecutionScope>,
     pub created_at: String,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HubuAuthorizationSnapshot {
+    pub account_id: String,
+    pub agent_id: String,
+    pub operation_key: String,
+    pub decision_id: String,
+    pub spend_auth_token_id: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub execution_scope: ExecutionScope,
+    pub workload_profile: String,
+    pub expires_at: String,
+    pub authorization_status: String,
+    pub task_id: Option<String>,
+    pub reason: String,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Execution {
     pub execution_id: String,
@@ -318,7 +334,41 @@ impl Repository {
         Ok(Self(Arc::new(Mutex::new(c)), redactor))
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
+        self.create_execution_inner(n, None)
+    }
+
+    pub fn create_execution_with_authorization(
+        &self,
+        n: &CreateExecutionParams,
+        authorization: &HubuAuthorizationSnapshot,
+    ) -> Result<Execution> {
+        self.create_execution_inner(n, Some(authorization))
+    }
+
+    fn create_execution_inner(
+        &self,
+        n: &CreateExecutionParams,
+        authorization: Option<&HubuAuthorizationSnapshot>,
+    ) -> Result<Execution> {
         validate_execution(n)?;
+        if authorization.is_some_and(|authorization| {
+            authorization.account_id != n.account_id
+                || authorization.operation_key != n.operation_key
+                || authorization.decision_id != n.hubu_authorization_id
+                || authorization.spend_auth_token_id != n.hubu_token_reference.as_str()
+                || authorization.amount_minor != n.authorized_minor
+                || !authorization
+                    .currency
+                    .eq_ignore_ascii_case(&n.authorization_currency)
+                || n.execution_scope.as_ref() != Some(&authorization.execution_scope)
+                || authorization.workload_profile != n.workload_type
+                || authorization.authorization_status != "available"
+                || authorization.agent_id.trim().is_empty()
+                || authorization.expires_at.trim().is_empty()
+                || authorization.reason.trim().is_empty()
+        }) {
+            return Err(Error::Invalid("Hubu authorization snapshot"));
+        }
         let id = Uuid::new_v4().to_string();
         self.reject_registered_secrets([
             n.account_id.as_str(),
@@ -358,6 +408,14 @@ impl Repository {
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,'pending',?23,?23,0)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,n.authorized_minor,n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,n.provider_config_digest,j(&n.pricing_snapshot),n.pricing_schema_version,execution_scope,n.created_at])?;
         let e = query_key(&tx, &n.account_id, &n.operation_key)?;
+        if let Some(authorization) = authorization {
+            if e.execution_id == id {
+                tx.execute(
+                    "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,workload_profile,expires_at,authorization_status,task_id,reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                    params![e.execution_id,authorization.account_id,authorization.agent_id,authorization.operation_key,authorization.decision_id,authorization.spend_auth_token_id,authorization.amount_minor,authorization.currency,serde_json::to_string(&authorization.execution_scope).expect("execution scope serializes"),authorization.workload_profile,authorization.expires_at,authorization.authorization_status,authorization.task_id,authorization.reason],
+                )?;
+            }
+        }
         tx.commit()?;
         Ok(e)
     }
@@ -376,6 +434,62 @@ impl Repository {
                 &format!("{EXECUTION_SELECT} WHERE account_id=?1 AND operation_key=?2"),
                 params![account_id, operation_key],
                 map,
+            )
+            .optional()?
+            .ok_or(Error::NotFound)
+    }
+
+    pub fn get_execution_by_hubu_token(
+        &self,
+        account_id: &str,
+        hubu_token_reference: &str,
+    ) -> Result<Execution> {
+        self.0
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("{EXECUTION_SELECT} WHERE account_id=?1 AND hubu_token_reference=?2"),
+                params![account_id, hubu_token_reference],
+                map,
+            )
+            .optional()?
+            .ok_or(Error::NotFound)
+    }
+
+    pub fn get_hubu_authorization_snapshot(
+        &self,
+        execution_id: &str,
+    ) -> Result<HubuAuthorizationSnapshot> {
+        self.0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,workload_profile,expires_at,authorization_status,task_id,reason FROM hubu_authorization_snapshots WHERE execution_id=?1",
+                [execution_id],
+                |row| {
+                    let scope: String = row.get(7)?;
+                    Ok(HubuAuthorizationSnapshot {
+                        account_id: row.get(0)?,
+                        agent_id: row.get(1)?,
+                        operation_key: row.get(2)?,
+                        decision_id: row.get(3)?,
+                        spend_auth_token_id: row.get(4)?,
+                        amount_minor: row.get(5)?,
+                        currency: row.get(6)?,
+                        execution_scope: serde_json::from_str(&scope).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                scope.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        workload_profile: row.get(8)?,
+                        expires_at: row.get(9)?,
+                        authorization_status: row.get(10)?,
+                        task_id: row.get(11)?,
+                        reason: row.get(12)?,
+                    })
+                },
             )
             .optional()?
             .ok_or(Error::NotFound)

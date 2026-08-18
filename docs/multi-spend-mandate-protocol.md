@@ -8,7 +8,7 @@ Provisional protocol version: `hubu-spend-executor-v5-draft`
 
 Hubu and Gongbu will not implement this draft for the current dogfood phase.
 The normative integration remains
-[`hubu-spend-executor-v4.1`](spend-executor-contract.md): one spend authorization
+[`hubu-spend-executor-v4.2`](spend-executor-contract.md): one spend authorization
 funds exactly one potentially billable provider invocation.
 
 When an agent task needs several model or provider calls, the agent platform
@@ -33,7 +33,7 @@ mandate
 └── close mandate -> release unused authorization
 ```
 
-The existing [`hubu-spend-executor-v4.1`](spend-executor-contract.md) contract
+The existing [`hubu-spend-executor-v4.2`](spend-executor-contract.md) contract
 remains normative for all current executor spend. The material below describes
 the deferred design and may change if mandate work resumes.
 

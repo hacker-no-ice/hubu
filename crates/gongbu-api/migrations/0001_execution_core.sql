@@ -13,6 +13,16 @@ CREATE TABLE IF NOT EXISTS executions(
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, release_transmission_started_at TEXT, version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0), UNIQUE(account_id,operation_key));
 CREATE INDEX IF NOT EXISTS executions_status_created ON executions(status,created_at);
 CREATE INDEX IF NOT EXISTS executions_claim ON executions(hubu_claim_id) WHERE hubu_claim_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS hubu_authorization_snapshots(
+ execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id) ON DELETE CASCADE,
+ account_id TEXT NOT NULL, agent_id TEXT NOT NULL, operation_key TEXT NOT NULL,
+ decision_id TEXT NOT NULL, spend_auth_token_id TEXT NOT NULL,
+ amount_minor INTEGER NOT NULL CHECK(amount_minor>=0), currency TEXT NOT NULL CHECK(length(currency)=3),
+ execution_scope_json TEXT NOT NULL CHECK(json_valid(execution_scope_json)),
+ workload_profile TEXT NOT NULL, expires_at TEXT NOT NULL, authorization_status TEXT NOT NULL,
+ task_id TEXT, reason TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS hubu_authorization_token
+ ON hubu_authorization_snapshots(spend_auth_token_id);
 CREATE TABLE IF NOT EXISTS provider_attempts(
  provider_attempt_id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions ON DELETE CASCADE, provider TEXT NOT NULL,
  provider_request_id TEXT, provider_operation_id TEXT, outcome TEXT NOT NULL CHECK(outcome IN ('started','succeeded','failed','ambiguous','canceled')),

@@ -19,7 +19,7 @@ The distribution has two independently visible versions:
   use SemVer tags such as `v0.1.0`; `main` builds use
   `<cargo-version>-main.<12-character-commit>`.
 - `executor_contract` identifies the negotiated external execution protocol.
-  It is `hubu-spend-executor-v4.1` and does not change merely because the
+  It is `hubu-spend-executor-v4.2` and does not change merely because the
   Hubu product version changes.
 
 At 10:00 America/Los_Angeles each day, the release workflow checks the current
@@ -131,7 +131,7 @@ install \
 
 Every binary's reported `product_version` and `source_commit` must match the
 archive provenance. Its `executor_contract` (or Gongbu's equivalent
-`hubu_executor_contract` field) must be `hubu-spend-executor-v4.1`. Consumers
+`hubu_executor_contract` field) must be `hubu-spend-executor-v4.2`. Consumers
 should record the exact tag, asset filename, and checksum in their
 lock/configuration file.
 

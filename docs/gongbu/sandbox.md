@@ -64,7 +64,9 @@ The available CLI overrides are `--hubu-mode`, `--hubu-version`, `--provider-mod
 `--image-size 1k|2k|4k`; this value selects the matching schema-v2 pricing rule
 and is transmitted to adapters that support resolution selection. A managed
 Hubu release provisions and supplies scoped authorization automatically; an
-externally managed Hubu still requires `--hubu-token-reference`.
+externally managed Hubu still requires `--spend-auth-token-id`. The retired
+`--hubu-token-reference` spelling remains an input-only compatibility alias and
+must equal the current field if both are supplied.
 
 Environment variables remain useful for CI and automation:
 
@@ -89,8 +91,11 @@ either mock boundary.
 The required real-Hubu compatibility profile uses an exact immutable release.
 Mutable aliases such as `latest` and `main` are rejected. The sandbox selects
 the current platform archive, verifies its published `SHA256SUMS` entry,
-validates packaged provenance and `hubu-spend-executor-v4.1`, and checks the
+validates packaged provenance and `hubu-spend-executor-v4.2`, and checks the
 binary's reported product/source/contract tuple before readiness.
+Managed startup also installs an explicit `image_generation` spend timing
+profile and authorizes the selected target's canonical typed scope, so the
+token-only resolution path exact-matches standard sandbox submissions.
 
 The selected implementation is wired through the same `HubuActivities` and
 `ProviderActivities` interfaces as the durable production workflow. Modes do

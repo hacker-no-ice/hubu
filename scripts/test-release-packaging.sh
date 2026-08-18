@@ -64,7 +64,7 @@ verify_package() {
      .product == "hubu" and
      .product_version == "0.0.0-test" and
      .source_commit == "0000000000000000000000000000000000000000" and
-     .executor_contract == "hubu-spend-executor-v4.1" and
+     .executor_contract == "hubu-spend-executor-v4.2" and
      .target == $target and
      .binaries == ["hubu", "hubu-server", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
      .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
@@ -75,7 +75,7 @@ verify_package() {
      .product == "hubu" and
      .product_version == "0.0.0-test" and
      .source_commit == "0000000000000000000000000000000000000000" and
-     .executor_contract == "hubu-spend-executor-v4.1" and
+     .executor_contract == "hubu-spend-executor-v4.2" and
      .target == $target and
      .repository == "hacker-no-ice/hubu" and
      .binaries == ["hubu", "hubu-server", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and

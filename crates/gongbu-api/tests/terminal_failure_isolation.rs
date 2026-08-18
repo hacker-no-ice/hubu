@@ -4,6 +4,7 @@ use gongbu_api::{
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
     execution::{Execution, Repository},
     http::{AuthenticatedAccount, ExecutionResponse, ExecutionStatus},
+    hubu::{BudgetHold, ExecutorSpendResponse, HttpClientError, SpendAuthorizationResolver},
     provider::{
         contract::{
             AdapterCapabilities, AdapterOutcome, NormalizedRequest, PricingCatalog,
@@ -88,6 +89,7 @@ async fn run() {
             artifacts: artifacts.clone(),
             providers: catalog(),
             hubu: Arc::new(ScenarioHubu),
+            hubu_authorizations: Arc::new(ScenarioHubu),
             secrets: Arc::new(UnavailableSecrets),
             provider_activities: Some(Arc::new(ScenarioProvider)),
             artifact_activities: Some(Arc::new(ArtifactServiceActivities::new(artifacts, || {
@@ -273,11 +275,7 @@ async fn wait_for_terminal(
 fn request(operation_key: &str) -> Value {
     json!({
         "schema_version": 1,
-        "operation_key": operation_key,
-        "hubu_authorization_id": "auth-1",
-        "hubu_claim_id": null,
-        "hubu_token_reference": "sha256:opaque-reference",
-        "authorization": {"amount_minor": 100, "currency": "USD"},
+        "spend_auth_token_id": operation_key,
         "input": {"prompt": "cat", "image_count": 1},
         "input_schema_version": 1,
         "workload_type": "image_generation",
@@ -361,6 +359,39 @@ impl HubuActivities for ScenarioHubu {
 
     fn release(&self, _: &Execution) -> Result<(), ActivityError> {
         Ok(())
+    }
+}
+
+impl SpendAuthorizationResolver for ScenarioHubu {
+    fn resolve_authorization(
+        &self,
+        spend_auth_token_id: &str,
+    ) -> Result<ExecutorSpendResponse, HttpClientError> {
+        Ok(ExecutorSpendResponse {
+            operation_key: spend_auth_token_id.into(),
+            reason: "terminal isolation scenario".into(),
+            spend_auth_token_id: spend_auth_token_id.into(),
+            decision_id: format!("decision-{spend_auth_token_id}"),
+            account_id: "account".into(),
+            agent_id: "agent".into(),
+            amount_cents: 100,
+            currency: "USD".into(),
+            merchant: None,
+            execution_scope: gongbu_api::execution_scope::for_target("example", "fixture"),
+            task_id: None,
+            workload_profile: "image_generation".into(),
+            status: "available".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            budget_hold: BudgetHold {
+                hold_id: "hold".into(),
+                budget_id: "budget".into(),
+                status: "frozen".into(),
+                amount_cents: 100,
+                consumed_amount_cents: 0,
+                frozen_amount_cents: 100,
+                remaining_amount_cents: 0,
+            },
+        })
     }
 }
 

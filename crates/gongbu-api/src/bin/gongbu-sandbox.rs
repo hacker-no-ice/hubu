@@ -94,29 +94,36 @@ async fn submit(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Sen
     let operation_key = args.required("--operation-key")?;
     let prompt = args.required("--prompt")?;
     let image_size = args.optional("--image-size")?;
-    let hubu_token_reference = args.optional("--hubu-token-reference")?;
+    let spend_auth_token_id = args.optional("--spend-auth-token-id")?;
+    let legacy_token_reference = args.optional("--hubu-token-reference")?;
     args.finish()?;
     let context = OperatorContext::load(&run_dir)?;
     let target = &context.manifest.provider_target;
     let input = submission_input(prompt, image_size)?;
-    let hubu_token_reference = if context.manifest.hubu_release_version.is_some() {
-        if hubu_token_reference.is_some() {
-            return Err("--hubu-token-reference cannot be used with managed Hubu".into());
+    let supplied_token = match (spend_auth_token_id, legacy_token_reference) {
+        (Some(current), Some(legacy)) if current != legacy => {
+            return Err("current and legacy Hubu token fields must be equal".into());
+        }
+        (Some(current), _) => Some(current),
+        (None, legacy) => legacy,
+    };
+    let spend_auth_token_id = if context.manifest.hubu_release_version.is_some() {
+        if supplied_token.is_some() {
+            return Err("an explicit spend auth token cannot be used with managed Hubu".into());
         }
         authorize_managed_hubu(&run_dir, &context.manifest, &operation_key)?
     } else {
-        select_hubu_token_reference(context.manifest.hubu_mode, hubu_token_reference)?
+        select_spend_auth_token_id(
+            context.manifest.hubu_mode,
+            supplied_token.or_else(|| {
+                (context.manifest.hubu_mode == BoundaryMode::Mock)
+                    .then(|| format!("sandbox-hubu-authorization-{operation_key}"))
+            }),
+        )?
     };
     let request = json!({
         "schema_version": 1,
-        "operation_key": operation_key,
-        "hubu_authorization_id": hubu_token_reference,
-        "hubu_claim_id": null,
-        "hubu_token_reference": hubu_token_reference,
-        "authorization": {
-            "amount_minor": context.manifest.authorization_amount_minor,
-            "currency": context.manifest.authorization_currency,
-        },
+        "spend_auth_token_id": spend_auth_token_id,
         "input": input,
         "input_schema_version": 1,
         "workload_type": target.workload_type,
@@ -158,25 +165,37 @@ fn authorize_managed_hubu(
         manifest.authorization_amount_minor / 100,
         manifest.authorization_amount_minor.abs() % 100
     );
+    let scope = gongbu_api::execution_scope::for_target(
+        &manifest.provider_target.provider,
+        &manifest.provider_target.adapter,
+    )
+    .ok_or("managed Hubu requires a canonical execution scope for the selected target")?;
+    let args = vec![
+        "--url".to_string(),
+        context.endpoint.clone(),
+        "spend".to_string(),
+        "authorize".to_string(),
+        "--operation-key".to_string(),
+        operation_key.to_string(),
+        "--account-id".to_string(),
+        context.account_id.clone(),
+        "--amount".to_string(),
+        amount,
+        "--reason".to_string(),
+        operation_key.to_string(),
+        "--provider".to_string(),
+        scope.provider.id,
+        "--executor".to_string(),
+        scope.executor.id,
+        "--capability".to_string(),
+        scope.capability.id,
+        "--billing-merchant".to_string(),
+        scope.billing_merchant.id,
+        "--workload-profile".to_string(),
+        "image_generation".to_string(),
+    ];
     let output = std::process::Command::new(&context.cli_binary)
-        .args([
-            "--url",
-            &context.endpoint,
-            "spend",
-            "authorize",
-            "--operation-key",
-            operation_key,
-            "--account-id",
-            &context.account_id,
-            "--amount",
-            &amount,
-            "--reason",
-            operation_key,
-            "--merchant",
-            "gongbu.sandbox",
-            "--workload-profile",
-            "default",
-        ])
+        .args(args)
         .env("HUBU_AUTH_TOKEN_FILE", &context.auth_token_file)
         .output()?;
     if !output.status.success() {
@@ -196,16 +215,16 @@ fn authorize_managed_hubu(
         .ok_or_else(|| "Hubu authorization output omitted auth_token_id".into())
 }
 
-fn select_hubu_token_reference(
+fn select_spend_auth_token_id(
     mode: BoundaryMode,
     reference: Option<String>,
 ) -> Result<String, String> {
     match (mode, reference) {
         (BoundaryMode::Real, None) => {
-            Err("--hubu-token-reference is required with real Hubu".into())
+            Err("--spend-auth-token-id is required with real Hubu".into())
         }
         (_, Some(value)) if value.trim().is_empty() => {
-            Err("--hubu-token-reference cannot be empty".into())
+            Err("--spend-auth-token-id cannot be empty".into())
         }
         (_, Some(value)) => Ok(value),
         (BoundaryMode::Mock, None) => Ok("sandbox-hubu-authorization".into()),
@@ -426,7 +445,7 @@ fn print_help() {
     println!(
         "gongbu-sandbox commands:\n\
          \n  start --config PROFILE [--hubu-mode mock|real] [--hubu-version vX.Y.Z] [--provider-mode mock|real] [--preserve DIR]\
-         \n  submit --run-dir DIR --operation-key KEY --prompt TEXT [--image-size 1k|2k|4k] [--hubu-token-reference ID]\
+         \n  submit --run-dir DIR --operation-key KEY --prompt TEXT [--image-size 1k|2k|4k] [--spend-auth-token-id ID]\
          \n  status --run-dir DIR --execution-id ID\
          \n  artifacts --run-dir DIR --execution-id ID [--download-dir DIR]\
          \n  inspect --run-dir DIR"
@@ -479,11 +498,11 @@ mod tests {
     #[test]
     fn real_hubu_requires_an_explicit_token_reference() {
         assert_eq!(
-            select_hubu_token_reference(BoundaryMode::Real, None).unwrap_err(),
-            "--hubu-token-reference is required with real Hubu"
+            select_spend_auth_token_id(BoundaryMode::Real, None).unwrap_err(),
+            "--spend-auth-token-id is required with real Hubu"
         );
         assert_eq!(
-            select_hubu_token_reference(BoundaryMode::Mock, None).unwrap(),
+            select_spend_auth_token_id(BoundaryMode::Mock, None).unwrap(),
             "sandbox-hubu-authorization"
         );
     }

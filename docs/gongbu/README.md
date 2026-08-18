@@ -25,9 +25,11 @@ configuration, tool examples, and its opt-in integration test.
 ## V1 boundary
 
 `Execution` is the persisted aggregate root and is unique by
-`(account_id, operation_key)`. Provider attempts, artifact metadata, and receipts
-are persisted under that aggregate. Raw Hubu tokens and provider credentials are
-not persisted.
+`(account_id, operation_key)`. Provider attempts, artifact metadata, receipts,
+and the resolved Hubu authorization snapshot are persisted under that aggregate.
+The opaque `spend_auth_token_id` is an authorization identifier used for replay,
+not a Hubu API bearer credential. Hubu API bearer credentials and provider
+credentials are never persisted.
 
 Gongbu owns normalized artifact bytes. The local backend stores them beneath an
 operator-supplied artifact root and persists only generated, storage-neutral

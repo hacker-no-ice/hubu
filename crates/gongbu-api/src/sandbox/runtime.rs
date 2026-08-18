@@ -28,6 +28,16 @@ use std::{
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions, Url};
 use temporalio_sdk::Runtime;
 use tokio::{net::TcpStream, task::JoinHandle, time::Instant};
+
+const MANAGED_HUBU_SPEND_TIMING_YAML: &str = r#"default_profile: default
+profiles:
+  default:
+    authorization_ttl_seconds: 300
+    claim_ttl_seconds: 900
+  image_generation:
+    authorization_ttl_seconds: 300
+    claim_ttl_seconds: 900
+"#;
 use uuid::Uuid;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -122,6 +132,7 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
     let secrets: Arc<dyn SecretProvider> = Arc::new(MacOsKeychain);
     let provider_activities = wiring.provider.activities(secrets.clone());
     let hubu_activities = wiring.hubu.activities();
+    let hubu_authorizations = wiring.hubu.authorization_resolver();
     let side_effects = start_side_effect_writer(run.root().to_path_buf(), &wiring);
 
     let listener = into_tokio_listener(run.take_listener("gongbu")?)?;
@@ -144,6 +155,7 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
         artifacts: artifact_service,
         providers: wiring.providers.clone(),
         hubu: hubu_activities,
+        hubu_authorizations,
         secrets,
         provider_activities: Some(provider_activities),
         artifact_activities: Some(artifact_activities),
@@ -247,6 +259,8 @@ async fn start_managed_hubu(
     let database = hubu_root.join("hubu.sqlite3");
     let auth_token = hubu_root.join("hubu.auth-token");
     let reconciliation_token = hubu_root.join("hubu.reconciliation-token");
+    let spend_timing = hubu_root.join("spend-timing.yaml");
+    fs::write(&spend_timing, MANAGED_HUBU_SPEND_TIMING_YAML)?;
     let log_path = run.root().join("logs/hubu.jsonl");
     let stdout = File::create(run.root().join("logs/hubu-process.log"))?;
     let stderr = stdout.try_clone()?;
@@ -257,6 +271,7 @@ async fn start_managed_hubu(
         .env("HUBU_DB_PATH", &database)
         .env("HUBU_AUTH_TOKEN_FILE", &auth_token)
         .env("HUBU_RECONCILIATION_TOKEN_FILE", &reconciliation_token)
+        .env("HUBU_SPEND_TIMING_CONFIG", &spend_timing)
         .env("HUBU_LOG_FILE", &log_path)
         .env("HUBU_LOG_STDERR", "0")
         .stdout(Stdio::from(stdout))
