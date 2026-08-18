@@ -125,10 +125,12 @@ Configure each backend independently by setting both variables in its pair:
   `HUBU_UNIFIED_GONGBU_BEARER_TOKEN`
 
 Endpoints must be HTTP(S) base URLs without embedded credentials, queries, or
-fragments. Supplying only one variable in a pair is a startup error. Diagnostics
-identify the affected backend but never include endpoint input or credentials.
-The shell currently lists only `hubu_unified_capabilities`; health negotiation
-and the Hubu/Gongbu domain catalogs remain follow-up work.
+fragments. Supplying only one variable in a pair leaves that backend
+`unconfigured` without blocking the other backend. Invalid complete pairs fail
+startup with diagnostics that identify the affected backend but never include
+endpoint input or credentials. The shell currently lists only
+`hubu_unified_capabilities`; health negotiation and the Hubu/Gongbu domain
+catalogs remain follow-up work.
 
 ## Quick Start
 

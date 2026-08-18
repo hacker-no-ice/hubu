@@ -179,8 +179,9 @@ fn backend_from_values(
     let token = token.filter(|value| !value.trim().is_empty());
     match (endpoint, token) {
         (None, None) => Ok(None),
-        (None, Some(_)) => Err(ConfigError::MissingEndpoint(owner)),
-        (Some(_), None) => Err(ConfigError::MissingCredential(owner)),
+        // A partial pair is unconfigured rather than a process-wide startup
+        // failure. This preserves the unrelated backend's failure domain.
+        (None, Some(_)) | (Some(_), None) => Ok(None),
         (Some(endpoint), Some(token)) => BackendConfig::new(owner, endpoint, token).map(Some),
     }
 }
@@ -388,6 +389,9 @@ impl Server {
             Ok(call) => call,
             Err(_) => return error_response(id, -32602, "Invalid params"),
         };
+        // Parsed at the shared boundary so future routed tools can consume
+        // trusted platform metadata without placing it in model arguments.
+        let _trusted_meta = &call.meta;
         if call.name != "hubu_unified_capabilities"
             || call
                 .arguments
@@ -515,6 +519,8 @@ struct ToolCall {
     name: String,
     #[serde(default = "empty_object")]
     arguments: Value,
+    #[serde(default, rename = "_meta")]
+    meta: Option<Value>,
 }
 
 fn empty_object() -> Value {
@@ -582,11 +588,23 @@ mod tests {
     }
 
     #[test]
-    fn rejects_partial_or_credential_bearing_endpoint_configuration() {
-        assert_eq!(
-            Config::from_lookup(lookup(&[(HUBU_ENDPOINT_ENV, "http://hubu.test")])).unwrap_err(),
-            ConfigError::MissingCredential(BackendOwner::Hubu)
-        );
+    fn incomplete_pair_is_unconfigured_without_blocking_the_other_backend() {
+        let config = Config::from_lookup(lookup(&[
+            (HUBU_ENDPOINT_ENV, "http://hubu.test"),
+            (HUBU_TOKEN_ENV, "hubu-secret"),
+            (GONGBU_ENDPOINT_ENV, "http://gongbu.test"),
+        ]))
+        .unwrap();
+
+        assert!(config.hubu.is_some());
+        assert!(config.gongbu.is_none());
+        let capability = Server::new(config).unwrap().capabilities();
+        assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
+        assert_eq!(capability["backends"]["gongbu"]["state"], "unconfigured");
+    }
+
+    #[test]
+    fn rejects_credential_bearing_endpoint_configuration() {
         assert_eq!(
             Config::from_lookup(lookup(&[
                 (GONGBU_ENDPOINT_ENV, "https://secret@gongbu.test"),
@@ -644,6 +662,28 @@ mod tests {
         let tools = responses[1]["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "hubu_unified_capabilities");
+    }
+
+    #[test]
+    fn capability_call_accepts_trusted_metadata() {
+        let server = Server::new(Config::default()).unwrap();
+        let input = Cursor::new(
+            concat!(
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",",
+                "\"params\":{\"name\":\"hubu_unified_capabilities\",\"arguments\":{},",
+                "\"_meta\":{\"hubu.dev/platform-invocation\":{\"operation_key\":\"opaque\"}}}}\n"
+            )
+            .as_bytes(),
+        );
+        let mut output = Vec::new();
+        server.run(input, &mut output).unwrap();
+        let response: Value = serde_json::from_slice(&output).unwrap();
+
+        assert!(response.get("error").is_none());
+        assert_eq!(
+            response["result"]["structuredContent"]["contract_version"],
+            UNIFIED_CONTRACT_VERSION
+        );
     }
 
     #[test]
