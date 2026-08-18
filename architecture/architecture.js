@@ -31,6 +31,16 @@ const sharedLinks = {
   telemetry: ["Telemetry", "crates/hubu-core/src/telemetry.rs"],
   releases: ["Release runbook", "docs/releases.md"],
   releaseWorkflow: ["Release workflow", ".github/workflows/release.yml"],
+  gongbuOverview: ["Gongbu overview", "docs/gongbu/README.md"],
+  gongbuServer: ["Gongbu server runbook", "docs/gongbu/server.md"],
+  gongbuApplication: ["Gongbu composition", "crates/gongbu-api/src/application.rs"],
+  gongbuWorkflow: ["Gongbu workflow", "crates/gongbu-api/src/workflow.rs"],
+  gongbuExecution: ["Gongbu execution store", "crates/gongbu-api/src/execution/mod.rs"],
+  gongbuArtifact: ["Gongbu artifact service", "crates/gongbu-api/src/artifact/mod.rs"],
+  gongbuProvider: ["Gongbu provider boundary", "crates/gongbu-api/src/provider/mod.rs"],
+  gongbuHubu: ["Gongbu Hubu client", "crates/gongbu-api/src/hubu/mod.rs"],
+  gongbuMcp: ["Gongbu MCP adapter", "crates/gongbu-mcp/src/lib.rs"],
+  gongbuConfig: ["Gongbu server example", "examples/gongbu/gongbu.server.json"],
 };
 
 const components = {
@@ -39,24 +49,25 @@ const components = {
     kind: "Top level",
     viewBox: "0 0 1200 760",
     copy:
-      "Hubu includes the CLI, MCP adapter, local server, governance core, wallet, and ledger. Gongbu is shown outside Hubu because it performs external model calls and other work through the executor contract.",
+      "Hubu and Gongbu share one source repository and locked workspace. Their binaries remain separate at runtime: Hubu governs spend in the control plane, while Gongbu executes provider work across an authenticated contract. HUB-84 tracks packaging all production binaries in one release archive.",
     responsibilities: [
       "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, review protected actions, and reconcile uncertain expired claims.",
       "Agents discover Hubu through configured MCP tools, while humans use the CLI for setup and administration.",
       "For local dogfooding, a repository Codex skill allocates a model-managed operation key once, binds it to immutable spend scope, and persists recovery state outside the Hubu server.",
       "The CLI and MCP adapter are part of broader Hubu, but they are not the Hubu server.",
       "Local HTTP callers reach the API with the Hubu bearer token before protected routes resolve user authority.",
-      "Gongbu and other external executors exclusively claim, then settle actual vendor cost with receipt metadata or release active authorized spend without Hubu performing the work; expired uncertainty returns to a human decision.",
+      "Current release archives contain hubu and hubu-server; HUB-84 owns the five-binary unified archive target.",
+      "Gongbu exclusively claims, then settles actual vendor cost with receipt metadata or releases active authorized spend without Hubu performing provider work; expired uncertainty returns to a human decision.",
       "The API handles local HTTP concerns and delegates spend approval, payment, and executor claim lifecycle orchestration to core app services.",
-      "Gongbu owns vendor credentials, provider adapters, model calls, artifact contents, and execution retries outside Hubu; Hubu stores only compact provider and artifact references.",
+      "Gongbu owns its process, database, Temporal workflow state, vendor credentials, provider adapters, model calls, artifacts, retries, and failure domain; Hubu stores only governance state and compact provider/artifact references.",
       "SQLite-backed records preserve users, agents, advisory spending targets, budgets, policies, executor claims and receipts, reconciliation evidence, payments, and ledger entries.",
-      "Immutable release archives carry the CLI, server, project licenses, third-party notices, checksums, source provenance, product version, and independently negotiated executor-contract version to pinned consumers.",
+      "The Hubu and Gongbu MCP adapters remain separate agent-facing surfaces; repository and release consolidation does not redesign their protocols.",
     ],
-    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.futureWallet],
+    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor],
     zones: [
-      { label: "Broader Hubu", x: 292, y: 24, w: 820, h: 704 },
-      { label: "Hubu server", x: 570, y: 36, w: 542, h: 692, labelX: 636, labelY: 58 },
-      { label: "Outside Hubu", x: 36, y: 578, w: 244, h: 136, labelY: 604 },
+      { label: "One source repository + locked workspace", x: 292, y: 24, w: 820, h: 716 },
+      { label: "Hubu control-plane process", x: 570, y: 36, w: 542, h: 692, labelX: 636, labelY: 86 },
+      { label: "Gongbu execution-plane process", x: 304, y: 616, w: 248, h: 112, labelY: 642 },
     ],
     nodes: [
       { id: "human", label: "Human owner", sub: "funds + policy", x: 48, y: 82, w: 190, h: 94, tone: "human" },
@@ -67,7 +78,7 @@ const components = {
       { id: "release", label: "Release artifacts", sub: "pinned + checksummed", x: 334, y: 526, w: 184, h: 88, tone: "surface" },
       { id: "api", label: "Local HTTP API", sub: "routes + auth", x: 620, y: 184, w: 190, h: 98, tone: "core" },
       { id: "app", label: "App services", sub: "approval + claims", x: 620, y: 360, w: 190, h: 98, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },
-      { id: "gongbu", label: "Gongbu", sub: "outside Hubu executor", x: 58, y: 632, w: 204, h: 74, tone: "executor" },
+      { id: "gongbu", label: "Gongbu server", sub: "separate executor", x: 328, y: 652, w: 200, h: 62, tone: "executor", path: "crates/gongbu-api/src/bin/gongbu-server.rs" },
       { id: "registration", label: "Registration", sub: "identity + sessions", x: 900, y: 46, w: 202, h: 86, tone: "core" },
       { id: "policy", label: "Policy engine", sub: "deterministic rules", x: 904, y: 166, w: 198, h: 86, tone: "core" },
       { id: "budget", label: "Budgets + targets", sub: "warn + reserve", x: 904, y: 304, w: 198, h: 86, tone: "core" },
@@ -81,7 +92,6 @@ const components = {
       ["cli", "api", "token", { labelDx: -12, labelDy: -26, labelT: 0.42 }],
       ["mcp", "api", "token", { labelDx: -14, labelDy: 34, labelT: 0.42 }],
       ["agent", "gongbu", "work + token"],
-      ["release", "gongbu", "pinned binaries", { labelDx: -18, labelDy: -22, labelT: 0.48 }],
       ["gongbu", "api", "claim/receipt"],
       ["api", "registration", "register"],
       ["api", "app", "dispatch"],
@@ -96,15 +106,16 @@ const components = {
     title: "Immutable Releases",
     kind: "Component",
     copy:
-      "The release workflow turns an exact main commit into target-specific Hubu archives. Required checks gate native builds, GitHub Releases preserve immutable tags and assets, and clean runners verify the published download before consumers pin it.",
+      "The current release workflow turns one exact main commit into target-specific archives containing hubu and hubu-server. HUB-84 tracks packaging all five production binaries from the unified workspace.",
     responsibilities: [
       "Creates a commit-addressed prerelease for each eligible main build and accepts explicit stable SemVer promotion for an exact main revision.",
       "Runs formatting, Clippy, workspace tests, the core integration flow, and locked release builds before publication.",
-      "Builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, both project licenses, generated dependency-license material, third-party notices, and per-target provenance.",
+      "Currently builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, licenses, notices, the lockfile, and per-target provenance.",
+      "HUB-84 will add hubu-mcp-server, gongbu-server, and gongbu-mcp while preserving separate runtime boundaries.",
       "Publishes SHA-256 checksums without overwriting existing tags or assets, then smoke-tests downloads, required legal files, startup, readiness, and version reporting.",
       "Keeps the Hubu product version separate from the hubu-spend-executor-v4 contract identifier so consumers can negotiate compatibility explicitly.",
     ],
-    links: [sharedLinks.releaseWorkflow, sharedLinks.releases, sharedLinks.common, sharedLinks.api, sharedLinks.cli],
+    links: [sharedLinks.releaseWorkflow, sharedLinks.releases, sharedLinks.common, sharedLinks.api, sharedLinks.cli, sharedLinks.mcp, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp],
     nodes: [
       { id: "source", label: "Exact main commit", sub: "40-character SHA", x: 62, y: 224, w: 210, h: 92, tone: "data" },
       { id: "checks", label: "Release gates", sub: "fmt + lint + tests", x: 352, y: 224, w: 210, h: 92, tone: "core" },
@@ -336,37 +347,51 @@ const components = {
     ],
   },
   gongbu: {
-    title: "Gongbu Executor",
-    kind: "External",
-    viewBox: "0 0 1280 700",
+    title: "Gongbu Execution Plane",
+    kind: "Runtime component",
+    viewBox: "0 0 1280 760",
     copy:
-      "Gongbu is outside Hubu. Agents ask it to perform work, Gongbu exclusively claims the scoped Hubu authorization, calls external vendors, and finalizes the claim with an actual-cost receipt or release.",
+      "Gongbu is in the Hubu source repository and unified product model, with archive packaging tracked by HUB-84. It remains outside the Hubu control-plane process, database, credential boundary, provider execution boundary, and failure domain.",
     responsibilities: [
-      "Accepts model/work requests from agents with the immutable operation key and spend authorization token.",
-      "Claims the token with that same operation key before irreversible billable vendor work.",
-      "Calls external model/API vendors such as Google using Gongbu-held credentials.",
-      "Returns outputs to the agent, then reports actual vendor cost, provider request ID, a price/model snapshot, and an artifact reference so Hubu can settle and release the remainder.",
-      "Keeps vendor credentials, prompts, provider payloads, and artifact contents outside Hubu.",
+      "Accepts authenticated execution requests through its HTTP API or separate Gongbu MCP adapter; callers cannot override operator-owned account, target, price, endpoint, or credentials.",
+      "Persists an immutable execution and provider attempt before crossing billable boundaries, then runs recovery through Gongbu-owned Temporal workflow state.",
+      "Claims the Hubu authorization before provider work and validates the claim again immediately before the call.",
+      "Resolves Gongbu-held credentials and invokes exactly the operator-selected provider adapter without routing or fallback.",
+      "Stores normalized artifacts under the Gongbu artifact root and persists metadata in the Gongbu database, never in Hubu storage.",
+      "Settles actual cost or safely releases through the v4 HTTP contract; ambiguous outcomes stay in reconciliation instead of causing blind provider retries.",
+      "Keeps the Hubu and Gongbu processes, databases, credentials, provider work, artifacts, MCP surfaces, and failure domains separate despite shared source and release identity.",
     ],
-    links: [sharedLinks.spendExecutor, sharedLinks.futureWallet, sharedLinks.api],
+    links: [sharedLinks.gongbuOverview, sharedLinks.gongbuServer, sharedLinks.gongbuApplication, sharedLinks.gongbuWorkflow, sharedLinks.gongbuExecution, sharedLinks.gongbuArtifact, sharedLinks.gongbuProvider, sharedLinks.gongbuHubu, sharedLinks.gongbuMcp, sharedLinks.gongbuConfig, sharedLinks.spendExecutor, sharedLinks.api],
     zones: [
-      { label: "Main model call path", x: 46, y: 112, w: 1130, h: 226 },
-      { label: "Hubu side control plane", x: 366, y: 396, w: 390, h: 190, labelY: 428 },
-      { label: "External vendors", x: 940, y: 136, w: 236, h: 198, labelX: 968 },
+      { label: "Gongbu process + owned state", x: 300, y: 44, w: 650, h: 670 },
+      { label: "Provider boundary", x: 986, y: 44, w: 246, h: 250 },
+      { label: "Hubu control plane", x: 986, y: 474, w: 246, h: 240 },
     ],
     nodes: [
-      { id: "agent", label: "Agent", sub: "work request", x: 82, y: 190, w: 190, h: 92, tone: "agent" },
-      { id: "gongbu", label: "Gongbu", sub: "model proxy", x: 520, y: 182, w: 230, h: 108, tone: "executor" },
-      { id: "vendor", label: "Google", sub: "model/API vendor", x: 966, y: 176, w: 186, h: 124, tone: "vendor" },
-      { id: "hubu", label: "Hubu", sub: "claim + receipt", x: 446, y: 462, w: 230, h: 92, tone: "core" },
+      { id: "agent", label: "Agent client", sub: "Gongbu HTTP/MCP", x: 58, y: 130, w: 196, h: 92, tone: "agent", path: "crates/gongbu-mcp/src/lib.rs" },
+      { id: "gongbuApi", label: "Execution API", sub: "auth + admission", x: 340, y: 112, w: 210, h: 92, tone: "executor", path: "crates/gongbu-api/src/http/mod.rs" },
+      { id: "workflow", label: "Durable workflow", sub: "claim → execute → settle", x: 674, y: 112, w: 230, h: 92, tone: "executor", path: "crates/gongbu-api/src/workflow.rs" },
+      { id: "executionDb", label: "Gongbu SQLite", sub: "executions + attempts", x: 340, y: 352, w: 210, h: 96, tone: "data", path: "crates/gongbu-api/src/execution/mod.rs" },
+      { id: "temporal", label: "Temporal state", sub: "timers + recovery", x: 674, y: 276, w: 230, h: 92, tone: "data", path: "crates/gongbu-api/src/temporal.rs" },
+      { id: "artifacts", label: "Artifact store", sub: "normalized bytes", x: 340, y: 548, w: 210, h: 96, tone: "data", path: "crates/gongbu-api/src/artifact/mod.rs" },
+      { id: "provider", label: "Provider adapter", sub: "selected target only", x: 674, y: 474, w: 230, h: 92, tone: "executor", path: "crates/gongbu-api/src/provider/mod.rs" },
+      { id: "credentials", label: "Keychain secrets", sub: "Gongbu-held", x: 674, y: 606, w: 230, h: 80, tone: "data", path: "crates/gongbu-api/src/config/secrets.rs" },
+      { id: "vendor", label: "Provider", sub: "external model/API", x: 1012, y: 120, w: 194, h: 124, tone: "vendor" },
+      { id: "hubu", label: "Hubu server", sub: "claim + settle/release", x: 1010, y: 556, w: 198, h: 100, tone: "core", path: "crates/hubu-api/src/lib.rs" },
     ],
     edges: [
-      ["agent", "gongbu", "operation + token", { labelDy: -34 }],
-      ["gongbu", "vendor", "model call", { labelDy: -34 }],
-      ["vendor", "gongbu", "vendor result", { labelDy: 54, labelT: 0.55 }],
-      ["gongbu", "agent", "return output", { labelDy: 54, labelT: 0.48 }],
-      ["gongbu", "hubu", "claim token", { labelDx: -74, labelDy: 10, labelT: 0.58 }],
-      ["gongbu", "hubu", "receipt/release", { labelDx: 150, labelDy: 38, labelT: 0.7 }],
+      ["agent", "gongbuApi", "request + token"],
+      ["gongbuApi", "executionDb", "persist first"],
+      ["gongbuApi", "workflow", "schedule"],
+      ["workflow", "temporal", "durable state"],
+      ["workflow", "executionDb", "attempt/receipt", { labelDx: -36, labelDy: 26 }],
+      ["workflow", "hubu", "claim/finalize", { labelDy: -26 }],
+      ["workflow", "provider", "execute once"],
+      ["credentials", "provider", "resolve secret"],
+      ["provider", "vendor", "model call", { labelDy: -26 }],
+      ["vendor", "provider", "result/usage", { labelDy: 44, labelT: 0.58 }],
+      ["provider", "artifacts", "normalized bytes"],
+      ["artifacts", "executionDb", "metadata"],
     ],
   },
   ledger: {
@@ -523,6 +548,7 @@ const detailsTitle = document.getElementById("details-title");
 const detailsKind = document.getElementById("details-kind");
 const detailsCopy = document.getElementById("details-copy");
 const responsibilities = document.getElementById("responsibilities");
+const codeLinks = document.getElementById("code-links");
 const pathTooltip = document.getElementById("path-tooltip");
 const topButtons = [
   document.getElementById("top-view-button"),
@@ -540,6 +566,7 @@ function showView(viewId) {
   detailsKind.textContent = view.kind;
   detailsCopy.textContent = view.copy;
   renderResponsibilities(view.responsibilities);
+  renderCodeLinks(view.links || []);
   renderDiagram(view);
 }
 
@@ -549,6 +576,20 @@ function renderResponsibilities(items) {
     const li = document.createElement("li");
     li.textContent = item;
     responsibilities.appendChild(li);
+  });
+}
+
+function renderCodeLinks(items) {
+  codeLinks.innerHTML = "";
+  items.forEach(([label, path]) => {
+    const li = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = `https://github.com/hacker-no-ice/hubu/blob/main/${path}`;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = `${label}: ${path}`;
+    li.appendChild(link);
+    codeLinks.appendChild(li);
   });
 }
 
@@ -814,7 +855,7 @@ function isActorNode(node) {
 }
 
 function pathForNode(node) {
-  return node.path || components[node.id]?.links?.[0]?.[1] || components[currentView]?.links?.[0]?.[1] || null;
+  return node.path || components[node.id]?.links?.[0]?.[1] || null;
 }
 
 function showPathTooltip(event, node) {

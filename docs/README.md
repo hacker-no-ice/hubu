@@ -28,6 +28,9 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
   supported targets, verification, rollback, and retention
 - [repository-security.md](repository-security.md): dependency scanning,
   immutable action pins, exception review, and post-merge GitHub controls
+- [gongbu/README.md](gongbu/README.md): Gongbu execution-plane overview and
+  index for its persistent server, sandbox, provider, credential, and MCP
+  runbooks; all paths and commands assume this repository root
 
 ## Working Notes
 

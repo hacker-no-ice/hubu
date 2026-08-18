@@ -24,9 +24,13 @@ payment through the configured rail and recording successful money movement in
 an audit ledger. The current local rail is intentionally mocked, but the policy,
 budget, authorization, and ledger boundaries are built for real spend control.
 
-This repository contains the Rust workspace for Hubu's policy engine, wallet
-logic, shared models, local HTTP server, human developer CLI, benchmark tool,
-and MCP transport adapter.
+This is the single source repository for Hubu and Gongbu. Its Rust workspace
+contains Hubu's spending control plane and Gongbu's execution plane. They build
+from one locked source revision, but run as separate processes with separate
+storage, credentials, provider boundaries, and failure domains. HUB-84 tracks
+shipping all production binaries in one release archive; until that lands,
+published archives contain only `hubu` and `hubu-server` and Gongbu is installed
+from this same checkout.
 
 ## What Hubu Does Today
 
@@ -74,18 +78,51 @@ minimum:
 - `hubu-cli`: human developer `hubu` CLI binary
 - `hubu-bench`: local benchmark tool for spend approval throughput and correctness
 - `hubu-mcp`: MCP stdio transport adapter and `hubu-mcp-server` binary
+- `gongbu-api`: execution API, durable workflow, provider adapters, artifacts,
+  and the `gongbu-server` and development-only `gongbu-sandbox` binaries
+- `gongbu-build-info`: Gongbu build and compatibility metadata shared by its
+  production binaries
+- `gongbu-mcp`: Gongbu's separate agent-facing MCP adapter and `gongbu-mcp`
+  binary
+
+All crates use one root `Cargo.toml`, `Cargo.lock`, and Rust 1.88 minimum
+supported Rust version (MSRV). The checked-in toolchain may be newer so local
+formatting and lint behavior stays reproducible; CI checks the complete locked
+workspace with Rust 1.88 explicitly. No normal build, test, or runbook requires
+a second Gongbu checkout.
+
+## Source, Distribution, and Runtime Boundaries
+
+Hubu and Gongbu share this source repository and product direction. The current
+release archive still contains only the Hubu CLI and server; the five-binary
+unified distribution is tracked by HUB-84. Neither the current source boundary
+nor the planned packaging boundary collapses runtime responsibilities:
+
+- `hubu-server` is the control-plane process. It owns identity, policy, budgets,
+  spend authorization, claims, settlement, the governance database, and ledger.
+- `gongbu-server` is the execution-plane process. It owns provider credentials,
+  provider calls and retries, its execution database, Temporal workflow state,
+  artifact bytes, and execution recovery.
+- They communicate only through the authenticated, versioned spend-executor
+  contract. They do not share a database, credential store, provider execution
+  boundary, or failure domain.
+- `hubu-mcp-server` and `gongbu-mcp` remain separate agent-facing surfaces. The
+  unified repository and distribution do not imply a unified MCP protocol.
 
 ## Quick Start
 
 ### 1. Set Up the Project and Binaries
 
-From a local checkout, verify the workspace and install the local binaries:
+From the repository root, install `protoc` (required by the Temporal Rust SDK),
+verify the locked workspace, and install the five production binaries:
 
 ```sh
-cargo test --workspace
-cargo install --path crates/hubu-cli
-cargo install --path crates/hubu-api
-cargo install --path crates/hubu-mcp
+cargo test --workspace --locked
+cargo install --locked --path crates/hubu-cli --bin hubu
+cargo install --locked --path crates/hubu-api --bin hubu-server
+cargo install --locked --path crates/hubu-mcp --bin hubu-mcp-server
+cargo install --locked --path crates/gongbu-api --bin gongbu-server
+cargo install --locked --path crates/gongbu-mcp --bin gongbu-mcp
 ```
 
 Start the local Hubu server:
@@ -93,6 +130,12 @@ Start the local Hubu server:
 ```sh
 hubu-server
 ```
+
+This starts only the Hubu control plane. Gongbu is configured and started as a
+separate process; follow the [persistent Gongbu server runbook](docs/gongbu/server.md)
+when exercising provider execution. The deterministic
+[Gongbu sandbox](docs/gongbu/sandbox.md) remains a development tool and is not
+part of the production binary set.
 
 ### 2. Human Admin Setup
 
@@ -207,8 +250,13 @@ hubu-server --version
 curl http://127.0.0.1:8787/version
 ```
 
-`product_version` versions Hubu itself, while `executor_contract` remains the
-independently negotiated `hubu-spend-executor-v4` identifier.
+Current published release provenance binds `hubu` and `hubu-server` to one
+product version and source commit. Local builds of the Gongbu production
+binaries expose their own build metadata, and `gongbu-mcp` reports its product
+version in the MCP `initialize` response. HUB-84 will give all five production
+binaries one release provenance identity. `executor_contract` remains the
+independently negotiated `hubu-spend-executor-v4` identifier; sharing source or
+a future release version does not change that wire contract.
 
 ## License
 
@@ -394,5 +442,7 @@ the hold lifecycle, and CLI examples.
   orchestration and ledger recording flow
 - [docs/mcp-transport.md](docs/mcp-transport.md): MCP stdio transport adapter
   and approval boundaries
+- [docs/gongbu/README.md](docs/gongbu/README.md): Gongbu execution-plane design,
+  operator configuration, persistent runtime, sandbox, and separate MCP adapter
 - [docs/notes/](docs/notes/): non-normative planning, improvement, and handoff
   notes

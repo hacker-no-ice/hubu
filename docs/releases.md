@@ -1,9 +1,12 @@
 # Hubu Release Runbook
 
-Hubu publishes immutable GitHub Releases from `.github/workflows/release.yml`.
-Gongbu and other compatibility consumers must pin an exact release tag and the
-matching SHA-256 checksum. A moving checkout of `main` is not a supported
-routine integration-test dependency.
+Hubu publishes immutable releases from `.github/workflows/release.yml`. Today,
+the target-specific archives contain `hubu` and `hubu-server`. Gongbu builds
+from the same source repository and locked workspace but is not yet packaged in
+those published archives; HUB-84 tracks the five-binary unified distribution.
+Consumers of a published archive must pin an exact release tag and matching
+SHA-256 checksum; a moving checkout of `main` is not a supported routine
+integration-test dependency.
 
 All current releases are experimental, local-first builds for the localhost
 demo server and mock payment rail. They are not approved for real-money
@@ -13,10 +16,10 @@ not mean production security, capacity, or payment-rail readiness.
 
 ## Versions and channels
 
-Hubu has two independently visible versions:
+The current Hubu archive has two independently visible versions:
 
-- `product_version` identifies the Hubu binaries. Stable releases use SemVer
-  tags such as `v0.1.0`; `main` builds use
+- `product_version` identifies the packaged Hubu binaries. Stable releases use
+  SemVer tags such as `v0.1.0`; `main` builds use
   `<cargo-version>-main.<12-character-commit>`.
 - `executor_contract` identifies the negotiated external execution protocol.
   It remains `hubu-spend-executor-v4` and does not change merely because the
@@ -44,8 +47,31 @@ money movement.
 
 ## Supported binary targets
 
-Each release contains the `hubu` CLI and `hubu-server` in a target-specific
-archive:
+Each current target-specific archive contains two production binaries:
+
+| Binary | Runtime responsibility |
+| --- | --- |
+| `hubu` | Human/developer control-plane CLI |
+| `hubu-server` | Hubu control-plane HTTP process and governance storage |
+
+## Unified archive target (HUB-84)
+
+HUB-84 will extend the archive to five production binaries built from one
+source commit and lockfile under one tag, product version, checksum set, and
+provenance identity:
+
+| Binary | Runtime responsibility |
+| --- | --- |
+| `hubu` | Human/developer control-plane CLI |
+| `hubu-server` | Hubu control-plane HTTP process and governance storage |
+| `hubu-mcp-server` | Hubu's agent-facing MCP adapter |
+| `gongbu-server` | Gongbu execution-plane process, storage, workflow, credentials, providers, and artifacts |
+| `gongbu-mcp` | Gongbu's separate agent-facing MCP adapter |
+
+`hubu-bench` and `gongbu-sandbox` will remain development tools rather than
+release artifacts. Unified packaging must not merge the production binaries'
+processes, databases, credentials, provider boundary, failure domain, or MCP
+surfaces.
 
 | Platform | Target | Asset suffix |
 | --- | --- | --- |
@@ -83,7 +109,9 @@ provenance before installing:
 ```sh
 package=${asset%.tar.gz}
 cat "$package/PROVENANCE.json"
-"$package/hubu-server" --version
+for binary in hubu hubu-server; do
+  "$package/$binary" --version
+done
 install "$package/hubu" "$package/hubu-server" /usr/local/bin/
 ```
 
@@ -107,8 +135,9 @@ The source must be an ancestor of `main`. Promotion reruns formatting, Clippy,
 the locked workspace tests, the core integration flow, and a locked release
 build before creating platform artifacts. After publication, clean GitHub
 runners download the release, verify `SHA256SUMS`, require the project license
-and third-party notice files, start an isolated `hubu-server`, and check
-`/health`, `/version`, and local `--version` metadata.
+and third-party notice files, verify both binaries' local `--version` metadata,
+start an isolated `hubu-server`, and check `/health` and `/version`. HUB-84 owns
+the future published-archive smoke coverage for Gongbu.
 HTTP probes use bounded connection and total-request timeouts so an unavailable
 or non-responsive server fails the smoke job promptly.
 

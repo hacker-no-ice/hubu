@@ -321,6 +321,27 @@ a {
   line-height: 1.45;
 }
 
+.code-links {
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 2px dashed rgba(31, 41, 51, 0.28);
+}
+
+.code-links a {
+  display: inline-block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+.code-links a:hover,
+.code-links a:focus {
+  color: #174f45;
+}
+
 .node {
   cursor: pointer;
 }
@@ -506,11 +527,21 @@ a {
   .architecture-canvas {
     min-height: 500px;
     height: 540px;
+    width: 900px;
+    max-width: none;
+  }
+
+  .diagram-region {
+    overflow-x: auto;
   }
 
   .details-panel,
   .diagram-region {
     box-shadow: 4px 5px 0 var(--shadow);
+  }
+
+  .code-links a {
+    font-size: 12px;
   }
 }
 
