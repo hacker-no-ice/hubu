@@ -1,7 +1,7 @@
 use chrono::Utc;
 use hubu_common::{
     execution_scope::ExecutionScope,
-    ids::{AgentAccountId, AgentId, BudgetId, SpendAuthTokenId},
+    ids::{AgentAccountId, AgentId, BudgetId, SpendAuthTokenId, SpendDecisionId},
     models::UserContext,
     money::Currency,
 };
@@ -49,6 +49,12 @@ pub struct AuthorizeSpendRequest {
 pub enum SpendAuthorizationOutcome {
     Approved(ApprovedSpendAuthorization),
     Rejected(RejectedSpendAuthorization),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum HumanApprovalDecision {
+    Approve,
+    Deny,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +171,18 @@ pub enum SpendApprovalError {
     #[error("exact replay is pending durable authorization completion for operation key `{operation_key}`")]
     PendingExactReplay { operation_key: String },
 
+    #[error("unknown spend approval request")]
+    UnknownApprovalRequest,
+
+    #[error("spend approval request belongs to another owner")]
+    ApprovalOwnerMismatch,
+
+    #[error("spend approval request is already {current} and cannot be changed to {requested}")]
+    ApprovalAlreadyResolved {
+        current: &'static str,
+        requested: &'static str,
+    },
+
     #[error(transparent)]
     Spend(#[from] crate::spend::SpendError),
 
@@ -257,6 +275,104 @@ impl SpendApprovalService {
             .and_then(|token| spend_manager.auth_token_record(&token.id));
 
         if evaluation.idempotent_replay {
+            attach_attempt_audit(
+                governance,
+                &mut evaluation,
+                &request.agent_id,
+                &operation_key,
+                SpendRetryAction::ReplayExactly,
+                "replay this exact immutable scope to recover the current authorization state",
+            )?;
+            let latest = evaluation
+                .attempt_history
+                .iter()
+                .find(|attempt| attempt.revision == evaluation.revision)
+                .map(|attempt| (attempt.final_decision.clone(), attempt.reasons.clone()));
+
+            if evaluation.evaluation.decision == Effect::NeedsApproval {
+                match latest {
+                    Some((SpendAuthorizationDecision::Allowed, _)) => {
+                        let existing_hold = budget_manager
+                            .get_budget_hold_by_spend_decision(&evaluation.decision_id)
+                            .ok_or(SpendApprovalError::MissingActiveBudget)?;
+                        let token = evaluation
+                            .auth_token
+                            .clone()
+                            .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
+                        let balance = budget_manager
+                            .get_budget_balance(&existing_hold.budget_id)
+                            .ok_or(SpendApprovalError::MissingActiveBudget)?;
+                        return Ok(SpendAuthorizationOutcome::Approved(
+                            ApprovedSpendAuthorization {
+                                operation_key: evaluation.operation_key.clone(),
+                                user: request.user,
+                                agent_id: request.agent_id,
+                                agent_account_id: request.agent_account_id,
+                                amount_cents: request.amount_cents,
+                                currency: request.currency,
+                                merchant: request.merchant,
+                                execution_scope: request.execution_scope,
+                                task_id: request.task_id,
+                                reason: request.reason,
+                                workload_profile: request.workload_profile,
+                                evaluation,
+                                token,
+                                budget_reservation: ReserveBudgetResponse {
+                                    hold: existing_hold,
+                                    balance,
+                                },
+                            },
+                        ));
+                    }
+                    Some((SpendAuthorizationDecision::Denied, reasons)) => {
+                        return Ok(SpendAuthorizationOutcome::Rejected(
+                            RejectedSpendAuthorization {
+                                operation_key: evaluation.operation_key.clone(),
+                                user: request.user,
+                                agent_id: request.agent_id,
+                                agent_account_id: request.agent_account_id,
+                                amount_cents: request.amount_cents,
+                                currency: request.currency,
+                                merchant: request.merchant,
+                                execution_scope: request.execution_scope,
+                                task_id: request.task_id,
+                                reason: request.reason,
+                                workload_profile: request.workload_profile,
+                                decision: Effect::Deny,
+                                reasons,
+                                evaluation,
+                            },
+                        ));
+                    }
+                    _ => {
+                        evaluation.retry_guidance = SpendRetryGuidance {
+                            action: SpendRetryAction::ReplayExactly,
+                            operation_key: operation_key.clone(),
+                            message: "approval is pending; replay this exact request after the human decides"
+                                .to_string(),
+                        };
+                        return Ok(SpendAuthorizationOutcome::Rejected(
+                            RejectedSpendAuthorization {
+                                operation_key: evaluation.operation_key.clone(),
+                                user: request.user,
+                                agent_id: request.agent_id,
+                                agent_account_id: request.agent_account_id,
+                                amount_cents: request.amount_cents,
+                                currency: request.currency,
+                                merchant: request.merchant,
+                                execution_scope: request.execution_scope,
+                                task_id: request.task_id,
+                                reason: request.reason,
+                                workload_profile: request.workload_profile,
+                                decision: Effect::NeedsApproval,
+                                reasons: evaluation.evaluation.reasons.clone(),
+                                evaluation,
+                            },
+                        ));
+                    }
+                }
+            }
+
             if evaluation.evaluation.decision != Effect::Allow {
                 attach_attempt_audit(
                     governance,
@@ -359,8 +475,8 @@ impl SpendApprovalService {
                     &mut evaluation,
                     &request.agent_id,
                     &operation_key,
-                    SpendRetryAction::CreateNewOperation,
-                    "approval is pending; changed scope requires a new operation key",
+                    SpendRetryAction::ReplayExactly,
+                    "approval is pending; replay this exact request after the human decides",
                 )?;
             }
             return Ok(SpendAuthorizationOutcome::Rejected(
@@ -527,6 +643,168 @@ impl SpendApprovalService {
         ))
     }
 
+    pub fn resolve_human_approval<G>(
+        &self,
+        user: UserContext,
+        approval_request_id: &SpendDecisionId,
+        decision: HumanApprovalDecision,
+        spend_manager: &mut SpendManager,
+        budget_manager: &mut BudgetManager,
+        governance: &mut G,
+    ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
+    where
+        G: SpendRepository + BudgetRepository,
+    {
+        let decision_record = spend_manager
+            .decision_record(approval_request_id)
+            .ok_or(SpendApprovalError::UnknownApprovalRequest)?;
+        if decision_record.owner_user_id != user.user_id {
+            return Err(SpendApprovalError::ApprovalOwnerMismatch);
+        }
+        if decision_record.evaluation.decision != Effect::NeedsApproval {
+            return Err(SpendApprovalError::UnknownApprovalRequest);
+        }
+
+        let request = authorize_request_from_decision(user, &decision_record);
+        let history = governance.load_spend_attempt_history(
+            &decision_record.request.agent_id,
+            &decision_record.operation_key,
+        )?;
+        let current = history
+            .iter()
+            .find(|attempt| attempt.revision == decision_record.revision)
+            .map(|attempt| attempt.final_decision.clone())
+            .unwrap_or(SpendAuthorizationDecision::PendingApproval);
+
+        match (current, decision) {
+            (SpendAuthorizationDecision::Allowed, HumanApprovalDecision::Deny) => {
+                Err(SpendApprovalError::ApprovalAlreadyResolved {
+                    current: "approved",
+                    requested: "denied",
+                })
+            }
+            (SpendAuthorizationDecision::Denied, HumanApprovalDecision::Approve) => {
+                Err(SpendApprovalError::ApprovalAlreadyResolved {
+                    current: "denied",
+                    requested: "approved",
+                })
+            }
+            (SpendAuthorizationDecision::Allowed, HumanApprovalDecision::Approve)
+            | (SpendAuthorizationDecision::Denied, HumanApprovalDecision::Deny) => self.authorize(
+                request,
+                &Policy {
+                    id: decision_record.evaluation.policy_id.clone(),
+                    version: decision_record.evaluation.policy_version.clone(),
+                    owner_user_id: decision_record.owner_user_id,
+                    rules: Vec::new(),
+                    default_effect: decision_record.evaluation.decision,
+                },
+                spend_manager,
+                budget_manager,
+                governance,
+            ),
+            (SpendAuthorizationDecision::PendingApproval, HumanApprovalDecision::Deny) => {
+                let reasons = vec!["human denied the immutable spend request".to_string()];
+                governance.record_spend_attempt_outcome(
+                    &decision_record,
+                    SpendAuthorizationDecision::Denied,
+                    &reasons,
+                    Utc::now(),
+                )?;
+                let mut evaluation = evaluation_response_for_decision(
+                    &decision_record,
+                    None,
+                    false,
+                    SpendRetryAction::ReplayExactly,
+                    "the human denied this immutable request",
+                );
+                attach_attempt_audit(
+                    governance,
+                    &mut evaluation,
+                    &decision_record.request.agent_id,
+                    &decision_record.operation_key,
+                    SpendRetryAction::ReplayExactly,
+                    "the human denied this immutable request",
+                )?;
+                Ok(SpendAuthorizationOutcome::Rejected(rejected_from_request(
+                    request,
+                    evaluation,
+                    Effect::Deny,
+                    reasons,
+                )))
+            }
+            (SpendAuthorizationDecision::PendingApproval, HumanApprovalDecision::Approve) => {
+                let token =
+                    spend_manager.issue_auth_token_for_approved_decision(approval_request_id)?;
+                let token_record = spend_manager
+                    .auth_token_record(&token.id)
+                    .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
+                let budget_id =
+                    active_budget_id_for_spend(budget_manager, &decision_record.request.agent_id)?;
+                let budget_reservation = match budget_manager.reserve_budget(ReserveBudgetRequest {
+                    budget_id,
+                    spend_decision_id: approval_request_id.clone(),
+                    amount_cents: decision_record.request.amount_cents,
+                    currency: decision_record.request.currency,
+                    expires_at: token.expires_at,
+                }) {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        spend_manager.discard_auth_token_for_decision(approval_request_id);
+                        return Err(error.into());
+                    }
+                };
+
+                let reasons = vec!["human approved the immutable spend request".to_string()];
+                if let Err(error) = governance.save_approved_spend_transition(
+                    &decision_record,
+                    &token_record,
+                    &budget_reservation.hold,
+                    &budget_reservation.balance,
+                    &reasons,
+                    Utc::now(),
+                ) {
+                    let _ = budget_manager.release_budget(&budget_reservation.hold.id);
+                    spend_manager.discard_auth_token_for_decision(approval_request_id);
+                    return Err(error.into());
+                }
+                let mut evaluation = evaluation_response_for_decision(
+                    &decision_record,
+                    Some(token.clone()),
+                    false,
+                    SpendRetryAction::ReplayExactly,
+                    "the human approved this request; replay returns the authorization",
+                );
+                attach_attempt_audit(
+                    governance,
+                    &mut evaluation,
+                    &decision_record.request.agent_id,
+                    &decision_record.operation_key,
+                    SpendRetryAction::ReplayExactly,
+                    "the human approved this request; replay returns the authorization",
+                )?;
+                Ok(SpendAuthorizationOutcome::Approved(
+                    ApprovedSpendAuthorization {
+                        operation_key: request.operation_key,
+                        user: request.user,
+                        agent_id: request.agent_id,
+                        agent_account_id: request.agent_account_id,
+                        amount_cents: request.amount_cents,
+                        currency: request.currency,
+                        merchant: request.merchant,
+                        execution_scope: request.execution_scope,
+                        task_id: request.task_id,
+                        reason: request.reason,
+                        workload_profile: request.workload_profile,
+                        evaluation,
+                        token,
+                        budget_reservation,
+                    },
+                ))
+            }
+        }
+    }
+
     // This orchestration boundary receives each stateful collaborator explicitly so callers
     // retain control of locking, persistence, and token loading.
     #[allow(clippy::too_many_arguments)]
@@ -649,6 +927,72 @@ impl SpendApprovalService {
             payment,
             budget_update,
         })
+    }
+}
+
+fn authorize_request_from_decision(
+    user: UserContext,
+    decision: &crate::spend::SpendDecisionRecord,
+) -> AuthorizeSpendRequest {
+    AuthorizeSpendRequest {
+        operation_key: decision.operation_key.clone(),
+        user,
+        agent_id: decision.request.agent_id.clone(),
+        agent_account_id: decision.request.agent_account_id.clone(),
+        amount_cents: decision.request.amount_cents,
+        currency: decision.request.currency,
+        merchant: decision.request.merchant.clone(),
+        execution_scope: decision.request.execution_scope.clone(),
+        task_id: decision.request.task_id.clone(),
+        reason: decision.request.reason.clone(),
+        workload_profile: decision.request.workload_profile.clone(),
+    }
+}
+
+fn evaluation_response_for_decision(
+    decision: &crate::spend::SpendDecisionRecord,
+    auth_token: Option<IssuedSpendAuthToken>,
+    idempotent_replay: bool,
+    action: SpendRetryAction,
+    message: &str,
+) -> SpendEvaluationResponse {
+    SpendEvaluationResponse {
+        operation_key: decision.operation_key.clone(),
+        decision_id: decision.id.clone(),
+        evaluation: decision.evaluation.clone(),
+        auth_token,
+        idempotent_replay,
+        revision: decision.revision,
+        retry_guidance: SpendRetryGuidance {
+            action,
+            operation_key: decision.operation_key.clone(),
+            message: message.to_string(),
+        },
+        attempt_history: Vec::new(),
+    }
+}
+
+fn rejected_from_request(
+    request: AuthorizeSpendRequest,
+    evaluation: SpendEvaluationResponse,
+    decision: Effect,
+    reasons: Vec<String>,
+) -> RejectedSpendAuthorization {
+    RejectedSpendAuthorization {
+        operation_key: request.operation_key,
+        user: request.user,
+        agent_id: request.agent_id,
+        agent_account_id: request.agent_account_id,
+        amount_cents: request.amount_cents,
+        currency: request.currency,
+        merchant: request.merchant,
+        execution_scope: request.execution_scope,
+        task_id: request.task_id,
+        reason: request.reason,
+        workload_profile: request.workload_profile,
+        evaluation,
+        decision,
+        reasons,
     }
 }
 

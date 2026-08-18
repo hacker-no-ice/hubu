@@ -142,6 +142,55 @@ impl SpendManager {
         self.tokens.get(token_id).cloned()
     }
 
+    pub fn issue_auth_token_for_approved_decision(
+        &mut self,
+        decision_id: &SpendDecisionId,
+    ) -> Result<IssuedSpendAuthToken, SpendError> {
+        if let Some(token_id) = self.token_id_by_decision.get(decision_id) {
+            let token = self
+                .tokens
+                .get(token_id)
+                .ok_or(SpendError::UnknownSpendAuthToken)?;
+            return Ok(IssuedSpendAuthToken {
+                id: token.id.clone(),
+                expires_at: token.expires_at,
+            });
+        }
+
+        let decision = self
+            .decisions
+            .get(decision_id)
+            .ok_or(SpendError::MissingSpendDecision)?;
+        if decision.evaluation.decision != Effect::NeedsApproval {
+            return Err(SpendError::SpendDecisionNotAllowed);
+        }
+        let timing = self
+            .timing
+            .profile(&decision.request.workload_profile)
+            .ok_or_else(|| {
+                SpendError::UnknownWorkloadProfile(decision.request.workload_profile.clone())
+            })?;
+        let token_id = SpendAuthTokenId::new();
+        let expires_at = Utc::now() + Duration::seconds(timing.authorization_ttl_seconds);
+        let token_record = SpendAuthTokenRecord {
+            id: token_id.clone(),
+            owner_user_id: decision.owner_user_id.clone(),
+            spend_decision_id: decision_id.clone(),
+            expires_at,
+            claim_ttl_seconds: timing.claim_ttl_seconds,
+            used_at: None,
+            used_by_payment_id: None,
+            revoked_at: None,
+        };
+        self.token_id_by_decision
+            .insert(decision_id.clone(), token_id.clone());
+        self.tokens.insert(token_id.clone(), token_record);
+        Ok(IssuedSpendAuthToken {
+            id: token_id,
+            expires_at,
+        })
+    }
+
     pub fn executor_claim_record(
         &self,
         claim_id: &SpendExecutorClaimId,
@@ -436,7 +485,12 @@ impl SpendManager {
                 SpendError::MissingSpendDecision
             })?;
 
-        if decision.evaluation.decision != Effect::Allow {
+        let human_approved = decision.evaluation.decision == Effect::NeedsApproval
+            && self
+                .token_id_by_decision
+                .get(&decision.id)
+                .is_some_and(|token_id| token_id == &token.id);
+        if decision.evaluation.decision != Effect::Allow && !human_approved {
             log_auth_validation_rejected(request, "spend_decision_not_allowed");
             return Err(SpendError::SpendDecisionNotAllowed);
         }
@@ -630,7 +684,12 @@ impl SpendManager {
             .decisions
             .get(&token.spend_decision_id)
             .ok_or(SpendError::MissingSpendDecision)?;
-        if decision.evaluation.decision != Effect::Allow {
+        let human_approved = decision.evaluation.decision == Effect::NeedsApproval
+            && self
+                .token_id_by_decision
+                .get(&decision.id)
+                .is_some_and(|token_id| token_id == &token.id);
+        if decision.evaluation.decision != Effect::Allow && !human_approved {
             return Err(SpendError::SpendDecisionNotAllowed);
         }
         if request.owner_user_id != decision.owner_user_id {

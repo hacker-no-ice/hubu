@@ -203,6 +203,60 @@ guidance.
    and `retry_guidance`. Retry guidance has one machine-readable action:
    `reuse_operation_key`, `replay_exactly`, or `create_new_operation`.
 
+   When policy returns `needs_approval`, the response also includes a durable
+   `approval` object:
+
+   ```json
+   {
+     "decision": "needs_approval",
+     "auth_token_id": null,
+     "approval": {
+       "approval_request_id": "<spend decision id>",
+       "status": "pending",
+       "review": {
+         "operation_key": "codex:tool-call:01JABC123",
+         "account_id": "aga_example",
+         "agent_id": "agt_example",
+         "amount_cents": 500,
+         "currency": "usd",
+         "workload_profile": "image_generation",
+         "reason": "hubu-logo-demo",
+         "policy_summary": "policy defaulted to needs_approval because no automatic-allow rule matched"
+       }
+     }
+   }
+   ```
+
+   No token, hold, claim, payment, or provider work exists while approval is
+   pending. The client shows the complete `approval.review` object to the human
+   and waits for an explicit decision. It may recover the durable state with:
+
+   ```http
+   GET /spend/approval?approval_request_id=<spend decision id>
+   ```
+
+   The owner-authenticated client then submits exactly one decision:
+
+   ```http
+   POST /spend/approval/resolve
+   X-Hubu-Approval-Capability: <owner-only capability>
+   ```
+
+   ```json
+   {
+     "approval_request_id": "<spend decision id>",
+     "decision": "approve"
+   }
+   ```
+
+   The normal API bearer is insufficient for this route; the server also verifies
+   the owner-only approval capability, which must not be shared with executors.
+   `decision` is `approve` or `deny`. Approval reserves the original immutable
+   maximum and returns the normal authorization token; it never invokes the
+   provider. Denial is terminal for that immutable request. Repeating the same
+   resolution or exact authorization request returns the stored result, while
+   a conflicting resolution is rejected.
+
    `operation_key`, `task_id`, and `reason` are independent. The first is the
    trusted financial/idempotency identity, the second is an optional trusted
    external correlation, and the third is human-readable authorization and

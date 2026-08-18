@@ -16,7 +16,8 @@ The HTTP server reads `HUBU_AUTH_TOKEN`, or creates/reads `hubu.auth-token` in
 its current directory. The MCP adapter reads `HUBU_AUTH_TOKEN` or the same token
 file and forwards protected HTTP requests with `Authorization: Bearer ...`.
 Use `HUBU_AUTH_TOKEN_FILE` when the server and adapter run from different
-working directories.
+working directories. Approval resolution also uses a separate
+`HUBU_APPROVAL_TOKEN_FILE`; `hubu init codex` creates and configures both.
 
 ## Cheatsheet
 
@@ -37,7 +38,10 @@ hubu init codex --token-file ~/.hubu/hubu.auth-token --trust-client-approval
 Start the Hubu server with the same token file:
 
 ```sh
-HUBU_AUTH_TOKEN_FILE=~/.hubu/hubu.auth-token hubu-server
+HUBU_AUTH_TOKEN_FILE=~/.hubu/hubu.auth-token \
+HUBU_APPROVAL_TOKEN_FILE=~/.hubu/hubu.approval-token \
+HUBU_RECONCILIATION_TOKEN_FILE=~/.hubu/hubu.reconciliation-token \
+hubu-server
 ```
 
 Then restart Codex. You do not normally start `hubu-mcp-server` yourself; Codex
@@ -73,7 +77,10 @@ Approval behavior:
   `hubu` CLI command themselves or ask an agent to invoke the protected MCP tool
   after the client shows a human approval prompt.
 - If a spend response includes `requires_human_approval: true`, Hubu did not
-  execute payment; the harness should show the response to the human.
+  execute payment. The harness should show `approval.review`, wait for an
+  explicit answer, then call `hubu_resolve_spend_approval` with `approve` or
+  `deny`. The adapter attaches the separate human approval capability; executors
+  receive neither that capability nor the reconciliation capability.
 
 ## Codex Setup
 
@@ -92,8 +99,8 @@ and `hubu_submit_spend` can run without an extra Codex approval prompt; Hubu
 policy still returns `needs_approval` without executing payment when review is
 required.
 Restart Codex after running the command. Start `hubu-server` with the
-`HUBU_AUTH_TOKEN_FILE` path printed by the command so the server and MCP adapter
-share the same bearer token.
+token-file paths printed by the command so the server and MCP adapter share the
+same bearer and human capability files.
 
 After Codex can discover Hubu tools, human-initiated actions have two paths:
 run `hubu` CLI commands directly, or ask the agent to perform the same
@@ -110,9 +117,9 @@ For a custom Codex config or prebuilt MCP server path:
 hubu init codex --config ~/.codex/config.toml --mcp-server /path/to/hubu-mcp-server
 ```
 
-Leave `--trust-client-approval` off for normal agent spend workflows. Add it
-only when the Codex client is trusted to prompt a human before invoking
-destructive MCP tools such as registration, policy changes, spending targets, or budget creation.
+Leave `--trust-client-approval` off when approval decisions will be resolved
+directly with the Hubu CLI. Enable it when the Codex client is trusted to prompt
+a human before invoking `hubu_resolve_spend_approval` or other protected tools.
 
 ## Manual MCP Setup
 
@@ -130,7 +137,8 @@ Then configure the harness from Hubu's MCP metadata:
   harness's approval settings.
 - Auto-approve `hubu_authorize_spend` and `hubu_submit_spend` at the harness
   layer. If Hubu returns `requires_human_approval: true`, no payment was
-  executed and the harness should surface the response to the human.
+  executed. Show `approval.review`, wait, and invoke the protected
+  `hubu_resolve_spend_approval` tool with the returned `approval_request_id`.
 - Prompt before setup/admin tools such as registration, policy changes, and
   spending-target or budget creation.
 
@@ -140,15 +148,16 @@ Protected write tools are disabled unless the MCP process is started with
 is trusted to show a human approval prompt before invoking destructive tools.
 The bearer token protects the local HTTP API from arbitrary localhost callers;
 the MCP approval gate still protects human-intent workflows from agent-controlled
-tool arguments.
+tool arguments. Hubu separately persists the pending and resolved spend decision.
 
 These controls define a local demo trust boundary, not production
 authentication. A same-user process that can read the bearer-token file or
 control an authorized MCP client can act with that client's authority, and the
 server does not issue scoped, short-lived workload credentials. The client-side
 approval gate is useful only when the selected MCP client reliably enforces it;
-it is not a server-side durable approval record. Do not expose this arrangement
-to a network or connect it to a real payment rail.
+it is not proof of a distinct human identity. The Hubu decision is durable, but
+the MVP attributes it to the existing owner-authenticated client. Do not expose
+this arrangement to a network or connect it to a real payment rail.
 
 ## Approval Boundaries
 
@@ -166,6 +175,7 @@ Human approval is required for:
 - `hubu_create_recurring_budget`
 - `hubu_revoke_budget`
 - `hubu_replace_budget`
+- `hubu_resolve_spend_approval`
 - `hubu_reconcile_vendor_billed_claim`
 - `hubu_reconcile_vendor_did_not_bill_claim`
 
@@ -193,6 +203,7 @@ Agents can call directly:
 - `hubu_show_spending_targets`
 - `hubu_list_budgets`
 - `hubu_list_ledger`
+- `hubu_get_spend_approval`
 - `hubu_get_executor_claim`
 - `hubu_list_claims_requiring_reconciliation`
 - `hubu_authorize_spend`
@@ -213,13 +224,30 @@ payment is executed and the MCP response includes:
 ```json
 {
   "requires_human_approval": true,
-  "approval_reason": "policy returned needs_approval; Hubu did not execute payment"
+  "approval_reason": "policy returned needs_approval; Hubu did not execute payment",
+  "approval": {
+    "approval_request_id": "<spend decision id>",
+    "status": "pending",
+    "review": {
+      "operation_key": "codex:tool-call:01K2AZNQ",
+      "account_id": "aga_example",
+      "agent_id": "agt_example",
+      "amount_cents": 500,
+      "currency": "usd",
+      "workload_profile": "default",
+      "reason": "Generate the release artwork",
+      "policy_summary": "policy defaulted to needs_approval because no automatic-allow rule matched"
+    }
+  }
 }
 ```
 
-The current adapter exposes the approval boundary but does not yet implement a
-durable approval queue or a follow-up endpoint that resumes payment after a
-human approves a `needs_approval` spend decision.
+The harness shows the complete review object and waits. It can read the durable
+state through `hubu_get_spend_approval`. After the human chooses, it invokes
+`hubu_resolve_spend_approval` with the approval request ID and `approve` or
+`deny`. Approval reserves the immutable maximum and returns the normal spend
+authorization; it does not call a provider. Repeating the same resolution is
+idempotent, and a conflicting resolution is rejected.
 
 `hubu_authorize_spend` uses the same policy and budget checks as
 `hubu_submit_spend`, but stops after issuing a spend authorization token and
@@ -289,6 +317,8 @@ responsibility of HUB-31; this adapter does not allocate operation keys.
 | `hubu_replace_budget` | `POST /budgets/replace` | required |
 | `hubu_authorize_spend` | `POST /spend/authorize` | conditional on policy result |
 | `hubu_submit_spend` | `POST /spend` | conditional on policy result |
+| `hubu_get_spend_approval` | `GET /spend/approval?approval_request_id=...` | none |
+| `hubu_resolve_spend_approval` | `POST /spend/approval/resolve` | required |
 | `hubu_list_agents` | `GET /agents` | none; defaults to current user |
 | `hubu_list_budgets` | `GET /budgets` | none |
 | `hubu_list_ledger` | `GET /ledger` | none |

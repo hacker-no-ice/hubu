@@ -15,13 +15,19 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
+const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
+const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
+const APPROVAL_CAPABILITY_HEADER: &str = "X-Hubu-Approval-Capability";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
 const RECONCILIATION_CAPABILITY_HEADER: &str = "X-Hubu-Reconciliation-Capability";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const HUBU_APPROVAL_PROFILE_VERSION: &str = "hubu-mcp-client-approval-v1";
-const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Every spend call must attach platform-owned operation_key and optional task_id under trusted params._meta['hubu.dev/platform-invocation']; Hubu MCP injects them outside model-authored arguments. The platform remains responsible for stable allocation and retry recovery. Protected setup/admin tools require a human approval prompt before tools/call. Expired-claim reconciliation tools use that prompt gate and a distinct server-verified human reconciliation capability that is never sent on executor requests. If a spend response has requires_human_approval=true, no payment was executed; stop and surface it to the human.";
+const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Every spend call must attach platform-owned operation_key and optional task_id under trusted params._meta['hubu.dev/platform-invocation']; Hubu MCP injects them outside model-authored arguments. The platform remains responsible for stable allocation and retry recovery. Protected setup/admin tools and hubu_resolve_spend_approval require a human approval prompt before tools/call. Approval resolution and expired-claim reconciliation also require distinct server-verified human capabilities that are never sent on executor requests. If a spend response has requires_human_approval=true, no payment was executed; show approval.review to the human and wait for approve or deny. After the human chooses, call hubu_resolve_spend_approval with the returned approval_request_id and explicit decision.";
+#[cfg(test)]
+const TEST_APPROVAL_TOKEN: &str = "test-human-approval-token";
 const READ_TOOL_NAMES: &[&str] = &[
     "hubu_health",
     "hubu_registration_guidance",
@@ -34,6 +40,7 @@ const READ_TOOL_NAMES: &[&str] = &[
     "hubu_list_agents",
     "hubu_list_budgets",
     "hubu_list_ledger",
+    "hubu_get_spend_approval",
     "hubu_get_executor_claim",
     "hubu_list_claims_requiring_reconciliation",
 ];
@@ -45,6 +52,7 @@ const APPROVAL_TOOL_NAMES: &[&str] = &[
     "hubu_apply_policy",
     "hubu_create_budget",
     "hubu_create_recurring_budget",
+    "hubu_resolve_spend_approval",
     "hubu_reconcile_vendor_billed_claim",
     "hubu_reconcile_vendor_did_not_bill_claim",
 ];
@@ -322,6 +330,21 @@ fn tool_definitions() -> Vec<Value> {
             }), &["account_id", "amount_cents", "reason"]),
         ),
         read_tool(
+            "hubu_get_spend_approval",
+            "Get the durable pending, approved, or denied state and immutable human review payload for one spend approval request.",
+            json_schema_required(json!({
+                "approval_request_id": { "type": "string" }
+            }), &["approval_request_id"]),
+        ),
+        approval_tool(
+            "hubu_resolve_spend_approval",
+            "Resolve a pending spend approval after the human explicitly chooses approve or deny. Requires a human click.",
+            json_schema_required(json!({
+                "approval_request_id": { "type": "string" },
+                "decision": { "type": "string", "enum": ["approve", "deny"] }
+            }), &["approval_request_id", "decision"]),
+        ),
+        read_tool(
             "hubu_list_agents",
             "List registered agents for the active Hubu user.",
             json_schema(json!({})),
@@ -509,7 +532,7 @@ fn approval_profile() -> Value {
         "response_contract": {
             "needs_approval_field": "requires_human_approval",
             "needs_approval_meaning": "Hubu policy required human review and no payment was executed.",
-            "agent_action": "Stop the spend workflow and surface approval_reason plus the structured response to the human."
+            "agent_action": "Show approval.review to the human, wait for an explicit approve or deny answer, then call hubu_resolve_spend_approval with approval_request_id and that decision."
         },
         "annotation_fields": {
             "client_pre_call": "x_hubu_client_approval_mode",
@@ -631,6 +654,21 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
         "hubu_authorize_spend" => {
             let arguments = trusted_spend_arguments(&params, arguments)?;
             let response = post_json(base_url, "/spend/authorize", arguments)?;
+            return Ok(tool_result(spend_response_with_approval_hint(response)));
+        }
+        "hubu_get_spend_approval" => {
+            let approval_request_id = arguments
+                .get("approval_request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("hubu_get_spend_approval requires approval_request_id"))?;
+            get_json(
+                base_url,
+                &format!("/spend/approval?approval_request_id={approval_request_id}"),
+            )?
+        }
+        "hubu_resolve_spend_approval" => {
+            require_trusted_client_approval(config, name)?;
+            let response = post_approval_json(base_url, "/spend/approval/resolve", arguments)?;
             return Ok(tool_result(spend_response_with_approval_hint(response)));
         }
         "hubu_list_agents" => get_json(base_url, "/agents")?,
@@ -756,15 +794,19 @@ fn tool_result(value: Value) -> Value {
 }
 
 fn get_json(base_url: &str, path: &str) -> Result<Value> {
-    request_json(base_url, "GET", path, None, false)
+    request_json(base_url, "GET", path, None, false, false)
 }
 
 fn post_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body), false)
+    request_json(base_url, "POST", path, Some(body), false, false)
+}
+
+fn post_approval_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
+    request_json(base_url, "POST", path, Some(body), true, false)
 }
 
 fn post_reconciliation_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body), true)
+    request_json(base_url, "POST", path, Some(body), false, true)
 }
 
 fn request_json(
@@ -772,6 +814,7 @@ fn request_json(
     method: &str,
     path: &str,
     body: Option<Value>,
+    include_approval_capability: bool,
     include_reconciliation_capability: bool,
 ) -> Result<Value> {
     let (host, port) = parse_base_url(base_url)?;
@@ -789,12 +832,20 @@ fn request_json(
     } else {
         String::new()
     };
+    let approval_header = if include_approval_capability {
+        let token = approval_token()?.ok_or_else(|| {
+            anyhow!("human approval requires {APPROVAL_TOKEN_ENV} or {APPROVAL_TOKEN_FILE_ENV}")
+        })?;
+        format!("{APPROVAL_CAPABILITY_HEADER}: {token}\r\n")
+    } else {
+        String::new()
+    };
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("connect to Hubu server at {base_url}"))?;
 
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}{reconciliation_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}{approval_header}{reconciliation_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body_text.len(),
         body_text
     )?;
@@ -877,6 +928,36 @@ fn reconciliation_token() -> Result<Option<String>> {
         Err(error) => {
             Err(error).with_context(|| format!("read Hubu reconciliation token file `{path}`"))
         }
+    }
+}
+
+fn approval_token() -> Result<Option<String>> {
+    #[cfg(test)]
+    if env::var(APPROVAL_TOKEN_ENV).is_err() && env::var(APPROVAL_TOKEN_FILE_ENV).is_err() {
+        return Ok(Some(TEST_APPROVAL_TOKEN.to_string()));
+    }
+
+    if let Ok(token) = env::var(APPROVAL_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{APPROVAL_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(Some(token));
+    }
+
+    let path = env::var(APPROVAL_TOKEN_FILE_ENV)
+        .unwrap_or_else(|_| DEFAULT_APPROVAL_TOKEN_FILE.to_string());
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                Err(anyhow!("Hubu approval token file `{path}` is empty"))
+            } else {
+                Ok(Some(token))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read Hubu approval token file `{path}`")),
     }
 }
 
@@ -989,6 +1070,52 @@ mod tests {
         );
         assert_eq!(tool["annotations"]["destructiveHint"], false);
         assert!(tool["inputSchema"]["properties"]["amount_cents"].is_object());
+    }
+
+    #[test]
+    fn spend_approval_read_is_automatic_and_resolution_requires_a_human_prompt() {
+        let tools = tool_definitions();
+        let read = tools
+            .iter()
+            .find(|tool| tool["name"] == "hubu_get_spend_approval")
+            .expect("approval read tool should exist");
+        assert_eq!(read["annotations"]["readOnlyHint"], true);
+        assert_eq!(read["annotations"]["x_hubu_client_approval_mode"], "auto");
+
+        let resolve = tools
+            .iter()
+            .find(|tool| tool["name"] == "hubu_resolve_spend_approval")
+            .expect("approval resolution tool should exist");
+        assert_eq!(resolve["annotations"]["destructiveHint"], true);
+        assert_eq!(
+            resolve["annotations"]["x_hubu_client_approval_mode"],
+            "prompt_before_call"
+        );
+        assert_eq!(
+            resolve["inputSchema"]["properties"]["decision"]["enum"],
+            json!(["approve", "deny"])
+        );
+    }
+
+    #[test]
+    fn spend_approval_resolution_fails_closed_without_trusted_client_gate() {
+        let error = call_tool(
+            "http://127.0.0.1:1",
+            McpConfig {
+                protected_tools_enabled: false,
+            },
+            json!({
+                "name": "hubu_resolve_spend_approval",
+                "arguments": {
+                    "approval_request_id": "decision-123",
+                    "decision": "approve"
+                }
+            }),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("trusted MCP client approval gate"));
     }
 
     #[test]
@@ -1176,7 +1303,10 @@ mod tests {
             .as_str()
             .expect("instructions should be present");
         assert!(instructions.contains("hubu_submit_spend"));
-        assert!(instructions.contains("Protected setup/admin tools require"));
+        assert!(
+            instructions.contains("hubu_resolve_spend_approval require a human approval prompt")
+        );
+        assert!(instructions.contains("wait for approve or deny"));
         assert_eq!(
             response["result"]["serverInfo"]["version"],
             hubu_common::build::build_info().product_version

@@ -22,6 +22,10 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
+const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
+const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
+const APPROVAL_CAPABILITY_HEADER: &str = "X-Hubu-Approval-Capability";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
@@ -34,6 +38,8 @@ const HUBU_HOME_ENV: &str = "HUBU_HOME";
 const HUBU_MCP_SERVER_ENV: &str = "HUBU_MCP_SERVER";
 const HUBU_CODEX_MCP_BEGIN: &str = "# >>> hubu managed codex mcp";
 const HUBU_CODEX_MCP_END: &str = "# <<< hubu managed codex mcp";
+#[cfg(test)]
+const TEST_APPROVAL_TOKEN: &str = "test-human-approval-token";
 
 fn main() {
     if let Err(error) = run() {
@@ -108,6 +114,9 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let token_file = take_value(&mut args, "--token-file")
         .map(PathBuf::from)
         .unwrap_or_else(default_codex_token_file_path);
+    let approval_token_file = take_value(&mut args, "--approval-token-file")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_codex_approval_token_file_path(&token_file));
     let reconciliation_token_file = take_value(&mut args, "--reconciliation-token-file")
         .map(PathBuf::from)
         .unwrap_or_else(|| default_codex_reconciliation_token_file_path(&token_file));
@@ -135,10 +144,21 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
             )
         })?
     };
+    let approval_token_file = if dry_run {
+        absolute_path(&approval_token_file)?
+    } else {
+        ensure_approval_token_file(&approval_token_file).with_context(|| {
+            format!(
+                "prepare Hubu approval token file `{}`",
+                approval_token_file.display()
+            )
+        })?
+    };
     let block = codex_mcp_config_block(
         &mcp_server,
         base_url,
         &token_file,
+        &approval_token_file,
         &reconciliation_token_file,
         trust_client_approval,
     );
@@ -156,14 +176,16 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     println!("  mcp_server: {}", mcp_server.display());
     println!("  hubu_url: {base_url}");
     println!("  token_file: {}", token_file.display());
+    println!("  approval_token_file: {}", approval_token_file.display());
     println!(
         "  reconciliation_token_file: {}",
         reconciliation_token_file.display()
     );
     println!("  next: restart Codex, then use /mcp or ask Codex to list Hubu tools");
     println!(
-        "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
+        "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {APPROVAL_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
         token_file.display(),
+        approval_token_file.display(),
         reconciliation_token_file.display()
     );
     println!(
@@ -209,6 +231,17 @@ fn default_codex_reconciliation_token_file_path(auth_token_file: &Path) -> PathB
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .join(DEFAULT_RECONCILIATION_TOKEN_FILE)
+}
+
+fn default_codex_approval_token_file_path(auth_token_file: &Path) -> PathBuf {
+    if let Ok(path) = env::var(APPROVAL_TOKEN_FILE_ENV) {
+        return PathBuf::from(path);
+    }
+    auth_token_file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(DEFAULT_APPROVAL_TOKEN_FILE)
 }
 
 fn hubu_home() -> PathBuf {
@@ -284,6 +317,10 @@ fn ensure_reconciliation_token_file(path: &Path) -> Result<PathBuf> {
     )
 }
 
+fn ensure_approval_token_file(path: &Path) -> Result<PathBuf> {
+    ensure_token_file(path, APPROVAL_TOKEN_ENV, generate_local_approval_token)
+}
+
 fn ensure_token_file(
     path: &Path,
     token_env: &str,
@@ -324,6 +361,10 @@ fn generate_local_reconciliation_token() -> String {
     format!("hubu_reconcile_{}", Uuid::new_v4().simple())
 }
 
+fn generate_local_approval_token() -> String {
+    format!("hubu_approve_{}", Uuid::new_v4().simple())
+}
+
 #[cfg(unix)]
 fn restrict_token_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -360,6 +401,7 @@ fn codex_mcp_config_block(
     mcp_server: &Path,
     base_url: &str,
     token_file: &Path,
+    approval_token_file: &Path,
     reconciliation_token_file: &Path,
     trust_client_approval: bool,
 ) -> String {
@@ -372,10 +414,12 @@ fn codex_mcp_config_block(
          [mcp_servers.hubu.env]\n\
          HUBU_URL = \"{}\"\n\
          {AUTH_TOKEN_FILE_ENV} = \"{}\"\n\
+         {APPROVAL_TOKEN_FILE_ENV} = \"{}\"\n\
          {RECONCILIATION_TOKEN_FILE_ENV} = \"{}\"\n",
         toml_basic_string(&mcp_server.display().to_string()),
         toml_basic_string(base_url),
         toml_basic_string(&token_file.display().to_string()),
+        toml_basic_string(&approval_token_file.display().to_string()),
         toml_basic_string(&reconciliation_token_file.display().to_string())
     );
     if trust_client_approval {
@@ -1524,6 +1568,10 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         args.remove(0);
         return spend_claim_status(base_url, args);
     }
+    if args.first().map(String::as_str) == Some("approval") {
+        args.remove(0);
+        return spend_approval(base_url, args);
+    }
     if args.first().map(String::as_str) == Some("reconcile") {
         args.remove(0);
         return spend_reconcile(base_url, args);
@@ -1623,6 +1671,42 @@ fn spend_claim_status(base_url: &str, mut args: Vec<String>) -> Result<()> {
         &format!("/spend/executor/claim?claim_id={claim_id}"),
     )?;
     print_executor_claim(&response)
+}
+
+fn spend_approval(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_spend_approval_help();
+        return Ok(());
+    }
+    let action = args
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("hubu spend approval requires get, approve, or deny"))?;
+    args.remove(0);
+    let approval_request_id = take_required(&mut args, "--approval-request-id")?;
+    ensure_no_args(args)?;
+
+    match action.as_str() {
+        "get" => {
+            let response = get_json(
+                base_url,
+                &format!("/spend/approval?approval_request_id={approval_request_id}"),
+            )?;
+            print_spend_approval_response(&response)
+        }
+        "approve" | "deny" => {
+            let response = post_approval_json(
+                base_url,
+                "/spend/approval/resolve",
+                json!({
+                    "approval_request_id": approval_request_id,
+                    "decision": action,
+                }),
+            )?;
+            print_spend_response(&response)
+        }
+        _ => bail!("unknown spend approval action `{action}`; use get, approve, or deny"),
+    }
 }
 
 fn take_execution_scope(args: &mut Vec<String>) -> Result<(Option<String>, Option<Value>)> {
@@ -1880,6 +1964,9 @@ fn print_spend_response(response: &Value) -> Result<()> {
     println!("  agent_id: {}", string_at(response, "agent_id")?);
     println!("  decision: {}", string_at(response, "decision")?);
     println!("  decision_id: {}", string_at(response, "decision_id")?);
+    if let Some(approval) = response.get("approval").filter(|value| value.is_object()) {
+        print_spend_approval_response(approval)?;
+    }
     if let Some(inputs) = response.get("scope_inputs").and_then(Value::as_object) {
         println!("  scope_inputs:");
         for field in [
@@ -1996,6 +2083,38 @@ fn print_spend_response(response: &Value) -> Result<()> {
         println!("  consumed: {}", money_at(hold, "consumed_amount_cents")?);
         println!("  frozen: {}", money_at(hold, "frozen_amount_cents")?);
         println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
+    }
+    Ok(())
+}
+
+fn print_spend_approval_response(approval: &Value) -> Result<()> {
+    println!("Spend approval");
+    println!(
+        "  approval_request_id: {}",
+        string_at(approval, "approval_request_id")?
+    );
+    println!("  status: {}", string_at(approval, "status")?);
+    let review = approval
+        .get("review")
+        .ok_or_else(|| anyhow!("server response missing `review`"))?;
+    println!("  operation_key: {}", string_at(review, "operation_key")?);
+    println!("  account_id: {}", string_at(review, "account_id")?);
+    println!("  agent_id: {}", string_at(review, "agent_id")?);
+    println!("  amount: {}", money_at(review, "amount_cents")?);
+    println!(
+        "  workload_profile: {}",
+        string_at(review, "workload_profile")?
+    );
+    println!("  reason: {}", string_at(review, "reason")?);
+    println!("  policy_summary: {}", string_at(review, "policy_summary")?);
+    if let Some(merchant) = review.get("merchant").and_then(Value::as_str) {
+        println!("  merchant: {merchant}");
+    }
+    print_execution_scope(review);
+    if let Some(reasons) = review.get("policy_reasons").and_then(Value::as_array) {
+        for reason in reasons.iter().filter_map(Value::as_str) {
+            println!("  policy_reason: {reason}");
+        }
     }
     Ok(())
 }
@@ -2162,6 +2281,7 @@ fn request_json(
     method: &str,
     path: &str,
     body: Option<Value>,
+    include_approval_capability: bool,
     include_reconciliation_capability: bool,
 ) -> Result<Value> {
     let (host, port) = parse_base_url(base_url)?;
@@ -2179,12 +2299,20 @@ fn request_json(
     } else {
         String::new()
     };
+    let approval_header = if include_approval_capability {
+        let token = approval_token()?.ok_or_else(|| {
+            anyhow!("human approval requires {APPROVAL_TOKEN_ENV} or {APPROVAL_TOKEN_FILE_ENV}")
+        })?;
+        format!("{APPROVAL_CAPABILITY_HEADER}: {token}\r\n")
+    } else {
+        String::new()
+    };
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("connect to Hubu server at {base_url}"))?;
 
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}{reconciliation_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}{approval_header}{reconciliation_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body_text.len(),
         body_text
     )?;
@@ -2208,15 +2336,19 @@ fn request_json(
 }
 
 fn get_json(base_url: &str, path: &str) -> Result<Value> {
-    request_json(base_url, "GET", path, None, false)
+    request_json(base_url, "GET", path, None, false, false)
 }
 
 fn post_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body), false)
+    request_json(base_url, "POST", path, Some(body), false, false)
+}
+
+fn post_approval_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
+    request_json(base_url, "POST", path, Some(body), true, false)
 }
 
 fn post_reconciliation_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body), true)
+    request_json(base_url, "POST", path, Some(body), false, true)
 }
 
 fn auth_token() -> Result<Option<String>> {
@@ -2268,6 +2400,36 @@ fn reconciliation_token() -> Result<Option<String>> {
         Err(error) => {
             Err(error).with_context(|| format!("read Hubu reconciliation token file `{path}`"))
         }
+    }
+}
+
+fn approval_token() -> Result<Option<String>> {
+    #[cfg(test)]
+    if env::var(APPROVAL_TOKEN_ENV).is_err() && env::var(APPROVAL_TOKEN_FILE_ENV).is_err() {
+        return Ok(Some(TEST_APPROVAL_TOKEN.to_string()));
+    }
+
+    if let Ok(token) = env::var(APPROVAL_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{APPROVAL_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(Some(token));
+    }
+
+    let path = env::var(APPROVAL_TOKEN_FILE_ENV)
+        .unwrap_or_else(|_| DEFAULT_APPROVAL_TOKEN_FILE.to_string());
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                Err(anyhow!("Hubu approval token file `{path}` is empty"))
+            } else {
+                Ok(Some(token))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read Hubu approval token file `{path}`")),
     }
 }
 
@@ -2622,7 +2784,7 @@ fn print_init_help() {
 
 Usage:
   hubu init [--policy FILE] [--force]
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--reconciliation-token-file FILE] [--force] [--dry-run]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
@@ -2643,12 +2805,14 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--reconciliation-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
   --mcp-server FILE         hubu-mcp-server executable (default: sibling of hubu, then PATH)
   --token-file FILE         Hubu auth token file (default: $HUBU_AUTH_TOKEN_FILE, ./hubu.auth-token, or ~/.hubu/hubu.auth-token)
+  --approval-token-file FILE
+                             Separate human approval capability file (default: beside --token-file)
   --reconciliation-token-file FILE
                              Separate human reconciliation capability file (default: beside --token-file)
   --force                   Replace an existing unmanaged [mcp_servers.hubu] config block
@@ -2659,7 +2823,7 @@ Notes:
   Hubu spend tools are pre-approved in Codex; Hubu policy still controls needs_approval outcomes.
   Keep --trust-client-approval off for normal agent spend workflows.
   Use --trust-client-approval only when you want to ask Codex to perform setup/admin actions behind a human approval prompt.
-  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
+  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE, HUBU_APPROVAL_TOKEN_FILE, and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
 
 Examples:
   hubu init codex --token-file ~/.hubu/hubu.auth-token
@@ -2775,6 +2939,9 @@ fn print_spend_help() {
 Usage:
   hubu spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
   hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend approval get --approval-request-id ID
+  hubu spend approval approve --approval-request-id ID
+  hubu spend approval deny --approval-request-id ID
   hubu spend claim --claim-id ID
   hubu spend reconcile list
   hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-cents CENTS --provider-request-id ID --provider NAME --model NAME --unit-price-cents CENTS --pricing-unit UNIT --artifact-reference REF
@@ -2784,12 +2951,26 @@ Note:
   Spend commands require the agent account id because the account is the spending source. CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
   --amount is a decimal major-unit amount: 5 means USD 5.00 and 0.05 means USD 0.05. USD is the only supported currency; Hubu performs no currency conversion.
   If merchant and typed execution scope are omitted, the CLI shows that omission before submission. Merchant policy conditions then cannot match and the policy may require approval.
+  When authorization returns needs_approval, show the approval review to the human, then use exactly one approval approve or approval deny command with its approval_request_id.
   The client harness must supply one immutable agent-scoped operation key before the first request, then reuse it for authorization, claim, finalization, and every retry.
   --task-id is an optional external business correlation. It is independent of the operation key and descriptive --reason. Omitting it preserves the legacy reason-to-task mapping for retry compatibility.
 
 Examples:
   hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --currency USD --merchant example-model-provider --reason \"Reserve model API credits\"
   hubu spend --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 0.05 --currency USD --merchant example-model-provider --reason \"Purchase API credits\""
+    );
+}
+
+fn print_spend_approval_help() {
+    println!(
+        "Resolve a pending spend request after explicit human review
+
+Usage:
+  hubu spend approval get --approval-request-id ID
+  hubu spend approval approve --approval-request-id ID
+  hubu spend approval deny --approval-request-id ID
+
+The review is immutable. Approving reserves budget and returns an authorization token; it does not invoke a provider. Denial is terminal for that request. Repeating the same decision is idempotent, while a conflicting decision is rejected."
     );
 }
 
@@ -2900,6 +3081,22 @@ mod tests {
     }
 
     #[test]
+    fn spend_approval_cli_submits_the_explicit_human_decision() {
+        let (path, body) = capture_cli_request(|base_url| {
+            spend_approval(
+                base_url,
+                ["approve", "--approval-request-id", "decision-123"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            )
+        });
+        assert_eq!(path, "/spend/approval/resolve");
+        assert_eq!(body["approval_request_id"], "decision-123");
+        assert_eq!(body["decision"], "approve");
+    }
+
+    #[test]
     fn typed_scope_flags_are_complete_and_stable() {
         let mut args = [
             "--provider",
@@ -2975,6 +3172,7 @@ mod tests {
             Path::new("/tmp/hubu \"dev\"/hubu-mcp-server"),
             "http://127.0.0.1:8787",
             Path::new("/tmp/hubu\\token"),
+            Path::new("/tmp/hubu\\approval-token"),
             Path::new("/tmp/hubu\\reconciliation-token"),
             false,
         );
@@ -2982,6 +3180,7 @@ mod tests {
         assert!(block.contains(HUBU_CODEX_MCP_BEGIN));
         assert!(block.contains("command = \"/tmp/hubu \\\"dev\\\"/hubu-mcp-server\""));
         assert!(block.contains("HUBU_AUTH_TOKEN_FILE = \"/tmp/hubu\\\\token\""));
+        assert!(block.contains("HUBU_APPROVAL_TOKEN_FILE = \"/tmp/hubu\\\\approval-token\""));
         assert!(block
             .contains("HUBU_RECONCILIATION_TOKEN_FILE = \"/tmp/hubu\\\\reconciliation-token\""));
         assert!(block.contains("[mcp_servers.hubu.tools.hubu_authorize_spend]"));
@@ -2997,6 +3196,7 @@ mod tests {
             Path::new("/tmp/hubu-mcp-server"),
             "http://127.0.0.1:8787",
             Path::new("/tmp/hubu.auth-token"),
+            Path::new("/tmp/hubu.approval-token"),
             Path::new("/tmp/hubu.reconciliation-token"),
             true,
         );
