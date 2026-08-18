@@ -497,6 +497,17 @@ impl Api {
         if !pricing_snapshot.is_image_only() {
             return Err(ApiError::validation());
         }
+        if request.authorization.amount_minor != pricing_snapshot.estimated_amount_minor
+            || !request
+                .authorization
+                .currency
+                .eq_ignore_ascii_case(&pricing_snapshot.currency)
+        {
+            return Err(ApiError::authorization_scope(
+                "submitted authorization amount and currency must exactly match the operator pricing catalog"
+                    .into(),
+            ));
+        }
         let canonical_execution_scope = for_target(&resolved.provider, &resolved.adapter)
             .or_else(|| request.execution_scope.clone());
         if request
@@ -1106,6 +1117,40 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingHubu(std::sync::atomic::AtomicUsize);
+
+    impl HubuActivities for RecordingHubu {
+        fn validate_before_admission(
+            &self,
+            _: &AuthorizationAdmissionRequest,
+        ) -> Result<(), crate::workflow::AuthorizationAdmissionError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn preflight(&self, _: &Execution) -> Result<(), crate::workflow::ActivityError> {
+            unreachable!()
+        }
+        fn claim(&self, _: &Execution) -> Result<String, crate::workflow::ActivityError> {
+            unreachable!()
+        }
+        fn validate_claim(&self, _: &Execution) -> Result<(), crate::workflow::ActivityError> {
+            unreachable!()
+        }
+        fn settle(
+            &self,
+            _: &Execution,
+            _: &str,
+            _: i64,
+        ) -> Result<String, crate::workflow::ActivityError> {
+            unreachable!()
+        }
+        fn release(&self, _: &Execution) -> Result<(), crate::workflow::ActivityError> {
+            unreachable!()
+        }
+    }
+
     fn fixture() -> Fixture {
         let repository = Repository::in_memory().unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -1197,11 +1242,13 @@ mod tests {
             100,
             || "2026-08-05T20:00:00Z".into(),
         );
+        let mut over_ceiling = request("over-ceiling");
+        over_ceiling["authorization"]["amount_minor"] = json!(101);
         let response = api.handle(
             "POST",
             "/v1/executions",
             Some(&fixture.owner),
-            &serde_json::to_vec(&request("over-ceiling")).unwrap(),
+            &serde_json::to_vec(&over_ceiling).unwrap(),
         );
         assert_eq!(response.status, 400);
         assert!(fixture
@@ -1235,7 +1282,7 @@ mod tests {
             "hubu_authorization_id": "auth-1",
             "hubu_claim_id": "claim-1",
             "hubu_token_reference": "sha256:opaque-reference",
-            "authorization": {"amount_minor": 500, "currency": "USD"},
+            "authorization": {"amount_minor": 100, "currency": "USD"},
             "input": {
                 "prompt": "cat",
                 "image_count": 1,
@@ -1365,6 +1412,57 @@ mod tests {
         assert!(scheduler.0.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn admission_requires_catalog_money_before_hubu_persistence_or_scheduling() {
+        let fixture = fixture();
+        let owner = fixture.owner.clone();
+        let repository = fixture.repository.clone();
+        let scheduler = fixture.scheduler.clone();
+        let hubu = Arc::new(RecordingHubu::default());
+        let api = Api::new_for_application(
+            fixture.repository,
+            fixture.artifacts,
+            fixture.api.providers,
+            scheduler.clone(),
+            100,
+            AuthorizationRuntime {
+                hubu: hubu.clone(),
+                scope: authorization_context(),
+            },
+            || "2026-08-05T20:00:00Z".into(),
+        );
+
+        for (operation_key, amount_minor, currency) in [
+            ("inflated-amount", 11, "USD"),
+            ("wrong-currency", 10, "EUR"),
+        ] {
+            let mut request = scoped_request(operation_key);
+            request["authorization"]["amount_minor"] = json!(amount_minor);
+            request["authorization"]["currency"] = json!(currency);
+            let response = api.handle(
+                "POST",
+                "/v1/executions",
+                Some(&owner),
+                &serde_json::to_vec(&request).unwrap(),
+            );
+            assert_eq!(response.status, 422);
+            let error: ErrorResponse = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(error.error.code, "authorization_scope_mismatch");
+            assert!(error
+                .error
+                .diagnostic
+                .as_deref()
+                .unwrap()
+                .contains("operator pricing catalog"));
+            assert!(repository
+                .get_execution_by_operation("account-a", operation_key)
+                .is_err());
+        }
+
+        assert_eq!(hubu.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(scheduler.0.lock().unwrap().is_empty());
+    }
+
     fn execution(response: &HttpResponse) -> ExecutionResponse {
         serde_json::from_slice(&response.body).unwrap()
     }
@@ -1377,7 +1475,7 @@ mod tests {
         let first = execution(&first);
         assert_eq!(first.schema_version, 1);
         assert_eq!(first.status, ExecutionStatus::Pending);
-        assert_eq!(first.authorization.amount_minor, 500);
+        assert_eq!(first.authorization.amount_minor, 100);
 
         // Object member ordering is immaterial to canonical immutable input.
         let mut reordered = request("operation-1");
@@ -1646,7 +1744,7 @@ mod tests {
                 "schema_version":1,"catalog_version":"prices-v2",
                 "rules":[{"rule_id":"example-image-v2","provider":"example",
                 "model":"image-v1","currency":"USD","unit":"image",
-                "unit_amount_minor":200}]
+                "unit_amount_minor":100}]
             }"#,
         )
         .unwrap();
