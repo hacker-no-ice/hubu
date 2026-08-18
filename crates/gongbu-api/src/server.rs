@@ -488,6 +488,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     let startup_hubu_digest = crate::config::setup::credential_digest(&hubu_secret);
 
     reject_fixture_targets(&targets)?;
+    let mut provider_secrets = Vec::new();
     let mut redaction_values = vec![
         caller_secret.expose().to_vec(),
         hubu_secret.expose().to_vec(),
@@ -504,7 +505,13 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
             )
             .map_err(|_| ServerError::Credential("provider credential is unavailable".into()))?;
         redaction_values.push(secret.expose().to_vec());
+        provider_secrets.push(secret);
     }
+    crate::config::setup::validate_active_credential_material(
+        &caller_secret,
+        &hubu_secret,
+        &provider_secrets,
+    )?;
     let pricing = PricingCatalog::load(&config.providers.pricing_catalog_path)
         .map_err(|error| invalid(format!("pricing catalog: {error}")))?;
     let limits = config.artifacts.limits();

@@ -74,20 +74,37 @@ fn bootstrap_config(
     explicit_file: Option<&Path>,
 ) -> Result<String, ServerError> {
     let targets = validate_credential_references(config)?;
-    verify_provider_credentials(&targets, store)?;
+    let provider_secrets = resolve_provider_credentials(&targets, store)?;
     let discovered = discover_hubu_credential(explicit_file)?;
     verify_hubu_credential(config, discovered.expose())?;
+    let provider_digests = provider_secrets
+        .iter()
+        .map(credential_digest)
+        .collect::<Vec<_>>();
+    if provider_digests.contains(&digest(discovered.expose())) {
+        return Err(material_overlap());
+    }
 
     let caller = reference(&config.authentication.bearer_credential_reference)?;
-    if store.resolve(&caller).is_err() {
-        let mut generated = format!("gongbu_caller_{}", Uuid::new_v4()).into_bytes();
-        store
-            .persist(&caller, &generated)
-            .map_err(|_| invalid("caller-to-Gongbu capability could not be persisted"))?;
-        generated.fill(0);
-    }
     let hubu = reference(&config.hubu.credential_reference)?;
-    persist_with_rollback(store, &hubu, discovered.expose())?;
+    let mut caller_forbidden = provider_digests.clone();
+    caller_forbidden.push(digest(discovered.expose()));
+    if let Ok(secret) = store.resolve(&hubu) {
+        caller_forbidden.push(credential_digest(&secret));
+    }
+    if let Ok(secret) = store.resolve(&rollback_reference(&hubu)?) {
+        caller_forbidden.push(credential_digest(&secret));
+    }
+    let caller_secret = ensure_safe_caller_material(store, &caller, &caller_forbidden)?;
+    let mut hubu_forbidden = provider_digests;
+    hubu_forbidden.push(credential_digest(&caller_secret));
+    if let Ok(secret) = store.resolve(&rollback_reference(&caller)?) {
+        hubu_forbidden.push(credential_digest(&secret));
+    }
+    if hubu_forbidden.contains(&digest(discovered.expose())) {
+        return Err(material_overlap());
+    }
+    persist_hubu_with_safe_rollback(store, &hubu, discovered.expose(), &hubu_forbidden)?;
     Ok(format!(
         "credential bootstrap complete: caller-to-Gongbu capability ready; Hubu executor/service credential verified from {}; provider credentials ready; restart Gongbu after any later caller or Hubu credential change",
         discovered.source()
@@ -100,11 +117,21 @@ pub fn rotate(
     explicit_file: Option<&Path>,
 ) -> Result<String, ServerError> {
     let config = ServerConfig::from_path(config_path)?;
-    validate_credential_references(&config)?;
+    let targets = validate_credential_references(&config)?;
     let store = MacOsKeychain;
+    let provider_secrets = resolve_provider_credentials(&targets, &store)?;
+    let provider_digests = provider_secrets
+        .iter()
+        .map(credential_digest)
+        .collect::<Vec<_>>();
     let target = class_reference(&config, class)?;
     match class {
         CredentialClass::CallerCapability => {
+            let hubu = class_reference(&config, CredentialClass::HubuExecutorCredential)?;
+            let mut forbidden = provider_digests;
+            append_resolved_digest(&store, &hubu, &mut forbidden);
+            append_resolved_digest(&store, &rollback_reference(&hubu)?, &mut forbidden);
+            ensure_safe_caller_material(&store, &target, &forbidden)?;
             let mut generated = format!("gongbu_caller_{}", Uuid::new_v4()).into_bytes();
             persist_with_rollback(&store, &target, &generated)?;
             generated.fill(0);
@@ -112,7 +139,14 @@ pub fn rotate(
         CredentialClass::HubuExecutorCredential => {
             let discovered = discover_hubu_credential(explicit_file)?;
             verify_hubu_credential(&config, discovered.expose())?;
-            persist_with_rollback(&store, &target, discovered.expose())?;
+            let caller = class_reference(&config, CredentialClass::CallerCapability)?;
+            let mut forbidden = provider_digests;
+            append_resolved_digest(&store, &caller, &mut forbidden);
+            append_resolved_digest(&store, &rollback_reference(&caller)?, &mut forbidden);
+            if forbidden.contains(&digest(discovered.expose())) {
+                return Err(material_overlap());
+            }
+            persist_hubu_with_safe_rollback(&store, &target, discovered.expose(), &forbidden)?;
         }
     }
     Ok(format!(
@@ -123,8 +157,20 @@ pub fn rotate(
 
 pub fn rollback(config_path: &Path, class: CredentialClass) -> Result<String, ServerError> {
     let config = ServerConfig::from_path(config_path)?;
-    validate_credential_references(&config)?;
+    let targets = validate_credential_references(&config)?;
     let store = MacOsKeychain;
+    let provider_secrets = resolve_provider_credentials(&targets, &store)?;
+    let mut forbidden = provider_secrets
+        .iter()
+        .map(credential_digest)
+        .collect::<Vec<_>>();
+    let other = match class {
+        CredentialClass::CallerCapability => CredentialClass::HubuExecutorCredential,
+        CredentialClass::HubuExecutorCredential => CredentialClass::CallerCapability,
+    };
+    let other_primary = class_reference(&config, other)?;
+    append_resolved_digest(&store, &other_primary, &mut forbidden);
+    append_resolved_digest(&store, &rollback_reference(&other_primary)?, &mut forbidden);
     let primary = class_reference(&config, class)?;
     let backup = rollback_reference(&primary)?;
     let current = store
@@ -133,6 +179,9 @@ pub fn rollback(config_path: &Path, class: CredentialClass) -> Result<String, Se
     let previous = store
         .resolve(&backup)
         .map_err(|_| invalid(format!("{} rollback is unavailable", class.label())))?;
+    if forbidden.contains(&credential_digest(&previous)) {
+        return Err(material_overlap());
+    }
     if class == CredentialClass::HubuExecutorCredential {
         verify_hubu_credential(&config, previous.expose())?;
     }
@@ -157,7 +206,29 @@ pub fn revoke_rollback(config_path: &Path, class: CredentialClass) -> Result<Str
 }
 
 pub fn credential_digest(secret: &ProviderSecret) -> [u8; 32] {
-    Sha256::digest(secret.expose()).into()
+    digest(secret.expose())
+}
+
+fn digest(secret: &[u8]) -> [u8; 32] {
+    Sha256::digest(secret).into()
+}
+
+pub(crate) fn validate_active_credential_material(
+    caller: &ProviderSecret,
+    hubu: &ProviderSecret,
+    providers: &[ProviderSecret],
+) -> Result<(), ServerError> {
+    let caller_digest = credential_digest(caller);
+    let hubu_digest = credential_digest(hubu);
+    if caller_digest == hubu_digest
+        || providers.iter().any(|provider| {
+            let provider_digest = credential_digest(provider);
+            provider_digest == caller_digest || provider_digest == hubu_digest
+        })
+    {
+        return Err(material_overlap());
+    }
+    Ok(())
 }
 
 pub fn configured_digests(
@@ -191,10 +262,11 @@ pub fn changed_credential_class(
     }
 }
 
-fn verify_provider_credentials(
+fn resolve_provider_credentials(
     targets: &ProviderTargetConfig,
     provider: &dyn SecretProvider,
-) -> Result<(), ServerError> {
+) -> Result<Vec<ProviderSecret>, ServerError> {
+    let mut secrets = Vec::new();
     for target in targets
         .revisions()
         .filter(|target| target.is_execution_enabled())
@@ -202,11 +274,13 @@ fn verify_provider_credentials(
         let reference = target
             .secret_reference()
             .map_err(|_| invalid("provider credential reference is invalid"))?;
-        provider
-            .resolve(&reference)
-            .map_err(|_| invalid("provider credential is unavailable"))?;
+        secrets.push(
+            provider
+                .resolve(&reference)
+                .map_err(|_| invalid("provider credential is unavailable"))?,
+        );
     }
-    Ok(())
+    Ok(secrets)
 }
 
 pub(crate) fn validate_credential_references(
@@ -279,6 +353,95 @@ fn persist_with_rollback(
         store
             .persist(&backup, existing.expose())
             .map_err(|_| invalid("credential rollback could not be persisted"))?;
+    }
+    store
+        .persist(primary, value)
+        .map_err(|_| invalid("credential could not be persisted"))
+}
+
+fn ensure_safe_caller_material(
+    store: &dyn SecretStore,
+    primary: &SecretReference,
+    forbidden: &[[u8; 32]],
+) -> Result<ProviderSecret, ServerError> {
+    let backup = rollback_reference(primary)?;
+    let current = store.resolve(primary).ok();
+    let primary_unsafe = current
+        .as_ref()
+        .is_some_and(|secret| forbidden.contains(&credential_digest(secret)));
+    let primary_missing = current.is_none();
+    let backup_unsafe = store
+        .resolve(&backup)
+        .is_ok_and(|secret| forbidden.contains(&credential_digest(&secret)));
+
+    if primary_unsafe {
+        persist_generated_caller(store, &backup)?;
+        persist_generated_caller(store, primary)?;
+    } else {
+        if backup_unsafe {
+            persist_generated_caller(store, &backup)?;
+        }
+        if primary_missing {
+            persist_generated_caller(store, primary)?;
+        }
+    }
+    store
+        .resolve(primary)
+        .map_err(|_| invalid("caller-to-Gongbu capability is unavailable after bootstrap"))
+}
+
+fn append_resolved_digest(
+    store: &dyn SecretProvider,
+    reference: &SecretReference,
+    digests: &mut Vec<[u8; 32]>,
+) {
+    if let Ok(secret) = store.resolve(reference) {
+        digests.push(credential_digest(&secret));
+    }
+}
+
+fn persist_generated_caller(
+    store: &dyn SecretStore,
+    reference: &SecretReference,
+) -> Result<(), ServerError> {
+    let mut generated = format!("gongbu_caller_{}", Uuid::new_v4()).into_bytes();
+    let result = store
+        .persist(reference, &generated)
+        .map_err(|_| invalid("caller-to-Gongbu capability could not be persisted"));
+    generated.fill(0);
+    result
+}
+
+fn persist_hubu_with_safe_rollback(
+    store: &dyn SecretStore,
+    primary: &SecretReference,
+    value: &[u8],
+    forbidden: &[[u8; 32]],
+) -> Result<(), ServerError> {
+    let backup = rollback_reference(primary)?;
+    let existing = store.resolve(primary).ok();
+    let backup_unsafe = store
+        .resolve(&backup)
+        .is_ok_and(|secret| forbidden.contains(&credential_digest(&secret)));
+    if existing
+        .as_ref()
+        .is_some_and(|secret| secret.expose() == value)
+    {
+        if backup_unsafe {
+            store
+                .persist(&backup, value)
+                .map_err(|_| invalid("Hubu credential rollback could not be repaired"))?;
+        }
+        return Ok(());
+    }
+    match existing {
+        Some(secret) if !forbidden.contains(&credential_digest(&secret)) => store
+            .persist(&backup, secret.expose())
+            .map_err(|_| invalid("credential rollback could not be persisted"))?,
+        Some(_) if backup_unsafe => store
+            .persist(&backup, value)
+            .map_err(|_| invalid("Hubu credential rollback could not be repaired"))?,
+        _ => {}
     }
     store
         .persist(primary, value)
@@ -378,6 +541,10 @@ fn discovered(
 
 fn invalid(message: impl Into<String>) -> ServerError {
     ServerError::Credential(message.into())
+}
+
+fn material_overlap() -> ServerError {
+    invalid("credential material must be distinct across caller, Hubu, and provider classes")
 }
 
 #[cfg(test)]
@@ -529,6 +696,57 @@ mod tests {
         assert!(error.to_string().contains("provider credential reference"));
         assert!(!error.to_string().contains("gongbu.caller"));
         assert!(!error.to_string().contains("local.rollback"));
+    }
+
+    #[test]
+    fn contaminated_caller_material_is_regenerated_without_preserving_it() {
+        const HUBU: &[u8] = b"hubu-material-canary";
+        const PROVIDER: &[u8] = b"provider-material-canary";
+        let store = MemoryStore::default();
+        let caller = SecretReference::new("gongbu.caller", "local").unwrap();
+        let backup = rollback_reference(&caller).unwrap();
+        store.persist(&caller, HUBU).unwrap();
+        store.persist(&backup, PROVIDER).unwrap();
+        let forbidden = [digest(HUBU), digest(PROVIDER)];
+
+        let recovered = ensure_safe_caller_material(&store, &caller, &forbidden).unwrap();
+        let recovered_backup = store.resolve(&backup).unwrap();
+
+        assert!(recovered.expose().starts_with(b"gongbu_caller_"));
+        assert!(recovered_backup.expose().starts_with(b"gongbu_caller_"));
+        assert!(!forbidden.contains(&credential_digest(&recovered)));
+        assert!(!forbidden.contains(&credential_digest(&recovered_backup)));
+    }
+
+    #[test]
+    fn duplicate_active_material_is_rejected_without_leaking_values() {
+        const CANARY: &str = "cross-class-material-canary";
+        let caller = secret_for_test(CANARY);
+        let hubu = secret_for_test("distinct-hubu-material");
+        let provider = secret_for_test(CANARY);
+
+        let error = validate_active_credential_material(&caller, &hubu, &[provider]).unwrap_err();
+
+        assert!(error.to_string().contains("must be distinct"));
+        assert!(!error.to_string().contains(CANARY));
+    }
+
+    #[test]
+    fn contaminated_hubu_rollback_is_replaced_with_safe_material() {
+        const CALLER: &[u8] = b"caller-material-canary";
+        const PROVIDER: &[u8] = b"provider-material-canary";
+        const HUBU: &[u8] = b"verified-hubu-material";
+        let store = MemoryStore::default();
+        let primary = SecretReference::new("gongbu.hubu", "local").unwrap();
+        let backup = rollback_reference(&primary).unwrap();
+        store.persist(&primary, PROVIDER).unwrap();
+        store.persist(&backup, CALLER).unwrap();
+        let forbidden = [digest(CALLER), digest(PROVIDER)];
+
+        persist_hubu_with_safe_rollback(&store, &primary, HUBU, &forbidden).unwrap();
+
+        assert_eq!(store.resolve(&primary).unwrap().expose(), HUBU);
+        assert_eq!(store.resolve(&backup).unwrap().expose(), HUBU);
     }
 
     #[test]
