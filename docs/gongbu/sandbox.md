@@ -388,7 +388,9 @@ Gongbu then claims and settles it through the real executor protocol. The
 provider output remains the deterministic one-pixel PNG. Replay the identical
 submission and inspect `hubu/hubu.sqlite3`, `logs/hubu.jsonl`, and
 `mock-side-effects.json` to verify there is one Hubu financial outcome and one
-provider invocation.
+provider invocation. Managed Hubu starts with the same `image_generation`
+timing profile that Gongbu returns in authorization-scope previews, so the
+preview request and Hubu's advertised startup guidance remain compatible.
 
 Release archives are cached by exact version and platform under
 `$XDG_CACHE_HOME/gongbu/hubu` or `$HOME/.cache/gongbu/hubu`. Cached provenance

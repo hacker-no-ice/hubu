@@ -4842,6 +4842,37 @@ profiles:
     }
 
     #[test]
+    fn managed_gongbu_sandbox_profile_authorizes_preview_workload() {
+        let timing = parse_spend_timing_config(
+            include_str!("../../../fixtures/gongbu-managed-hubu-spend-timing.json"),
+            "fixtures/gongbu-managed-hubu-spend-timing.json",
+        )
+        .expect("managed sandbox timing fixture should parse");
+        timing
+            .validate()
+            .expect("managed sandbox timing should be valid");
+
+        let (path, state, _agent, authorization) =
+            setup_executor_authorization_with_timing_and_profile(
+                "managed-gongbu-preview-profile",
+                timing,
+                Some("image_generation"),
+            );
+        assert_eq!(authorization.decision, "allow");
+        assert_eq!(authorization.workload_profile, "image_generation");
+        assert!(authorization.auth_token_id.is_some());
+        let guidance = spend_executor_guidance(&state);
+        assert_eq!(
+            guidance["timing"]["profiles"]["image_generation"],
+            json!({
+                "authorization_ttl_seconds": 300,
+                "claim_ttl_seconds": 900,
+            })
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn spend_timing_yaml_rejects_unknown_fields() {
         let error = parse_spend_timing_config(
             r#"
@@ -8033,6 +8064,19 @@ rules: []
         RegisterAgentHttpResponse,
         SpendHttpResponse,
     ) {
+        setup_executor_authorization_with_timing_and_profile(test_name, timing, None)
+    }
+
+    fn setup_executor_authorization_with_timing_and_profile(
+        test_name: &str,
+        timing: SpendTimingConfig,
+        workload_profile: Option<&str>,
+    ) -> (
+        std::path::PathBuf,
+        ServerState,
+        RegisterAgentHttpResponse,
+        SpendHttpResponse,
+    ) {
         let path =
             std::env::temp_dir().join(format!("hubu-api-{test_name}-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path_and_spend_timing(&path, timing)
@@ -8069,18 +8113,18 @@ rules: []
 
         create_test_agent_budget(&state, &agent.agent_id, 500);
 
-        let authorization = authorize_spend(
-            json!({
-                "operation_key": format!("{test_name}-operation"),
-                "account_id": agent.account_id,
-                "amount_cents": 500,
-                "reason": "hubu-logo-demo",
-                "merchant": "gongbu.image",
-            })
-            .to_string(),
-            &state,
-        )
-        .expect("spend should authorize");
+        let mut request = json!({
+            "operation_key": format!("{test_name}-operation"),
+            "account_id": agent.account_id,
+            "amount_cents": 500,
+            "reason": "hubu-logo-demo",
+            "merchant": "gongbu.image",
+        });
+        if let Some(workload_profile) = workload_profile {
+            request["workload_profile"] = workload_profile.into();
+        }
+        let authorization =
+            authorize_spend(request.to_string(), &state).expect("spend should authorize");
 
         (path, state, agent, authorization)
     }

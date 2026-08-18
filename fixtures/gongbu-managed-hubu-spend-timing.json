@@ -1,0 +1,13 @@
+{
+  "default_profile": "default",
+  "profiles": {
+    "default": {
+      "authorization_ttl_seconds": 300,
+      "claim_ttl_seconds": 900
+    },
+    "image_generation": {
+      "authorization_ttl_seconds": 300,
+      "claim_ttl_seconds": 900
+    }
+  }
+}

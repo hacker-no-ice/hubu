@@ -9,6 +9,7 @@ use crate::{
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
     execution::Repository,
     http::AuthorizationScopeContext,
+    hubu::HubuTimingConfig,
     redaction::Redactor,
     secrets::{MacOsKeychain, SecretProvider},
     temporal::TemporalWorkerConfig,
@@ -32,6 +33,9 @@ use tokio::{net::TcpStream, task::JoinHandle, time::Instant};
 use uuid::Uuid;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+const MANAGED_HUBU_SPEND_TIMING_CONFIG: &str =
+    include_str!("../../../../fixtures/gongbu-managed-hubu-spend-timing.json");
 
 pub async fn serve(mut config: SandboxConfig, preserve: Option<PathBuf>) -> Result<(), BoxError> {
     let mut run = SandboxRun::start(&config)?;
@@ -158,17 +162,7 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
             .provider
             .maximum_spend_minor
             .unwrap_or(config.hubu.maximum_authorization_minor),
-        authorization_scope: AuthorizationScopeContext {
-            agent_id: config.hubu.agent_id.clone(),
-            expiry_by_workload: std::collections::HashMap::from([(
-                "image_generation".into(),
-                hubu_executor_contract::AuthorizationExpiryGuidance {
-                    authorization_ttl_seconds: 300,
-                    claim_ttl_seconds: 900,
-                    guidance: "sandbox authorization timing".into(),
-                },
-            )]),
-        },
+        authorization_scope: managed_authorization_scope_context(&config.hubu.agent_id)?,
         dependency_checker: None,
         worker_drain_timeout: Duration::from_secs(30),
         authenticator: Arc::new(SandboxAuthenticator {
@@ -259,6 +253,8 @@ async fn start_managed_hubu(
     let database = hubu_root.join("hubu.sqlite3");
     let auth_token = hubu_root.join("hubu.auth-token");
     let reconciliation_token = hubu_root.join("hubu.reconciliation-token");
+    let spend_timing = hubu_root.join("hubu-spend-timing.json");
+    fs::write(&spend_timing, MANAGED_HUBU_SPEND_TIMING_CONFIG)?;
     let log_path = run.root().join("logs/hubu.jsonl");
     let stdout = File::create(run.root().join("logs/hubu-process.log"))?;
     let stderr = stdout.try_clone()?;
@@ -269,6 +265,7 @@ async fn start_managed_hubu(
         .env("HUBU_DB_PATH", &database)
         .env("HUBU_AUTH_TOKEN_FILE", &auth_token)
         .env("HUBU_RECONCILIATION_TOKEN_FILE", &reconciliation_token)
+        .env("HUBU_SPEND_TIMING_CONFIG", &spend_timing)
         .env("HUBU_LOG_FILE", &log_path)
         .env("HUBU_LOG_STDERR", "0")
         .stdout(Stdio::from(stdout))
@@ -461,6 +458,35 @@ fn cents_as_amount(cents: i64) -> String {
     format!("{}.{:02}", cents / 100, cents.abs() % 100)
 }
 
+fn managed_hubu_timing_config() -> Result<HubuTimingConfig, BoxError> {
+    serde_json::from_str(MANAGED_HUBU_SPEND_TIMING_CONFIG).map_err(|error| {
+        io::Error::other(format!("invalid managed Hubu timing config: {error}")).into()
+    })
+}
+
+fn managed_authorization_scope_context(
+    agent_id: &str,
+) -> Result<AuthorizationScopeContext, BoxError> {
+    let timing = managed_hubu_timing_config()?;
+    let workload = "image_generation";
+    let profile = timing.profiles.get(workload).ok_or_else(|| {
+        io::Error::other(format!(
+            "managed Hubu timing config has no `{workload}` workload profile"
+        ))
+    })?;
+    Ok(AuthorizationScopeContext {
+        agent_id: agent_id.into(),
+        expiry_by_workload: std::collections::HashMap::from([(
+            workload.into(),
+            hubu_executor_contract::AuthorizationExpiryGuidance {
+                authorization_ttl_seconds: profile.authorization_ttl_seconds,
+                claim_ttl_seconds: profile.claim_ttl_seconds,
+                guidance: "sandbox authorization timing".into(),
+            },
+        )]),
+    })
+}
+
 fn write_private_json(path: &Path, value: &impl Serialize) -> Result<(), BoxError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -617,4 +643,32 @@ fn write_side_effect_values(
         root.join("mock-side-effects.json"),
         serde_json::to_vec_pretty(&value).map_err(io::Error::other)?,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_hubu_timing_matches_preview_workload_and_expiry() {
+        let timing = managed_hubu_timing_config().expect("managed Hubu timing should parse");
+        assert_eq!(timing.default_profile, "default");
+        assert!(timing.profiles.contains_key("default"));
+
+        let context = managed_authorization_scope_context("sandbox-agent")
+            .expect("managed preview timing should be available");
+        let preview = context
+            .expiry_by_workload
+            .get("image_generation")
+            .expect("preview workload must be advertised by managed Hubu");
+        let hubu = timing
+            .profiles
+            .get("image_generation")
+            .expect("managed Hubu must accept the preview workload");
+        assert_eq!(
+            preview.authorization_ttl_seconds,
+            hubu.authorization_ttl_seconds
+        );
+        assert_eq!(preview.claim_ttl_seconds, hubu.claim_ttl_seconds);
+    }
 }
