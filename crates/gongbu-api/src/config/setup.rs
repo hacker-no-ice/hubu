@@ -65,9 +65,18 @@ impl DiscoveredHubuCredential {
 pub fn bootstrap(config_path: &Path, explicit_file: Option<&Path>) -> Result<String, ServerError> {
     let config = ServerConfig::from_path(config_path)?;
     let store = MacOsKeychain;
-    verify_provider_credentials(&config, &store)?;
+    bootstrap_config(&config, &store, explicit_file)
+}
+
+fn bootstrap_config(
+    config: &ServerConfig,
+    store: &dyn SecretStore,
+    explicit_file: Option<&Path>,
+) -> Result<String, ServerError> {
+    let targets = validate_credential_references(config)?;
+    verify_provider_credentials(&targets, store)?;
     let discovered = discover_hubu_credential(explicit_file)?;
-    verify_hubu_credential(&config, discovered.expose())?;
+    verify_hubu_credential(config, discovered.expose())?;
 
     let caller = reference(&config.authentication.bearer_credential_reference)?;
     if store.resolve(&caller).is_err() {
@@ -78,7 +87,7 @@ pub fn bootstrap(config_path: &Path, explicit_file: Option<&Path>) -> Result<Str
         generated.fill(0);
     }
     let hubu = reference(&config.hubu.credential_reference)?;
-    persist_with_rollback(&store, &hubu, discovered.expose())?;
+    persist_with_rollback(store, &hubu, discovered.expose())?;
     Ok(format!(
         "credential bootstrap complete: caller-to-Gongbu capability ready; Hubu executor/service credential verified from {}; provider credentials ready; restart Gongbu after any later caller or Hubu credential change",
         discovered.source()
@@ -91,6 +100,7 @@ pub fn rotate(
     explicit_file: Option<&Path>,
 ) -> Result<String, ServerError> {
     let config = ServerConfig::from_path(config_path)?;
+    validate_credential_references(&config)?;
     let store = MacOsKeychain;
     let target = class_reference(&config, class)?;
     match class {
@@ -113,6 +123,7 @@ pub fn rotate(
 
 pub fn rollback(config_path: &Path, class: CredentialClass) -> Result<String, ServerError> {
     let config = ServerConfig::from_path(config_path)?;
+    validate_credential_references(&config)?;
     let store = MacOsKeychain;
     let primary = class_reference(&config, class)?;
     let backup = rollback_reference(&primary)?;
@@ -136,6 +147,7 @@ pub fn rollback(config_path: &Path, class: CredentialClass) -> Result<String, Se
 
 pub fn revoke_rollback(config_path: &Path, class: CredentialClass) -> Result<String, ServerError> {
     let config = ServerConfig::from_path(config_path)?;
+    validate_credential_references(&config)?;
     let store = MacOsKeychain;
     let backup = rollback_reference(&class_reference(&config, class)?)?;
     store
@@ -180,11 +192,9 @@ pub fn changed_credential_class(
 }
 
 fn verify_provider_credentials(
-    config: &ServerConfig,
+    targets: &ProviderTargetConfig,
     provider: &dyn SecretProvider,
 ) -> Result<(), ServerError> {
-    let targets = ProviderTargetConfig::from_path(&config.providers.target_catalog_path)
-        .map_err(|error| invalid(format!("provider target catalog: {error}")))?;
     for target in targets
         .revisions()
         .filter(|target| target.is_execution_enabled())
@@ -197,6 +207,40 @@ fn verify_provider_credentials(
             .map_err(|_| invalid("provider credential is unavailable"))?;
     }
     Ok(())
+}
+
+pub(crate) fn validate_credential_references(
+    config: &ServerConfig,
+) -> Result<ProviderTargetConfig, ServerError> {
+    let caller = reference(&config.authentication.bearer_credential_reference)?;
+    let hubu = reference(&config.hubu.credential_reference)?;
+    let reserved = [
+        caller.clone(),
+        rollback_reference(&caller)?,
+        hubu.clone(),
+        rollback_reference(&hubu)?,
+    ];
+    for (index, reference) in reserved.iter().enumerate() {
+        if reserved[index + 1..].contains(reference) {
+            return Err(invalid(
+                "caller, Hubu, and rollback credential references must be distinct",
+            ));
+        }
+    }
+
+    let targets = ProviderTargetConfig::from_path(&config.providers.target_catalog_path)
+        .map_err(|error| invalid(format!("provider target catalog: {error}")))?;
+    for target in targets.revisions() {
+        let provider = target
+            .secret_reference()
+            .map_err(|_| invalid("provider credential reference is invalid"))?;
+        if reserved.contains(&provider) {
+            return Err(invalid(
+                "provider credential reference must not overlap caller, Hubu, or rollback references",
+            ));
+        }
+    }
+    Ok(targets)
 }
 
 fn verify_hubu_credential(
@@ -374,6 +418,25 @@ mod tests {
         })).unwrap()
     }
 
+    fn write_target_catalog(root: &Path, service: &str, account: &str) {
+        fs::write(
+            root.join("targets.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "provider_configs": [{
+                    "provider_config_version": "v1",
+                    "workload_type": "image_generation",
+                    "provider": "vendor",
+                    "adapter": "adapter",
+                    "model": "model",
+                    "secret_service": service,
+                    "secret_account": account
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     impl SecretProvider for MemoryStore {
         fn resolve(
             &self,
@@ -439,6 +502,33 @@ mod tests {
             store.resolve(&rollback),
             Err(SecretError::Unavailable)
         ));
+    }
+
+    #[test]
+    fn overlapping_caller_and_hubu_references_fail_before_bootstrap_writes() {
+        let root = tempdir().unwrap();
+        let mut config = test_config(root.path());
+        config.hubu.credential_reference =
+            config.authentication.bearer_credential_reference.clone();
+        let store = MemoryStore::default();
+
+        let error = bootstrap_config(&config, &store, None).unwrap_err();
+
+        assert!(error.to_string().contains("must be distinct"));
+        assert!(store.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn provider_reference_cannot_overlap_a_credential_rollback_slot() {
+        let root = tempdir().unwrap();
+        let config = test_config(root.path());
+        write_target_catalog(root.path(), "gongbu.caller", "local.rollback");
+
+        let error = validate_credential_references(&config).unwrap_err();
+
+        assert!(error.to_string().contains("provider credential reference"));
+        assert!(!error.to_string().contains("gongbu.caller"));
+        assert!(!error.to_string().contains("local.rollback"));
     }
 
     #[test]

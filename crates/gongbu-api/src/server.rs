@@ -263,10 +263,32 @@ impl ServerConfig {
         }
         validate_duration(self.hubu.startup_timeout_ms, "Hubu startup timeout")?;
         validate_hubu_endpoint(&self.hubu.endpoint, &self.hubu.allowlisted_hosts)?;
-        self.hubu.credential_reference.validated()?;
-        self.authentication
+        let hubu_credential = self.hubu.credential_reference.validated()?;
+        let caller_credential = self
+            .authentication
             .bearer_credential_reference
             .validated()?;
+        let credential_references = [
+            caller_credential.clone(),
+            SecretReference::new(
+                caller_credential.service(),
+                format!("{}.rollback", caller_credential.account()),
+            )
+            .map_err(|_| invalid("invalid caller rollback credential reference"))?,
+            hubu_credential.clone(),
+            SecretReference::new(
+                hubu_credential.service(),
+                format!("{}.rollback", hubu_credential.account()),
+            )
+            .map_err(|_| invalid("invalid Hubu rollback credential reference"))?,
+        ];
+        for (index, reference) in credential_references.iter().enumerate() {
+            if credential_references[index + 1..].contains(reference) {
+                return Err(invalid(
+                    "caller, Hubu, and rollback credential references must be distinct",
+                ));
+            }
+        }
         let (namespace, task_queue) = self.temporal.identity();
         TemporalWorkerConfig {
             task_queue: task_queue.into(),
@@ -444,6 +466,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     config.validate()?;
     prepare_state_paths(&config)?;
     normalize_paths(&mut config)?;
+    let targets = crate::config::setup::validate_credential_references(&config)?;
 
     let secrets: Arc<dyn SecretProvider> = Arc::new(MacOsKeychain);
     let caller_secret = secrets
@@ -464,8 +487,6 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     let startup_caller_digest = crate::config::setup::credential_digest(&caller_secret);
     let startup_hubu_digest = crate::config::setup::credential_digest(&hubu_secret);
 
-    let targets = ProviderTargetConfig::from_path(&config.providers.target_catalog_path)
-        .map_err(|error| invalid(format!("provider target catalog: {error}")))?;
     reject_fixture_targets(&targets)?;
     let mut redaction_values = vec![
         caller_secret.expose().to_vec(),
@@ -998,6 +1019,27 @@ mod tests {
         let mut value = config(root.path());
         value.hubu.endpoint = "http://example.com:8787".into();
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_overlapping_caller_hubu_and_rollback_references() {
+        let root = tempdir().unwrap();
+        let mut value = config(root.path());
+        value.hubu.credential_reference = value.authentication.bearer_credential_reference.clone();
+        assert!(value
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("distinct"));
+
+        let mut value = config(root.path());
+        value.hubu.credential_reference.service = "gongbu.caller".into();
+        value.hubu.credential_reference.account = "local.rollback".into();
+        assert!(value
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("distinct"));
     }
 
     #[test]
