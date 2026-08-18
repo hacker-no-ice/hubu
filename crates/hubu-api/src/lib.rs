@@ -928,6 +928,8 @@ struct SpendHttpRequest {
     agent_id: Option<String>,
     account_id: Option<String>,
     amount_cents: i64,
+    #[serde(default)]
+    currency: Option<String>,
     reason: String,
     merchant: Option<String>,
     #[serde(default)]
@@ -943,6 +945,8 @@ struct SpendHttpResponse {
     decision_id: String,
     decision: String,
     reasons: Vec<String>,
+    scope_inputs: SpendScopeInputsHttpResponse,
+    policy_decision: PolicyDecisionHttpResponse,
     auth_token_id: Option<String>,
     execution_scope: Option<ExecutionScope>,
     workload_profile: String,
@@ -953,6 +957,45 @@ struct SpendHttpResponse {
     idempotent_replay: bool,
     retry_guidance: SpendRetryGuidance,
     attempt_history: Vec<SpendAttemptAuditRecord>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SpendScopeInputSource {
+    Supplied,
+    Inferred,
+    Omitted,
+}
+
+#[derive(Debug, Serialize)]
+struct SpendScopeInputHttpResponse<T> {
+    source: SpendScopeInputSource,
+    value: Option<T>,
+}
+
+#[derive(Debug, Serialize)]
+struct SpendScopeInputsHttpResponse {
+    amount_minor: SpendScopeInputHttpResponse<i64>,
+    currency: SpendScopeInputHttpResponse<String>,
+    merchant: SpendScopeInputHttpResponse<String>,
+    provider: SpendScopeInputHttpResponse<String>,
+    executor: SpendScopeInputHttpResponse<String>,
+    capability: SpendScopeInputHttpResponse<String>,
+    billing_merchant: SpendScopeInputHttpResponse<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PolicyDecisionHttpResponse {
+    summary: String,
+    decisive_conditions: Vec<PolicyConditionHttpResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct PolicyConditionHttpResponse {
+    rule_id: String,
+    effect: String,
+    matched: bool,
+    condition: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2993,6 +3036,7 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
     let auth_token_id = authorization.approval.auth_token_id();
     let workload_profile = authorization.approval.workload_profile.clone();
     let authorization_expires_at = authorization.approval.token.expires_at.to_rfc3339();
+    let policy_decision = policy_decision_response(&authorization.approval.evaluation.evaluation);
 
     Ok(SpendHttpResponse {
         operation_key: authorization.approval.operation_key.clone(),
@@ -3001,6 +3045,8 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
         decision: effect_name(authorization.approval.evaluation.evaluation.decision).to_string(),
         reasons: authorization.approval.evaluation.evaluation.reasons.clone(),
+        scope_inputs: authorization.scope_inputs,
+        policy_decision,
         auth_token_id: Some(auth_token_id),
         execution_scope: authorization.approval.execution_scope.clone(),
         workload_profile,
@@ -3112,6 +3158,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
     let auth_token_id = authorization.approval.auth_token_id();
     let workload_profile = authorization.approval.workload_profile.clone();
     let authorization_expires_at = authorization.approval.token.expires_at.to_rfc3339();
+    let policy_decision = policy_decision_response(&authorization.approval.evaluation.evaluation);
 
     Ok(SpendHttpResponse {
         operation_key: authorization.approval.operation_key.clone(),
@@ -3120,6 +3167,8 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
         decision: effect_name(authorization.approval.evaluation.evaluation.decision).to_string(),
         reasons: authorization.approval.evaluation.evaluation.reasons.clone(),
+        scope_inputs: authorization.scope_inputs,
+        policy_decision,
         auth_token_id: Some(auth_token_id),
         execution_scope: authorization.approval.execution_scope.clone(),
         workload_profile,
@@ -3513,6 +3562,7 @@ fn resolve_executor_spend_request(
         agent_id: request.agent_id.clone(),
         account_id: request.account_id.clone(),
         amount_cents: request.amount_cents,
+        currency: Some(Currency::Usd.to_string()),
         reason: request.task_id.clone().unwrap_or_default(),
         merchant: request.merchant.clone(),
         execution_scope: request.execution_scope.as_ref().map(scope_as_selector),
@@ -3745,6 +3795,7 @@ struct AuthorizedSpend {
     account_pub_id: String,
     agent_pub_id: String,
     approval: ApprovedSpendAuthorization,
+    scope_inputs: SpendScopeInputsHttpResponse,
 }
 
 enum SpendAuthorization {
@@ -3766,10 +3817,20 @@ fn evaluate_and_reserve_spend(
         .filter(|operation_key| !operation_key.is_empty())
         .ok_or_else(|| anyhow!("spend operation_key is required"))?;
     let account = resolve_agent_account_for_spend(&request, &user, state)?;
+    let currency_supplied = request.currency.is_some();
+    let currency = normalize_spend_currency(request.currency.as_deref())?;
     let execution_scope = resolve_requested_execution_scope(
         request.execution_scope.as_ref(),
         request.merchant.as_deref(),
     )?;
+    let scope_inputs = spend_scope_inputs(
+        request.amount_cents,
+        currency,
+        currency_supplied,
+        request.merchant.as_deref(),
+        request.execution_scope.as_ref(),
+        execution_scope.as_ref(),
+    );
     let account_pub_id = account.pub_id.clone();
     let agent_id = account.agent_id.clone();
     let agent_pub_id = registration_agent_pub_id(&agent_id, state)?;
@@ -3816,7 +3877,7 @@ fn evaluate_and_reserve_spend(
                 agent_id: agent_id.clone(),
                 agent_account_id: account.id,
                 amount_cents: request.amount_cents,
-                currency: Currency::Usd,
+                currency,
                 merchant: request.merchant.clone(),
                 execution_scope,
                 task_id: Some(request.reason.clone()),
@@ -3842,6 +3903,7 @@ fn evaluate_and_reserve_spend(
                 account_pub_id,
                 agent_pub_id,
                 approval,
+                scope_inputs,
             }))
         }
         SpendAuthorizationOutcome::Rejected(rejection) => {
@@ -3856,6 +3918,7 @@ fn evaluate_and_reserve_spend(
                 rejection,
                 account_pub_id,
                 agent_pub_id,
+                scope_inputs,
             )))
         }
     }
@@ -3890,7 +3953,9 @@ fn spend_rejection_response(
     rejection: RejectedSpendAuthorization,
     account_pub_id: String,
     agent_pub_id: String,
+    scope_inputs: SpendScopeInputsHttpResponse,
 ) -> SpendHttpResponse {
+    let policy_decision = policy_decision_response(&rejection.evaluation.evaluation);
     SpendHttpResponse {
         operation_key: rejection.operation_key,
         account_id: account_pub_id,
@@ -3898,6 +3963,8 @@ fn spend_rejection_response(
         decision_id: rejection.evaluation.decision_id.to_string(),
         decision: effect_name(rejection.decision).to_string(),
         reasons: rejection.reasons,
+        scope_inputs,
+        policy_decision,
         auth_token_id: None,
         execution_scope: rejection.execution_scope,
         workload_profile: rejection.workload_profile,
@@ -3908,6 +3975,162 @@ fn spend_rejection_response(
         idempotent_replay: rejection.evaluation.idempotent_replay,
         retry_guidance: rejection.evaluation.retry_guidance.clone(),
         attempt_history: rejection.evaluation.attempt_history.clone(),
+    }
+}
+
+fn normalize_spend_currency(currency: Option<&str>) -> Result<Currency> {
+    currency
+        .unwrap_or("usd")
+        .trim()
+        .to_ascii_lowercase()
+        .parse::<Currency>()
+        .map_err(|error| anyhow!(error))
+}
+
+fn spend_scope_inputs(
+    amount_minor: i64,
+    currency: Currency,
+    currency_supplied: bool,
+    merchant: Option<&str>,
+    selector: Option<&ExecutionScopeSelector>,
+    resolved_scope: Option<&ExecutionScope>,
+) -> SpendScopeInputsHttpResponse {
+    let (provider, executor, capability, billing_merchant) = if let Some(selector) = selector {
+        (
+            scope_input(
+                SpendScopeInputSource::Supplied,
+                Some(selector.provider.clone()),
+            ),
+            scope_input(
+                SpendScopeInputSource::Supplied,
+                Some(selector.executor.clone()),
+            ),
+            scope_input(
+                SpendScopeInputSource::Supplied,
+                Some(selector.capability.clone()),
+            ),
+            scope_input(
+                SpendScopeInputSource::Supplied,
+                Some(selector.billing_merchant.clone()),
+            ),
+        )
+    } else if let Some(scope) = resolved_scope {
+        (
+            scope_input(
+                SpendScopeInputSource::Inferred,
+                Some(scope.provider.id.clone()),
+            ),
+            scope_input(
+                SpendScopeInputSource::Inferred,
+                Some(scope.executor.id.clone()),
+            ),
+            scope_input(
+                SpendScopeInputSource::Inferred,
+                Some(scope.capability.id.clone()),
+            ),
+            scope_input(
+                SpendScopeInputSource::Inferred,
+                Some(scope.billing_merchant.id.clone()),
+            ),
+        )
+    } else {
+        (
+            scope_input(SpendScopeInputSource::Omitted, None),
+            scope_input(SpendScopeInputSource::Omitted, None),
+            scope_input(SpendScopeInputSource::Omitted, None),
+            scope_input(SpendScopeInputSource::Omitted, None),
+        )
+    };
+    SpendScopeInputsHttpResponse {
+        amount_minor: scope_input(SpendScopeInputSource::Supplied, Some(amount_minor)),
+        currency: scope_input(
+            if currency_supplied {
+                SpendScopeInputSource::Supplied
+            } else {
+                SpendScopeInputSource::Inferred
+            },
+            Some(currency.to_string()),
+        ),
+        merchant: scope_input(
+            if merchant.is_some() {
+                SpendScopeInputSource::Supplied
+            } else {
+                SpendScopeInputSource::Omitted
+            },
+            merchant.map(str::to_string),
+        ),
+        provider,
+        executor,
+        capability,
+        billing_merchant,
+    }
+}
+
+fn scope_input<T>(
+    source: SpendScopeInputSource,
+    value: Option<T>,
+) -> SpendScopeInputHttpResponse<T> {
+    SpendScopeInputHttpResponse { source, value }
+}
+
+fn policy_decision_response(
+    evaluation: &hubu_core::policy::Evaluation,
+) -> PolicyDecisionHttpResponse {
+    let decisive = evaluation
+        .rule_results
+        .iter()
+        .filter(|result| {
+            if evaluation.decision == Effect::NeedsApproval {
+                result.matched && result.configured_effect == Some(Effect::NeedsApproval)
+            } else {
+                result.matched && result.configured_effect == Some(evaluation.decision)
+            }
+        })
+        .collect::<Vec<_>>();
+    let (summary, conditions) =
+        if decisive.is_empty() && evaluation.decision == Effect::NeedsApproval {
+            let automatic_allow = evaluation
+                .rule_results
+                .iter()
+                .filter(|result| !result.matched && result.configured_effect == Some(Effect::Allow))
+                .collect::<Vec<_>>();
+            (
+                format!(
+                    "policy defaulted to needs_approval because no automatic-allow rule matched{}",
+                    if automatic_allow.is_empty() {
+                        ""
+                    } else {
+                        "; see the unmet allow conditions"
+                    }
+                ),
+                automatic_allow,
+            )
+        } else {
+            (
+                format!(
+                    "policy returned {} from {} matching condition{}",
+                    effect_name(evaluation.decision),
+                    decisive.len(),
+                    if decisive.len() == 1 { "" } else { "s" }
+                ),
+                decisive,
+            )
+        };
+    PolicyDecisionHttpResponse {
+        summary,
+        decisive_conditions: conditions
+            .into_iter()
+            .map(|result| PolicyConditionHttpResponse {
+                rule_id: result.rule_id.clone(),
+                effect: effect_name(result.configured_effect.unwrap_or(evaluation.decision))
+                    .to_string(),
+                matched: result.matched,
+                condition: result
+                    .condition
+                    .clone()
+                    .unwrap_or_else(|| "condition unavailable for legacy decision".to_string()),
+            })
+            .collect(),
     }
 }
 
@@ -7434,6 +7657,7 @@ rules: []
             agent_id: None,
             account_id: Some(agent.account_id.clone()),
             amount_cents: 100,
+            currency: None,
             reason: "pending exact request".to_string(),
             merchant: Some("Acme Cafe".to_string()),
             execution_scope: None,
@@ -7668,6 +7892,78 @@ rules: []
         )
         .expect("restarted server should still have the policy assignment");
         assert_eq!(resumed_spend.decision, "allow");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn scope_input_contract_marks_missing_merchant_and_typed_scope_as_omitted() {
+        let inputs = spend_scope_inputs(5, Currency::Usd, false, None, None, None);
+        let value = serde_json::to_value(inputs).unwrap();
+        assert_eq!(
+            value["amount_minor"],
+            json!({"source":"supplied","value":5})
+        );
+        assert_eq!(
+            value["currency"],
+            json!({"source":"inferred","value":"usd"})
+        );
+        assert_eq!(value["merchant"], json!({"source":"omitted","value":null}));
+        assert_eq!(
+            value["billing_merchant"],
+            json!({"source":"omitted","value":null})
+        );
+    }
+
+    #[test]
+    fn spend_currency_normalizes_usd_and_rejects_unsupported_values() {
+        assert_eq!(normalize_spend_currency(None).unwrap(), Currency::Usd);
+        assert_eq!(
+            normalize_spend_currency(Some(" USD ")).unwrap(),
+            Currency::Usd
+        );
+        let error = normalize_spend_currency(Some("eur")).unwrap_err();
+        assert!(error.to_string().contains("unsupported currency `eur`"));
+    }
+
+    #[test]
+    fn needs_approval_explains_the_unmet_automatic_allow_condition() {
+        let evaluation = hubu_core::policy::Evaluation {
+            policy_id: "merchant-policy".to_string(),
+            policy_version: "v1".to_string(),
+            decision: Effect::NeedsApproval,
+            reasons: Vec::new(),
+            rule_results: vec![hubu_core::policy::RuleResult {
+                rule_id: "allow_approved_merchant".to_string(),
+                matched: false,
+                effect: None,
+                reason: None,
+                configured_effect: Some(Effect::Allow),
+                condition: Some("merchant equals `approved.example`".to_string()),
+            }],
+        };
+
+        let response = serde_json::to_value(policy_decision_response(&evaluation)).unwrap();
+        assert!(response["summary"]
+            .as_str()
+            .unwrap()
+            .contains("no automatic-allow rule matched"));
+        assert_eq!(
+            response["decisive_conditions"][0],
+            json!({
+                "rule_id":"allow_approved_merchant",
+                "effect":"allow",
+                "matched":false,
+                "condition":"merchant equals `approved.example`"
+            })
+        );
+    }
+
+    #[test]
+    fn authorization_machine_timestamp_remains_utc() {
+        let (path, _state, _agent, authorization) =
+            setup_executor_authorization("machine-utc-expiration");
+        let expiration = authorization.authorization_expires_at.unwrap();
+        assert!(expiration.ends_with("+00:00") || expiration.ends_with('Z'));
         std::fs::remove_file(path).ok();
     }
 

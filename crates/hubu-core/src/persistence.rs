@@ -3596,6 +3596,8 @@ mod tests {
                     matched: true,
                     effect: Some(Effect::Allow),
                     reason: Some("small spend".to_string()),
+                    configured_effect: Some(Effect::Allow),
+                    condition: Some("amount is at most 5000 minor units".to_string()),
                 }],
             },
             created_at: Utc::now(),
