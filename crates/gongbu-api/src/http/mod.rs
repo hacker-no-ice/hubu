@@ -5,7 +5,7 @@
 //! every request schema.
 use crate::{
     artifacts::{ArtifactService, Error as ArtifactError},
-    execution_scope::for_target,
+    execution_scope::{for_target, ExecutionScope},
     hubu::{HttpClientError, SpendAuthorizationResolver},
     persistence::{
         Artifact, CreateExecutionParams, Error as PersistenceError, Execution,
@@ -55,6 +55,17 @@ pub struct CreateExecutionRequest {
     /// Version-1 compatibility name. New clients use `spend_auth_token_id`.
     #[serde(default)]
     pub hubu_token_reference: Option<String>,
+    /// Input-only compatibility assertions from the original v1 envelope.
+    #[serde(default)]
+    pub operation_key: Option<String>,
+    #[serde(default)]
+    pub hubu_authorization_id: Option<String>,
+    #[serde(default)]
+    pub hubu_claim_id: Option<String>,
+    #[serde(default)]
+    pub authorization: Option<Money>,
+    #[serde(default)]
+    pub execution_scope: Option<ExecutionScope>,
     pub input: Value,
     pub input_schema_version: i64,
     pub workload_type: String,
@@ -394,6 +405,12 @@ impl Api {
                 .eq_ignore_ascii_case(&pricing_snapshot.currency)
             || authorization.execution_scope.as_ref() != Some(&execution_scope)
             || authorization.workload_profile != request.workload_type
+            || !legacy_authorization_matches(
+                &request,
+                &authorization,
+                &execution_scope,
+                &pricing_snapshot,
+            )
         {
             return Err(ApiError::validation());
         }
@@ -585,7 +602,29 @@ fn immutable_request_matches(
     request: &CreateExecutionRequest,
     normalized_input: &Value,
 ) -> bool {
-    &execution.normalized_input == normalized_input
+    request
+        .operation_key
+        .as_ref()
+        .is_none_or(|value| execution.operation_key == value.trim())
+        && request
+            .hubu_authorization_id
+            .as_ref()
+            .is_none_or(|value| execution.hubu_authorization_id == value.trim())
+        && request
+            .hubu_claim_id
+            .as_ref()
+            .is_none_or(|value| execution.hubu_claim_id.as_deref() == Some(value.trim()))
+        && request.authorization.as_ref().is_none_or(|money| {
+            execution.authorized_minor == money.amount_minor
+                && execution
+                    .authorization_currency
+                    .eq_ignore_ascii_case(&money.currency)
+        })
+        && request
+            .execution_scope
+            .as_ref()
+            .is_none_or(|scope| execution.execution_scope.as_ref() == Some(scope))
+        && &execution.normalized_input == normalized_input
         && execution.input_schema_version == request.input_schema_version
         && execution.workload_type == request.workload_type
         && execution.provider == request.provider
@@ -627,6 +666,22 @@ fn validate_create(request: &CreateExecutionRequest) -> Result<String, ApiError>
         || request.input_schema_version < 1
         || !request.input.is_object()
         || [
+            request.operation_key.as_deref(),
+            request.hubu_authorization_id.as_deref(),
+            request.hubu_claim_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value.trim().is_empty() || value.len() > 255)
+        || request.authorization.as_ref().is_some_and(|money| {
+            money.amount_minor < 0
+                || money.currency.len() != 3
+                || !money
+                    .currency
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphabetic())
+        })
+        || [
             &request.workload_type,
             &request.provider,
             &request.adapter,
@@ -639,6 +694,35 @@ fn validate_create(request: &CreateExecutionRequest) -> Result<String, ApiError>
     }
     HubuTokenReference::new(spend_auth_token_id).map_err(|_| ApiError::validation())?;
     Ok(spend_auth_token_id.to_owned())
+}
+
+fn legacy_authorization_matches(
+    request: &CreateExecutionRequest,
+    authorization: &crate::hubu::ExecutorSpendResponse,
+    execution_scope: &ExecutionScope,
+    pricing_snapshot: &PricingSnapshot,
+) -> bool {
+    request
+        .operation_key
+        .as_ref()
+        .is_none_or(|value| authorization.operation_key == value.trim())
+        && request
+            .hubu_authorization_id
+            .as_ref()
+            .is_none_or(|value| authorization.decision_id == value.trim())
+        && request.hubu_claim_id.is_none()
+        && request.authorization.as_ref().is_none_or(|money| {
+            money.amount_minor == authorization.amount_cents
+                && money.amount_minor == pricing_snapshot.estimated_amount_minor
+                && money.currency.eq_ignore_ascii_case(&authorization.currency)
+                && money
+                    .currency
+                    .eq_ignore_ascii_case(&pricing_snapshot.currency)
+        })
+        && request
+            .execution_scope
+            .as_ref()
+            .is_none_or(|scope| scope == execution_scope)
 }
 
 fn immutable_hash(
@@ -1025,6 +1109,18 @@ mod tests {
         })
     }
 
+    fn legacy_request(operation_key: &str) -> Value {
+        let mut request = request(operation_key);
+        request["hubu_token_reference"] = request["spend_auth_token_id"].take();
+        request["operation_key"] = json!(operation_key);
+        request["hubu_authorization_id"] = json!(format!("decision-{operation_key}"));
+        request["hubu_claim_id"] = Value::Null;
+        request["authorization"] = json!({"amount_minor": 100, "currency": "USD"});
+        request["execution_scope"] =
+            serde_json::to_value(for_target("example", "fixture").unwrap()).unwrap();
+        request
+    }
+
     #[test]
     fn token_only_create_fixture_matches_v1_schema() {
         let request: CreateExecutionRequest = serde_json::from_str(include_str!(
@@ -1104,10 +1200,9 @@ mod tests {
     }
 
     #[test]
-    fn v1_legacy_token_field_translates_but_unequal_dual_fields_fail_closed() {
+    fn v1_legacy_envelope_translates_but_mismatches_fail_closed() {
         let fixture = fixture();
-        let mut legacy = request("legacy-token");
-        legacy["hubu_token_reference"] = legacy["spend_auth_token_id"].take();
+        let legacy = legacy_request("legacy-token");
         assert_eq!(call_create(&fixture, &legacy).status, 200);
 
         let mut unequal = request("current-token");
@@ -1116,6 +1211,14 @@ mod tests {
         assert!(fixture
             .repository
             .get_execution_by_hubu_token("account-a", "current-token")
+            .is_err());
+
+        let mut mismatched_legacy = legacy_request("legacy-mismatch");
+        mismatched_legacy["operation_key"] = json!("caller-substituted-operation");
+        assert_eq!(call_create(&fixture, &mismatched_legacy).status, 400);
+        assert!(fixture
+            .repository
+            .get_execution_by_hubu_token("account-a", "legacy-mismatch")
             .is_err());
     }
 

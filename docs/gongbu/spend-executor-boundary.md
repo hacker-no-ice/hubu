@@ -21,8 +21,12 @@ Resolution never claims; the durable workflow claims only after persistence.
 Any preview remains optional UX for obtaining the right authorization amount;
 admission always recomputes from the active operator catalog and never trusts a
 preview or caller-supplied price.
-The legacy v1 `hubu_token_reference` name remains input-only compatibility:
-when both names are present they must be equal.
+The original v1 `hubu_token_reference`, `operation_key`,
+`hubu_authorization_id`, `hubu_claim_id`, `authorization`, and
+`execution_scope` fields remain input-only compatibility assertions. When both
+token names are present they must be equal, and every supplied legacy authority
+field must exactly match Hubu's resolved snapshot and Gongbu's derived price and
+scope before persistence. New callers omit them.
 
 Future execution work must use the persisted `Execution` aggregate. It must
 create a `ProviderAttempt` before irreversible provider transmission and use a

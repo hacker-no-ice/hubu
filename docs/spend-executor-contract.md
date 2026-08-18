@@ -217,6 +217,12 @@ guidance.
    selection to the executor. It does not repeat account, operation key, money,
    typed scope, task ID, reason, workload profile, or expiry.
 
+   Original v1 clients may still send `hubu_token_reference`, `operation_key`,
+   `hubu_authorization_id`, a null `hubu_claim_id`, `authorization`, and
+   `execution_scope`. Gongbu treats these only as compatibility assertions and
+   rejects any value that differs from the resolved authorization or its own
+   derived price and scope before persistence.
+
 3. Before persistence, the executor performs a read-only resolution:
 
    ```http
