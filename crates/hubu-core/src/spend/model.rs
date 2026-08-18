@@ -94,6 +94,8 @@ pub struct SpendDecisionRecord {
     pub id: SpendDecisionId,
     pub owner_user_id: UserId,
     pub operation_key: String,
+    pub revision: u64,
+    pub actor: String,
     pub request: SpendRequest,
     pub evaluation: Evaluation,
     pub created_at: DateTime<Utc>,
@@ -119,6 +121,44 @@ pub struct SpendEvaluationResponse {
     pub evaluation: Evaluation,
     pub auth_token: Option<IssuedSpendAuthToken>,
     pub idempotent_replay: bool,
+    pub revision: u64,
+    pub retry_guidance: SpendRetryGuidance,
+    pub attempt_history: Vec<SpendAttemptAuditRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendRetryAction {
+    ReuseOperationKey,
+    ReplayExactly,
+    CreateNewOperation,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SpendRetryGuidance {
+    pub action: SpendRetryAction,
+    pub operation_key: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendAuthorizationDecision {
+    PendingApproval,
+    Denied,
+    Allowed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpendAttemptAuditRecord {
+    pub revision: u64,
+    pub request: SpendRequest,
+    pub actor: String,
+    pub submitted_at: DateTime<Utc>,
+    pub decision_id: Option<SpendDecisionId>,
+    pub final_decision: SpendAuthorizationDecision,
+    pub decided_at: DateTime<Utc>,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

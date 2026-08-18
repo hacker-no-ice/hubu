@@ -12,8 +12,9 @@ use sha2::{Digest, Sha256};
 use crate::budget::{Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetStatus};
 use crate::policy::Policy;
 use crate::spend::{
-    PersistedSpendExecutorSettlementReceipt, SpendAuthTokenRecord, SpendDecisionRecord,
-    SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendExecutorSettlementReceipt,
+    PersistedSpendExecutorSettlementReceipt, SpendAttemptAuditRecord, SpendAuthTokenRecord,
+    SpendAuthorizationDecision, SpendDecisionRecord, SpendExecutorClaimRecord,
+    SpendExecutorClaimStatus, SpendExecutorSettlementReceipt, SpendRequest,
 };
 use crate::spending_target::{SpendingTarget, SpendingTargetStatus};
 use crate::storage::StorageError;
@@ -79,6 +80,31 @@ pub trait PolicyRepository {
 }
 
 pub trait SpendRepository {
+    fn admit_spend_attempt(
+        &mut self,
+        owner_user_id: &UserId,
+        operation_key: &str,
+        request: &SpendRequest,
+        actor: &str,
+        submitted_at: DateTime<Utc>,
+    ) -> Result<SpendAttemptAdmission, StorageError>;
+    fn record_spend_attempt_outcome(
+        &mut self,
+        record: &SpendDecisionRecord,
+        decision: SpendAuthorizationDecision,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+    fn load_spend_attempt_history(
+        &self,
+        agent_id: &AgentId,
+        operation_key: &str,
+    ) -> Result<Vec<SpendAttemptAuditRecord>, StorageError>;
+    fn changed_scope_retry_is_safe(
+        &self,
+        agent_id: &AgentId,
+        operation_key: &str,
+    ) -> Result<bool, StorageError>;
     fn save_spend_decision(&mut self, record: &SpendDecisionRecord) -> Result<(), StorageError>;
     fn save_spend_auth_token(&mut self, record: &SpendAuthTokenRecord) -> Result<(), StorageError>;
     fn update_spend_auth_token(
@@ -92,6 +118,13 @@ pub trait SpendRepository {
         record: &SpendExecutorClaimRecord,
     ) -> Result<(), StorageError>;
     fn load_executor_claims(&self) -> Result<Vec<SpendExecutorClaimRecord>, StorageError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpendAttemptAdmission {
+    Admitted { revision: u64 },
+    ExactReplay { revision: u64 },
+    ChangedScopeBlocked,
 }
 
 pub trait BudgetRepository {
@@ -932,9 +965,36 @@ impl SqliteGovernanceRepository {
                 owner_user_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 operation_key TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 1,
+                actor TEXT NOT NULL DEFAULT 'system:legacy',
                 request_json TEXT NOT NULL,
                 evaluation_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS spend_operation_attempts (
+                agent_id TEXT NOT NULL,
+                operation_key TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                submitted_at TEXT NOT NULL,
+                PRIMARY KEY(agent_id, operation_key, revision)
+            );
+
+            CREATE TABLE IF NOT EXISTS spend_authorization_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT NOT NULL,
+                operation_key TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                spend_decision_id TEXT,
+                decision TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(agent_id, operation_key, revision)
+                    REFERENCES spend_operation_attempts(agent_id, operation_key, revision),
+                FOREIGN KEY(spend_decision_id) REFERENCES spend_decisions(id)
             );
 
             CREATE TABLE IF NOT EXISTS spend_auth_tokens (
@@ -1079,6 +1139,7 @@ impl SqliteGovernanceRepository {
         self.migrate_executor_claim_budget_holds()?;
         self.migrate_spend_auth_token_claim_ttl()?;
         self.migrate_spend_operation_keys()?;
+        self.migrate_spend_operation_attempts()?;
         self.migrate_executor_claim_reconciliation()?;
         self.enforce_one_budget_hold_per_spend_decision()?;
         Ok(())
@@ -1600,6 +1661,117 @@ impl SqliteGovernanceRepository {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    fn migrate_spend_operation_attempts(&self) -> Result<(), StorageError> {
+        if !table_has_column(&self.conn, "spend_decisions", "revision")? {
+            self.conn.execute(
+                "ALTER TABLE spend_decisions ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
+                [],
+            )?;
+        }
+        if !table_has_column(&self.conn, "spend_decisions", "actor")? {
+            self.conn.execute(
+                "ALTER TABLE spend_decisions ADD COLUMN actor TEXT NOT NULL DEFAULT 'system:migration'",
+                [],
+            )?;
+        }
+        self.conn.execute_batch(
+            "DROP INDEX IF EXISTS spend_decisions_agent_operation_unique;
+             CREATE UNIQUE INDEX IF NOT EXISTS spend_decisions_agent_operation_revision_unique
+             ON spend_decisions(agent_id, operation_key, revision);
+
+             CREATE TABLE IF NOT EXISTS spend_operation_attempts (
+                agent_id TEXT NOT NULL,
+                operation_key TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                submitted_at TEXT NOT NULL,
+                PRIMARY KEY(agent_id, operation_key, revision)
+             );
+             CREATE TABLE IF NOT EXISTS spend_authorization_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT NOT NULL,
+                operation_key TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                spend_decision_id TEXT,
+                decision TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(agent_id, operation_key, revision)
+                    REFERENCES spend_operation_attempts(agent_id, operation_key, revision),
+                FOREIGN KEY(spend_decision_id) REFERENCES spend_decisions(id)
+             );
+
+             INSERT OR IGNORE INTO spend_operation_attempts
+                (agent_id, operation_key, revision, owner_user_id, request_json, actor, submitted_at)
+             SELECT agent_id, operation_key, revision, owner_user_id, request_json,
+                    actor, created_at
+             FROM spend_decisions;
+
+             INSERT INTO spend_authorization_outcomes
+                (agent_id, operation_key, revision, spend_decision_id, decision,
+                 reasons_json, created_at)
+             SELECT decisions.agent_id, decisions.operation_key, decisions.revision,
+                    decisions.id,
+                    CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM spend_auth_tokens AS tokens
+                            WHERE tokens.spend_decision_id = decisions.id
+                        ) THEN 'allowed'
+                        WHEN json_extract(decisions.evaluation_json, '$.decision') = 'deny'
+                            THEN 'denied'
+                        ELSE 'pending_approval'
+                    END,
+                    COALESCE(json_extract(decisions.evaluation_json, '$.reasons'), '[]'),
+                    decisions.created_at
+             FROM spend_decisions AS decisions
+             WHERE NOT EXISTS (
+                SELECT 1 FROM spend_authorization_outcomes AS outcomes
+                WHERE outcomes.agent_id = decisions.agent_id
+                  AND outcomes.operation_key = decisions.operation_key
+                  AND outcomes.revision = decisions.revision
+             );
+
+             CREATE TRIGGER IF NOT EXISTS spend_operation_attempts_no_update
+             BEFORE UPDATE ON spend_operation_attempts
+             BEGIN
+                SELECT RAISE(ABORT, 'spend operation attempts are immutable');
+             END;
+             CREATE TRIGGER IF NOT EXISTS spend_operation_attempts_no_delete
+             BEFORE DELETE ON spend_operation_attempts
+             BEGIN
+                SELECT RAISE(ABORT, 'spend operation attempts are immutable');
+             END;
+             CREATE TRIGGER IF NOT EXISTS spend_authorization_outcomes_no_update
+             BEFORE UPDATE ON spend_authorization_outcomes
+             BEGIN
+                SELECT RAISE(ABORT, 'spend authorization outcomes are immutable');
+             END;
+             CREATE TRIGGER IF NOT EXISTS spend_authorization_outcomes_no_delete
+             BEFORE DELETE ON spend_authorization_outcomes
+             BEGIN
+                SELECT RAISE(ABORT, 'spend authorization outcomes are immutable');
+             END;
+             CREATE TRIGGER IF NOT EXISTS spend_authorization_outcomes_valid_transition
+             BEFORE INSERT ON spend_authorization_outcomes
+             WHEN EXISTS (
+                SELECT 1 FROM spend_authorization_outcomes AS prior
+                WHERE prior.agent_id = NEW.agent_id
+                  AND prior.operation_key = NEW.operation_key
+                  AND prior.revision = NEW.revision
+                  AND (
+                    NEW.decision = 'pending_approval'
+                    OR prior.decision != 'pending_approval'
+                  )
+             )
+             BEGIN
+                SELECT RAISE(ABORT, 'spend authorization outcome is already final');
+             END;",
+        )?;
         Ok(())
     }
 }
@@ -2173,16 +2345,214 @@ fn table_has_column(
 }
 
 impl SpendRepository for SqliteGovernanceRepository {
+    fn admit_spend_attempt(
+        &mut self,
+        owner_user_id: &UserId,
+        operation_key: &str,
+        request: &SpendRequest,
+        actor: &str,
+        submitted_at: DateTime<Utc>,
+    ) -> Result<SpendAttemptAdmission, StorageError> {
+        let request_json = serde_json::to_string(request)?;
+        let transaction = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exact_revision = transaction
+            .query_row(
+                "SELECT revision FROM spend_operation_attempts
+                 WHERE agent_id = ?1 AND operation_key = ?2 AND request_json = ?3
+                 ORDER BY revision ASC LIMIT 1",
+                params![request.agent_id.to_string(), operation_key, request_json],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?;
+        if let Some(revision) = exact_revision {
+            transaction.commit()?;
+            return Ok(SpendAttemptAdmission::ExactReplay { revision });
+        }
+
+        let unsafe_prior: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM spend_operation_attempts AS attempts
+                WHERE attempts.agent_id = ?1 AND attempts.operation_key = ?2
+                  AND COALESCE((
+                    SELECT outcomes.decision
+                    FROM spend_authorization_outcomes AS outcomes
+                    WHERE outcomes.agent_id = attempts.agent_id
+                      AND outcomes.operation_key = attempts.operation_key
+                      AND outcomes.revision = attempts.revision
+                    ORDER BY outcomes.id DESC LIMIT 1
+                  ), 'pending_approval') != 'denied'
+             ) OR EXISTS(
+                SELECT 1 FROM spend_decisions AS decisions
+                JOIN spend_auth_tokens AS tokens ON tokens.spend_decision_id = decisions.id
+                WHERE decisions.agent_id = ?1 AND decisions.operation_key = ?2
+             ) OR EXISTS(
+                SELECT 1 FROM spend_decisions AS decisions
+                JOIN budget_holds AS holds ON holds.spend_decision_id = decisions.id
+                WHERE decisions.agent_id = ?1 AND decisions.operation_key = ?2
+             ) OR EXISTS(
+                SELECT 1 FROM spend_executor_claims AS claims
+                WHERE claims.agent_id = ?1 AND claims.operation_key = ?2
+             )",
+            params![request.agent_id.to_string(), operation_key],
+            |row| row.get(0),
+        )?;
+        if unsafe_prior {
+            transaction.commit()?;
+            return Ok(SpendAttemptAdmission::ChangedScopeBlocked);
+        }
+
+        let revision: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(revision), 0) + 1 FROM spend_operation_attempts
+             WHERE agent_id = ?1 AND operation_key = ?2",
+            params![request.agent_id.to_string(), operation_key],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO spend_operation_attempts
+             (agent_id, operation_key, revision, owner_user_id, request_json, actor, submitted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                request.agent_id.to_string(),
+                operation_key,
+                revision,
+                owner_user_id.to_string(),
+                request_json,
+                actor,
+                submitted_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO spend_authorization_outcomes
+             (agent_id, operation_key, revision, decision, reasons_json, created_at)
+             VALUES (?1, ?2, ?3, 'pending_approval', ?4, ?5)",
+            params![
+                request.agent_id.to_string(),
+                operation_key,
+                revision,
+                serde_json::to_string(&vec!["authorization evaluation in progress"])?,
+                submitted_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(SpendAttemptAdmission::Admitted { revision })
+    }
+
+    fn record_spend_attempt_outcome(
+        &mut self,
+        record: &SpendDecisionRecord,
+        decision: SpendAuthorizationDecision,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO spend_authorization_outcomes
+             (agent_id, operation_key, revision, spend_decision_id, decision,
+              reasons_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                record.request.agent_id.to_string(),
+                record.operation_key,
+                record.revision,
+                record.id.to_string(),
+                spend_authorization_decision_name(&decision),
+                serde_json::to_string(reasons)?,
+                decided_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn load_spend_attempt_history(
+        &self,
+        agent_id: &AgentId,
+        operation_key: &str,
+    ) -> Result<Vec<SpendAttemptAuditRecord>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT attempts.revision, attempts.request_json, attempts.actor,
+                    attempts.submitted_at, outcomes.spend_decision_id,
+                    outcomes.decision, outcomes.created_at, outcomes.reasons_json
+             FROM spend_operation_attempts AS attempts
+             JOIN spend_authorization_outcomes AS outcomes ON outcomes.id = (
+                SELECT latest.id FROM spend_authorization_outcomes AS latest
+                WHERE latest.agent_id = attempts.agent_id
+                  AND latest.operation_key = attempts.operation_key
+                  AND latest.revision = attempts.revision
+                ORDER BY latest.id DESC LIMIT 1
+             )
+             WHERE attempts.agent_id = ?1 AND attempts.operation_key = ?2
+             ORDER BY attempts.revision ASC",
+        )?;
+        let rows = statement.query_map(params![agent_id.to_string(), operation_key], |row| {
+            let request_json: String = row.get(1)?;
+            let submitted_at: String = row.get(3)?;
+            let decision_id: Option<String> = row.get(4)?;
+            let decision: String = row.get(5)?;
+            let decided_at: String = row.get(6)?;
+            let reasons_json: String = row.get(7)?;
+            Ok(SpendAttemptAuditRecord {
+                revision: row.get(0)?,
+                request: parse_json(&request_json)?,
+                actor: row.get(2)?,
+                submitted_at: parse_timestamp(&submitted_at)?,
+                decision_id: decision_id.as_deref().map(parse_id).transpose()?,
+                final_decision: parse_spend_authorization_decision(&decision)?,
+                decided_at: parse_timestamp(&decided_at)?,
+                reasons: parse_json(&reasons_json)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    fn changed_scope_retry_is_safe(
+        &self,
+        agent_id: &AgentId,
+        operation_key: &str,
+    ) -> Result<bool, StorageError> {
+        let unsafe_prior: bool = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM spend_operation_attempts AS attempts
+                WHERE attempts.agent_id = ?1 AND attempts.operation_key = ?2
+                  AND COALESCE((
+                    SELECT outcomes.decision
+                    FROM spend_authorization_outcomes AS outcomes
+                    WHERE outcomes.agent_id = attempts.agent_id
+                      AND outcomes.operation_key = attempts.operation_key
+                      AND outcomes.revision = attempts.revision
+                    ORDER BY outcomes.id DESC LIMIT 1
+                  ), 'pending_approval') != 'denied'
+             ) OR EXISTS(
+                SELECT 1 FROM spend_decisions AS decisions
+                JOIN spend_auth_tokens AS tokens ON tokens.spend_decision_id = decisions.id
+                WHERE decisions.agent_id = ?1 AND decisions.operation_key = ?2
+             ) OR EXISTS(
+                SELECT 1 FROM spend_decisions AS decisions
+                JOIN budget_holds AS holds ON holds.spend_decision_id = decisions.id
+                WHERE decisions.agent_id = ?1 AND decisions.operation_key = ?2
+             ) OR EXISTS(
+                SELECT 1 FROM spend_executor_claims AS claims
+                WHERE claims.agent_id = ?1 AND claims.operation_key = ?2
+             )",
+            params![agent_id.to_string(), operation_key],
+            |row| row.get(0),
+        )?;
+        Ok(!unsafe_prior)
+    }
+
     fn save_spend_decision(&mut self, record: &SpendDecisionRecord) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO spend_decisions
-             (id, owner_user_id, agent_id, operation_key, request_json, evaluation_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (id, owner_user_id, agent_id, operation_key, revision, actor,
+              request_json, evaluation_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 record.id.to_string(),
                 record.owner_user_id.to_string(),
                 record.request.agent_id.to_string(),
                 record.operation_key,
+                record.revision,
+                record.actor,
                 serde_json::to_string(&record.request)?,
                 serde_json::to_string(&record.evaluation)?,
                 record.created_at.to_rfc3339(),
@@ -2231,18 +2601,19 @@ impl SpendRepository for SqliteGovernanceRepository {
 
     fn load_spend_decisions(&self) -> Result<Vec<SpendDecisionRecord>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, owner_user_id, agent_id, operation_key, request_json, evaluation_json, created_at
+            "SELECT id, owner_user_id, agent_id, operation_key, revision, actor,
+                    request_json, evaluation_json, created_at
              FROM spend_decisions
-             ORDER BY created_at ASC",
+             ORDER BY agent_id, operation_key, revision ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let owner_user_id: String = row.get(1)?;
             let agent_id: String = row.get(2)?;
             let operation_key: String = row.get(3)?;
-            let request_json: String = row.get(4)?;
-            let evaluation_json: String = row.get(5)?;
-            let created_at: String = row.get(6)?;
+            let request_json: String = row.get(6)?;
+            let evaluation_json: String = row.get(7)?;
+            let created_at: String = row.get(8)?;
             let request: crate::spend::SpendRequest = parse_json(&request_json)?;
             if request.agent_id.to_string() != agent_id {
                 return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
@@ -2255,6 +2626,8 @@ impl SpendRepository for SqliteGovernanceRepository {
                 id: parse_id(&id)?,
                 owner_user_id: parse_id(&owner_user_id)?,
                 operation_key,
+                revision: row.get(4)?,
+                actor: row.get(5)?,
                 request,
                 evaluation: parse_json(&evaluation_json)?,
                 created_at: parse_timestamp(&created_at)?,
@@ -2967,6 +3340,27 @@ fn executor_claim_status(status: &SpendExecutorClaimStatus) -> &'static str {
     }
 }
 
+fn spend_authorization_decision_name(decision: &SpendAuthorizationDecision) -> &'static str {
+    match decision {
+        SpendAuthorizationDecision::PendingApproval => "pending_approval",
+        SpendAuthorizationDecision::Denied => "denied",
+        SpendAuthorizationDecision::Allowed => "allowed",
+    }
+}
+
+fn parse_spend_authorization_decision(
+    value: &str,
+) -> Result<SpendAuthorizationDecision, rusqlite::Error> {
+    match value {
+        "pending_approval" => Ok(SpendAuthorizationDecision::PendingApproval),
+        "denied" => Ok(SpendAuthorizationDecision::Denied),
+        "allowed" => Ok(SpendAuthorizationDecision::Allowed),
+        other => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            StorageError::InvalidData(format!("unknown spend authorization decision `{other}`")),
+        ))),
+    }
+}
+
 fn spending_target_status(status: SpendingTargetStatus) -> &'static str {
     match status {
         SpendingTargetStatus::Active => "active",
@@ -3065,6 +3459,8 @@ fn collect_rows<T>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use chrono::Duration;
     use hubu_common::ids::{
         AgentAccountId, BudgetHoldId, BudgetId, SpendAuthTokenId, SpendDecisionId,
@@ -3138,6 +3534,8 @@ mod tests {
             id: SpendDecisionId::new(),
             owner_user_id: user_id(),
             operation_key: "gongbu-operation-transactional".to_string(),
+            revision: 1,
+            actor: "test:actor".to_string(),
             request: spend_request(),
             evaluation: Evaluation {
                 policy_id: "demo_policy".to_string(),
@@ -3153,6 +3551,15 @@ mod tests {
             },
             created_at: Utc::now(),
         }
+    }
+
+    fn denied_spend_decision(revision: u64, request: SpendRequest) -> SpendDecisionRecord {
+        let mut decision = spend_decision();
+        decision.revision = revision;
+        decision.request = request;
+        decision.evaluation.decision = Effect::Deny;
+        decision.evaluation.reasons = vec!["policy denied spend".to_string()];
+        decision
     }
 
     fn persist_claimed_executor_spend(
@@ -3976,6 +4383,163 @@ mod tests {
             .save_spend_decision(&duplicate)
             .expect_err("one agent must not reuse an operation key");
         assert!(error.to_string().contains("UNIQUE constraint failed"));
+    }
+
+    #[test]
+    fn corrected_attempt_admission_is_atomic_across_separate_sqlite_connections() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-corrected-attempt-concurrency-{}.sqlite",
+            UserId::new()
+        ));
+        let mut seed = SqliteGovernanceRepository::open(&path).unwrap();
+        let initial_request = spend_request();
+        let initial = seed
+            .admit_spend_attempt(
+                &user_id(),
+                "corrected-concurrent",
+                &initial_request,
+                "test:initial",
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(initial, SpendAttemptAdmission::Admitted { revision: 1 });
+        let mut denied = denied_spend_decision(1, initial_request.clone());
+        denied.operation_key = "corrected-concurrent".to_string();
+        seed.save_spend_decision(&denied).unwrap();
+        seed.record_spend_attempt_outcome(
+            &denied,
+            SpendAuthorizationDecision::Denied,
+            &denied.evaluation.reasons,
+            Utc::now(),
+        )
+        .unwrap();
+        drop(seed);
+
+        let first_repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let second_repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = [first_repo, second_repo]
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut repo)| {
+                let barrier = Arc::clone(&barrier);
+                let mut corrected = initial_request.clone();
+                corrected.amount_cents += index as i64 + 1;
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    repo.admit_spend_attempt(
+                        &user_id(),
+                        "corrected-concurrent",
+                        &corrected,
+                        &format!("test:concurrent-{index}"),
+                        Utc::now(),
+                    )
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, SpendAttemptAdmission::Admitted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, SpendAttemptAdmission::ChangedScopeBlocked))
+                .count(),
+            1
+        );
+
+        let audit = SqliteGovernanceRepository::open(&path)
+            .unwrap()
+            .load_spend_attempt_history(&agent_id(), "corrected-concurrent")
+            .unwrap();
+        assert_eq!(audit.len(), 2);
+        assert_eq!(audit[0].final_decision, SpendAuthorizationDecision::Denied);
+        assert_eq!(
+            audit[1].final_decision,
+            SpendAuthorizationDecision::PendingApproval
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_allow_without_token_migrates_pending_and_blocks_changed_scope() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-legacy-unsafe-allow-{}.sqlite", UserId::new()));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE spend_decisions (
+                id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                operation_key TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                evaluation_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        let legacy = spend_decision();
+        conn.execute(
+            "INSERT INTO spend_decisions
+             (id, owner_user_id, agent_id, operation_key, request_json, evaluation_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                legacy.id.to_string(),
+                legacy.owner_user_id.to_string(),
+                legacy.request.agent_id.to_string(),
+                legacy.operation_key,
+                serde_json::to_string(&legacy.request).unwrap(),
+                serde_json::to_string(&legacy.evaluation).unwrap(),
+                legacy.created_at.to_rfc3339(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let audit = repo
+            .load_spend_attempt_history(&legacy.request.agent_id, &legacy.operation_key)
+            .unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            audit[0].final_decision,
+            SpendAuthorizationDecision::PendingApproval
+        );
+        assert_eq!(
+            repo.admit_spend_attempt(
+                &legacy.owner_user_id,
+                &legacy.operation_key,
+                &legacy.request,
+                "test:replay",
+                Utc::now(),
+            )
+            .unwrap(),
+            SpendAttemptAdmission::ExactReplay { revision: 1 }
+        );
+        let mut changed = legacy.request.clone();
+        changed.amount_cents += 1;
+        assert_eq!(
+            repo.admit_spend_attempt(
+                &legacy.owner_user_id,
+                &legacy.operation_key,
+                &changed,
+                "test:changed",
+                Utc::now(),
+            )
+            .unwrap(),
+            SpendAttemptAdmission::ChangedScopeBlocked
+        );
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

@@ -55,9 +55,9 @@ use hubu_core::{
     },
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
     spend::{
-        SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendExecutorPriceModelSnapshot,
-        SpendExecutorSettlementReceipt, SpendManager, SpendPaymentValidationRequest,
-        SpendTimingConfig,
+        SpendAttemptAuditRecord, SpendExecutorClaimRecord, SpendExecutorClaimStatus,
+        SpendExecutorPriceModelSnapshot, SpendExecutorSettlementReceipt, SpendManager,
+        SpendPaymentValidationRequest, SpendRetryGuidance, SpendTimingConfig,
     },
     spending_target::{
         periods_overlap, CreateSpendingTargetRequest, SpendingTarget, SpendingTargetManager,
@@ -941,6 +941,10 @@ struct SpendHttpResponse {
     authorization_expires_at: Option<String>,
     budget_hold: Option<BudgetHoldHttpResponse>,
     payment: Option<PaymentHttpResponse>,
+    revision: u64,
+    idempotent_replay: bool,
+    retry_guidance: SpendRetryGuidance,
+    attempt_history: Vec<SpendAttemptAuditRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1325,11 +1329,35 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
                     "error": error.to_string(),
                 }),
             );
+            let message = error.to_string();
+            let (status, retry_guidance) = spend_retry_error_response(&error);
             HttpResponse {
-                status: 400,
-                body: json!({ "error": error.to_string() }),
+                status,
+                body: json!({ "error": message, "retry_guidance": retry_guidance }),
             }
         }
+    }
+}
+
+fn spend_retry_error_response(error: &anyhow::Error) -> (u16, Option<Value>) {
+    match error.downcast_ref::<SpendApprovalError>() {
+        Some(SpendApprovalError::ChangedScopeRetryRejected { operation_key }) => (
+            409,
+            Some(json!({
+                "action": "create_new_operation",
+                "operation_key": operation_key,
+                "message": "an attempt is pending, allowed, or side-effect-capable; create a new logical operation key"
+            })),
+        ),
+        Some(SpendApprovalError::PendingExactReplay { operation_key }) => (
+            409,
+            Some(json!({
+                "action": "replay_exactly",
+                "operation_key": operation_key,
+                "message": "replay this exact scope after the pending authorization completes"
+            })),
+        ),
+        _ => (400, None),
     }
 }
 
@@ -1475,9 +1503,20 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "prohibited": [
                 "ask the autonomous model to invent the operation_key",
                 "derive operation_key from mutable spend fields such as amount or merchant",
-                "reuse one operation_key for different work by the same agent",
-                "generate a new operation_key for a retry"
-            ]
+                "reuse one operation_key for different logical work by the same agent",
+                "change scope when retry guidance says replay_exactly",
+                "reuse a blocked key when retry guidance says create_new_operation"
+            ],
+            "corrected_scope_retry": {
+                "admission": "only after every prior attempt is terminally denied and no token, approval, hold, claim, dispatch, payment, or settlement side effect exists",
+                "authority": "an immediate SQLite transaction, not the process-local manager mutex",
+                "attempts": "immutable monotonic revisions under the stable operation key",
+                "actions": [
+                    "reuse_operation_key",
+                    "replay_exactly",
+                    "create_new_operation"
+                ]
+            }
         },
         "authorization_request": {
             "required": [
@@ -2949,7 +2988,7 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
         agent_id: authorization.agent_pub_id,
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
         decision: effect_name(authorization.approval.evaluation.evaluation.decision).to_string(),
-        reasons: authorization.approval.evaluation.evaluation.reasons,
+        reasons: authorization.approval.evaluation.evaluation.reasons.clone(),
         auth_token_id: Some(auth_token_id),
         workload_profile,
         authorization_expires_at: Some(authorization_expires_at),
@@ -2958,6 +2997,10 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
             authorization.approval.budget_reservation.balance,
         )),
         payment: None,
+        revision: authorization.approval.evaluation.revision,
+        idempotent_replay: authorization.approval.evaluation.idempotent_replay,
+        retry_guidance: authorization.approval.evaluation.retry_guidance.clone(),
+        attempt_history: authorization.approval.evaluation.attempt_history.clone(),
     })
 }
 
@@ -3007,12 +3050,16 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         agent_id: authorization.agent_pub_id,
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
         decision: effect_name(authorization.approval.evaluation.evaluation.decision).to_string(),
-        reasons: authorization.approval.evaluation.evaluation.reasons,
+        reasons: authorization.approval.evaluation.evaluation.reasons.clone(),
         auth_token_id: Some(auth_token_id),
         workload_profile,
         authorization_expires_at: Some(authorization_expires_at),
         budget_hold,
         payment,
+        revision: authorization.approval.evaluation.revision,
+        idempotent_replay: authorization.approval.evaluation.idempotent_replay,
+        retry_guidance: authorization.approval.evaluation.retry_guidance.clone(),
+        attempt_history: authorization.approval.evaluation.attempt_history.clone(),
     })
 }
 
@@ -3755,6 +3802,10 @@ fn spend_rejection_response(
         authorization_expires_at: None,
         budget_hold: None,
         payment: None,
+        revision: rejection.evaluation.revision,
+        idempotent_replay: rejection.evaluation.idempotent_replay,
+        retry_guidance: rejection.evaluation.retry_guidance.clone(),
+        attempt_history: rejection.evaluation.attempt_history.clone(),
     }
 }
 
@@ -6004,7 +6055,9 @@ profiles:
             &state,
         )
         .expect_err("an operation key cannot be reused for different spend scope");
-        assert!(conflict.to_string().contains("different spend scope"));
+        assert!(conflict
+            .to_string()
+            .contains("changed scope retry is unsafe"));
 
         let request = json!({
             "operation_key": operation_key,
@@ -6509,7 +6562,9 @@ profiles:
             &restarted,
         )
         .expect_err("an explicitly changed profile should still conflict");
-        assert!(conflict.to_string().contains("different spend scope"));
+        assert!(conflict
+            .to_string()
+            .contains("changed scope retry is unsafe"));
 
         std::fs::remove_file(path).ok();
     }
@@ -7079,10 +7134,206 @@ rules: []
             .expect("reasons should be an array")
             .iter()
             .any(|reason| reason == "budget does not have enough remaining balance"));
+        assert_eq!(response.body["revision"], 1);
+        assert_eq!(
+            response.body["retry_guidance"]["action"],
+            "reuse_operation_key"
+        );
+        assert_eq!(
+            response.body["retry_guidance"]["operation_key"],
+            "over-budget-job"
+        );
+        assert_eq!(
+            response.body["attempt_history"][0]["final_decision"],
+            "denied"
+        );
+
+        let original_decision_id = response.body["decision_id"].clone();
+        let corrected = route(
+            authenticated_json_request(
+                "/spend/authorize",
+                json!({
+                    "operation_key": "over-budget-job",
+                    "account_id": agent.account_id,
+                    "amount_cents": 500,
+                    "reason": "corrected affordable purchase",
+                    "merchant": "Acme Cafe",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(corrected.status, 200);
+        assert_eq!(corrected.body["decision"], "allow");
+        assert_eq!(corrected.body["revision"], 2);
+        assert_eq!(
+            corrected.body["attempt_history"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            corrected.body["attempt_history"][0]["final_decision"],
+            "denied"
+        );
+        assert_eq!(
+            corrected.body["attempt_history"][1]["final_decision"],
+            "allowed"
+        );
+
+        let historical_replay = route(
+            authenticated_json_request(
+                "/spend/authorize",
+                json!({
+                    "operation_key": "over-budget-job",
+                    "account_id": agent.account_id,
+                    "amount_cents": 2_500,
+                    "reason": "over budget purchase",
+                    "merchant": "Acme Cafe",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(historical_replay.status, 200);
+        assert_eq!(historical_replay.body["decision_id"], original_decision_id);
+        assert_eq!(historical_replay.body["revision"], 1);
+        assert_eq!(historical_replay.body["idempotent_replay"], true);
+        assert_eq!(
+            historical_replay.body["retry_guidance"]["action"],
+            "replay_exactly"
+        );
+
+        let blocked = route(
+            authenticated_json_request(
+                "/spend/authorize",
+                json!({
+                    "operation_key": "over-budget-job",
+                    "account_id": agent.account_id,
+                    "amount_cents": 400,
+                    "reason": "third changed scope",
+                    "merchant": "Acme Cafe",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(blocked.status, 409);
+        assert_eq!(
+            blocked.body["retry_guidance"]["action"],
+            "create_new_operation"
+        );
+        assert_eq!(
+            blocked.body["retry_guidance"]["operation_key"],
+            "over-budget-job"
+        );
 
         let budgets = list_budgets(&state, false).expect("budgets should list");
-        assert_eq!(budgets.budgets[0].remaining_amount_cents, 1_000);
-        assert_eq!(budgets.budgets[0].frozen_amount_cents, 0);
+        assert_eq!(budgets.budgets[0].remaining_amount_cents, 500);
+        assert_eq!(budgets.budgets[0].frozen_amount_cents, 500);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn pending_exact_replay_returns_stable_structured_guidance() {
+        let (path, state, agent, _) = setup_executor_authorization("pending-exact-shape");
+        let user = authenticated_user_context(&state).unwrap();
+        let request = SpendHttpRequest {
+            operation_key: Some("pending-exact-operation".to_string()),
+            agent_id: None,
+            account_id: Some(agent.account_id.clone()),
+            amount_cents: 100,
+            reason: "pending exact request".to_string(),
+            merchant: Some("Acme Cafe".to_string()),
+            workload_profile: None,
+        };
+        let account = resolve_agent_account_for_spend(&request, &user, &state).unwrap();
+        let spend_request = hubu_core::spend::SpendRequest {
+            amount_cents: request.amount_cents,
+            currency: Currency::Usd,
+            owner_user_id: user.user_id.clone(),
+            agent_id: account.agent_id,
+            agent_account_id: account.id,
+            merchant: request.merchant.clone(),
+            category: None,
+            task_id: Some(request.reason.clone()),
+            workload_profile: "default".to_string(),
+        };
+        state
+            .governance
+            .lock()
+            .unwrap()
+            .admit_spend_attempt(
+                &user.user_id,
+                "pending-exact-operation",
+                &spend_request,
+                "test:interrupted",
+                Utc::now(),
+            )
+            .unwrap();
+
+        let response = route(
+            authenticated_json_request(
+                "/spend/authorize",
+                json!({
+                    "operation_key": "pending-exact-operation",
+                    "account_id": agent.account_id,
+                    "amount_cents": 100,
+                    "reason": "pending exact request",
+                    "merchant": "Acme Cafe",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(response.status, 409);
+        assert_eq!(response.body["retry_guidance"]["action"], "replay_exactly");
+        assert_eq!(
+            response.body["retry_guidance"]["operation_key"],
+            "pending-exact-operation"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn pending_approval_blocks_changed_scope() {
+        let (path, state, agent, _) = setup_executor_authorization("pending-approval-scope");
+        let pending = route(
+            authenticated_json_request(
+                "/spend/authorize",
+                json!({
+                    "operation_key": "pending-approval-operation",
+                    "account_id": agent.account_id,
+                    "amount_cents": 600,
+                    "reason": "requires human approval",
+                    "merchant": "Acme Cafe",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(pending.status, 200);
+        assert_eq!(pending.body["decision"], "needs_approval");
+        assert_eq!(
+            pending.body["attempt_history"][0]["final_decision"],
+            "pending_approval"
+        );
+        assert_eq!(
+            pending.body["retry_guidance"]["action"],
+            "create_new_operation"
+        );
+
+        let changed = route(
+            authenticated_json_request(
+                "/spend/authorize",
+                json!({
+                    "operation_key": "pending-approval-operation",
+                    "account_id": agent.account_id,
+                    "amount_cents": 400,
+                    "reason": "changed while approval pending",
+                    "merchant": "Acme Cafe",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(changed.status, 409);
+        assert_eq!(
+            changed.body["retry_guidance"]["action"],
+            "create_new_operation"
+        );
         std::fs::remove_file(path).ok();
     }
 

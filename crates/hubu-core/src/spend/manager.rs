@@ -21,7 +21,7 @@ use crate::telemetry::log_event;
 /// Spend manager owns in-memory state for spend decisions and issued auth tokens.
 pub struct SpendManager {
     decisions: HashMap<SpendDecisionId, SpendDecisionRecord>,
-    decision_id_by_operation: HashMap<(AgentId, String), SpendDecisionId>,
+    decision_ids_by_operation: HashMap<(AgentId, String), Vec<SpendDecisionId>>,
     tokens: HashMap<SpendAuthTokenId, SpendAuthTokenRecord>,
     token_id_by_decision: HashMap<SpendDecisionId, SpendAuthTokenId>,
     executor_claims: HashMap<SpendExecutorClaimId, SpendExecutorClaimRecord>,
@@ -34,7 +34,7 @@ impl SpendManager {
     pub fn new() -> Self {
         Self {
             decisions: HashMap::new(),
-            decision_id_by_operation: HashMap::new(),
+            decision_ids_by_operation: HashMap::new(),
             tokens: HashMap::new(),
             token_id_by_decision: HashMap::new(),
             executor_claims: HashMap::new(),
@@ -57,18 +57,16 @@ impl SpendManager {
         executor_claims: Vec<SpendExecutorClaimRecord>,
         timing: SpendTimingConfig,
     ) -> Self {
-        let decision_id_by_operation = decisions
-            .iter()
-            .map(|decision| {
-                (
-                    (
-                        decision.request.agent_id.clone(),
-                        decision.operation_key.clone(),
-                    ),
-                    decision.id.clone(),
-                )
-            })
-            .collect();
+        let mut decision_ids_by_operation: HashMap<_, Vec<_>> = HashMap::new();
+        for decision in &decisions {
+            decision_ids_by_operation
+                .entry((
+                    decision.request.agent_id.clone(),
+                    decision.operation_key.clone(),
+                ))
+                .or_default()
+                .push(decision.id.clone());
+        }
         let token_id_by_decision = tokens
             .iter()
             .map(|token| (token.spend_decision_id.clone(), token.id.clone()))
@@ -91,7 +89,7 @@ impl SpendManager {
                 .into_iter()
                 .map(|decision| (decision.id.clone(), decision))
                 .collect(),
-            decision_id_by_operation,
+            decision_ids_by_operation,
             tokens: tokens
                 .into_iter()
                 .map(|token| (token.id.clone(), token))
@@ -111,13 +109,31 @@ impl SpendManager {
         self.decisions.get(decision_id).cloned()
     }
 
+    pub fn has_decision_for_scope(
+        &self,
+        agent_id: &AgentId,
+        operation_key: &str,
+        request: &SpendRequest,
+    ) -> bool {
+        self.decision_ids_by_operation
+            .get(&(agent_id.clone(), operation_key.to_string()))
+            .into_iter()
+            .flatten()
+            .any(|decision_id| {
+                self.decisions
+                    .get(decision_id)
+                    .is_some_and(|decision| &decision.request == request)
+            })
+    }
+
     pub fn workload_profile_for_operation(
         &self,
         agent_id: &AgentId,
         operation_key: &str,
     ) -> Option<String> {
-        self.decision_id_by_operation
+        self.decision_ids_by_operation
             .get(&(agent_id.clone(), operation_key.to_string()))
+            .and_then(|decision_ids| decision_ids.last())
             .and_then(|decision_id| self.decisions.get(decision_id))
             .map(|decision| decision.request.workload_profile.clone())
     }
@@ -183,6 +199,35 @@ impl SpendManager {
         request: SpendRequest,
         policy: &Policy,
     ) -> Result<SpendEvaluationResponse, SpendError> {
+        self.evaluate_spend_with_revision(user, operation_key, request, policy, None)
+    }
+
+    pub fn evaluate_spend_at_revision(
+        &mut self,
+        user: &UserContext,
+        operation_key: &str,
+        request: SpendRequest,
+        policy: &Policy,
+        revision: u64,
+        actor: &str,
+    ) -> Result<SpendEvaluationResponse, SpendError> {
+        self.evaluate_spend_with_revision(
+            user,
+            operation_key,
+            request,
+            policy,
+            Some((revision, actor)),
+        )
+    }
+
+    fn evaluate_spend_with_revision(
+        &mut self,
+        user: &UserContext,
+        operation_key: &str,
+        request: SpendRequest,
+        policy: &Policy,
+        revision_and_actor: Option<(u64, &str)>,
+    ) -> Result<SpendEvaluationResponse, SpendError> {
         let operation_key = operation_key.trim();
         if operation_key.is_empty() {
             return Err(SpendError::EmptyOperationKey);
@@ -204,8 +249,15 @@ impl SpendManager {
         }
 
         if let Some(decision_id) = self
-            .decision_id_by_operation
+            .decision_ids_by_operation
             .get(&(request.agent_id.clone(), operation_key.to_string()))
+            .into_iter()
+            .flatten()
+            .find(|decision_id| {
+                self.decisions
+                    .get(*decision_id)
+                    .is_some_and(|decision| decision.request == request)
+            })
         {
             let decision = self
                 .decisions
@@ -228,6 +280,14 @@ impl SpendManager {
                 evaluation: decision.evaluation.clone(),
                 auth_token,
                 idempotent_replay: true,
+                revision: decision.revision,
+                retry_guidance: crate::spend::SpendRetryGuidance {
+                    action: crate::spend::SpendRetryAction::ReplayExactly,
+                    operation_key: decision.operation_key.clone(),
+                    message: "replay this exact immutable scope to recover the original result"
+                        .to_string(),
+                },
+                attempt_history: Vec::new(),
             });
         }
 
@@ -243,14 +303,25 @@ impl SpendManager {
             id: decision_id.clone(),
             owner_user_id: user.user_id.clone(),
             operation_key: operation_key.to_string(),
+            revision: revision_and_actor.map_or_else(
+                || {
+                    self.decision_ids_by_operation
+                        .get(&(request.agent_id.clone(), operation_key.to_string()))
+                        .map_or(1, |ids| ids.len() as u64 + 1)
+                },
+                |(revision, _)| revision,
+            ),
+            actor: revision_and_actor
+                .map_or_else(|| user.user_id.to_string(), |(_, actor)| actor.to_string()),
             request: request.clone(),
             evaluation: evaluation.clone(),
             created_at: Utc::now(),
         };
-        self.decision_id_by_operation.insert(
-            (request.agent_id.clone(), operation_key.to_string()),
-            decision_id.clone(),
-        );
+        self.decision_ids_by_operation
+            .entry((request.agent_id.clone(), operation_key.to_string()))
+            .or_default()
+            .push(decision_id.clone());
+        let revision = decision_record.revision;
         self.decisions.insert(decision_id.clone(), decision_record);
 
         let auth_token = if evaluation.decision == Effect::Allow {
@@ -304,6 +375,14 @@ impl SpendManager {
             evaluation,
             auth_token,
             idempotent_replay: false,
+            revision,
+            retry_guidance: crate::spend::SpendRetryGuidance {
+                action: crate::spend::SpendRetryAction::ReplayExactly,
+                operation_key: operation_key.to_string(),
+                message: "replay this exact immutable scope to recover the original result"
+                    .to_string(),
+            },
+            attempt_history: Vec::new(),
         })
     }
 
@@ -762,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn authorization_operation_is_idempotent_and_rejects_scope_changes() {
+    fn authorization_operation_replays_historical_scope_and_tracks_new_revision() {
         let mut manager = SpendManager::new();
         let request = spend_request(2_500);
         let policy = policy(Effect::Allow, Vec::new());
@@ -785,14 +864,20 @@ mod tests {
         assert_eq!(manager.decisions.len(), 1);
         assert_eq!(manager.tokens.len(), 1);
 
-        let mut changed = request;
+        let mut changed = request.clone();
         changed.amount_cents += 1;
-        let conflict = manager
+        let corrected = manager
             .evaluate_spend(&user_context(), "stable-job-1", changed, &policy)
-            .expect_err("same operation with changed scope must be rejected");
-        assert!(matches!(conflict, SpendError::OperationKeyConflict));
-        assert_eq!(manager.decisions.len(), 1);
-        assert_eq!(manager.tokens.len(), 1);
+            .expect("SQLite admission, not the process-local manager, governs corrected scope");
+        assert_eq!(corrected.revision, 2);
+        assert_eq!(manager.decisions.len(), 2);
+        assert_eq!(manager.tokens.len(), 2);
+
+        let historical = manager
+            .evaluate_spend(&user_context(), "stable-job-1", request, &policy)
+            .expect("the original immutable scope remains replayable");
+        assert!(historical.idempotent_replay);
+        assert_eq!(historical.decision_id, first.decision_id);
     }
 
     #[test]

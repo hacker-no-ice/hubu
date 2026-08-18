@@ -17,11 +17,11 @@ use crate::{
         BudgetWithBalance, ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse,
         SettleBudgetResponse,
     },
-    persistence::{BudgetRepository, SpendRepository},
+    persistence::{BudgetRepository, SpendAttemptAdmission, SpendRepository},
     policy::model::{Effect, Policy},
     spend::{
-        IssuedSpendAuthToken, SpendAuthTokenRecord, SpendEvaluationResponse, SpendManager,
-        SpendRequest,
+        IssuedSpendAuthToken, SpendAuthTokenRecord, SpendAuthorizationDecision,
+        SpendEvaluationResponse, SpendManager, SpendRequest, SpendRetryAction, SpendRetryGuidance,
     },
     storage::StorageError,
     telemetry::log_event,
@@ -152,6 +152,12 @@ pub enum SpendApprovalError {
     #[error("no active USD budget found for agent")]
     MissingActiveBudget,
 
+    #[error("changed scope retry is unsafe for operation key `{operation_key}`")]
+    ChangedScopeRetryRejected { operation_key: String },
+
+    #[error("exact replay is pending durable authorization completion for operation key `{operation_key}`")]
+    PendingExactReplay { operation_key: String },
+
     #[error(transparent)]
     Spend(#[from] crate::spend::SpendError),
 
@@ -195,12 +201,44 @@ impl SpendApprovalService {
             task_id: request.task_id.clone(),
             workload_profile: request.workload_profile.clone(),
         };
-        let evaluation = spend_manager.evaluate_spend(
-            &request.user,
-            &request.operation_key,
-            spend_request,
-            policy,
+        let operation_key = request.operation_key.trim().to_string();
+        let actor = request.user.user_id.to_string();
+        let admission = governance.admit_spend_attempt(
+            &request.user.user_id,
+            &operation_key,
+            &spend_request,
+            &actor,
+            Utc::now(),
         )?;
+        let mut evaluation = match admission {
+            SpendAttemptAdmission::Admitted { revision } => spend_manager
+                .evaluate_spend_at_revision(
+                    &request.user,
+                    &operation_key,
+                    spend_request,
+                    policy,
+                    revision,
+                    &actor,
+                )?,
+            SpendAttemptAdmission::ExactReplay { .. } => {
+                if !spend_manager.has_decision_for_scope(
+                    &request.agent_id,
+                    &operation_key,
+                    &spend_request,
+                ) {
+                    return Err(SpendApprovalError::PendingExactReplay { operation_key });
+                }
+                spend_manager.evaluate_spend(
+                    &request.user,
+                    &operation_key,
+                    spend_request,
+                    policy,
+                )?
+            }
+            SpendAttemptAdmission::ChangedScopeBlocked => {
+                return Err(SpendApprovalError::ChangedScopeRetryRejected { operation_key });
+            }
+        };
         let decision_record = spend_manager
             .decision_record(&evaluation.decision_id)
             .ok_or(SpendApprovalError::MissingSpendDecision)?;
@@ -211,6 +249,14 @@ impl SpendApprovalService {
 
         if evaluation.idempotent_replay {
             if evaluation.evaluation.decision != Effect::Allow {
+                attach_attempt_audit(
+                    governance,
+                    &mut evaluation,
+                    &request.agent_id,
+                    &operation_key,
+                    SpendRetryAction::ReuseOperationKey,
+                    "the prior attempt was denied; reuse this operation key with corrected scope",
+                )?;
                 return Ok(SpendAuthorizationOutcome::Rejected(
                     RejectedSpendAuthorization {
                         operation_key: evaluation.operation_key.clone(),
@@ -232,6 +278,14 @@ impl SpendApprovalService {
             let existing_hold =
                 budget_manager.get_budget_hold_by_spend_decision(&evaluation.decision_id);
             if let (Some(token), Some(hold)) = (evaluation.auth_token.clone(), existing_hold) {
+                attach_attempt_audit(
+                    governance,
+                    &mut evaluation,
+                    &request.agent_id,
+                    &operation_key,
+                    SpendRetryAction::ReplayExactly,
+                    "replay this exact immutable scope to recover the original authorization",
+                )?;
                 let balance = budget_manager
                     .get_budget_balance(&hold.budget_id)
                     .ok_or(SpendApprovalError::MissingActiveBudget)?;
@@ -253,6 +307,14 @@ impl SpendApprovalService {
                 ));
             }
 
+            attach_attempt_audit(
+                governance,
+                &mut evaluation,
+                &request.agent_id,
+                &operation_key,
+                SpendRetryAction::ReuseOperationKey,
+                "the prior attempt was denied; reuse this operation key with corrected scope",
+            )?;
             return Ok(SpendAuthorizationOutcome::Rejected(budget_rejection(
                 request,
                 evaluation,
@@ -263,6 +325,31 @@ impl SpendApprovalService {
         governance.save_spend_decision(&decision_record)?;
 
         if evaluation.evaluation.decision != Effect::Allow {
+            if evaluation.evaluation.decision == Effect::Deny {
+                governance.record_spend_attempt_outcome(
+                    &decision_record,
+                    SpendAuthorizationDecision::Denied,
+                    &evaluation.evaluation.reasons,
+                    Utc::now(),
+                )?;
+                attach_attempt_audit(
+                    governance,
+                    &mut evaluation,
+                    &request.agent_id,
+                    &operation_key,
+                    SpendRetryAction::ReuseOperationKey,
+                    "this attempt was denied; reuse this operation key with corrected scope",
+                )?;
+            } else {
+                attach_attempt_audit(
+                    governance,
+                    &mut evaluation,
+                    &request.agent_id,
+                    &operation_key,
+                    SpendRetryAction::CreateNewOperation,
+                    "approval is pending; changed scope requires a new operation key",
+                )?;
+            }
             return Ok(SpendAuthorizationOutcome::Rejected(
                 RejectedSpendAuthorization {
                     operation_key: evaluation.operation_key.clone(),
@@ -289,6 +376,21 @@ impl SpendApprovalService {
             Ok(budget_id) => budget_id,
             Err(SpendApprovalError::MissingActiveBudget) => {
                 spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
+                let reasons = vec!["no active USD budget found for agent".to_string()];
+                governance.record_spend_attempt_outcome(
+                    &decision_record,
+                    SpendAuthorizationDecision::Denied,
+                    &reasons,
+                    Utc::now(),
+                )?;
+                attach_attempt_audit(
+                    governance,
+                    &mut evaluation,
+                    &request.agent_id,
+                    &operation_key,
+                    SpendRetryAction::ReuseOperationKey,
+                    "this attempt was denied; reuse this operation key with corrected scope",
+                )?;
                 return Ok(SpendAuthorizationOutcome::Rejected(budget_rejection(
                     request,
                     evaluation,
@@ -308,6 +410,21 @@ impl SpendApprovalService {
             Ok(reservation) => reservation,
             Err(BudgetManagerError::InsufficientRemainingBudget) => {
                 spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
+                let reasons = vec!["budget does not have enough remaining balance".to_string()];
+                governance.record_spend_attempt_outcome(
+                    &decision_record,
+                    SpendAuthorizationDecision::Denied,
+                    &reasons,
+                    Utc::now(),
+                )?;
+                attach_attempt_audit(
+                    governance,
+                    &mut evaluation,
+                    &request.agent_id,
+                    &operation_key,
+                    SpendRetryAction::ReuseOperationKey,
+                    "this attempt was denied; reuse this operation key with corrected scope",
+                )?;
                 log_event(
                     "warn",
                     "spend_budget_denied",
@@ -346,6 +463,20 @@ impl SpendApprovalService {
             }
         }
         governance.save_budget_hold(&budget_reservation.hold, &budget_reservation.balance)?;
+        governance.record_spend_attempt_outcome(
+            &decision_record,
+            SpendAuthorizationDecision::Allowed,
+            &evaluation.evaluation.reasons,
+            Utc::now(),
+        )?;
+        attach_attempt_audit(
+            governance,
+            &mut evaluation,
+            &request.agent_id,
+            &operation_key,
+            SpendRetryAction::ReplayExactly,
+            "replay this exact immutable scope to recover the original authorization",
+        )?;
 
         log_event(
             "info",
@@ -522,6 +653,40 @@ fn budget_rejection(
         decision: Effect::Deny,
         reasons: vec![reason.to_string()],
     }
+}
+
+fn attach_attempt_audit<G: SpendRepository>(
+    governance: &G,
+    evaluation: &mut SpendEvaluationResponse,
+    agent_id: &AgentId,
+    operation_key: &str,
+    action: SpendRetryAction,
+    message: &str,
+) -> Result<(), StorageError> {
+    evaluation.attempt_history = governance.load_spend_attempt_history(agent_id, operation_key)?;
+    let (action, message) = if action == SpendRetryAction::ReuseOperationKey
+        && !governance.changed_scope_retry_is_safe(agent_id, operation_key)?
+    {
+        if evaluation.idempotent_replay {
+            (
+                SpendRetryAction::ReplayExactly,
+                "replay this exact immutable scope; changed scope requires a new operation key",
+            )
+        } else {
+            (
+                SpendRetryAction::CreateNewOperation,
+                "this operation has side-effect-capable history; create a new operation key",
+            )
+        }
+    } else {
+        (action, message)
+    };
+    evaluation.retry_guidance = SpendRetryGuidance {
+        action,
+        operation_key: operation_key.to_string(),
+        message: message.to_string(),
+    };
+    Ok(())
 }
 
 fn release_authorized_hold(

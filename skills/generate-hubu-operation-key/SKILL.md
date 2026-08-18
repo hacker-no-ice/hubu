@@ -35,7 +35,7 @@ python3 skills/generate-hubu-operation-key/scripts/operation_keys.py reuse \
   --scope-json '{"account_id":"ACCOUNT","amount":5,"merchant":"gongbu.image","provider":"gemini","reason":"Generate logo candidate"}'
 ```
 
-Use the returned key for authorization, claim, settlement, release, and every retry of that logical operation. The helper rejects changed scope.
+Use the returned key for authorization, claim, settlement, release, and every exact retry of that logical operation. The helper rejects changed scope locally. If Hubu returns `retry_guidance.action = reuse_operation_key` after a terminal denial, keep the same operation key for the corrected authorization request; Hubu's SQLite admission check remains the authority. Never correct scope when guidance says `replay_exactly` or `create_new_operation`.
 
 After context or process loss, run:
 
