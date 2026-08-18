@@ -213,8 +213,8 @@ the omission and its policy consequence before submission. Use a distinct
 operation key for different logical work.
 `--task-id` is an optional external business correlation and `--reason` is
 human-readable authorization context; neither must equal the stable financial
-`--operation-key`. Omitting `--task-id` from the updated CLI explicitly sends
-no task correlation.
+`--operation-key`. Omitting `--task-id` preserves the historical
+reason-to-task mapping so retries of pre-HUB-73 CLI operations remain exact.
 For new executor-backed work, prefer the typed `--provider`, `--executor`,
 `--capability`, and `--billing-merchant` flags. Hubu resolves them against its
 trusted catalog and prints both friendly names and stable IDs. The legacy

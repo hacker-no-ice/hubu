@@ -6332,6 +6332,24 @@ profiles:
         assert_eq!(authorization.reason, "Generate Project Hubu logo");
         assert!(authorization.auth_token_id.is_some());
         assert!(authorization.payment.is_none());
+
+        let replay = authorize_spend(
+            json!({
+                "operation_key": "logo-design-job-1",
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "reason": "Generate Project Hubu logo",
+                "merchant": "hubu-model-proxy",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("legacy missing task_id retry should replay");
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.decision_id, authorization.decision_id);
+        assert_eq!(replay.task_id, authorization.task_id);
+        assert_eq!(replay.reason, authorization.reason);
+
         let budget_hold = authorization
             .budget_hold
             .expect("allowed authorization should reserve budget");

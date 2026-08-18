@@ -1556,12 +1556,14 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "amount_cents": amount_cents,
         "currency": currency_arg.map(|_| currency.to_string()),
         "reason": reason,
-        "task_id": task_id,
         "merchant": merchant,
         "execution_scope": execution_scope,
         "workload_profile": workload_profile,
     });
     body["account_id"] = json!(account_id);
+    if let Some(task_id) = task_id {
+        body["task_id"] = json!(task_id);
+    }
 
     let response = post_json(base_url, "/spend", body)?;
     print_spend_response(&response)
@@ -1600,12 +1602,14 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "amount_cents": amount_cents,
         "currency": currency_arg.map(|_| currency.to_string()),
         "reason": reason,
-        "task_id": task_id,
         "merchant": merchant,
         "execution_scope": execution_scope,
         "workload_profile": workload_profile,
     });
     body["account_id"] = json!(account_id);
+    if let Some(task_id) = task_id {
+        body["task_id"] = json!(task_id);
+    }
 
     let response = post_json(base_url, "/spend/authorize", body)?;
     print_spend_response(&response)
@@ -2781,7 +2785,7 @@ Note:
   --amount is a decimal major-unit amount: 5 means USD 5.00 and 0.05 means USD 0.05. USD is the only supported currency; Hubu performs no currency conversion.
   If merchant and typed execution scope are omitted, the CLI shows that omission before submission. Merchant policy conditions then cannot match and the policy may require approval.
   The client harness must supply one immutable agent-scoped operation key before the first request, then reuse it for authorization, claim, finalization, and every retry.
-  --task-id is an optional external business correlation. It is independent of the operation key and descriptive --reason. Omitting it explicitly sends no task id.
+  --task-id is an optional external business correlation. It is independent of the operation key and descriptive --reason. Omitting it preserves the legacy reason-to-task mapping for retry compatibility.
 
 Examples:
   hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --currency USD --merchant example-model-provider --reason \"Reserve model API credits\"
@@ -2800,7 +2804,7 @@ Note:
   Supply one immutable agent-scoped operation key before the first request; do not generate a new key on retry.
   --amount is a decimal major-unit amount: 5 means USD 5.00 and 0.05 means USD 0.05. USD is the only supported currency; Hubu performs no currency conversion.
   Omitted merchant/scope fields are shown before submission because policies that evaluate those fields will not match them.
-  --task-id is an optional external business correlation. It is independent of the operation key and descriptive --reason. Omitting it explicitly sends no task id.
+  --task-id is an optional external business correlation. It is independent of the operation key and descriptive --reason. Omitting it preserves the legacy reason-to-task mapping for retry compatibility.
 
 Example:
   hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --currency USD --merchant example-model-provider --reason \"Reserve model API credits\""
@@ -2835,6 +2839,65 @@ Example:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_spend_args() -> Vec<String> {
+        [
+            "--operation-key",
+            "legacy-operation",
+            "--account-id",
+            "aga_example",
+            "--amount",
+            "5",
+            "--reason",
+            "Legacy CLI reason",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    fn capture_cli_request(run: impl FnOnce(&str) -> Result<()>) -> (String, Value) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = String::new();
+            stream.read_to_string(&mut raw).unwrap();
+            let response_body = r#"{"error":"captured"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            )
+            .unwrap();
+            let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+            let path = head
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .to_string();
+            (path, serde_json::from_str(body).unwrap())
+        });
+
+        let error = run(&format!("http://{address}")).unwrap_err();
+        assert!(error.to_string().contains("captured"));
+        server.join().unwrap()
+    }
+
+    #[test]
+    fn both_spend_helpers_omit_task_id_for_legacy_retry_compatibility() {
+        let (path, body) = capture_cli_request(|base_url| spend(base_url, legacy_spend_args()));
+        assert_eq!(path, "/spend");
+        assert!(body.get("task_id").is_none());
+
+        let (path, body) =
+            capture_cli_request(|base_url| spend_authorize(base_url, legacy_spend_args()));
+        assert_eq!(path, "/spend/authorize");
+        assert!(body.get("task_id").is_none());
+    }
 
     #[test]
     fn typed_scope_flags_are_complete_and_stable() {
