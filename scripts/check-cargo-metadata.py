@@ -20,6 +20,7 @@ EXPECTED_PACKAGES = {
     "hubu-cli",
     "hubu-common",
     "hubu-core",
+    "hubu-executor-contract",
     "hubu-mcp",
     "hubu-wallet",
 }
