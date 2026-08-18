@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use hubu_common::execution_scope::ExecutionScope;
 use hubu_common::ids::{
     AgentAccountId, AgentId, LedgerTransactionId, PaymentId, SpendAuthTokenId, UserId,
 };
@@ -77,6 +78,7 @@ pub struct PaymentRequest {
     pub amount_cents: i64,
     pub currency: Currency,
     pub merchant: Option<String>,
+    pub execution_scope: Option<ExecutionScope>,
     pub task_id: Option<String>,
     pub rail: PaymentRailKind,
     pub destination: PaymentDestination,
@@ -357,6 +359,7 @@ mod tests {
         amount_cents: i64,
         currency: Currency,
         merchant: Option<String>,
+        execution_scope: Option<ExecutionScope>,
         task_id: Option<String>,
         used_payment_id: Option<PaymentId>,
     }
@@ -371,6 +374,7 @@ mod tests {
                 amount_cents: request.amount_cents,
                 currency: request.currency,
                 merchant: request.merchant.clone(),
+                execution_scope: request.execution_scope.clone(),
                 task_id: request.task_id.clone(),
                 used_payment_id: None,
             }
@@ -389,6 +393,7 @@ mod tests {
                 && request.amount_cents == self.amount_cents
                 && request.currency == self.currency
                 && request.merchant == self.merchant
+                && request.execution_scope == self.execution_scope
                 && request.task_id == self.task_id;
 
             if !matches_authorized_spend {
@@ -439,6 +444,7 @@ mod tests {
             amount_cents: 2_500,
             currency: Currency::Usd,
             merchant: Some("Acme Cafe".to_string()),
+            execution_scope: None,
             task_id: Some("task_123".to_string()),
             rail,
             destination,

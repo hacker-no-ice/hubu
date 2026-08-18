@@ -367,6 +367,7 @@ mod tests {
                     "currency": "USD"
                 }),
                 pricing_schema_version: 1,
+                execution_scope: None,
                 created_at: "2026-08-05T20:00:00Z".into(),
             })
             .unwrap()

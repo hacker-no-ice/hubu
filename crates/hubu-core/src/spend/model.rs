@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use hubu_common::execution_scope::ExecutionScope;
 use hubu_common::ids::{
     AgentAccountId, AgentId, PaymentId, SpendAuthTokenId, SpendDecisionId, SpendExecutorClaimId,
     UserId,
 };
 use hubu_common::money::Currency;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::policy::model::Evaluation;
 
@@ -18,10 +20,51 @@ pub struct SpendRequest {
     pub agent_id: AgentId,
     pub agent_account_id: AgentAccountId,
     pub merchant: Option<String>,
+    #[serde(default)]
+    pub execution_scope: Option<ExecutionScope>,
     pub category: Option<String>,
     pub task_id: Option<String>,
     #[serde(default = "default_workload_profile")]
     pub workload_profile: String,
+}
+
+impl SpendRequest {
+    pub(crate) fn replay_equivalent(&self, other: &Self) -> bool {
+        if self == other {
+            return true;
+        }
+        let (without_scope, with_scope) = match (&self.execution_scope, &other.execution_scope) {
+            (None, Some(_)) => (self, other),
+            (Some(_), None) => (other, self),
+            _ => return false,
+        };
+        let Some(merchant) = with_scope.merchant.as_deref() else {
+            return false;
+        };
+        let Some(scope) = with_scope.execution_scope.as_ref() else {
+            return false;
+        };
+        if !is_legacy_scope_for_merchant(scope, merchant) {
+            return false;
+        }
+        let mut normalized = with_scope.clone();
+        normalized.execution_scope = None;
+        without_scope == &normalized
+    }
+}
+
+fn is_legacy_scope_for_merchant(scope: &ExecutionScope, merchant: &str) -> bool {
+    let merchant = merchant.trim();
+    let digest = format!("{:x}", Sha256::digest(merchant.as_bytes()));
+    scope.schema_version == hubu_common::execution_scope::EXECUTION_SCOPE_SCHEMA_VERSION
+        && scope.provider.id == "provider:legacy:unresolved"
+        && scope.provider.display_name == "Legacy unresolved provider"
+        && scope.executor.id == "executor:legacy:unresolved"
+        && scope.executor.display_name == "Legacy unresolved executor"
+        && scope.capability.id == "capability:legacy:unresolved"
+        && scope.capability.display_name == "Legacy unresolved capability"
+        && scope.billing_merchant.id == format!("merchant:legacy:{}", &digest[..16])
+        && scope.billing_merchant.display_name == merchant
 }
 
 pub fn default_workload_profile() -> String {
@@ -176,6 +219,7 @@ pub struct SpendPaymentValidationRequest {
     pub amount_cents: i64,
     pub currency: Currency,
     pub merchant: Option<String>,
+    pub execution_scope: Option<ExecutionScope>,
     pub task_id: Option<String>,
 }
 

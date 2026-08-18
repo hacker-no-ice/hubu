@@ -302,6 +302,7 @@ fn tool_definitions() -> Vec<Value> {
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
+                "execution_scope": execution_scope_input_schema(),
                 "workload_profile": { "type": "string" }
             }), &["operation_key", "account_id", "amount_cents", "reason"]),
         ),
@@ -314,6 +315,7 @@ fn tool_definitions() -> Vec<Value> {
                 "amount_cents": { "type": "integer" },
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
+                "execution_scope": execution_scope_input_schema(),
                 "workload_profile": { "type": "string" }
             }), &["operation_key", "account_id", "amount_cents", "reason"]),
         ),
@@ -394,6 +396,21 @@ fn json_schema(properties: Value) -> Value {
         "type": "object",
         "properties": properties,
         "additionalProperties": false
+    })
+}
+
+fn execution_scope_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "schema_version": {"type":"integer","const":1},
+            "provider": {"type":"string","minLength":1},
+            "executor": {"type":"string","minLength":1},
+            "capability": {"type":"string","minLength":1},
+            "billing_merchant": {"type":"string","minLength":1}
+        },
+        "required": ["schema_version","provider","executor","capability","billing_merchant"]
     })
 }
 

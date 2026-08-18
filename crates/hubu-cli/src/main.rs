@@ -1534,8 +1534,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let operation_key = take_required(&mut args, "--operation-key")?;
     let amount = take_required(&mut args, "--amount")?;
     let reason = take_required(&mut args, "--reason")?;
-    let merchant =
-        take_value(&mut args, "--merchant").unwrap_or_else(|| "local-merchant".to_string());
+    let (merchant, execution_scope) = take_execution_scope(&mut args)?;
     let workload_profile = take_value(&mut args, "--workload-profile");
     ensure_no_args(args)?;
 
@@ -1544,6 +1543,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "amount_cents": amount_to_cents(&amount)?,
         "reason": reason,
         "merchant": merchant,
+        "execution_scope": execution_scope,
         "workload_profile": workload_profile,
     });
     body["account_id"] = json!(account_id);
@@ -1564,8 +1564,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let operation_key = take_required(&mut args, "--operation-key")?;
     let amount = take_required(&mut args, "--amount")?;
     let reason = take_required(&mut args, "--reason")?;
-    let merchant =
-        take_value(&mut args, "--merchant").unwrap_or_else(|| "local-merchant".to_string());
+    let (merchant, execution_scope) = take_execution_scope(&mut args)?;
     let workload_profile = take_value(&mut args, "--workload-profile");
     ensure_no_args(args)?;
 
@@ -1574,6 +1573,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "amount_cents": amount_to_cents(&amount)?,
         "reason": reason,
         "merchant": merchant,
+        "execution_scope": execution_scope,
         "workload_profile": workload_profile,
     });
     body["account_id"] = json!(account_id);
@@ -1590,6 +1590,47 @@ fn spend_claim_status(base_url: &str, mut args: Vec<String>) -> Result<()> {
         &format!("/spend/executor/claim?claim_id={claim_id}"),
     )?;
     print_executor_claim(&response)
+}
+
+fn take_execution_scope(args: &mut Vec<String>) -> Result<(Option<String>, Option<Value>)> {
+    let merchant = take_value(args, "--merchant");
+    let provider = take_value(args, "--provider");
+    let executor = take_value(args, "--executor");
+    let capability = take_value(args, "--capability");
+    let billing_merchant = take_value(args, "--billing-merchant");
+    let typed_count = [
+        provider.as_ref(),
+        executor.as_ref(),
+        capability.as_ref(),
+        billing_merchant.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .count();
+    if merchant.is_some() && typed_count > 0 {
+        return Err(anyhow!(
+            "--merchant cannot be combined with typed execution-scope flags"
+        ));
+    }
+    if typed_count == 0 {
+        return Ok((
+            Some(merchant.unwrap_or_else(|| "local-merchant".to_string())),
+            None,
+        ));
+    }
+    if typed_count != 4 {
+        return Err(anyhow!("--provider, --executor, --capability, and --billing-merchant must be supplied together"));
+    }
+    Ok((
+        None,
+        Some(json!({
+            "schema_version": 1,
+            "provider": provider,
+            "executor": executor,
+            "capability": capability,
+            "billing_merchant": billing_merchant,
+        })),
+    ))
 }
 
 fn spend_reconcile(base_url: &str, args: Vec<String>) -> Result<()> {
@@ -1722,6 +1763,7 @@ fn print_executor_claim(claim: &Value) -> Result<()> {
     if let Some(merchant) = spend.get("merchant").and_then(Value::as_str) {
         println!("  merchant: {merchant}");
     }
+    print_execution_scope(spend);
     let hold = spend
         .get("budget_hold")
         .ok_or_else(|| anyhow!("server response missing `budget_hold`"))?;
@@ -1756,6 +1798,7 @@ fn print_spend_response(response: &Value) -> Result<()> {
     if let Some(token_id) = response.get("auth_token_id").and_then(Value::as_str) {
         println!("  auth_token_id: {token_id}");
     }
+    print_execution_scope(response);
     println!(
         "  workload_profile: {}",
         string_at(response, "workload_profile")?
@@ -1813,6 +1856,33 @@ fn print_spend_response(response: &Value) -> Result<()> {
         println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
     }
     Ok(())
+}
+
+fn print_execution_scope(value: &Value) {
+    let Some(scope) = value.get("execution_scope").and_then(Value::as_object) else {
+        return;
+    };
+    println!(
+        "  execution_scope_schema: {}",
+        scope
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    );
+    for field in ["provider", "executor", "capability", "billing_merchant"] {
+        let Some(identity) = scope.get(field).and_then(Value::as_object) else {
+            continue;
+        };
+        let name = identity
+            .get("display_name")
+            .and_then(Value::as_str)
+            .unwrap_or("<unnamed>");
+        let id = identity
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing-id>");
+        println!("  {field}: {name} [{id}]");
+    }
 }
 
 fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
@@ -2567,8 +2637,8 @@ fn print_spend_help() {
         "Test an agent spend request
 
 Usage:
-  hubu spend --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
-  hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
+  hubu spend --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
   hubu spend claim --claim-id ID
   hubu spend reconcile list
   hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-cents CENTS --provider-request-id ID --provider NAME --model NAME --unit-price-cents CENTS --pricing-unit UNIT --artifact-reference REF
@@ -2589,7 +2659,7 @@ fn print_spend_authorize_help() {
         "Authorize spend and reserve budget without executing payment
 
 Usage:
-  hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME] [--workload-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
 
 Note:
   Supply one immutable agent-scoped operation key before the first request; do not generate a new key on retry.
@@ -2627,6 +2697,46 @@ Example:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_scope_flags_are_complete_and_stable() {
+        let mut args = [
+            "--provider",
+            "provider:google:gemini-developer",
+            "--executor",
+            "executor:gongbu:image",
+            "--capability",
+            "capability:image:generate",
+            "--billing-merchant",
+            "merchant:google",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let (merchant, scope) = take_execution_scope(&mut args).unwrap();
+        assert!(merchant.is_none());
+        assert_eq!(
+            scope.unwrap()["provider"],
+            "provider:google:gemini-developer"
+        );
+    }
+
+    #[test]
+    fn typed_scope_flags_cannot_mix_with_legacy_merchant() {
+        let mut args = [
+            "--merchant",
+            "google",
+            "--provider",
+            "provider:google:gemini-developer",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert!(take_execution_scope(&mut args)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be combined"));
+    }
 
     #[test]
     fn local_timestamp_converts_rfc3339_to_the_system_timezone() {

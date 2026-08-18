@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "provider": {
+    "id": "provider:google:gemini-developer",
+    "display_name": "Google Gemini Developer API"
+  },
+  "executor": {
+    "id": "executor:gongbu:image",
+    "display_name": "Gongbu image executor"
+  },
+  "capability": {
+    "id": "capability:image:generate",
+    "display_name": "Generate image"
+  },
+  "billing_merchant": {
+    "id": "merchant:google",
+    "display_name": "Google"
+  }
+}

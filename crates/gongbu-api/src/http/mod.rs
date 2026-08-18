@@ -5,6 +5,7 @@
 //! every request schema.
 use crate::{
     artifacts::{ArtifactService, Error as ArtifactError},
+    execution_scope::{for_target, ExecutionScope, EXECUTION_SCOPE_SCHEMA_VERSION},
     persistence::{
         Artifact, CreateExecutionParams, Error as PersistenceError, Execution, HubuTokenReference,
         Repository,
@@ -56,6 +57,8 @@ pub struct CreateExecutionRequest {
     pub input_schema_version: i64,
     pub workload_type: String,
     pub provider: String,
+    #[serde(default)]
+    pub execution_scope: Option<ExecutionScope>,
     pub adapter: String,
     pub model: String,
 }
@@ -370,6 +373,7 @@ impl Api {
             pricing_snapshot: serde_json::to_value(pricing_snapshot)
                 .map_err(|_| ApiError::internal())?,
             pricing_schema_version,
+            execution_scope: request.execution_scope,
             created_at: (self.now)(),
         };
         let execution = self
@@ -517,6 +521,7 @@ fn immutable_request_matches(
         && execution.input_schema_version == request.input_schema_version
         && execution.workload_type == request.workload_type
         && execution.provider == request.provider
+        && request.execution_scope.as_ref().is_none_or(|scope| for_target(&request.provider, &request.adapter).as_ref() == Some(scope))
         && execution.adapter == request.adapter
         && execution.model == request.model
 }
@@ -559,6 +564,13 @@ fn validate_create(request: &CreateExecutionRequest) -> Result<(), ApiError> {
     {
         return Err(ApiError::validation());
     }
+    if let Some(scope) = &request.execution_scope {
+        if scope.schema_version != EXECUTION_SCOPE_SCHEMA_VERSION
+            || for_target(&request.provider, &request.adapter).as_ref() != Some(scope)
+        {
+            return Err(ApiError::validation());
+        }
+    }
     Ok(())
 }
 
@@ -577,6 +589,7 @@ fn immutable_hash(
         "input_schema_version": request.input_schema_version,
         "workload_type": resolved.workload_type,
         "provider": resolved.provider,
+        "execution_scope": for_target(&resolved.provider, &resolved.adapter),
         "adapter": resolved.adapter,
         "model": resolved.model,
         "provider_config_version": resolved.provider_config_version,

@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS executions(
  authorized_minor INTEGER NOT NULL CHECK(authorized_minor>=0), authorization_currency TEXT NOT NULL CHECK(length(authorization_currency)=3),
  normalized_input_json TEXT NOT NULL CHECK(json_valid(normalized_input_json)), input_hash TEXT NOT NULL, input_schema_version INTEGER NOT NULL CHECK(input_schema_version>0),
  target TEXT NOT NULL, config_version TEXT NOT NULL, provider_config_digest TEXT NOT NULL CHECK(provider_config_digest GLOB 'sha256:*' AND length(provider_config_digest)=71), pricing_snapshot_json TEXT NOT NULL CHECK(json_valid(pricing_snapshot_json)), pricing_schema_version INTEGER NOT NULL CHECK(pricing_schema_version>0),
+ execution_scope_json TEXT CHECK(execution_scope_json IS NULL OR json_valid(execution_scope_json)),
  status TEXT NOT NULL CHECK(status IN ('pending','preflighting','claimed','executing','settling','succeeded','released','failed','reconciliation_required')), outcome TEXT,
  provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT,
  failure_code TEXT, failure_message_redacted TEXT,

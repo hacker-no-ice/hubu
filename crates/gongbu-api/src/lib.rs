@@ -4,6 +4,7 @@ pub mod application;
 pub mod artifact;
 pub mod config;
 pub mod execution;
+pub mod execution_scope;
 pub mod http;
 pub mod hubu;
 pub mod lifecycle;

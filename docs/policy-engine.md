@@ -70,7 +70,8 @@ SpendRequest {
     amount_cents: 4_500,
     currency: Currency::Usd,
     agent_id: AgentId::new(),
-    merchant: Some("Acme Cafe".to_string()),
+    execution_scope: Some(canonical_execution_scope),
+    merchant: None,
     category: Some("meals".to_string()),
 }
 ```
@@ -177,8 +178,15 @@ amount      -> money_cents
 currency    -> currency
 agent_id    -> agent_id
 merchant    -> string
+provider    -> string (stable provider id)
+executor    -> string (stable executor id)
+capability  -> string (stable capability id)
+billing_merchant -> string (stable billing merchant id)
 category    -> string
 ```
+
+`merchant` is retained only for legacy policies. New execution policies should
+target the four typed scope fields; see [Trusted execution scope](execution-scope.md).
 
 Ordered comparisons are currently only valid for `amount`.
 

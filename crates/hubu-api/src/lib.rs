@@ -18,6 +18,10 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Months, Utc};
 use hubu_common::{
     build::{build_info, EXECUTOR_CONTRACT},
+    execution_scope::{
+        resolve_execution_scope, ExecutionScope, ExecutionScopeSelector, ScopeIdentity,
+        EXECUTION_SCOPE_SCHEMA_VERSION,
+    },
     ids::{
         AgentId, AgentSessionId, BudgetId, SpendAuthTokenId, SpendExecutorClaimId,
         SpendingTargetId, UserId,
@@ -608,6 +612,7 @@ impl SpendAuthorizationValidator for SharedSpendAuthorizer {
                 amount_cents: request.amount_cents,
                 currency: request.currency,
                 merchant: request.merchant.clone(),
+                execution_scope: request.execution_scope.clone(),
                 task_id: request.task_id.clone(),
             })
             .map(|validation| hubu_wallet::ValidatedSpendAuthorization {
@@ -925,6 +930,8 @@ struct SpendHttpRequest {
     amount_cents: i64,
     reason: String,
     merchant: Option<String>,
+    #[serde(default)]
+    execution_scope: Option<ExecutionScopeSelector>,
     workload_profile: Option<String>,
 }
 
@@ -937,6 +944,7 @@ struct SpendHttpResponse {
     decision: String,
     reasons: Vec<String>,
     auth_token_id: Option<String>,
+    execution_scope: Option<ExecutionScope>,
     workload_profile: String,
     authorization_expires_at: Option<String>,
     budget_hold: Option<BudgetHoldHttpResponse>,
@@ -954,6 +962,7 @@ struct ExecutorSpendHttpRequest {
     account_id: Option<String>,
     amount_cents: i64,
     merchant: Option<String>,
+    execution_scope: Option<ExecutionScope>,
     task_id: Option<String>,
 }
 
@@ -1000,6 +1009,7 @@ struct ExecutorSpendHttpResponse {
     amount_cents: i64,
     currency: String,
     merchant: Option<String>,
+    execution_scope: Option<ExecutionScope>,
     task_id: Option<String>,
     expires_at: String,
     budget_hold: BudgetHoldHttpResponse,
@@ -1526,7 +1536,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "reason"
             ],
             "optional": [
-                "merchant",
+                "execution_scope",
+                "merchant (legacy only)",
                 "workload_profile"
             ]
         },
@@ -1538,7 +1549,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "amount_cents"
             ],
             "optional": [
-                "merchant",
+                "execution_scope",
+                "merchant (legacy only)",
                 "task_id"
             ],
             "currency": "usd in v4"
@@ -1585,7 +1597,9 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
         "timing": &state.spend_timing,
         "scope_rules": [
             "operation_key is platform-assigned, immutable, and scoped to the authorized agent; authorization retries must use the same spend scope",
-            "account_id, amount_cents, merchant, and task_id must match the original authorized spend",
+            "account_id, amount_cents, complete canonical execution_scope, legacy merchant, and task_id must match the original authorized spend",
+            "typed execution_scope identifiers resolve against Hubu's trusted catalog; unknown or ambiguous identifiers are rejected",
+            "provider, executor, capability, and billing_merchant are independently policy-addressable stable identities",
             "workload_profile is selected during authorization and cannot be changed by the executor",
             "the spend auth token must be unexpired, unused, unrevoked, and unclaimed when a new claim starts",
             "authorization and claim retries with the same operation_key return stored workflow state, including terminal state",
@@ -1610,11 +1624,9 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "a human-confirmed vendor_billed resolution settles the hold; vendor_did_not_bill releases it",
             "each reconciliation stores the provider reference, evidence, resolving user, outcome, and timestamp"
         ],
-        "merchant_examples": [
-            "gongbu.image",
-            "gongbu.browser",
-            "example.executor"
-        ]
+        "execution_scope_schema_version": EXECUTION_SCOPE_SCHEMA_VERSION,
+        "execution_scope_catalog": trusted_execution_scope_catalog(),
+        "legacy_merchant": "accepted for migration and normalized to an explicit legacy-unresolved scope; new clients should send execution_scope"
     })
 }
 
@@ -2990,6 +3002,7 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
         decision: effect_name(authorization.approval.evaluation.evaluation.decision).to_string(),
         reasons: authorization.approval.evaluation.evaluation.reasons.clone(),
         auth_token_id: Some(auth_token_id),
+        execution_scope: authorization.approval.execution_scope.clone(),
         workload_profile,
         authorization_expires_at: Some(authorization_expires_at),
         budget_hold: Some(budget_hold_state_response(
@@ -3002,6 +3015,62 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
         retry_guidance: authorization.approval.evaluation.retry_guidance.clone(),
         attempt_history: authorization.approval.evaluation.attempt_history.clone(),
     })
+}
+
+fn scope_identity(id: &str, display_name: &str) -> ScopeIdentity {
+    ScopeIdentity {
+        id: id.to_string(),
+        display_name: display_name.to_string(),
+    }
+}
+
+fn trusted_execution_scope_catalog() -> Vec<ExecutionScope> {
+    serde_json::from_str(include_str!(
+        "../../../fixtures/execution-scope-catalog-v1.json"
+    ))
+    .expect("built-in execution scope catalog must match schema v1")
+}
+
+fn scope_as_selector(scope: &ExecutionScope) -> ExecutionScopeSelector {
+    ExecutionScopeSelector {
+        schema_version: scope.schema_version,
+        provider: scope.provider.id.clone(),
+        executor: scope.executor.id.clone(),
+        capability: scope.capability.id.clone(),
+        billing_merchant: scope.billing_merchant.id.clone(),
+    }
+}
+
+fn resolve_requested_execution_scope(
+    selector: Option<&ExecutionScopeSelector>,
+    legacy_merchant: Option<&str>,
+) -> Result<Option<ExecutionScope>> {
+    if selector.is_some() && legacy_merchant.is_some() {
+        return Err(anyhow!(
+            "provide execution_scope or legacy merchant, not both"
+        ));
+    }
+    if let Some(selector) = selector {
+        return resolve_execution_scope(selector, &trusted_execution_scope_catalog())
+            .map(Some)
+            .map_err(|error| anyhow!(error));
+    }
+    Ok(legacy_merchant.map(legacy_execution_scope))
+}
+
+fn legacy_execution_scope(merchant: &str) -> ExecutionScope {
+    let merchant = merchant.trim();
+    let digest = format!("{:x}", Sha256::digest(merchant.as_bytes()));
+    ExecutionScope {
+        schema_version: EXECUTION_SCOPE_SCHEMA_VERSION,
+        provider: scope_identity("provider:legacy:unresolved", "Legacy unresolved provider"),
+        executor: scope_identity("executor:legacy:unresolved", "Legacy unresolved executor"),
+        capability: scope_identity(
+            "capability:legacy:unresolved",
+            "Legacy unresolved capability",
+        ),
+        billing_merchant: scope_identity(&format!("merchant:legacy:{}", &digest[..16]), merchant),
+    }
 }
 
 fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
@@ -3052,6 +3121,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         decision: effect_name(authorization.approval.evaluation.evaluation.decision).to_string(),
         reasons: authorization.approval.evaluation.evaluation.reasons.clone(),
         auth_token_id: Some(auth_token_id),
+        execution_scope: authorization.approval.execution_scope.clone(),
         workload_profile,
         authorization_expires_at: Some(authorization_expires_at),
         budget_hold,
@@ -3382,6 +3452,7 @@ impl ResolvedExecutorSpend {
             amount_cents: self.request.amount_cents,
             currency: Currency::Usd,
             merchant: self.request.merchant.clone(),
+            execution_scope: self.request.execution_scope.clone(),
             task_id: self.request.task_id.clone(),
         }
     }
@@ -3407,13 +3478,34 @@ impl ResolvedExecutorSpend {
 }
 
 fn resolve_executor_spend_request(
-    request: ExecutorSpendHttpRequest,
+    mut request: ExecutorSpendHttpRequest,
     state: &ServerState,
 ) -> Result<ResolvedExecutorSpend> {
     if request.amount_cents <= 0 {
         return Err(anyhow!("executor spend amount must be positive"));
     }
     reconcile_expired_budget_holds(state)?;
+    request.execution_scope = match request.execution_scope.as_ref() {
+        Some(scope) => {
+            if request.merchant.is_some() {
+                return Err(anyhow!(
+                    "provide execution_scope or legacy merchant, not both"
+                ));
+            }
+            let canonical = resolve_execution_scope(
+                &scope_as_selector(scope),
+                &trusted_execution_scope_catalog(),
+            )
+            .map_err(|error| anyhow!(error))?;
+            if canonical != *scope {
+                return Err(anyhow!(
+                    "executor execution_scope must exactly match the canonical authorization scope"
+                ));
+            }
+            Some(canonical)
+        }
+        None => resolve_requested_execution_scope(None, request.merchant.as_deref())?,
+    };
 
     let user = authenticated_user_context(state)?;
     let spend_request = SpendHttpRequest {
@@ -3423,6 +3515,7 @@ fn resolve_executor_spend_request(
         amount_cents: request.amount_cents,
         reason: request.task_id.clone().unwrap_or_default(),
         merchant: request.merchant.clone(),
+        execution_scope: request.execution_scope.as_ref().map(scope_as_selector),
         workload_profile: None,
     };
     let account = resolve_agent_account_for_spend(&spend_request, &user, state)?;
@@ -3558,6 +3651,7 @@ fn executor_spend_from_claim_state(
             account_id: Some(account.pub_id.clone()),
             amount_cents: claim_state.decision.request.amount_cents,
             merchant: claim_state.decision.request.merchant.clone(),
+            execution_scope: claim_state.decision.request.execution_scope.clone(),
             task_id: claim_state.decision.request.task_id.clone(),
         },
         account_pub_id: account.pub_id,
@@ -3640,6 +3734,7 @@ fn executor_spend_response_with_hold(
         amount_cents: validated.request.amount_cents,
         currency: Currency::Usd.to_string(),
         merchant: validated.request.merchant.clone(),
+        execution_scope: validated.request.execution_scope.clone(),
         task_id: validated.request.task_id.clone(),
         expires_at: validated.validation.expires_at.to_rfc3339(),
         budget_hold: budget_hold_state_response(hold, balance),
@@ -3671,6 +3766,10 @@ fn evaluate_and_reserve_spend(
         .filter(|operation_key| !operation_key.is_empty())
         .ok_or_else(|| anyhow!("spend operation_key is required"))?;
     let account = resolve_agent_account_for_spend(&request, &user, state)?;
+    let execution_scope = resolve_requested_execution_scope(
+        request.execution_scope.as_ref(),
+        request.merchant.as_deref(),
+    )?;
     let account_pub_id = account.pub_id.clone();
     let agent_id = account.agent_id.clone();
     let agent_pub_id = registration_agent_pub_id(&agent_id, state)?;
@@ -3685,6 +3784,7 @@ fn evaluate_and_reserve_spend(
             "amount_cents": request.amount_cents,
             "currency": Currency::Usd.to_string(),
             "merchant": request.merchant.clone(),
+            "execution_scope_selector": request.execution_scope.clone(),
             "reason": request.reason.clone(),
         }),
     );
@@ -3718,6 +3818,7 @@ fn evaluate_and_reserve_spend(
                 amount_cents: request.amount_cents,
                 currency: Currency::Usd,
                 merchant: request.merchant.clone(),
+                execution_scope,
                 task_id: Some(request.reason.clone()),
                 workload_profile,
             },
@@ -3798,6 +3899,7 @@ fn spend_rejection_response(
         decision: effect_name(rejection.decision).to_string(),
         reasons: rejection.reasons,
         auth_token_id: None,
+        execution_scope: rejection.execution_scope,
         workload_profile: rejection.workload_profile,
         authorization_expires_at: None,
         budget_hold: None,
@@ -5985,7 +6087,7 @@ profiles:
                 .as_array()
                 .expect("scope rules should be an array")
                 .iter()
-                .any(|item| item == "account_id, amount_cents, merchant, and task_id must match the original authorized spend"));
+                .any(|item| item == "account_id, amount_cents, complete canonical execution_scope, legacy merchant, and task_id must match the original authorized spend"));
             assert_eq!(
                 response.body["routes"]["reconciliation_queue"],
                 "GET /spend/executor/reconciliation"
@@ -6520,6 +6622,100 @@ profiles:
         .expect("reloaded claim should settle");
         assert_eq!(settlement.status, "settled");
         assert_eq!(settlement.spend.budget_hold.status, "settled");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn typed_execution_scope_is_exactly_bound_across_restart_and_claim() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-typed-scope-restart-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).unwrap();
+        init(
+            json!({"display_name":"Alice Example","email":"alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name":"typed-scope-agent","version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(
+            json!({"agent_id":agent.agent_id,"daily_limit_cents":500}).to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 500);
+        let scope = json!({
+            "schema_version": 1,
+            "provider": "provider:google:gemini-developer",
+            "executor": "executor:gongbu:image",
+            "capability": "capability:image:generate",
+            "billing_merchant": "merchant:google"
+        });
+        let authorization = authorize_spend(
+            json!({
+                "operation_key":"typed-scope-operation",
+                "account_id":agent.account_id,
+                "amount_cents":500,
+                "reason":"typed image generation",
+                "execution_scope":scope
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(
+            authorization
+                .execution_scope
+                .as_ref()
+                .unwrap()
+                .provider
+                .display_name,
+            "Google Gemini Developer API"
+        );
+
+        let mut broadened = authorization.execution_scope.clone().unwrap();
+        broadened.billing_merchant = scope_identity("merchant:ideogram", "Ideogram");
+        let rejected = claim_executor_spend(
+            json!({
+                "operation_key":"typed-scope-operation",
+                "spend_auth_token_id":authorization.auth_token_id,
+                "account_id":agent.account_id,
+                "amount_cents":500,
+                "execution_scope":broadened,
+                "task_id":"typed image generation"
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap_err();
+        assert!(rejected
+            .to_string()
+            .contains("unknown execution scope identifier"));
+
+        let claim = claim_executor_spend(
+            json!({
+                "operation_key":"typed-scope-operation",
+                "spend_auth_token_id":authorization.auth_token_id,
+                "account_id":agent.account_id,
+                "amount_cents":500,
+                "execution_scope":authorization.execution_scope,
+                "task_id":"typed image generation"
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        drop(state);
+        let restarted = ServerState::new_with_db_path(&path).unwrap();
+        let restored = get_executor_claim(Some(&claim.claim_id), &restarted).unwrap();
+        assert_eq!(
+            restored.spend.execution_scope.unwrap().provider.id,
+            "provider:google:gemini-developer"
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -7240,6 +7436,7 @@ rules: []
             amount_cents: 100,
             reason: "pending exact request".to_string(),
             merchant: Some("Acme Cafe".to_string()),
+            execution_scope: None,
             workload_profile: None,
         };
         let account = resolve_agent_account_for_spend(&request, &user, &state).unwrap();
@@ -7250,6 +7447,7 @@ rules: []
             agent_id: account.agent_id,
             agent_account_id: account.id,
             merchant: request.merchant.clone(),
+            execution_scope: Some(legacy_execution_scope("Acme Cafe")),
             category: None,
             task_id: Some(request.reason.clone()),
             workload_profile: "default".to_string(),

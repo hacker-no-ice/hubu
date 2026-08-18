@@ -2370,6 +2370,28 @@ impl SpendRepository for SqliteGovernanceRepository {
             transaction.commit()?;
             return Ok(SpendAttemptAdmission::ExactReplay { revision });
         }
+        let compatible_revision = {
+            let mut statement = transaction.prepare(
+                "SELECT revision, request_json FROM spend_operation_attempts
+                 WHERE agent_id = ?1 AND operation_key = ?2
+                 ORDER BY revision ASC",
+            )?;
+            let mut rows = statement.query(params![request.agent_id.to_string(), operation_key])?;
+            let mut compatible = None;
+            while let Some(row) = rows.next()? {
+                let stored_json: String = row.get(1)?;
+                let stored: SpendRequest = parse_json(&stored_json)?;
+                if stored.replay_equivalent(request) {
+                    compatible = Some(row.get(0)?);
+                    break;
+                }
+            }
+            compatible
+        };
+        if let Some(revision) = compatible_revision {
+            transaction.commit()?;
+            return Ok(SpendAttemptAdmission::ExactReplay { revision });
+        }
 
         let unsafe_prior: bool = transaction.query_row(
             "SELECT EXISTS(
@@ -3523,9 +3545,36 @@ mod tests {
             agent_id: agent_id(),
             agent_account_id: AgentAccountId::new(),
             merchant: Some("Acme".to_string()),
+            execution_scope: None,
             category: None,
             task_id: Some("task".to_string()),
             workload_profile: "default".to_string(),
+        }
+    }
+
+    fn legacy_execution_scope(merchant: &str) -> hubu_common::execution_scope::ExecutionScope {
+        use hubu_common::execution_scope::{ExecutionScope, ScopeIdentity};
+
+        let merchant = merchant.trim();
+        let digest = format!("{:x}", Sha256::digest(merchant.as_bytes()));
+        ExecutionScope {
+            schema_version: hubu_common::execution_scope::EXECUTION_SCOPE_SCHEMA_VERSION,
+            provider: ScopeIdentity {
+                id: "provider:legacy:unresolved".into(),
+                display_name: "Legacy unresolved provider".into(),
+            },
+            executor: ScopeIdentity {
+                id: "executor:legacy:unresolved".into(),
+                display_name: "Legacy unresolved executor".into(),
+            },
+            capability: ScopeIdentity {
+                id: "capability:legacy:unresolved".into(),
+                display_name: "Legacy unresolved capability".into(),
+            },
+            billing_merchant: ScopeIdentity {
+                id: format!("merchant:legacy:{}", &digest[..16]),
+                display_name: merchant.into(),
+            },
         }
     }
 
@@ -4532,6 +4581,118 @@ mod tests {
             repo.admit_spend_attempt(
                 &legacy.owner_user_id,
                 &legacy.operation_key,
+                &changed,
+                "test:changed",
+                Utc::now(),
+            )
+            .unwrap(),
+            SpendAttemptAdmission::ChangedScopeBlocked
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn pre_scope_attempt_exact_replay_recovers_token_and_blocks_changed_scope() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-pre-scope-exact-replay-{}.sqlite",
+            UserId::new()
+        ));
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let mut decision = spend_decision();
+        decision.operation_key = "pre-scope-token-recovery".into();
+        decision.request.merchant = Some("Acme".into());
+        decision.request.execution_scope = None;
+        let mut legacy_request = serde_json::to_value(&decision.request).unwrap();
+        legacy_request
+            .as_object_mut()
+            .unwrap()
+            .remove("execution_scope");
+        let legacy_request_json = serde_json::to_string(&legacy_request).unwrap();
+        repo.conn
+            .execute(
+                "INSERT INTO spend_operation_attempts
+                 (agent_id, operation_key, revision, owner_user_id, request_json, actor, submitted_at)
+                 VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6)",
+                params![
+                    decision.request.agent_id.to_string(),
+                    decision.operation_key,
+                    decision.owner_user_id.to_string(),
+                    legacy_request_json,
+                    decision.actor,
+                    decision.created_at.to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        repo.conn
+            .execute(
+                "INSERT INTO spend_decisions
+                 (id, owner_user_id, agent_id, operation_key, revision, actor,
+                  request_json, evaluation_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8)",
+                params![
+                    decision.id.to_string(),
+                    decision.owner_user_id.to_string(),
+                    decision.request.agent_id.to_string(),
+                    decision.operation_key,
+                    decision.actor,
+                    legacy_request_json,
+                    serde_json::to_string(&decision.evaluation).unwrap(),
+                    decision.created_at.to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        let token = SpendAuthTokenRecord {
+            id: SpendAuthTokenId::new(),
+            owner_user_id: decision.owner_user_id.clone(),
+            spend_decision_id: decision.id.clone(),
+            expires_at: Utc::now() + Duration::minutes(5),
+            claim_ttl_seconds: 900,
+            used_at: None,
+            used_by_payment_id: None,
+            revoked_at: None,
+        };
+        repo.save_spend_auth_token(&token).unwrap();
+        drop(repo);
+
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let mut upgraded = decision.request.clone();
+        upgraded.execution_scope = Some(legacy_execution_scope("Acme"));
+        assert_eq!(
+            repo.admit_spend_attempt(
+                &decision.owner_user_id,
+                &decision.operation_key,
+                &upgraded,
+                "test:retry",
+                Utc::now(),
+            )
+            .unwrap(),
+            SpendAttemptAdmission::ExactReplay { revision: 1 }
+        );
+
+        let mut manager = crate::spend::SpendManager::from_records(
+            repo.load_spend_decisions().unwrap(),
+            repo.load_spend_auth_tokens().unwrap(),
+        );
+        let replay = manager
+            .evaluate_spend(
+                &hubu_common::models::UserContext::new(decision.owner_user_id.clone()),
+                &decision.operation_key,
+                upgraded.clone(),
+                &policy(),
+            )
+            .unwrap();
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.auth_token.unwrap().id, token.id);
+
+        let mut changed = upgraded;
+        changed.execution_scope = Some(
+            serde_json::from_str(include_str!("../../../fixtures/execution-scope-v1.json"))
+                .unwrap(),
+        );
+        assert_eq!(
+            repo.admit_spend_attempt(
+                &decision.owner_user_id,
+                &decision.operation_key,
                 &changed,
                 "test:changed",
                 Utc::now(),

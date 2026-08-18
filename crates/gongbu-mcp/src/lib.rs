@@ -425,6 +425,8 @@ struct CreateExecutionRequest {
     input_schema_version: i64,
     workload_type: String,
     provider: String,
+    #[serde(default)]
+    execution_scope: Option<Value>,
     adapter: String,
     model: String,
 }
@@ -521,6 +523,7 @@ pub fn tool_definitions() -> Value {
         "input_schema_version": {"type":"integer","minimum":1},
         "workload_type": {"type":"string","minLength":1},
         "provider": {"type":"string","minLength":1},
+        "execution_scope": {"type":"object","additionalProperties":false,"required":["schema_version","provider","executor","capability","billing_merchant"]},
         "adapter": {"type":"string","minLength":1},
         "model": {"type":"string","minLength":1}
     });

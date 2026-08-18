@@ -1306,6 +1306,7 @@ mod tests {
                 provider_config_digest: format!("sha256:{}", "a".repeat(64)),
                 pricing_snapshot: serde_json::to_value(snapshot).unwrap(),
                 pricing_schema_version: 1,
+                execution_scope: None,
                 created_at: "now".into(),
             })
             .unwrap();

@@ -2,6 +2,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use hubu_common::execution_scope::ExecutionScope;
 use hubu_common::ids::{
     AgentAccountId, AgentId, LedgerTransactionId, PaymentId, SpendAuthTokenId, UserId,
 };
@@ -19,6 +20,8 @@ pub enum PaymentAttemptStorageError {
         #[from]
         source: rusqlite::Error,
     },
+    #[error("payment attempt execution scope is invalid")]
+    Json(#[from] serde_json::Error),
 }
 
 pub trait PaymentAttemptRepository {
@@ -44,6 +47,7 @@ pub struct PaymentAttemptRecord {
     pub amount_cents: i64,
     pub currency: Currency,
     pub merchant: Option<String>,
+    pub execution_scope: Option<ExecutionScope>,
     pub task_id: Option<String>,
     pub rail: PaymentRailKind,
     pub destination: PaymentDestination,
@@ -66,6 +70,7 @@ impl PaymentAttemptRecord {
             amount_cents: self.amount_cents,
             currency: self.currency,
             merchant: self.merchant.clone(),
+            execution_scope: self.execution_scope.clone(),
             task_id: self.task_id.clone(),
             rail: self.rail,
             destination: self.destination.clone(),
@@ -124,6 +129,7 @@ impl SqlitePaymentAttemptRepository {
                 amount_cents INTEGER NOT NULL,
                 currency TEXT NOT NULL,
                 merchant TEXT,
+                execution_scope_json TEXT,
                 task_id TEXT,
                 rail TEXT NOT NULL,
                 destination_type TEXT NOT NULL,
@@ -140,6 +146,19 @@ impl SqlitePaymentAttemptRepository {
             ON payment_attempts(idempotency_key);
             ",
         )?;
+        let has_scope_column = self
+            .conn
+            .prepare("PRAGMA table_info(payment_attempts)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .any(|column| column == "execution_scope_json");
+        if !has_scope_column {
+            self.conn.execute(
+                "ALTER TABLE payment_attempts ADD COLUMN execution_scope_json TEXT",
+                [],
+            )?;
+        }
         Ok(())
     }
 }
@@ -154,9 +173,9 @@ impl PaymentAttemptRepository for SqlitePaymentAttemptRepository {
         self.conn.execute(
             "INSERT OR IGNORE INTO payment_attempts
              (payment_id, idempotency_key, spend_auth_token_id, owner_user_id, agent_id, agent_account_id,
-              amount_cents, currency, merchant, task_id, rail, destination_type, destination_ref,
+              amount_cents, currency, merchant, execution_scope_json, task_id, rail, destination_type, destination_ref,
               memo, status, ledger_transaction_id, rail_reference, failure_reason, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 response.payment_id.to_string(),
                 request.idempotency_key,
@@ -167,6 +186,7 @@ impl PaymentAttemptRepository for SqlitePaymentAttemptRepository {
                 request.amount_cents,
                 request.currency.to_string(),
                 request.merchant,
+                request.execution_scope.as_ref().map(serde_json::to_string).transpose()?,
                 request.task_id,
                 request.rail.as_ref(),
                 destination_type,
@@ -187,7 +207,7 @@ impl PaymentAttemptRepository for SqlitePaymentAttemptRepository {
     ) -> Result<Vec<PaymentAttemptRecord>, PaymentAttemptStorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT payment_id, idempotency_key, spend_auth_token_id, owner_user_id, agent_id,
-                    agent_account_id, amount_cents, currency, merchant, task_id, rail, destination_type, destination_ref,
+                    agent_account_id, amount_cents, currency, merchant, execution_scope_json, task_id, rail, destination_type, destination_ref,
                     memo, status, ledger_transaction_id, rail_reference, failure_reason, created_at
              FROM payment_attempts
              ORDER BY created_at ASC, payment_id ASC",
@@ -199,12 +219,13 @@ impl PaymentAttemptRepository for SqlitePaymentAttemptRepository {
             let agent_id: String = row.get(4)?;
             let agent_account_id: String = row.get(5)?;
             let currency: String = row.get(7)?;
-            let rail: String = row.get(10)?;
-            let destination_type: String = row.get(11)?;
-            let destination_ref: String = row.get(12)?;
-            let status: String = row.get(14)?;
-            let ledger_transaction_id: Option<String> = row.get(15)?;
-            let created_at: String = row.get(18)?;
+            let execution_scope_json: Option<String> = row.get(9)?;
+            let rail: String = row.get(11)?;
+            let destination_type: String = row.get(12)?;
+            let destination_ref: String = row.get(13)?;
+            let status: String = row.get(15)?;
+            let ledger_transaction_id: Option<String> = row.get(16)?;
+            let created_at: String = row.get(19)?;
             Ok(PaymentAttemptRecord {
                 payment_id: parse_id(&payment_id)?,
                 idempotency_key: row.get(1)?,
@@ -215,17 +236,28 @@ impl PaymentAttemptRepository for SqlitePaymentAttemptRepository {
                 amount_cents: row.get(6)?,
                 currency: parse_currency(&currency)?,
                 merchant: row.get(8)?,
-                task_id: row.get(9)?,
+                execution_scope: execution_scope_json
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            9,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                task_id: row.get(10)?,
                 rail: parse_rail(&rail)?,
                 destination: parse_destination(&destination_type, &destination_ref)?,
-                memo: row.get(13)?,
+                memo: row.get(14)?,
                 status: parse_payment_status(&status)?,
                 ledger_transaction_id: ledger_transaction_id
                     .as_deref()
                     .map(parse_id)
                     .transpose()?,
-                rail_reference: row.get(16)?,
-                failure_reason: row.get(17)?,
+                rail_reference: row.get(17)?,
+                failure_reason: row.get(18)?,
                 created_at: parse_timestamp(&created_at)?,
             })
         })?;
@@ -301,4 +333,100 @@ where
     T: FromStr,
 {
     T::from_str(value).map_err(|_| rusqlite::Error::InvalidQuery)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hubu_common::execution_scope::{
+        ExecutionScope, ScopeIdentity, EXECUTION_SCOPE_SCHEMA_VERSION,
+    };
+
+    fn identity(id: &str, name: &str) -> ScopeIdentity {
+        ScopeIdentity {
+            id: id.into(),
+            display_name: name.into(),
+        }
+    }
+
+    fn scope() -> ExecutionScope {
+        ExecutionScope {
+            schema_version: EXECUTION_SCOPE_SCHEMA_VERSION,
+            provider: identity(
+                "provider:google:gemini-developer",
+                "Google Gemini Developer API",
+            ),
+            executor: identity("executor:gongbu:image", "Gongbu image executor"),
+            capability: identity("capability:image:generate", "Generate image"),
+            billing_merchant: identity("merchant:google", "Google"),
+        }
+    }
+
+    #[test]
+    fn execution_scope_round_trips_across_restart() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-wallet-scope-{}.sqlite", PaymentId::new()));
+        let request = PaymentRequest {
+            idempotency_key: "scope-restart".into(),
+            spend_auth_token_id: SpendAuthTokenId::new(),
+            owner_user_id: UserId::new(),
+            agent_id: AgentId::new(),
+            agent_account_id: AgentAccountId::new(),
+            amount_cents: 25,
+            currency: Currency::Usd,
+            merchant: None,
+            execution_scope: Some(scope()),
+            task_id: Some("task".into()),
+            rail: PaymentRailKind::FiatMock,
+            destination: PaymentDestination::FiatAccount {
+                account_ref: "merchant".into(),
+            },
+            memo: None,
+        };
+        let response = PaymentResponse {
+            payment_id: PaymentId::new(),
+            owner_user_id: request.owner_user_id.clone(),
+            agent_account_id: request.agent_account_id.clone(),
+            status: PaymentStatus::Succeeded,
+            amount_cents: 25,
+            currency: Currency::Usd,
+            ledger_transaction_id: None,
+            rail_reference: Some("rail".into()),
+            failure_reason: None,
+            created_at: Utc::now(),
+        };
+        SqlitePaymentAttemptRepository::open(&path)
+            .unwrap()
+            .save_payment_attempt(&request, &response)
+            .unwrap();
+        let restarted = SqlitePaymentAttemptRepository::open(&path).unwrap();
+        let restored = restarted.list_payment_attempts().unwrap();
+        assert_eq!(
+            restored[0].request().execution_scope,
+            request.execution_scope
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_payment_schema_adds_nullable_scope_column() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-wallet-legacy-scope-{}.sqlite",
+            PaymentId::new()
+        ));
+        Connection::open(&path).unwrap().execute_batch("CREATE TABLE payment_attempts (payment_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL, spend_auth_token_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, agent_id TEXT NOT NULL, agent_account_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, currency TEXT NOT NULL, merchant TEXT, task_id TEXT, rail TEXT NOT NULL, destination_type TEXT NOT NULL, destination_ref TEXT NOT NULL, memo TEXT, status TEXT NOT NULL, ledger_transaction_id TEXT, rail_reference TEXT, failure_reason TEXT, created_at TEXT NOT NULL);").unwrap();
+        let repository = SqlitePaymentAttemptRepository::open(&path).unwrap();
+        let columns = repository
+            .conn
+            .prepare("PRAGMA table_info(payment_attempts)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns
+            .iter()
+            .any(|column| column == "execution_scope_json"));
+        let _ = std::fs::remove_file(path);
+    }
 }
