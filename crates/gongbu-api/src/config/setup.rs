@@ -571,7 +571,7 @@ mod tests {
             "temporal": {"mode": "external", "address": "http://127.0.0.1:7233", "namespace": "default", "task_queue": "gongbu-local", "ui_url": null},
             "hubu": {
                 "endpoint": "http://127.0.0.1:8787", "allowlisted_hosts": [],
-                "expected_product_version": "0.1.0", "expected_executor_contract": "hubu-spend-executor-v4",
+                "expected_product_version": "0.1.0", "expected_executor_contract": gongbu_build_info::HUBU_EXECUTOR_CONTRACT,
                 "account_id": "account-1", "agent_id": "agent-1",
                 "credential_reference": {"service": "gongbu.hubu", "account": "local"},
                 "startup_policy": "exit", "startup_timeout_ms": 1000
