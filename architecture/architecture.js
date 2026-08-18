@@ -116,7 +116,7 @@ const components = {
       "Builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, hubu-mcp-server, gongbu-server, gongbu-mcp, licenses, notices, the lockfile, manifest, and per-target provenance.",
       "Preserves separate Hubu and Gongbu runtime boundaries while sharing one product version and source provenance identity.",
       "Publishes SHA-256 checksums without overwriting existing tags or assets, then smoke-tests downloads, legal files, manifests, startup, MCP initialization, and all five version surfaces.",
-      "Keeps the Hubu product version separate from the hubu-spend-executor-v4 contract identifier so consumers can negotiate compatibility explicitly.",
+      "Keeps the Hubu product version separate from the hubu-spend-executor-v4.1 contract identifier so consumers can negotiate compatibility explicitly.",
     ],
     links: [sharedLinks.releaseWorkflow, sharedLinks.releases, sharedLinks.common, sharedLinks.api, sharedLinks.cli, sharedLinks.mcp, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp],
     nodes: [

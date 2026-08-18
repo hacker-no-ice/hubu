@@ -17,7 +17,7 @@ These belong in Hubu because they define generic spend control-plane behavior:
   - Status: merged into `main`.
 
 - `docs/spend-executor-contract.md`
-  - Keep: the current `hubu-spend-executor-v4` single-spend claim, receipt,
+  - Keep: the current `hubu-spend-executor-v4.1` single-spend claim, receipt,
     settlement, release, and reconciliation contract.
   - This remains the normative contract for one authorized provider call.
 

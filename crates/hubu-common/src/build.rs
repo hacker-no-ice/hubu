@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-pub const EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4";
+pub const EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct BuildInfo {
@@ -33,6 +33,6 @@ mod tests {
 
         assert!(!info.product_version.is_empty());
         assert!(!info.source_commit.is_empty());
-        assert_eq!(info.executor_contract, "hubu-spend-executor-v4");
+        assert_eq!(info.executor_contract, "hubu-spend-executor-v4.1");
     }
 }

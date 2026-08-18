@@ -75,7 +75,7 @@ for required in (
     "./scripts/test-release-packaging.sh",
     "./scripts/test-release-archive-runtime.sh",
     "./scripts/release-smoke-test.sh",
-    "hubu-spend-executor-v4",
+    "hubu-spend-executor-v4.1",
 ):
     if required not in workflow:
         fail(f"release workflow is missing {required!r}")

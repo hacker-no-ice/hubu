@@ -939,6 +939,9 @@ mod tests {
     fn strict_config_accepts_only_safe_production_shape() {
         let root = tempdir().unwrap();
         config(root.path()).validate().unwrap();
+        let mut legacy_contract = config(root.path());
+        legacy_contract.hubu.expected_executor_contract = "hubu-spend-executor-v4".into();
+        assert!(legacy_contract.validate().is_err());
         let mut value = serde_json::to_value(config(root.path())).unwrap();
         value["mock_hubu"] = serde_json::json!(true);
         assert!(serde_json::from_value::<ServerConfig>(value).is_err());

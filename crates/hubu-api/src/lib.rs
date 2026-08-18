@@ -5215,7 +5215,10 @@ profiles:
             response.body["product_version"],
             build_info().product_version
         );
-        assert_eq!(response.body["executor_contract"], "hubu-spend-executor-v4");
+        assert_eq!(
+            response.body["executor_contract"],
+            "hubu-spend-executor-v4.1"
+        );
         assert!(response.body["source_commit"]
             .as_str()
             .is_some_and(|value| !value.is_empty()));
@@ -6379,7 +6382,10 @@ profiles:
             let response = route(public_request("GET", path), &state);
 
             assert_eq!(response.status, 200);
-            assert_eq!(response.body["protocol_version"], "hubu-spend-executor-v4");
+            assert_eq!(
+                response.body["protocol_version"],
+                "hubu-spend-executor-v4.1"
+            );
             assert!(response.body["role_boundary"]["hubu"]
                 .as_array()
                 .expect("hubu role list should be an array")

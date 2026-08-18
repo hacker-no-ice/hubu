@@ -273,7 +273,7 @@ curl http://127.0.0.1:8787/version
 
 Release provenance binds all five production binaries to one product version
 and source commit. `executor_contract` remains the independently negotiated
-`hubu-spend-executor-v4` identifier; sharing source or a release version does
+`hubu-spend-executor-v4.1` identifier; sharing source or a release version does
 not change that wire contract.
 
 ## License

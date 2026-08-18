@@ -18,7 +18,7 @@ references needed for settlement auditability.
 
 ## Protocol Version
 
-The current version is `hubu-spend-executor-v4`. Agents and executors can
+The current version is `hubu-spend-executor-v4.1`. Agents and executors can
 discover its machine-readable guidance from either public route:
 
 ```http
