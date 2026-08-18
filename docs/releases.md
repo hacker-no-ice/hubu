@@ -29,6 +29,23 @@ has not advanced since the previous canary, the build and publication jobs are
 skipped. These releases are for early compatibility testing. There is
 deliberately no mutable `latest-main` asset.
 
+An operator can publish the same immutable canary on demand for an exact commit
+that is already contained in `main`:
+
+```sh
+source_commit=FULL_40_CHARACTER_COMMIT_SHA
+gh workflow run release.yml \
+  --repo hacker-no-ice/hubu \
+  --ref main \
+  -f channel=canary \
+  -f source_commit="$source_commit"
+```
+
+The resulting tag remains `main-<full-source-commit>`. Repeating the request
+does not replace the tag or assets; the workflow exits without publishing when
+that canary already exists. Use this path for a time-sensitive cutover instead
+of waiting for the next scheduled run.
+
 The schedule uses GitHub's timezone-aware cron support, which keeps publication
 at 10:00 local time through daylight-saving transitions.
 
@@ -124,6 +141,8 @@ Then dispatch the workflow with a new SemVer tag and the exact full commit SHA:
 ```sh
 gh workflow run release.yml \
   --repo hacker-no-ice/hubu \
+  --ref main \
+  -f channel=stable \
   -f version=v0.1.0 \
   -f source_commit=FULL_40_CHARACTER_COMMIT_SHA
 ```

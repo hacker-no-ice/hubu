@@ -57,6 +57,11 @@ for target in TARGETS:
         fail(f"{target} must appear once in build and once in published smoke matrices")
 
 for required in (
+    "channel:",
+    "default: canary",
+    'INPUT_CHANNEL: ${{ inputs.channel }}',
+    '"${INPUT_CHANNEL}" == "canary"',
+    'git checkout --detach "${source_commit}"',
     "GONGBU_PRODUCT_VERSION:",
     "GONGBU_SOURCE_COMMIT:",
     "HUBU_PRODUCT_VERSION:",
@@ -86,5 +91,6 @@ if unpinned:
 
 print(
     "validated immutable release workflow: five production binaries, four native "
-    "targets, shared build identity, bounded permissions, and pinned actions"
+    "targets, scheduled and explicit canaries, shared build identity, bounded "
+    "permissions, and pinned actions"
 )
