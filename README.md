@@ -239,12 +239,13 @@ discoverable to Codex agents, initialize the Codex MCP config:
 ```sh
 hubu init codex --token-file ~/.hubu/hubu.auth-token
 HUBU_AUTH_TOKEN_FILE=~/.hubu/hubu.auth-token \
+HUBU_APPROVAL_TOKEN_FILE=~/.hubu/hubu.approval-token \
 HUBU_RECONCILIATION_TOKEN_FILE=~/.hubu/hubu.reconciliation-token \
 hubu-server
 ```
 
 If the server from step 1 is already running with a different token file,
-restart it with the same auth and reconciliation token files before restarting Codex. Codex
+restart it with the same auth, approval, and reconciliation token files before restarting Codex. Codex
 should then be able to discover Hubu MCP tools and call spend tools without
 holding wallet credentials. For other MCP clients, use Hubu's tool annotations
 or `hubu_client_approval_profile`; see
@@ -338,11 +339,13 @@ user may be able to read the token or control an already-authorized client, and
 possession grants broad local API authority. It is not a user identity,
 workload identity, or durable human approval for real-money operations.
 
-Human claim reconciliation additionally requires a distinct capability from
+Human approval resolution requires a distinct capability from
+`HUBU_APPROVAL_TOKEN` or `HUBU_APPROVAL_TOKEN_FILE` (default
+`hubu.approval-token`). Human claim reconciliation similarly requires a distinct capability from
 `HUBU_RECONCILIATION_TOKEN` or `HUBU_RECONCILIATION_TOKEN_FILE` (default
 `hubu.reconciliation-token`). Executors should receive only the normal bearer
-token. The CLI and approved MCP reconciliation tools send the second capability
-only on reconciliation requests.
+token. The CLI and approved MCP tools send these human capabilities only on
+their respective approval or reconciliation requests.
 
 Restart `hubu-server` after rebuilding API or storage changes; reinstalling the
 CLI only updates the client binary. To start over with clean local state:

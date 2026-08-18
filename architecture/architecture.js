@@ -143,8 +143,8 @@ const components = {
       "The local server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, resolves public IDs, and leaves spend approval, payment, and claim state transitions to core app services.",
     responsibilities: [
       "Frames each request at CRLF-CRLF, validates Content-Length, reads exactly the declared body, and bounds header size, body size, and socket read time.",
-      "Keeps health and guidance public while requiring a local bearer token for protected routes and a second human capability for reconciliation mutations.",
-      "Uses the local token and current user context for protected workflow authority, while refusing to treat executor possession of that token as human reconciliation approval.",
+      "Keeps health and guidance public while requiring a local bearer token for protected routes plus distinct human capabilities for approval and reconciliation mutations.",
+      "Uses the local token and current user context for protected workflow authority, while refusing to treat executor possession of that token as human approval or reconciliation authority.",
       "Exposes owner-scoped approval lookup and resolve routes; approve and deny are idempotent, while conflicting resolutions are rejected.",
       "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
       "Delegates authorize/payment to `SpendApprovalService` and claim, lookup, queue selection, settle/release, and reconciliation to `ExecutorClaimService` so both workflows are testable without HTTP.",
@@ -156,7 +156,7 @@ const components = {
     links: [sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, sharedLinks.telemetry],
     nodes: [
       { id: "routes", label: "HTTP framing + routes", sub: "bounded GET/POST JSON", x: 72, y: 92, w: 220, h: 90, tone: "agent" },
-      { id: "auth", label: "Local auth", sub: "bearer + human cap", x: 410, y: 76, w: 220, h: 92, tone: "core" },
+      { id: "auth", label: "Local auth", sub: "bearer + owner caps", x: 410, y: 76, w: 220, h: 92, tone: "core" },
       { id: "state", label: "ServerState", sub: "shared managers", x: 410, y: 250, w: 220, h: 96, tone: "core" },
       { id: "app", label: "App services", sub: "approval + claims", x: 410, y: 432, w: 220, h: 92, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },
       { id: "registration", label: "Registration", sub: "agent records", x: 805, y: 48, w: 190, h: 84, tone: "core" },
@@ -450,7 +450,7 @@ const components = {
       "Supports init, Codex MCP setup, register, user list and spending-target commands, protocol, declarative policy apply/list/show/export/history/diff, agent list with scoped/all modes, budget, spend approval get/approve/deny, ledger, and health commands.",
       "Writes a managed Codex config block that lets agents in other projects discover Hubu MCP tools without reading the Hubu repo.",
       "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
-      "Loads the local Hubu token from env or file and sends it as a bearer header on HTTP JSON requests.",
+      "Loads the local Hubu bearer and owner capability tokens from env or files, sending approval and reconciliation capabilities only on their human mutations.",
     ],
     links: [sharedLinks.cli, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
@@ -482,7 +482,7 @@ const components = {
       "Annotates tools with read-only, destructive, idempotent, open-world, and Hubu approval hints.",
       "Keeps operation_key and task_id out of model-visible spend schemas, validates trusted platform metadata, and injects those identities into the HTTP request.",
       "Leaves durable operation-key allocation and recovery to the client platform and HUB-31.",
-      "Loads the local Hubu token, forwards tool calls to the HTTP API, returns durable approval status, and protects the explicit approve-or-deny mutation behind the trusted client gate.",
+      "Loads the local Hubu bearer and owner capability tokens, returns durable approval status, and protects approve-or-deny with both the trusted client gate and server-verified approval capability.",
     ],
     links: [sharedLinks.mcp, sharedLinks.gongbuMcp, sharedLinks.unifiedMcpContract, ["MCP transport doc", "docs/mcp-transport.md"], sharedLinks.api],
     nodes: [

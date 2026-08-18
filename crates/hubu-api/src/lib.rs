@@ -85,6 +85,10 @@ const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
+const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
+const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
+const APPROVAL_CAPABILITY_HEADER: &str = "x-hubu-approval-capability";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
@@ -95,6 +99,8 @@ const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 #[cfg(test)]
 const TEST_AUTH_TOKEN: &str = "test-local-auth-token";
+#[cfg(test)]
+const TEST_APPROVAL_TOKEN: &str = "test-human-approval-token";
 #[cfg(test)]
 const TEST_RECONCILIATION_TOKEN: &str = "test-human-reconciliation-token";
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -217,6 +223,7 @@ impl ServerState {
             "local_api_auth_configured",
             json!({
                 "source": auth.source(),
+                "approval_source": auth.approval_source(),
                 "reconciliation_source": auth.reconciliation_source(),
                 "owner_user_id": default_user.id.to_string(),
                 "owner_user_pub_id": default_user.pub_id,
@@ -353,6 +360,8 @@ fn parse_spend_timing_config(yaml: &str, path: &str) -> Result<SpendTimingConfig
 struct LocalAuth {
     token_hash: String,
     token_source: String,
+    approval_token_hash: String,
+    approval_token_source: String,
     reconciliation_token_hash: String,
     reconciliation_token_source: String,
     owner_user_id: Mutex<UserId>,
@@ -361,7 +370,16 @@ struct LocalAuth {
 impl LocalAuth {
     fn new(owner_user_id: UserId) -> Result<Self> {
         let token = load_local_auth_token()?;
+        let approval_token = load_local_approval_token()?;
         let reconciliation_token = load_local_reconciliation_token()?;
+        if constant_time_eq(
+            hash_token(&token.value).as_bytes(),
+            hash_token(&approval_token.value).as_bytes(),
+        ) {
+            return Err(anyhow!(
+                "Hubu approval capability must be distinct from the API bearer token"
+            ));
+        }
         if constant_time_eq(
             hash_token(&token.value).as_bytes(),
             hash_token(&reconciliation_token.value).as_bytes(),
@@ -370,9 +388,19 @@ impl LocalAuth {
                 "Hubu reconciliation capability must be distinct from the API bearer token"
             ));
         }
+        if constant_time_eq(
+            hash_token(&approval_token.value).as_bytes(),
+            hash_token(&reconciliation_token.value).as_bytes(),
+        ) {
+            return Err(anyhow!(
+                "Hubu approval and reconciliation capabilities must be distinct"
+            ));
+        }
         Ok(Self {
             token_hash: hash_token(&token.value),
             token_source: token.source,
+            approval_token_hash: hash_token(&approval_token.value),
+            approval_token_source: approval_token.source,
             reconciliation_token_hash: hash_token(&reconciliation_token.value),
             reconciliation_token_source: reconciliation_token.source,
             owner_user_id: Mutex::new(owner_user_id),
@@ -385,6 +413,17 @@ impl LocalAuth {
 
     fn source(&self) -> &str {
         &self.token_source
+    }
+
+    fn verifies_approval_capability(&self, token: &str) -> bool {
+        constant_time_eq(
+            hash_token(token).as_bytes(),
+            self.approval_token_hash.as_bytes(),
+        )
+    }
+
+    fn approval_source(&self) -> &str {
+        &self.approval_token_source
     }
 
     fn verifies_reconciliation_capability(&self, token: &str) -> bool {
@@ -516,6 +555,53 @@ fn load_local_reconciliation_token() -> Result<LoadedLocalAuthToken> {
     }
 }
 
+fn load_local_approval_token() -> Result<LoadedLocalAuthToken> {
+    #[cfg(test)]
+    if env::var(APPROVAL_TOKEN_ENV).is_err() && env::var(APPROVAL_TOKEN_FILE_ENV).is_err() {
+        return Ok(LoadedLocalAuthToken {
+            value: TEST_APPROVAL_TOKEN.to_string(),
+            source: "test".to_string(),
+        });
+    }
+
+    if let Ok(token) = env::var(APPROVAL_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{APPROVAL_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(LoadedLocalAuthToken {
+            value: token,
+            source: APPROVAL_TOKEN_ENV.to_string(),
+        });
+    }
+
+    let path = approval_token_file_path();
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                return Err(anyhow!(
+                    "Hubu approval token file `{}` is empty",
+                    path.display()
+                ));
+            }
+            Ok(LoadedLocalAuthToken {
+                value: token,
+                source: path.display().to_string(),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let token = create_token_file(&path, "hubu_approve_")?;
+            Ok(LoadedLocalAuthToken {
+                value: token,
+                source: path.display().to_string(),
+            })
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("read Hubu approval token file `{}`", path.display())),
+    }
+}
+
 fn auth_token_file_path() -> PathBuf {
     env::var(AUTH_TOKEN_FILE_ENV)
         .map(PathBuf::from)
@@ -526,6 +612,12 @@ fn reconciliation_token_file_path() -> PathBuf {
     env::var(RECONCILIATION_TOKEN_FILE_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_RECONCILIATION_TOKEN_FILE))
+}
+
+fn approval_token_file_path() -> PathBuf {
+    env::var(APPROVAL_TOKEN_FILE_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_APPROVAL_TOKEN_FILE))
 }
 
 fn create_auth_token_file(path: &Path) -> Result<String> {
@@ -1388,6 +1480,10 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         .headers
         .get(RECONCILIATION_CAPABILITY_HEADER)
         .map(String::as_str);
+    let approval_capability = request
+        .headers
+        .get(APPROVAL_CAPABILITY_HEADER)
+        .map(String::as_str);
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
         ("GET", "/version") => serde_json::to_value(build_info()).map_err(Into::into),
@@ -1426,7 +1522,8 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         )
         .map(to_json),
         ("POST", "/spend/approval/resolve") => {
-            resolve_spend_approval(request.body, state).map(to_json)
+            authenticate_approval_capability(approval_capability, state)
+                .and_then(|()| resolve_spend_approval(request.body, state).map(to_json))
         }
         ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
             Ok(spend_executor_guidance(state))
@@ -1584,6 +1681,17 @@ fn authenticate_reconciliation_capability(
     Ok(())
 }
 
+fn authenticate_approval_capability(capability: Option<&str>, state: &ServerState) -> Result<()> {
+    let capability = capability
+        .map(str::trim)
+        .filter(|capability| !capability.is_empty())
+        .ok_or_else(|| anyhow!("missing human approval capability"))?;
+    if !state.auth.verifies_approval_capability(capability) {
+        return Err(anyhow!("invalid human approval capability"));
+    }
+    Ok(())
+}
+
 fn spend_executor_guidance(state: &ServerState) -> Value {
     json!({
         "protocol_version": EXECUTOR_CONTRACT,
@@ -1681,7 +1789,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "statuses": ["pending", "approved", "denied"],
             "approval_request_id": "the immutable spend decision id returned by needs_approval",
             "review": "show the complete approval.review object before asking the human to approve or deny",
-            "resolve": "the owner-authenticated client submits approve or deny; approval reserves budget but never invokes a provider",
+            "resolve": "the owner-authenticated client submits approve or deny with the distinct human approval capability; approval reserves budget but never invokes a provider",
+            "capability_header": APPROVAL_CAPABILITY_HEADER,
             "retry": "replay the exact authorization request or read approval status to recover the durable result",
             "mcp": "hubu_resolve_spend_approval is protected by the trusted client human-approval gate"
         },
@@ -5630,6 +5739,15 @@ profiles:
         }
     }
 
+    fn approval_json_request(body: Value) -> HttpRequest {
+        let mut request = authenticated_json_request("/spend/approval/resolve", body);
+        request.headers.insert(
+            APPROVAL_CAPABILITY_HEADER.to_string(),
+            TEST_APPROVAL_TOKEN.to_string(),
+        );
+        request
+    }
+
     fn authenticated_get_request(path: &str) -> HttpRequest {
         let (path, query) = split_path_and_query(path);
         let mut headers = HashMap::new();
@@ -8548,13 +8666,10 @@ rules: []
         assert_eq!(snapshot.body["status"], "pending");
 
         let approved = route(
-            authenticated_json_request(
-                "/spend/approval/resolve",
-                json!({
-                    "approval_request_id": approval_request_id,
-                    "decision": "approve",
-                }),
-            ),
+            approval_json_request(json!({
+                "approval_request_id": approval_request_id,
+                "decision": "approve",
+            })),
             &state,
         );
         assert_eq!(approved.status, 200);
@@ -8624,13 +8739,10 @@ rules: []
             workers.push(std::thread::spawn(move || {
                 barrier.wait();
                 route(
-                    authenticated_json_request(
-                        "/spend/approval/resolve",
-                        json!({
-                            "approval_request_id": approval_request_id,
-                            "decision": "approve",
-                        }),
-                    ),
+                    approval_json_request(json!({
+                        "approval_request_id": approval_request_id,
+                        "decision": "approve",
+                    })),
                     &state,
                 )
             }));
@@ -8701,6 +8813,29 @@ rules: []
     }
 
     #[test]
+    fn api_bearer_alone_cannot_resolve_human_approval() {
+        let (path, state, _agent, pending) = setup_pending_approval("approval-owner-boundary");
+        let approval_request_id = pending.body["approval"]["approval_request_id"]
+            .as_str()
+            .unwrap();
+
+        let response = route(
+            authenticated_json_request(
+                "/spend/approval/resolve",
+                json!({
+                    "approval_request_id": approval_request_id,
+                    "decision": "approve",
+                }),
+            ),
+            &state,
+        );
+
+        assert_eq!(response.status, 400);
+        assert_eq!(response.body["error"], "missing human approval capability");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn denial_is_idempotent_and_conflicting_approval_is_rejected() {
         let (path, state, _agent, pending) = setup_pending_approval("approval-deny");
         let approval_request_id = pending.body["approval"]["approval_request_id"]
@@ -8712,32 +8847,23 @@ rules: []
             "decision": "deny",
         });
 
-        let denied = route(
-            authenticated_json_request("/spend/approval/resolve", body.clone()),
-            &state,
-        );
+        let denied = route(approval_json_request(body.clone()), &state);
         assert_eq!(denied.status, 200);
         assert_eq!(denied.body["decision"], "deny");
         assert_eq!(denied.body["approval"]["status"], "denied");
         assert!(denied.body["auth_token_id"].is_null());
         assert!(denied.body["budget_hold"].is_null());
 
-        let replay = route(
-            authenticated_json_request("/spend/approval/resolve", body),
-            &state,
-        );
+        let replay = route(approval_json_request(body), &state);
         assert_eq!(replay.status, 200);
         assert_eq!(replay.body["approval"]["status"], "denied");
         assert_eq!(replay.body["idempotent_replay"], true);
 
         let conflict = route(
-            authenticated_json_request(
-                "/spend/approval/resolve",
-                json!({
-                    "approval_request_id": approval_request_id,
-                    "decision": "approve",
-                }),
-            ),
+            approval_json_request(json!({
+                "approval_request_id": approval_request_id,
+                "decision": "approve",
+            })),
             &state,
         );
         assert_eq!(conflict.status, 400);

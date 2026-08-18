@@ -239,6 +239,7 @@ guidance.
 
    ```http
    POST /spend/approval/resolve
+   X-Hubu-Approval-Capability: <owner-only capability>
    ```
 
    ```json
@@ -248,6 +249,8 @@ guidance.
    }
    ```
 
+   The normal API bearer is insufficient for this route; the server also verifies
+   the owner-only approval capability, which must not be shared with executors.
    `decision` is `approve` or `deny`. Approval reserves the original immutable
    maximum and returns the normal authorization token; it never invokes the
    provider. Denial is terminal for that immutable request. Repeating the same

@@ -16,7 +16,8 @@ The HTTP server reads `HUBU_AUTH_TOKEN`, or creates/reads `hubu.auth-token` in
 its current directory. The MCP adapter reads `HUBU_AUTH_TOKEN` or the same token
 file and forwards protected HTTP requests with `Authorization: Bearer ...`.
 Use `HUBU_AUTH_TOKEN_FILE` when the server and adapter run from different
-working directories.
+working directories. Approval resolution also uses a separate
+`HUBU_APPROVAL_TOKEN_FILE`; `hubu init codex` creates and configures both.
 
 ## Cheatsheet
 
@@ -37,7 +38,10 @@ hubu init codex --token-file ~/.hubu/hubu.auth-token --trust-client-approval
 Start the Hubu server with the same token file:
 
 ```sh
-HUBU_AUTH_TOKEN_FILE=~/.hubu/hubu.auth-token hubu-server
+HUBU_AUTH_TOKEN_FILE=~/.hubu/hubu.auth-token \
+HUBU_APPROVAL_TOKEN_FILE=~/.hubu/hubu.approval-token \
+HUBU_RECONCILIATION_TOKEN_FILE=~/.hubu/hubu.reconciliation-token \
+hubu-server
 ```
 
 Then restart Codex. You do not normally start `hubu-mcp-server` yourself; Codex
@@ -75,7 +79,8 @@ Approval behavior:
 - If a spend response includes `requires_human_approval: true`, Hubu did not
   execute payment. The harness should show `approval.review`, wait for an
   explicit answer, then call `hubu_resolve_spend_approval` with `approve` or
-  `deny`.
+  `deny`. The adapter attaches the separate human approval capability; executors
+  receive neither that capability nor the reconciliation capability.
 
 ## Codex Setup
 
@@ -94,8 +99,8 @@ and `hubu_submit_spend` can run without an extra Codex approval prompt; Hubu
 policy still returns `needs_approval` without executing payment when review is
 required.
 Restart Codex after running the command. Start `hubu-server` with the
-`HUBU_AUTH_TOKEN_FILE` path printed by the command so the server and MCP adapter
-share the same bearer token.
+token-file paths printed by the command so the server and MCP adapter share the
+same bearer and human capability files.
 
 After Codex can discover Hubu tools, human-initiated actions have two paths:
 run `hubu` CLI commands directly, or ask the agent to perform the same

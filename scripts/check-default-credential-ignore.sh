@@ -38,6 +38,7 @@ run_default_server_check() {
   local work_dir="$1"
   local label="$2"
   local auth_token_path="${work_dir}/hubu.auth-token"
+  local approval_token_path="${work_dir}/hubu.approval-token"
   local reconciliation_token_path="${work_dir}/hubu.reconciliation-token"
 
   (
@@ -45,6 +46,8 @@ run_default_server_check() {
     exec env \
       -u HUBU_AUTH_TOKEN \
       -u HUBU_AUTH_TOKEN_FILE \
+      -u HUBU_APPROVAL_TOKEN \
+      -u HUBU_APPROVAL_TOKEN_FILE \
       -u HUBU_RECONCILIATION_TOKEN \
       -u HUBU_RECONCILIATION_TOKEN_FILE \
       HUBU_DB_PATH="${CHECK_DIR}/${label}.sqlite3" \
@@ -54,7 +57,7 @@ run_default_server_check() {
   SERVER_PID=$!
 
   for _ in $(seq 1 100); do
-    if [[ -f "${auth_token_path}" && -f "${reconciliation_token_path}" ]]; then
+    if [[ -f "${auth_token_path}" && -f "${approval_token_path}" && -f "${reconciliation_token_path}" ]]; then
       break
     fi
     if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
@@ -64,7 +67,7 @@ run_default_server_check() {
     sleep 0.05
   done
 
-  for credential in "${auth_token_path}" "${reconciliation_token_path}"; do
+  for credential in "${auth_token_path}" "${approval_token_path}" "${reconciliation_token_path}"; do
     if [[ ! -s "${credential}" ]]; then
       echo "hubu-server did not create a non-empty ${label} $(basename "${credential}")" >&2
       exit 1
@@ -76,7 +79,7 @@ run_default_server_check() {
   done
 
   if [[ -n "$(git -C "${CHECKOUT_DIR}" status --porcelain --untracked-files=all -- \
-    "${auth_token_path}" "${reconciliation_token_path}")" ]]; then
+    "${auth_token_path}" "${approval_token_path}" "${reconciliation_token_path}")" ]]; then
     echo "a generated ${label} credential file is eligible for commit" >&2
     exit 1
   fi
@@ -89,6 +92,7 @@ run_default_server_check "${NESTED_WORK_DIR}" "nested"
 
 for ignored_path in \
   "${CHECKOUT_DIR}/.hubu/hubu.auth-token" \
+  "${CHECKOUT_DIR}/.hubu/hubu.approval-token" \
   "${CHECKOUT_DIR}/.hubu/hubu.reconciliation-token"; do
   if ! git -C "${CHECKOUT_DIR}" check-ignore --quiet -- "${ignored_path}"; then
     echo "$(basename "${ignored_path}") in .hubu is not ignored" >&2
@@ -96,4 +100,4 @@ for ignored_path in \
   fi
 done
 
-echo "root and nested default auth and reconciliation credential files are ignored"
+echo "root and nested default auth, approval, and reconciliation credential files are ignored"

@@ -51,10 +51,10 @@ CLI only updates the client binary. To reset local demo data:
 ./scripts/reset-local-state.sh --yes
 ```
 
-The reset command is a dry run without `--yes` and preserves both credential
-files by default. Add `--include-auth-token` and/or
+The reset command is a dry run without `--yes` and preserves all credential
+files by default. Add `--include-auth-token`, `--include-approval-token`, and/or
 `--include-reconciliation-token` to explicitly remove those files too. Override
-their paths with `HUBU_AUTH_TOKEN_FILE` and
+their paths with `HUBU_AUTH_TOKEN_FILE`, `HUBU_APPROVAL_TOKEN_FILE`, and
 `HUBU_RECONCILIATION_TOKEN_FILE`, respectively.
 
 In another terminal, check that the CLI can reach it:
