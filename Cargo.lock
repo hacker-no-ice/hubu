@@ -994,6 +994,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hubu-unified-mcp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "hubu-wallet"
 version = "0.1.0"
 dependencies = [
