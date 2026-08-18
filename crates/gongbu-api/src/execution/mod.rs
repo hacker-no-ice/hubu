@@ -77,6 +77,7 @@ pub struct CreateExecutionParams {
     pub provider_config_digest: String,
     pub pricing_snapshot: Value,
     pub pricing_schema_version: i64,
+    pub execution_scope: Option<ExecutionScope>,
     pub created_at: String,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -347,8 +348,10 @@ impl Repository {
         ])?;
         let normalized_input = j(&n.normalized_input);
         let pricing_snapshot = j(&n.pricing_snapshot);
-        let execution_scope = for_target(&n.provider, &n.adapter)
-            .map(|scope| serde_json::to_string(&scope).expect("execution scope serializes"));
+        let execution_scope = n
+            .execution_scope
+            .as_ref()
+            .map(|scope| serde_json::to_string(scope).expect("execution scope serializes"));
         self.reject_registered_json([&n.normalized_input, &n.pricing_snapshot])?;
         self.reject_registered_secrets([normalized_input.as_str(), pricing_snapshot.as_str()])?;
         let mut c = self.0.lock().unwrap();
@@ -1340,6 +1343,12 @@ fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
     ) {
         return Err(Error::Invalid("pricing schema version"));
     }
+    if n.execution_scope
+        .as_ref()
+        .is_some_and(|scope| for_target(&n.provider, &n.adapter).as_ref() != Some(scope))
+    {
+        return Err(Error::Invalid("execution scope"));
+    }
     let snapshot: PricingSnapshot = serde_json::from_value(n.pricing_snapshot.clone())
         .map_err(|_| Error::Invalid("pricing snapshot"))?;
     if i64::from(snapshot.schema_version) != n.pricing_schema_version {
@@ -1470,6 +1479,7 @@ mod tests {
                 "estimated_amount_minor":100,"currency":"USD"
             }),
             pricing_schema_version: 1,
+            execution_scope: None,
             created_at: "2026-08-05T20:00:00Z".into(),
         }
     }
@@ -1642,22 +1652,43 @@ mod tests {
         assert_eq!(legacy_claim["merchant"], "gongbu.execution");
         assert!(legacy_claim.get("execution_scope").is_none());
 
+        let mut omitted = new("migration", "omitted-scope");
+        omitted.provider = "google".into();
+        omitted.adapter = "gemini_developer_image".into();
+        omitted.pricing_snapshot["provider"] = json!("google");
+        let omitted = repository.create_execution(&omitted).unwrap();
+        assert_eq!(omitted.execution_scope, None);
+        let omitted_claim = submitted_claim(&omitted);
+        assert_eq!(omitted_claim["merchant"], "gongbu.execution");
+        assert!(omitted_claim.get("execution_scope").is_none());
+
+        let expected_scope = for_target("google", "gemini_developer_image").unwrap();
         let mut typed = new("migration", "typed-scope");
         typed.provider = "google".into();
         typed.adapter = "gemini_developer_image".into();
-        typed.pricing_snapshot["provider"] = serde_json::json!("google");
+        typed.pricing_snapshot["provider"] = json!("google");
+        typed.execution_scope = Some(expected_scope.clone());
         let created = repository.create_execution(&typed).unwrap();
         assert_eq!(
             created.provider_config_digest,
             format!("sha256:{}", "a".repeat(64))
         );
-        let expected_scope = for_target("google", "gemini_developer_image").unwrap();
         assert_eq!(created.execution_scope.as_ref(), Some(&expected_scope));
         let typed_claim = submitted_claim(&created);
         assert!(typed_claim.get("merchant").is_none());
         assert_eq!(
             typed_claim["execution_scope"],
             json!(expected_scope.clone())
+        );
+        let mut broadened = typed;
+        broadened.operation_key = "broadened-scope".into();
+        broadened.execution_scope.as_mut().unwrap().provider.id = "provider:other".into();
+        assert_eq!(
+            repository
+                .create_execution(&broadened)
+                .unwrap_err()
+                .to_string(),
+            "invalid execution scope"
         );
         drop(repository);
         let restarted = Repository::open(&path, Redactor::default()).unwrap();

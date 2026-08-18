@@ -1765,7 +1765,7 @@ mod tests {
             provider_config_version: "fixture-v1".into(),
             provider_config_digest: format!("sha256:{}", "a".repeat(64)),
             pricing_snapshot: json!({"provider":"example","model":"image-v1","catalog_version":"v1","catalog_digest":format!("sha256:{}", "b".repeat(64)),"pricing_rule_id":"image","unit":"image","unit_amount_minor":100,"quantity":1,"estimated_amount_minor":100,"currency":"USD"}),
-            pricing_schema_version: 1, created_at: "2026-08-10T00:00:00Z".into(),
+            pricing_schema_version: 1, execution_scope: None, created_at: "2026-08-10T00:00:00Z".into(),
         }).unwrap()
     }
 

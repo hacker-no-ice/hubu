@@ -122,7 +122,7 @@ impl SpendManager {
             .any(|decision_id| {
                 self.decisions
                     .get(decision_id)
-                    .is_some_and(|decision| &decision.request == request)
+                    .is_some_and(|decision| decision.request.replay_equivalent(request))
             })
     }
 
@@ -256,14 +256,14 @@ impl SpendManager {
             .find(|decision_id| {
                 self.decisions
                     .get(*decision_id)
-                    .is_some_and(|decision| decision.request == request)
+                    .is_some_and(|decision| decision.request.replay_equivalent(&request))
             })
         {
             let decision = self
                 .decisions
                 .get(decision_id)
                 .ok_or(SpendError::MissingSpendDecision)?;
-            if decision.request != request {
+            if !decision.request.replay_equivalent(&request) {
                 return Err(SpendError::OperationKeyConflict);
             }
             let auth_token = self

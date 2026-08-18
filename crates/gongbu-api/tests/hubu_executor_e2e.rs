@@ -403,6 +403,7 @@ fn execution_params(
             "currency":"USD"
         }),
         pricing_schema_version: 1,
+        execution_scope: gongbu_api::execution_scope::for_target("mock", "deterministic"),
         created_at: NOW.into(),
     }
 }

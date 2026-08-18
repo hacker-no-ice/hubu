@@ -373,6 +373,7 @@ impl Api {
             pricing_snapshot: serde_json::to_value(pricing_snapshot)
                 .map_err(|_| ApiError::internal())?,
             pricing_schema_version,
+            execution_scope: request.execution_scope,
             created_at: (self.now)(),
         };
         let execution = self
