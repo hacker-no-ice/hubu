@@ -135,8 +135,10 @@ liveness/readiness/version independently, then reports `available`, `degraded`,
 `unavailable`, `incompatible`, or `unconfigured` with fixed, redacted reason
 codes. Exact product, source-commit, executor-contract, MCP, and schema matches
 are required; unstamped local builds fail closed as incompatible. The shell
-currently lists only `hubu_unified_capabilities`; backend domain catalogs and
-forwarding remain follow-up work.
+currently lists only `hubu_unified_capabilities`; domain entries remain
+`available:false` with `routing_not_implemented` even when their backend safety
+preconditions pass. Backend domain catalogs and forwarding remain follow-up
+work.
 
 ## Quick Start
 

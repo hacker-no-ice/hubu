@@ -37,6 +37,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const GONGBU_API_SCHEMA_VERSION: u32 = 2;
 const GONGBU_MCP_SCHEMA_VERSION: u32 = 2;
+const ROUTING_NOT_IMPLEMENTED: &str = "routing_not_implemented";
 
 const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("gongbu_create_execution", BackendOwner::Gongbu),
@@ -728,12 +729,15 @@ fn capabilities_value(snapshot: &CapabilitySnapshot) -> Value {
     let mut tools = DOMAIN_TOOLS
         .iter()
         .map(|(name, owner)| {
-            let availability = tool_availability(name, *owner, snapshot);
+            let reason_code = tool_availability(name, *owner, snapshot)
+                .err()
+                .map(ToolRejection::reason_code)
+                .unwrap_or(ROUTING_NOT_IMPLEMENTED);
             json!({
                 "name": name,
                 "owner": owner.as_str(),
-                "available": availability.is_ok(),
-                "reason_code": availability.err().map(ToolRejection::reason_code)
+                "available": false,
+                "reason_code": reason_code
             })
         })
         .collect::<Vec<_>>();
@@ -1142,6 +1146,26 @@ mod tests {
             tool_availability("gongbu_get_execution", BackendOwner::Gongbu, &state),
             Err(ToolRejection::Unavailable)
         );
+    }
+
+    #[test]
+    fn compatible_but_unrouted_domain_tools_are_not_advertised_available() {
+        let capability =
+            capabilities_value(&snapshot(BackendState::Available, BackendState::Available));
+        let tools = capability["tools"].as_array().unwrap();
+        for tool in tools {
+            if tool["owner"] == "router" {
+                assert_eq!(tool["available"], true);
+                assert!(tool["reason_code"].is_null());
+            } else {
+                assert_eq!(tool["available"], false, "{}", tool["name"]);
+                assert_eq!(
+                    tool["reason_code"], ROUTING_NOT_IMPLEMENTED,
+                    "{}",
+                    tool["name"]
+                );
+            }
+        }
     }
 
     #[test]
