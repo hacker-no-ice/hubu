@@ -416,17 +416,11 @@ fn text_result(value: &impl Serialize) -> ToolResult {
 #[serde(deny_unknown_fields)]
 struct CreateExecutionRequest {
     schema_version: u32,
-    operation_key: String,
-    hubu_authorization_id: String,
-    hubu_claim_id: Option<String>,
-    hubu_token_reference: String,
-    authorization: Money,
+    spend_auth_token_id: String,
     input: Value,
     input_schema_version: i64,
     workload_type: String,
     provider: String,
-    #[serde(default)]
-    execution_scope: Option<Value>,
     adapter: String,
     model: String,
 }
@@ -514,21 +508,16 @@ pub enum Content {
 pub fn tool_definitions() -> Value {
     let create_properties = json!({
         "schema_version": {"type":"integer","const":1},
-        "operation_key": {"type":"string","minLength":1,"maxLength":255},
-        "hubu_authorization_id": {"type":"string","minLength":1},
-        "hubu_claim_id": {"type":["string","null"]},
-        "hubu_token_reference": {"type":"string","minLength":1},
-        "authorization": {"type":"object","additionalProperties":false,"required":["amount_minor","currency"],"properties":{"amount_minor":{"type":"integer","minimum":0},"currency":{"type":"string","pattern":"^[A-Za-z]{3}$"}}},
+        "spend_auth_token_id": {"type":"string","minLength":1,"maxLength":255},
         "input": {"type":"object"},
         "input_schema_version": {"type":"integer","minimum":1},
         "workload_type": {"type":"string","minLength":1},
         "provider": {"type":"string","minLength":1},
-        "execution_scope": {"type":"object","additionalProperties":false,"required":["schema_version","provider","executor","capability","billing_merchant"]},
         "adapter": {"type":"string","minLength":1},
         "model": {"type":"string","minLength":1}
     });
     json!([
-        {"name":"gongbu_create_execution","description":"Create or replay a Gongbu execution using an existing Hubu authorization.","inputSchema":{"type":"object","additionalProperties":false,"required":["schema_version","operation_key","hubu_authorization_id","hubu_token_reference","authorization","input","input_schema_version","workload_type","provider","adapter","model"],"properties":create_properties}},
+        {"name":"gongbu_create_execution","description":"Create or replay a Gongbu execution from a Hubu spend authorization token and execution intent.","inputSchema":{"type":"object","additionalProperties":false,"required":["schema_version","spend_auth_token_id","input","input_schema_version","workload_type","provider","adapter","model"],"properties":create_properties}},
         {"name":"gongbu_get_execution","description":"Get coarse status and redacted outcome for an execution.","inputSchema":id_schema("execution_id")},
         {"name":"gongbu_list_artifacts","description":"List portable metadata for an execution's artifacts.","inputSchema":id_schema("execution_id")},
         {"name":"gongbu_get_artifact","description":"Get portable base64 image content and safe metadata for an artifact.","inputSchema":id_schema("artifact_id")}
@@ -617,7 +606,7 @@ mod tests {
     }
 
     fn create_arguments() -> Value {
-        json!({"schema_version":1,"operation_key":"op-1","hubu_authorization_id":"auth-1","hubu_claim_id":null,"hubu_token_reference":"hubu-ref-1","authorization":{"amount_minor":25,"currency":"USD"},"input":{"prompt":"circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"example","adapter":"fixture","model":"v1"})
+        json!({"schema_version":1,"spend_auth_token_id":"hubu-token-1","input":{"prompt":"circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"example","adapter":"fixture","model":"v1"})
     }
 
     const EXECUTION: &str = r#"{"schema_version":1,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":null,"failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;

@@ -368,7 +368,8 @@ const components = {
     copy:
       "Gongbu is in the Hubu source repository, unified product model, and shared release archive. It remains outside the Hubu control-plane process, database, credential boundary, provider execution boundary, and failure domain.",
     responsibilities: [
-      "Accepts authenticated execution requests through its HTTP API or separate Gongbu MCP adapter; callers cannot override operator-owned account, target, price, endpoint, or credentials.",
+      "Accepts a Hubu spend token plus execution intent through its HTTP API or separate Gongbu MCP adapter; callers cannot override account, operation identity, money, scope, task metadata, endpoint, or credentials.",
+      "Resolves Hubu's authorization snapshot read-only, exact-matches Gongbu-derived target scope and catalog price, and persists the immutable snapshot before scheduling.",
       "Persists an immutable execution and provider attempt before crossing billable boundaries, then runs recovery through Gongbu-owned Temporal workflow state.",
       "Claims the Hubu authorization before provider work and validates the claim again immediately before the call.",
       "Derives the version-1 canonical execution scope from the operator-selected provider/adapter target and exact-matches it across the Hubu trust boundary.",
@@ -393,15 +394,16 @@ const components = {
       { id: "provider", label: "Provider adapter", sub: "selected target only", x: 674, y: 474, w: 230, h: 92, tone: "executor", path: "crates/gongbu-api/src/provider/mod.rs" },
       { id: "credentials", label: "Keychain secrets", sub: "Gongbu-held", x: 674, y: 606, w: 230, h: 80, tone: "data", path: "crates/gongbu-api/src/config/secrets.rs" },
       { id: "vendor", label: "Provider", sub: "external model/API", x: 1012, y: 120, w: 194, h: 124, tone: "vendor" },
-      { id: "hubu", label: "Hubu trust boundary", sub: "canonical scope + claim", x: 1010, y: 556, w: 198, h: 100, tone: "core", path: "crates/hubu-api/src/lib.rs" },
+      { id: "hubu", label: "Hubu trust boundary", sub: "resolve → claim → finalize", x: 1010, y: 556, w: 198, h: 100, tone: "core", path: "crates/hubu-api/src/lib.rs" },
     ],
     edges: [
       ["agent", "gongbuApi", "request + token", { labelDy: -65 }],
+      ["gongbuApi", "hubu", "read-only resolve + exact match", { fromSide: "right", toSide: "top", waypoints: [{ x: 580, y: 158 }, { x: 580, y: 450 }, { x: 1109, y: 450 }], labelSegment: 2, labelDy: -12 }],
       ["gongbuApi", "executionDb", "persist first"],
       ["gongbuApi", "workflow", "schedule"],
       ["workflow", "temporal", "durable state"],
       ["workflow", "executionDb", "attempt/receipt", { labelDx: -36, labelDy: 26 }],
-      ["workflow", "hubu", "exact scope + claim/finalize", { fromSide: "right", toSide: "left", waypoints: [{ x: 936, y: 158 }, { x: 936, y: 606 }], labelSegment: 1, labelDx: 120 }],
+      ["workflow", "hubu", "durable claim/finalize", { fromSide: "right", toSide: "left", waypoints: [{ x: 936, y: 158 }, { x: 936, y: 606 }], labelSegment: 1, labelDx: 120 }],
       ["workflow", "provider", "execute once", { fromSide: "left", toSide: "left", waypoints: [{ x: 630, y: 158 }, { x: 630, y: 520 }], labelSegment: 1, labelDx: -80 }],
       ["credentials", "provider", "resolve secret", { labelDx: -175 }],
       ["provider", "vendor", "model call", { fromSide: "right", toSide: "left", waypoints: [{ x: 962, y: 520 }, { x: 962, y: 182 }], labelSegment: 1 }],

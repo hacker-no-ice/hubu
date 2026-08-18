@@ -113,6 +113,24 @@ The server maps that capability to the operator-configured account. See
 With `CAPABILITY` resolved from Keychain, submit an authorization already issued
 by the independently managed Hubu service:
 
+```json
+{
+  "schema_version": 1,
+  "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
+  "input": {"prompt": "A small blue circle", "image_count": 1},
+  "input_schema_version": 1,
+  "workload_type": "image_generation",
+  "provider": "google",
+  "adapter": "gemini_image",
+  "model": "gemini-2.5-flash-image"
+}
+```
+
+Gongbu resolves the authoritative account, operation identity, amount, currency,
+scope, workload profile, task correlation, reason, and expiry from Hubu. It
+derives price and scope again from operator configuration and persists only
+after exact agreement; the durable workflow claims afterward.
+
 ```sh
 curl -fsS -H "Authorization: Bearer $CAPABILITY" \
   -H 'Content-Type: application/json' \

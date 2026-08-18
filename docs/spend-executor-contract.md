@@ -95,7 +95,8 @@ Agent platforms or orchestrators are responsible for:
 Executors are responsible for:
 
 - storing vendor API keys and other execution secrets outside Hubu
-- carrying the immutable `operation_key` into executor requests
+- resolving the immutable `operation_key` from Hubu and carrying it into the
+  durable claim/finalization requests
 - claiming Hubu authorization before irreversible work
 - calling vendors or tools
 - reporting the actual vendor cost with a provider request ID, price/model
@@ -212,10 +213,29 @@ guidance.
    }
    ```
 
-2. The agent sends the work request, `operation_key`, and
-   `spend_auth_token_id` to the executor.
+2. The agent sends only `spend_auth_token_id` plus execution intent and target
+   selection to the executor. It does not repeat account, operation key, money,
+   typed scope, task ID, reason, workload profile, or expiry.
 
-3. Before irreversible work, the executor claims the authorization:
+3. Before persistence, the executor performs a read-only resolution:
+
+   ```http
+   POST /spend/executor/resolve
+   ```
+
+   ```json
+   {"spend_auth_token_id":"00000000-0000-4000-8000-000000000123"}
+   ```
+
+   Hubu returns the authoritative authorization snapshot without claiming it.
+   The executor independently derives its operator-controlled target, typed
+   scope, and catalog price and requires exact identity, price, currency,
+   workload, and scope agreement before persistence. An existing execution may
+   replay locally by the same token and immutable intent after a claim or
+   restart.
+
+4. After persistence and before irreversible work, the durable executor claims
+   the authorization:
 
    ```http
    POST /spend/executor/claim
@@ -252,9 +272,9 @@ guidance.
    `claim_expires_at`. The claim may remain active after the original
    authorization expires.
 
-4. The executor performs work using its own credentials.
+5. The executor performs work using its own credentials.
 
-5. After irreversible billable work succeeds, the executor settles:
+6. After irreversible billable work succeeds, the executor settles:
 
    ```http
    POST /spend/executor/settle
@@ -287,7 +307,7 @@ guidance.
    if the caller lost the response. A retry with changed receipt data is
    rejected, and budget is not consumed twice.
 
-6. If no irreversible billable work occurred, the executor releases without a
+7. If no irreversible billable work occurred, the executor releases without a
    receipt:
 
    ```http
@@ -341,6 +361,8 @@ guidance.
     },
     "task_id": "hubu-logo-demo",
     "reason": "Generate the Project Hubu logo",
+    "workload_profile": "image_generation",
+    "status": "claimed",
     "expires_at": "2026-07-20T12:05:00Z",
     "budget_hold": {
       "hold_id": "uuid",

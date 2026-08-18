@@ -9,6 +9,7 @@ use crate::{
     artifact::ArtifactService,
     execution::{Execution, Repository},
     http::{Api, AuthenticatedAccount, HttpResponse},
+    hubu::SpendAuthorizationResolver,
     lifecycle::LifecycleReason,
     provider::{
         contract::{
@@ -349,6 +350,7 @@ pub struct ApplicationDependencies {
     pub artifacts: ArtifactService,
     pub providers: ValidatedProviderCatalog,
     pub hubu: Arc<dyn HubuActivities + Send + Sync>,
+    pub hubu_authorizations: Arc<dyn SpendAuthorizationResolver + Send + Sync>,
     pub secrets: Arc<dyn SecretProvider>,
     pub provider_activities: Option<Arc<dyn ProviderActivities + Send + Sync>>,
     pub artifact_activities: Option<Arc<dyn ArtifactActivities + Send + Sync>>,
@@ -435,12 +437,13 @@ where
             return Err(std::io::Error::other(error).into());
         }
     }
-    let api = Api::new_with_maximum_spend(
+    let api = Api::new_with_authorization_resolver(
         dependencies.repository,
         dependencies.artifacts,
         dependencies.providers,
         worker.scheduler.clone(),
         dependencies.maximum_spend_minor,
+        dependencies.hubu_authorizations,
         move || (dependencies.now)(),
     );
     let ready = Arc::new(AtomicBool::new(true));

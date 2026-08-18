@@ -2,7 +2,7 @@ use gongbu_api::{
     application::ArtifactServiceActivities,
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
     execution::{CreateExecutionParams, Execution, HubuTokenReference, Repository},
-    hubu::{HubuClient, ProductionHubuActivities},
+    hubu::{HubuClient, ProductionHubuActivities, SpendAuthorizationResolver},
     provider_contract::NormalizedUsage,
     redaction::Redactor,
     workflow::{
@@ -27,7 +27,7 @@ use tempfile::{tempdir, TempDir};
 
 const AUTH_TOKEN: &str = "hubu_e2e_local_auth";
 const RECONCILIATION_TOKEN: &str = "hubu_reconcile_e2e_local_auth";
-const AUTHORIZED_MINOR: i64 = 100;
+const AUTHORIZED_MINOR: i64 = 40;
 const ACTUAL_MINOR: i64 = 40;
 const NOW: &str = "2026-08-17T00:00:00Z";
 const POLICY: &str = r#"id: hubu_gongbu_e2e
@@ -128,6 +128,7 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     let log = fs::read_to_string(&workspace.log_path).expect("read Hubu server log");
     for route in [
         "/spend/authorize",
+        "/spend/executor/resolve",
         "/spend/executor/validate",
         "/spend/executor/claim",
         "/spend/executor/settle",
@@ -166,7 +167,7 @@ fn run_success(
     fault: Fault,
 ) -> ScenarioResult {
     let authorization = workspace.admin.authorize(provisioned, operation_key);
-    let params = execution_params(provisioned, operation_key, &authorization);
+    let params = execution_params(workspace, provisioned, operation_key, &authorization);
     let execution = repository
         .create_execution(&params)
         .expect("create Gongbu execution");
@@ -263,6 +264,7 @@ fn run_provider_failure(
     let authorization = workspace.admin.authorize(provisioned, operation_key);
     let execution = repository
         .create_execution(&execution_params(
+            workspace,
             provisioned,
             operation_key,
             &authorization,
@@ -317,6 +319,7 @@ fn run_ambiguous_claim_recovery(
     let authorization = workspace.admin.authorize(provisioned, operation_key);
     let execution = repository
         .create_execution(&execution_params(
+            workspace,
             provisioned,
             operation_key,
             &authorization,
@@ -366,19 +369,30 @@ fn run_ambiguous_claim_recovery(
 }
 
 fn execution_params(
+    workspace: &TestWorkspace,
     provisioned: &Provisioned,
     operation_key: &str,
     authorization: &Value,
 ) -> CreateExecutionParams {
+    let resolved = workspace
+        .hubu_client()
+        .resolve_authorization(&string_at(authorization, "auth_token_id"))
+        .expect("resolve authorization without claiming");
+    assert_eq!(resolved.operation_key, operation_key);
+    assert_eq!(resolved.account_id, provisioned.account_id);
+    assert_eq!(resolved.agent_id, provisioned.agent_id);
+    assert_eq!(resolved.amount_cents, AUTHORIZED_MINOR);
+    assert_eq!(resolved.workload_profile, "image_generation");
+    assert_eq!(resolved.status, "available");
     CreateExecutionParams {
-        account_id: provisioned.account_id.clone(),
-        operation_key: operation_key.to_string(),
-        hubu_authorization_id: string_at(authorization, "decision_id"),
+        account_id: resolved.account_id,
+        operation_key: resolved.operation_key,
+        hubu_authorization_id: resolved.decision_id,
         hubu_claim_id: None,
         hubu_token_reference: HubuTokenReference::new(string_at(authorization, "auth_token_id"))
             .unwrap(),
-        authorized_minor: AUTHORIZED_MINOR,
-        authorization_currency: "USD".into(),
+        authorized_minor: resolved.amount_cents,
+        authorization_currency: resolved.currency.to_ascii_uppercase(),
         normalized_input: json!({"prompt":"deterministic blue pixel","image_count":1}),
         input_hash: format!("sha256:{}", "1".repeat(64)),
         input_schema_version: 1,
@@ -403,7 +417,7 @@ fn execution_params(
             "currency":"USD"
         }),
         pricing_schema_version: 1,
-        execution_scope: gongbu_api::execution_scope::for_target("mock", "deterministic"),
+        execution_scope: resolved.execution_scope,
         created_at: NOW.into(),
     }
 }
@@ -598,6 +612,7 @@ impl HubuAdmin {
                 "amount_cents":AUTHORIZED_MINOR,
                 "task_id":task_id,
                 "reason":"Deterministic Gongbu executor test",
+                "workload_profile":"image_generation",
                 "execution_scope": {
                     "schema_version":1,
                     "provider":"provider:local:fixture",
@@ -659,6 +674,12 @@ impl TestWorkspace {
         let address = reserve_address();
         let base_url = format!("http://{address}");
         let log_path = directory.path().join("hubu-server.jsonl");
+        let spend_timing = directory.path().join("spend-timing.yaml");
+        fs::write(
+            &spend_timing,
+            "default_profile: default\nprofiles:\n  default:\n    authorization_ttl_seconds: 300\n    claim_ttl_seconds: 900\n  image_generation:\n    authorization_ttl_seconds: 300\n    claim_ttl_seconds: 900\n",
+        )
+        .expect("write spend timing config");
         let log = File::create(&log_path).expect("create Hubu log");
         let server_bin = env::var_os("HUBU_SERVER_BIN")
             .map(PathBuf::from)
@@ -668,6 +689,7 @@ impl TestWorkspace {
             .env("HUBU_DB_PATH", directory.path().join("hubu.sqlite3"))
             .env("HUBU_AUTH_TOKEN", AUTH_TOKEN)
             .env("HUBU_RECONCILIATION_TOKEN", RECONCILIATION_TOKEN)
+            .env("HUBU_SPEND_TIMING_CONFIG", &spend_timing)
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log))
             .spawn()

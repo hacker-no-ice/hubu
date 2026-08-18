@@ -70,6 +70,13 @@ impl HubuClient {
         self.post_json("/spend/executor/validate", request)
     }
 
+    pub fn resolve(
+        &self,
+        request: &ExecutorSpendResolveRequest,
+    ) -> Result<ExecutorSpendResponse, HttpClientError> {
+        self.post_json("/spend/executor/resolve", request)
+    }
+
     pub fn claim(
         &self,
         request: &ExecutorSpendClaimRequest,
@@ -143,6 +150,40 @@ pub struct HubuVersion {
 pub struct ProductionHubuActivities {
     client: HubuClient,
     agent_id: String,
+}
+
+pub trait SpendAuthorizationResolver {
+    fn resolve_authorization(
+        &self,
+        spend_auth_token_id: &str,
+    ) -> Result<ExecutorSpendResponse, HttpClientError>;
+}
+
+impl SpendAuthorizationResolver for HubuClient {
+    fn resolve_authorization(
+        &self,
+        spend_auth_token_id: &str,
+    ) -> Result<ExecutorSpendResponse, HttpClientError> {
+        self.resolve(&ExecutorSpendResolveRequest {
+            spend_auth_token_id: spend_auth_token_id.into(),
+        })
+    }
+}
+
+impl SpendAuthorizationResolver for ProductionHubuActivities {
+    fn resolve_authorization(
+        &self,
+        spend_auth_token_id: &str,
+    ) -> Result<ExecutorSpendResponse, HttpClientError> {
+        let response = self.client.resolve_authorization(spend_auth_token_id)?;
+        if response.agent_id != self.agent_id {
+            return Err(HttpClientError::Status {
+                status: 400,
+                body: "resolved authorization belongs to another configured agent".into(),
+            });
+        }
+        Ok(response)
+    }
 }
 
 impl ProductionHubuActivities {
@@ -333,6 +374,12 @@ pub struct ExecutorSpendRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutorSpendResolveRequest {
+    pub spend_auth_token_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutorSpendClaimRequest {
     pub operation_key: String,
     #[serde(flatten)]
@@ -342,6 +389,7 @@ pub struct ExecutorSpendClaimRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutorSpendResponse {
     pub operation_key: String,
+    pub reason: String,
     pub spend_auth_token_id: String,
     pub decision_id: String,
     pub account_id: String,
@@ -351,6 +399,8 @@ pub struct ExecutorSpendResponse {
     pub merchant: Option<String>,
     pub execution_scope: Option<ExecutionScope>,
     pub task_id: Option<String>,
+    pub workload_profile: String,
+    pub status: String,
     pub expires_at: String,
     pub budget_hold: BudgetHold,
 }
@@ -417,6 +467,7 @@ pub struct BudgetHold {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -443,6 +494,34 @@ mod tests {
         let value = serde_json::to_value(claim_request()).unwrap();
         assert!(value.get("task_id").is_none());
         assert_eq!(value["operation_key"], "platform:op-1");
+    }
+
+    #[test]
+    fn resolver_rejects_authorization_for_another_configured_agent() {
+        let (client, _) = fake_hubu(vec![Some(json!({
+            "operation_key":"op-1",
+            "reason":"test",
+            "spend_auth_token_id":"token-1",
+            "decision_id":"decision-1",
+            "account_id":"account-1",
+            "agent_id":"another-agent",
+            "amount_cents":100,
+            "currency":"usd",
+            "merchant":null,
+            "execution_scope":null,
+            "task_id":null,
+            "workload_profile":"image_generation",
+            "status":"available",
+            "expires_at":"2099-01-01T00:00:00Z",
+            "budget_hold":{
+                "hold_id":"hold-1","budget_id":"budget-1","status":"frozen",
+                "amount_cents":100,"consumed_amount_cents":0,
+                "frozen_amount_cents":100,"remaining_amount_cents":0
+            }
+        }))]);
+        let activities = ProductionHubuActivities::new(client, "configured-agent").unwrap();
+        let error = activities.resolve_authorization("token-1").unwrap_err();
+        assert!(matches!(error, HttpClientError::Status { status: 400, .. }));
     }
 
     #[test]
