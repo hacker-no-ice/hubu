@@ -17,7 +17,8 @@ use std::{
 
 use chrono::{SecondsFormat, Utc};
 use hubu_mcp::{
-    route_tool_call_v1, HubuHttpRequestV1, HubuRequestCapabilityV1, HUBU_ROUTING_CONTRACT_VERSION,
+    route_tool_call_v1, tool_result_v1, HubuHttpRequestV1, HubuRequestCapabilityV1,
+    HUBU_ROUTING_CONTRACT_VERSION,
 };
 use reqwest::{
     blocking::Client,
@@ -130,6 +131,28 @@ fn is_approved_hubu_http_route(method: &str, path: &str) -> bool {
             | ("POST", "/spend/executor/settle")
             | ("POST", "/spend/executor/release")
     )
+}
+
+fn unified_approval_profile() -> Value {
+    let mut profile = hubu_mcp::approval_profile();
+    for pointer in [
+        "/client_policy/auto_approve_tools",
+        "/client_policy/prompt_before_call_tools",
+        "/client_policy/hubu_policy_conditional_tools",
+        "/tools/0/names",
+        "/tools/1/names",
+        "/tools/2/names",
+    ] {
+        profile
+            .pointer_mut(pointer)
+            .and_then(Value::as_array_mut)
+            .expect("standalone approval profile contract contains tool names")
+            .retain(|name| name.as_str().is_some_and(is_approved_hubu_tool));
+    }
+    profile["response_contract"]["agent_action"] = json!(
+        "Stop the spend workflow and surface approval_reason plus the structured response to the human."
+    );
+    profile
 }
 
 pub fn product_version() -> &'static str {
@@ -689,6 +712,9 @@ impl Server {
             );
         };
         let name = call.name;
+        if name == "hubu_client_approval_profile" {
+            return success_response(id, tool_result_v1(unified_approval_profile()));
+        }
         let params = json!({
             "name": name,
             "arguments": call.arguments,
@@ -1271,6 +1297,31 @@ mod tests {
         assert!(!hubu_down
             .iter()
             .any(|tool| tool["name"] == "gongbu_create_execution"));
+    }
+
+    #[test]
+    fn unified_approval_profile_contains_only_callable_continuations() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = server_with_backends(&endpoint, None, false, None);
+
+        let response = tool_call(&server, "hubu_client_approval_profile", json!({}), None);
+        let profile = &response["result"]["structuredContent"];
+        let serialized = profile.to_string();
+        assert!(!serialized.contains("hubu_get_spend_approval"));
+        assert!(!serialized.contains("hubu_resolve_spend_approval"));
+        assert_eq!(
+            profile["response_contract"]["agent_action"],
+            "Stop the spend workflow and surface approval_reason plus the structured response to the human."
+        );
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            serde_json::to_string_pretty(profile).unwrap()
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
     }
 
     #[test]

@@ -808,7 +808,7 @@ pub fn route_tool_call_v1(
             }
         }
     };
-    Ok(tool_result(response))
+    Ok(tool_result_v1(response))
 }
 
 fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> {
@@ -893,7 +893,7 @@ fn spend_response_with_approval_hint(mut response: Value) -> Value {
     response
 }
 
-fn tool_result(value: Value) -> Value {
+pub fn tool_result_v1(value: Value) -> Value {
     json!({
         "content": [
             {
