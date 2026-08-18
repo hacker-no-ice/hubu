@@ -9,6 +9,8 @@ use std::{
     collections::BTreeMap,
     env, fmt,
     io::{self, BufRead, Write},
+    sync::{Arc, Mutex},
+    thread,
     time::Duration,
 };
 
@@ -18,7 +20,7 @@ use reqwest::{
     header::{self, HeaderMap, HeaderValue},
     Url,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -32,7 +34,9 @@ const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
 const GONGBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_GONGBU_ENDPOINT";
 const GONGBU_TOKEN_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const GONGBU_API_SCHEMA_VERSION: u32 = 2;
+const GONGBU_MCP_SCHEMA_VERSION: u32 = 2;
 
 const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("gongbu_create_execution", BackendOwner::Gongbu),
@@ -77,6 +81,59 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
 
 pub fn product_version() -> &'static str {
     option_env!("HUBU_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+pub fn source_commit() -> &'static str {
+    option_env!("HUBU_SOURCE_COMMIT").unwrap_or("unknown")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BackendState {
+    Available,
+    Degraded,
+    Unavailable,
+    Incompatible,
+    Unconfigured,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ContractVersions {
+    executor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct BackendReport {
+    state: BackendState,
+    product_version: Option<String>,
+    source_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_schema_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_schema_version: Option<u32>,
+    contract_versions: ContractVersions,
+    reason_code: Option<&'static str>,
+}
+
+impl BackendReport {
+    fn unconfigured() -> Self {
+        Self {
+            state: BackendState::Unconfigured,
+            product_version: None,
+            source_commit: None,
+            api_schema_version: None,
+            mcp_schema_version: None,
+            contract_versions: ContractVersions { executor: None },
+            reason_code: Some("configuration_missing"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CapabilitySnapshot {
+    generated_at: String,
+    hubu: BackendReport,
+    gongbu: BackendReport,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,6 +286,12 @@ pub struct BackendClient {
     http: Client,
 }
 
+#[derive(Debug)]
+struct ProbeResponse {
+    status: u16,
+    body: Value,
+}
+
 impl fmt::Debug for BackendClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -276,6 +339,14 @@ impl BackendClient {
     pub fn http_client(&self) -> &Client {
         &self.http
     }
+
+    fn probe(&self, path: &str) -> Result<ProbeResponse, ()> {
+        let url = self.endpoint.join(path).map_err(|_| ())?;
+        let response = self.http.get(url).send().map_err(|_| ())?;
+        let status = response.status().as_u16();
+        let body = response.json().map_err(|_| ())?;
+        Ok(ProbeResponse { status, body })
+    }
 }
 
 /// Versioned boundary implemented by each independently configured backend.
@@ -315,17 +386,214 @@ impl BackendClients {
             gongbu: config.gongbu.map(BackendClient::new).transpose()?,
         })
     }
+
+    fn probe(&self) -> CapabilitySnapshot {
+        thread::scope(|scope| {
+            let hubu = scope.spawn(|| {
+                self.hubu
+                    .as_ref()
+                    .map(probe_hubu)
+                    .unwrap_or_else(BackendReport::unconfigured)
+            });
+            let gongbu = scope.spawn(|| {
+                self.gongbu
+                    .as_ref()
+                    .map(probe_gongbu)
+                    .unwrap_or_else(BackendReport::unconfigured)
+            });
+            CapabilitySnapshot {
+                generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                hubu: hubu.join().expect("Hubu capability probe must not panic"),
+                gongbu: gongbu
+                    .join()
+                    .expect("Gongbu capability probe must not panic"),
+            }
+        })
+    }
+}
+
+fn probe_hubu(client: &BackendClient) -> BackendReport {
+    let health = client.probe("health");
+    let version = client.probe("version");
+    classify_hubu(health.as_ref().ok(), version.as_ref().ok())
+}
+
+fn classify_hubu(health: Option<&ProbeResponse>, version: Option<&ProbeResponse>) -> BackendReport {
+    classify_hubu_for(health, version, product_version(), source_commit())
+}
+
+fn classify_hubu_for(
+    health: Option<&ProbeResponse>,
+    version: Option<&ProbeResponse>,
+    expected_product_version: &str,
+    expected_source_commit: &str,
+) -> BackendReport {
+    let metadata = version.and_then(|response| response.body.as_object());
+    let reported_product_version = metadata
+        .and_then(|value| value.get("product_version"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let source = metadata
+        .and_then(|value| value.get("source_commit"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let executor = metadata
+        .and_then(|value| value.get("executor_contract"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut report = BackendReport {
+        state: BackendState::Unavailable,
+        product_version: reported_product_version,
+        source_commit: source,
+        api_schema_version: None,
+        mcp_schema_version: None,
+        contract_versions: ContractVersions { executor },
+        reason_code: Some("health_unavailable"),
+    };
+
+    if !health.is_some_and(|response| {
+        (200..300).contains(&response.status) && response.body["status"] == "ok"
+    }) {
+        return report;
+    }
+    if !version.is_some_and(|response| (200..300).contains(&response.status)) {
+        report.reason_code = Some("version_unavailable");
+        return report;
+    }
+    if report.product_version.as_deref() != Some(expected_product_version) {
+        return incompatible(report, "product_version_mismatch");
+    }
+    if !matching_source_commit(report.source_commit.as_deref(), expected_source_commit) {
+        return incompatible(report, "source_commit_mismatch");
+    }
+    if report.contract_versions.executor.as_deref() != Some(EXECUTOR_CONTRACT_VERSION) {
+        return incompatible(report, "executor_contract_mismatch");
+    }
+    report.state = BackendState::Available;
+    report.reason_code = None;
+    report
+}
+
+fn probe_gongbu(client: &BackendClient) -> BackendReport {
+    let live = client.probe("livez");
+    let ready = client.probe("readyz");
+    let version = client.probe("version");
+    classify_gongbu(
+        live.as_ref().ok(),
+        ready.as_ref().ok(),
+        version.as_ref().ok(),
+    )
+}
+
+fn classify_gongbu(
+    live: Option<&ProbeResponse>,
+    ready: Option<&ProbeResponse>,
+    version: Option<&ProbeResponse>,
+) -> BackendReport {
+    classify_gongbu_for(live, ready, version, product_version(), source_commit())
+}
+
+fn classify_gongbu_for(
+    live: Option<&ProbeResponse>,
+    ready: Option<&ProbeResponse>,
+    version: Option<&ProbeResponse>,
+    expected_product_version: &str,
+    expected_source_commit: &str,
+) -> BackendReport {
+    let metadata = version.and_then(|response| response.body.as_object());
+    let reported_product_version = string_value(metadata, "product_version");
+    let source = string_value(metadata, "source_commit");
+    let executor = string_value(metadata, "hubu_executor_contract");
+    let api_schema_version = integer_value(metadata, "api_schema_version");
+    let mcp_schema_version = integer_value(metadata, "mcp_schema_version");
+    let mcp_protocol = string_value(metadata, "mcp_protocol_version");
+    let mut report = BackendReport {
+        state: BackendState::Unavailable,
+        product_version: reported_product_version,
+        source_commit: source,
+        api_schema_version,
+        mcp_schema_version,
+        contract_versions: ContractVersions { executor },
+        reason_code: Some("liveness_unavailable"),
+    };
+
+    if !live.is_some_and(|response| {
+        (200..300).contains(&response.status) && response.body["status"] == "live"
+    }) {
+        return report;
+    }
+    if !version.is_some_and(|response| (200..300).contains(&response.status)) {
+        report.reason_code = Some("version_unavailable");
+        return report;
+    }
+    if report.product_version.as_deref() != Some(expected_product_version) {
+        return incompatible(report, "product_version_mismatch");
+    }
+    if !matching_source_commit(report.source_commit.as_deref(), expected_source_commit) {
+        return incompatible(report, "source_commit_mismatch");
+    }
+    if report.contract_versions.executor.as_deref() != Some(EXECUTOR_CONTRACT_VERSION) {
+        return incompatible(report, "executor_contract_mismatch");
+    }
+    if report.api_schema_version != Some(GONGBU_API_SCHEMA_VERSION) {
+        return incompatible(report, "api_schema_version_mismatch");
+    }
+    if report.mcp_schema_version != Some(GONGBU_MCP_SCHEMA_VERSION) {
+        return incompatible(report, "mcp_schema_version_mismatch");
+    }
+    if mcp_protocol.as_deref() != Some(MCP_PROTOCOL_VERSION) {
+        return incompatible(report, "mcp_protocol_version_mismatch");
+    }
+    if !ready.is_some_and(|response| {
+        (200..300).contains(&response.status) && response.body["status"] == "ready"
+    }) {
+        report.state = BackendState::Degraded;
+        report.reason_code = Some("backend_not_ready");
+        return report;
+    }
+    report.state = BackendState::Available;
+    report.reason_code = None;
+    report
+}
+
+fn string_value(object: Option<&serde_json::Map<String, Value>>, key: &str) -> Option<String> {
+    object?.get(key)?.as_str().map(str::to_owned)
+}
+
+fn integer_value(object: Option<&serde_json::Map<String, Value>>, key: &str) -> Option<u32> {
+    object?.get(key)?.as_u64()?.try_into().ok()
+}
+
+fn incompatible(mut report: BackendReport, reason: &'static str) -> BackendReport {
+    report.state = BackendState::Incompatible;
+    report.reason_code = Some(reason);
+    report
+}
+
+fn matching_source_commit(candidate: Option<&str>, expected: &str) -> bool {
+    valid_source_commit(expected) && candidate == Some(expected)
+}
+
+fn valid_source_commit(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Clone, Debug)]
 pub struct Server {
     backends: BackendClients,
+    snapshot: Arc<Mutex<CapabilitySnapshot>>,
 }
 
 impl Server {
     pub fn new(config: Config) -> Result<Self, ConfigError> {
+        let backends = BackendClients::new(config)?;
+        let snapshot = backends.probe();
         Ok(Self {
-            backends: BackendClients::new(config)?,
+            backends,
+            snapshot: Arc::new(Mutex::new(snapshot)),
         })
     }
 
@@ -364,6 +632,7 @@ impl Server {
     }
 
     fn initialize_result(&self) -> Value {
+        self.refresh_capabilities();
         let mut capability = self.capabilities();
         capability
             .as_object_mut()
@@ -392,96 +661,176 @@ impl Server {
         // Parsed at the shared boundary so future routed tools can consume
         // trusted platform metadata without placing it in model arguments.
         let _trusted_meta = &call.meta;
-        if call.name != "hubu_unified_capabilities"
-            || call
-                .arguments
-                .as_object()
-                .is_none_or(|arguments| !arguments.is_empty())
-        {
+        if call.arguments.as_object().is_none() {
             return error_response(id, -32602, "Invalid params");
         }
-        let capability = self.capabilities();
-        success_response(
+        self.refresh_capabilities();
+        if call.name == "hubu_unified_capabilities" {
+            if call
+                .arguments
+                .as_object()
+                .is_some_and(|arguments| !arguments.is_empty())
+            {
+                return error_response(id, -32602, "Invalid params");
+            }
+            let capability = self.capabilities();
+            return success_response(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&capability)
+                            .expect("capability snapshot serializes")
+                    }],
+                    "structuredContent": capability
+                }),
+            );
+        }
+
+        let Some(owner) = DOMAIN_TOOLS
+            .iter()
+            .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
+        else {
+            return error_response(id, -32602, "Invalid params");
+        };
+        let snapshot = self.snapshot();
+        if let Err(rejection) = tool_availability(&call.name, owner, &snapshot) {
+            return backend_error_response(id, &call.name, owner, rejection);
+        }
+        error_response(
             id,
-            json!({
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&capability)
-                        .expect("capability snapshot serializes")
-                }],
-                "structuredContent": capability
-            }),
+            -32601,
+            "Domain tool routing is not implemented by this capability release",
         )
     }
 
     fn capabilities(&self) -> Value {
-        let mut tools = DOMAIN_TOOLS
-            .iter()
-            .map(|(name, owner)| {
-                let configured = match owner {
-                    BackendOwner::Hubu => self.backends.hubu.is_some(),
-                    BackendOwner::Gongbu => self.backends.gongbu.is_some(),
-                };
-                json!({
-                    "name": name,
-                    "owner": owner.as_str(),
-                    "available": false,
-                    "reason_code": if configured {
-                        "capability_probe_pending"
-                    } else {
-                        "configuration_missing"
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        tools.push(json!({
-            "name": "hubu_unified_capabilities",
-            "owner": "router",
-            "available": true,
-            "reason_code": null
-        }));
-        tools.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+        capabilities_value(&self.snapshot())
+    }
 
-        json!({
-            "contract_version": UNIFIED_CONTRACT_VERSION,
-            "routing_revision": ROUTING_REVISION,
-            "generated_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-            "backends": {
-                "hubu": backend_placeholder(self.backends.hubu.is_some(), false),
-                "gongbu": backend_placeholder(self.backends.gongbu.is_some(), true)
-            },
-            "tools": tools
-        })
+    fn snapshot(&self) -> CapabilitySnapshot {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn refresh_capabilities(&self) {
+        let refreshed = self.backends.probe();
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = refreshed;
     }
 }
 
-fn backend_placeholder(configured: bool, gongbu: bool) -> Value {
+fn capabilities_value(snapshot: &CapabilitySnapshot) -> Value {
+    let mut tools = DOMAIN_TOOLS
+        .iter()
+        .map(|(name, owner)| {
+            let availability = tool_availability(name, *owner, snapshot);
+            json!({
+                "name": name,
+                "owner": owner.as_str(),
+                "available": availability.is_ok(),
+                "reason_code": availability.err().map(ToolRejection::reason_code)
+            })
+        })
+        .collect::<Vec<_>>();
+    tools.push(json!({
+        "name": "hubu_unified_capabilities",
+        "owner": "router",
+        "available": true,
+        "reason_code": null
+    }));
+    tools.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+
+    json!({
+        "contract_version": UNIFIED_CONTRACT_VERSION,
+        "routing_revision": ROUTING_REVISION,
+        "generated_at": snapshot.generated_at,
+        "backends": {
+            "hubu": backend_value(&snapshot.hubu, false),
+            "gongbu": backend_value(&snapshot.gongbu, true)
+        },
+        "tools": tools
+    })
+}
+
+fn backend_value(report: &BackendReport, gongbu: bool) -> Value {
     let mut backend = BTreeMap::from([
+        ("state", json!(report.state)),
+        ("product_version", json!(report.product_version)),
+        ("source_commit", json!(report.source_commit)),
         (
-            "state",
-            json!(if configured {
-                "unavailable"
-            } else {
-                "unconfigured"
-            }),
+            "contract_versions",
+            json!({ "executor": report.contract_versions.executor }),
         ),
-        ("product_version", Value::Null),
-        ("source_commit", Value::Null),
-        ("contract_versions", json!({ "executor": Value::Null })),
-        (
-            "reason_code",
-            json!(if configured {
-                "capability_probe_pending"
-            } else {
-                "configuration_missing"
-            }),
-        ),
+        ("reason_code", json!(report.reason_code)),
     ]);
     if gongbu {
-        backend.insert("api_schema_version", Value::Null);
-        backend.insert("mcp_schema_version", Value::Null);
+        backend.insert("api_schema_version", json!(report.api_schema_version));
+        backend.insert("mcp_schema_version", json!(report.mcp_schema_version));
     }
     serde_json::to_value(backend).expect("backend placeholder serializes")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolRejection {
+    Unconfigured,
+    Unavailable,
+    Incompatible,
+    NotReady,
+    RequiredBackendUnavailable,
+}
+
+impl ToolRejection {
+    fn reason_code(self) -> &'static str {
+        match self {
+            Self::Unconfigured => "backend_unconfigured",
+            Self::Unavailable | Self::RequiredBackendUnavailable => "backend_unavailable",
+            Self::Incompatible => "backend_incompatible",
+            Self::NotReady => "backend_not_ready",
+        }
+    }
+
+    fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::Unavailable | Self::NotReady | Self::RequiredBackendUnavailable
+        )
+    }
+}
+
+fn tool_availability(
+    name: &str,
+    owner: BackendOwner,
+    snapshot: &CapabilitySnapshot,
+) -> Result<(), ToolRejection> {
+    let report = match owner {
+        BackendOwner::Hubu => &snapshot.hubu,
+        BackendOwner::Gongbu => &snapshot.gongbu,
+    };
+    match report.state {
+        BackendState::Unconfigured => return Err(ToolRejection::Unconfigured),
+        BackendState::Unavailable => return Err(ToolRejection::Unavailable),
+        BackendState::Incompatible => return Err(ToolRejection::Incompatible),
+        BackendState::Degraded if name == "gongbu_create_execution" => {
+            return Err(ToolRejection::NotReady);
+        }
+        BackendState::Degraded | BackendState::Available => {}
+    }
+    if name == "gongbu_create_execution" && snapshot.hubu.state != BackendState::Available {
+        return Err(match snapshot.hubu.state {
+            BackendState::Unconfigured => ToolRejection::Unconfigured,
+            BackendState::Incompatible => ToolRejection::Incompatible,
+            BackendState::Degraded | BackendState::Unavailable => {
+                ToolRejection::RequiredBackendUnavailable
+            }
+            BackendState::Available => unreachable!(),
+        });
+    }
+    Ok(())
 }
 
 fn capability_tool() -> Value {
@@ -539,6 +888,30 @@ fn error_response(id: Value, code: i32, message: &str) -> Value {
     })
 }
 
+fn backend_error_response(
+    id: Value,
+    tool: &str,
+    owner: BackendOwner,
+    rejection: ToolRejection,
+) -> Value {
+    let code = rejection.reason_code();
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32010,
+            "message": format!("{owner} backend cannot safely serve `{tool}` ({code})"),
+            "data": {
+                "code": code,
+                "tool": tool,
+                "owner": owner.as_str(),
+                "retryable": rejection.retryable(),
+                "capabilities_changed": true
+            }
+        }
+    })
+}
+
 pub fn run_stdio_from_env(input: impl BufRead, output: impl Write) -> Result<(), StartupError> {
     let config = Config::from_env()?;
     Server::new(config)?.run(input, output)?;
@@ -564,6 +937,32 @@ mod tests {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_owned()))
         }
+    }
+
+    fn report(state: BackendState, gongbu: bool) -> BackendReport {
+        BackendReport {
+            state,
+            product_version: Some("1.2.3".into()),
+            source_commit: Some("a".repeat(40)),
+            api_schema_version: gongbu.then_some(GONGBU_API_SCHEMA_VERSION),
+            mcp_schema_version: gongbu.then_some(GONGBU_MCP_SCHEMA_VERSION),
+            contract_versions: ContractVersions {
+                executor: Some(EXECUTOR_CONTRACT_VERSION.into()),
+            },
+            reason_code: (state != BackendState::Available).then_some("test_state"),
+        }
+    }
+
+    fn snapshot(hubu: BackendState, gongbu: BackendState) -> CapabilitySnapshot {
+        CapabilitySnapshot {
+            generated_at: "2026-08-18T00:00:00.000Z".into(),
+            hubu: report(hubu, false),
+            gongbu: report(gongbu, true),
+        }
+    }
+
+    fn probe(status: u16, body: Value) -> ProbeResponse {
+        ProbeResponse { status, body }
     }
 
     #[test]
@@ -707,6 +1106,217 @@ mod tests {
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));
         assert!(!serialized.contains("secret"));
+    }
+
+    #[test]
+    fn capability_schema_covers_full_partial_unavailable_and_incompatible_states() {
+        let cases = [
+            (BackendState::Available, BackendState::Available),
+            (BackendState::Available, BackendState::Unavailable),
+            (BackendState::Unavailable, BackendState::Unavailable),
+            (BackendState::Incompatible, BackendState::Available),
+        ];
+        for (hubu, gongbu) in cases {
+            let capability = capabilities_value(&snapshot(hubu, gongbu));
+            assert_eq!(capability["backends"]["hubu"]["state"], json!(hubu));
+            assert_eq!(capability["backends"]["gongbu"]["state"], json!(gongbu));
+            assert_eq!(capability["tools"].as_array().unwrap().len(), 33);
+            let names = capability["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+    }
+
+    #[test]
+    fn partial_availability_preserves_unrelated_healthy_tools() {
+        let state = snapshot(BackendState::Available, BackendState::Unavailable);
+        assert_eq!(
+            tool_availability("hubu_list_budgets", BackendOwner::Hubu, &state),
+            Ok(())
+        );
+        assert_eq!(
+            tool_availability("gongbu_get_execution", BackendOwner::Gongbu, &state),
+            Err(ToolRejection::Unavailable)
+        );
+    }
+
+    #[test]
+    fn degraded_gongbu_keeps_reads_but_blocks_execution_admission() {
+        let state = snapshot(BackendState::Available, BackendState::Degraded);
+        assert_eq!(
+            tool_availability("gongbu_get_artifact", BackendOwner::Gongbu, &state),
+            Ok(())
+        );
+        assert_eq!(
+            tool_availability("gongbu_create_execution", BackendOwner::Gongbu, &state),
+            Err(ToolRejection::NotReady)
+        );
+    }
+
+    #[test]
+    fn governed_execution_fails_closed_on_required_hubu_state() {
+        for hubu in [
+            BackendState::Unconfigured,
+            BackendState::Unavailable,
+            BackendState::Incompatible,
+        ] {
+            let state = snapshot(hubu, BackendState::Available);
+            assert!(
+                tool_availability("gongbu_create_execution", BackendOwner::Gongbu, &state).is_err()
+            );
+            assert_eq!(
+                tool_availability("gongbu_get_execution", BackendOwner::Gongbu, &state),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn exact_compatibility_matrix_accepts_matching_backends() {
+        let commit = "a".repeat(40);
+        let health = probe(200, json!({"status":"ok"}));
+        let hubu_version = probe(
+            200,
+            json!({
+                "product_version":"1.2.3",
+                "source_commit":commit,
+                "executor_contract":EXECUTOR_CONTRACT_VERSION
+            }),
+        );
+        assert_eq!(
+            classify_hubu_for(Some(&health), Some(&hubu_version), "1.2.3", &commit).state,
+            BackendState::Available
+        );
+
+        let live = probe(200, json!({"status":"live"}));
+        let ready = probe(200, json!({"status":"ready"}));
+        let gongbu_version = probe(
+            200,
+            json!({
+                "product_version":"1.2.3",
+                "source_commit":commit,
+                "api_schema_version":2,
+                "mcp_protocol_version":MCP_PROTOCOL_VERSION,
+                "mcp_schema_version":2,
+                "hubu_executor_contract":EXECUTOR_CONTRACT_VERSION
+            }),
+        );
+        assert_eq!(
+            classify_gongbu_for(
+                Some(&live),
+                Some(&ready),
+                Some(&gongbu_version),
+                "1.2.3",
+                &commit
+            )
+            .state,
+            BackendState::Available
+        );
+    }
+
+    #[test]
+    fn compatibility_mismatches_and_unknown_commits_fail_closed() {
+        let health = probe(200, json!({"status":"ok"}));
+        let version = probe(
+            200,
+            json!({
+                "product_version":"1.2.3",
+                "source_commit":"unknown",
+                "executor_contract":EXECUTOR_CONTRACT_VERSION
+            }),
+        );
+        let report = classify_hubu_for(Some(&health), Some(&version), "1.2.3", &"a".repeat(40));
+        assert_eq!(report.state, BackendState::Incompatible);
+        assert_eq!(report.reason_code, Some("source_commit_mismatch"));
+    }
+
+    #[test]
+    fn every_gongbu_compatibility_dimension_fails_closed() {
+        let commit = "a".repeat(40);
+        let live = probe(200, json!({"status":"live"}));
+        let ready = probe(200, json!({"status":"ready"}));
+        let base = json!({
+            "product_version":"1.2.3",
+            "source_commit":commit,
+            "api_schema_version":GONGBU_API_SCHEMA_VERSION,
+            "mcp_protocol_version":MCP_PROTOCOL_VERSION,
+            "mcp_schema_version":GONGBU_MCP_SCHEMA_VERSION,
+            "hubu_executor_contract":EXECUTOR_CONTRACT_VERSION
+        });
+        let cases = [
+            (
+                "product_version",
+                json!("9.9.9"),
+                "product_version_mismatch",
+            ),
+            (
+                "source_commit",
+                json!("b".repeat(40)),
+                "source_commit_mismatch",
+            ),
+            (
+                "hubu_executor_contract",
+                json!("hubu-spend-executor-v0"),
+                "executor_contract_mismatch",
+            ),
+            (
+                "api_schema_version",
+                json!(1),
+                "api_schema_version_mismatch",
+            ),
+            (
+                "mcp_schema_version",
+                json!(1),
+                "mcp_schema_version_mismatch",
+            ),
+            (
+                "mcp_protocol_version",
+                json!("2099-01-01"),
+                "mcp_protocol_version_mismatch",
+            ),
+        ];
+        for (field, mismatch, expected_reason) in cases {
+            let mut body = base.clone();
+            body[field] = mismatch;
+            let version = probe(200, body);
+            let report =
+                classify_gongbu_for(Some(&live), Some(&ready), Some(&version), "1.2.3", &commit);
+            assert_eq!(report.state, BackendState::Incompatible, "{field}");
+            assert_eq!(report.reason_code, Some(expected_reason), "{field}");
+        }
+    }
+
+    #[test]
+    fn initialize_extension_matches_capability_schema_without_timestamp() {
+        let server = Server::new(Config::default()).unwrap();
+        let mut capability = server.capabilities();
+        capability.as_object_mut().unwrap().remove("generated_at");
+        assert_eq!(
+            server.initialize_result()["capabilities"]["experimental"]["hubu.dev/unified-mcp"],
+            capability
+        );
+    }
+
+    #[test]
+    fn unavailable_backend_errors_are_actionable_and_redacted() {
+        let response = backend_error_response(
+            json!(7),
+            "hubu_list_budgets",
+            BackendOwner::Hubu,
+            ToolRejection::Unavailable,
+        );
+        assert_eq!(response["error"]["code"], -32010);
+        assert_eq!(response["error"]["data"]["code"], "backend_unavailable");
+        assert_eq!(response["error"]["data"]["retryable"], true);
+        assert_eq!(response["error"]["data"]["capabilities_changed"], true);
+        let serialized = response.to_string();
+        assert!(!serialized.contains("endpoint"));
+        assert!(!serialized.contains("credential"));
+        assert!(!serialized.contains("token"));
     }
 
     #[test]
