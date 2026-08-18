@@ -277,14 +277,13 @@ For an existing operation key:
   denial created no token, hold, claim, payment, or financial side effect.
 - A changed scope after `allow` is rejected because authorization or execution
   state may exist. Exact replay remains valid.
-- `needs_approval` needs an explicit rule. Although it creates no payment today,
-  a future durable approval workflow may hold pending state that must be safely
-  cancelled or superseded.
+- `needs_approval` is side-effect-capable pending state and blocks changed-scope
+  retry. Exact replay remains valid.
 
-Audit every attempt, canonical scope hash, predecessor, decision, and reason a
-new evaluation was allowed. The client may resubmit safely after denial, or use
-an explicit corrected-scope flag if accidental changes need an additional
-guard. No extra client-supplied `intent_id` is required.
+Audit every attempt, scope, revision, timestamp, actor, final authorization
+decision, and reason a new evaluation was allowed. The API returns structured
+guidance to reuse the key after safe denial, replay exactly, or create a new
+operation. No extra client-supplied `intent_id` is required.
 
 ## Theme 4: Unified distribution and agent surface
 

@@ -139,6 +139,14 @@ Replaying authorization with the same agent, operation key, and scope recovers
 the decision, token, hold, and current workflow state. Claim and finalization
 use that same key.
 
+Hubu journals immutable, monotonically numbered authorization attempts beneath
+the stable key. A changed scope is admitted only when every prior attempt has an
+explicit terminal denial and no token, pending approval, hold, claim, dispatch,
+payment, or settlement side effect exists. Admission uses an immediate SQLite
+transaction, so process-local locking is not the concurrency authority. Exact
+scope replay can recover any historical attempt, including a denial that
+precedes a later allowed attempt.
+
 Do not derive the operation key from mutable request fields, generate it inside
 a retry loop, or ask the model to invent or remember it. A reusable skill can
 teach the protocol, but enforcement belongs in the platform adapter or SDK and
@@ -174,9 +182,14 @@ guidance.
 
    Hubu returns the original `operation_key`, `auth_token_id`, decision, and
    frozen agent-budget hold. Retrying the same operation key and scope returns
-   those same records; reusing the operation key with different scope for that
-   agent is rejected. Another agent may independently use the same operation
-   key.
+   those same records. After a side-effect-free terminal denial, a corrected
+   scope may append a new revision under the same key. Once any revision is
+   pending approval, allowed, or side-effect-capable, changed scope is rejected.
+   Another agent may independently use the same operation key.
+
+   Every response includes `revision`, `idempotent_replay`, `attempt_history`,
+   and `retry_guidance`. Retry guidance has one machine-readable action:
+   `reuse_operation_key`, `replay_exactly`, or `create_new_operation`.
 
    ```json
    {

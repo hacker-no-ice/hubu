@@ -204,12 +204,16 @@ hubu ledger list
 
 CLI `--amount` values are decimal USD amounts in major units, so `5` means
 `$5.00`. Supply `--merchant` explicitly because it is part of the scope
-evaluated by policy. Use a distinct operation key for each materially different
-request; reuse a key only when retrying the exact same scope.
+evaluated by policy. Use a distinct operation key for different logical work.
+After a terminal denial with no token, approval, hold, dispatch, or settlement
+side effect, Hubu may explicitly advise reusing the same key with corrected
+scope; otherwise reuse a key only for exact replay.
 
 The agent platform supplies a stable, namespaced operation key. Hubu stores the
 authoritative workflow state under `(agent_id, operation_key)`, so replaying
 authorization, claim, or finalization recovers the same result.
+Authorization responses include immutable attempt history and structured retry
+guidance: `reuse_operation_key`, `replay_exactly`, or `create_new_operation`.
 
 Codex is one supported MCP harness, not a Hubu requirement. To make Hubu tools
 discoverable to Codex agents, initialize the Codex MCP config:

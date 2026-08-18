@@ -78,7 +78,10 @@ scoped spend authorization token and freezes the agent budget without executing
 payment or writing a ledger transaction. The caller supplies one immutable
 platform `operation_key`; Hubu stores the workflow under that agent-scoped key.
 Identical authorization retries return the same decision, token, and hold,
-while changed spend scope is rejected.
+including for historical attempts. Changed scope appends an immutable revision
+only after every prior revision is explicitly denied and SQLite confirms there
+is no token, pending approval, hold, claim, dispatch, payment, or settlement
+side effect. A pending or allowed revision locks the key to exact replay.
 
 External executors must turn that frozen authorization into an exclusive
 `claimed` hold before irreversible work. Claiming assigns a separate execution
