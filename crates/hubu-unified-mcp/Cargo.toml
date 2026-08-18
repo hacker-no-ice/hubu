@@ -1,0 +1,27 @@
+[package]
+name = "hubu-unified-mcp"
+version = "0.1.0"
+description = "Unified Model Context Protocol router for Hubu and Gongbu"
+edition.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["ai-agents", "mcp", "payments", "protocol"]
+categories = ["development-tools"]
+publish = false
+
+[[bin]]
+name = "hubu-unified-mcp"
+path = "src/main.rs"
+
+[dependencies]
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -9,6 +9,7 @@ members = [
     "crates/hubu-common",
     "crates/hubu-core",
     "crates/hubu-mcp",
+    "crates/hubu-unified-mcp",
     "crates/hubu-wallet",
 ]
 resolver = "2"
