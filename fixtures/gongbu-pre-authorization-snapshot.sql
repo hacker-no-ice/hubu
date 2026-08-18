@@ -2,7 +2,6 @@
 -- has a positive format version. Lifecycle/outcome/provider fields are nullable.
 CREATE TABLE IF NOT EXISTS executions(
  execution_id TEXT PRIMARY KEY, account_id TEXT NOT NULL CHECK(trim(account_id)<>''), operation_key TEXT NOT NULL CHECK(trim(operation_key)<>''),
- -- Deprecated v1 compatibility columns. Both store the same opaque spend-auth token ID.
  hubu_authorization_id TEXT NOT NULL, hubu_claim_id TEXT, hubu_token_reference TEXT NOT NULL CHECK(length(hubu_token_reference) BETWEEN 1 AND 255),
  authorized_minor INTEGER NOT NULL CHECK(authorized_minor>=0), authorization_currency TEXT NOT NULL CHECK(length(authorization_currency)=3),
  normalized_input_json TEXT NOT NULL CHECK(json_valid(normalized_input_json)), input_hash TEXT NOT NULL, input_schema_version INTEGER NOT NULL CHECK(input_schema_version>0),
@@ -14,16 +13,6 @@ CREATE TABLE IF NOT EXISTS executions(
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, release_transmission_started_at TEXT, version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0), UNIQUE(account_id,operation_key));
 CREATE INDEX IF NOT EXISTS executions_status_created ON executions(status,created_at);
 CREATE INDEX IF NOT EXISTS executions_claim ON executions(hubu_claim_id) WHERE hubu_claim_id IS NOT NULL;
-CREATE TABLE IF NOT EXISTS hubu_authorization_snapshots(
- execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id) ON DELETE CASCADE,
- account_id TEXT NOT NULL, agent_id TEXT NOT NULL, operation_key TEXT NOT NULL,
- decision_id TEXT NOT NULL, spend_auth_token_id TEXT NOT NULL,
- amount_minor INTEGER NOT NULL CHECK(amount_minor>=0), currency TEXT NOT NULL CHECK(length(currency)=3),
- execution_scope_json TEXT NOT NULL CHECK(json_valid(execution_scope_json)),
- workload_profile TEXT NOT NULL, expires_at TEXT NOT NULL, authorization_status TEXT NOT NULL,
- task_id TEXT, reason TEXT NOT NULL);
-CREATE UNIQUE INDEX IF NOT EXISTS hubu_authorization_token
- ON hubu_authorization_snapshots(spend_auth_token_id);
 CREATE TABLE IF NOT EXISTS provider_attempts(
  provider_attempt_id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions ON DELETE CASCADE, provider TEXT NOT NULL,
  provider_request_id TEXT, provider_operation_id TEXT, outcome TEXT NOT NULL CHECK(outcome IN ('started','succeeded','failed','ambiguous','canceled')),
@@ -57,3 +46,39 @@ CREATE TABLE IF NOT EXISTS reconciliation_operator_actions(
  execution_id TEXT NOT NULL REFERENCES reconciliation_records ON DELETE CASCADE,
  action_id TEXT NOT NULL, action TEXT NOT NULL, evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)), created_at TEXT NOT NULL,
  PRIMARY KEY(execution_id,action_id));
+-- Exact columns installed by the pre-HUB-70 repository-open migrations.
+ALTER TABLE executions ADD COLUMN workload_type TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim(workload_type)<>'');
+ALTER TABLE executions ADD COLUMN provider TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim(provider)<>'');
+ALTER TABLE executions ADD COLUMN adapter TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim(adapter)<>'');
+ALTER TABLE executions ADD COLUMN model TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim(model)<>'');
+ALTER TABLE executions ADD COLUMN provider_config_version TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim(provider_config_version)<>'');
+
+-- Persisted pre-upgrade execution and ambiguous-provider reconciliation
+-- evidence. This fixture intentionally has no hubu_authorization_snapshots
+-- table; repository open must preserve this row while installing that table.
+INSERT INTO executions(
+ execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,
+ hubu_token_reference,authorized_minor,authorization_currency,
+ normalized_input_json,input_hash,input_schema_version,target,config_version,
+ workload_type,provider,adapter,model,provider_config_version,
+ provider_config_digest,pricing_snapshot_json,pricing_schema_version,
+ execution_scope_json,status,created_at,updated_at,version
+) VALUES(
+ 'legacy-reconciliation','account-a','legacy-operation','legacy-token',NULL,
+ 'legacy-token',100,'USD','{"image_count":1,"prompt":"cat"}',
+ 'sha256:legacy',1,'image_generation/example/fixture/image-v1','provider-v1',
+ 'image_generation','example','fixture','image-v1','provider-v1',
+ 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+ '{"provider":"example","model":"image-v1","catalog_version":"prices-v1","catalog_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pricing_rule_id":"example-image","unit":"image","unit_amount_minor":100,"quantity":1,"estimated_amount_minor":100,"currency":"USD"}',
+ 1,NULL,'reconciliation_required','2026-08-05T20:00:00Z',
+ '2026-08-05T20:01:00Z',3
+);
+INSERT INTO reconciliation_records(
+ execution_id,evidence_json,evidence_schema_version,last_confirmed_step,
+ entered_at,updated_at,automatic_attempts,automatic_attempts_exhausted
+) VALUES(
+ 'legacy-reconciliation',
+ '{"provider_request_id":"provider-before-upgrade","redacted_error":"ambiguous result"}',
+ 1,'provider_transmitted','2026-08-05T20:01:00Z',
+ '2026-08-05T20:01:00Z',2,1
+);

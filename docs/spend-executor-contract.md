@@ -218,14 +218,18 @@ guidance.
    ```
 
 2. The agent sends only `spend_auth_token_id` plus execution intent and target
-   selection to the executor. It does not repeat account, operation key, money,
-   typed scope, task ID, reason, workload profile, or expiry.
+   selection to canonical `POST /v2/executions` with `schema_version: 2`. It
+   does not repeat account, operation key, money, typed scope, task ID, reason,
+   workload profile, or expiry.
 
-   Original v1 clients may still send `hubu_token_reference`, `operation_key`,
-   `hubu_authorization_id`, a null `hubu_claim_id`, `authorization`, and
-   `execution_scope`. Gongbu treats these only as compatibility assertions and
-   rejects any value that differs from the resolved authorization or its own
-   derived price and scope before persistence.
+   Original v1 clients send `hubu_authorization_id` and
+   `hubu_token_reference` as equal historical aliases of the same spend-auth
+   token ID; neither field contains Hubu's decision ID. V1 also carries
+   `operation_key`, a null `hubu_claim_id`, `authorization`, and optional
+   `execution_scope` as compatibility assertions. Unequal token aliases fail
+   before Hubu resolution, and every other mismatch fails before persistence or
+   scheduling. V1 is supported through all `0.1.x` releases and removed in
+   `0.2.0`.
 
 3. Before persistence, the executor performs a read-only resolution:
 

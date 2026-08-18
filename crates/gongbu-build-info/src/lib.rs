@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const API_SCHEMA_VERSION: u32 = 1;
+pub const API_SCHEMA_VERSION: u32 = 2;
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
-pub const MCP_SCHEMA_VERSION: u32 = 1;
+pub const MCP_SCHEMA_VERSION: u32 = 2;
 pub const SERVER_CONFIG_SCHEMA_VERSION: u32 = 1;
 pub const HUBU_EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4.2";
 
@@ -47,7 +47,8 @@ mod tests {
         assert!(!info.product_version.is_empty());
         assert!(!info.source_commit.is_empty());
         assert!(!info.build_id.is_empty());
-        assert_eq!(info.api_schema_version, 1);
+        assert_eq!(info.api_schema_version, 2);
+        assert_eq!(info.mcp_schema_version, 2);
         assert_eq!(info.server_config_schema_version, 1);
         assert_eq!(info.hubu_executor_contract, "hubu-spend-executor-v4.2");
     }

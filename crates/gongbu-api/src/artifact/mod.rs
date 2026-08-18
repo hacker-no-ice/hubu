@@ -338,7 +338,7 @@ mod tests {
             .create_execution(&CreateExecutionParams {
                 account_id: account.into(),
                 operation_key: operation.into(),
-                hubu_authorization_id: "auth".into(),
+                hubu_authorization_id: "secret-ref".into(),
                 hubu_claim_id: Some("claim".into()),
                 hubu_token_reference: HubuTokenReference::new("secret-ref").unwrap(),
                 authorized_minor: 100,

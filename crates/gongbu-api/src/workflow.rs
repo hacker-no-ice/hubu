@@ -972,7 +972,7 @@ mod tests {
         execution_with_quantity(repo, key, 1)
     }
     fn execution_with_quantity(repo: &Repository, key: &str, quantity: i64) -> Execution {
-        repo.create_execution(&CreateExecutionParams { account_id:"account".into(),operation_key:key.into(),hubu_authorization_id:"auth".into(),hubu_claim_id:None,hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(),authorized_minor:500,authorization_currency:"USD".into(),normalized_input:json!({"prompt":"cat"}),input_hash:"hash".into(),input_schema_version:1,target:"example/image-v1".into(),config_version:"cfg-1".into(),workload_type:"image_generation".into(),provider:"example".into(),adapter:"fixture".into(),model:"image-v1".into(),provider_config_version:"pcv-1".into(),provider_config_digest:format!("sha256:{}","a".repeat(64)),pricing_snapshot:json!({"provider":"example","model":"image-v1","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","unit":"image","unit_amount_minor":100,"quantity":quantity,"estimated_amount_minor":100 * quantity,"currency":"USD"}),pricing_schema_version:1,execution_scope:None,created_at:"2026-08-05T00:00:00Z".into() }).unwrap()
+        repo.create_execution(&CreateExecutionParams { account_id:"account".into(),operation_key:key.into(),hubu_authorization_id:"token-ref".into(),hubu_claim_id:None,hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(),authorized_minor:500,authorization_currency:"USD".into(),normalized_input:json!({"prompt":"cat"}),input_hash:"hash".into(),input_schema_version:1,target:"example/image-v1".into(),config_version:"cfg-1".into(),workload_type:"image_generation".into(),provider:"example".into(),adapter:"fixture".into(),model:"image-v1".into(),provider_config_version:"pcv-1".into(),provider_config_digest:format!("sha256:{}","a".repeat(64)),pricing_snapshot:json!({"provider":"example","model":"image-v1","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","unit":"image","unit_amount_minor":100,"quantity":quantity,"estimated_amount_minor":100 * quantity,"currency":"USD"}),pricing_schema_version:1,execution_scope:None,created_at:"2026-08-05T00:00:00Z".into() }).unwrap()
     }
     struct Hubu {
         claims: Cell<u32>,
@@ -1442,7 +1442,7 @@ mod tests {
         let params = CreateExecutionParams {
             account_id: "account".into(),
             operation_key: "supplied-claim".into(),
-            hubu_authorization_id: "auth".into(),
+            hubu_authorization_id: "token-ref".into(),
             hubu_claim_id: Some("existing-claim".into()),
             hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
             authorized_minor: 500,

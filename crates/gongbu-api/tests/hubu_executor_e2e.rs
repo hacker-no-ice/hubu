@@ -387,7 +387,7 @@ fn execution_params(
     CreateExecutionParams {
         account_id: resolved.account_id,
         operation_key: resolved.operation_key,
-        hubu_authorization_id: resolved.decision_id,
+        hubu_authorization_id: resolved.spend_auth_token_id.clone(),
         hubu_claim_id: None,
         hubu_token_reference: HubuTokenReference::new(string_at(authorization, "auth_token_id"))
             .unwrap(),

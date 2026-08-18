@@ -115,7 +115,7 @@ by the independently managed Hubu service:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
   "input": {"prompt": "A small blue circle", "image_count": 1},
   "input_schema_version": 1,
@@ -135,7 +135,7 @@ after exact agreement; the durable workflow claims afterward.
 curl -fsS -H "Authorization: Bearer $CAPABILITY" \
   -H 'Content-Type: application/json' \
   -d @execution.json \
-  http://127.0.0.1:8788/v1/executions
+  http://127.0.0.1:8788/v2/executions
 curl -fsS -H "Authorization: Bearer $CAPABILITY" \
   http://127.0.0.1:8788/v1/executions/EXECUTION_ID
 curl -fsS -H "Authorization: Bearer $CAPABILITY" \

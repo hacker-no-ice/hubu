@@ -368,7 +368,8 @@ const components = {
     copy:
       "Gongbu is in the Hubu source repository, unified product model, and shared release archive. It remains outside the Hubu control-plane process, database, credential boundary, provider execution boundary, and failure domain.",
     responsibilities: [
-      "Accepts a Hubu spend token plus execution intent through its HTTP API or separate Gongbu MCP adapter; callers cannot override account, operation identity, money, scope, task metadata, endpoint, or credentials.",
+      "Accepts one opaque Hubu spend-auth token ID plus execution intent through canonical HTTP v2 or the separate Gongbu MCP adapter; callers cannot override account, operation identity, money, scope, task metadata, endpoint, or credentials.",
+      "Translates deprecated HTTP v1 only at admission: its two historical token aliases must be equal, never mean decision ID, and cannot broaden any resolved authority.",
       "Resolves Hubu's authorization snapshot read-only, exact-matches Gongbu-derived target scope and catalog price, and persists the immutable snapshot before scheduling.",
       "Persists an immutable execution and provider attempt before crossing billable boundaries, then runs recovery through Gongbu-owned Temporal workflow state.",
       "Claims the Hubu authorization before provider work and validates the claim again immediately before the call.",
@@ -386,7 +387,7 @@ const components = {
     ],
     nodes: [
       { id: "agent", label: "Agent client", sub: "Gongbu HTTP/MCP", x: 58, y: 130, w: 196, h: 92, tone: "agent", path: "crates/gongbu-mcp/src/lib.rs" },
-      { id: "gongbuApi", label: "Execution API", sub: "auth + admission", x: 340, y: 112, w: 210, h: 92, tone: "executor", path: "crates/gongbu-api/src/http/mod.rs" },
+      { id: "gongbuApi", label: "Execution API", sub: "v2 + v1 translation", x: 340, y: 112, w: 210, h: 92, tone: "executor", path: "crates/gongbu-api/src/http/mod.rs" },
       { id: "workflow", label: "Durable workflow", sub: "claim → execute → settle", x: 674, y: 112, w: 230, h: 92, tone: "executor", path: "crates/gongbu-api/src/workflow.rs" },
       { id: "executionDb", label: "Gongbu SQLite", sub: "executions + attempts", x: 340, y: 352, w: 210, h: 96, tone: "data", path: "crates/gongbu-api/src/execution/mod.rs" },
       { id: "temporal", label: "Temporal state", sub: "timers + recovery", x: 674, y: 276, w: 230, h: 92, tone: "data", path: "crates/gongbu-api/src/temporal.rs" },
@@ -397,7 +398,7 @@ const components = {
       { id: "hubu", label: "Hubu trust boundary", sub: "resolve → claim → finalize", x: 1010, y: 556, w: 198, h: 100, tone: "core", path: "crates/hubu-api/src/lib.rs" },
     ],
     edges: [
-      ["agent", "gongbuApi", "request + token", { labelDy: -65 }],
+      ["agent", "gongbuApi", "v2 request + token ID", { labelDy: -65 }],
       ["gongbuApi", "hubu", "read-only resolve + exact match", { fromSide: "right", toSide: "top", waypoints: [{ x: 580, y: 158 }, { x: 580, y: 450 }, { x: 1109, y: 450 }], labelSegment: 2, labelDy: -12 }],
       ["gongbuApi", "executionDb", "persist first"],
       ["gongbuApi", "workflow", "schedule"],

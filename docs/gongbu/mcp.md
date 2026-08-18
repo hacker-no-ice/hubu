@@ -34,7 +34,7 @@ directory, and the two required environment variables above.
 
 ## Tools
 
-- `gongbu_create_execution` mirrors `POST /v1/executions`. Retrying a client
+- `gongbu_create_execution` mirrors canonical `POST /v2/executions`. Retrying a client
   call with the same `spend_auth_token_id` and execution intent relies on
   Gongbu's token-to-authoritative-operation replay guarantee; the adapter itself
   never retries the POST. Money, scope, account, operation key, task ID, and
@@ -48,7 +48,7 @@ directory, and the two required environment variables above.
 Example `tools/call` request (one JSON object per stdio line):
 
 ```json
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gongbu_create_execution","arguments":{"schema_version":1,"spend_auth_token_id":"00000000-0000-4000-8000-000000000123","input":{"prompt":"A small blue circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-2.5-flash-image"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gongbu_create_execution","arguments":{"schema_version":2,"spend_auth_token_id":"00000000-0000-4000-8000-000000000123","input":{"prompt":"A small blue circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-2.5-flash-image"}}}
 ```
 
 Example artifact listing:
