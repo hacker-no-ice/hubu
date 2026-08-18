@@ -1,6 +1,6 @@
 use crate::{
     execution::Execution,
-    execution_scope::{for_target, ExecutionScope},
+    execution_scope::ExecutionScope,
     workflow::{ActivityError, HubuActivities},
 };
 use serde::{Deserialize, Serialize};
@@ -155,13 +155,17 @@ impl ProductionHubuActivities {
     }
 
     pub(crate) fn spend(&self, execution: &Execution) -> ExecutorSpendRequest {
+        let (merchant, execution_scope) = match &execution.execution_scope {
+            Some(scope) => (None, Some(scope.clone())),
+            None => (Some("gongbu.execution".into()), None),
+        };
         ExecutorSpendRequest {
             spend_auth_token_id: execution.hubu_token_reference.as_str().into(),
             agent_id: None,
             account_id: Some(execution.account_id.clone()),
             amount_cents: execution.authorized_minor,
-            merchant: None,
-            execution_scope: for_target(&execution.provider, &execution.adapter),
+            merchant,
+            execution_scope,
             task_id: Some(execution.operation_key.clone()),
         }
     }

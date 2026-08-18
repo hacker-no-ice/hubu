@@ -1,7 +1,10 @@
 //! SQLite persistence for the execution aggregate.
 //! Schema units and formats are documented in the migration.
-use crate::provider_contract::{PricingSnapshot, PRICING_SNAPSHOT_SCHEMA_VERSION};
 use crate::redaction::Redactor;
+use crate::{
+    execution_scope::{for_target, ExecutionScope},
+    provider_contract::{PricingSnapshot, PRICING_SNAPSHOT_SCHEMA_VERSION},
+};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::{
@@ -99,6 +102,7 @@ pub struct Execution {
     pub provider_config_digest: String,
     pub pricing_snapshot: Value,
     pub pricing_schema_version: i64,
+    pub execution_scope: Option<ExecutionScope>,
     pub status: String,
     pub outcome: Option<String>,
     pub provider_outcome: Option<LifecycleOutcome>,
@@ -309,6 +313,7 @@ impl Repository {
         c.execute_batch(MIGRATION)?;
         migrate_artifact_storage_columns(&c)?;
         migrate_resolved_target_columns(&c)?;
+        migrate_execution_scope_column(&c)?;
         Ok(Self(Arc::new(Mutex::new(c)), redactor))
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
@@ -342,11 +347,13 @@ impl Repository {
         ])?;
         let normalized_input = j(&n.normalized_input);
         let pricing_snapshot = j(&n.pricing_snapshot);
+        let execution_scope = for_target(&n.provider, &n.adapter)
+            .map(|scope| serde_json::to_string(&scope).expect("execution scope serializes"));
         self.reject_registered_json([&n.normalized_input, &n.pricing_snapshot])?;
         self.reject_registered_secrets([normalized_input.as_str(), pricing_snapshot.as_str()])?;
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,'pending',?22,?22,0)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,n.authorized_minor,n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,n.provider_config_digest,j(&n.pricing_snapshot),n.pricing_schema_version,n.created_at])?;
+        tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,'pending',?23,?23,0)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,n.authorized_minor,n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,n.provider_config_digest,j(&n.pricing_snapshot),n.pricing_schema_version,execution_scope,n.created_at])?;
         let e = query_key(&tx, &n.account_id, &n.operation_key)?;
         tx.commit()?;
         Ok(e)
@@ -1187,6 +1194,19 @@ fn migrate_resolved_target_columns(c: &Connection) -> rusqlite::Result<()> {
     }
     Ok(())
 }
+fn migrate_execution_scope_column(c: &Connection) -> rusqlite::Result<()> {
+    let mut statement = c.prepare("PRAGMA table_info(executions)")?;
+    let existing: std::collections::BTreeSet<String> = statement
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !existing.contains("execution_scope_json") {
+        c.execute(
+            "ALTER TABLE executions ADD COLUMN execution_scope_json TEXT CHECK(execution_scope_json IS NULL OR json_valid(execution_scope_json))",
+            [],
+        )?;
+    }
+    Ok(())
+}
 const ARTIFACT_SELECT: &str = "SELECT a.artifact_id,a.execution_id,a.provider_attempt_id,a.kind,a.storage_backend,a.storage_key,a.media_type,a.size_bytes,a.sha256,a.metadata_json,a.metadata_schema_version,a.created_at FROM artifacts a";
 fn map_artifact(r: &rusqlite::Row) -> rusqlite::Result<Artifact> {
     let metadata: String = r.get(9)?;
@@ -1228,10 +1248,11 @@ fn query_id(c: &Connection, id: &str) -> Result<Execution> {
     .optional()?
     .ok_or(Error::NotFound)
 }
-const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,release_transmission_started_at,version FROM executions";
+const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,release_transmission_started_at,version,execution_scope_json FROM executions";
 fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
     let i: String = r.get(8)?;
     let p: String = r.get(19)?;
+    let execution_scope_json: Option<String> = r.get(34)?;
     Ok(Execution {
         execution_id: r.get(0)?,
         account_id: r.get(1)?,
@@ -1254,6 +1275,17 @@ fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
         provider_config_digest: r.get(18)?,
         pricing_snapshot: serde_json::from_str(&p).unwrap(),
         pricing_schema_version: r.get(20)?,
+        execution_scope: execution_scope_json
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        json.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
         status: r.get(21)?,
         outcome: r.get(22)?,
         provider_outcome: map_lifecycle_outcome(r.get(23)?)?,
@@ -1403,7 +1435,13 @@ fn j(v: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::{collections::BTreeSet, sync::Barrier, thread};
+    use std::{
+        collections::BTreeSet,
+        io::{Read, Write},
+        net::TcpListener,
+        sync::Barrier,
+        thread,
+    };
     fn new(a: &str, k: &str) -> CreateExecutionParams {
         CreateExecutionParams {
             account_id: a.into(),
@@ -1445,6 +1483,31 @@ mod tests {
         })
         .unwrap()
         .provider_attempt_id
+    }
+
+    fn submitted_claim(execution: &Execution) -> Value {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = String::new();
+            stream.read_to_string(&mut raw).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 422 Unprocessable Entity\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let body = raw.split_once("\r\n\r\n").unwrap().1;
+            serde_json::from_str(body).unwrap()
+        });
+        let hubu = crate::hubu::ProductionHubuActivities::new(
+            crate::hubu::HubuClient::new(format!("http://{address}")),
+            "gongbu",
+        )
+        .unwrap();
+        crate::workflow::HubuActivities::claim(&hubu, execution)
+            .expect_err("capture server rejects after receiving the claim");
+        server.join().unwrap()
     }
     fn complete_success(repo: &Repository, attempt_id: &str) {
         repo.complete_provider_attempt(
@@ -1524,11 +1587,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_database_migrates_provider_digest_column_and_new_rows_freeze_it() {
+    fn legacy_database_preserves_claim_contract_and_new_rows_use_typed_scope() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("legacy.sqlite3");
         let legacy = MIGRATION.replace(
             ", provider_config_digest TEXT NOT NULL CHECK(provider_config_digest GLOB 'sha256:*' AND length(provider_config_digest)=71)",
+            "",
+        ).replace(
+            " execution_scope_json TEXT CHECK(execution_scope_json IS NULL OR json_valid(execution_scope_json)),\n",
             "",
         );
         let legacy_connection = Connection::open(&path).unwrap();
@@ -1565,30 +1631,42 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(columns.contains("provider_config_digest"));
+        assert!(columns.contains("execution_scope_json"));
+        let legacy_execution = repository.get_execution("legacy-execution").unwrap();
         assert_eq!(
-            repository
-                .get_execution("legacy-execution")
-                .unwrap()
-                .provider_config_digest,
+            legacy_execution.provider_config_digest,
             crate::provider_targets::LEGACY_UNRESOLVED_DIGEST
         );
+        assert_eq!(legacy_execution.execution_scope, None);
+        let legacy_claim = submitted_claim(&legacy_execution);
+        assert_eq!(legacy_claim["merchant"], "gongbu.execution");
+        assert!(legacy_claim.get("execution_scope").is_none());
 
-        let created = repository
-            .create_execution(&new("migration", "digest"))
-            .unwrap();
+        let mut typed = new("migration", "typed-scope");
+        typed.provider = "google".into();
+        typed.adapter = "gemini_developer_image".into();
+        typed.pricing_snapshot["provider"] = serde_json::json!("google");
+        let created = repository.create_execution(&typed).unwrap();
         assert_eq!(
             created.provider_config_digest,
             format!("sha256:{}", "a".repeat(64))
         );
+        let expected_scope = for_target("google", "gemini_developer_image").unwrap();
+        assert_eq!(created.execution_scope.as_ref(), Some(&expected_scope));
+        let typed_claim = submitted_claim(&created);
+        assert!(typed_claim.get("merchant").is_none());
+        assert_eq!(
+            typed_claim["execution_scope"],
+            json!(expected_scope.clone())
+        );
         drop(repository);
         let restarted = Repository::open(&path, Redactor::default()).unwrap();
+        let restarted_execution = restarted.get_execution(&created.execution_id).unwrap();
         assert_eq!(
-            restarted
-                .get_execution(&created.execution_id)
-                .unwrap()
-                .provider_config_digest,
+            restarted_execution.provider_config_digest,
             created.provider_config_digest
         );
+        assert_eq!(restarted_execution.execution_scope, Some(expected_scope));
     }
     #[test]
     fn concurrent_create_returns_one() {
