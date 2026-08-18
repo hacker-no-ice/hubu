@@ -23,6 +23,10 @@ const READ_TOOL_NAMES: &[&str] = &[
     "hubu_registration_guidance",
     "hubu_client_approval_profile",
     "hubu_list_users",
+    "hubu_show_policy",
+    "hubu_export_policy",
+    "hubu_policy_history",
+    "hubu_policy_diff",
     "hubu_list_agents",
     "hubu_list_budgets",
     "hubu_list_ledger",
@@ -34,6 +38,7 @@ const APPROVAL_TOOL_NAMES: &[&str] = &[
     "hubu_register_human",
     "hubu_register_agent",
     "hubu_add_policy",
+    "hubu_apply_policy",
     "hubu_create_budget",
     "hubu_create_recurring_budget",
     "hubu_reconcile_vendor_billed_claim",
@@ -174,11 +179,57 @@ fn tool_definitions() -> Vec<Value> {
         ),
         approval_tool(
             "hubu_add_policy",
-            "Attach a spending policy to the active Hubu user. Requires a human click.",
+            "Compatibility alias that declaratively applies and assigns a spending policy. Requires a human click.",
             json_schema(json!({
                 "policy_yaml": { "type": "string" },
                 "daily_limit_cents": { "type": "integer" }
             })),
+        ),
+        approval_tool(
+            "hubu_apply_policy",
+            "Declaratively reconcile a policy resource and assignment with optional compare-and-set. Requires a human click.",
+            json_schema_required(json!({
+                "policy_yaml": { "type": "string" },
+                "declarative_key": { "type": "string" },
+                "display_name": { "type": "string" },
+                "agent_id": { "type": "string" },
+                "expected_revision": { "type": "integer" },
+                "expected_hash": { "type": "string" }
+            }), &["policy_yaml"]),
+        ),
+        read_tool(
+            "hubu_show_policy",
+            "Show complete current policy content and every assignment without database access.",
+            json_schema(json!({
+                "policy_id": { "type": "string" },
+                "agent_id": { "type": "string" }
+            })),
+        ),
+        read_tool(
+            "hubu_export_policy",
+            "Export the complete current policy as YAML with resource metadata and assignments.",
+            json_schema(json!({
+                "policy_id": { "type": "string" },
+                "agent_id": { "type": "string" }
+            })),
+        ),
+        read_tool(
+            "hubu_policy_history",
+            "Inspect immutable policy revisions, payload hashes, actors, sources, and timestamps.",
+            json_schema(json!({
+                "policy_id": { "type": "string" },
+                "agent_id": { "type": "string" }
+            })),
+        ),
+        read_tool(
+            "hubu_policy_diff",
+            "Compare two immutable policy revisions; to_revision defaults to current.",
+            json_schema_required(json!({
+                "policy_id": { "type": "string" },
+                "agent_id": { "type": "string" },
+                "from_revision": { "type": "integer" },
+                "to_revision": { "type": "integer" }
+            }), &["from_revision"]),
         ),
         approval_tool(
             "hubu_create_budget",
@@ -493,6 +544,31 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
             require_trusted_client_approval(config, name)?;
             post_json(base_url, "/policies", arguments)?
         }
+        "hubu_apply_policy" => {
+            require_trusted_client_approval(config, name)?;
+            let mut arguments = arguments;
+            arguments["source"] = json!("mcp");
+            post_json(base_url, "/policies", arguments)?
+        }
+        "hubu_show_policy" => get_json(base_url, &policy_inspection_path("show", &arguments)?)?,
+        "hubu_export_policy" => get_json(base_url, &policy_inspection_path("export", &arguments)?)?,
+        "hubu_policy_history" => {
+            get_json(base_url, &policy_inspection_path("history", &arguments)?)?
+        }
+        "hubu_policy_diff" => {
+            let mut path = policy_inspection_path("diff", &arguments)?;
+            let separator = if path.contains('?') { '&' } else { '?' };
+            let from = arguments
+                .get("from_revision")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| anyhow!("hubu_policy_diff requires from_revision"))?;
+            path.push(separator);
+            path.push_str(&format!("from_revision={from}"));
+            if let Some(to) = arguments.get("to_revision").and_then(Value::as_u64) {
+                path.push_str(&format!("&to_revision={to}"));
+            }
+            get_json(base_url, &path)?
+        }
         "hubu_create_budget" => {
             require_trusted_client_approval(config, name)?;
             post_json(base_url, "/budgets", arguments)?
@@ -574,6 +650,19 @@ fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> 
     };
 
     Ok(tool_result(response))
+}
+
+fn policy_inspection_path(action: &str, arguments: &Value) -> Result<String> {
+    let policy_id = arguments.get("policy_id").and_then(Value::as_str);
+    let agent_id = arguments.get("agent_id").and_then(Value::as_str);
+    if policy_id.is_some() && agent_id.is_some() {
+        bail!("pass only one of policy_id or agent_id");
+    }
+    let query = policy_id
+        .map(|value| format!("?policy_id={value}"))
+        .or_else(|| agent_id.map(|value| format!("?agent_id={value}")))
+        .unwrap_or_default();
+    Ok(format!("/policies/{action}{query}"))
 }
 
 fn require_trusted_client_approval(config: McpConfig, tool_name: &str) -> Result<()> {

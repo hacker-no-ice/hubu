@@ -726,6 +726,11 @@ struct AddPolicyHttpRequest {
     agent_id: Option<String>,
     daily_limit_cents: Option<i64>,
     policy_yaml: Option<String>,
+    display_name: Option<String>,
+    declarative_key: Option<String>,
+    expected_revision: Option<u64>,
+    expected_hash: Option<String>,
+    source: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -733,8 +738,14 @@ struct AddPolicyHttpResponse {
     scope: String,
     agent_id: Option<String>,
     policy_id: String,
+    declarative_key: String,
+    display_name: String,
+    revision: u64,
+    payload_hash: String,
     policy_version: String,
     default_decision: String,
+    changed: bool,
+    assignment_changed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -747,6 +758,10 @@ struct PolicyHttpResponse {
     scope: String,
     agent_id: Option<String>,
     policy_id: String,
+    declarative_key: String,
+    display_name: String,
+    revision: u64,
+    payload_hash: String,
     policy_version: String,
     default_decision: String,
     rules: usize,
@@ -1262,6 +1277,10 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         }
         ("GET", "/agents") => list_agents(state).map(to_json),
         ("GET", "/policies") => list_policies(state).map(to_json),
+        ("GET", "/policies/show") => inspect_policy(&request, state, false),
+        ("GET", "/policies/export") => inspect_policy(&request, state, true),
+        ("GET", "/policies/history") => policy_history(&request, state),
+        ("GET", "/policies/diff") => policy_diff(&request, state),
         ("POST", "/policies") => add_policy(request.body, state).map(to_json),
         ("POST", "/budgets") => create_budget(request.body, state).map(to_json),
         ("POST", "/budgets/series") => create_budget_series(request.body, state).map(to_json),
@@ -2089,7 +2108,8 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
     let request: AddPolicyHttpRequest = serde_json::from_str(&body)?;
 
     let user = authenticated_user_context(state)?;
-    let (scope, agent_pub_id) = if let Some(agent_pub_id) = request.agent_id {
+    let actor = authenticated_user(state)?.pub_id;
+    let (scope, agent_pub_id) = if let Some(agent_pub_id) = request.agent_id.clone() {
         let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
         (
             PolicyAssignmentScope::AgentOverride(agent_id),
@@ -2146,20 +2166,52 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         }
     };
 
-    let policy_id = policy.id.clone();
+    let declarative_key = request.declarative_key.unwrap_or_else(|| policy.id.clone());
+    let display_name = request
+        .display_name
+        .unwrap_or_else(|| declarative_key.clone());
     let policy_version = policy.version.clone();
     let default_decision = effect_name(policy.default_effect).to_string();
-    state
-        .governance
-        .lock()
-        .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .save_policy_assignment(&user.user_id, &scope, &policy)?;
+    let (result, resource_assignments) = {
+        let mut governance = state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        let result = governance.apply_policy(
+            &user.user_id,
+            &declarative_key,
+            &display_name,
+            &scope,
+            &policy,
+            request.expected_revision,
+            request.expected_hash.as_deref(),
+            &actor,
+            request.source.as_deref().unwrap_or("api"),
+        )?;
+        let resource_assignments = governance
+            .load_policy_assignments()?
+            .into_iter()
+            .filter(|assignment| {
+                assignment.owner_user_id == user.user_id
+                    && assignment.policy_id == result.resource.policy_id
+            })
+            .collect::<Vec<_>>();
+        (result, resource_assignments)
+    };
 
-    state
+    let policy_id = result.resource.policy_id.clone();
+
+    let mut policies = state
         .policies
         .lock()
-        .map_err(|_| anyhow!("policy store lock poisoned"))?
-        .insert((user.user_id, scope.clone()), policy);
+        .map_err(|_| anyhow!("policy store lock poisoned"))?;
+    for assignment in resource_assignments {
+        policies.insert(
+            (assignment.owner_user_id, assignment.scope),
+            assignment.policy,
+        );
+    }
+    drop(policies);
 
     log_event(
         "info",
@@ -2169,6 +2221,9 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
             "agent_pub_id": agent_pub_id,
             "policy_id": policy_id,
             "policy_version": policy_version,
+            "revision": result.resource.current_revision,
+            "payload_hash": result.resource.current_hash,
+            "changed": result.changed,
             "default_decision": default_decision,
         }),
     );
@@ -2176,24 +2231,61 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         scope: scope.scope_type().to_string(),
         agent_id: agent_pub_id,
         policy_id,
+        declarative_key: result.resource.declarative_key,
+        display_name: result.resource.display_name,
+        revision: result.resource.current_revision,
+        payload_hash: result.resource.current_hash,
         policy_version,
         default_decision,
+        changed: result.changed,
+        assignment_changed: result.assignment_changed,
     })
 }
 
 fn list_policies(state: &ServerState) -> Result<PolicyListHttpResponse> {
     let user = authenticated_user_context(state)?;
-    let assignments = state
+    let governance = state
         .governance
         .lock()
-        .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .load_policy_assignments()?;
+        .map_err(|_| anyhow!("governance store lock poisoned"))?;
+    let assignments = governance.load_policy_assignments()?;
+    let resources = governance.load_policies(&user.user_id)?;
+    drop(governance);
 
-    let policies = assignments
-        .into_iter()
-        .filter(|assignment| assignment.owner_user_id == user.user_id)
-        .map(|assignment| policy_http_response(assignment, state))
-        .collect::<Result<Vec<_>>>()?;
+    let mut policies = Vec::new();
+    for resource in resources {
+        let resource_assignments = assignments
+            .iter()
+            .filter(|assignment| {
+                assignment.owner_user_id == user.user_id
+                    && assignment.policy_id == resource.policy_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if resource_assignments.is_empty() {
+            policies.push(PolicyHttpResponse {
+                scope: "unassigned".to_string(),
+                agent_id: None,
+                policy_id: resource.policy_id,
+                declarative_key: resource.declarative_key,
+                display_name: resource.display_name,
+                revision: resource.current_revision,
+                payload_hash: resource.current_hash,
+                policy_version: resource.policy.version,
+                default_decision: effect_name(resource.policy.default_effect).to_string(),
+                rules: resource.policy.rules.len(),
+                attached_at: resource.created_at.to_rfc3339(),
+                updated_at: resource.updated_at.to_rfc3339(),
+            });
+        } else {
+            policies.extend(
+                resource_assignments
+                    .into_iter()
+                    .map(|assignment| policy_http_response(assignment, state))
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+    }
 
     Ok(PolicyListHttpResponse { policies })
 }
@@ -2202,6 +2294,12 @@ fn policy_http_response(
     assignment: hubu_core::persistence::PolicyAssignmentRecord,
     state: &ServerState,
 ) -> Result<PolicyHttpResponse> {
+    let resource = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .load_policy(&assignment.owner_user_id, &assignment.policy_id)?
+        .ok_or_else(|| anyhow!("policy resource {} is missing", assignment.policy_id))?;
     let agent_id = match &assignment.scope {
         PolicyAssignmentScope::UserDefault => None,
         PolicyAssignmentScope::AgentOverride(agent_id) => {
@@ -2211,13 +2309,168 @@ fn policy_http_response(
     Ok(PolicyHttpResponse {
         scope: assignment.scope.scope_type().to_string(),
         agent_id,
-        policy_id: assignment.policy.id,
+        policy_id: assignment.policy_id,
+        declarative_key: resource.declarative_key,
+        display_name: resource.display_name,
+        revision: resource.current_revision,
+        payload_hash: resource.current_hash,
         policy_version: assignment.policy.version,
         default_decision: effect_name(assignment.policy.default_effect).to_string(),
         rules: assignment.policy.rules.len(),
         attached_at: assignment.created_at.to_rfc3339(),
         updated_at: assignment.updated_at.to_rfc3339(),
     })
+}
+
+fn policy_selector(request: &HttpRequest, state: &ServerState) -> Result<(UserContext, String)> {
+    let user = authenticated_user_context(state)?;
+    if let Some(selector) = request.query.get("policy_id") {
+        return Ok((user, selector.clone()));
+    }
+
+    let scope = if let Some(agent_pub_id) = request.query.get("agent_id") {
+        PolicyAssignmentScope::AgentOverride(resolve_agent_id_for_user(agent_pub_id, &user, state)?)
+    } else {
+        PolicyAssignmentScope::UserDefault
+    };
+    let assignment = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .load_policy_assignments()?
+        .into_iter()
+        .find(|assignment| assignment.owner_user_id == user.user_id && assignment.scope == scope)
+        .ok_or_else(|| anyhow!("no policy assignment found for requested scope"))?;
+    Ok((user, assignment.policy_id))
+}
+
+fn inspect_policy(request: &HttpRequest, state: &ServerState, export: bool) -> Result<Value> {
+    let (user, selector) = policy_selector(request, state)?;
+    let governance = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?;
+    let resource = governance
+        .load_policy(&user.user_id, &selector)?
+        .ok_or_else(|| anyhow!("unknown policy `{selector}`"))?;
+    let assignments = governance
+        .load_policy_assignments()?
+        .into_iter()
+        .filter(|assignment| {
+            assignment.owner_user_id == user.user_id && assignment.policy_id == resource.policy_id
+        })
+        .map(|assignment| {
+            let agent_id = match assignment.scope {
+                PolicyAssignmentScope::UserDefault => None,
+                PolicyAssignmentScope::AgentOverride(ref agent_id) => {
+                    Some(registration_agent_pub_id(agent_id, state)?)
+                }
+            };
+            Ok(json!({
+                "scope": assignment.scope.scope_type(),
+                "agent_id": agent_id,
+                "attached_at": assignment.created_at.to_rfc3339(),
+                "updated_at": assignment.updated_at.to_rfc3339(),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let policy_value = serde_json::to_value(&resource.policy)?;
+    let mut response = json!({
+        "policy_id": resource.policy_id,
+        "declarative_key": resource.declarative_key,
+        "display_name": resource.display_name,
+        "revision": resource.current_revision,
+        "payload_hash": resource.current_hash,
+        "created_at": resource.created_at.to_rfc3339(),
+        "updated_at": resource.updated_at.to_rfc3339(),
+        "policy": policy_value,
+        "assignments": assignments,
+    });
+    if export {
+        response["policy_yaml"] = Value::String(serde_yaml_ng::to_string(&resource.policy)?);
+    }
+    Ok(response)
+}
+
+fn policy_history(request: &HttpRequest, state: &ServerState) -> Result<Value> {
+    let (user, selector) = policy_selector(request, state)?;
+    let governance = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?;
+    let revisions = governance.load_policy_history(&user.user_id, &selector)?;
+    if revisions.is_empty() {
+        return Err(anyhow!("unknown policy `{selector}`"));
+    }
+    let audit = governance.load_policy_audit(&user.user_id, &selector)?;
+    Ok(json!({ "policy_id": revisions[0].policy_id, "revisions": revisions, "audit": audit }))
+}
+
+fn policy_diff(request: &HttpRequest, state: &ServerState) -> Result<Value> {
+    let (user, selector) = policy_selector(request, state)?;
+    let from_revision = request
+        .query
+        .get("from_revision")
+        .ok_or_else(|| anyhow!("policy diff requires `from_revision`"))?
+        .parse::<u64>()
+        .context("invalid from_revision")?;
+    let governance = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?;
+    let resource = governance
+        .load_policy(&user.user_id, &selector)?
+        .ok_or_else(|| anyhow!("unknown policy `{selector}`"))?;
+    let to_revision = request
+        .query
+        .get("to_revision")
+        .map(|value| value.parse::<u64>().context("invalid to_revision"))
+        .transpose()?
+        .unwrap_or(resource.current_revision);
+    let from = governance
+        .load_policy_revision(&user.user_id, &selector, from_revision)?
+        .ok_or_else(|| anyhow!("unknown policy revision {from_revision}"))?;
+    let to = governance
+        .load_policy_revision(&user.user_id, &selector, to_revision)?
+        .ok_or_else(|| anyhow!("unknown policy revision {to_revision}"))?;
+    let from_value = serde_json::to_value(&from.policy)?;
+    let to_value = serde_json::to_value(&to.policy)?;
+    let mut changed_paths = Vec::new();
+    collect_changed_paths("", &from_value, &to_value, &mut changed_paths);
+    Ok(json!({
+        "policy_id": resource.policy_id,
+        "from_revision": from_revision,
+        "to_revision": to_revision,
+        "from_hash": from.payload_hash,
+        "to_hash": to.payload_hash,
+        "changed_paths": changed_paths,
+        "from": from_value,
+        "to": to_value,
+    }))
+}
+
+fn collect_changed_paths(prefix: &str, from: &Value, to: &Value, paths: &mut Vec<String>) {
+    match (from, to) {
+        (Value::Object(from), Value::Object(to)) => {
+            let keys = from
+                .keys()
+                .chain(to.keys())
+                .collect::<std::collections::BTreeSet<_>>();
+            for key in keys {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                match (from.get(key), to.get(key)) {
+                    (Some(from), Some(to)) => collect_changed_paths(&path, from, to, paths),
+                    _ => paths.push(path),
+                }
+            }
+        }
+        _ if from != to => paths.push(prefix.to_string()),
+        _ => {}
+    }
 }
 
 fn policy_load_error_message(error: PolicyLoadError) -> String {
@@ -6392,7 +6645,9 @@ rules:
         .expect("yaml policy should be added");
         assert_eq!(policy.scope, "user_default");
         assert_eq!(policy.agent_id, None);
-        assert_eq!(policy.policy_id, "yaml_demo_policy");
+        assert!(policy.policy_id.starts_with("pol_"));
+        assert_eq!(policy.declarative_key, "yaml_demo_policy");
+        assert_eq!(policy.revision, 1);
         assert_eq!(policy.policy_version, "demo-1");
 
         let policies_response = route(authenticated_get_request("/policies"), &state);
@@ -6403,7 +6658,9 @@ rules:
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0]["scope"], "user_default");
         assert_eq!(policies[0]["agent_id"], Value::Null);
-        assert_eq!(policies[0]["policy_id"], "yaml_demo_policy");
+        assert_eq!(policies[0]["policy_id"], policy.policy_id);
+        assert_eq!(policies[0]["declarative_key"], "yaml_demo_policy");
+        assert_eq!(policies[0]["revision"], 1);
         assert_eq!(policies[0]["policy_version"], "demo-1");
         assert_eq!(policies[0]["default_decision"], "needs_approval");
         assert_eq!(policies[0]["rules"], 1);
@@ -6480,6 +6737,217 @@ rules: []
         assert!(error.to_string().contains("failed to parse policy yaml"));
         assert!(error.to_string().contains("daily_limit_cents"));
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn policy_apply_show_export_history_diff_and_stale_write_are_safe() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-declarative-policy-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let yaml_v1 = r#"
+id: review_policy
+version: authored-v1
+default_effect: needs_approval
+rules: []
+"#;
+        let first = add_policy(
+            json!({
+                "policy_yaml": yaml_v1,
+                "display_name": "Review policy",
+                "source": "test",
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        assert!(first.changed);
+        assert_eq!(first.revision, 1);
+
+        let identical = add_policy(
+            json!({
+                "policy_yaml": yaml_v1,
+                "display_name": "Review policy",
+                "expected_revision": 1,
+                "expected_hash": first.payload_hash,
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        assert!(!identical.changed);
+
+        let yaml_v2 = r#"
+id: review_policy
+version: authored-v2
+default_effect: deny
+rules: []
+"#;
+        let second = add_policy(
+            json!({
+                "policy_yaml": yaml_v2,
+                "display_name": "Renamed review policy",
+                "expected_revision": 1,
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(second.policy_id, first.policy_id);
+        assert_eq!(second.revision, 2);
+
+        let stale = add_policy(
+            json!({
+                "policy_yaml": yaml_v1,
+                "display_name": "Stale name",
+                "expected_revision": 1,
+            })
+            .to_string(),
+            &state,
+        );
+        assert!(stale
+            .unwrap_err()
+            .to_string()
+            .contains("compare-and-set failed"));
+
+        let show = route(
+            authenticated_get_request(&format!("/policies/show?policy_id={}", first.policy_id)),
+            &state,
+        );
+        assert_eq!(show.status, 200);
+        assert_eq!(show.body["revision"], 2);
+        assert_eq!(show.body["display_name"], "Renamed review policy");
+        assert_eq!(show.body["policy"]["default_effect"], "deny");
+        assert_eq!(show.body["assignments"][0]["scope"], "user_default");
+
+        let export = route(
+            authenticated_get_request(&format!("/policies/export?policy_id={}", first.policy_id)),
+            &state,
+        );
+        assert_eq!(export.status, 200);
+        assert!(export.body["policy_yaml"]
+            .as_str()
+            .unwrap()
+            .contains("default_effect: deny"));
+
+        let history = route(
+            authenticated_get_request(&format!("/policies/history?policy_id={}", first.policy_id)),
+            &state,
+        );
+        assert_eq!(history.body["revisions"].as_array().unwrap().len(), 2);
+        assert_eq!(history.body["audit"].as_array().unwrap().len(), 2);
+        assert_eq!(history.body["audit"][1]["old_hash"], first.payload_hash);
+
+        let diff = route(
+            authenticated_get_request(&format!(
+                "/policies/diff?policy_id={}&from_revision=1&to_revision=2",
+                first.policy_id
+            )),
+            &state,
+        );
+        assert_eq!(diff.status, 200);
+        assert!(diff.body["changed_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "default_effect"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn policy_revision_refreshes_every_cached_assignment_without_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-shared-policy-cache-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let first_agent = register_agent(
+            json!({
+                "name": "shared-policy-agent-one",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("first agent should register");
+        let second_agent = register_agent(
+            json!({
+                "name": "shared-policy-agent-two",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("second agent should register");
+        let yaml_v1 = r#"
+id: shared_policy
+version: authored-v1
+default_effect: allow
+rules: []
+"#;
+
+        let first = add_policy(
+            json!({
+                "agent_id": first_agent.agent_id,
+                "policy_yaml": yaml_v1,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("shared policy should attach to first agent");
+        let second = add_policy(
+            json!({
+                "agent_id": second_agent.agent_id,
+                "policy_yaml": yaml_v1,
+                "expected_revision": 1,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("shared policy should attach to second agent");
+        assert_eq!(second.policy_id, first.policy_id);
+
+        let revised = add_policy(
+            json!({
+                "agent_id": first_agent.agent_id,
+                "policy_yaml": r#"
+id: shared_policy
+version: authored-v2
+default_effect: deny
+rules: []
+"#,
+                "expected_revision": 1,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("shared policy revision should apply");
+        assert_eq!(revised.revision, 2);
+
+        create_test_agent_budget(&state, &first_agent.agent_id, 10_000);
+        create_test_agent_budget(&state, &second_agent.agent_id, 10_000);
+        for (operation_key, account_id) in [
+            ("shared-policy-first-agent", first_agent.account_id),
+            ("shared-policy-second-agent", second_agent.account_id),
+        ] {
+            let response = spend(
+                json!({
+                    "operation_key": operation_key,
+                    "account_id": account_id,
+                    "amount_cents": 1_000,
+                    "reason": "evaluate revised shared policy",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("revised shared policy should evaluate");
+            assert_eq!(response.decision, "deny");
+            assert!(response.payment.is_none());
+        }
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
