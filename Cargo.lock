@@ -998,7 +998,9 @@ name = "hubu-unified-mcp"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "anyhow",
  "chrono",
+ "hubu-mcp",
  "reqwest",
  "serde",
  "serde_json",

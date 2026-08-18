@@ -6,8 +6,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::{
-    diagnostics::{tool_availability, ROUTING_NOT_IMPLEMENTED},
-    DOMAIN_TOOLS, ROUTING_REVISION, UNIFIED_CONTRACT_VERSION,
+    diagnostics::tool_availability, DOMAIN_TOOLS, ROUTING_REVISION, UNIFIED_CONTRACT_VERSION,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -63,14 +62,14 @@ pub(super) fn capabilities_value(snapshot: &CapabilitySnapshot) -> Value {
     let mut tools = DOMAIN_TOOLS
         .iter()
         .map(|(name, owner)| {
-            let reason_code = tool_availability(name, *owner, snapshot)
-                .err()
-                .map(|rejection| rejection.reason_code())
-                .unwrap_or(ROUTING_NOT_IMPLEMENTED);
+            let (available, reason_code) = match tool_availability(name, *owner, snapshot) {
+                Ok(()) => (true, None),
+                Err(rejection) => (false, Some(rejection.reason_code())),
+            };
             json!({
                 "name": name,
                 "owner": owner.as_str(),
-                "available": false,
+                "available": available,
                 "reason_code": reason_code
             })
         })
@@ -164,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn compatible_but_unrouted_domain_tools_are_not_advertised_available() {
+    fn compatible_routed_tools_are_advertised_available() {
         let capability =
             capabilities_value(&snapshot(BackendState::Available, BackendState::Available));
         for tool in capability["tools"].as_array().unwrap() {
@@ -172,12 +171,8 @@ mod tests {
                 assert_eq!(tool["available"], true);
                 assert!(tool["reason_code"].is_null());
             } else {
-                assert_eq!(tool["available"], false, "{}", tool["name"]);
-                assert_eq!(
-                    tool["reason_code"], ROUTING_NOT_IMPLEMENTED,
-                    "{}",
-                    tool["name"]
-                );
+                assert_eq!(tool["available"], true, "{}", tool["name"]);
+                assert!(tool["reason_code"].is_null(), "{}", tool["name"]);
             }
         }
     }

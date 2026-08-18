@@ -31,14 +31,16 @@ impl BackendClient {
 }
 
 impl BackendClients {
+    pub(super) fn probe_hubu(&self) -> BackendReport {
+        self.hubu
+            .as_ref()
+            .map(probe_hubu)
+            .unwrap_or_else(BackendReport::unconfigured)
+    }
+
     pub(super) fn probe(&self) -> CapabilitySnapshot {
         thread::scope(|scope| {
-            let hubu = scope.spawn(|| {
-                self.hubu
-                    .as_ref()
-                    .map(probe_hubu)
-                    .unwrap_or_else(BackendReport::unconfigured)
-            });
+            let hubu = scope.spawn(|| self.probe_hubu());
             let gongbu = scope.spawn(|| {
                 self.gongbu
                     .as_ref()

@@ -62,6 +62,7 @@ fn client(endpoint: &str, token: &str) -> BackendClient {
     BackendClients::new(Config {
         hubu: None,
         gongbu: Some(BackendConfig::new(BackendOwner::Gongbu, endpoint, token).unwrap()),
+        ..Config::default()
     })
     .unwrap()
     .gongbu

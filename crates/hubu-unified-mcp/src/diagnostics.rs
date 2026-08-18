@@ -7,8 +7,6 @@ use crate::{
     BackendOwner,
 };
 
-pub(super) const ROUTING_NOT_IMPLEMENTED: &str = "routing_not_implemented";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ToolRejection {
     Unconfigured,

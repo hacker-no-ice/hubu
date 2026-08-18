@@ -1,19 +1,24 @@
-//! Unified MCP transport shell for the separate Hubu and Gongbu services.
+//! Unified MCP server for the separate Hubu and Gongbu services.
 //!
 //! This crate deliberately has no dependency on either backend's domain or
 //! server crate. Backend clients hold independent endpoints, credentials, HTTP
-//! clients, and failure boundaries. Gongbu-owned tool forwarding is implemented
-//! over its public versioned HTTP contract; Hubu-owned routing remains separate.
+//! clients, and failure boundaries. Both approved domain catalogs route through
+//! public, versioned adapter contracts without importing backend implementation
+//! crates.
 
 mod gongbu;
 
 use std::{
-    env, fmt,
+    env, fmt, fs,
     io::{self, BufRead, Write},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use chrono::{SecondsFormat, Utc};
+use hubu_mcp::{
+    route_tool_call_v1, HubuHttpRequestV1, HubuRequestCapabilityV1, HUBU_ROUTING_CONTRACT_VERSION,
+};
 use reqwest::{
     blocking::Client,
     header::{self, HeaderMap, HeaderValue},
@@ -27,8 +32,8 @@ mod capability;
 mod diagnostics;
 mod probe;
 
-use capability::{capabilities_value, CapabilitySnapshot};
-use diagnostics::{backend_error_response, tool_availability};
+use capability::{capabilities_value, BackendState, CapabilitySnapshot};
+use diagnostics::{backend_error_response, tool_availability, ToolRejection};
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
@@ -39,6 +44,11 @@ const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
 const GONGBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_GONGBU_ENDPOINT";
 const GONGBU_TOKEN_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN";
+const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
+const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
+const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
+const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
+const RECONCILIATION_CAPABILITY_HEADER: &str = "X-Hubu-Reconciliation-Capability";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -82,6 +92,45 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_show_spending_targets", BackendOwner::Hubu),
     ("hubu_submit_spend", BackendOwner::Hubu),
 ];
+
+fn is_approved_hubu_tool(name: &str) -> bool {
+    DOMAIN_TOOLS
+        .iter()
+        .any(|(candidate, owner)| *owner == BackendOwner::Hubu && *candidate == name)
+}
+
+fn is_approved_hubu_http_route(method: &str, path: &str) -> bool {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    matches!(
+        (method, path),
+        ("GET", "/health")
+            | ("GET", "/registration/guidance")
+            | ("GET", "/users")
+            | ("POST", "/init")
+            | ("POST", "/agents/register")
+            | ("POST", "/policies")
+            | ("GET", "/policies/show")
+            | ("GET", "/policies/export")
+            | ("GET", "/policies/history")
+            | ("GET", "/policies/diff")
+            | ("POST", "/budgets")
+            | ("POST", "/budgets/series")
+            | ("POST", "/budgets/revoke")
+            | ("POST", "/budgets/replace")
+            | ("POST", "/user/spending-target")
+            | ("POST", "/user/spending-target/revoke")
+            | ("GET", "/user/spending-target")
+            | ("POST", "/spend")
+            | ("POST", "/spend/authorize")
+            | ("GET", "/agents")
+            | ("GET", "/budgets")
+            | ("GET", "/ledger")
+            | ("GET", "/spend/executor/claim")
+            | ("GET", "/spend/executor/reconciliation")
+            | ("POST", "/spend/executor/settle")
+            | ("POST", "/spend/executor/release")
+    )
+}
 
 pub fn product_version() -> &'static str {
     option_env!("HUBU_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
@@ -155,10 +204,53 @@ impl BackendConfig {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct HubuRoutingConfig {
+    trusted_client_approval: bool,
+    reconciliation_capability: Option<Secret>,
+    reconciliation_capability_file: String,
+}
+
+impl HubuRoutingConfig {
+    pub fn new(trusted_client_approval: bool, reconciliation_capability: Option<String>) -> Self {
+        Self {
+            trusted_client_approval,
+            reconciliation_capability: reconciliation_capability.map(Secret),
+            reconciliation_capability_file: DEFAULT_RECONCILIATION_TOKEN_FILE.to_string(),
+        }
+    }
+
+    fn reconciliation_capability(&self) -> Result<Secret, HubuForwardError> {
+        if let Some(capability) = &self.reconciliation_capability {
+            if capability.expose().trim().is_empty() {
+                return Err(HubuForwardError::InvalidReconciliationCapability);
+            }
+            return Ok(capability.clone());
+        }
+        match fs::read_to_string(&self.reconciliation_capability_file) {
+            Ok(contents) if contents.trim().is_empty() => {
+                Err(HubuForwardError::InvalidReconciliationCapability)
+            }
+            Ok(contents) => Ok(Secret(contents.trim().to_string())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(HubuForwardError::MissingReconciliationCapability)
+            }
+            Err(_) => Err(HubuForwardError::InvalidReconciliationCapability),
+        }
+    }
+}
+
+impl Default for HubuRoutingConfig {
+    fn default() -> Self {
+        Self::new(false, None)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     pub hubu: Option<BackendConfig>,
     pub gongbu: Option<BackendConfig>,
+    pub hubu_routing: HubuRoutingConfig,
 }
 
 impl Config {
@@ -167,6 +259,12 @@ impl Config {
     }
 
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let mut hubu_routing = HubuRoutingConfig::new(
+            lookup(TRUST_CLIENT_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
+            lookup(RECONCILIATION_TOKEN_ENV),
+        );
+        hubu_routing.reconciliation_capability_file = lookup(RECONCILIATION_TOKEN_FILE_ENV)
+            .unwrap_or_else(|| DEFAULT_RECONCILIATION_TOKEN_FILE.to_string());
         Ok(Self {
             hubu: backend_from_values(
                 BackendOwner::Hubu,
@@ -178,8 +276,13 @@ impl Config {
                 lookup(GONGBU_ENDPOINT_ENV),
                 lookup(GONGBU_TOKEN_ENV),
             )?,
+            hubu_routing,
         })
     }
+}
+
+fn env_flag_value(value: &str) -> bool {
+    matches!(value, "1" | "true" | "TRUE" | "yes" | "YES")
 }
 
 fn backend_from_values(
@@ -238,6 +341,7 @@ impl fmt::Display for BackendOwner {
 pub struct BackendClient {
     owner: BackendOwner,
     endpoint: Url,
+    bearer_token: Secret,
     http: Client,
 }
 
@@ -248,6 +352,7 @@ impl fmt::Debug for BackendClient {
             .field("owner", &self.owner)
             .field("endpoint", &self.endpoint)
             .field("executor_contract", &EXECUTOR_CONTRACT_VERSION)
+            .field("hubu_routing_contract", &HUBU_ROUTING_CONTRACT_VERSION)
             .finish_non_exhaustive()
     }
 }
@@ -269,6 +374,7 @@ impl BackendClient {
         Ok(Self {
             owner: config.owner,
             endpoint: config.endpoint,
+            bearer_token: config.bearer_token,
             http,
         })
     }
@@ -288,6 +394,118 @@ impl BackendClient {
     pub fn http_client(&self) -> &Client {
         &self.http
     }
+
+    fn execute_hubu(
+        &self,
+        request: HubuHttpRequestV1,
+        routing: &HubuRoutingConfig,
+    ) -> anyhow::Result<Value> {
+        debug_assert_eq!(self.owner, BackendOwner::Hubu);
+        if !is_approved_hubu_http_route(request.method, &request.path) {
+            return Err(HubuForwardError::InvalidRoute.into());
+        }
+        let is_read = request.method == "GET";
+        let url = self
+            .endpoint
+            .join(request.path.trim_start_matches('/'))
+            .map_err(|_| HubuForwardError::InvalidRoute)?;
+        let mut builder = match request.method {
+            "GET" => self.http.get(url),
+            "POST" => self.http.post(url),
+            _ => return Err(HubuForwardError::InvalidRoute.into()),
+        };
+        if let Some(body) = request.body {
+            builder = builder.json(&body);
+        }
+        let mut used_reconciliation_capability = None;
+        match request.capability {
+            HubuRequestCapabilityV1::None => {}
+            HubuRequestCapabilityV1::Reconciliation => {
+                let capability = routing.reconciliation_capability()?;
+                builder = builder.header(RECONCILIATION_CAPABILITY_HEADER, capability.expose());
+                used_reconciliation_capability = Some(capability);
+            }
+            HubuRequestCapabilityV1::Approval => {
+                return Err(HubuForwardError::UnsupportedCapability.into());
+            }
+        }
+
+        let response = builder.send().map_err(|error| {
+            if error.is_connect() || is_read {
+                HubuForwardError::Unavailable
+            } else {
+                HubuForwardError::AmbiguousTransport
+            }
+        })?;
+        let status = response.status();
+        let body = response.json::<Value>().map_err(|error| {
+            if is_read && (error.is_timeout() || error.is_body()) {
+                HubuForwardError::Unavailable
+            } else if is_read {
+                HubuForwardError::InvalidResponse
+            } else {
+                HubuForwardError::AmbiguousTransport
+            }
+        })?;
+        if !status.is_success() {
+            let message = body
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("request failed");
+            let message = redact_backend_message(
+                message,
+                &self.bearer_token,
+                routing.reconciliation_capability.as_ref(),
+                used_reconciliation_capability.as_ref(),
+            );
+            return Err(HubuForwardError::Application {
+                status: status.as_u16(),
+                message,
+            }
+            .into());
+        }
+        Ok(body)
+    }
+}
+
+fn redact_backend_message(
+    message: &str,
+    bearer_token: &Secret,
+    configured_reconciliation: Option<&Secret>,
+    used_reconciliation: Option<&Secret>,
+) -> String {
+    let mut redacted = message.replace(bearer_token.expose(), "<redacted>");
+    for secret in [configured_reconciliation, used_reconciliation]
+        .into_iter()
+        .flatten()
+    {
+        if !secret.expose().is_empty() {
+            redacted = redacted.replace(secret.expose(), "<redacted>");
+        }
+    }
+    redacted
+}
+
+#[derive(Debug, Error)]
+enum HubuForwardError {
+    #[error("Hubu backend is unavailable")]
+    Unavailable,
+    #[error("Hubu backend request failed after dispatch; mutation outcome may be ambiguous")]
+    AmbiguousTransport,
+    #[error("Hubu backend returned an invalid JSON response")]
+    InvalidResponse,
+    #[error("Hubu route is invalid")]
+    InvalidRoute,
+    #[error(
+        "human reconciliation requires HUBU_RECONCILIATION_TOKEN or HUBU_RECONCILIATION_TOKEN_FILE"
+    )]
+    MissingReconciliationCapability,
+    #[error("Hubu reconciliation credential is invalid")]
+    InvalidReconciliationCapability,
+    #[error("Hubu approval capability is not supported by the HUB-88 routing contract")]
+    UnsupportedCapability,
+    #[error("Hubu server returned HTTP {status}: {message}")]
+    Application { status: u16, message: String },
 }
 
 /// Versioned boundary implemented by each independently configured backend.
@@ -333,15 +551,18 @@ impl BackendClients {
 pub struct Server {
     backends: BackendClients,
     snapshot: Arc<Mutex<CapabilitySnapshot>>,
+    hubu_routing: HubuRoutingConfig,
 }
 
 impl Server {
     pub fn new(config: Config) -> Result<Self, ConfigError> {
+        let hubu_routing = config.hubu_routing.clone();
         let backends = BackendClients::new(config)?;
         let snapshot = backends.probe();
         Ok(Self {
             backends,
             snapshot: Arc::new(Mutex::new(snapshot)),
+            hubu_routing,
         })
     }
 
@@ -402,39 +623,123 @@ impl Server {
     }
 
     fn call_tool(&self, id: Value, params: Value) -> Value {
-        let call: ToolCall = match serde_json::from_value(params) {
+        let call: ToolCall = match serde_json::from_value::<ToolCall>(params) {
             Ok(call) => call,
             Err(_) => return error_response(id, -32602, "Invalid params"),
         };
-        // Parsed at the shared boundary so future routed tools can consume
-        // trusted platform metadata without placing it in model arguments.
-        let _trusted_meta = &call.meta;
-        if call.arguments.as_object().is_none() {
+        if !call.arguments.is_object() {
             return error_response(id, -32602, "Invalid params");
         }
-        self.refresh_capabilities();
+        if call.name == "hubu_unified_capabilities" {
+            self.refresh_capabilities();
+            if call
+                .arguments
+                .as_object()
+                .is_some_and(|arguments| arguments.is_empty())
+            {
+                let capability = self.capabilities();
+                return success_response(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&capability)
+                                .expect("capability snapshot serializes")
+                        }],
+                        "structuredContent": capability
+                    }),
+                );
+            }
+            return error_response(id, -32602, "Invalid params");
+        }
+        let Some(owner) = DOMAIN_TOOLS
+            .iter()
+            .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
+        else {
+            return error_response(id, -32602, "Invalid params");
+        };
+        if owner == BackendOwner::Gongbu {
+            self.refresh_capabilities();
+            let snapshot = self.snapshot();
+            if let Err(rejection) = tool_availability(&call.name, owner, &snapshot) {
+                return backend_error_response(id, &call.name, owner, rejection);
+            }
+            let client = self
+                .backends
+                .gongbu
+                .as_ref()
+                .expect("available Gongbu route has a configured client");
+            return success_response(id, gongbu::call_tool(client, &call.name, call.arguments));
+        }
+        self.refresh_hubu_capability();
+        self.call_approved_hubu_tool(id, call)
+    }
+
+    fn call_approved_hubu_tool(&self, id: Value, call: ToolCall) -> Value {
+        let snapshot = self.snapshot();
+        if let Err(rejection) = tool_availability(&call.name, BackendOwner::Hubu, &snapshot) {
+            return backend_error_response(id, &call.name, BackendOwner::Hubu, rejection);
+        }
+        let Some(hubu) = self.backends.hubu.as_ref() else {
+            return backend_error_response(
+                id,
+                &call.name,
+                BackendOwner::Hubu,
+                ToolRejection::Unconfigured,
+            );
+        };
+        let name = call.name;
+        let params = json!({
+            "name": name,
+            "arguments": call.arguments,
+            "_meta": call.meta
+        });
+        match route_tool_call_v1(
+            params,
+            self.hubu_routing.trusted_client_approval,
+            |request| hubu.execute_hubu(request, &self.hubu_routing),
+        ) {
+            Ok(result) => success_response(id, result),
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<HubuForwardError>(),
+                    Some(HubuForwardError::Unavailable)
+                ) =>
+            {
+                self.mark_hubu_unavailable();
+                backend_error_response(id, &name, BackendOwner::Hubu, ToolRejection::Unavailable)
+            }
+            Err(error) => error_response(id, -32000, &error.to_string()),
+        }
+    }
+
+    #[cfg(test)]
+    fn call_tool_from_snapshot(&self, id: Value, params: Value) -> Value {
+        let call: ToolCall = match serde_json::from_value::<ToolCall>(params) {
+            Ok(call) if call.arguments.is_object() => call,
+            _ => return error_response(id, -32602, "Invalid params"),
+        };
         if call.name == "hubu_unified_capabilities" {
             if call
                 .arguments
                 .as_object()
-                .is_some_and(|arguments| !arguments.is_empty())
+                .is_some_and(|value| value.is_empty())
             {
-                return error_response(id, -32602, "Invalid params");
+                let capability = self.capabilities();
+                return success_response(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&capability)
+                                .expect("capability snapshot serializes")
+                        }],
+                        "structuredContent": capability
+                    }),
+                );
             }
-            let capability = self.capabilities();
-            return success_response(
-                id,
-                json!({
-                    "content": [{
-                        "type": "text",
-                        "text": serde_json::to_string_pretty(&capability)
-                            .expect("capability snapshot serializes")
-                    }],
-                    "structuredContent": capability
-                }),
-            );
+            return error_response(id, -32602, "Invalid params");
         }
-
         let Some(owner) = DOMAIN_TOOLS
             .iter()
             .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
@@ -453,17 +758,24 @@ impl Server {
                 .expect("available Gongbu route has a configured client");
             return success_response(id, gongbu::call_tool(client, &call.name, call.arguments));
         }
-        error_response(
-            id,
-            -32601,
-            "Hubu tool routing is not implemented by this release",
-        )
+        self.call_approved_hubu_tool(id, call)
     }
 
     fn list_tools(&self) -> Vec<Value> {
         self.refresh_capabilities();
+        self.list_tools_for_snapshot()
+    }
+
+    fn list_tools_for_snapshot(&self) -> Vec<Value> {
         let snapshot = self.snapshot();
         let mut tools = vec![capability_tool()];
+        if tool_availability("hubu_health", BackendOwner::Hubu, &snapshot).is_ok() {
+            tools.extend(
+                hubu_mcp::tool_definitions()
+                    .into_iter()
+                    .filter(|tool| tool["name"].as_str().is_some_and(is_approved_hubu_tool)),
+            );
+        }
         tools.extend(gongbu::tool_definitions().into_iter().filter(|tool| {
             let name = tool["name"]
                 .as_str()
@@ -490,6 +802,26 @@ impl Server {
             .snapshot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = refreshed;
+    }
+
+    fn refresh_hubu_capability(&self) {
+        let refreshed = self.backends.probe_hubu();
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        snapshot.hubu = refreshed;
+    }
+
+    fn mark_hubu_unavailable(&self) {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        snapshot.hubu.state = BackendState::Unavailable;
+        snapshot.hubu.reason_code = Some("health_unavailable");
     }
 }
 
@@ -565,7 +897,14 @@ pub enum StartupError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use crate::capability::{BackendReport, ContractVersions};
+    use std::{
+        io::{Cursor, Read},
+        net::TcpListener,
+        sync::mpsc::{self, Receiver},
+        thread,
+        time::Duration,
+    };
 
     fn lookup<'a>(values: &'a [(&'a str, &'a str)]) -> impl FnMut(&str) -> Option<String> + 'a {
         move |name| {
@@ -573,6 +912,129 @@ mod tests {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_owned()))
         }
+    }
+
+    fn server_with_backends(
+        hubu_endpoint: &str,
+        gongbu_endpoint: Option<&str>,
+        trusted_client_approval: bool,
+        reconciliation_capability: Option<&str>,
+    ) -> Server {
+        let config = Config {
+            hubu: Some(
+                BackendConfig::new(BackendOwner::Hubu, hubu_endpoint, "hubu-token-canary").unwrap(),
+            ),
+            gongbu: gongbu_endpoint.map(|endpoint| {
+                BackendConfig::new(BackendOwner::Gongbu, endpoint, "gongbu-token-canary").unwrap()
+            }),
+            hubu_routing: HubuRoutingConfig::new(
+                trusted_client_approval,
+                reconciliation_capability.map(str::to_string),
+            ),
+        };
+        let hubu_routing = config.hubu_routing.clone();
+        let gongbu_state = if config.gongbu.is_some() {
+            BackendState::Available
+        } else {
+            BackendState::Unconfigured
+        };
+        Server {
+            backends: BackendClients::new(config).unwrap(),
+            snapshot: Arc::new(Mutex::new(CapabilitySnapshot {
+                generated_at: "2026-08-18T00:00:00.000Z".into(),
+                hubu: test_backend_report(BackendState::Available, false),
+                gongbu: test_backend_report(gongbu_state, true),
+            })),
+            hubu_routing,
+        }
+    }
+
+    fn test_backend_report(state: BackendState, gongbu: bool) -> BackendReport {
+        BackendReport {
+            state,
+            product_version: Some(product_version().into()),
+            source_commit: Some("a".repeat(40)),
+            api_schema_version: gongbu.then_some(2),
+            mcp_schema_version: gongbu.then_some(2),
+            contract_versions: ContractVersions {
+                executor: Some(EXECUTOR_CONTRACT_VERSION.into()),
+            },
+            reason_code: (state != BackendState::Available).then_some("configuration_missing"),
+        }
+    }
+
+    fn tool_call(server: &Server, name: &str, arguments: Value, meta: Option<Value>) -> Value {
+        server.call_tool_from_snapshot(
+            json!(7),
+            json!({"name": name, "arguments": arguments, "_meta": meta}),
+        )
+    }
+
+    fn one_shot_http_server(
+        status: u16,
+        body: &'static str,
+    ) -> (String, Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+                if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let header_end = header_end + 4;
+                    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(str::trim)
+                                .and_then(|value| value.parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if bytes.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+            }
+            sender.send(String::from_utf8(bytes).unwrap()).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        (endpoint, receiver, handle)
+    }
+
+    fn disconnect_after_request_server() -> (String, Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buffer = [0_u8; 2048];
+            let count = stream.read(&mut buffer).unwrap();
+            sender
+                .send(String::from_utf8(buffer[..count].to_vec()).unwrap())
+                .unwrap();
+        });
+        (endpoint, receiver, handle)
     }
 
     #[test]
@@ -636,6 +1098,9 @@ mod tests {
             .to_string();
         assert!(!error.contains("url-secret"));
         assert!(!error.contains(secret));
+
+        let routing = HubuRoutingConfig::new(true, Some(secret.to_string()));
+        assert!(!format!("{routing:?}").contains(secret));
     }
 
     #[test]
@@ -705,6 +1170,7 @@ mod tests {
                 BackendConfig::new(BackendOwner::Gongbu, "https://gongbu.test", "gongbu-secret")
                     .unwrap(),
             ),
+            hubu_routing: HubuRoutingConfig::default(),
         };
         let server = Server::new(config).unwrap();
         let capability = server.capabilities();
@@ -727,6 +1193,628 @@ mod tests {
             server.initialize_result()["capabilities"]["experimental"]["hubu.dev/unified-mcp"],
             capability
         );
+    }
+
+    #[test]
+    fn configured_catalog_matches_the_approved_standalone_hubu_contract() {
+        let server = server_with_backends("http://127.0.0.1:1", None, false, None);
+        let actual = server.list_tools_for_snapshot();
+        assert_eq!(actual[0], capability_tool());
+
+        let expected = hubu_mcp::tool_definitions()
+            .into_iter()
+            .filter(|tool| tool["name"].as_str().is_some_and(is_approved_hubu_tool))
+            .collect::<Vec<_>>();
+        assert_eq!(&actual[1..], expected.as_slice());
+        assert_eq!(expected.len(), 28);
+        assert!(!actual.iter().any(|tool| {
+            matches!(
+                tool["name"].as_str(),
+                Some("hubu_get_spend_approval" | "hubu_resolve_spend_approval")
+            )
+        }));
+        assert!(!actual.iter().any(|tool| tool["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("gongbu_"))));
+    }
+
+    #[test]
+    fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
+        let server = server_with_backends(
+            "http://127.0.0.1:1",
+            Some("http://127.0.0.1:2"),
+            false,
+            None,
+        );
+        let tools = server.list_tools_for_snapshot();
+        assert_eq!(tools.len(), 33);
+        for definition in hubu_mcp::tool_definitions()
+            .into_iter()
+            .filter(|tool| tool["name"].as_str().is_some_and(is_approved_hubu_tool))
+            .chain(gongbu::tool_definitions())
+        {
+            assert!(tools.contains(&definition), "{}", definition["name"]);
+        }
+
+        {
+            let mut snapshot = server
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snapshot.gongbu.state = BackendState::Degraded;
+            snapshot.gongbu.reason_code = Some("backend_not_ready");
+        }
+        let degraded = server.list_tools_for_snapshot();
+        assert_eq!(degraded.len(), 32);
+        assert!(!degraded
+            .iter()
+            .any(|tool| tool["name"] == "gongbu_create_execution"));
+        assert!(degraded
+            .iter()
+            .any(|tool| tool["name"] == "gongbu_get_execution"));
+
+        {
+            let mut snapshot = server
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snapshot.gongbu.state = BackendState::Available;
+            snapshot.gongbu.reason_code = None;
+            snapshot.hubu.state = BackendState::Unavailable;
+            snapshot.hubu.reason_code = Some("health_unavailable");
+        }
+        let hubu_down = server.list_tools_for_snapshot();
+        assert_eq!(hubu_down.len(), 4);
+        assert!(!hubu_down.iter().any(|tool| tool["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("hubu_") && name != "hubu_unified_capabilities")));
+        assert!(!hubu_down
+            .iter()
+            .any(|tool| tool["name"] == "gongbu_create_execution"));
+    }
+
+    #[test]
+    fn approved_hubu_routes_prepare_exact_static_requests() {
+        let empty = json!({});
+        let spend = json!({"account_id":"account-1","amount_cents":25,"reason":"test"});
+        let reconciliation = json!({
+            "claim_id":"claim-1",
+            "provider_reference":"provider-1",
+            "evidence":"reviewed"
+        });
+        let cases = [
+            (
+                "hubu_health",
+                empty.clone(),
+                "GET",
+                "/health",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_registration_guidance",
+                empty.clone(),
+                "GET",
+                "/registration/guidance",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_list_users",
+                empty.clone(),
+                "GET",
+                "/users",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_register_human",
+                empty.clone(),
+                "POST",
+                "/init",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_register_agent",
+                empty.clone(),
+                "POST",
+                "/agents/register",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_add_policy",
+                empty.clone(),
+                "POST",
+                "/policies",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_apply_policy",
+                json!({"policy_yaml":"version: 1"}),
+                "POST",
+                "/policies",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_show_policy",
+                empty.clone(),
+                "GET",
+                "/policies/show",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_export_policy",
+                empty.clone(),
+                "GET",
+                "/policies/export",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_policy_history",
+                empty.clone(),
+                "GET",
+                "/policies/history",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_policy_diff",
+                json!({"from_revision":1}),
+                "GET",
+                "/policies/diff?from_revision=1",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_create_budget",
+                empty.clone(),
+                "POST",
+                "/budgets",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_create_recurring_budget",
+                empty.clone(),
+                "POST",
+                "/budgets/series",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_revoke_budget",
+                empty.clone(),
+                "POST",
+                "/budgets/revoke",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_replace_budget",
+                empty.clone(),
+                "POST",
+                "/budgets/replace",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_set_spending_target",
+                empty.clone(),
+                "POST",
+                "/user/spending-target",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_revoke_spending_target",
+                empty.clone(),
+                "POST",
+                "/user/spending-target/revoke",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_show_spending_targets",
+                empty.clone(),
+                "GET",
+                "/user/spending-target",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_submit_spend",
+                spend.clone(),
+                "POST",
+                "/spend",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_authorize_spend",
+                spend,
+                "POST",
+                "/spend/authorize",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_list_agents",
+                empty.clone(),
+                "GET",
+                "/agents",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_list_budgets",
+                empty.clone(),
+                "GET",
+                "/budgets",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_list_ledger",
+                empty.clone(),
+                "GET",
+                "/ledger",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_get_executor_claim",
+                json!({"claim_id":"claim-1"}),
+                "GET",
+                "/spend/executor/claim?claim_id=claim-1",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_list_claims_requiring_reconciliation",
+                empty.clone(),
+                "GET",
+                "/spend/executor/reconciliation",
+                HubuRequestCapabilityV1::None,
+            ),
+            (
+                "hubu_reconcile_vendor_billed_claim",
+                reconciliation.clone(),
+                "POST",
+                "/spend/executor/settle",
+                HubuRequestCapabilityV1::Reconciliation,
+            ),
+            (
+                "hubu_reconcile_vendor_did_not_bill_claim",
+                reconciliation,
+                "POST",
+                "/spend/executor/release",
+                HubuRequestCapabilityV1::Reconciliation,
+            ),
+        ];
+        assert_eq!(cases.len(), 27);
+        for (name, arguments, method, path, capability) in cases {
+            let params = json!({
+                "name": name,
+                "arguments": arguments,
+                "_meta": {
+                    "hubu.dev/platform-invocation": {
+                        "platform":"codex",
+                        "installation_id":"installation-1",
+                        "invocation_id":"invocation-1",
+                        "operation_key":"operation-1",
+                        "task_id":"linear:HUB-91"
+                    }
+                }
+            });
+            let mut captured = None;
+            let result = route_tool_call_v1(params, true, |request| {
+                captured = Some(request);
+                Ok(json!({"status":"ok"}))
+            })
+            .unwrap();
+            let request = captured.expect("routed Hubu tool should make one request");
+            assert_eq!(request.method, method, "{name}");
+            assert_eq!(request.path, path, "{name}");
+            assert_eq!(request.capability, capability, "{name}");
+            assert!(request
+                .body
+                .as_ref()
+                .is_none_or(|body| body.get("_meta").is_none()));
+            if matches!(name, "hubu_submit_spend" | "hubu_authorize_spend") {
+                assert_eq!(
+                    request.body.as_ref().unwrap()["operation_key"],
+                    "operation-1"
+                );
+                assert_eq!(request.body.as_ref().unwrap()["task_id"], "linear:HUB-91");
+            }
+            if name == "hubu_apply_policy" {
+                assert_eq!(request.body.as_ref().unwrap()["source"], "mcp");
+            }
+            assert_eq!(result["structuredContent"]["status"], "ok");
+        }
+
+        let mut called = false;
+        let local = route_tool_call_v1(
+            json!({"name":"hubu_client_approval_profile","arguments":{}}),
+            true,
+            |_| {
+                called = true;
+                Ok(json!({}))
+            },
+        )
+        .unwrap();
+        assert!(!called);
+        assert_eq!(local["structuredContent"], hubu_mcp::approval_profile());
+    }
+
+    #[test]
+    fn approved_query_variants_match_standalone_routing() {
+        let cases = [
+            (
+                "hubu_show_policy",
+                json!({"policy_id":"policy-1"}),
+                "/policies/show?policy_id=policy-1",
+            ),
+            (
+                "hubu_export_policy",
+                json!({"agent_id":"agent-1"}),
+                "/policies/export?agent_id=agent-1",
+            ),
+            (
+                "hubu_policy_diff",
+                json!({"agent_id":"agent-1","from_revision":2,"to_revision":4}),
+                "/policies/diff?agent_id=agent-1&from_revision=2&to_revision=4",
+            ),
+            (
+                "hubu_show_spending_targets",
+                json!({"include_all":true}),
+                "/user/spending-target?all=true",
+            ),
+            (
+                "hubu_list_budgets",
+                json!({"include_all":true}),
+                "/budgets?all=true",
+            ),
+        ];
+        for (name, arguments, expected_path) in cases {
+            let mut captured = None;
+            route_tool_call_v1(
+                json!({"name":name,"arguments":arguments}),
+                false,
+                |request| {
+                    captured = Some(request);
+                    Ok(json!({}))
+                },
+            )
+            .unwrap();
+            assert_eq!(captured.unwrap().path, expected_path, "{name}");
+        }
+
+        let error = route_tool_call_v1(
+            json!({
+                "name":"hubu_show_policy",
+                "arguments":{"policy_id":"policy-1","agent_id":"agent-1"}
+            }),
+            false,
+            |_| unreachable!(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("pass only one"));
+    }
+
+    #[test]
+    fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
+        let (endpoint, request, handle) =
+            one_shot_http_server(200, r#"{"decision":"needs_approval","payment":null}"#);
+        let server = server_with_backends(&endpoint, None, false, None);
+        let arguments = json!({"account_id":"account-1","amount_cents":25,"reason":"review"});
+        let meta = json!({"hubu.dev/platform-invocation":{
+            "platform":"codex",
+            "installation_id":"installation-1",
+            "invocation_id":"invocation-1",
+            "operation_key":"operation-1",
+            "task_id":"linear:HUB-91"
+        }});
+        let standalone_result = route_tool_call_v1(
+            json!({
+                "name":"hubu_authorize_spend",
+                "arguments":arguments.clone(),
+                "_meta":meta.clone()
+            }),
+            false,
+            |_| Ok(json!({"decision":"needs_approval","payment":null})),
+        )
+        .unwrap();
+        let response = tool_call(&server, "hubu_authorize_spend", arguments, Some(meta));
+        let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+        handle.join().unwrap();
+
+        assert!(raw.starts_with("POST /spend/authorize HTTP/1.1"));
+        assert!(raw.contains("authorization: Bearer hubu-token-canary"));
+        assert!(!raw.contains("gongbu-token-canary"));
+        let body: Value = serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["operation_key"], "operation-1");
+        assert_eq!(body["task_id"], "linear:HUB-91");
+        assert!(body.get("_meta").is_none());
+        assert!(body.get("platform").is_none());
+        assert_eq!(response["result"], standalone_result);
+        assert_eq!(
+            response["result"]["structuredContent"]["requires_human_approval"],
+            true
+        );
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            serde_json::to_string_pretty(&response["result"]["structuredContent"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn reconciliation_uses_distinct_hubu_capability_and_never_gongbu() {
+        let (hubu_endpoint, request, handle) = one_shot_http_server(200, r#"{"status":"settled"}"#);
+        let gongbu_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        gongbu_listener.set_nonblocking(true).unwrap();
+        let gongbu_endpoint = format!("http://{}", gongbu_listener.local_addr().unwrap());
+        let server = server_with_backends(
+            &hubu_endpoint,
+            Some(&gongbu_endpoint),
+            true,
+            Some("reconciliation-canary"),
+        );
+        let response = tool_call(
+            &server,
+            "hubu_reconcile_vendor_did_not_bill_claim",
+            json!({"claim_id":"claim-1","provider_reference":"provider-1","evidence":"reviewed"}),
+            None,
+        );
+        let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+        handle.join().unwrap();
+        assert!(response.get("error").is_none());
+        assert!(raw.contains("authorization: Bearer hubu-token-canary"));
+        assert!(raw.contains("x-hubu-reconciliation-capability: reconciliation-canary"));
+        assert!(!raw.contains("gongbu-token-canary"));
+        assert!(
+            matches!(gongbu_listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn reconciliation_without_distinct_capability_fails_before_network() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let mut server = server_with_backends(&endpoint, None, true, None);
+        server.hubu_routing.reconciliation_capability_file = format!(
+            "/private/tmp/hubu-91-missing-reconciliation-token-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+
+        let response = tool_call(
+            &server,
+            "hubu_reconcile_vendor_did_not_bill_claim",
+            json!({"claim_id":"claim-1","provider_reference":"provider-1","evidence":"reviewed"}),
+            None,
+        );
+        assert_eq!(response["error"]["code"], -32000);
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("human reconciliation requires"));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn protected_and_unapproved_hubu_tools_fail_before_network() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = server_with_backends(&endpoint, Some(&endpoint), false, None);
+
+        let protected = tool_call(&server, "hubu_create_budget", json!({}), None);
+        assert_eq!(protected["error"]["code"], -32000);
+        assert!(protected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("trusted MCP client approval gate"));
+        for name in [
+            "hubu_get_spend_approval",
+            "hubu_resolve_spend_approval",
+            "hubu_not_a_tool",
+        ] {
+            let rejected = tool_call(&server, name, json!({}), None);
+            assert_eq!(rejected["error"]["code"], -32602, "{name}");
+        }
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn hubu_outage_is_sanitized_retryable_and_has_no_fallback() {
+        let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
+        let hubu_endpoint = format!("http://{}", unavailable.local_addr().unwrap());
+        drop(unavailable);
+        let gongbu_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        gongbu_listener.set_nonblocking(true).unwrap();
+        let gongbu_endpoint = format!("http://{}", gongbu_listener.local_addr().unwrap());
+        let server = server_with_backends(&hubu_endpoint, Some(&gongbu_endpoint), false, None);
+
+        let response = tool_call(&server, "hubu_health", json!({}), None);
+        assert_eq!(response["error"]["code"], -32010);
+        assert_eq!(response["error"]["data"]["code"], "backend_unavailable");
+        assert_eq!(response["error"]["data"]["owner"], "hubu");
+        assert_eq!(response["error"]["data"]["retryable"], true);
+        let serialized = response.to_string();
+        assert!(!serialized.contains("hubu-token-canary"));
+        assert!(!serialized.contains(&hubu_endpoint));
+        assert!(
+            matches!(gongbu_listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+
+        let capability = tool_call(&server, "hubu_unified_capabilities", json!({}), None);
+        assert!(capability.get("error").is_none());
+    }
+
+    #[test]
+    fn forwarded_application_errors_preserve_hubu_contract_without_secrets() {
+        let (endpoint, _request, handle) = one_shot_http_server(
+            403,
+            r#"{"error":"bearer hubu-token-canary reconciliation reconciliation-canary"}"#,
+        );
+        let server = server_with_backends(&endpoint, None, true, Some("reconciliation-canary"));
+        let response = tool_call(
+            &server,
+            "hubu_reconcile_vendor_did_not_bill_claim",
+            json!({"claim_id":"claim-1","provider_reference":"provider-1","evidence":"reviewed"}),
+            None,
+        );
+        handle.join().unwrap();
+        assert_eq!(response["error"]["code"], -32000);
+        assert_eq!(
+            response["error"]["message"],
+            "Hubu server returned HTTP 403: bearer <redacted> reconciliation <redacted>"
+        );
+        let serialized = response.to_string();
+        assert!(!serialized.contains("hubu-token-canary"));
+        assert!(!serialized.contains(&endpoint));
+    }
+
+    #[test]
+    fn malformed_mutation_response_is_sanitized_ambiguous_and_not_retried() {
+        let (endpoint, request, handle) = one_shot_http_server(200, "backend-secret-not-json");
+        let server = server_with_backends(&endpoint, None, true, None);
+        let response = tool_call(&server, "hubu_create_budget", json!({}), None);
+        let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+        handle.join().unwrap();
+
+        assert!(raw.starts_with("POST /budgets HTTP/1.1"));
+        assert_eq!(response["error"]["code"], -32000);
+        assert_eq!(
+            response["error"]["message"],
+            "Hubu backend request failed after dispatch; mutation outcome may be ambiguous"
+        );
+        assert!(!response.to_string().contains("backend-secret-not-json"));
+    }
+
+    #[test]
+    fn connected_read_outage_is_retryable_and_never_reaches_gongbu() {
+        let (hubu_endpoint, request, handle) = disconnect_after_request_server();
+        let gongbu_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        gongbu_listener.set_nonblocking(true).unwrap();
+        let gongbu_endpoint = format!("http://{}", gongbu_listener.local_addr().unwrap());
+        let server = server_with_backends(&hubu_endpoint, Some(&gongbu_endpoint), false, None);
+
+        let response = tool_call(&server, "hubu_health", json!({}), None);
+        let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+        handle.join().unwrap();
+        assert!(raw.starts_with("GET /health HTTP/1.1"));
+        assert_eq!(response["error"]["code"], -32010);
+        assert_eq!(response["error"]["data"]["code"], "backend_unavailable");
+        assert_eq!(response["error"]["data"]["retryable"], true);
+        assert!(
+            matches!(gongbu_listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn production_dependencies_exclude_backend_implementation_crates() {
+        let unified_manifest = include_str!("../Cargo.toml");
+        let hubu_adapter_manifest = include_str!("../../hubu-mcp/Cargo.toml");
+        for forbidden in [
+            "hubu-api",
+            "hubu-core",
+            "hubu-wallet",
+            "gongbu-api",
+            "gongbu-mcp",
+        ] {
+            assert!(!unified_manifest.contains(forbidden), "{forbidden}");
+            assert!(!hubu_adapter_manifest.contains(forbidden), "{forbidden}");
+        }
+        assert!(unified_manifest.contains("hubu-mcp"));
     }
 
     #[test]
