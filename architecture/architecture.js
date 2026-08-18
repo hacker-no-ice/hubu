@@ -47,9 +47,9 @@ const sharedLinks = {
 
 const components = {
   top: {
-    title: "System Map",
-    kind: "Top level",
-    viewBox: "0 0 1200 760",
+    title: "Major Components",
+    kind: "Overview",
+    viewBox: "0 0 1440 900",
     copy:
       "Hubu and Gongbu share one source repository, locked workspace, and five-binary release archive. Their binaries remain separate at runtime: Hubu governs spend in the control plane, while Gongbu executes provider work across an authenticated contract.",
     responsibilities: [
@@ -68,41 +68,41 @@ const components = {
     ],
     links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.scopeModel],
     zones: [
-      { label: "One source repository + locked workspace", x: 292, y: 24, w: 820, h: 716 },
-      { label: "Hubu control-plane process", x: 570, y: 36, w: 542, h: 692, labelX: 636, labelY: 86 },
-      { label: "Gongbu execution-plane process", x: 304, y: 616, w: 248, h: 112, labelY: 642 },
+      { label: "One source repository + locked workspace", x: 310, y: 24, w: 1070, h: 846 },
+      { label: "Hubu control-plane process", x: 650, y: 48, w: 730, h: 802, labelX: 692, labelY: 88 },
+      { label: "Gongbu execution-plane process", x: 326, y: 738, w: 292, h: 112, labelY: 766 },
     ],
     nodes: [
-      { id: "human", label: "Human owner", sub: "funds + policy", x: 48, y: 82, w: 190, h: 94, tone: "human" },
-      { id: "agent", label: "AI agent", sub: "spend requests", x: 48, y: 330, w: 190, h: 94, tone: "agent" },
-      { id: "cli", label: "Hubu CLI", sub: "developer commands", x: 334, y: 82, w: 184, h: 88, tone: "surface" },
-      { id: "operationKeys", label: "Operation-key skill", sub: "local recipe + SQLite", x: 334, y: 218, w: 184, h: 76, tone: "data", path: "skills/generate-hubu-operation-key/SKILL.md" },
-      { id: "mcp", label: "MCP adapter", sub: "agent tools", x: 334, y: 330, w: 184, h: 88, tone: "surface" },
-      { id: "release", label: "Release artifacts", sub: "pinned + checksummed", x: 334, y: 526, w: 184, h: 88, tone: "surface" },
-      { id: "api", label: "Local HTTP API", sub: "routes + auth", x: 620, y: 184, w: 190, h: 98, tone: "core" },
-      { id: "app", label: "App services", sub: "approval + claims", x: 620, y: 360, w: 190, h: 98, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },
-      { id: "gongbu", label: "Gongbu server", sub: "separate executor", x: 328, y: 652, w: 200, h: 62, tone: "executor", path: "crates/gongbu-api/src/bin/gongbu-server.rs" },
-      { id: "registration", label: "Registration", sub: "identity + sessions", x: 900, y: 46, w: 202, h: 86, tone: "core" },
-      { id: "policy", label: "Policy resources", sub: "revisions + evaluation", x: 904, y: 166, w: 198, h: 86, tone: "core" },
-      { id: "budget", label: "Budgets + targets", sub: "warn + reserve", x: 904, y: 304, w: 198, h: 86, tone: "core" },
-      { id: "payment", label: "Payment manager", sub: "rail boundary", x: 904, y: 448, w: 198, h: 86, tone: "wallet" },
-      { id: "ledger", label: "SQLite ledger", sub: "double-entry audit", x: 900, y: 626, w: 202, h: 88, tone: "data" },
+      { id: "human", label: "Human owner", sub: "funds + policy", x: 48, y: 112, w: 212, h: 100, tone: "human" },
+      { id: "agent", label: "AI agent", sub: "spend requests", x: 48, y: 404, w: 212, h: 100, tone: "agent" },
+      { id: "cli", label: "Hubu CLI", sub: "developer commands", x: 350, y: 116, w: 218, h: 96, tone: "surface" },
+      { id: "operationKeys", label: "Operation-key skill", sub: "local recipe + SQLite", x: 350, y: 306, w: 218, h: 90, tone: "data", path: "skills/generate-hubu-operation-key/SKILL.md" },
+      { id: "mcp", label: "MCP adapter", sub: "agent tools", x: 350, y: 438, w: 218, h: 96, tone: "surface" },
+      { id: "release", label: "Release artifacts", sub: "pinned + checksummed", x: 350, y: 606, w: 218, h: 96, tone: "surface" },
+      { id: "api", label: "Local HTTP API", sub: "routes + auth", x: 720, y: 214, w: 226, h: 104, tone: "core" },
+      { id: "app", label: "App services", sub: "approval + claims", x: 720, y: 444, w: 226, h: 104, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },
+      { id: "gongbu", label: "Gongbu server", sub: "separate executor", x: 350, y: 778, w: 242, h: 64, tone: "executor", path: "crates/gongbu-api/src/bin/gongbu-server.rs" },
+      { id: "registration", label: "Registration", sub: "identity + sessions", x: 1080, y: 102, w: 244, h: 94, tone: "core" },
+      { id: "policy", label: "Policy resources", sub: "revisions + evaluation", x: 1080, y: 248, w: 244, h: 94, tone: "core" },
+      { id: "budget", label: "Budgets + targets", sub: "warn + reserve", x: 1080, y: 449, w: 244, h: 94, tone: "core" },
+      { id: "payment", label: "Payment manager", sub: "rail boundary", x: 1080, y: 580, w: 244, h: 94, tone: "wallet" },
+      { id: "ledger", label: "SQLite ledger", sub: "double-entry audit", x: 1080, y: 730, w: 244, h: 96, tone: "data" },
     ],
     edges: [
-      ["human", "cli", "cmd/reconcile"],
-      ["agent", "operationKeys", "begin/reuse"],
-      ["operationKeys", "mcp", "operation key"],
-      ["cli", "api", "token", { labelDx: -12, labelDy: -26, labelT: 0.42 }],
-      ["mcp", "api", "token", { labelDx: -14, labelDy: 34, labelT: 0.42 }],
-      ["agent", "gongbu", "work + token"],
-      ["gongbu", "api", "canonical scope + claim/receipt"],
-      ["api", "registration", "register"],
+      ["human", "cli", "cmd/reconcile", { labelDy: -56 }],
+      ["agent", "operationKeys", "begin/reuse", { fromSide: "right", toSide: "left", waypoints: [{ x: 302, y: 454 }, { x: 302, y: 351 }], labelSegment: 1, labelDx: -28 }],
+      ["operationKeys", "mcp", "operation key", { labelDx: 176 }],
+      ["cli", "api", "token", { fromSide: "right", toSide: "top", waypoints: [{ x: 650, y: 164 }, { x: 650, y: 190 }, { x: 833, y: 190 }], labelSegment: 2 }],
+      ["mcp", "api", "token", { fromSide: "right", toSide: "left", waypoints: [{ x: 620, y: 486 }, { x: 620, y: 266 }], labelSegment: 1 }],
+      ["agent", "gongbu", "work + token", { fromSide: "bottom", toSide: "left", waypoints: [{ x: 154, y: 810 }], labelSegment: 0 }],
+      ["gongbu", "api", "canonical scope + claim/receipt", { fromSide: "right", toSide: "bottom", waypoints: [{ x: 690, y: 810 }, { x: 690, y: 350 }, { x: 833, y: 350 }], labelSegment: 1 }],
+      ["api", "registration", "register", { fromSide: "right", toSide: "left", waypoints: [{ x: 1000, y: 266 }, { x: 1000, y: 149 }], labelSegment: 1 }],
       ["api", "app", "dispatch"],
-      ["app", "policy", "evaluate"],
+      ["app", "policy", "evaluate", { fromSide: "top", toSide: "left", waypoints: [{ x: 970, y: 444 }, { x: 970, y: 295 }], labelSegment: 1 }],
       ["app", "budget", "reserve/settle"],
-      ["app", "payment", "submit payment", { labelDx: -20, labelDy: 56, labelT: 0.45 }],
-      ["payment", "ledger", "ledger", { labelDx: 54, labelDy: 18, labelT: 0.5 }],
-      ["budget", "ledger", "audit", { labelDx: -104, labelDy: 48, labelT: 0.62 }],
+      ["app", "payment", "submit payment", { fromSide: "bottom", toSide: "left", waypoints: [{ x: 970, y: 548 }, { x: 970, y: 627 }], labelSegment: 1 }],
+      ["payment", "ledger", "ledger"],
+      ["budget", "ledger", "audit", { fromSide: "right", toSide: "right", waypoints: [{ x: 1360, y: 451 }, { x: 1360, y: 778 }], labelSegment: 1 }],
     ],
   },
   release: {
@@ -128,9 +128,9 @@ const components = {
       { id: "consumer", label: "Pinned consumer", sub: "tag + checksum", x: 642, y: 510, w: 210, h: 92, tone: "executor" },
     ],
     edges: [
-      ["source", "checks", "checkout"],
+      ["source", "checks", "checkout", { labelDy: -44 }],
       ["checks", "matrix", "gate"],
-      ["matrix", "published", "publish once"],
+      ["matrix", "published", "publish once", { fromSide: "top", toSide: "left", waypoints: [{ x: 747, y: 170 }, { x: 900, y: 170 }, { x: 900, y: 158 }], labelSegment: 1 }],
       ["published", "smoke", "download"],
       ["smoke", "consumer", "validated pin"],
     ],
@@ -198,11 +198,11 @@ const components = {
     edges: [
       ["input", "approval", "authorize"],
       ["input", "claims", "claim/finalize"],
-      ["approval", "managers", "evaluate/reserve"],
+      ["approval", "managers", "evaluate/reserve", { fromSide: "left", toSide: "left", waypoints: [{ x: 360, y: 118 }, { x: 360, y: 538 }], labelSegment: 1, labelDx: -80 }],
       ["claims", "managers", "read/apply"],
       ["approval", "persist", "save"],
-      ["claims", "persist", "atomic transition", { labelDx: 8, labelDy: -22, labelT: 0.54 }],
-      ["approval", "payment", "execute", { labelDx: 50, labelDy: 34, labelT: 0.62 }],
+      ["claims", "persist", "atomic transition", { labelDx: 8, labelDy: 50 }],
+      ["approval", "payment", "execute", { labelDx: 50, labelDy: 80 }],
     ],
   },
   registration: {
@@ -273,7 +273,7 @@ const components = {
       ["resource", "assignments", "reference"],
       ["assignments", "validate", "select current"],
       ["request", "validate", "input"],
-      ["validate", "decision", "trace + precedence"],
+      ["validate", "decision", "trace + precedence", { labelDy: -50 }],
     ],
   },
   budget: {
@@ -316,10 +316,10 @@ const components = {
       ["agentSpend", "reserve", "authorize"],
       ["reserve", "store", "freeze one"],
       ["payment", "settle", "payment", { labelDx: 18, labelDy: -18, labelT: 0.56 }],
-      ["reserve", "executor", "claim lease", { labelDx: -30, labelDy: 18, labelT: 0.62 }],
+      ["reserve", "executor", "claim lease", { labelDx: -36, labelDy: -46 }],
       ["executor", "settle", "receipt", { labelDx: 8, labelDy: 24, labelT: 0.56 }],
-      ["executor", "reconcile", "lease expires", { labelDx: 10, labelDy: 24, labelT: 0.58 }],
-      ["reconcile", "settle", "billed / not billed", { labelDx: 0, labelDy: -20, labelT: 0.48 }],
+      ["executor", "reconcile", "lease expires", { labelDx: 10, labelDy: 50 }],
+      ["reconcile", "settle", "billed / not billed", { labelDy: -75 }],
       ["reconcile", "store", "audit receipt"],
       ["settle", "store", "one transaction"],
       ["periods", "reserve", "active limits"],
@@ -357,7 +357,7 @@ const components = {
       ["rail", "ledger", "success"],
       ["ledger", "token", "ledger id"],
       ["token", "response", "used", { labelDx: 120, labelDy: -6 }],
-      ["rail", "response", "failed", { labelDx: -70, labelDy: 68, labelT: 0.68 }],
+      ["rail", "response", "failed", { fromSide: "right", toSide: "right", waypoints: [{ x: 1060, y: 214 }, { x: 1060, y: 500 }, { x: 700, y: 500 }, { x: 700, y: 594 }], labelSegment: 2 }],
       ["response", "attempts", "persist"],
     ],
   },
@@ -396,17 +396,17 @@ const components = {
       { id: "hubu", label: "Hubu trust boundary", sub: "canonical scope + claim", x: 1010, y: 556, w: 198, h: 100, tone: "core", path: "crates/hubu-api/src/lib.rs" },
     ],
     edges: [
-      ["agent", "gongbuApi", "request + token"],
+      ["agent", "gongbuApi", "request + token", { labelDy: -65 }],
       ["gongbuApi", "executionDb", "persist first"],
       ["gongbuApi", "workflow", "schedule"],
       ["workflow", "temporal", "durable state"],
       ["workflow", "executionDb", "attempt/receipt", { labelDx: -36, labelDy: 26 }],
-      ["workflow", "hubu", "exact scope + claim/finalize", { labelDy: -26 }],
-      ["workflow", "provider", "execute once"],
-      ["credentials", "provider", "resolve secret"],
-      ["provider", "vendor", "model call", { labelDy: -26 }],
-      ["vendor", "provider", "result/usage", { labelDy: 44, labelT: 0.58 }],
-      ["provider", "artifacts", "normalized bytes"],
+      ["workflow", "hubu", "exact scope + claim/finalize", { fromSide: "right", toSide: "left", waypoints: [{ x: 936, y: 158 }, { x: 936, y: 606 }], labelSegment: 1, labelDx: 120 }],
+      ["workflow", "provider", "execute once", { fromSide: "left", toSide: "left", waypoints: [{ x: 630, y: 158 }, { x: 630, y: 520 }], labelSegment: 1, labelDx: -80 }],
+      ["credentials", "provider", "resolve secret", { labelDx: -175 }],
+      ["provider", "vendor", "model call", { fromSide: "right", toSide: "left", waypoints: [{ x: 962, y: 520 }, { x: 962, y: 182 }], labelSegment: 1 }],
+      ["vendor", "provider", "result/usage", { fromSide: "bottom", toSide: "right", waypoints: [{ x: 1109, y: 320 }, { x: 982, y: 320 }, { x: 982, y: 520 }], labelSegment: 1 }],
+      ["provider", "artifacts", "normalized bytes", { fromSide: "left", toSide: "bottom", waypoints: [{ x: 620, y: 520 }, { x: 620, y: 680 }, { x: 445, y: 680 }], labelSegment: 2 }],
       ["artifacts", "executionDb", "metadata"],
     ],
   },
@@ -457,7 +457,7 @@ const components = {
       ["commands", "guidance", "read"],
       ["guidance", "fingerprint", "fill"],
       ["fingerprint", "http", "POST"],
-      ["commands", "http", "GET/POST"],
+      ["commands", "http", "GET/POST", { fromSide: "right", toSide: "left", waypoints: [{ x: 350, y: 178 }, { x: 350, y: 330 }, { x: 760, y: 330 }], labelSegment: 2 }],
     ],
   },
   mcp: {
@@ -538,9 +538,9 @@ const components = {
     edges: [
       ["user", "review", "approve"],
       ["review", "policy", "attach"],
-      ["review", "budget", "create"],
-      ["policy", "audit", "observe"],
-      ["budget", "audit", "observe"],
+      ["review", "budget", "create", { fromSide: "right", toSide: "left", waypoints: [{ x: 700, y: 172 }, { x: 700, y: 380 }], labelSegment: 1 }],
+      ["policy", "audit", "observe", { fromSide: "right", toSide: "right", waypoints: [{ x: 1050, y: 146 }, { x: 1050, y: 500 }], labelSegment: 1 }],
+      ["budget", "audit", "observe", { fromSide: "bottom", toSide: "top", waypoints: [{ x: 905, y: 470 }, { x: 540, y: 470 }], labelSegment: 1 }],
     ],
   },
 };
@@ -557,6 +557,79 @@ const fillByTone = {
   vendor: "var(--vendor)",
 };
 
+const sidebarHighlights = {
+  top: [
+    "Owners set budgets, policies, and approvals.",
+    "Hubu authorizes spend; Gongbu executes provider work.",
+    "Runtime, data, credential, and failure boundaries stay separate.",
+  ],
+  release: [
+    "One exact commit builds all five production binaries.",
+    "Formatting, lint, tests, and integration gates run before publication.",
+    "Archives carry checksums, manifests, and source provenance.",
+  ],
+  api: [
+    "Bearer authentication protects local HTTP routes.",
+    "Routes translate requests and delegate work to app services.",
+    "Transport concerns stay outside domain orchestration.",
+  ],
+  app: [
+    "Approval services authorize and reserve spend.",
+    "Claim services coordinate executor settlement and release.",
+    "State transitions are persisted atomically.",
+  ],
+  registration: [
+    "Humans establish the active owner context.",
+    "Agents submit structured identity and version envelopes.",
+    "The server recomputes fingerprints before registration.",
+  ],
+  policy: [
+    "Policies use immutable, hash-addressed revisions.",
+    "Assignments select the current user or agent policy.",
+    "Evaluation is deterministic and deny-first.",
+  ],
+  budget: [
+    "Agent budgets are hard limits; owner targets are advisory.",
+    "Authorization freezes one execution-scoped hold.",
+    "Claims settle, release, or wait for human reconciliation.",
+  ],
+  payment: [
+    "Requests validate idempotency, spend token, and scope.",
+    "Successful rail execution writes the immutable ledger.",
+    "Identical retries return the stored result without paying twice.",
+  ],
+  gongbu: [
+    "Gongbu runs as a separate execution-plane process.",
+    "It claims Hubu authorization before provider work.",
+    "It owns workflows, credentials, provider calls, and artifacts.",
+  ],
+  ledger: [
+    "Successful money movement is recorded double-entry.",
+    "Every transaction must balance within one owner scope.",
+    "Triggers prevent updates and deletes.",
+  ],
+  cli: [
+    "Humans use the CLI for setup and administration.",
+    "It configures agent-facing MCP access.",
+    "It exposes policy, budget, spend, ledger, and health workflows.",
+  ],
+  mcp: [
+    "Agents receive structured spend-control tools.",
+    "Tool calls map to the local Hubu API.",
+    "Protected outcomes remain visible for human approval.",
+  ],
+  agent: [
+    "The agent reuses a scope-bound operation key.",
+    "Hubu authorizes spend before any billable work.",
+    "Execution finishes by settling or releasing the hold.",
+  ],
+  human: [
+    "The owner initializes and funds the control plane.",
+    "Policies and budgets define agent authority.",
+    "Protected actions and uncertain claims return for review.",
+  ],
+};
+
 let currentView = "top";
 
 const svg = document.getElementById("architecture-canvas");
@@ -564,10 +637,7 @@ const title = document.getElementById("diagram-title");
 const crumb = document.getElementById("diagram-crumb");
 const detailsTitle = document.getElementById("details-title");
 const detailsKind = document.getElementById("details-kind");
-const detailsCopy = document.getElementById("details-copy");
 const responsibilities = document.getElementById("responsibilities");
-const codeLinks = document.getElementById("code-links");
-const pathTooltip = document.getElementById("path-tooltip");
 const topButtons = [
   document.getElementById("top-view-button"),
   document.getElementById("details-back-button"),
@@ -582,9 +652,7 @@ function showView(viewId) {
   crumb.textContent = view.kind;
   detailsTitle.textContent = view.title;
   detailsKind.textContent = view.kind;
-  detailsCopy.textContent = view.copy;
-  renderResponsibilities(view.responsibilities);
-  renderCodeLinks(view.links || []);
+  renderResponsibilities(sidebarHighlights[viewId]);
   renderDiagram(view);
 }
 
@@ -594,20 +662,6 @@ function renderResponsibilities(items) {
     const li = document.createElement("li");
     li.textContent = item;
     responsibilities.appendChild(li);
-  });
-}
-
-function renderCodeLinks(items) {
-  codeLinks.innerHTML = "";
-  items.forEach(([label, path]) => {
-    const li = document.createElement("li");
-    const link = document.createElement("a");
-    link.href = `https://github.com/hacker-no-ice/hubu/blob/main/${path}`;
-    link.target = "_blank";
-    link.rel = "noreferrer";
-    link.textContent = `${label}: ${path}`;
-    li.appendChild(link);
-    codeLinks.appendChild(li);
   });
 }
 
@@ -660,6 +714,10 @@ function addMarker() {
 }
 
 function drawEdge(from, to, label, index, options = {}) {
+  if (options.waypoints) {
+    drawRoutedEdge(from, to, label, options);
+    return;
+  }
   const start = center(from);
   const end = center(to);
   const dx = end.x - start.x;
@@ -667,60 +725,105 @@ function drawEdge(from, to, label, index, options = {}) {
   const horizontal = Math.abs(dx) >= Math.abs(dy);
   const fromPoint = edgePoint(from, horizontal ? Math.sign(dx) : 0, horizontal ? 0 : Math.sign(dy));
   const toPoint = edgePoint(to, horizontal ? -Math.sign(dx) : 0, horizontal ? 0 : -Math.sign(dy));
-  const jitter = (index % 2 === 0 ? 1 : -1) * 18;
-  const controlA = horizontal
-    ? { x: fromPoint.x + dx * 0.32, y: fromPoint.y + jitter }
-    : { x: fromPoint.x + jitter, y: fromPoint.y + dy * 0.32 };
-  const controlB = horizontal
-    ? { x: toPoint.x - dx * 0.32, y: toPoint.y - jitter }
-    : { x: toPoint.x - jitter, y: toPoint.y - dy * 0.32 };
+  const offset = (index % 2 === 0 ? 1 : -1) * 10;
+  const points = horizontal
+    ? [
+        fromPoint,
+        { x: (fromPoint.x + toPoint.x) / 2 + offset, y: fromPoint.y },
+        { x: (fromPoint.x + toPoint.x) / 2 + offset, y: toPoint.y },
+        toPoint,
+      ]
+    : [
+        fromPoint,
+        { x: fromPoint.x, y: (fromPoint.y + toPoint.y) / 2 + offset },
+        { x: toPoint.x, y: (fromPoint.y + toPoint.y) / 2 + offset },
+        toPoint,
+      ];
+  drawPolylineEdge(points, label, {
+    ...options,
+    labelPoint: {
+      x: (fromPoint.x + toPoint.x) / 2,
+      y: (fromPoint.y + toPoint.y) / 2,
+    },
+  });
+}
+
+function drawRoutedEdge(from, to, label, options) {
+  const points = [
+    edgePointForSide(from, options.fromSide),
+    ...options.waypoints,
+    edgePointForSide(to, options.toSide),
+  ];
+  drawPolylineEdge(points, label, options);
+}
+
+function drawPolylineEdge(points, label, options = {}) {
   const path = makeSvg("path", {
     class: "arrow-line",
-    d: `M ${fromPoint.x} ${fromPoint.y} C ${controlA.x} ${controlA.y}, ${controlB.x} ${controlB.y}, ${toPoint.x} ${toPoint.y}`,
+    d: points.map((point, pointIndex) => `${pointIndex === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" "),
     "marker-end": "url(#arrow-tip)",
   });
   svg.appendChild(path);
 
-  const midpoint = cubicPoint(fromPoint, controlA, controlB, toPoint, options.labelT || 0.5);
-  const labelText = label;
-  const labelWidth = Math.max(58, labelText.length * 8 + 18);
-  const labelX = midpoint.x + (options.labelDx || 0);
-  const labelY = midpoint.y - 8 + (options.labelDy || 0);
-  const labelBack = makeSvg("rect", {
+  const segmentIndex = options.labelSegment == null
+    ? longestSegmentIndex(points)
+    : Math.min(options.labelSegment, points.length - 2);
+  const segmentStart = points[segmentIndex];
+  const segmentEnd = points[segmentIndex + 1];
+  const labelPoint = options.labelPoint || {
+    x: (segmentStart.x + segmentEnd.x) / 2,
+    y: (segmentStart.y + segmentEnd.y) / 2,
+  };
+  drawEdgeLabel(label, {
+    x: labelPoint.x + (options.labelDx || 0),
+    y: labelPoint.y - 8 + (options.labelDy || 0),
+  });
+}
+
+function longestSegmentIndex(points) {
+  let longestIndex = 0;
+  let longestLength = -1;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const length = Math.abs(points[index + 1].x - points[index].x)
+      + Math.abs(points[index + 1].y - points[index].y);
+    if (length > longestLength) {
+      longestLength = length;
+      longestIndex = index;
+    }
+  }
+  return longestIndex;
+}
+
+function drawEdgeLabel(label, point) {
+  const labelWidth = Math.max(58, label.length * 8 + 18);
+  svg.appendChild(makeSvg("rect", {
     class: "arrow-label-back",
-    x: labelX - labelWidth / 2,
-    y: labelY - 17,
+    x: point.x - labelWidth / 2,
+    y: point.y - 17,
     width: labelWidth,
     height: 23,
     rx: "4",
-  });
-  svg.appendChild(labelBack);
-
+  }));
   const text = makeSvg("text", {
     class: "arrow-label",
-    x: labelX,
-    y: labelY,
+    x: point.x,
+    y: point.y,
     "text-anchor": "middle",
   });
-  text.textContent = labelText;
+  text.textContent = label;
   svg.appendChild(text);
 }
 
 function drawNode(node) {
-  const path = pathForNode(node);
-  const group = makeSvg("g", {
-    class: nodeClass(node),
-    tabindex: "0",
-    role: "button",
-    "aria-label": `${node.label}. Click for details.${path ? ` Path: ${path}.` : ""}`,
-  });
-  group.dataset.nodeId = node.id;
-  if (path) {
-    group.dataset.path = path;
-    const title = makeSvg("title");
-    title.textContent = path;
-    group.appendChild(title);
+  const drillable = Boolean(components[node.id]);
+  const attributes = { class: nodeClass(node, drillable) };
+  if (drillable) {
+    attributes.tabindex = "0";
+    attributes.role = "button";
+    attributes["aria-label"] = `${node.label}. Select for subsystem details.`;
   }
+  const group = makeSvg("g", attributes);
+  group.dataset.nodeId = node.id;
 
   const angle = ((node.x + node.y) % 7) - 3;
   group.setAttribute("transform", `rotate(${angle} ${node.x + node.w / 2} ${node.y + node.h / 2})`);
@@ -741,28 +844,27 @@ function drawNode(node) {
     x: node.x + node.w / 2,
     y: node.y + node.h / 2 + 24,
     "text-anchor": "middle",
+    "font-size": subLabelSize(node.sub),
   });
   sub.textContent = node.sub;
   group.appendChild(sub);
 
-  group.addEventListener("click", () => drill(node.id));
-  group.addEventListener("mouseenter", (event) => showPathTooltip(event, node));
-  group.addEventListener("mousemove", (event) => positionPathTooltip(event.clientX, event.clientY));
-  group.addEventListener("mouseleave", hidePathTooltip);
-  group.addEventListener("focus", () => showFocusedPathTooltip(group, node));
-  group.addEventListener("blur", hidePathTooltip);
-  group.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      drill(node.id);
-    }
-  });
+  if (drillable) {
+    group.addEventListener("click", () => drill(node.id));
+    group.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        drill(node.id);
+      }
+    });
+  }
   svg.appendChild(group);
 }
 
-function nodeClass(node) {
+function nodeClass(node, drillable) {
   return [
     "node",
+    drillable ? "is-drillable" : "",
     isActorNode(node) ? "actor-node" : "",
     node.tone === "data" ? "storage-node" : "",
     node.tone === "vendor" ? "vendor-node" : "",
@@ -872,43 +974,8 @@ function isActorNode(node) {
   return node.tone === "human" || node.tone === "agent";
 }
 
-function pathForNode(node) {
-  return node.path || components[node.id]?.links?.[0]?.[1] || null;
-}
-
-function showPathTooltip(event, node) {
-  const path = pathForNode(node);
-  if (!path) return;
-  pathTooltip.textContent = path;
-  pathTooltip.classList.add("is-visible");
-  positionPathTooltip(event.clientX, event.clientY);
-}
-
-function showFocusedPathTooltip(group, node) {
-  const path = pathForNode(node);
-  if (!path) return;
-  const box = group.getBoundingClientRect();
-  pathTooltip.textContent = path;
-  pathTooltip.classList.add("is-visible");
-  positionPathTooltip(box.left + box.width / 2, box.top + box.height / 2);
-}
-
-function positionPathTooltip(clientX, clientY) {
-  const offset = 14;
-  const tooltipBox = pathTooltip.getBoundingClientRect();
-  const x = Math.min(clientX + offset, window.innerWidth - tooltipBox.width - offset);
-  const y = Math.min(clientY + offset, window.innerHeight - tooltipBox.height - offset);
-  pathTooltip.style.left = `${Math.max(offset, x)}px`;
-  pathTooltip.style.top = `${Math.max(offset, y)}px`;
-}
-
-function hidePathTooltip() {
-  pathTooltip.classList.remove("is-visible");
-}
-
 function drill(nodeId) {
   if (components[nodeId]) {
-    hidePathTooltip();
     showView(nodeId);
   }
 }
@@ -924,12 +991,15 @@ function edgePoint(node, sideX, sideY) {
   };
 }
 
-function cubicPoint(a, b, c, d, t) {
-  const mt = 1 - t;
-  return {
-    x: mt ** 3 * a.x + 3 * mt ** 2 * t * b.x + 3 * mt * t ** 2 * c.x + t ** 3 * d.x,
-    y: mt ** 3 * a.y + 3 * mt ** 2 * t * b.y + 3 * mt * t ** 2 * c.y + t ** 3 * d.y,
+function edgePointForSide(node, side) {
+  const sides = {
+    top: [0, -1],
+    right: [1, 0],
+    bottom: [0, 1],
+    left: [-1, 0],
   };
+  const [sideX, sideY] = sides[side];
+  return edgePoint(node, sideX, sideY);
 }
 
 function roughUnderline(x, y, width) {
@@ -941,6 +1011,12 @@ function labelSize(label) {
   if (label.length > 20) return 19;
   if (label.length > 14) return 21;
   return 24;
+}
+
+function subLabelSize(label) {
+  if (label.length > 30) return 11;
+  if (label.length > 24) return 12;
+  return 14;
 }
 
 function makeSvg(name, attrs = {}) {

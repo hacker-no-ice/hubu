@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Hubu Architecture Map</title>
+    <title>Agent Spend Control Plane</title>
     <link rel="stylesheet" href="./architecture.css" />
   </head>
   <body>
@@ -15,7 +15,14 @@
         </div>
         <div>
           <p class="kicker">Hubu + Gongbu architecture</p>
-          <h1>One product, separate runtimes</h1>
+          <h1>Agent Spend Control Plane</h1>
+          <p class="snapshot-record">
+            Architecture snapshot
+            <time datetime="2026-08-18">2026-08-18</time>
+            <span aria-hidden="true">·</span>
+            <span>source</span>
+            <code>f225fd3bd54aa386d9483eb890a7673ce02098d2</code>
+          </p>
         </div>
       </div>
       <nav aria-label="Architecture views">
@@ -38,8 +45,8 @@
       <section class="diagram-region" aria-label="Hubu architecture diagram">
         <div class="diagram-toolbar">
           <div>
-            <p class="crumb" id="diagram-crumb">Top level</p>
-            <h2 id="diagram-title">System Map</h2>
+            <p class="crumb" id="diagram-crumb">Overview</p>
+            <h2 id="diagram-title">Major Components</h2>
           </div>
           <div class="legend" aria-label="Diagram legend">
             <span><i class="swatch human"></i>Human</span>
@@ -60,7 +67,7 @@
           aria-labelledby="diagram-title diagram-summary"
         ></svg>
         <p id="diagram-summary" class="diagram-summary">
-          Click a component to drill into its runtime flow. Hover a box to see its in-repository path.
+          Select a component to zoom into its subsystem and see how the internals interact.
         </p>
       </section>
 
@@ -69,24 +76,15 @@
           <span aria-hidden="true">←</span>
           Top level
         </button>
-        <p class="crumb" id="details-kind">Component</p>
-        <h2 id="details-title">System Map</h2>
-        <p id="details-copy">
-          Hubu lets humans fund and govern agent spending while agents submit structured requests
-          through deterministic authorization and payment boundaries.
-        </p>
+        <p class="crumb" id="details-kind">Overview</p>
+        <h2 id="details-title">Major Components</h2>
         <div class="detail-list">
-          <h3>Responsibilities</h3>
+          <h3>At a glance</h3>
           <ul id="responsibilities"></ul>
-        </div>
-        <div class="detail-list code-links">
-          <h3>Code &amp; docs</h3>
-          <ul id="code-links"></ul>
         </div>
       </aside>
     </main>
 
-    <div class="path-tooltip" id="path-tooltip" role="status" aria-live="polite"></div>
     <script src="./architecture.js"></script>
   </body>
 </html>
