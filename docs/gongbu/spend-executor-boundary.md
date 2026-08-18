@@ -2,7 +2,7 @@
 
 The canonical Hubu protocol is the in-repository
 [Hubu spend executor contract](../spend-executor-contract.md). Gongbu's
-production Hubu activities implement that v4.1 HTTP contract for resolution, claim,
+production Hubu activities implement that v4.2 HTTP contract for resolution, claim,
 inspection, settlement, and release. Sharing a repository and product version
 does not turn this wire boundary into an in-process or shared-database call.
 

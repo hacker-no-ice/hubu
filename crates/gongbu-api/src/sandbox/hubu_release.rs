@@ -7,7 +7,7 @@ use std::{
     process::Command,
 };
 
-pub const EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4.1";
+pub const EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4.2";
 const DEFAULT_REPOSITORY: &str = "hacker-no-ice/hubu";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

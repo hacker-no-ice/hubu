@@ -91,7 +91,7 @@ either mock boundary.
 The required real-Hubu compatibility profile uses an exact immutable release.
 Mutable aliases such as `latest` and `main` are rejected. The sandbox selects
 the current platform archive, verifies its published `SHA256SUMS` entry,
-validates packaged provenance and `hubu-spend-executor-v4.1`, and checks the
+validates packaged provenance and `hubu-spend-executor-v4.2`, and checks the
 binary's reported product/source/contract tuple before readiness.
 Managed startup also installs an explicit `image_generation` spend timing
 profile and authorizes the selected target's canonical typed scope, so the

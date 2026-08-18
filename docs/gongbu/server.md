@@ -50,7 +50,7 @@ Start the already installed Hubu server using its own persistent database and
 authentication configuration. Register or select the account and agent, create
 the relevant budget/policy, and issue the authorization used by the execution.
 Verify Hubu reports the exact `product_version` configured in Gongbu and the
-`hubu-spend-executor-v4.1` executor contract. The Gongbu startup policy may exit
+`hubu-spend-executor-v4.2` executor contract. The Gongbu startup policy may exit
 immediately or wait for the configured bounded interval; it never repairs Hubu.
 
 ## Choose Temporal ownership

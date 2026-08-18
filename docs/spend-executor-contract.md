@@ -18,13 +18,17 @@ references needed for settlement auditability.
 
 ## Protocol Version
 
-The current version is `hubu-spend-executor-v4.1`. Agents and executors can
+The current version is `hubu-spend-executor-v4.2`. Agents and executors can
 discover its machine-readable guidance from either public route:
 
 ```http
 GET /spend/executor/guidance
 GET /.well-known/hubu-spend-executor.json
 ```
+
+V4.2 requires the read-only `POST /spend/executor/resolve` capability used for
+token-only executor admission. A v4.1 Hubu does not provide that route and is
+therefore intentionally startup-incompatible with a v4.2 Gongbu.
 
 V4 retains V3's immutable, platform-provided `operation_key` from authorization
 through claim and finalization. Hubu stores workflow state under

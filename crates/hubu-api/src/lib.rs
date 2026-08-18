@@ -5360,7 +5360,7 @@ profiles:
         );
         assert_eq!(
             response.body["executor_contract"],
-            "hubu-spend-executor-v4.1"
+            "hubu-spend-executor-v4.2"
         );
         assert!(response.body["source_commit"]
             .as_str()
@@ -6527,7 +6527,7 @@ profiles:
             assert_eq!(response.status, 200);
             assert_eq!(
                 response.body["protocol_version"],
-                "hubu-spend-executor-v4.1"
+                "hubu-spend-executor-v4.2"
             );
             assert!(response.body["role_boundary"]["hubu"]
                 .as_array()
@@ -6601,7 +6601,7 @@ profiles:
     #[test]
     fn token_only_resolution_returns_authoritative_snapshot_without_claiming() {
         let fixture: ExecutorSpendResolveHttpRequest = serde_json::from_str(include_str!(
-            "../../../fixtures/hubu-executor-resolve-v4.1.json"
+            "../../../fixtures/hubu-executor-resolve-v4.2.json"
         ))
         .unwrap();
         assert_eq!(
