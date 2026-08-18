@@ -44,6 +44,7 @@ pub type Result<T> = std::result::Result<T, SecretError>;
 /// Secret bytes deliberately have no `Debug`, `Display`, serde, or clone implementation.
 pub struct ProviderSecret(Vec<u8>);
 impl ProviderSecret {
+    #[cfg(any(target_os = "macos", test))]
     fn new(bytes: Vec<u8>) -> Result<Self> {
         if bytes.is_empty() {
             Err(SecretError::Unavailable)
