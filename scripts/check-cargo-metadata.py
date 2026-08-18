@@ -21,6 +21,7 @@ EXPECTED_PACKAGES = {
     "hubu-common",
     "hubu-core",
     "hubu-mcp",
+    "hubu-unified-mcp",
     "hubu-wallet",
 }
 EXPECTED_RUST_VERSION = "1.88"
