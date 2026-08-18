@@ -42,7 +42,7 @@ run_default_server_check() {
 
   (
     cd "${work_dir}"
-    env \
+    exec env \
       -u HUBU_AUTH_TOKEN \
       -u HUBU_AUTH_TOKEN_FILE \
       -u HUBU_RECONCILIATION_TOKEN \

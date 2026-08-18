@@ -27,6 +27,18 @@ fn empty_object() -> Value {
 }
 
 fn main() {
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|argument| matches!(argument.as_str(), "version" | "--version" | "-V"))
+    {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&gongbu_build_info::build_info())
+                .expect("build metadata should serialize")
+        );
+        return;
+    }
+
     if let Err(error) = run() {
         eprintln!("gongbu-mcp: {error}");
         std::process::exit(1);

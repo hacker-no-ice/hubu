@@ -98,7 +98,7 @@ fn handle_json_rpc(base_url: &str, config: McpConfig, request: Value) -> Option<
             "protocolVersion": PROTOCOL_VERSION,
             "serverInfo": {
                 "name": "hubu-mcp-server",
-                "version": env!("CARGO_PKG_VERSION")
+                "version": hubu_common::build::build_info().product_version
             },
             "capabilities": {
                 "tools": {}
@@ -944,6 +944,10 @@ mod tests {
             .expect("instructions should be present");
         assert!(instructions.contains("hubu_submit_spend"));
         assert!(instructions.contains("Protected setup/admin tools require"));
+        assert_eq!(
+            response["result"]["serverInfo"]["version"],
+            hubu_common::build::build_info().product_version
+        );
     }
 
     #[test]
