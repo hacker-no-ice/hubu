@@ -589,13 +589,15 @@ impl HubuAdmin {
     }
 
     fn authorize(&self, provisioned: &Provisioned, operation_key: &str) -> Value {
+        let task_id = format!("e2e-task:{operation_key}");
         let response = self.post(
             "/spend/authorize",
             json!({
                 "operation_key":operation_key,
                 "account_id":provisioned.account_id,
                 "amount_cents":AUTHORIZED_MINOR,
-                "reason":operation_key,
+                "task_id":task_id,
+                "reason":"Deterministic Gongbu executor test",
                 "execution_scope": {
                     "schema_version":1,
                     "provider":"provider:local:fixture",
@@ -606,6 +608,8 @@ impl HubuAdmin {
             }),
         );
         assert_eq!(response["decision"], "allow");
+        assert_eq!(response["task_id"], task_id);
+        assert_eq!(response["reason"], "Deterministic Gongbu executor test");
         assert_eq!(response["payment"], Value::Null);
         assert_eq!(response["budget_hold"]["status"], "frozen");
         response

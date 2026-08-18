@@ -25,8 +25,9 @@ payment, or becomes `released` when payment fails, the authorization is unused,
 or the hold is canceled.
 
 Every spend decision may have at most one budget hold and requires an active USD
-budget belonging to the spending agent. A spend may still carry `task_id` as
-audit and executor metadata, but that metadata does not select or own a budget.
+budget belonging to the spending agent. A spend may still carry optional
+`task_id` business correlation and a separate descriptive `reason` as audit and
+executor evidence, but neither field selects or owns a budget.
 
 An agent may only have one budget for a currency at any instant. Single budgets
 and recurring series reject overlapping periods for the same agent and

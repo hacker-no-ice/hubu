@@ -424,6 +424,7 @@ mod tests {
             execution_scope: None,
             category: Some("meals".to_string()),
             task_id: None,
+            reason: "test spend".to_string(),
             workload_profile: "default".to_string(),
         }
     }

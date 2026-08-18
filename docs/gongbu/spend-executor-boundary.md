@@ -11,6 +11,15 @@ their audit state. Gongbu owns operator-controlled provider configuration,
 provider credentials, provider execution, normalized artifacts, cost
 calculation, and settlement evidence.
 
+Hubu's stored authorization snapshot is authoritative for `operation_key`, the
+optional external `task_id`, and the descriptive `reason`. Current Gongbu
+compatibility requests carry the persisted execution operation key required by
+the v4 claim route, but omit `task_id`; Hubu resolves and returns the authorized
+task correlation and reason. Gongbu must not derive task identity from its
+operation key or accept a new caller-controlled duplicate. The planned
+token-resolution flow will reduce this further to the token plus execution
+intent, with Gongbu resolving the full Hubu snapshot before admission.
+
 Future execution work must use the persisted `Execution` aggregate. It must
 create a `ProviderAttempt` before irreversible provider transmission and use a
 stable persisted receipt for finalization. An ambiguous provider or settlement

@@ -89,7 +89,7 @@ either mock boundary.
 The required real-Hubu compatibility profile uses an exact immutable release.
 Mutable aliases such as `latest` and `main` are rejected. The sandbox selects
 the current platform archive, verifies its published `SHA256SUMS` entry,
-validates packaged provenance and `hubu-spend-executor-v4`, and checks the
+validates packaged provenance and `hubu-spend-executor-v4.1`, and checks the
 binary's reported product/source/contract tuple before readiness.
 
 The selected implementation is wired through the same `HubuActivities` and

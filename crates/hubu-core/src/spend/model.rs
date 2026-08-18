@@ -24,18 +24,25 @@ pub struct SpendRequest {
     pub execution_scope: Option<ExecutionScope>,
     pub category: Option<String>,
     pub task_id: Option<String>,
+    #[serde(default)]
+    pub reason: String,
     #[serde(default = "default_workload_profile")]
     pub workload_profile: String,
 }
 
 impl SpendRequest {
     pub(crate) fn replay_equivalent(&self, other: &Self) -> bool {
-        if self == other {
+        let self_normalized = self.with_legacy_reason();
+        let other_normalized = other.with_legacy_reason();
+        if self_normalized == other_normalized {
             return true;
         }
-        let (without_scope, with_scope) = match (&self.execution_scope, &other.execution_scope) {
-            (None, Some(_)) => (self, other),
-            (Some(_), None) => (other, self),
+        let (without_scope, with_scope) = match (
+            &self_normalized.execution_scope,
+            &other_normalized.execution_scope,
+        ) {
+            (None, Some(_)) => (&self_normalized, &other_normalized),
+            (Some(_), None) => (&other_normalized, &self_normalized),
             _ => return false,
         };
         let Some(merchant) = with_scope.merchant.as_deref() else {
@@ -50,6 +57,18 @@ impl SpendRequest {
         let mut normalized = with_scope.clone();
         normalized.execution_scope = None;
         without_scope == &normalized
+    }
+
+    fn with_legacy_reason(&self) -> Self {
+        let mut normalized = self.clone();
+        normalized.normalize_legacy_reason();
+        normalized
+    }
+
+    pub(crate) fn normalize_legacy_reason(&mut self) {
+        if self.reason.is_empty() {
+            self.reason = self.task_id.clone().unwrap_or_default();
+        }
     }
 }
 
@@ -255,6 +274,46 @@ pub struct SpendExecutorClaimRecord {
     pub reconciliation_evidence: Option<String>,
     pub reconciled_at: Option<DateTime<Utc>>,
     pub reconciled_by_user_id: Option<UserId>,
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    fn request(task_id: Option<&str>, reason: &str) -> SpendRequest {
+        SpendRequest {
+            amount_cents: 500,
+            currency: Currency::Usd,
+            owner_user_id: "00000000-0000-4000-8000-000000000123".parse().unwrap(),
+            agent_id: AgentId::new(),
+            agent_account_id: AgentAccountId::new(),
+            merchant: Some("vendor.example".to_string()),
+            execution_scope: None,
+            category: None,
+            task_id: task_id.map(str::to_string),
+            reason: reason.to_string(),
+            workload_profile: "default".to_string(),
+        }
+    }
+
+    #[test]
+    fn legacy_persisted_reason_maps_from_task_id_for_replay() {
+        let legacy = request(Some("Generate logo"), "");
+        let mut replay = legacy.clone();
+        replay.reason = "Generate logo".to_string();
+        assert!(legacy.replay_equivalent(&replay));
+    }
+
+    #[test]
+    fn independent_task_and_reason_are_both_replay_bound() {
+        let request = request(Some("linear:HUB-73"), "Generate logo");
+        let mut changed_task = request.clone();
+        changed_task.task_id = Some("linear:HUB-74".to_string());
+        let mut changed_reason = request.clone();
+        changed_reason.reason = "Generate a different logo".to_string();
+        assert!(!request.replay_equivalent(&changed_task));
+        assert!(!request.replay_equivalent(&changed_reason));
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

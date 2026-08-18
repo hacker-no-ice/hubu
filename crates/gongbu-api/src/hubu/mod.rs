@@ -166,7 +166,9 @@ impl ProductionHubuActivities {
             amount_cents: execution.authorized_minor,
             merchant,
             execution_scope,
-            task_id: Some(execution.operation_key.clone()),
+            // Hubu owns task correlation in the authorization snapshot. Gongbu
+            // omits the untrusted duplicate and lets Hubu return the stored value.
+            task_id: None,
         }
     }
 }
@@ -437,6 +439,13 @@ mod tests {
     }
 
     #[test]
+    fn claim_request_omits_task_identity_for_hubu_to_resolve() {
+        let value = serde_json::to_value(claim_request()).unwrap();
+        assert!(value.get("task_id").is_none());
+        assert_eq!(value["operation_key"], "platform:op-1");
+    }
+
+    #[test]
     fn ambiguous_settlement_is_returned_without_inspection_or_retry() {
         let (client, paths) = fake_hubu(vec![None]);
         client
@@ -473,7 +482,7 @@ mod tests {
                 amount_cents: 500,
                 merchant: Some("gongbu.image".to_string()),
                 execution_scope: None,
-                task_id: Some("task-1".to_string()),
+                task_id: None,
             },
         }
     }

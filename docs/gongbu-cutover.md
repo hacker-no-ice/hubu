@@ -46,7 +46,7 @@ contract. Confirm all of these before archiving the legacy repository:
 | Databases | Hubu and Gongbu continue to use separate operator-selected SQLite files. Neither process opens or migrates the other's database. |
 | Artifacts | Gongbu continues to own normalized artifact bytes beneath its configured root and stores storage-neutral keys rather than absolute paths. |
 | Temporal | The `gongbu-executions` task queue and stable `gongbu-execution-{execution_id}` workflow IDs remain unchanged, preserving replay and recovery semantics. |
-| Boundary | Hubu remains the control plane and Gongbu the execution plane over `hubu-spend-executor-v4`; credentials, provider calls, MCP surfaces, storage, and failure domains remain separate. |
+| Boundary | Hubu remains the control plane and Gongbu the execution plane over `hubu-spend-executor-v4.1`; credentials, provider calls, MCP surfaces, storage, and failure domains remain separate. |
 
 Use the unified workspace checks, deterministic executor E2E, archive verifier,
 and published release smoke as executable evidence. A live dogfood is optional

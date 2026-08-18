@@ -75,7 +75,7 @@ use hubu_wallet::{
     PaymentManager, PaymentRailKind, PaymentRequest, PaymentStatus, SpendAuthorizationValidator,
     SqliteLedger, SqlitePaymentAttemptRepository,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -931,15 +931,42 @@ struct SpendHttpRequest {
     #[serde(default)]
     currency: Option<String>,
     reason: String,
+    #[serde(default)]
+    task_id: FieldPresence<String>,
     merchant: Option<String>,
     #[serde(default)]
     execution_scope: Option<ExecutionScopeSelector>,
     workload_profile: Option<String>,
 }
 
+#[derive(Debug, Default)]
+enum FieldPresence<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+
+impl<'de, T> Deserialize<'de> for FieldPresence<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            Some(value) => Self::Value(value),
+            None => Self::Null,
+        })
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct SpendHttpResponse {
     operation_key: String,
+    task_id: Option<String>,
+    reason: String,
     account_id: String,
     agent_id: String,
     decision_id: String,
@@ -1045,6 +1072,7 @@ struct ExecutorClaimReconciliationHttpRequest {
 #[derive(Debug, Serialize)]
 struct ExecutorSpendHttpResponse {
     operation_key: String,
+    reason: String,
     spend_auth_token_id: String,
     decision_id: String,
     account_id: String,
@@ -1579,10 +1607,12 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "reason"
             ],
             "optional": [
+                "task_id",
                 "execution_scope",
                 "merchant (legacy only)",
                 "workload_profile"
-            ]
+            ],
+            "task_id_compatibility": "missing maps reason into task_id for legacy clients; explicit null omits task correlation; an explicit string is preserved independently"
         },
         "claim_request": {
             "required": [
@@ -1594,7 +1624,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "optional": [
                 "execution_scope",
                 "merchant (legacy only)",
-                "task_id"
+                "task_id (compatibility assertion only; Hubu uses the authorization snapshot)"
             ],
             "currency": "usd in v4"
         },
@@ -1640,7 +1670,9 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
         "timing": &state.spend_timing,
         "scope_rules": [
             "operation_key is platform-assigned, immutable, and scoped to the authorized agent; authorization retries must use the same spend scope",
-            "account_id, amount_cents, complete canonical execution_scope, legacy merchant, and task_id must match the original authorized spend",
+            "task_id is an optional trusted external correlation and reason is independent human-readable authorization context; neither must equal operation_key",
+            "Hubu resolves task_id and reason from the authorization snapshot for executor and reconciliation evidence; a supplied executor task_id is only a compatibility assertion and must match",
+            "account_id, amount_cents, complete canonical execution_scope, and legacy merchant must match the original authorized spend",
             "typed execution_scope identifiers resolve against Hubu's trusted catalog; unknown or ambiguous identifiers are rejected",
             "provider, executor, capability, and billing_merchant are independently policy-addressable stable identities",
             "workload_profile is selected during authorization and cannot be changed by the executor",
@@ -3040,6 +3072,8 @@ fn authorize_spend(body: String, state: &ServerState) -> Result<SpendHttpRespons
 
     Ok(SpendHttpResponse {
         operation_key: authorization.approval.operation_key.clone(),
+        task_id: authorization.approval.task_id.clone(),
+        reason: authorization.approval.reason.clone(),
         account_id: authorization.account_pub_id,
         agent_id: authorization.agent_pub_id,
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
@@ -3162,6 +3196,8 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
 
     Ok(SpendHttpResponse {
         operation_key: authorization.approval.operation_key.clone(),
+        task_id: authorization.approval.task_id.clone(),
+        reason: authorization.approval.reason.clone(),
         account_id: authorization.account_pub_id,
         agent_id: authorization.agent_pub_id,
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
@@ -3193,7 +3229,14 @@ fn claim_executor_spend(
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
-    let resolved = resolve_executor_spend_request(request.spend, state)?;
+    let mut resolved = resolve_executor_spend_request(request.spend, state)?;
+    {
+        let spend = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        apply_authoritative_executor_identity(&mut resolved, &spend)?;
+    }
     let authorization = resolved.payment_validation_request();
     let claim_state = {
         let mut spend_manager = state
@@ -3472,6 +3515,7 @@ fn release_executor_spend_request(
 
 struct ValidatedExecutorSpend {
     operation_key: String,
+    reason: String,
     request: ExecutorSpendHttpRequest,
     account_pub_id: String,
     agent_pub_id: String,
@@ -3509,12 +3553,14 @@ impl ResolvedExecutorSpend {
     fn into_validated(
         self,
         operation_key: String,
+        reason: String,
         validation: hubu_core::spend::ValidatedSpendAuthorization,
         budget_hold: BudgetHold,
         budget_balance: hubu_core::budget::BudgetBalance,
     ) -> ValidatedExecutorSpend {
         ValidatedExecutorSpend {
             operation_key,
+            reason,
             request: self.request,
             account_pub_id: self.account_pub_id,
             agent_pub_id: self.agent_pub_id,
@@ -3524,6 +3570,28 @@ impl ResolvedExecutorSpend {
             budget_balance,
         }
     }
+}
+
+fn apply_authoritative_executor_identity(
+    resolved: &mut ResolvedExecutorSpend,
+    spend: &SpendManager,
+) -> Result<(String, String)> {
+    let token = spend
+        .auth_token_record(&resolved.token_id)
+        .ok_or_else(|| anyhow!("unknown spend auth token"))?;
+    let decision = spend
+        .decision_record(&token.spend_decision_id)
+        .ok_or_else(|| anyhow!("spend decision is missing"))?;
+    if resolved.request.task_id.is_some() && resolved.request.task_id != decision.request.task_id {
+        return Err(anyhow!(
+            "executor task_id assertion does not match the authoritative authorization"
+        ));
+    }
+    resolved.request.task_id = decision.request.task_id.clone();
+    Ok((
+        decision.operation_key.clone(),
+        decision.request.reason.clone(),
+    ))
 }
 
 fn resolve_executor_spend_request(
@@ -3563,7 +3631,8 @@ fn resolve_executor_spend_request(
         account_id: request.account_id.clone(),
         amount_cents: request.amount_cents,
         currency: Some(Currency::Usd.to_string()),
-        reason: request.task_id.clone().unwrap_or_default(),
+        reason: "executor authorization snapshot lookup".to_string(),
+        task_id: FieldPresence::Missing,
         merchant: request.merchant.clone(),
         execution_scope: request.execution_scope.as_ref().map(scope_as_selector),
         workload_profile: None,
@@ -3592,20 +3661,17 @@ fn validate_executor_spend_request(
     request: ExecutorSpendHttpRequest,
     state: &ServerState,
 ) -> Result<ValidatedExecutorSpend> {
-    let resolved = resolve_executor_spend_request(request, state)?;
-
-    let validation = state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .validate_auth_token_for_payment(&resolved.payment_validation_request())?;
-    let operation_key = state
-        .spend
-        .lock()
-        .map_err(|_| anyhow!("spend manager lock poisoned"))?
-        .decision_record(&validation.spend_decision_id)
-        .ok_or_else(|| anyhow!("spend decision is missing"))?
-        .operation_key;
+    let mut resolved = resolve_executor_spend_request(request, state)?;
+    let (validation, operation_key, reason) = {
+        let spend = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let (operation_key, reason) = apply_authoritative_executor_identity(&mut resolved, &spend)?;
+        let validation =
+            spend.validate_auth_token_for_payment(&resolved.payment_validation_request())?;
+        (validation, operation_key, reason)
+    };
 
     let (budget_hold, budget_balance) = {
         let budgets = state
@@ -3647,7 +3713,13 @@ fn validate_executor_spend_request(
         }),
     );
 
-    Ok(resolved.into_validated(operation_key, validation, budget_hold, budget_balance))
+    Ok(resolved.into_validated(
+        operation_key,
+        reason,
+        validation,
+        budget_hold,
+        budget_balance,
+    ))
 }
 
 fn executor_claim_validation_request(
@@ -3695,6 +3767,7 @@ fn executor_spend_from_claim_state(
 
     Ok(ValidatedExecutorSpend {
         operation_key: claim_state.decision.operation_key.clone(),
+        reason: claim_state.decision.request.reason.clone(),
         request: ExecutorSpendHttpRequest {
             spend_auth_token_id: claim_state.token.id.to_string(),
             agent_id: Some(agent_pub_id.clone()),
@@ -3777,6 +3850,7 @@ fn executor_spend_response_with_hold(
 ) -> ExecutorSpendHttpResponse {
     ExecutorSpendHttpResponse {
         operation_key: validated.operation_key.clone(),
+        reason: validated.reason.clone(),
         spend_auth_token_id: validated.token_id.to_string(),
         decision_id: validated.validation.spend_decision_id.to_string(),
         account_id: validated.account_pub_id.clone(),
@@ -3816,6 +3890,21 @@ fn evaluate_and_reserve_spend(
         .map(|operation_key| operation_key.trim().to_string())
         .filter(|operation_key| !operation_key.is_empty())
         .ok_or_else(|| anyhow!("spend operation_key is required"))?;
+    let reason = request.reason.trim().to_string();
+    if reason.is_empty() || reason.len() > 2_000 {
+        return Err(anyhow!("spend reason must contain 1 to 2000 characters"));
+    }
+    let task_id = match std::mem::take(&mut request.task_id) {
+        FieldPresence::Missing => Some(reason.clone()),
+        FieldPresence::Null => None,
+        FieldPresence::Value(task_id) => {
+            let task_id = task_id.trim().to_string();
+            if task_id.is_empty() || task_id.len() > 512 {
+                return Err(anyhow!("spend task_id must contain 1 to 512 characters"));
+            }
+            Some(task_id)
+        }
+    };
     let account = resolve_agent_account_for_spend(&request, &user, state)?;
     let currency_supplied = request.currency.is_some();
     let currency = normalize_spend_currency(request.currency.as_deref())?;
@@ -3846,7 +3935,8 @@ fn evaluate_and_reserve_spend(
             "currency": Currency::Usd.to_string(),
             "merchant": request.merchant.clone(),
             "execution_scope_selector": request.execution_scope.clone(),
-            "reason": request.reason.clone(),
+            "task_id": task_id.clone(),
+            "reason": reason.clone(),
         }),
     );
     let policy = policy_for_spend(state, &user.user_id, &agent_id)?
@@ -3880,7 +3970,8 @@ fn evaluate_and_reserve_spend(
                 currency,
                 merchant: request.merchant.clone(),
                 execution_scope,
-                task_id: Some(request.reason.clone()),
+                task_id,
+                reason,
                 workload_profile,
             },
             &policy,
@@ -3958,6 +4049,8 @@ fn spend_rejection_response(
     let policy_decision = policy_decision_response(&rejection.evaluation.evaluation);
     SpendHttpResponse {
         operation_key: rejection.operation_key,
+        task_id: rejection.task_id,
+        reason: rejection.reason,
         account_id: account_pub_id,
         agent_id: agent_pub_id,
         decision_id: rejection.evaluation.decision_id.to_string(),
@@ -5122,7 +5215,10 @@ profiles:
             response.body["product_version"],
             build_info().product_version
         );
-        assert_eq!(response.body["executor_contract"], "hubu-spend-executor-v4");
+        assert_eq!(
+            response.body["executor_contract"],
+            "hubu-spend-executor-v4.1"
+        );
         assert!(response.body["source_commit"]
             .as_str()
             .is_some_and(|value| !value.is_empty()));
@@ -6232,8 +6328,31 @@ profiles:
 
         assert_eq!(authorization.decision, "allow");
         assert_eq!(authorization.operation_key, "logo-design-job-1");
+        assert_eq!(
+            authorization.task_id.as_deref(),
+            Some("Generate Project Hubu logo")
+        );
+        assert_eq!(authorization.reason, "Generate Project Hubu logo");
         assert!(authorization.auth_token_id.is_some());
         assert!(authorization.payment.is_none());
+
+        let replay = authorize_spend(
+            json!({
+                "operation_key": "logo-design-job-1",
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "reason": "Generate Project Hubu logo",
+                "merchant": "hubu-model-proxy",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("legacy missing task_id retry should replay");
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.decision_id, authorization.decision_id);
+        assert_eq!(replay.task_id, authorization.task_id);
+        assert_eq!(replay.reason, authorization.reason);
+
         let budget_hold = authorization
             .budget_hold
             .expect("allowed authorization should reserve budget");
@@ -6263,7 +6382,10 @@ profiles:
             let response = route(public_request("GET", path), &state);
 
             assert_eq!(response.status, 200);
-            assert_eq!(response.body["protocol_version"], "hubu-spend-executor-v4");
+            assert_eq!(
+                response.body["protocol_version"],
+                "hubu-spend-executor-v4.1"
+            );
             assert!(response.body["role_boundary"]["hubu"]
                 .as_array()
                 .expect("hubu role list should be an array")
@@ -6310,7 +6432,7 @@ profiles:
                 .as_array()
                 .expect("scope rules should be an array")
                 .iter()
-                .any(|item| item == "account_id, amount_cents, complete canonical execution_scope, legacy merchant, and task_id must match the original authorized spend"));
+                .any(|item| item == "Hubu resolves task_id and reason from the authorization snapshot for executor and reconciliation evidence; a supplied executor task_id is only a compatibility assertion and must match"));
             assert_eq!(
                 response.body["routes"]["reconciliation_queue"],
                 "GET /spend/executor/reconciliation"
@@ -6473,6 +6595,80 @@ profiles:
         assert!(retry_error
             .to_string()
             .contains("spend auth token has already been used"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn explicit_task_id_and_reason_are_independent_and_claim_uses_authorized_snapshot() {
+        let (path, state, agent, authorization) = setup_executor_authorization_with_identity(
+            "separate-task-reason",
+            Some(json!("linear:HUB-73")),
+            "Generate a release artifact",
+        );
+        assert_eq!(authorization.task_id.as_deref(), Some("linear:HUB-73"));
+        assert_eq!(authorization.reason, "Generate a release artifact");
+        assert_ne!(authorization.operation_key, "linear:HUB-73");
+
+        let token = authorization.auth_token_id.clone().unwrap();
+        let mismatch = validate_executor_spend(
+            json!({
+                "spend_auth_token_id": token,
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "merchant": "gongbu.image",
+                "task_id": "spoofed-task"
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap_err();
+        assert!(mismatch.to_string().contains("authoritative authorization"));
+
+        let claim = claim_executor_spend(
+            json!({
+                "operation_key": authorization.operation_key,
+                "spend_auth_token_id": authorization.auth_token_id,
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "merchant": "gongbu.image"
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(claim.spend.task_id.as_deref(), Some("linear:HUB-73"));
+        assert_eq!(claim.spend.reason, "Generate a release artifact");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn explicit_null_task_id_survives_replay_and_restart() {
+        let (path, state, agent, authorization) = setup_executor_authorization_with_identity(
+            "null-task-restart",
+            Some(Value::Null),
+            "Spend without business correlation",
+        );
+        assert!(authorization.task_id.is_none());
+        let decision_id = authorization.decision_id.clone();
+        drop(state);
+
+        let restarted = ServerState::new_with_db_path(&path).unwrap();
+        let replay = authorize_spend(
+            json!({
+                "operation_key": "null-task-restart-operation",
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "reason": "Spend without business correlation",
+                "task_id": null,
+                "merchant": "gongbu.image"
+            })
+            .to_string(),
+            &restarted,
+        )
+        .unwrap();
+        assert_eq!(replay.decision_id, decision_id);
+        assert!(replay.task_id.is_none());
+        assert!(replay.idempotent_replay);
         std::fs::remove_file(path).ok();
     }
 
@@ -7659,6 +7855,7 @@ rules: []
             amount_cents: 100,
             currency: None,
             reason: "pending exact request".to_string(),
+            task_id: FieldPresence::Missing,
             merchant: Some("Acme Cafe".to_string()),
             execution_scope: None,
             workload_profile: None,
@@ -7674,6 +7871,7 @@ rules: []
             execution_scope: Some(legacy_execution_scope("Acme Cafe")),
             category: None,
             task_id: Some(request.reason.clone()),
+            reason: request.reason.clone(),
             workload_profile: "default".to_string(),
         };
         state
@@ -7987,6 +8185,43 @@ rules: []
         RegisterAgentHttpResponse,
         SpendHttpResponse,
     ) {
+        setup_executor_authorization_with_identity_and_timing(
+            test_name,
+            timing,
+            None,
+            "hubu-logo-demo",
+        )
+    }
+
+    fn setup_executor_authorization_with_identity(
+        test_name: &str,
+        task_id: Option<Value>,
+        reason: &str,
+    ) -> (
+        std::path::PathBuf,
+        ServerState,
+        RegisterAgentHttpResponse,
+        SpendHttpResponse,
+    ) {
+        setup_executor_authorization_with_identity_and_timing(
+            test_name,
+            SpendTimingConfig::default(),
+            task_id,
+            reason,
+        )
+    }
+
+    fn setup_executor_authorization_with_identity_and_timing(
+        test_name: &str,
+        timing: SpendTimingConfig,
+        task_id: Option<Value>,
+        reason: &str,
+    ) -> (
+        std::path::PathBuf,
+        ServerState,
+        RegisterAgentHttpResponse,
+        SpendHttpResponse,
+    ) {
         let path =
             std::env::temp_dir().join(format!("hubu-api-{test_name}-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path_and_spend_timing(&path, timing)
@@ -8023,18 +8258,18 @@ rules: []
 
         create_test_agent_budget(&state, &agent.agent_id, 500);
 
-        let authorization = authorize_spend(
-            json!({
-                "operation_key": format!("{test_name}-operation"),
-                "account_id": agent.account_id,
-                "amount_cents": 500,
-                "reason": "hubu-logo-demo",
-                "merchant": "gongbu.image",
-            })
-            .to_string(),
-            &state,
-        )
-        .expect("spend should authorize");
+        let mut request = json!({
+            "operation_key": format!("{test_name}-operation"),
+            "account_id": agent.account_id,
+            "amount_cents": 500,
+            "reason": reason,
+            "merchant": "gongbu.image",
+        });
+        if let Some(task_id) = task_id {
+            request["task_id"] = task_id;
+        }
+        let authorization =
+            authorize_spend(request.to_string(), &state).expect("spend should authorize");
 
         (path, state, agent, authorization)
     }

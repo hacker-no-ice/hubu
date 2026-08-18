@@ -71,7 +71,7 @@ jq -e \
    .product == "hubu" and
    .product_version == $product_version and
    .source_commit == $source_commit and
-   .executor_contract == "hubu-spend-executor-v4" and
+   .executor_contract == "hubu-spend-executor-v4.1" and
    .target == $target and
    .binaries == ["hubu", "hubu-server", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
    .manifest == "MANIFEST.json" and
@@ -86,7 +86,7 @@ jq -e \
    .product == "hubu" and
    .product_version == $product_version and
    .source_commit == $source_commit and
-   .executor_contract == "hubu-spend-executor-v4" and
+   .executor_contract == "hubu-spend-executor-v4.1" and
    .target == $target and
    .binaries == ["hubu", "hubu-server", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
    .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
@@ -100,7 +100,7 @@ for binary in "${expected_binaries[@]}"; do
     --arg source_commit "${source_commit}" \
     '.product_version == $product_version and
      .source_commit == $source_commit and
-     ((.executor_contract // .hubu_executor_contract) == "hubu-spend-executor-v4")' \
+     ((.executor_contract // .hubu_executor_contract) == "hubu-spend-executor-v4.1")' \
     <<<"${version_output}" >/dev/null
 done
 
@@ -138,7 +138,7 @@ jq -e \
   --arg source_commit "${source_commit}" \
   '.product_version == $product_version and
    .source_commit == $source_commit and
-   .executor_contract == "hubu-spend-executor-v4"' \
+   .executor_contract == "hubu-spend-executor-v4.1"' \
   <<<"${reported_version}" >/dev/null
 
 initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'

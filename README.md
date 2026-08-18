@@ -189,6 +189,7 @@ hubu spend authorize \
   --amount 5 \
   --currency USD \
   --merchant example-model-provider \
+  --task-id "linear:HUB-73" \
   --reason "Reserve model API credits"
 
 hubu spend \
@@ -210,6 +211,10 @@ and Hubu performs no currency conversion. Supply `--merchant` explicitly when
 legacy merchant policy conditions should match; if it is omitted, the CLI shows
 the omission and its policy consequence before submission. Use a distinct
 operation key for different logical work.
+`--task-id` is an optional external business correlation and `--reason` is
+human-readable authorization context; neither must equal the stable financial
+`--operation-key`. Omitting `--task-id` preserves the historical
+reason-to-task mapping so retries of pre-HUB-73 CLI operations remain exact.
 For new executor-backed work, prefer the typed `--provider`, `--executor`,
 `--capability`, and `--billing-merchant` flags. Hubu resolves them against its
 trusted catalog and prints both friendly names and stable IDs. The legacy
@@ -268,7 +273,7 @@ curl http://127.0.0.1:8787/version
 
 Release provenance binds all five production binaries to one product version
 and source commit. `executor_contract` remains the independently negotiated
-`hubu-spend-executor-v4` identifier; sharing source or a release version does
+`hubu-spend-executor-v4.1` identifier; sharing source or a release version does
 not change that wire contract.
 
 ## License

@@ -18,7 +18,7 @@ references needed for settlement auditability.
 
 ## Protocol Version
 
-The current version is `hubu-spend-executor-v4`. Agents and executors can
+The current version is `hubu-spend-executor-v4.1`. Agents and executors can
 discover its machine-readable guidance from either public route:
 
 ```http
@@ -174,6 +174,7 @@ guidance.
      "operation_key": "codex:tool-call:01JABC123",
      "account_id": "aga_example",
      "amount_cents": 500,
+     "task_id": "linear:HUB-73",
      "execution_scope": {
        "schema_version": 1,
        "provider": "provider:google:gemini-developer",
@@ -196,6 +197,12 @@ guidance.
    Every response includes `revision`, `idempotent_replay`, `attempt_history`,
    and `retry_guidance`. Retry guidance has one machine-readable action:
    `reuse_operation_key`, `replay_exactly`, or `create_new_operation`.
+
+   `operation_key`, `task_id`, and `reason` are independent. The first is the
+   trusted financial/idempotency identity, the second is an optional trusted
+   external correlation, and the third is human-readable authorization and
+   audit context. For compatibility, an absent `task_id` maps `reason` into the
+   stored task ID; explicit null means no task correlation.
 
    ```json
    {
@@ -226,14 +233,16 @@ guidance.
        "executor": {"id":"executor:gongbu:image","display_name":"Gongbu image executor"},
        "capability": {"id":"capability:image:generate","display_name":"Generate image"},
        "billing_merchant": {"id":"merchant:google","display_name":"Google"}
-     },
-     "task_id": "hubu-logo-demo"
+     }
    }
    ```
 
    Hubu accepts only if the token is unexpired, unused, unrevoked, unclaimed,
    matches the authorized operation and scope, and has a frozen agent-budget
-   hold. A retry with the same operation key returns the existing claim,
+   hold. Hubu resolves task ID and reason from the stored authorization rather
+   than trusting executor input. A legacy executor may send `task_id` as a
+   compatibility assertion, but a mismatch is rejected. A retry with the same
+   operation key returns the existing claim,
    including its terminal state if it has already been settled or released.
 
    The version-1 typed scope and legacy migration behavior are specified in
@@ -331,6 +340,7 @@ guidance.
       "billing_merchant": {"id":"merchant:google","display_name":"Google"}
     },
     "task_id": "hubu-logo-demo",
+    "reason": "Generate the Project Hubu logo",
     "expires_at": "2026-07-20T12:05:00Z",
     "budget_hold": {
       "hold_id": "uuid",

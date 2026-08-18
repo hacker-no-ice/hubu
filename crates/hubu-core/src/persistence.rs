@@ -2513,9 +2513,11 @@ impl SpendRepository for SqliteGovernanceRepository {
             let decision: String = row.get(5)?;
             let decided_at: String = row.get(6)?;
             let reasons_json: String = row.get(7)?;
+            let mut request = parse_json::<crate::spend::SpendRequest>(&request_json)?;
+            request.normalize_legacy_reason();
             Ok(SpendAttemptAuditRecord {
                 revision: row.get(0)?,
-                request: parse_json(&request_json)?,
+                request,
                 actor: row.get(2)?,
                 submitted_at: parse_timestamp(&submitted_at)?,
                 decision_id: decision_id.as_deref().map(parse_id).transpose()?,
@@ -2636,7 +2638,8 @@ impl SpendRepository for SqliteGovernanceRepository {
             let request_json: String = row.get(6)?;
             let evaluation_json: String = row.get(7)?;
             let created_at: String = row.get(8)?;
-            let request: crate::spend::SpendRequest = parse_json(&request_json)?;
+            let mut request: crate::spend::SpendRequest = parse_json(&request_json)?;
+            request.normalize_legacy_reason();
             if request.agent_id.to_string() != agent_id {
                 return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
                     StorageError::InvalidData(
@@ -3548,6 +3551,7 @@ mod tests {
             execution_scope: None,
             category: None,
             task_id: Some("task".to_string()),
+            reason: "test spend".to_string(),
             workload_profile: "default".to_string(),
         }
     }
@@ -4605,10 +4609,12 @@ mod tests {
         decision.request.merchant = Some("Acme".into());
         decision.request.execution_scope = None;
         let mut legacy_request = serde_json::to_value(&decision.request).unwrap();
+        legacy_request["task_id"] = serde_json::json!(decision.request.reason);
         legacy_request
             .as_object_mut()
             .unwrap()
             .remove("execution_scope");
+        legacy_request.as_object_mut().unwrap().remove("reason");
         let legacy_request_json = serde_json::to_string(&legacy_request).unwrap();
         repo.conn
             .execute(
@@ -4658,6 +4664,7 @@ mod tests {
 
         let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
         let mut upgraded = decision.request.clone();
+        upgraded.task_id = Some(upgraded.reason.clone());
         upgraded.execution_scope = Some(legacy_execution_scope("Acme"));
         assert_eq!(
             repo.admit_spend_attempt(
@@ -4671,8 +4678,10 @@ mod tests {
             SpendAttemptAdmission::ExactReplay { revision: 1 }
         );
 
+        let loaded_decisions = repo.load_spend_decisions().unwrap();
+        assert_eq!(loaded_decisions[0].request.reason, "test spend");
         let mut manager = crate::spend::SpendManager::from_records(
-            repo.load_spend_decisions().unwrap(),
+            loaded_decisions,
             repo.load_spend_auth_tokens().unwrap(),
         );
         let replay = manager
