@@ -48,11 +48,29 @@ jobs:
         name: Validate version and source
         env:
           EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
           INPUT_CHANNEL: ${{ inputs.channel }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
+
+          canary_release_is_complete() {
+            release_json="$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets,isDraft,isPrerelease,targetCommitish 2>/dev/null)" || return 1
+            jq -e \
+              --arg source_commit "${source_commit}" \
+              --arg linux_x86 "hubu-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+              --arg linux_arm "hubu-${version}-aarch64-unknown-linux-gnu.tar.gz" \
+              --arg macos_x86 "hubu-${version}-x86_64-apple-darwin.tar.gz" \
+              --arg macos_arm "hubu-${version}-aarch64-apple-darwin.tar.gz" \
+              '.isDraft == false and
+               .isPrerelease == true and
+               .targetCommitish == $source_commit and
+               ([.assets[] | select(.state == "uploaded" and .size > 0) | .name] | sort) ==
+               (["SHA256SUMS", $linux_x86, $linux_arm, $macos_x86, $macos_arm] | sort)' \
+              <<<"${release_json}" >/dev/null
+          }
+
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ ! "${INPUT_SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
               echo "source_commit must be an exact 40-character lowercase commit SHA" >&2
@@ -70,11 +88,6 @@ jobs:
               tag="main-${source_commit}"
               prerelease=true
 
-              if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-                echo "No release needed: ${tag} is already published"
-                echo "should_release=false" >> "${GITHUB_OUTPUT}"
-                exit 0
-              fi
             elif [[ "${INPUT_CHANNEL}" == "stable" ]]; then
               if [[ ! "${INPUT_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                 echo "Stable version must match vMAJOR.MINOR.PATCH" >&2
@@ -96,14 +109,14 @@ jobs:
             tag="main-${source_commit}"
             prerelease=true
 
-            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-              echo "No release needed: main is still at already-published ${tag}"
-              echo "should_release=false" >> "${GITHUB_OUTPUT}"
-              exit 0
-            fi
           fi
 
           if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            if [[ "${prerelease}" == "true" ]] && canary_release_is_complete; then
+              echo "No release needed: complete immutable canary ${tag} is already published"
+              echo "should_release=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
             echo "Refusing to mutate existing release tag ${tag}" >&2
             exit 1
           fi

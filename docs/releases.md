@@ -42,9 +42,11 @@ gh workflow run release.yml \
 ```
 
 The resulting tag remains `main-<full-source-commit>`. Repeating the request
-does not replace the tag or assets; the workflow exits without publishing when
-that canary already exists. Use this path for a time-sensitive cutover instead
-of waiting for the next scheduled run.
+does not replace the tag or assets. The workflow exits without publishing only
+after it confirms that the existing release is a published prerelease targeting
+the requested commit with all four non-empty archives and `SHA256SUMS`; a draft,
+partial, or mismatched release fails closed for operator recovery. Use this path
+for a time-sensitive cutover instead of waiting for the next scheduled run.
 
 The schedule uses GitHub's timezone-aware cron support, which keeps publication
 at 10:00 local time through daylight-saving transitions.
