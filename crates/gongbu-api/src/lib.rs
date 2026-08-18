@@ -6,6 +6,7 @@ pub mod config;
 pub mod execution;
 pub mod http;
 pub mod hubu;
+pub mod lifecycle;
 pub mod provider;
 pub mod sandbox;
 pub mod server;

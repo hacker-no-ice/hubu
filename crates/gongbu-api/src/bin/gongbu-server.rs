@@ -6,8 +6,24 @@ const HELP: &str = "gongbu-server\n\nUSAGE:\n    gongbu-server serve --config /a
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("gongbu-server: {error}");
+        eprintln!(
+            "gongbu-server: server stopped ({})",
+            error_category(error.as_ref())
+        );
         std::process::exit(1);
+    }
+}
+
+fn error_category(error: &(dyn std::error::Error + 'static)) -> &'static str {
+    if error
+        .downcast_ref::<gongbu_api::server::ServerError>()
+        .is_some()
+    {
+        "configuration"
+    } else if error.downcast_ref::<std::io::Error>().is_some() {
+        "io"
+    } else {
+        "dependency"
     }
 }
 

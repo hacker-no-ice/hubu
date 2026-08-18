@@ -424,11 +424,18 @@ fn validate_temporal_address(address: &str) -> Result<(), ServerError> {
 }
 
 pub async fn serve(config_path: impl AsRef<Path>) -> Result<(), BoxError> {
-    let config = ServerConfig::from_path(config_path)?;
+    let config = match ServerConfig::from_path(config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            crate::lifecycle::log(crate::lifecycle::LifecycleReason::ConfigurationStartupFailure);
+            return Err(error.into());
+        }
+    };
     serve_config(config).await
 }
 
 pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
+    let mut startup = StartupLifecycleGuard::armed();
     config.validate()?;
     prepare_state_paths(&config)?;
     normalize_paths(&mut config)?;
@@ -562,11 +569,37 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         authenticator,
         now,
     };
+    startup.mark_started();
     let result = application::serve(listener, dependencies, shutdown_signal()).await;
     if let Some(child) = temporal_child.as_mut() {
         child.stop();
     }
-    result
+    if result.is_err() {
+        crate::lifecycle::log(crate::lifecycle::LifecycleReason::WorkerUnavailable);
+    }
+    result.map(|_| ())
+}
+
+struct StartupLifecycleGuard {
+    armed: bool,
+}
+
+impl StartupLifecycleGuard {
+    fn armed() -> Self {
+        Self { armed: true }
+    }
+
+    fn mark_started(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartupLifecycleGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            crate::lifecycle::log(crate::lifecycle::LifecycleReason::ConfigurationStartupFailure);
+        }
+    }
 }
 
 fn prepare_state_paths(config: &ServerConfig) -> Result<(), ServerError> {

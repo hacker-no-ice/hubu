@@ -895,6 +895,9 @@ impl ExecutionWorkflow<'_> {
             self.repository
                 .record_reconciliation(&updated, e.status.as_str(), outcome, now)?;
         }
+        if status == "failed" || (status == "released" && provider == Some("failed")) {
+            crate::lifecycle::log(crate::lifecycle::LifecycleReason::ExecutionFailure);
+        }
         Ok(updated)
     }
 }
@@ -1173,6 +1176,54 @@ mod tests {
             ),
             (1, 1, 1, 1)
         );
+    }
+
+    #[test]
+    fn repeated_hubu_rejections_do_not_poison_subsequent_execution() {
+        let repo = Repository::in_memory().unwrap();
+        let hubu = Hubu::default();
+        let provider = Provider::default();
+        let artifacts = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let workflow = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &hubu,
+            provider: &provider,
+            artifacts: &artifacts,
+        };
+
+        let rejection_codes = [
+            "hubu_request_rejected",
+            "hubu_scope_mismatch",
+            "hubu_authorization_expired",
+            "hubu_provider_rejected",
+            "hubu_other_proven_failure",
+        ];
+        for index in 0..64 {
+            let execution = execution(&repo, &format!("rejected-{index}"));
+            let code = rejection_codes[index % rejection_codes.len()];
+            hubu.claim_error
+                .replace(Some(ActivityError::Proven(code.into())));
+            let terminal = workflow
+                .run(&execution.execution_id, "2026-08-05T00:00:01Z")
+                .unwrap();
+            assert_eq!(terminal.status, "failed");
+            assert_eq!(terminal.failure_code.as_deref(), Some(code));
+        }
+
+        let valid = execution(&repo, "valid-after-rejections");
+        let completed = workflow
+            .run(&valid.execution_id, "2026-08-05T00:00:02Z")
+            .unwrap();
+        assert_eq!(completed.status, "succeeded");
+        assert_eq!(hubu.claims.get(), 65);
+        assert_eq!(provider.calls.get(), 1);
+        assert_eq!(artifacts.calls.get(), 1);
+        assert_eq!(hubu.settles.get(), 1);
+        assert_eq!(hubu.releases.get(), 0);
+        assert!(repo.list_nonterminal_execution_ids().unwrap().is_empty());
     }
 
     #[test]
