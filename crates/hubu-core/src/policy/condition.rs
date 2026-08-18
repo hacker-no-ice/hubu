@@ -83,6 +83,26 @@ pub enum PolicyValue {
 }
 
 impl Condition {
+    pub fn describe(&self) -> String {
+        match self {
+            Condition::All { conditions } => describe_group("all", conditions),
+            Condition::Any { conditions } => describe_group("any", conditions),
+            Condition::Not { condition } => format!("not ({})", condition.describe()),
+            Condition::Eq { field, value } => describe_comparison(*field, "equals", value),
+            Condition::Neq { field, value } => describe_comparison(*field, "does not equal", value),
+            Condition::Gt { field, value } => describe_comparison(*field, "is greater than", value),
+            Condition::Gte { field, value } => describe_comparison(*field, "is at least", value),
+            Condition::Lt { field, value } => describe_comparison(*field, "is less than", value),
+            Condition::Lte { field, value } => describe_comparison(*field, "is at most", value),
+            Condition::In { field, values } => format!(
+                "{} is one of {}",
+                field_name(*field),
+                values.iter().map(value_name).collect::<Vec<_>>().join(", ")
+            ),
+            Condition::Exists { field } => format!("{} is supplied", field_name(*field)),
+        }
+    }
+
     pub fn eval(&self, request: &SpendRequest) -> bool {
         match self {
             Condition::All { conditions } => {
@@ -145,6 +165,44 @@ impl Condition {
             }
             Condition::Exists { .. } => Ok(()),
         }
+    }
+}
+
+fn describe_group(operator: &str, conditions: &[Condition]) -> String {
+    format!(
+        "{operator} of ({})",
+        conditions
+            .iter()
+            .map(Condition::describe)
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
+fn describe_comparison(field: Field, operator: &str, value: &PolicyValue) -> String {
+    format!("{} {operator} {}", field_name(field), value_name(value))
+}
+
+fn field_name(field: Field) -> &'static str {
+    match field {
+        Field::Amount => "amount",
+        Field::Currency => "currency",
+        Field::AgentId => "agent_id",
+        Field::Merchant => "merchant",
+        Field::Provider => "provider",
+        Field::Executor => "executor",
+        Field::Capability => "capability",
+        Field::BillingMerchant => "billing_merchant",
+        Field::Category => "category",
+    }
+}
+
+fn value_name(value: &PolicyValue) -> String {
+    match value {
+        PolicyValue::String(value) => format!("`{value}`"),
+        PolicyValue::MoneyCents(value) => format!("{value} minor units"),
+        PolicyValue::Currency(value) => value.to_string(),
+        PolicyValue::AgentId(value) => value.to_string(),
     }
 }
 

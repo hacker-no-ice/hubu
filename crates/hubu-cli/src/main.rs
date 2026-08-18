@@ -12,6 +12,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Local};
 use hubu_common::build::build_info;
+use hubu_common::money::{Currency, DecimalMajorAmount};
 use hubu_core::policy::{Effect, Policy};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1533,14 +1534,26 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let account_id = require_spend_account_id("hubu spend", account_id, agent_id)?;
     let operation_key = take_required(&mut args, "--operation-key")?;
     let amount = take_required(&mut args, "--amount")?;
+    let currency_arg = take_value(&mut args, "--currency");
+    let currency = normalize_currency(currency_arg.as_deref().unwrap_or("usd"))?;
     let reason = take_required(&mut args, "--reason")?;
     let (merchant, execution_scope) = take_execution_scope(&mut args)?;
     let workload_profile = take_value(&mut args, "--workload-profile");
     ensure_no_args(args)?;
 
+    let amount_cents = amount_to_cents(&amount)?;
+    print_spend_submission(
+        amount_cents,
+        currency,
+        currency_arg.is_some(),
+        merchant.as_deref(),
+        execution_scope.as_ref(),
+    );
+
     let mut body = json!({
         "operation_key": operation_key,
-        "amount_cents": amount_to_cents(&amount)?,
+        "amount_cents": amount_cents,
+        "currency": currency_arg.map(|_| currency.to_string()),
         "reason": reason,
         "merchant": merchant,
         "execution_scope": execution_scope,
@@ -1563,14 +1576,26 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let account_id = require_spend_account_id("hubu spend authorize", account_id, agent_id)?;
     let operation_key = take_required(&mut args, "--operation-key")?;
     let amount = take_required(&mut args, "--amount")?;
+    let currency_arg = take_value(&mut args, "--currency");
+    let currency = normalize_currency(currency_arg.as_deref().unwrap_or("usd"))?;
     let reason = take_required(&mut args, "--reason")?;
     let (merchant, execution_scope) = take_execution_scope(&mut args)?;
     let workload_profile = take_value(&mut args, "--workload-profile");
     ensure_no_args(args)?;
 
+    let amount_cents = amount_to_cents(&amount)?;
+    print_spend_submission(
+        amount_cents,
+        currency,
+        currency_arg.is_some(),
+        merchant.as_deref(),
+        execution_scope.as_ref(),
+    );
+
     let mut body = json!({
         "operation_key": operation_key,
-        "amount_cents": amount_to_cents(&amount)?,
+        "amount_cents": amount_cents,
+        "currency": currency_arg.map(|_| currency.to_string()),
         "reason": reason,
         "merchant": merchant,
         "execution_scope": execution_scope,
@@ -1613,10 +1638,7 @@ fn take_execution_scope(args: &mut Vec<String>) -> Result<(Option<String>, Optio
         ));
     }
     if typed_count == 0 {
-        return Ok((
-            Some(merchant.unwrap_or_else(|| "local-merchant".to_string())),
-            None,
-        ));
+        return Ok((merchant, None));
     }
     if typed_count != 4 {
         return Err(anyhow!("--provider, --executor, --capability, and --billing-merchant must be supplied together"));
@@ -1631,6 +1653,61 @@ fn take_execution_scope(args: &mut Vec<String>) -> Result<(Option<String>, Optio
             "billing_merchant": billing_merchant,
         })),
     ))
+}
+
+fn normalize_currency(value: &str) -> Result<Currency> {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .parse()
+        .map_err(Into::into)
+}
+
+fn print_spend_submission(
+    amount_cents: i64,
+    currency: Currency,
+    currency_supplied: bool,
+    merchant: Option<&str>,
+    execution_scope: Option<&Value>,
+) {
+    println!("Spend request inputs");
+    println!(
+        "  amount: {} {} major units (supplied; {} minor units)",
+        currency.to_string().to_ascii_uppercase(),
+        format_major_amount(amount_cents),
+        amount_cents
+    );
+    println!(
+        "  currency: {currency} ({}; no currency conversion is performed)",
+        if currency_supplied {
+            "supplied"
+        } else {
+            "inferred CLI default"
+        }
+    );
+    if let Some(merchant) = merchant {
+        println!("  merchant: {merchant} (supplied)");
+        println!("  typed execution scope: inferred by the API from legacy merchant");
+    } else if let Some(scope) = execution_scope.and_then(Value::as_object) {
+        println!("  merchant: omitted (typed billing_merchant is evaluated instead)");
+        for field in ["provider", "executor", "capability", "billing_merchant"] {
+            let value = scope
+                .get(field)
+                .and_then(Value::as_str)
+                .unwrap_or("<missing>");
+            println!("  {field}: {value} (supplied)");
+        }
+    } else {
+        println!("  merchant: omitted (merchant policy conditions cannot match)");
+        println!("  provider: omitted");
+        println!("  executor: omitted");
+        println!("  capability: omitted");
+        println!("  billing_merchant: omitted");
+    }
+}
+
+fn format_major_amount(amount_cents: i64) -> String {
+    format!("{}.{:02}", amount_cents / 100, amount_cents % 100)
 }
 
 fn spend_reconcile(base_url: &str, args: Vec<String>) -> Result<()> {
@@ -1795,6 +1872,32 @@ fn print_spend_response(response: &Value) -> Result<()> {
     println!("  agent_id: {}", string_at(response, "agent_id")?);
     println!("  decision: {}", string_at(response, "decision")?);
     println!("  decision_id: {}", string_at(response, "decision_id")?);
+    if let Some(inputs) = response.get("scope_inputs").and_then(Value::as_object) {
+        println!("  scope_inputs:");
+        for field in [
+            "amount_minor",
+            "currency",
+            "merchant",
+            "provider",
+            "executor",
+            "capability",
+            "billing_merchant",
+        ] {
+            let Some(input) = inputs.get(field).and_then(Value::as_object) else {
+                continue;
+            };
+            let source = input
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let value = input
+                .get("value")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string)
+                .unwrap_or_else(|| "<none>".to_string());
+            println!("    {field}: {value} ({source})");
+        }
+    }
     if let Some(token_id) = response.get("auth_token_id").and_then(Value::as_str) {
         println!("  auth_token_id: {token_id}");
     }
@@ -1818,6 +1921,37 @@ fn print_spend_response(response: &Value) -> Result<()> {
                 "  reason: {}",
                 reason.as_str().unwrap_or("<non-string reason>")
             );
+        }
+    }
+    if let Some(policy_decision) = response.get("policy_decision") {
+        if let Some(summary) = policy_decision.get("summary").and_then(Value::as_str) {
+            println!("  policy_decision: {summary}");
+        }
+        if let Some(conditions) = policy_decision
+            .get("decisive_conditions")
+            .and_then(Value::as_array)
+        {
+            for condition in conditions {
+                println!(
+                    "  policy_condition: {} [{}; matched={}] {}",
+                    condition
+                        .get("rule_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unknown>"),
+                    condition
+                        .get("effect")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unknown>"),
+                    condition
+                        .get("matched")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    condition
+                        .get("condition")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unavailable>")
+                );
+            }
         }
     }
 
@@ -2239,13 +2373,7 @@ fn money_at(value: &Value, key: &str) -> Result<String> {
 }
 
 fn amount_to_cents(value: &str) -> Result<i64> {
-    let (dollars, cents) = value.split_once('.').unwrap_or((value, "0"));
-    if cents.len() > 2 {
-        bail!("amount `{value}` has more than two decimal places");
-    }
-    let dollars = dollars.parse::<i64>()?;
-    let cents = format!("{cents:0<2}").parse::<i64>()?;
-    Ok(dollars * 100 + cents)
+    Ok(value.parse::<DecimalMajorAmount>()?.minor_units())
 }
 
 fn default_policy_template() -> &'static str {
@@ -2637,8 +2765,8 @@ fn print_spend_help() {
         "Test an agent spend request
 
 Usage:
-  hubu spend --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
-  hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
   hubu spend claim --claim-id ID
   hubu spend reconcile list
   hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-cents CENTS --provider-request-id ID --provider NAME --model NAME --unit-price-cents CENTS --pricing-unit UNIT --artifact-reference REF
@@ -2646,11 +2774,13 @@ Usage:
 
 Note:
   Spend commands require the agent account id because the account is the spending source. CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
+  --amount is a decimal major-unit amount: 5 means USD 5.00 and 0.05 means USD 0.05. USD is the only supported currency; Hubu performs no currency conversion.
+  If merchant and typed execution scope are omitted, the CLI shows that omission before submission. Merchant policy conditions then cannot match and the policy may require approval.
   The client harness must supply one immutable agent-scoped operation key before the first request, then reuse it for authorization, claim, finalization, and every retry.
 
 Examples:
-  hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --reason \"Reserve model API credits\"
-  hubu spend --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 20 --reason \"Purchase API credits\""
+  hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --currency USD --merchant example-model-provider --reason \"Reserve model API credits\"
+  hubu spend --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 0.05 --currency USD --merchant example-model-provider --reason \"Purchase API credits\""
     );
 }
 
@@ -2659,13 +2789,15 @@ fn print_spend_authorize_help() {
         "Authorize spend and reserve budget without executing payment
 
 Usage:
-  hubu spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
 
 Note:
   Supply one immutable agent-scoped operation key before the first request; do not generate a new key on retry.
+  --amount is a decimal major-unit amount: 5 means USD 5.00 and 0.05 means USD 0.05. USD is the only supported currency; Hubu performs no currency conversion.
+  Omitted merchant/scope fields are shown before submission because policies that evaluate those fields will not match them.
 
 Example:
-  hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --reason \"Reserve model API credits\""
+  hubu spend authorize --operation-key OPERATION_KEY --account-id ACCOUNT_ID --amount 5 --currency USD --merchant example-model-provider --reason \"Reserve model API credits\""
     );
 }
 
@@ -2736,6 +2868,20 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("cannot be combined"));
+    }
+
+    #[test]
+    fn decimal_major_unit_amounts_distinguish_five_from_five_cents() {
+        assert_eq!(amount_to_cents("5").unwrap(), 500);
+        assert_eq!(amount_to_cents("0.05").unwrap(), 5);
+    }
+
+    #[test]
+    fn missing_merchant_remains_explicitly_omitted() {
+        let mut args = Vec::new();
+        let (merchant, scope) = take_execution_scope(&mut args).unwrap();
+        assert!(merchant.is_none());
+        assert!(scope.is_none());
     }
 
     #[test]

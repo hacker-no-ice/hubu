@@ -40,6 +40,10 @@ pub struct RuleResult {
     pub matched: bool,
     pub effect: Option<Effect>,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub configured_effect: Option<Effect>,
+    #[serde(default)]
+    pub condition: Option<String>,
 }
 
 /// The auditable output of policy evaluation.
@@ -76,6 +80,8 @@ impl Rule {
             matched,
             effect: matched.then_some(self.effect),
             reason: matched.then(|| self.reason.clone()),
+            configured_effect: Some(self.effect),
+            condition: Some(self.when.describe()),
         }
     }
 }

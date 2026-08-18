@@ -187,6 +187,7 @@ hubu spend authorize \
   --operation-key PLATFORM_AUTH_OPERATION_KEY \
   --account-id ACCOUNT_ID \
   --amount 5 \
+  --currency USD \
   --merchant example-model-provider \
   --reason "Reserve model API credits"
 
@@ -194,6 +195,7 @@ hubu spend \
   --operation-key PLATFORM_SPEND_OPERATION_KEY \
   --account-id ACCOUNT_ID \
   --amount 20 \
+  --currency USD \
   --merchant example-model-provider \
   --reason "Purchase API credits"
 
@@ -202,9 +204,12 @@ hubu budget list
 hubu ledger list
 ```
 
-CLI `--amount` values are decimal USD amounts in major units, so `5` means
-`$5.00`. Supply `--merchant` explicitly because it is part of the scope
-evaluated by policy. Use a distinct operation key for different logical work.
+CLI `--amount` values are decimal amounts in major units, so `5` means
+`USD 5.00` while `0.05` means `USD 0.05`. USD is the only supported currency
+and Hubu performs no currency conversion. Supply `--merchant` explicitly when
+legacy merchant policy conditions should match; if it is omitted, the CLI shows
+the omission and its policy consequence before submission. Use a distinct
+operation key for different logical work.
 For new executor-backed work, prefer the typed `--provider`, `--executor`,
 `--capability`, and `--billing-merchant` flags. Hubu resolves them against its
 trusted catalog and prints both friendly names and stable IDs. The legacy

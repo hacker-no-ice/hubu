@@ -169,6 +169,37 @@ mod tests {
     }
 
     #[test]
+    fn approved_merchant_allows_while_missing_merchant_explains_default_approval() {
+        let policy = policy(
+            Effect::NeedsApproval,
+            vec![rule(
+                "allow_approved_merchant",
+                Effect::Allow,
+                Condition::Eq {
+                    field: Field::Merchant,
+                    value: PolicyValue::String("approved.example".to_string()),
+                },
+            )],
+        );
+        let mut approved = spend_request(5, None);
+        approved.merchant = Some("approved.example".to_string());
+        let approved_evaluation = evaluate_policy(&approved, &policy).unwrap();
+        assert_eq!(approved_evaluation.decision, Effect::Allow);
+
+        let mut missing = approved;
+        missing.merchant = None;
+        let missing_evaluation = evaluate_policy(&missing, &policy).unwrap();
+        assert_eq!(missing_evaluation.decision, Effect::NeedsApproval);
+        let allow_rule = &missing_evaluation.rule_results[0];
+        assert!(!allow_rule.matched);
+        assert_eq!(allow_rule.configured_effect, Some(Effect::Allow));
+        assert_eq!(
+            allow_rule.condition.as_deref(),
+            Some("merchant equals `approved.example`")
+        );
+    }
+
+    #[test]
     fn deny_wins_over_allow() {
         let request = spend_request(60_000, Some("meals"));
         let policy = policy(

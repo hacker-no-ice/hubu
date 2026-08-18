@@ -277,6 +277,7 @@ hubu spend authorize \
   --operation-key demo-logo \
   --account-id aga_c6q3d9m1v8ra \
   --amount 5 \
+  --currency USD \
   --reason "Generate Project Hubu logo" \
   --merchant hubu-model-proxy
 ```
@@ -284,6 +285,11 @@ hubu spend authorize \
 Expected output:
 
 ```txt
+Spend request inputs
+  amount: USD 5.00 major units (supplied; 500 minor units)
+  currency: usd (supplied; no currency conversion is performed)
+  merchant: hubu-model-proxy (supplied)
+  typed execution scope: inferred by the API from legacy merchant
 Spend evaluated
   operation_key: demo-logo
   account_id: aga_c6q3d9m1v8ra
@@ -291,7 +297,13 @@ Spend evaluated
   decision: allow
   decision_id: 7da692a8-d5a7-4028-b5db-fc8b0de79d10
   auth_token_id: 1e48e2ec-564e-4519-9db4-d7892012ca78
+  scope_inputs:
+    amount_minor: 500 (supplied)
+    currency: "usd" (supplied)
+    merchant: "hubu-model-proxy" (supplied)
   reason: amount is within the starter single-spend limit of 10000 cents
+  policy_decision: policy returned allow from 1 matching condition
+  policy_condition: allow_small_spend [allow; matched=true] amount is at most 10000 minor units
 Budget hold
   status: frozen
   hold_id: e9ee93b7-dac7-4c23-946f-2a7bc2835c24
@@ -459,8 +471,8 @@ hubu [--url http://127.0.0.1:8787] budget create-recurring --amount AMOUNT --age
 hubu [--url http://127.0.0.1:8787] budget revoke --budget-id ID
 hubu [--url http://127.0.0.1:8787] budget replace --budget-id ID --amount AMOUNT
 hubu [--url http://127.0.0.1:8787] budget list [--all]
-hubu [--url http://127.0.0.1:8787] spend --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
-hubu [--url http://127.0.0.1:8787] spend authorize --operation-key KEY --account-id ID --amount AMOUNT --reason TEXT [--merchant NAME]
+hubu [--url http://127.0.0.1:8787] spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--merchant NAME]
+hubu [--url http://127.0.0.1:8787] spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--merchant NAME]
 hubu [--url http://127.0.0.1:8787] ledger list
 hubu [--url http://127.0.0.1:8787] health
 ```
