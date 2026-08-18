@@ -248,11 +248,15 @@ refresh interval, the router probes independently:
 1. Hubu `GET /health` and `GET /version`.
 2. Gongbu `GET /livez`, `GET /readyz`, and `GET /version`.
 
-The initialize result includes the same snapshot (without `generated_at`) under
-`capabilities.experimental["hubu.dev/unified-mcp"]`. The value contains
-`contractVersion`, `routingRevision`, `backends`, and `availableTools`. Clients
-must compare `contractVersion` exactly, not infer compatibility from product
-SemVer. Clients that cannot consume experimental initialize fields call
+The initialize result includes `UnifiedCapabilitiesV1` under
+`capabilities.experimental["hubu.dev/unified-mcp"]`, with exactly the same
+snake-case field names and value schemas shown above except that `generated_at`
+is omitted. Its `tools` array still contains all 33 names in lexical order with
+each owner, availability flag, and reason code; it is not reduced to a list of
+available names. Given a capability-tool response `C`, the initialize extension
+must therefore equal `C` after deleting only `generated_at`. Clients compare
+`contract_version` exactly and must not infer compatibility from product SemVer.
+Clients that cannot consume experimental initialize fields call
 `hubu_unified_capabilities`.
 
 The v1 compatibility matrix is fixed as follows:
@@ -267,11 +271,14 @@ The v1 compatibility matrix is fixed as follows:
 | Gongbu API schema | exact integer `2` |
 | Gongbu MCP schema | exact integer `2` |
 | backend product versions | each must exactly equal the unified router's `product_version`, and therefore each other |
-| source commits | every value that is neither `unknown` nor empty must exactly equal the router's known `source_commit`; if the router commit is unknown, the two known backend values must equal each other |
+| source commits | router, Hubu, and Gongbu values must all be known, non-empty 40-character lowercase Git SHAs and must exactly equal |
 
 An implementation changes a required value only by publishing a new unified
 contract version or routing revision with contract tests. It must never use
-"latest", silently accept an unknown schema, or guess from field presence.
+"latest", accept `unknown` build provenance, silently accept an unknown schema,
+or guess from field presence. An unstamped local build is therefore
+`incompatible`, not a development exception; local unified testing must stamp
+all three binaries from the same workspace commit.
 
 Backend states and catalog behavior are deterministic:
 
