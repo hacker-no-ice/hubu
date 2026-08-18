@@ -971,6 +971,15 @@ mod tests {
         .unwrap();
         assert_eq!(input.execution_id, "execution-2");
         assert_eq!(input.recovery_delays_seconds, vec![1, 2, 3]);
+        let visible = serde_json::to_string(&input).unwrap();
+        for canary in [
+            "gongbu-caller-canary",
+            "hubu-executor-canary",
+            "hubu-reconciliation-canary",
+            "provider-credential-canary",
+        ] {
+            assert!(!visible.contains(canary));
+        }
     }
 
     #[test]

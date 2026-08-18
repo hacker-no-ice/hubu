@@ -2,3 +2,4 @@
 
 pub mod redaction;
 pub mod secrets;
+pub mod setup;

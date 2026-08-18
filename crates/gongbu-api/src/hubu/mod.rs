@@ -63,6 +63,10 @@ impl HubuClient {
         self.get_json("/version")
     }
 
+    pub fn check_executor_credential(&self) -> Result<HubuCredentialCheck, HttpClientError> {
+        self.get_json("/spend/executor/credential-check")
+    }
+
     pub fn validate(
         &self,
         request: &ExecutorSpendRequest,
@@ -136,6 +140,13 @@ pub struct HubuVersion {
     pub executor_contract: String,
     #[serde(default)]
     pub source_commit: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HubuCredentialCheck {
+    pub status: String,
+    pub credential_class: String,
+    pub executor_contract: String,
 }
 
 /// Production Hubu activity bridge. It only connects to the operator-provided

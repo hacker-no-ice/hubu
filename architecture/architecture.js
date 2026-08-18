@@ -43,6 +43,7 @@ const sharedLinks = {
   gongbuHubu: ["Gongbu Hubu client", "crates/gongbu-api/src/hubu/mod.rs"],
   gongbuMcp: ["Gongbu MCP adapter", "crates/gongbu-mcp/src/lib.rs"],
   gongbuConfig: ["Gongbu server example", "examples/gongbu/gongbu.server.json"],
+  gongbuCredentialSetup: ["Gongbu credential setup", "crates/gongbu-api/src/config/setup.rs"],
 };
 
 const components = {
@@ -373,11 +374,13 @@ const components = {
       "Claims the Hubu authorization before provider work and validates the claim again immediately before the call.",
       "Derives the version-1 canonical execution scope from the operator-selected provider/adapter target and exact-matches it across the Hubu trust boundary.",
       "Resolves Gongbu-held credentials and invokes exactly the operator-selected provider adapter without routing or fallback.",
+      "Bootstraps caller and Hubu credentials directly into Keychain, verifies the Hubu bearer on a protected executor route, and closes readiness when a cached credential changes so rotation requires an explicit restart.",
+      "Keeps the human reconciliation capability entirely on Hubu's operator side; Gongbu receives only its caller capability, Hubu executor/service credential, spend-auth token IDs, and provider credentials in their distinct roles.",
       "Stores normalized artifacts under the Gongbu artifact root and persists metadata in the Gongbu database, never in Hubu storage.",
       "Settles actual cost or safely releases through the v4 HTTP contract; ambiguous outcomes stay in reconciliation instead of causing blind provider retries.",
       "Keeps the Hubu and Gongbu processes, databases, credentials, provider work, artifacts, MCP surfaces, and failure domains separate despite shared source and release identity.",
     ],
-    links: [sharedLinks.gongbuOverview, sharedLinks.gongbuServer, sharedLinks.gongbuApplication, sharedLinks.gongbuWorkflow, sharedLinks.gongbuExecution, sharedLinks.gongbuArtifact, sharedLinks.gongbuProvider, sharedLinks.gongbuHubu, sharedLinks.gongbuMcp, sharedLinks.gongbuConfig, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.api],
+    links: [sharedLinks.gongbuOverview, sharedLinks.gongbuServer, sharedLinks.gongbuCredentialSetup, sharedLinks.gongbuApplication, sharedLinks.gongbuWorkflow, sharedLinks.gongbuExecution, sharedLinks.gongbuArtifact, sharedLinks.gongbuProvider, sharedLinks.gongbuHubu, sharedLinks.gongbuMcp, sharedLinks.gongbuConfig, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.api],
     zones: [
       { label: "Gongbu process + owned state", x: 300, y: 44, w: 650, h: 670 },
       { label: "Provider boundary", x: 986, y: 44, w: 246, h: 250 },
@@ -391,7 +394,7 @@ const components = {
       { id: "temporal", label: "Temporal state", sub: "timers + recovery", x: 674, y: 276, w: 230, h: 92, tone: "data", path: "crates/gongbu-api/src/temporal.rs" },
       { id: "artifacts", label: "Artifact store", sub: "normalized bytes", x: 340, y: 548, w: 210, h: 96, tone: "data", path: "crates/gongbu-api/src/artifact/mod.rs" },
       { id: "provider", label: "Provider adapter", sub: "selected target only", x: 674, y: 474, w: 230, h: 92, tone: "executor", path: "crates/gongbu-api/src/provider/mod.rs" },
-      { id: "credentials", label: "Keychain secrets", sub: "Gongbu-held", x: 674, y: 606, w: 230, h: 80, tone: "data", path: "crates/gongbu-api/src/config/secrets.rs" },
+      { id: "credentials", label: "Keychain secrets", sub: "bootstrap + rotation", x: 674, y: 606, w: 230, h: 80, tone: "data", path: "crates/gongbu-api/src/config/setup.rs" },
       { id: "vendor", label: "Provider", sub: "external model/API", x: 1012, y: 120, w: 194, h: 124, tone: "vendor" },
       { id: "hubu", label: "Hubu trust boundary", sub: "canonical scope + claim", x: 1010, y: 556, w: 198, h: 100, tone: "core", path: "crates/hubu-api/src/lib.rs" },
     ],
@@ -403,7 +406,8 @@ const components = {
       ["workflow", "executionDb", "attempt/receipt", { labelDx: -36, labelDy: 26 }],
       ["workflow", "hubu", "exact scope + claim/finalize", { labelDy: -26 }],
       ["workflow", "provider", "execute once"],
-      ["credentials", "provider", "resolve secret"],
+      ["credentials", "provider", "provider credential"],
+      ["credentials", "hubu", "verified service bearer"],
       ["provider", "vendor", "model call", { labelDy: -26 }],
       ["vendor", "provider", "result/usage", { labelDy: 44, labelT: 0.58 }],
       ["provider", "artifacts", "normalized bytes"],

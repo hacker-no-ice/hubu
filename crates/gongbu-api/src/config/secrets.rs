@@ -1,5 +1,4 @@
 //! Operator-owned secret references and the local macOS Keychain backend.
-use std::process::Command;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,12 +36,15 @@ pub enum SecretError {
     InvalidReference,
     #[error("operator secret unavailable")]
     Unavailable,
+    #[error("local Keychain credential storage is supported only on macOS")]
+    Unsupported,
 }
 pub type Result<T> = std::result::Result<T, SecretError>;
 
 /// Secret bytes deliberately have no `Debug`, `Display`, serde, or clone implementation.
 pub struct ProviderSecret(Vec<u8>);
 impl ProviderSecret {
+    #[cfg(any(target_os = "macos", test))]
     fn new(bytes: Vec<u8>) -> Result<Self> {
         if bytes.is_empty() {
             Err(SecretError::Unavailable)
@@ -64,6 +66,11 @@ pub trait SecretProvider: Send + Sync {
     fn resolve(&self, reference: &SecretReference) -> Result<ProviderSecret>;
 }
 
+pub trait SecretStore: SecretProvider {
+    fn persist(&self, reference: &SecretReference, value: &[u8]) -> Result<()>;
+    fn delete(&self, reference: &SecretReference) -> Result<()>;
+}
+
 /// Resolve exactly the reference attached to the already-selected operator target.
 pub fn resolve_selected(
     provider: &dyn SecretProvider,
@@ -77,28 +84,58 @@ pub fn resolve_selected(
 pub struct MacOsKeychain;
 impl SecretProvider for MacOsKeychain {
     fn resolve(&self, reference: &SecretReference) -> Result<ProviderSecret> {
-        let mut output = Command::new("/usr/bin/security")
-            .args([
-                "find-generic-password",
-                "-s",
+        #[cfg(target_os = "macos")]
+        {
+            let bytes = security_framework::passwords::get_generic_password(
                 reference.service(),
-                "-a",
                 reference.account(),
-                "-w",
-            ])
-            .output()
+            )
             .map_err(|_| SecretError::Unavailable)?;
-        if !output.status.success() {
+            ProviderSecret::new(bytes)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = reference;
+            Err(SecretError::Unsupported)
+        }
+    }
+}
+
+impl SecretStore for MacOsKeychain {
+    fn persist(&self, reference: &SecretReference, value: &[u8]) -> Result<()> {
+        if value.is_empty() {
             return Err(SecretError::Unavailable);
         }
-        while output
-            .stdout
-            .last()
-            .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+        #[cfg(target_os = "macos")]
         {
-            output.stdout.pop();
+            security_framework::passwords::set_generic_password(
+                reference.service(),
+                reference.account(),
+                value,
+            )
+            .map_err(|_| SecretError::Unavailable)
         }
-        ProviderSecret::new(output.stdout)
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (reference, value);
+            Err(SecretError::Unsupported)
+        }
+    }
+
+    fn delete(&self, reference: &SecretReference) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            security_framework::passwords::delete_generic_password(
+                reference.service(),
+                reference.account(),
+            )
+            .map_err(|_| SecretError::Unavailable)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = reference;
+            Err(SecretError::Unsupported)
+        }
     }
 }
 

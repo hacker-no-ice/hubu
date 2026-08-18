@@ -484,6 +484,13 @@ only the normal bearer, while human-facing CLI/MCP administration receives the
 reconciliation capability. The server validates both credentials before
 entering the reconciliation transaction.
 
+Local executors can verify that their bearer is accepted, without presenting a
+spend-auth token ID or causing a financial transition, through protected
+`GET /spend/executor/credential-check`. Its response contains only status,
+credential class, and executor contract. Health and version remain public and
+are not credential checks. The route never accepts or returns the human
+reconciliation capability.
+
 The CLI is the direct operator surface:
 
 ```sh

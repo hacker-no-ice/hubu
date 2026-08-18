@@ -34,8 +34,12 @@ preflight, a missing item or denied Keychain access fails as
 `provider error (secret_unavailable)` before claim or provider work. Gongbu does
 not include Keychain stderr in the response.
 
-To replace a credential manually, open the same item in Keychain Access, select
-**Show password**, enter the replacement, save the item, and restart Gongbu so
-subsequent executions use it. To verify the database contains references rather
-than plaintext, stop Gongbu and inspect the schema/data with `sqlite3`; the
-provider credential itself has no DB column and must not appear in a `.dump`.
+Provider credentials are a separate credential class from the generated
+caller-to-Gongbu capability, the Hubu executor/service credential, a request's
+spend-auth token ID, and Hubu's human reconciliation capability. Provider
+credentials may be replaced in the same Keychain item. Gongbu resolves them at
+provider preflight, while caller and Hubu credential changes require restart;
+see the [server rotation workflow](server.md#credential-rotation-rollback-and-revocation).
+To verify the database contains references rather than plaintext, stop Gongbu
+and inspect the schema/data with `sqlite3`; the provider credential itself has
+no DB column and must not appear in a `.dump`.

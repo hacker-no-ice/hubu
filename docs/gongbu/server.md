@@ -29,15 +29,37 @@ field overrides and does not reload the file. Any change requires a graceful
 restart. Build provenance environment variables are compile-time metadata only,
 and MCP client variables configure only `gongbu-mcp`.
 
-Raw tokens never belong in the JSON. Store three kinds of credentials in macOS
-Keychain: the scoped Hubu bearer, the caller capability, and every provider
-credential referenced by the provider target catalog. For example:
+Raw tokens never belong in JSON, command arguments, shell tracing, SQLite, or
+Temporal payloads. The config names only opaque macOS Keychain service/account
+references. First create each provider credential in Keychain Access as
+described in [Local Keychain secrets](local-keychain-secrets.md). Then, with
+Hubu already running, bootstrap the remaining references:
 
 ```sh
-security add-generic-password -U -s gongbu.hubu -a local -w 'HUBU_SCOPED_BEARER'
-security add-generic-password -U -s gongbu.caller -a local-mcp -w 'LONG_RANDOM_CALLER_CAPABILITY'
-security add-generic-password -U -s gongbu.google -a local -w 'PROVIDER_CREDENTIAL'
+target/release/gongbu-server credentials bootstrap \
+  --config /absolute/path/gongbu.json
 ```
+
+The command uses the production config and provider-catalog parsers, confirms
+all enabled provider references resolve, generates the caller-to-Gongbu
+capability, and persists it directly through the Keychain API. It discovers the
+Hubu executor/service credential in this explicit precedence order:
+
+1. `--hubu-token-file FILE`
+2. `HUBU_AUTH_TOKEN`
+3. `HUBU_AUTH_TOKEN_FILE`
+4. `./hubu.auth-token`
+5. `$HUBU_HOME/hubu.auth-token`
+6. `~/.hubu/hubu.auth-token`
+
+Before persisting that handoff, setup calls Hubu's protected
+`GET /spend/executor/credential-check` endpoint. Public `/health` and `/version`
+are compatibility signals only and cannot prove the bearer. Setup reports only
+the credential class and discovery source category, never a value, path, or
+Keychain reference. Until HUB-32 issues a narrower executor capability, this
+handoff necessarily uses Hubu's protected local service bearer; the config name
+and endpoint are ready to accept the narrower credential later without changing
+spend-authorization request semantics.
 
 The authenticated caller account must exactly equal the configured Hubu account.
 Requests contain no account override. Provider endpoints, credentials, target
@@ -50,8 +72,10 @@ Start the already installed Hubu server using its own persistent database and
 authentication configuration. Register or select the account and agent, create
 the relevant budget/policy, and issue the authorization used by the execution.
 Verify Hubu reports the exact `product_version` configured in Gongbu and the
-`hubu-spend-executor-v4.1` executor contract. The Gongbu startup policy may exit
-immediately or wait for the configured bounded interval; it never repairs Hubu.
+`hubu-spend-executor-v4.1` executor contract. Gongbu additionally verifies its
+Hubu executor/service credential on the protected credential-check route before
+Temporal or the Gongbu listener starts. The startup policy may exit immediately
+or wait for the configured bounded interval; it never repairs Hubu.
 
 ## Choose Temporal ownership
 
@@ -144,6 +168,46 @@ gracefully shuts down and bounds its worker drain, then stops only a managed
 Temporal child. It retains the database, artifacts, Temporal state, and logs.
 Hubu is untouched.
 
+### Credential rotation, rollback, and revocation
+
+Caller and Hubu credentials are loaded once because they become authenticators
+and long-lived clients. Gongbu re-resolves both Keychain items while running; a
+change or removal closes readiness and stops new admission with a
+`restart required` diagnostic. Provider credentials remain separately owned and
+are checked at startup and re-resolved at provider preflight.
+
+Rotate the generated caller capability or hand off the currently discoverable
+Hubu credential:
+
+```sh
+target/release/gongbu-server credentials rotate caller --config /absolute/path/gongbu.json
+target/release/gongbu-server credentials rotate hubu --config /absolute/path/gongbu.json
+```
+
+Each replacement copies the previous value to an opaque `.rollback` Keychain
+account without printing either value. Stop or allow the running process to
+close admission, restart Gongbu, and verify authenticated execution admission.
+If validation fails, swap the previous value back and restart:
+
+```sh
+target/release/gongbu-server credentials rollback caller --config /absolute/path/gongbu.json
+target/release/gongbu-server credentials rollback hubu --config /absolute/path/gongbu.json
+```
+
+After the new credential is proven and all clients have moved, revoke the
+rollback copy:
+
+```sh
+target/release/gongbu-server credentials revoke-rollback caller --config /absolute/path/gongbu.json
+target/release/gongbu-server credentials revoke-rollback hubu --config /absolute/path/gongbu.json
+```
+
+For Hubu rotation, rotate the source used by the Hubu server first, restart Hubu,
+then run Gongbu's `rotate hubu`; the protected check rejects a stale or placeholder
+candidate before Keychain replacement. Never copy the human reconciliation
+capability: it remains only in Hubu operator clients and Gongbu has no config,
+header, database column, or Temporal field for it.
+
 For a consistent cold backup, stop Gongbu gracefully, then copy the SQLite
 database, artifact root, and managed Temporal data directory together. Restart
 with the unchanged config. Do not restore only one member of that state set.
@@ -162,7 +226,8 @@ settlement in Hubu. Never place this acknowledgement in CI configuration.
 ## Troubleshooting
 
 - Startup rejects relative paths, unknown JSON keys, mock/fixture targets,
-  missing Keychain items, unavailable active adapters, incomplete prices,
+  missing caller-to-Gongbu, Hubu executor/service, or provider credentials,
+  rejected Hubu credentials, unavailable active adapters, incomplete prices,
   account mismatches, unsafe hosts, or incompatible Hubu/Temporal versions.
 - If `/readyz` becomes unavailable, inspect the managed Temporal log under its
   persistent data directory or the independently managed external service, then

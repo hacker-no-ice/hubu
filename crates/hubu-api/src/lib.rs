@@ -1376,6 +1376,11 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
             Ok(spend_executor_guidance(state))
         }
+        ("GET", "/spend/executor/credential-check") => Ok(json!({
+            "status": "ok",
+            "credential_class": "hubu_executor_or_service",
+            "executor_contract": EXECUTOR_CONTRACT,
+        })),
         ("POST", "/spend/executor/validate") => {
             validate_executor_spend(request.body, state).map(to_json)
         }
@@ -5222,6 +5227,36 @@ profiles:
         assert!(response.body["source_commit"]
             .as_str()
             .is_some_and(|value| !value.is_empty()));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn executor_credential_check_is_protected_and_reconciliation_free() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-executor-credential-check-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+
+        let rejected = route(
+            public_request("GET", "/spend/executor/credential-check"),
+            &state,
+        );
+        assert_eq!(rejected.status, 401);
+        let accepted = route(
+            authenticated_get_request("/spend/executor/credential-check"),
+            &state,
+        );
+        assert_eq!(accepted.status, 200);
+        assert_eq!(
+            accepted.body["credential_class"],
+            "hubu_executor_or_service"
+        );
+        assert_eq!(accepted.body["executor_contract"], EXECUTOR_CONTRACT);
+        let rendered = accepted.body.to_string();
+        assert!(!rendered.contains(TEST_AUTH_TOKEN));
+        assert!(!rendered.contains(TEST_RECONCILIATION_TOKEN));
 
         std::fs::remove_file(path).ok();
     }
