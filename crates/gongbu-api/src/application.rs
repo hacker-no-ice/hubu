@@ -9,6 +9,7 @@ use crate::{
     artifact::ArtifactService,
     execution::{Execution, Repository},
     http::{Api, AuthenticatedAccount, HttpResponse},
+    lifecycle::LifecycleReason,
     provider::{
         contract::{
             enforce_cost, vendor_idempotency_key, AdapterOutcome, NormalizedRequest,
@@ -449,18 +450,23 @@ where
         ready: ready.clone(),
     };
     let completion = worker.take_completion();
-    let supervised_shutdown = wait_for_shutdown(
-        shutdown,
-        completion,
-        monitor_temporal(
-            temporal_client,
-            dependencies.temporal_namespace,
-            task_queue,
-            dependencies.dependency_check_interval,
-            dependencies.dependency_checker,
-        ),
-        ready.clone(),
-    );
+    let supervised_ready = ready.clone();
+    let supervised_shutdown = async move {
+        let reason = wait_for_shutdown(
+            shutdown,
+            completion,
+            monitor_temporal(
+                temporal_client,
+                dependencies.temporal_namespace,
+                task_queue,
+                dependencies.dependency_check_interval,
+                dependencies.dependency_checker,
+            ),
+            supervised_ready,
+        )
+        .await;
+        crate::lifecycle::log(reason);
+    };
     let result = axum::serve(listener, Router::new().fallback(dispatch).with_state(state))
         .with_graceful_shutdown(supervised_shutdown)
         .await;
@@ -499,7 +505,7 @@ async fn monitor_temporal(
     task_queue: String,
     interval: Duration,
     dependency_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-) {
+) -> LifecycleReason {
     loop {
         tokio::time::sleep(interval).await;
         let temporal_ready = worker_is_polling(&client, &namespace, &task_queue)
@@ -515,7 +521,7 @@ async fn monitor_temporal(
             None => true,
         };
         if !temporal_ready || !dependencies_ready {
-            return;
+            return LifecycleReason::DependencyHealthShutdown;
         }
     }
 }
@@ -525,19 +531,23 @@ async fn wait_for_shutdown<F, H>(
     completion: futures::channel::oneshot::Receiver<()>,
     health: H,
     ready: Arc<AtomicBool>,
-) where
+) -> LifecycleReason
+where
     F: Future<Output = ()>,
-    H: Future<Output = ()>,
+    H: Future<Output = LifecycleReason>,
 {
     let worker_or_health = async {
         match select(Box::pin(completion), Box::pin(health)).await {
-            Either::Left(_) | Either::Right(_) => {}
+            Either::Left(_) => LifecycleReason::WorkerUnavailable,
+            Either::Right((reason, _)) => reason,
         }
     };
-    match select(Box::pin(shutdown), Box::pin(worker_or_health)).await {
-        Either::Left(_) | Either::Right(_) => {}
+    let reason = match select(Box::pin(shutdown), Box::pin(worker_or_health)).await {
+        Either::Left(_) => LifecycleReason::OperatorSignal,
+        Either::Right((reason, _)) => reason,
     };
     ready.store(false, Ordering::SeqCst);
+    reason
 }
 
 async fn stop_worker(
@@ -559,15 +569,7 @@ async fn dispatch(State(state): State<ApplicationState>, request: Request<Body>)
         return json_transport(StatusCode::OK, json!({"status":"live"}));
     }
     if method == "GET" && path == "/readyz" {
-        let is_ready = state.ready.load(Ordering::SeqCst);
-        return json_transport(
-            if is_ready {
-                StatusCode::OK
-            } else {
-                StatusCode::SERVICE_UNAVAILABLE
-            },
-            json!({"status": if is_ready { "ready" } else { "not_ready" }}),
-        );
+        return readiness_response(&state.ready);
     }
     if method == "GET" && path == "/version" {
         return json_transport(
@@ -594,6 +596,18 @@ async fn dispatch(State(state): State<ApplicationState>, request: Request<Body>)
         Ok(response) => into_axum(response),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+fn readiness_response(ready: &AtomicBool) -> Response {
+    let is_ready = ready.load(Ordering::SeqCst);
+    json_transport(
+        if is_ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        json!({"status": if is_ready { "ready" } else { "not_ready" }}),
+    )
 }
 
 fn json_transport(status: StatusCode, body: serde_json::Value) -> Response {
@@ -662,12 +676,79 @@ mod tests {
             .unwrap();
         let (completion_tx, completion_rx) = futures::channel::oneshot::channel();
         completion_tx.send(()).unwrap();
-        runtime.block_on(wait_for_shutdown(
+        let ready = Arc::new(AtomicBool::new(true));
+        let reason = runtime.block_on(wait_for_shutdown(
             futures::future::pending(),
             completion_rx,
             futures::future::pending(),
-            Arc::new(AtomicBool::new(true)),
+            ready.clone(),
         ));
+        assert_eq!(reason, LifecycleReason::WorkerUnavailable);
+        assert!(!ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn dependency_loss_removes_readiness_and_reports_shutdown_reason() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_completion_tx, completion_rx) = futures::channel::oneshot::channel();
+        let ready = Arc::new(AtomicBool::new(true));
+        let reason = runtime.block_on(wait_for_shutdown(
+            futures::future::pending(),
+            completion_rx,
+            futures::future::ready(LifecycleReason::DependencyHealthShutdown),
+            ready.clone(),
+        ));
+        assert_eq!(reason, LifecycleReason::DependencyHealthShutdown);
+        assert!(!ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn operator_signal_removes_readiness_and_reports_shutdown_reason() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_completion_tx, completion_rx) = futures::channel::oneshot::channel();
+        let ready = Arc::new(AtomicBool::new(true));
+        let reason = runtime.block_on(wait_for_shutdown(
+            futures::future::ready(()),
+            completion_rx,
+            futures::future::pending(),
+            ready.clone(),
+        ));
+        assert_eq!(reason, LifecycleReason::OperatorSignal);
+        assert!(!ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn repeated_execution_failures_leave_readiness_and_supervisor_healthy() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            let (_completion_tx, completion_rx) = futures::channel::oneshot::channel();
+            let ready = Arc::new(AtomicBool::new(true));
+            let mut supervisor = Box::pin(wait_for_shutdown(
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+                completion_rx,
+                futures::future::pending(),
+                ready.clone(),
+            ));
+
+            for _ in 0..64 {
+                crate::lifecycle::log(LifecycleReason::ExecutionFailure);
+                assert_eq!(readiness_response(&ready).status(), StatusCode::OK);
+                assert!(futures::poll!(supervisor.as_mut()).is_pending());
+            }
+            assert!(ready.load(Ordering::SeqCst));
+        });
     }
 
     #[test]

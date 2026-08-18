@@ -253,6 +253,42 @@ fn map_activity_error(error: HttpClientError) -> ActivityError {
     }
 }
 
+#[cfg(test)]
+mod rejection_tests {
+    use super::*;
+
+    #[test]
+    fn request_level_hubu_rejections_are_proven_and_redacted() {
+        for (status, body) in [
+            (401, "token=secret-value"),
+            (403, "authorization scope account-private"),
+            (410, "expired bearer credential"),
+            (422, "provider rejected private prompt"),
+            (429, "rate-limit account-private"),
+        ] {
+            assert_eq!(
+                map_activity_error(HttpClientError::Status {
+                    status,
+                    body: body.into(),
+                }),
+                ActivityError::Proven("hubu_request_rejected".into())
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_transport_loss_remains_ambiguous() {
+        let error = HttpClientError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "endpoint unavailable",
+        ));
+        assert_eq!(
+            map_activity_error(error),
+            ActivityError::Ambiguous("hubu_transport_ambiguous".into())
+        );
+    }
+}
+
 fn percent_encode_query(value: &str) -> String {
     value
         .bytes()
