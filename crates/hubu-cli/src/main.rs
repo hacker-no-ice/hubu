@@ -982,7 +982,12 @@ fn policy(base_url: &str, args: Vec<String>) -> Result<()> {
     args.remove(0);
 
     match command.as_str() {
-        "add" => add_policy(base_url, args),
+        "add" => apply_policy(base_url, args, true),
+        "apply" => apply_policy(base_url, args, false),
+        "show" => show_policy(base_url, args, false),
+        "export" => show_policy(base_url, args, true),
+        "history" => policy_history(base_url, args),
+        "diff" => policy_diff(base_url, args),
         "list" => policy_list(base_url, args),
         "new-template" => new_policy_template(args),
         "validate" => validate_policy_file(args),
@@ -1048,7 +1053,7 @@ fn write_policy_template(policy_path: &str, force: bool) -> Result<()> {
         .with_context(|| format!("write default policy template to `{policy_path}`"))?;
     println!("Hubu policy template created");
     println!("  path: {policy_path}");
-    println!("  next: edit the file, then run hubu policy add --path {policy_path}");
+    println!("  next: edit the file, then run hubu policy apply --path {policy_path}");
     Ok(())
 }
 
@@ -1060,13 +1065,19 @@ fn policy_effect_name(effect: Effect) -> &'static str {
     }
 }
 
-fn add_policy(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn apply_policy(base_url: &str, mut args: Vec<String>, legacy_add: bool) -> Result<()> {
     if take_help(&mut args) {
         print_policy_add_help();
         return Ok(());
     }
 
     let agent_id = take_value(&mut args, "--agent-id");
+    let display_name = take_value(&mut args, "--name");
+    let declarative_key = take_value(&mut args, "--key");
+    let expected_revision = take_value(&mut args, "--expected-revision")
+        .map(|value| value.parse::<u64>().context("invalid --expected-revision"))
+        .transpose()?;
+    let expected_hash = take_value(&mut args, "--expected-hash");
     let path = take_required(&mut args, "--path")?;
     ensure_no_args(args)?;
     Policy::from_yaml_file(&path).with_context(|| format!("validate policy file `{path}`"))?;
@@ -1078,15 +1089,41 @@ fn add_policy(base_url: &str, mut args: Vec<String>) -> Result<()> {
     if let Some(agent_id) = agent_id {
         body["agent_id"] = json!(agent_id);
     }
+    if let Some(display_name) = display_name {
+        body["display_name"] = json!(display_name);
+    }
+    if let Some(declarative_key) = declarative_key {
+        body["declarative_key"] = json!(declarative_key);
+    }
+    if let Some(expected_revision) = expected_revision {
+        body["expected_revision"] = json!(expected_revision);
+    }
+    if let Some(expected_hash) = expected_hash {
+        body["expected_hash"] = json!(expected_hash);
+    }
+    body["source"] = json!("cli");
 
     let response = post_json(base_url, "/policies", body)?;
 
-    println!("Policy added");
+    println!(
+        "Policy {}",
+        if legacy_add {
+            "added"
+        } else if response.get("changed").and_then(Value::as_bool) == Some(false) {
+            "unchanged"
+        } else {
+            "applied"
+        }
+    );
     println!("  scope: {}", string_at(&response, "scope")?);
     if let Some(agent_id) = response.get("agent_id").and_then(Value::as_str) {
         println!("  agent_id: {agent_id}");
     }
     println!("  policy_id: {}", string_at(&response, "policy_id")?);
+    println!("  key: {}", string_at(&response, "declarative_key")?);
+    println!("  name: {}", string_at(&response, "display_name")?);
+    println!("  revision: {}", response["revision"]);
+    println!("  payload_hash: {}", string_at(&response, "payload_hash")?);
     println!(
         "  policy_version: {}",
         string_at(&response, "policy_version")?
@@ -1095,6 +1132,67 @@ fn add_policy(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "  default_decision: {}",
         string_at(&response, "default_decision")?
     );
+    Ok(())
+}
+
+fn policy_query(mut args: Vec<String>) -> Result<String> {
+    let policy_id = take_value(&mut args, "--policy-id");
+    let agent_id = take_value(&mut args, "--agent-id");
+    ensure_no_args(args)?;
+    match (policy_id, agent_id) {
+        (Some(policy_id), None) => Ok(format!("policy_id={policy_id}")),
+        (None, Some(agent_id)) => Ok(format!("agent_id={agent_id}")),
+        (None, None) => Ok(String::new()),
+        _ => bail!("pass only one of --policy-id or --agent-id"),
+    }
+}
+
+fn show_policy(base_url: &str, args: Vec<String>, export: bool) -> Result<()> {
+    let query = policy_query(args)?;
+    let path = format!(
+        "/policies/{}{}{}",
+        if export { "export" } else { "show" },
+        if query.is_empty() { "" } else { "?" },
+        query
+    );
+    let response = get_json(base_url, &path)?;
+    if export {
+        print!("{}", string_at(&response, "policy_yaml")?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    }
+    Ok(())
+}
+
+fn policy_history(base_url: &str, args: Vec<String>) -> Result<()> {
+    let query = policy_query(args)?;
+    let path = format!(
+        "/policies/history{}{}",
+        if query.is_empty() { "" } else { "?" },
+        query
+    );
+    let response = get_json(base_url, &path)?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+fn policy_diff(base_url: &str, mut args: Vec<String>) -> Result<()> {
+    let from_revision = take_required(&mut args, "--from-revision")?;
+    let to_revision = take_value(&mut args, "--to-revision");
+    let query = policy_query(args)?;
+    let mut parameters = Vec::new();
+    if !query.is_empty() {
+        parameters.push(query);
+    }
+    parameters.push(format!("from_revision={from_revision}"));
+    if let Some(to_revision) = to_revision {
+        parameters.push(format!("to_revision={to_revision}"));
+    }
+    let response = get_json(
+        base_url,
+        &format!("/policies/diff?{}", parameters.join("&")),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
 
@@ -1127,6 +1225,13 @@ fn policy_list(base_url: &str, mut args: Vec<String>) -> Result<()> {
                     .unwrap_or("-")
                     .to_string(),
                 string_at(policy, "policy_id")?.to_string(),
+                string_at(policy, "declarative_key")?.to_string(),
+                string_at(policy, "display_name")?.to_string(),
+                policy
+                    .get("revision")
+                    .and_then(Value::as_u64)
+                    .map(|revision| revision.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 string_at(policy, "policy_version")?.to_string(),
                 string_at(policy, "default_decision")?.to_string(),
                 policy
@@ -1144,7 +1249,10 @@ fn policy_list(base_url: &str, mut args: Vec<String>) -> Result<()> {
             "SCOPE",
             "AGENT ID",
             "POLICY ID",
-            "VERSION",
+            "KEY",
+            "NAME",
+            "REV",
+            "AUTHORED VERSION",
             "DEFAULT",
             "RULES",
             "ATTACHED AT",
@@ -2233,13 +2341,18 @@ fn print_policy_help() {
 Usage:
   hubu policy new-template [--path FILE] [--force]
   hubu policy validate --path FILE
-  hubu policy add --path FILE
+  hubu policy apply --path FILE [--key KEY] [--name NAME] [--agent-id AGENT_ID]
+  hubu policy add --path FILE                 Compatibility alias for apply
   hubu policy list
+  hubu policy show [--policy-id ID | --agent-id AGENT_ID]
+  hubu policy export [--policy-id ID | --agent-id AGENT_ID]
+  hubu policy history [--policy-id ID | --agent-id AGENT_ID]
+  hubu policy diff --from-revision N [--to-revision N] [--policy-id ID | --agent-id AGENT_ID]
 
 Examples:
   hubu policy new-template --path policies/policy.yaml
   hubu policy validate --path policies/policy.yaml
-  hubu policy add --path policies/policy.yaml
+  hubu policy apply --path policies/policy.yaml
   hubu policy list"
     );
 }
@@ -2271,13 +2384,20 @@ Options:
 
 fn print_policy_add_help() {
     println!(
-        "Attach a spending policy to the current user
+        "Declaratively apply and assign a spending policy to the current user
 
 Usage:
-  hubu policy add --path FILE
+  hubu policy apply --path FILE [--key KEY] [--name NAME] [--agent-id AGENT_ID]
+      [--expected-revision N] [--expected-hash SHA256]
+  hubu policy add --path FILE [OPTIONS]
 
 Options:
-  --path FILE  YAML policy file generated by `hubu policy new-template` or written by hand"
+  --path FILE            YAML policy file generated by `hubu policy new-template` or written by hand
+  --key KEY              Immutable owner-scoped declarative key (defaults to authored id)
+  --name NAME            Mutable display name (defaults to key)
+  --agent-id AGENT_ID    Assign as an agent override instead of the user default
+  --expected-revision N  Apply only if the current server revision matches
+  --expected-hash HASH   Apply only if the current payload hash matches"
     );
 }
 

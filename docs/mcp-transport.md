@@ -248,6 +248,11 @@ idempotency boundary.
 | `hubu_list_users` | `GET /users` | none; marks current local user |
 | `hubu_register_agent` | `POST /agents/register` | required |
 | `hubu_add_policy` | `POST /policies` | required |
+| `hubu_apply_policy` | `POST /policies` | required |
+| `hubu_show_policy` | `GET /policies/show` | none |
+| `hubu_export_policy` | `GET /policies/export` | none |
+| `hubu_policy_history` | `GET /policies/history` | none |
+| `hubu_policy_diff` | `GET /policies/diff` | none |
 | `hubu_set_spending_target` | `POST /user/spending-target` | required |
 | `hubu_revoke_spending_target` | `POST /user/spending-target/revoke` | required |
 | `hubu_show_spending_targets` | `GET /user/spending-target` | none |

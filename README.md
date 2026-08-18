@@ -153,7 +153,7 @@ hubu agent list
 
 hubu policy new-template --path policies/starter.yaml
 hubu policy validate --path policies/starter.yaml
-hubu policy add --path policies/starter.yaml
+hubu policy apply --path policies/starter.yaml
 hubu policy list
 
 hubu user spending-target set --amount 100
@@ -165,7 +165,9 @@ hubu budget list
 Replace `AGENT_ID` with the public agent id printed by `hubu register agent` or
 `hubu agent list`. The starter policy allows small spend, denies a blocked
 merchant, and defaults everything else to `needs_approval`; edit the YAML before
-`hubu policy add` for your local rules.
+`hubu policy apply` for your local rules. Apply returns a stable `pol_` resource
+id and server revision; use `policy show`, `export`, `history`, and `diff` to
+inspect complete content and assignments without opening SQLite.
 
 For human-initiated setup and administration, you can either run the CLI
 commands yourself or ask an agent to do the work behind a human approval prompt.

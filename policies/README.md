@@ -14,11 +14,25 @@ By default, this writes `policies/policy.yaml`. You can choose a different path:
 hubu policy new-template --path policies/openai-allowlist.yaml
 ```
 
-Then attach the policy to the current human user:
+Then declaratively apply the policy as the current human user's default:
 
 ```sh
 hubu policy validate --path policies/openai-allowlist.yaml
-hubu policy add --path policies/openai-allowlist.yaml
+hubu policy apply --path policies/openai-allowlist.yaml --name "OpenAI allowlist"
+```
+
+The first apply creates a stable `pol_...` id. Subsequent applies reconcile by
+the immutable owner-scoped key (the YAML `id` by default), append a revision
+only when canonical content changes, and atomically update the assignment.
+`hubu policy add` remains a compatibility alias.
+
+Inspect or export without reading SQLite:
+
+```sh
+hubu policy show --policy-id pol_...
+hubu policy export --policy-id pol_...
+hubu policy history --policy-id pol_...
+hubu policy diff --policy-id pol_... --from-revision 1
 ```
 
 ## YAML compatibility

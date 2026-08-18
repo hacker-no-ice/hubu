@@ -2,10 +2,12 @@ use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, PaymentId, SpendExecutorClaimId, UserId};
+use hubu_common::ids::{AgentId, PaymentId, PolicyId, SpendExecutorClaimId, UserId};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::budget::{Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetStatus};
 use crate::policy::Policy;
@@ -22,9 +24,58 @@ pub trait PolicyRepository {
         owner_user_id: &UserId,
         scope: &PolicyAssignmentScope,
         policy: &Policy,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        self.apply_policy(
+            owner_user_id,
+            &policy.id,
+            &policy.id,
+            scope,
+            policy,
+            None,
+            None,
+            "system:compatibility",
+            "legacy_save_policy_assignment",
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_policy(
+        &mut self,
+        owner_user_id: &UserId,
+        declarative_key: &str,
+        display_name: &str,
+        scope: &PolicyAssignmentScope,
+        policy: &Policy,
+        expected_revision: Option<u64>,
+        expected_hash: Option<&str>,
+        actor: &str,
+        source: &str,
+    ) -> Result<PolicyApplyResult, StorageError>;
 
     fn load_policy_assignments(&self) -> Result<Vec<PolicyAssignmentRecord>, StorageError>;
+    fn load_policies(&self, owner_user_id: &UserId) -> Result<Vec<PolicyResource>, StorageError>;
+    fn load_policy(
+        &self,
+        owner_user_id: &UserId,
+        selector: &str,
+    ) -> Result<Option<PolicyResource>, StorageError>;
+    fn load_policy_history(
+        &self,
+        owner_user_id: &UserId,
+        selector: &str,
+    ) -> Result<Vec<PolicyRevisionRecord>, StorageError>;
+    fn load_policy_revision(
+        &self,
+        owner_user_id: &UserId,
+        selector: &str,
+        revision: u64,
+    ) -> Result<Option<PolicyRevisionRecord>, StorageError>;
+    fn load_policy_audit(
+        &self,
+        owner_user_id: &UserId,
+        selector: &str,
+    ) -> Result<Vec<PolicyAuditRecord>, StorageError>;
 }
 
 pub trait SpendRepository {
@@ -74,10 +125,58 @@ pub trait SpendingTargetRepository {
 pub struct PolicyAssignmentRecord {
     pub owner_user_id: UserId,
     pub scope: PolicyAssignmentScope,
+    pub policy_id: String,
     pub policy: Policy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyResource {
+    pub policy_id: String,
+    pub owner_user_id: UserId,
+    pub declarative_key: String,
+    pub display_name: String,
+    pub current_revision: u64,
+    pub current_hash: String,
+    pub policy: Policy,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyRevisionRecord {
+    pub policy_id: String,
+    pub revision: u64,
+    pub payload_hash: String,
+    pub policy: Policy,
+    pub actor: String,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyAuditRecord {
+    pub policy_id: String,
+    pub actor: String,
+    pub source: String,
+    pub occurred_at: DateTime<Utc>,
+    pub old_hash: Option<String>,
+    pub new_hash: String,
+    pub affected_assignments: Vec<String>,
+    pub action: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyApplyResult {
+    pub resource: PolicyResource,
+    pub assignment: PolicyAssignmentRecord,
+    pub changed: bool,
+    pub assignment_changed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PolicyAuditAssignments(Vec<String>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PolicyAssignmentScope {
@@ -768,12 +867,12 @@ impl SqliteGovernanceRepository {
     }
 
     fn from_connection(conn: Connection) -> Result<Self, StorageError> {
-        let repository = Self { conn };
+        let mut repository = Self { conn };
         repository.init()?;
         Ok(repository)
     }
 
-    fn init(&self) -> Result<(), StorageError> {
+    fn init(&mut self) -> Result<(), StorageError> {
         self.conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;
@@ -789,6 +888,43 @@ impl SqliteGovernanceRepository {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(owner_user_id, scope_type, scope_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS policies (
+                policy_id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                declarative_key TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                current_revision INTEGER NOT NULL,
+                current_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(owner_user_id, declarative_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS policy_revisions (
+                policy_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                payload_hash TEXT NOT NULL,
+                policy_json TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                source TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(policy_id, revision),
+                FOREIGN KEY(policy_id) REFERENCES policies(policy_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS policy_audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                policy_id TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                source TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                old_hash TEXT,
+                new_hash TEXT NOT NULL,
+                affected_assignments_json TEXT NOT NULL,
+                action TEXT NOT NULL,
+                FOREIGN KEY(policy_id) REFERENCES policies(policy_id)
             );
 
             CREATE TABLE IF NOT EXISTS spend_decisions (
@@ -910,9 +1046,35 @@ impl SqliteGovernanceRepository {
             BEGIN
                 SELECT RAISE(ABORT, 'spend decisions are immutable');
             END;
+
+
+            CREATE TRIGGER IF NOT EXISTS policy_revisions_no_update
+            BEFORE UPDATE ON policy_revisions
+            BEGIN
+                SELECT RAISE(ABORT, 'policy revisions are immutable');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS policy_revisions_no_delete
+            BEFORE DELETE ON policy_revisions
+            BEGIN
+                SELECT RAISE(ABORT, 'policy revisions are immutable');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS policy_audit_events_no_update
+            BEFORE UPDATE ON policy_audit_events
+            BEGIN
+                SELECT RAISE(ABORT, 'policy audit events are immutable');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS policy_audit_events_no_delete
+            BEFORE DELETE ON policy_audit_events
+            BEGIN
+                SELECT RAISE(ABORT, 'policy audit events are immutable');
+            END;
             ",
         )?;
         self.migrate_policy_assignment_scope()?;
+        self.migrate_declarative_policies()?;
         self.migrate_user_caps_to_spending_targets()?;
         self.migrate_executor_claim_budget_holds()?;
         self.migrate_spend_auth_token_claim_ttl()?;
@@ -953,6 +1115,166 @@ impl SqliteGovernanceRepository {
             DROP TABLE policy_assignments_legacy;
             ",
         )?;
+        Ok(())
+    }
+
+    fn migrate_declarative_policies(&mut self) -> Result<(), StorageError> {
+        if !table_has_column(&self.conn, "policy_assignments", "policy_json")? {
+            return Ok(());
+        }
+
+        #[derive(Debug)]
+        struct LegacyAssignment {
+            owner_user_id: String,
+            scope_type: String,
+            scope_id: String,
+            agent_id: Option<String>,
+            policy_json: String,
+            created_at: String,
+            updated_at: String,
+        }
+
+        let legacy = {
+            let mut statement = self.conn.prepare(
+                "SELECT owner_user_id, scope_type, scope_id, agent_id, policy_json, created_at, updated_at
+                 FROM policy_assignments ORDER BY created_at, owner_user_id, scope_type, scope_id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(LegacyAssignment {
+                    owner_user_id: row.get(0)?,
+                    scope_type: row.get(1)?,
+                    scope_id: row.get(2)?,
+                    agent_id: row.get(3)?,
+                    policy_json: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })?;
+            collect_rows(rows)?
+        };
+
+        let transaction = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "ALTER TABLE policy_assignments RENAME TO policy_assignments_embedded_legacy;
+             CREATE TABLE policy_assignments (
+                owner_user_id TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                agent_id TEXT,
+                policy_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(owner_user_id, scope_type, scope_id),
+                FOREIGN KEY(policy_id) REFERENCES policies(policy_id)
+             );",
+        )?;
+
+        for assignment in legacy {
+            let policy: Policy = serde_json::from_str(&assignment.policy_json)?;
+            let payload_hash = policy_payload_hash(&policy)?;
+            let mut declarative_key = legacy_declarative_key(&policy.id, &payload_hash);
+            let existing =
+                policy_identity_for_key(&transaction, &assignment.owner_user_id, &declarative_key)?;
+
+            let policy_id = match existing {
+                Some((policy_id, hash)) if hash == payload_hash => policy_id,
+                Some(_) => {
+                    let hash_hex = payload_hash
+                        .strip_prefix("sha256:")
+                        .ok_or_else(|| StorageError::InvalidData("invalid policy hash".into()))?;
+                    declarative_key = format!(
+                        "{}--migrated-{hash_hex}",
+                        declarative_key.chars().take(53).collect::<String>(),
+                    );
+                    match policy_identity_for_key(
+                        &transaction,
+                        &assignment.owner_user_id,
+                        &declarative_key,
+                    )? {
+                        Some((policy_id, hash)) if hash == payload_hash => policy_id,
+                        Some(_) => {
+                            return Err(StorageError::InvalidData(format!(
+                                "legacy policy migration key collision for `{declarative_key}`"
+                            )));
+                        }
+                        None => new_public_policy_id(&transaction)?,
+                    }
+                }
+                None => new_public_policy_id(&transaction)?,
+            };
+
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM policies WHERE policy_id = ?1)",
+                params![policy_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                transaction.execute(
+                    "INSERT INTO policies
+                     (policy_id, owner_user_id, declarative_key, display_name, current_revision,
+                      current_hash, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7)",
+                    params![
+                        policy_id,
+                        assignment.owner_user_id,
+                        declarative_key,
+                        policy.id,
+                        payload_hash,
+                        assignment.created_at,
+                        assignment.updated_at,
+                    ],
+                )?;
+                transaction.execute(
+                    "INSERT INTO policy_revisions
+                     (policy_id, revision, payload_hash, policy_json, actor, source, created_at)
+                     VALUES (?1, 1, ?2, ?3, 'system:migration', 'legacy_assignment_migration', ?4)",
+                    params![
+                        policy_id,
+                        payload_hash,
+                        assignment.policy_json,
+                        assignment.created_at
+                    ],
+                )?;
+            }
+
+            let affected = serde_json::to_string(&PolicyAuditAssignments(vec![format!(
+                "{}:{}",
+                assignment.scope_type, assignment.scope_id
+            )]))?;
+            transaction.execute(
+                "INSERT INTO policy_assignments
+                 (owner_user_id, scope_type, scope_id, agent_id, policy_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    assignment.owner_user_id,
+                    assignment.scope_type,
+                    assignment.scope_id,
+                    assignment.agent_id,
+                    policy_id,
+                    assignment.created_at,
+                    assignment.updated_at,
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO policy_audit_events
+                 (policy_id, actor, source, occurred_at, old_hash, new_hash,
+                  affected_assignments_json, action)
+                 VALUES (?1, 'system:migration', 'legacy_assignment_migration', ?2,
+                         ?3, ?4, ?5, 'migrated')",
+                params![
+                    policy_id,
+                    assignment.updated_at,
+                    exists.then_some(payload_hash.as_str()),
+                    payload_hash,
+                    affected
+                ],
+            )?;
+        }
+
+        transaction.execute_batch("DROP TABLE policy_assignments_embedded_legacy;")?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1370,51 +1692,257 @@ impl ExecutorClaimRepository for SqliteGovernanceRepository {
 }
 
 impl PolicyRepository for SqliteGovernanceRepository {
-    fn save_policy_assignment(
+    fn apply_policy(
         &mut self,
         owner_user_id: &UserId,
+        declarative_key: &str,
+        display_name: &str,
         scope: &PolicyAssignmentScope,
         policy: &Policy,
-    ) -> Result<(), StorageError> {
+        expected_revision: Option<u64>,
+        expected_hash: Option<&str>,
+        actor: &str,
+        source: &str,
+    ) -> Result<PolicyApplyResult, StorageError> {
+        let declarative_key = declarative_key.trim();
+        let display_name = display_name.trim();
+        if declarative_key.is_empty() {
+            return Err(StorageError::InvalidData(
+                "policy declarative key cannot be empty".to_string(),
+            ));
+        }
+        if !valid_declarative_key(declarative_key) {
+            return Err(StorageError::InvalidData(
+                "policy declarative key must be 1-128 ASCII letters, digits, `_`, `-`, or `.`"
+                    .to_string(),
+            ));
+        }
+        if display_name.is_empty() {
+            return Err(StorageError::InvalidData(
+                "policy display name cannot be empty".to_string(),
+            ));
+        }
+
         let now = Utc::now().to_rfc3339();
         let policy_json = serde_json::to_string(policy)?;
-        self.conn.execute(
-            "INSERT INTO policy_assignments
-             (owner_user_id, scope_type, scope_id, agent_id, policy_id, policy_version, policy_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
-             ON CONFLICT(owner_user_id, scope_type, scope_id) DO UPDATE SET
-                agent_id = excluded.agent_id,
-                policy_id = excluded.policy_id,
-                policy_version = excluded.policy_version,
-                policy_json = excluded.policy_json,
-                updated_at = excluded.updated_at",
-            params![
-                owner_user_id.to_string(),
-                scope.scope_type(),
-                scope.scope_id(),
-                scope.agent_id(),
-                policy.id,
-                policy.version,
-                policy_json,
-                now,
-            ],
-        )?;
-        Ok(())
+        let payload_hash = policy_payload_hash(policy)?;
+        let owner = owner_user_id.to_string();
+        let transaction = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, u64, String, String)> = transaction
+            .query_row(
+                "SELECT policy_id, current_revision, current_hash, display_name
+                 FROM policies WHERE owner_user_id = ?1 AND declarative_key = ?2",
+                params![owner, declarative_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+
+        let (policy_id, previous_revision, previous_hash, previous_name) = match existing {
+            Some(existing) => existing,
+            None => {
+                if expected_revision.is_some() || expected_hash.is_some() {
+                    return Err(StorageError::InvalidData(
+                        "policy compare-and-set failed: resource does not exist".to_string(),
+                    ));
+                }
+                (
+                    new_public_policy_id(&transaction)?,
+                    0,
+                    String::new(),
+                    String::new(),
+                )
+            }
+        };
+
+        if let Some(expected_revision) = expected_revision {
+            if expected_revision != previous_revision {
+                return Err(StorageError::InvalidData(format!(
+                    "policy compare-and-set failed: expected revision {expected_revision}, current revision is {previous_revision}"
+                )));
+            }
+        }
+        if let Some(expected_hash) = expected_hash {
+            if expected_hash != previous_hash {
+                return Err(StorageError::InvalidData(format!(
+                    "policy compare-and-set failed: expected hash {expected_hash}, current hash is {previous_hash}"
+                )));
+            }
+        }
+
+        let content_changed = previous_revision == 0 || previous_hash != payload_hash;
+        let name_changed = previous_revision != 0 && previous_name != display_name;
+        let revision = if content_changed {
+            previous_revision + 1
+        } else {
+            previous_revision
+        };
+
+        if previous_revision == 0 {
+            transaction.execute(
+                "INSERT INTO policies
+                 (policy_id, owner_user_id, declarative_key, display_name, current_revision,
+                  current_hash, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![
+                    policy_id,
+                    owner,
+                    declarative_key,
+                    display_name,
+                    revision,
+                    payload_hash,
+                    now,
+                ],
+            )?;
+        } else if content_changed || name_changed {
+            transaction.execute(
+                "UPDATE policies SET display_name = ?1, current_revision = ?2,
+                 current_hash = ?3, updated_at = ?4 WHERE policy_id = ?5",
+                params![display_name, revision, payload_hash, now, policy_id],
+            )?;
+        }
+
+        if content_changed {
+            transaction.execute(
+                "INSERT INTO policy_revisions
+                 (policy_id, revision, payload_hash, policy_json, actor, source, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    policy_id,
+                    revision,
+                    payload_hash,
+                    policy_json,
+                    actor,
+                    source,
+                    now
+                ],
+            )?;
+        }
+
+        let prior_assignment: Option<String> = transaction
+            .query_row(
+                "SELECT policy_id FROM policy_assignments
+                 WHERE owner_user_id = ?1 AND scope_type = ?2 AND scope_id = ?3",
+                params![owner, scope.scope_type(), scope.scope_id()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let assignment_changed = prior_assignment.as_deref() != Some(policy_id.as_str());
+        if assignment_changed {
+            transaction.execute(
+                "INSERT INTO policy_assignments
+                 (owner_user_id, scope_type, scope_id, agent_id, policy_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                 ON CONFLICT(owner_user_id, scope_type, scope_id) DO UPDATE SET
+                    agent_id = excluded.agent_id,
+                    policy_id = excluded.policy_id,
+                    updated_at = excluded.updated_at",
+                params![
+                    owner,
+                    scope.scope_type(),
+                    scope.scope_id(),
+                    scope.agent_id(),
+                    policy_id,
+                    now,
+                ],
+            )?;
+        }
+
+        let changed = content_changed || name_changed || assignment_changed;
+        if changed {
+            let affected = if assignment_changed {
+                vec![format!("{}:{}", scope.scope_type(), scope.scope_id())]
+            } else {
+                Vec::new()
+            };
+            if let Some(prior_policy_id) = prior_assignment
+                .as_deref()
+                .filter(|prior_policy_id| *prior_policy_id != policy_id)
+            {
+                let prior_hash: String = transaction.query_row(
+                    "SELECT current_hash FROM policies WHERE policy_id = ?1",
+                    params![prior_policy_id],
+                    |row| row.get(0),
+                )?;
+                transaction.execute(
+                    "INSERT INTO policy_audit_events
+                     (policy_id, actor, source, occurred_at, old_hash, new_hash,
+                      affected_assignments_json, action)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, 'unassigned')",
+                    params![
+                        prior_policy_id,
+                        actor,
+                        source,
+                        now,
+                        prior_hash,
+                        serde_json::to_string(&PolicyAuditAssignments(affected.clone()))?,
+                    ],
+                )?;
+            }
+            transaction.execute(
+                "INSERT INTO policy_audit_events
+                 (policy_id, actor, source, occurred_at, old_hash, new_hash,
+                  affected_assignments_json, action)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    policy_id,
+                    actor,
+                    source,
+                    now,
+                    (previous_revision != 0).then_some(previous_hash.as_str()),
+                    payload_hash,
+                    serde_json::to_string(&PolicyAuditAssignments(affected))?,
+                    if content_changed {
+                        "applied"
+                    } else if name_changed {
+                        "renamed"
+                    } else {
+                        "assigned"
+                    },
+                ],
+            )?;
+        }
+        transaction.commit()?;
+
+        let resource = self
+            .load_policy(owner_user_id, &policy_id)?
+            .ok_or_else(|| StorageError::InvalidData("applied policy disappeared".to_string()))?;
+        let assignment = self
+            .load_policy_assignments()?
+            .into_iter()
+            .find(|candidate| {
+                candidate.owner_user_id == *owner_user_id && candidate.scope == *scope
+            })
+            .ok_or_else(|| {
+                StorageError::InvalidData("applied assignment disappeared".to_string())
+            })?;
+        Ok(PolicyApplyResult {
+            resource,
+            assignment,
+            changed,
+            assignment_changed,
+        })
     }
 
     fn load_policy_assignments(&self) -> Result<Vec<PolicyAssignmentRecord>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT owner_user_id, scope_type, scope_id, policy_json, created_at, updated_at
-             FROM policy_assignments
-             ORDER BY updated_at ASC",
+            "SELECT a.owner_user_id, a.scope_type, a.scope_id, a.policy_id,
+                    r.policy_json, a.created_at, a.updated_at
+             FROM policy_assignments a
+             JOIN policies p ON p.policy_id = a.policy_id
+             JOIN policy_revisions r
+               ON r.policy_id = p.policy_id AND r.revision = p.current_revision
+             ORDER BY a.updated_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             let owner_user_id: String = row.get(0)?;
             let scope_type: String = row.get(1)?;
             let scope_id: String = row.get(2)?;
-            let policy_json: String = row.get(3)?;
-            let created_at: String = row.get(4)?;
-            let updated_at: String = row.get(5)?;
+            let policy_id: String = row.get(3)?;
+            let policy_json: String = row.get(4)?;
+            let created_at: String = row.get(5)?;
+            let updated_at: String = row.get(6)?;
             let policy: Policy = serde_json::from_str(&policy_json)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             Ok(PolicyAssignmentRecord {
@@ -1428,6 +1956,7 @@ impl PolicyRepository for SqliteGovernanceRepository {
                         )
                     },
                 )?,
+                policy_id,
                 policy,
                 created_at: parse_timestamp(&created_at)?,
                 updated_at: parse_timestamp(&updated_at)?,
@@ -1435,6 +1964,197 @@ impl PolicyRepository for SqliteGovernanceRepository {
         })?;
         collect_rows(rows)
     }
+
+    fn load_policies(&self, owner_user_id: &UserId) -> Result<Vec<PolicyResource>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT p.policy_id, p.owner_user_id, p.declarative_key, p.display_name,
+                    p.current_revision, p.current_hash, r.policy_json, p.created_at, p.updated_at
+             FROM policies p JOIN policy_revisions r
+               ON r.policy_id = p.policy_id AND r.revision = p.current_revision
+             WHERE p.owner_user_id = ?1 ORDER BY p.declarative_key",
+        )?;
+        let rows =
+            statement.query_map(params![owner_user_id.to_string()], policy_resource_from_row)?;
+        collect_rows(rows)
+    }
+
+    fn load_policy(
+        &self,
+        owner_user_id: &UserId,
+        selector: &str,
+    ) -> Result<Option<PolicyResource>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT p.policy_id, p.owner_user_id, p.declarative_key, p.display_name,
+                        p.current_revision, p.current_hash, r.policy_json, p.created_at, p.updated_at
+                 FROM policies p JOIN policy_revisions r
+                   ON r.policy_id = p.policy_id AND r.revision = p.current_revision
+                 WHERE p.owner_user_id = ?1 AND (p.policy_id = ?2 OR p.declarative_key = ?2)",
+                params![owner_user_id.to_string(), selector],
+                policy_resource_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn load_policy_history(
+        &self,
+        owner_user_id: &UserId,
+        selector: &str,
+    ) -> Result<Vec<PolicyRevisionRecord>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT r.policy_id, r.revision, r.payload_hash, r.policy_json,
+                    r.actor, r.source, r.created_at
+             FROM policy_revisions r JOIN policies p ON p.policy_id = r.policy_id
+             WHERE p.owner_user_id = ?1 AND (p.policy_id = ?2 OR p.declarative_key = ?2)
+             ORDER BY r.revision",
+        )?;
+        let rows = statement.query_map(
+            params![owner_user_id.to_string(), selector],
+            policy_revision_from_row,
+        )?;
+        collect_rows(rows)
+    }
+
+    fn load_policy_revision(
+        &self,
+        owner_user_id: &UserId,
+        selector: &str,
+        revision: u64,
+    ) -> Result<Option<PolicyRevisionRecord>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT r.policy_id, r.revision, r.payload_hash, r.policy_json,
+                        r.actor, r.source, r.created_at
+                 FROM policy_revisions r JOIN policies p ON p.policy_id = r.policy_id
+                 WHERE p.owner_user_id = ?1 AND (p.policy_id = ?2 OR p.declarative_key = ?2)
+                   AND r.revision = ?3",
+                params![owner_user_id.to_string(), selector, revision],
+                policy_revision_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn load_policy_audit(
+        &self,
+        owner_user_id: &UserId,
+        selector: &str,
+    ) -> Result<Vec<PolicyAuditRecord>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT a.policy_id, a.actor, a.source, a.occurred_at, a.old_hash,
+                    a.new_hash, a.affected_assignments_json, a.action
+             FROM policy_audit_events a JOIN policies p ON p.policy_id = a.policy_id
+             WHERE p.owner_user_id = ?1 AND (p.policy_id = ?2 OR p.declarative_key = ?2)
+             ORDER BY a.id",
+        )?;
+        let rows = statement.query_map(params![owner_user_id.to_string(), selector], |row| {
+            let occurred_at: String = row.get(3)?;
+            let affected: String = row.get(6)?;
+            let affected: PolicyAuditAssignments = serde_json::from_str(&affected)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            Ok(PolicyAuditRecord {
+                policy_id: row.get(0)?,
+                actor: row.get(1)?,
+                source: row.get(2)?,
+                occurred_at: parse_timestamp(&occurred_at)?,
+                old_hash: row.get(4)?,
+                new_hash: row.get(5)?,
+                affected_assignments: affected.0,
+                action: row.get(7)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+}
+
+fn policy_payload_hash(policy: &Policy) -> Result<String, StorageError> {
+    let canonical = serde_json::to_vec(policy)?;
+    Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
+}
+
+fn new_public_policy_id(conn: &Connection) -> Result<String, StorageError> {
+    loop {
+        let candidate = format!("pol_{}", PolicyId::new().public_suffix());
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM policies WHERE policy_id = ?1)",
+            params![candidate],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(candidate);
+        }
+    }
+}
+
+fn policy_identity_for_key(
+    conn: &Connection,
+    owner_user_id: &str,
+    declarative_key: &str,
+) -> Result<Option<(String, String)>, StorageError> {
+    conn.query_row(
+        "SELECT policy_id, current_hash FROM policies
+         WHERE owner_user_id = ?1 AND declarative_key = ?2",
+        params![owner_user_id, declarative_key],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn valid_declarative_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn legacy_declarative_key(authored_id: &str, payload_hash: &str) -> String {
+    if valid_declarative_key(authored_id) {
+        authored_id.to_string()
+    } else {
+        format!(
+            "legacy-{}",
+            &payload_hash["sha256:".len().."sha256:".len() + 16]
+        )
+    }
+}
+
+fn policy_resource_from_row(row: &rusqlite::Row<'_>) -> Result<PolicyResource, rusqlite::Error> {
+    let owner_user_id: String = row.get(1)?;
+    let policy_json: String = row.get(6)?;
+    let created_at: String = row.get(7)?;
+    let updated_at: String = row.get(8)?;
+    Ok(PolicyResource {
+        policy_id: row.get(0)?,
+        owner_user_id: parse_id(&owner_user_id)?,
+        declarative_key: row.get(2)?,
+        display_name: row.get(3)?,
+        current_revision: row.get(4)?,
+        current_hash: row.get(5)?,
+        policy: serde_json::from_str(&policy_json)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+        created_at: parse_timestamp(&created_at)?,
+        updated_at: parse_timestamp(&updated_at)?,
+    })
+}
+
+fn policy_revision_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<PolicyRevisionRecord, rusqlite::Error> {
+    let policy_json: String = row.get(3)?;
+    let created_at: String = row.get(6)?;
+    Ok(PolicyRevisionRecord {
+        policy_id: row.get(0)?,
+        revision: row.get(1)?,
+        payload_hash: row.get(2)?,
+        policy: serde_json::from_str(&policy_json)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+        actor: row.get(4)?,
+        source: row.get(5)?,
+        created_at: parse_timestamp(&created_at)?,
+    })
 }
 
 fn table_has_column(
@@ -2536,6 +3256,249 @@ mod tests {
         ] {
             assert!(table_has_column(&repo.conn, "spend_executor_claims", column).unwrap());
         }
+    }
+
+    #[test]
+    fn declarative_policy_apply_is_idempotent_versioned_and_compare_and_set() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let scope = PolicyAssignmentScope::UserDefault;
+        let first = repo
+            .apply_policy(
+                &user_id(),
+                "demo_policy",
+                "Demo policy",
+                &scope,
+                &policy(),
+                None,
+                None,
+                "usr_test",
+                "test",
+            )
+            .unwrap();
+        assert!(first.resource.policy_id.starts_with("pol_"));
+        assert_eq!(first.resource.policy_id.len(), 16);
+        assert_eq!(first.resource.current_revision, 1);
+        assert!(first.changed);
+
+        let identical = repo
+            .apply_policy(
+                &user_id(),
+                "demo_policy",
+                "Demo policy",
+                &scope,
+                &policy(),
+                Some(1),
+                Some(&first.resource.current_hash),
+                "usr_test",
+                "test",
+            )
+            .unwrap();
+        assert!(!identical.changed);
+        assert_eq!(identical.resource.policy_id, first.resource.policy_id);
+        assert_eq!(
+            repo.load_policy_history(&user_id(), "demo_policy")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let renamed = repo
+            .apply_policy(
+                &user_id(),
+                "demo_policy",
+                "Renamed policy",
+                &scope,
+                &policy(),
+                Some(1),
+                None,
+                "usr_test",
+                "test",
+            )
+            .unwrap();
+        assert_eq!(renamed.resource.policy_id, first.resource.policy_id);
+        assert_eq!(renamed.resource.current_revision, 1);
+        assert_eq!(renamed.resource.display_name, "Renamed policy");
+
+        let mut changed_policy = policy();
+        changed_policy.version = "v2".to_string();
+        changed_policy.rules[0].reason = "changed reason".to_string();
+        let changed = repo
+            .apply_policy(
+                &user_id(),
+                "demo_policy",
+                "Renamed policy",
+                &scope,
+                &changed_policy,
+                Some(1),
+                None,
+                "usr_test",
+                "test",
+            )
+            .unwrap();
+        assert_eq!(changed.resource.current_revision, 2);
+        assert_eq!(
+            repo.load_policy_history(&user_id(), "demo_policy")
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let reverted = repo
+            .apply_policy(
+                &user_id(),
+                "demo_policy",
+                "Renamed policy",
+                &scope,
+                &policy(),
+                Some(2),
+                Some(&changed.resource.current_hash),
+                "usr_test",
+                "test",
+            )
+            .unwrap();
+        assert_eq!(reverted.resource.current_revision, 3);
+        assert_eq!(reverted.resource.current_hash, first.resource.current_hash);
+        assert_eq!(
+            repo.load_policy_history(&user_id(), "demo_policy")
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let stale = repo.apply_policy(
+            &user_id(),
+            "demo_policy",
+            "Stale rename",
+            &scope,
+            &policy(),
+            Some(1),
+            None,
+            "usr_test",
+            "test",
+        );
+        assert!(stale
+            .unwrap_err()
+            .to_string()
+            .contains("compare-and-set failed"));
+        let current = repo
+            .load_policy(&user_id(), "demo_policy")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.current_revision, 3);
+        assert_eq!(current.current_hash, first.resource.current_hash);
+        assert_eq!(current.display_name, "Renamed policy");
+        assert_eq!(
+            repo.load_policy_audit(&user_id(), "demo_policy")
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn legacy_scope_assignments_migrate_without_effective_policy_changes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE policy_assignments (
+                owner_user_id TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                agent_id TEXT,
+                policy_id TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                policy_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(owner_user_id, scope_type, scope_id)
+            );",
+        )
+        .unwrap();
+        let legacy = policy();
+        conn.execute(
+            "INSERT INTO policy_assignments
+             (owner_user_id, scope_type, scope_id, policy_id, policy_version, policy_json,
+              created_at, updated_at)
+             VALUES (?1, 'user_default', 'default', ?2, ?3, ?4, ?5, ?5)",
+            params![
+                user_id().to_string(),
+                legacy.id,
+                legacy.version,
+                serde_json::to_string(&legacy).unwrap(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .unwrap();
+        let mut divergent = legacy.clone();
+        divergent.version = "v2-agent-only".to_string();
+        divergent.default_effect = Effect::Deny;
+        conn.execute(
+            "INSERT INTO policy_assignments
+             (owner_user_id, scope_type, scope_id, agent_id, policy_id, policy_version,
+              policy_json, created_at, updated_at)
+             VALUES (?1, 'agent_override', ?2, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![
+                user_id().to_string(),
+                agent_id().to_string(),
+                divergent.id,
+                divergent.version,
+                serde_json::to_string(&divergent).unwrap(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .unwrap();
+        let second_agent_id = "00000000-0000-4000-8000-000000000789";
+        conn.execute(
+            "INSERT INTO policy_assignments
+             (owner_user_id, scope_type, scope_id, agent_id, policy_id, policy_version,
+              policy_json, created_at, updated_at)
+             VALUES (?1, 'agent_override', ?2, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![
+                user_id().to_string(),
+                second_agent_id,
+                divergent.id,
+                divergent.version,
+                serde_json::to_string(&divergent).unwrap(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .unwrap();
+
+        let repo = SqliteGovernanceRepository::from_connection(conn).unwrap();
+        let assignments = repo.load_policy_assignments().unwrap();
+        assert_eq!(assignments.len(), 3);
+        let default = assignments
+            .iter()
+            .find(|assignment| assignment.scope == PolicyAssignmentScope::UserDefault)
+            .unwrap();
+        let override_assignments = assignments
+            .iter()
+            .filter(|assignment| {
+                matches!(assignment.scope, PolicyAssignmentScope::AgentOverride(_))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(override_assignments.len(), 2);
+        assert!(default.policy_id.starts_with("pol_"));
+        assert_ne!(default.policy_id, override_assignments[0].policy_id);
+        assert_eq!(
+            override_assignments[0].policy_id,
+            override_assignments[1].policy_id
+        );
+        assert_eq!(default.policy.version, legacy.version);
+        assert_eq!(override_assignments[0].policy.version, divergent.version);
+        assert_eq!(override_assignments[0].policy.default_effect, Effect::Deny);
+        let resource = repo
+            .load_policy(&user_id(), "demo_policy")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.current_revision, 1);
+        let audit = repo.load_policy_audit(&user_id(), "demo_policy").unwrap();
+        assert_eq!(audit[0].source, "legacy_assignment_migration");
+        assert_eq!(audit[0].affected_assignments, vec!["user_default:default"]);
+        let resources = repo.load_policies(&user_id()).unwrap();
+        assert_eq!(resources.len(), 2);
+        assert!(resources.iter().any(|resource| resource
+            .declarative_key
+            .starts_with("demo_policy--migrated-")));
     }
 
     #[test]

@@ -8,6 +8,33 @@ The current v1 engine supports one policy at a time. Mandates and multi-policy
 evaluation can be layered on top later by reusing the same `Rule` and
 `Condition` model.
 
+## Declarative Resources
+
+Authored YAML is reconciled into an owner-scoped policy resource. The authored
+`id` is the default immutable declarative key; the server creates a stable
+opaque `pol_` public id and a mutable display name. The authored `version`
+remains part of the rule payload for evaluation compatibility, while the server
+assigns an independent monotonic revision number and SHA-256 payload hash.
+
+`hubu policy apply` is idempotent. Reapplying identical canonical content does
+not append a revision. Changed content appends an immutable revision and moves
+the current pointer in the same SQLite transaction. Optional
+`--expected-revision` and `--expected-hash` arguments provide compare-and-set;
+stale or invalid requests do not alter the current policy or its assignment.
+
+Assignments are separate references. A user-default assignment is the fallback
+and an agent override takes precedence. `show`, `export`, `history`, and `diff`
+are available through the CLI, HTTP API, and MCP adapter. History includes the
+actor, source, timestamp, old/new hashes, and affected assignments.
+
+On first startup after upgrade, embedded legacy assignment rows are migrated
+transactionally. Identical owner/id payloads share a resource. If the same
+legacy id had divergent content in separate scopes, Hubu creates a
+hash-suffixed migration key so each scope keeps its exact effective rules.
+Legacy authored ids that do not satisfy the new safe key syntax are mapped to a
+deterministic `legacy-<hash>` key; their authored id remains unchanged inside
+the immutable policy payload.
+
 ## Core Flow
 
 ```txt
