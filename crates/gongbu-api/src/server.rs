@@ -29,7 +29,10 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     str::FromStr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions, Url};
@@ -207,6 +210,8 @@ pub struct ShutdownConfig {
 pub enum ServerError {
     #[error("gongbu-server configuration: {0}")]
     Invalid(String),
+    #[error("gongbu-server credential: {0}")]
+    Credential(String),
     #[error("gongbu-server IO: {0}")]
     Io(#[from] io::Error),
     #[error("gongbu-server JSON: {0}")]
@@ -448,10 +453,16 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
                 .bearer_credential_reference
                 .validated()?,
         )
-        .map_err(|_| invalid("caller capability credential is unavailable"))?;
+        .map_err(|_| {
+            ServerError::Credential("caller-to-Gongbu capability is unavailable".into())
+        })?;
     let hubu_secret = secrets
         .resolve(&config.hubu.credential_reference.validated()?)
-        .map_err(|_| invalid("Hubu scoped credential is unavailable"))?;
+        .map_err(|_| {
+            ServerError::Credential("Hubu executor/service credential is unavailable".into())
+        })?;
+    let startup_caller_digest = crate::config::setup::credential_digest(&caller_secret);
+    let startup_hubu_digest = crate::config::setup::credential_digest(&hubu_secret);
 
     let targets = ProviderTargetConfig::from_path(&config.providers.target_catalog_path)
         .map_err(|error| invalid(format!("provider target catalog: {error}")))?;
@@ -470,7 +481,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
                     .secret_reference()
                     .map_err(|_| invalid("provider credential reference is invalid"))?,
             )
-            .map_err(|_| invalid("an enabled provider credential is unavailable"))?;
+            .map_err(|_| ServerError::Credential("provider credential is unavailable".into()))?;
         redaction_values.push(secret.expose().to_vec());
     }
     let pricing = PricingCatalog::load(&config.providers.pricing_catalog_path)
@@ -495,14 +506,39 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         HubuClient::new(&config.hubu.endpoint).with_bearer_token(hubu_secret.expose().to_vec());
     wait_for_hubu_compatibility(&config.hubu, &hubu_client).await?;
     let health_client = hubu_client.clone();
+    let credential_secrets = Arc::clone(&secrets);
+    let credential_config = config.clone();
+    let change_reported = Arc::new(AtomicBool::new(false));
     let expected_hubu_version = config.hubu.expected_product_version.clone();
     let expected_hubu_contract = config.hubu.expected_executor_contract.clone();
     let dependency_checker: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
-        health_client.health().is_ok()
+        let credential_state = crate::config::setup::changed_credential_class(
+            &credential_config,
+            credential_secrets.as_ref(),
+            startup_caller_digest,
+            startup_hubu_digest,
+        );
+        let credential_unchanged = matches!(credential_state, Ok(None));
+        if !credential_unchanged && !change_reported.swap(true, Ordering::Relaxed) {
+            let class = match credential_state {
+                Ok(Some(class)) => class.label().to_string(),
+                Err(ServerError::Credential(message)) => message,
+                _ => "credential dependency".to_string(),
+            };
+            eprintln!("gongbu-server dependency changed: {class}; restart required");
+        }
+        let hubu_ready = health_client.health().is_ok()
             && health_client.version().is_ok_and(|version| {
                 version.product_version == expected_hubu_version
                     && version.executor_contract == expected_hubu_contract
             })
+            && health_client
+                .check_executor_credential()
+                .is_ok_and(|check| check.executor_contract == expected_hubu_contract);
+        if credential_unchanged && !hubu_ready && !change_reported.swap(true, Ordering::Relaxed) {
+            eprintln!("gongbu-server dependency unavailable: Hubu executor/service credential rejected or Hubu incompatible; restart or repair required");
+        }
+        credential_unchanged && hubu_ready
     });
     let hubu = Arc::new(
         ProductionHubuActivities::new(hubu_client, config.hubu.agent_id.clone())
@@ -676,12 +712,17 @@ async fn wait_for_hubu_compatibility(
             && client.version().is_ok_and(|version| {
                 version.product_version == config.expected_product_version
                     && version.executor_contract == config.expected_executor_contract
-            });
+            })
+            && client
+                .check_executor_credential()
+                .is_ok_and(|check| check.executor_contract == config.expected_executor_contract);
         if compatible {
             return Ok(());
         }
         if config.startup_policy == StartupPolicy::Exit || tokio::time::Instant::now() >= deadline {
-            return Err(io::Error::other("Hubu is unavailable or incompatible").into());
+            return Err(ServerError::Credential(
+                "Hubu is unavailable, incompatible, or rejected the Hubu executor/service credential".into(),
+            ).into());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
