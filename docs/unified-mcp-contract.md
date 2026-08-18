@@ -24,9 +24,9 @@ and forwarded to exactly one owning backend. The router must not compose a
 governance mutation and an execution mutation into one tool call.
 
 The existing `hubu-mcp-server` and `gongbu-mcp` binaries remain supported during
-the parity and deprecation gates below. The implementation may replace the
-installed behavior of `hubu-mcp-server` only after those gates; this design does
-not implement that replacement.
+the parity and deprecation gates below. Default client configuration may switch
+to `hubu-unified-mcp` only at the packaging and migration gates; neither
+standalone binary is replaced or removed by this design.
 
 ## Boundaries and non-goals
 
