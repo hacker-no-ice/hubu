@@ -3523,6 +3523,7 @@ mod tests {
             agent_id: agent_id(),
             agent_account_id: AgentAccountId::new(),
             merchant: Some("Acme".to_string()),
+            execution_scope: None,
             category: None,
             task_id: Some("task".to_string()),
             workload_profile: "default".to_string(),

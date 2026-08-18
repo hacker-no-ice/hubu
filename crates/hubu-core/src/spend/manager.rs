@@ -361,6 +361,7 @@ impl SpendManager {
                 "amount_cents": request.amount_cents,
                 "currency": request.currency.to_string(),
                 "merchant": request.merchant,
+                "execution_scope": request.execution_scope,
                 "task_id": request.task_id,
                 "policy_id": evaluation.policy_id,
                 "policy_version": evaluation.policy_version,
@@ -701,11 +702,16 @@ fn payment_matches_authorized_spend(
     payment: &SpendPaymentValidationRequest,
     spend: &SpendRequest,
 ) -> bool {
+    let execution_scope_matches = payment.execution_scope == spend.execution_scope
+        || (spend.execution_scope.is_none()
+            && spend.merchant.is_some()
+            && payment.merchant == spend.merchant);
     payment.agent_id == spend.agent_id
         && payment.agent_account_id == spend.agent_account_id
         && payment.amount_cents == spend.amount_cents
         && payment.currency == spend.currency
         && payment.merchant == spend.merchant
+        && execution_scope_matches
         && payment.task_id == spend.task_id
 }
 
@@ -721,6 +727,7 @@ fn log_auth_validation_rejected(request: &SpendPaymentValidationRequest, reason:
             "amount_cents": request.amount_cents,
             "currency": request.currency.to_string(),
             "merchant": request.merchant,
+            "execution_scope": request.execution_scope,
             "task_id": request.task_id,
         }),
     );
@@ -759,6 +766,7 @@ mod tests {
             agent_id: AgentId::new(),
             agent_account_id: AgentAccountId::new(),
             merchant: Some("Acme Cafe".to_string()),
+            execution_scope: None,
             category: Some("meals".to_string()),
             task_id: Some("task_123".to_string()),
             workload_profile: "default".to_string(),
@@ -932,6 +940,7 @@ mod tests {
                 amount_cents: request.amount_cents,
                 currency: request.currency,
                 merchant: request.merchant,
+                execution_scope: request.execution_scope,
                 task_id: request.task_id,
             })
             .expect("matching payment should validate");
@@ -965,6 +974,7 @@ mod tests {
                 amount_cents: request.amount_cents + 1,
                 currency: request.currency,
                 merchant: request.merchant,
+                execution_scope: request.execution_scope,
                 task_id: request.task_id,
             })
             .expect_err("mismatched amount should fail validation");
@@ -996,6 +1006,7 @@ mod tests {
                 amount_cents: request.amount_cents,
                 currency: request.currency,
                 merchant: request.merchant,
+                execution_scope: request.execution_scope,
                 task_id: request.task_id,
             })
             .expect_err("mismatched account should fail validation");
@@ -1031,6 +1042,7 @@ mod tests {
                 amount_cents: request.amount_cents,
                 currency: request.currency,
                 merchant: request.merchant,
+                execution_scope: request.execution_scope,
                 task_id: request.task_id,
             })
             .expect_err("used token should fail validation");
@@ -1128,6 +1140,7 @@ mod tests {
             amount_cents: spend.amount_cents,
             currency: spend.currency,
             merchant: spend.merchant.clone(),
+            execution_scope: spend.execution_scope.clone(),
             task_id: spend.task_id.clone(),
         };
         let (claim, _) = manager
@@ -1176,6 +1189,7 @@ mod tests {
             amount_cents: spend.amount_cents,
             currency: spend.currency,
             merchant: spend.merchant,
+            execution_scope: spend.execution_scope,
             task_id: spend.task_id,
         };
         let request = SpendExecutorClaimRequest {

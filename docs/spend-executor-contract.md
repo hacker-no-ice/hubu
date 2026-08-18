@@ -174,7 +174,13 @@ guidance.
      "operation_key": "codex:tool-call:01JABC123",
      "account_id": "aga_example",
      "amount_cents": 500,
-     "merchant": "gongbu.image",
+     "execution_scope": {
+       "schema_version": 1,
+       "provider": "provider:google:gemini-developer",
+       "executor": "executor:gongbu:image",
+       "capability": "capability:image:generate",
+       "billing_merchant": "merchant:google"
+     },
      "reason": "hubu-logo-demo",
      "workload_profile": "image_generation"
    }
@@ -214,7 +220,13 @@ guidance.
      "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
      "account_id": "aga_example",
      "amount_cents": 500,
-     "merchant": "gongbu.image",
+     "execution_scope": {
+       "schema_version": 1,
+       "provider": {"id":"provider:google:gemini-developer","display_name":"Google Gemini Developer API"},
+       "executor": {"id":"executor:gongbu:image","display_name":"Gongbu image executor"},
+       "capability": {"id":"capability:image:generate","display_name":"Generate image"},
+       "billing_merchant": {"id":"merchant:google","display_name":"Google"}
+     },
      "task_id": "hubu-logo-demo"
    }
    ```
@@ -223,6 +235,9 @@ guidance.
    matches the authorized operation and scope, and has a frozen agent-budget
    hold. A retry with the same operation key returns the existing claim,
    including its terminal state if it has already been settled or released.
+
+   The version-1 typed scope and legacy migration behavior are specified in
+   [Trusted execution scope](execution-scope.md). New callers omit `merchant`.
 
    Claiming moves the hold to `claimed` and extends its expiry to
    `claim_expires_at`. The claim may remain active after the original
@@ -307,7 +322,14 @@ guidance.
     "agent_id": "agt_...",
     "amount_cents": 500,
     "currency": "usd",
-    "merchant": "gongbu.image",
+    "merchant": null,
+    "execution_scope": {
+      "schema_version": 1,
+      "provider": {"id":"provider:google:gemini-developer","display_name":"Google Gemini Developer API"},
+      "executor": {"id":"executor:gongbu:image","display_name":"Gongbu image executor"},
+      "capability": {"id":"capability:image:generate","display_name":"Generate image"},
+      "billing_merchant": {"id":"merchant:google","display_name":"Google"}
+    },
     "task_id": "hubu-logo-demo",
     "expires_at": "2026-07-20T12:05:00Z",
     "budget_hold": {

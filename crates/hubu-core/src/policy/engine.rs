@@ -114,6 +114,7 @@ mod tests {
             agent_id: AgentId::new(),
             agent_account_id: AgentAccountId::new(),
             merchant: Some("Acme Cafe".to_string()),
+            execution_scope: None,
             category: category.map(str::to_string),
             task_id: None,
             workload_profile: "default".to_string(),

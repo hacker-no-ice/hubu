@@ -1,5 +1,6 @@
 use crate::{
     execution::Execution,
+    execution_scope::{for_target, ExecutionScope},
     workflow::{ActivityError, HubuActivities},
 };
 use serde::{Deserialize, Serialize};
@@ -159,7 +160,8 @@ impl ProductionHubuActivities {
             agent_id: None,
             account_id: Some(execution.account_id.clone()),
             amount_cents: execution.authorized_minor,
-            merchant: Some("gongbu.execution".into()),
+            merchant: None,
+            execution_scope: for_target(&execution.provider, &execution.adapter),
             task_id: Some(execution.operation_key.clone()),
         }
     }
@@ -319,6 +321,8 @@ pub struct ExecutorSpendRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merchant: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_scope: Option<ExecutionScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
 }
 
@@ -339,6 +343,7 @@ pub struct ExecutorSpendResponse {
     pub amount_cents: i64,
     pub currency: String,
     pub merchant: Option<String>,
+    pub execution_scope: Option<ExecutionScope>,
     pub task_id: Option<String>,
     pub expires_at: String,
     pub budget_hold: BudgetHold,
@@ -463,6 +468,7 @@ mod tests {
                 account_id: None,
                 amount_cents: 500,
                 merchant: Some("gongbu.image".to_string()),
+                execution_scope: None,
                 task_id: Some("task-1".to_string()),
             },
         }

@@ -39,9 +39,9 @@ rules:
     reason: deterministic local Gongbu executor test
     when:
       op: eq
-      field: merchant
+      field: provider
       value:
-        string: gongbu.execution
+        string: provider:local:fixture
 "#;
 
 #[test]
@@ -595,7 +595,13 @@ impl HubuAdmin {
                 "account_id":provisioned.account_id,
                 "amount_cents":AUTHORIZED_MINOR,
                 "reason":operation_key,
-                "merchant":"gongbu.execution"
+                "execution_scope": {
+                    "schema_version":1,
+                    "provider":"provider:local:fixture",
+                    "executor":"executor:gongbu:image",
+                    "capability":"capability:image:generate",
+                    "billing_merchant":"merchant:local"
+                }
             }),
         );
         assert_eq!(response["decision"], "allow");

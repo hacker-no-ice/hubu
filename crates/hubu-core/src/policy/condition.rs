@@ -58,6 +58,10 @@ pub enum Field {
     Currency,
     AgentId,
     Merchant,
+    Provider,
+    Executor,
+    Capability,
+    BillingMerchant,
     Category,
 }
 
@@ -151,6 +155,22 @@ impl Field {
             Field::Currency => Some(PolicyValue::Currency(request.currency)),
             Field::AgentId => Some(PolicyValue::AgentId(request.agent_id.clone())),
             Field::Merchant => request.merchant.clone().map(PolicyValue::String),
+            Field::Provider => request
+                .execution_scope
+                .as_ref()
+                .map(|scope| PolicyValue::String(scope.provider.id.clone())),
+            Field::Executor => request
+                .execution_scope
+                .as_ref()
+                .map(|scope| PolicyValue::String(scope.executor.id.clone())),
+            Field::Capability => request
+                .execution_scope
+                .as_ref()
+                .map(|scope| PolicyValue::String(scope.capability.id.clone())),
+            Field::BillingMerchant => request
+                .execution_scope
+                .as_ref()
+                .map(|scope| PolicyValue::String(scope.billing_merchant.id.clone())),
             Field::Category => request.category.clone().map(PolicyValue::String),
         }
     }
@@ -160,7 +180,12 @@ impl Field {
             Field::Amount => ValueKind::MoneyCents,
             Field::Currency => ValueKind::Currency,
             Field::AgentId => ValueKind::AgentId,
-            Field::Merchant | Field::Category => ValueKind::String,
+            Field::Merchant
+            | Field::Provider
+            | Field::Executor
+            | Field::Capability
+            | Field::BillingMerchant
+            | Field::Category => ValueKind::String,
         }
     }
 
@@ -302,6 +327,10 @@ impl fmt::Display for Field {
             Field::Currency => f.write_str("currency"),
             Field::AgentId => f.write_str("agent_id"),
             Field::Merchant => f.write_str("merchant"),
+            Field::Provider => f.write_str("provider"),
+            Field::Executor => f.write_str("executor"),
+            Field::Capability => f.write_str("capability"),
+            Field::BillingMerchant => f.write_str("billing_merchant"),
             Field::Category => f.write_str("category"),
         }
     }
@@ -321,6 +350,9 @@ impl fmt::Display for ValueKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hubu_common::execution_scope::{
+        ExecutionScope, ScopeIdentity, EXECUTION_SCOPE_SCHEMA_VERSION,
+    };
     use hubu_common::ids::{AgentAccountId, UserId};
 
     fn spend_request() -> SpendRequest {
@@ -331,6 +363,7 @@ mod tests {
             agent_id: AgentId::new(),
             agent_account_id: AgentAccountId::new(),
             merchant: Some("Acme Cafe".to_string()),
+            execution_scope: None,
             category: Some("meals".to_string()),
             task_id: None,
             workload_profile: "default".to_string(),
@@ -378,6 +411,34 @@ mod tests {
         };
 
         assert!(condition.eval(&request));
+    }
+
+    #[test]
+    fn evaluates_each_typed_execution_scope_field() {
+        let mut request = spend_request();
+        let identity = |id: &str| ScopeIdentity {
+            id: id.into(),
+            display_name: id.into(),
+        };
+        request.execution_scope = Some(ExecutionScope {
+            schema_version: EXECUTION_SCOPE_SCHEMA_VERSION,
+            provider: identity("provider:google:gemini-developer"),
+            executor: identity("executor:gongbu:image"),
+            capability: identity("capability:image:generate"),
+            billing_merchant: identity("merchant:google"),
+        });
+        for (field, expected) in [
+            (Field::Provider, "provider:google:gemini-developer"),
+            (Field::Executor, "executor:gongbu:image"),
+            (Field::Capability, "capability:image:generate"),
+            (Field::BillingMerchant, "merchant:google"),
+        ] {
+            assert!(Condition::Eq {
+                field,
+                value: PolicyValue::String(expected.into())
+            }
+            .eval(&request));
+        }
     }
 
     #[test]

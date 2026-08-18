@@ -205,6 +205,11 @@ hubu ledger list
 CLI `--amount` values are decimal USD amounts in major units, so `5` means
 `$5.00`. Supply `--merchant` explicitly because it is part of the scope
 evaluated by policy. Use a distinct operation key for different logical work.
+For new executor-backed work, prefer the typed `--provider`, `--executor`,
+`--capability`, and `--billing-merchant` flags. Hubu resolves them against its
+trusted catalog and prints both friendly names and stable IDs. The legacy
+`--merchant` form remains available during migration; see
+[Trusted execution scope](docs/execution-scope.md).
 After a terminal denial with no token, approval, hold, dispatch, or settlement
 side effect, Hubu may explicitly advise reusing the same key with corrected
 scope; otherwise reuse a key only for exact replay.

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use hubu_common::execution_scope::ExecutionScope;
 use hubu_common::ids::{
     AgentAccountId, AgentId, PaymentId, SpendAuthTokenId, SpendDecisionId, SpendExecutorClaimId,
     UserId,
@@ -18,6 +19,8 @@ pub struct SpendRequest {
     pub agent_id: AgentId,
     pub agent_account_id: AgentAccountId,
     pub merchant: Option<String>,
+    #[serde(default)]
+    pub execution_scope: Option<ExecutionScope>,
     pub category: Option<String>,
     pub task_id: Option<String>,
     #[serde(default = "default_workload_profile")]
@@ -176,6 +179,7 @@ pub struct SpendPaymentValidationRequest {
     pub amount_cents: i64,
     pub currency: Currency,
     pub merchant: Option<String>,
+    pub execution_scope: Option<ExecutionScope>,
     pub task_id: Option<String>,
 }
 
