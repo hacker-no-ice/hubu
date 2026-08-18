@@ -103,8 +103,11 @@ collapses runtime responsibilities:
 - They communicate only through the authenticated, versioned spend-executor
   contract. They do not share a database, credential store, provider execution
   boundary, or failure domain.
-- `hubu-mcp-server` and `gongbu-mcp` remain separate agent-facing surfaces. The
-  unified repository and distribution do not imply a unified MCP protocol.
+- `hubu-mcp-server` and `gongbu-mcp` remain separate implemented agent-facing
+  surfaces today. The accepted [unified MCP contract](docs/unified-mcp-contract.md)
+  defines their future routed public surface without merging backend ownership;
+  standalone configuration remains supported until its explicit parity and
+  deprecation gates pass.
 
 ## Quick Start
 

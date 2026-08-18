@@ -21,6 +21,9 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
   v5 design research for multiple provider calls under one authorized maximum
 - [mcp-transport.md](mcp-transport.md): MCP adapter setup, approval boundaries,
   and tool mapping
+- [unified-mcp-contract.md](unified-mcp-contract.md): accepted unified
+  Hubu–Gongbu MCP names, schemas, backend routing, compatibility negotiation,
+  partial availability, and standalone migration gates
 - [benchmarking.md](benchmarking.md): local benchmark usage and current MVP
   performance notes
 - [demo.md](demo.md): scripted local walkthrough and CLI reference
