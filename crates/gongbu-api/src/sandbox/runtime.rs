@@ -8,6 +8,7 @@ use crate::{
     },
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
     execution::Repository,
+    http::AuthorizationScopeContext,
     redaction::Redactor,
     secrets::{MacOsKeychain, SecretProvider},
     temporal::TemporalWorkerConfig,
@@ -157,6 +158,17 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
             .provider
             .maximum_spend_minor
             .unwrap_or(config.hubu.maximum_authorization_minor),
+        authorization_scope: AuthorizationScopeContext {
+            agent_id: config.hubu.agent_id.clone(),
+            expiry_by_workload: std::collections::HashMap::from([(
+                "image_generation".into(),
+                hubu_executor_contract::AuthorizationExpiryGuidance {
+                    authorization_ttl_seconds: 300,
+                    claim_ttl_seconds: 900,
+                    guidance: "sandbox authorization timing".into(),
+                },
+            )]),
+        },
         dependency_checker: None,
         worker_drain_timeout: Duration::from_secs(30),
         authenticator: Arc::new(SandboxAuthenticator {

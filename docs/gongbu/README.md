@@ -21,6 +21,9 @@ adapters.
 The separate `gongbu-mcp` crate exposes the authenticated HTTP contract to local
 agent platforms over MCP stdio. See [mcp.md](mcp.md) for operator
 configuration, tool examples, and its opt-in integration test.
+Use the [Hubu authorization scope preview](authorization-scope.md) before token
+issuance so amount, account/agent binding, typed provider scope, task semantics,
+workload profile, and expiry guidance come from operator-owned configuration.
 
 ## V1 boundary
 
@@ -74,6 +77,7 @@ durable workflow for settlement. No provider or fixture fallback is installed.
 
 The authoritative v1 routes are:
 
+- `POST /v1/authorization-scopes/preview`
 - `POST /v1/executions`
 - `GET /v1/executions/{execution_id}`
 - `GET /v1/executions/{execution_id}/artifacts`

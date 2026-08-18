@@ -16,12 +16,19 @@ use crate::{
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, TargetKey},
     temporal::ExecutionScheduler,
-    workflow::{OperatorReconciliationRequest, ReconciliationAction},
+    workflow::{
+        AuthorizationAdmissionRequest, HubuActivities, OperatorReconciliationRequest,
+        ReconciliationAction,
+    },
+};
+use hubu_executor_contract::{
+    AuthorizationAmount, AuthorizationExpiryGuidance, AuthorizationScope, AuthorizationTask,
+    AuthorizationWorkload, ExecutionScopeSelector, AUTHORIZATION_SCOPE_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 pub use gongbu_build_info::API_SCHEMA_VERSION as SCHEMA_VERSION;
 
@@ -61,6 +68,48 @@ pub struct CreateExecutionRequest {
     pub execution_scope: Option<ExecutionScope>,
     pub adapter: String,
     pub model: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationScopePreviewRequest {
+    pub schema_version: u32,
+    pub operation_key: String,
+    pub input: Value,
+    pub input_schema_version: i64,
+    pub workload_type: String,
+    pub provider: String,
+    pub adapter: String,
+    pub model: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HubuAuthorizeRequest {
+    pub operation_key: String,
+    pub account_id: String,
+    pub amount_cents: i64,
+    pub currency: String,
+    pub reason: String,
+    pub execution_scope: ExecutionScopeSelector,
+    pub workload_profile: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AuthorizationScopePreviewResponse {
+    pub authorization_scope: AuthorizationScope,
+    pub hubu_authorize_request: HubuAuthorizeRequest,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthorizationScopeContext {
+    pub agent_id: String,
+    pub expiry_by_workload: HashMap<String, AuthorizationExpiryGuidance>,
+}
+
+#[derive(Clone)]
+pub struct AuthorizationRuntime {
+    pub hubu: Arc<dyn HubuActivities + Send + Sync>,
+    pub scope: AuthorizationScopeContext,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -144,6 +193,8 @@ pub struct ErrorResponse {
 pub struct ErrorBody {
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,7 +208,8 @@ pub struct HttpResponse {
 pub struct ApiError {
     status: u16,
     code: &'static str,
-    message: &'static str,
+    message: String,
+    diagnostic: Option<String>,
 }
 
 impl ApiError {
@@ -165,7 +217,8 @@ impl ApiError {
         Self {
             status,
             code,
-            message,
+            message: message.into(),
+            diagnostic: None,
         }
     }
     fn unauthorized() -> Self {
@@ -190,6 +243,15 @@ impl ApiError {
     fn internal() -> Self {
         Self::new(500, "internal_error", "request could not be completed")
     }
+    fn authorization_scope(diagnostic: String) -> Self {
+        let mut error = Self::new(
+            422,
+            "authorization_scope_mismatch",
+            "Hubu authorization does not match the operator-owned execution scope",
+        );
+        error.diagnostic = Some(diagnostic);
+        error
+    }
     fn response(&self) -> HttpResponse {
         json_response(
             self.status,
@@ -197,7 +259,8 @@ impl ApiError {
                 schema_version: SCHEMA_VERSION,
                 error: ErrorBody {
                     code: self.code.into(),
-                    message: self.message.into(),
+                    message: self.message.clone(),
+                    diagnostic: self.diagnostic.clone(),
                 },
             },
         )
@@ -212,6 +275,7 @@ pub struct Api {
     scheduler: Arc<dyn ExecutionScheduler>,
     now: Arc<dyn Fn() -> String + Send + Sync>,
     maximum_spend_minor: i64,
+    authorization: Option<AuthorizationRuntime>,
 }
 
 impl Api {
@@ -240,6 +304,27 @@ impl Api {
             scheduler,
             now: Arc::new(now),
             maximum_spend_minor,
+            authorization: None,
+        }
+    }
+
+    pub fn new_for_application(
+        repository: Repository,
+        artifacts: ArtifactService,
+        providers: ValidatedProviderCatalog,
+        scheduler: Arc<dyn ExecutionScheduler>,
+        maximum_spend_minor: i64,
+        authorization: AuthorizationRuntime,
+        now: impl Fn() -> String + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            repository,
+            artifacts,
+            providers,
+            scheduler,
+            now: Arc::new(now),
+            maximum_spend_minor,
+            authorization: Some(authorization),
         }
     }
 
@@ -255,6 +340,9 @@ impl Api {
             .and_then(|account| {
                 let segments: Vec<_> = path.trim_matches('/').split('/').collect();
                 match (method, segments.as_slice()) {
+                    ("POST", ["v1", "authorization-scopes", "preview"]) => {
+                        self.preview_authorization_scope(account, body)
+                    }
                     ("POST", ["v1", "executions"]) => self.create(account, body),
                     ("GET", ["v1", "executions", execution_id]) => {
                         self.get_execution(account, execution_id)
@@ -272,6 +360,70 @@ impl Api {
                 }
             });
         result.unwrap_or_else(|error| error.response())
+    }
+
+    fn preview_authorization_scope(
+        &self,
+        account: &AuthenticatedAccount,
+        body: &[u8],
+    ) -> Result<HttpResponse, ApiError> {
+        let request: AuthorizationScopePreviewRequest =
+            serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
+        validate_preview(&request)?;
+        let context = self
+            .authorization
+            .as_ref()
+            .map(|runtime| &runtime.scope)
+            .ok_or_else(ApiError::internal)?;
+        let target_key = TargetKey::new(
+            &request.workload_type,
+            &request.provider,
+            &request.adapter,
+            &request.model,
+        )
+        .map_err(map_target_error)?;
+        let resolved = self
+            .providers
+            .resolve_active(&target_key)
+            .map_err(|_| ApiError::validation())?;
+        let normalized_input = canonicalize(&request.input);
+        let pricing_request = NormalizedRequest {
+            provider: resolved.provider.clone(),
+            model: resolved.model.clone(),
+            image_count: input_quantity(&normalized_input, "image_count")?,
+            input_tokens: input_quantity(&normalized_input, "input_tokens")?,
+            max_output_tokens: input_quantity(&normalized_input, "max_output_tokens")?,
+            image_size: normalized_input
+                .get("image_size")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        };
+        let pricing = self
+            .providers
+            .pricing()
+            .snapshot_for_target(&resolved.target_key(), &pricing_request)
+            .map_err(map_pricing_error)?;
+        if pricing.estimated_amount_minor > self.maximum_spend_minor || !pricing.is_image_only() {
+            return Err(ApiError::validation());
+        }
+        let execution_scope =
+            for_target(&resolved.provider, &resolved.adapter).ok_or_else(ApiError::validation)?;
+        let expiry = context
+            .expiry_by_workload
+            .get(&resolved.workload_type)
+            .cloned()
+            .ok_or_else(ApiError::validation)?;
+        let preview = build_authorization_scope_preview(
+            &account.account_id,
+            &context.agent_id,
+            request.operation_key.trim(),
+            pricing.estimated_amount_minor,
+            &pricing.currency,
+            execution_scope,
+            &resolved.workload_type,
+            expiry,
+        );
+        Ok(json_response(200, &preview))
     }
 
     fn create(
@@ -345,6 +497,30 @@ impl Api {
         if !pricing_snapshot.is_image_only() {
             return Err(ApiError::validation());
         }
+        let canonical_execution_scope = for_target(&resolved.provider, &resolved.adapter)
+            .or_else(|| request.execution_scope.clone());
+        if request
+            .execution_scope
+            .as_ref()
+            .is_some_and(|supplied| canonical_execution_scope.as_ref() != Some(supplied))
+        {
+            return Err(ApiError::validation());
+        }
+        if let Some(authorization) = &self.authorization {
+            let execution_scope = canonical_execution_scope
+                .clone()
+                .ok_or_else(ApiError::validation)?;
+            authorization
+                .hubu
+                .validate_before_admission(&AuthorizationAdmissionRequest {
+                    spend_auth_token_id: request.hubu_token_reference.trim().to_owned(),
+                    account_id: account.account_id.clone(),
+                    amount_minor: request.authorization.amount_minor,
+                    execution_scope,
+                    operation_key: request.operation_key.trim().to_owned(),
+                })
+                .map_err(|error| ApiError::authorization_scope(error.diagnostic))?;
+        }
         let input_hash = immutable_hash(&request, resolved, &pricing_snapshot, &normalized_input)?;
         let pricing_schema_version = i64::from(pricing_snapshot.schema_version);
         let params = CreateExecutionParams {
@@ -373,7 +549,7 @@ impl Api {
             pricing_snapshot: serde_json::to_value(pricing_snapshot)
                 .map_err(|_| ApiError::internal())?,
             pricing_schema_version,
-            execution_scope: request.execution_scope,
+            execution_scope: canonical_execution_scope,
             created_at: (self.now)(),
         };
         let execution = self
@@ -488,6 +664,60 @@ impl Api {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_authorization_scope_preview(
+    account_id: &str,
+    agent_id: &str,
+    operation_key: &str,
+    amount_minor: i64,
+    currency: &str,
+    execution_scope: ExecutionScope,
+    workload_type: &str,
+    expiry: AuthorizationExpiryGuidance,
+) -> AuthorizationScopePreviewResponse {
+    let operation_key = operation_key.to_owned();
+    let currency = currency.to_ascii_uppercase();
+    AuthorizationScopePreviewResponse {
+        authorization_scope: AuthorizationScope {
+            schema_version: AUTHORIZATION_SCOPE_SCHEMA_VERSION,
+            executor_contract: gongbu_build_info::HUBU_EXECUTOR_CONTRACT.into(),
+            account_id: account_id.into(),
+            agent_id: agent_id.into(),
+            operation_key: operation_key.clone(),
+            authorization: AuthorizationAmount {
+                amount_minor,
+                currency: currency.clone(),
+            },
+            execution_scope: execution_scope.clone(),
+            task: AuthorizationTask {
+                task_id: operation_key.clone(),
+                reason: operation_key.clone(),
+                semantics: "reason is the executor task id and must equal operation_key".into(),
+            },
+            workload: AuthorizationWorkload {
+                workload_type: workload_type.into(),
+                profile: workload_type.into(),
+            },
+            expiry,
+        },
+        hubu_authorize_request: HubuAuthorizeRequest {
+            operation_key: operation_key.clone(),
+            account_id: account_id.into(),
+            amount_cents: amount_minor,
+            currency,
+            reason: operation_key,
+            execution_scope: ExecutionScopeSelector {
+                schema_version: execution_scope.schema_version,
+                provider: execution_scope.provider.id,
+                executor: execution_scope.executor.id,
+                capability: execution_scope.capability.id,
+                billing_merchant: execution_scope.billing_merchant.id,
+            },
+            workload_profile: workload_type.into(),
+        },
+    }
+}
+
 fn input_quantity(input: &Value, field: &str) -> Result<Option<i64>, ApiError> {
     match input.get(field) {
         None | Some(Value::Null) => Ok(None),
@@ -570,6 +800,26 @@ fn validate_create(request: &CreateExecutionRequest) -> Result<(), ApiError> {
         {
             return Err(ApiError::validation());
         }
+    }
+    Ok(())
+}
+
+fn validate_preview(request: &AuthorizationScopePreviewRequest) -> Result<(), ApiError> {
+    if request.schema_version != SCHEMA_VERSION
+        || request.operation_key.trim().is_empty()
+        || request.operation_key.len() > 255
+        || request.input_schema_version < 1
+        || !request.input.is_object()
+        || [
+            &request.workload_type,
+            &request.provider,
+            &request.adapter,
+            &request.model,
+        ]
+        .iter()
+        .any(|value| value.trim().is_empty() || value.len() > 255)
+    {
+        return Err(ApiError::validation());
     }
     Ok(())
 }
@@ -733,10 +983,10 @@ mod tests {
     use std::{io::Cursor, sync::Barrier, thread};
     use tempfile::TempDir;
 
-    struct AdmissionAdapter;
+    struct AdmissionAdapter(&'static str);
     impl ProviderAdapter for AdmissionAdapter {
         fn adapter_id(&self) -> &str {
-            "fixture"
+            self.0
         }
         fn capabilities(&self) -> AdapterCapabilities {
             AdapterCapabilities {
@@ -756,8 +1006,40 @@ mod tests {
 
     fn catalog(targets: ProviderTargetConfig, pricing: PricingCatalog) -> ValidatedProviderCatalog {
         let mut registry = ProviderRegistry::new();
-        registry.register("example", "fixture", |_| Ok(Arc::new(AdmissionAdapter)));
+        registry.register("example", "fixture", |_| {
+            Ok(Arc::new(AdmissionAdapter("fixture")))
+        });
+        registry.register("google", "gemini_developer_image", |_| {
+            Ok(Arc::new(AdmissionAdapter("gemini_developer_image")))
+        });
         ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap()
+    }
+
+    #[test]
+    fn authorization_preview_matches_the_versioned_cross_component_fixture() {
+        let fixture: AuthorizationScope = serde_json::from_str(include_str!(
+            "../../../../fixtures/hubu-authorization-scope-v1.json"
+        ))
+        .unwrap();
+        let preview = build_authorization_scope_preview(
+            &fixture.account_id,
+            &fixture.agent_id,
+            &fixture.operation_key,
+            fixture.authorization.amount_minor,
+            &fixture.authorization.currency,
+            fixture.execution_scope.clone(),
+            &fixture.workload.workload_type,
+            fixture.expiry.clone(),
+        );
+        assert_eq!(preview.authorization_scope, fixture);
+        assert_eq!(
+            preview.hubu_authorize_request.reason,
+            preview.hubu_authorize_request.operation_key
+        );
+        assert_eq!(
+            preview.hubu_authorize_request.execution_scope.provider,
+            preview.authorization_scope.execution_scope.provider.id
+        );
     }
 
     #[derive(Default)]
@@ -790,6 +1072,40 @@ mod tests {
         _root: TempDir,
     }
 
+    struct RejectingHubu;
+
+    impl HubuActivities for RejectingHubu {
+        fn validate_before_admission(
+            &self,
+            _: &AuthorizationAdmissionRequest,
+        ) -> Result<(), crate::workflow::AuthorizationAdmissionError> {
+            Err(crate::workflow::AuthorizationAdmissionError {
+                diagnostic: "amount differs from the authorized maximum; issue a new token".into(),
+            })
+        }
+
+        fn preflight(&self, _: &Execution) -> Result<(), crate::workflow::ActivityError> {
+            unreachable!()
+        }
+        fn claim(&self, _: &Execution) -> Result<String, crate::workflow::ActivityError> {
+            unreachable!()
+        }
+        fn validate_claim(&self, _: &Execution) -> Result<(), crate::workflow::ActivityError> {
+            unreachable!()
+        }
+        fn settle(
+            &self,
+            _: &Execution,
+            _: &str,
+            _: i64,
+        ) -> Result<String, crate::workflow::ActivityError> {
+            unreachable!()
+        }
+        fn release(&self, _: &Execution) -> Result<(), crate::workflow::ActivityError> {
+            unreachable!()
+        }
+    }
+
     fn fixture() -> Fixture {
         let repository = Repository::in_memory().unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -799,6 +1115,7 @@ mod tests {
             ArtifactLimits::default(),
         );
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
             "provider_configs": [{
                 "provider_config_version": "provider-v1",
                 "workload_type": "image_generation",
@@ -806,7 +1123,25 @@ mod tests {
                 "adapter": "fixture",
                 "model": "image-v1",
                 "secret_service": "gongbu.example",
-                "secret_account": "local"
+                "secret_account": "local",
+                "settings": {"type": "fixture"}
+            }, {
+                "provider_config_version": "gemini-v1",
+                "workload_type": "image_generation",
+                "provider": "google",
+                "adapter": "gemini_developer_image",
+                "model": "gemini-3.1-flash-image-preview",
+                "secret_service": "gongbu.google",
+                "secret_account": "local",
+                "settings": {
+                    "type": "gemini_developer_image",
+                    "config": {
+                        "endpoint": "https://generativelanguage.googleapis.com",
+                        "api_version": "v1beta",
+                        "timeout_ms": 1000,
+                        "headers": {}
+                    }
+                }
             }]
         }))
         .unwrap();
@@ -822,6 +1157,13 @@ mod tests {
                     "currency":"USD",
                     "unit":"image",
                     "unit_amount_minor":100
+                }, {
+                    "rule_id":"gemini-image",
+                    "provider":"google",
+                    "model":"gemini-3.1-flash-image-preview",
+                    "currency":"USD",
+                    "unit":"image",
+                    "unit_amount_minor":10
                 }]
             }"#,
         )
@@ -914,6 +1256,113 @@ mod tests {
             Some(&fixture.owner),
             &serde_json::to_vec(request).unwrap(),
         )
+    }
+
+    fn scoped_request(operation_key: &str) -> Value {
+        let mut request = request(operation_key);
+        request["authorization"]["amount_minor"] = json!(10);
+        request["provider"] = json!("google");
+        request["adapter"] = json!("gemini_developer_image");
+        request["model"] = json!("gemini-3.1-flash-image-preview");
+        request
+    }
+
+    fn authorization_context() -> AuthorizationScopeContext {
+        AuthorizationScopeContext {
+            agent_id: "agt_gongbu_executor".into(),
+            expiry_by_workload: HashMap::from([(
+                "image_generation".into(),
+                AuthorizationExpiryGuidance {
+                    authorization_ttl_seconds: 300,
+                    claim_ttl_seconds: 900,
+                    guidance: "issue immediately before admission; Gongbu must claim before authorization expiry".into(),
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn authenticated_preview_derives_operator_owned_scope() {
+        let fixture = fixture();
+        let owner = fixture.owner.clone();
+        let api = Api::new_for_application(
+            fixture.repository,
+            fixture.artifacts,
+            fixture.api.providers,
+            fixture.scheduler,
+            100,
+            AuthorizationRuntime {
+                hubu: Arc::new(RejectingHubu),
+                scope: authorization_context(),
+            },
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let planned = scoped_request("preview-op");
+        let request = json!({
+            "schema_version": 1,
+            "operation_key": planned["operation_key"],
+            "input": planned["input"],
+            "input_schema_version": planned["input_schema_version"],
+            "workload_type": planned["workload_type"],
+            "provider": planned["provider"],
+            "adapter": planned["adapter"],
+            "model": planned["model"]
+        });
+        let response = api.handle(
+            "POST",
+            "/v1/authorization-scopes/preview",
+            Some(&owner),
+            &serde_json::to_vec(&request).unwrap(),
+        );
+        assert_eq!(response.status, 200);
+        let preview: AuthorizationScopePreviewResponse =
+            serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(preview.authorization_scope.account_id, "account-a");
+        assert_eq!(preview.authorization_scope.agent_id, "agt_gongbu_executor");
+        assert_eq!(preview.authorization_scope.authorization.amount_minor, 10);
+        assert_eq!(
+            preview.authorization_scope.execution_scope,
+            for_target("google", "gemini_developer_image").unwrap()
+        );
+    }
+
+    #[test]
+    fn hubu_mismatch_fails_before_persistence_or_scheduling_with_diagnostics() {
+        let fixture = fixture();
+        let owner = fixture.owner.clone();
+        let repository = fixture.repository.clone();
+        let scheduler = fixture.scheduler.clone();
+        let api = Api::new_for_application(
+            fixture.repository,
+            fixture.artifacts,
+            fixture.api.providers,
+            scheduler.clone(),
+            100,
+            AuthorizationRuntime {
+                hubu: Arc::new(RejectingHubu),
+                scope: authorization_context(),
+            },
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let response = api.handle(
+            "POST",
+            "/v1/executions",
+            Some(&owner),
+            &serde_json::to_vec(&scoped_request("scope-mismatch")).unwrap(),
+        );
+        assert_eq!(response.status, 422);
+        let error: ErrorResponse = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(error.error.code, "authorization_scope_mismatch");
+        assert!(error
+            .error
+            .diagnostic
+            .as_deref()
+            .unwrap()
+            .contains("issue a new token"));
+        assert!(repository
+            .get_execution_by_operation("account-a", "scope-mismatch")
+            .is_err());
+        assert!(scheduler.0.lock().unwrap().is_empty());
     }
 
     fn execution(response: &HttpResponse) -> ExecutionResponse {

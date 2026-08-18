@@ -34,6 +34,10 @@ directory, and the two required environment variables above.
 
 ## Tools
 
+- `gongbu_preview_authorization_scope` derives the exact Hubu authorization
+  request for planned work before token issuance. Account, agent, amount,
+  currency, typed scope, workload profile, and expiry guidance are
+  operator-owned; see [authorization scope preview](authorization-scope.md).
 - `gongbu_create_execution` mirrors `POST /v1/executions`. Retrying a client
   call with the same operation scope relies on Gongbu's `(account_id,
   operation_key)` replay guarantee; the adapter itself never retries the POST.
@@ -44,6 +48,12 @@ directory, and the two required environment variables above.
   filesystem path.
 
 Example `tools/call` request (one JSON object per stdio line):
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"gongbu_preview_authorization_scope","arguments":{"schema_version":1,"operation_key":"agent-op-001","input":{"prompt":"A small blue circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-2.5-flash-image"}}}
+```
+
+After issuing the Hubu token from the returned request, submit the same plan:
 
 ```json
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gongbu_create_execution","arguments":{"schema_version":1,"operation_key":"agent-op-001","hubu_authorization_id":"auth-001","hubu_claim_id":null,"hubu_token_reference":"operator-stored-ref","authorization":{"amount_minor":25,"currency":"USD"},"input":{"prompt":"A small blue circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-2.5-flash-image"}}}

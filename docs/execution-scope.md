@@ -49,3 +49,10 @@ Gongbu uses the same version-1 JSON schema and catalog fixtures at
 derives its scope from the operator-selected
 provider/adapter target, and sends that canonical scope when claiming Hubu
 authorization. It never derives authority from caller-supplied display names.
+The Rust types now live in the neutral `hubu-executor-contract` crate and are
+re-exported at legacy module paths, avoiding duplicate Hubu and Gongbu type
+definitions. The complete versioned authorization fixture at
+`fixtures/hubu-authorization-scope-v1.json` additionally binds account, agent,
+amount, currency, operation key, task/reason semantics, workload profile, and
+expiry guidance. See the Gongbu
+[authorization scope preview](gongbu/authorization-scope.md).

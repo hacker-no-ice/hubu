@@ -11,6 +11,14 @@ their audit state. Gongbu owns operator-controlled provider configuration,
 provider credentials, provider execution, normalized artifacts, cost
 calculation, and settlement evidence.
 
+Before token issuance, Gongbu's authenticated
+[authorization scope preview](authorization-scope.md) derives the exact Hubu
+request from the operator-owned account, agent identity, provider target,
+pricing catalog, and Hubu timing guidance. On execution submission Gongbu
+recomputes that scope and asks Hubu to validate the token before persistence or
+workflow scheduling. The later workflow preflight and claim remain defense in
+depth before provider transmission.
+
 Future execution work must use the persisted `Execution` aggregate. It must
 create a `ProviderAttempt` before irreversible provider transmission and use a
 stable persisted receipt for finalization. An ambiguous provider or settlement

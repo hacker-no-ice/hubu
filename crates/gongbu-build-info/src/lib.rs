@@ -6,7 +6,7 @@ pub const API_SCHEMA_VERSION: u32 = 1;
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const MCP_SCHEMA_VERSION: u32 = 1;
 pub const SERVER_CONFIG_SCHEMA_VERSION: u32 = 1;
-pub const HUBU_EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4";
+pub const HUBU_EXECUTOR_CONTRACT: &str = hubu_executor_contract::EXECUTOR_CONTRACT;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct BuildInfo {

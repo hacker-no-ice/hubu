@@ -774,6 +774,7 @@ dependencies = [
  "chrono",
  "futures",
  "gongbu-build-info",
+ "hubu-executor-contract",
  "image",
  "reqwest",
  "rusqlite",
@@ -796,6 +797,7 @@ dependencies = [
 name = "gongbu-build-info"
 version = "0.1.0"
 dependencies = [
+ "hubu-executor-contract",
  "serde",
 ]
 
@@ -928,6 +930,7 @@ dependencies = [
  "chrono",
  "hubu-common",
  "hubu-core",
+ "hubu-executor-contract",
  "hubu-wallet",
  "serde",
  "serde_json",
@@ -962,6 +965,7 @@ name = "hubu-common"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hubu-executor-contract",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -980,6 +984,15 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "hubu-executor-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 

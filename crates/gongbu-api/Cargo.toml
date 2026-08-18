@@ -34,5 +34,6 @@ reqwest.workspace = true
 tempfile.workspace = true
 chrono.workspace = true
 gongbu-build-info.workspace = true
+hubu-executor-contract.workspace = true
 
 [dev-dependencies]

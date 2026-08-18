@@ -1,23 +1,18 @@
 [package]
-name = "hubu-common"
+name = "hubu-executor-contract"
 version = "0.1.0"
-description = "Shared identity, ownership, session, and account models for Hubu"
+description = "Versioned Hubu-Gongbu authorization and execution scope contract"
 edition.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-keywords = ["ai-agents", "identity", "payments", "models"]
-categories = ["data-structures", "finance"]
 publish = false
 
 [dependencies]
-chrono.workspace = true
-hubu-executor-contract.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

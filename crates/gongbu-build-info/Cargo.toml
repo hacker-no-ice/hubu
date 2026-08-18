@@ -13,4 +13,5 @@ categories = ["development-tools::build-utils"]
 publish = false
 
 [dependencies]
+hubu-executor-contract.workspace = true
 serde.workspace = true

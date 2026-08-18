@@ -1,9 +1,12 @@
 use crate::{
     execution::Execution,
     execution_scope::ExecutionScope,
-    workflow::{ActivityError, HubuActivities},
+    workflow::{
+        ActivityError, AuthorizationAdmissionError, AuthorizationAdmissionRequest, HubuActivities,
+    },
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 mod transport;
 
@@ -61,6 +64,14 @@ impl HubuClient {
 
     pub fn version(&self) -> Result<HubuVersion, HttpClientError> {
         self.get_json("/version")
+    }
+
+    pub fn guidance(&self) -> Result<HubuExecutorGuidance, HttpClientError> {
+        self.get_json("/.well-known/hubu-spend-executor.json")
+    }
+
+    pub fn agents(&self) -> Result<HubuAgentList, HttpClientError> {
+        self.get_json("/agents")
     }
 
     pub fn validate(
@@ -138,6 +149,40 @@ pub struct HubuVersion {
     pub source_commit: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HubuExecutorGuidance {
+    pub protocol_version: String,
+    pub authorization_scope_schema_version: u32,
+    pub execution_scope_schema_version: u32,
+    pub execution_scope_catalog: Vec<ExecutionScope>,
+    pub timing: HubuTimingConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HubuTimingConfig {
+    pub default_profile: String,
+    pub profiles: HashMap<String, HubuTimingProfile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HubuTimingProfile {
+    pub authorization_ttl_seconds: i64,
+    pub claim_ttl_seconds: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HubuAgentList {
+    pub agents: Vec<HubuAgentBinding>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HubuAgentBinding {
+    pub agent_id: String,
+    pub account_id: String,
+    pub status: String,
+    pub account_status: String,
+}
+
 /// Production Hubu activity bridge. It only connects to the operator-provided
 /// Hubu endpoint; it contains no installation, provisioning, or lifecycle code.
 pub struct ProductionHubuActivities {
@@ -172,6 +217,26 @@ impl ProductionHubuActivities {
 }
 
 impl HubuActivities for ProductionHubuActivities {
+    fn validate_before_admission(
+        &self,
+        request: &AuthorizationAdmissionRequest,
+    ) -> Result<(), AuthorizationAdmissionError> {
+        self.client
+            .validate(&ExecutorSpendRequest {
+                spend_auth_token_id: request.spend_auth_token_id.clone(),
+                agent_id: None,
+                account_id: Some(request.account_id.clone()),
+                amount_cents: request.amount_minor,
+                merchant: None,
+                execution_scope: Some(request.execution_scope.clone()),
+                task_id: Some(request.operation_key.clone()),
+            })
+            .map(|_| ())
+            .map_err(|error| AuthorizationAdmissionError {
+                diagnostic: authenticated_diagnostic(&error),
+            })
+    }
+
     fn preflight(&self, execution: &Execution) -> Result<(), ActivityError> {
         self.client
             .validate(&self.spend(execution))
@@ -247,6 +312,28 @@ impl HubuActivities for ProductionHubuActivities {
             })
             .map(|_| ())
             .map_err(map_activity_error)
+    }
+}
+
+fn authenticated_diagnostic(error: &HttpClientError) -> String {
+    match error {
+        HttpClientError::Status { status, body } if (400..500).contains(status) => {
+            let reason = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("error")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                })
+                .filter(|value| value.len() <= 512 && !value.chars().any(char::is_control))
+                .unwrap_or_else(|| "Hubu rejected one or more authorization scope fields".into());
+            format!("Hubu returned HTTP {status}: {reason}. Regenerate the authorization from the Gongbu preview and issue a new token.")
+        }
+        _ => {
+            "Hubu authorization validation was unavailable; retry without submitting provider work"
+                .into()
+        }
     }
 }
 

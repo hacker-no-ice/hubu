@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "executor_contract": "hubu-spend-executor-v4",
+  "account_id": "acct_gongbu_operator",
+  "agent_id": "agt_gongbu_executor",
+  "operation_key": "codex:tool-call:01JABC123",
+  "authorization": {
+    "amount_minor": 10,
+    "currency": "USD"
+  },
+  "execution_scope": {
+    "schema_version": 1,
+    "provider": {
+      "id": "provider:google:gemini-developer",
+      "display_name": "Google Gemini Developer API"
+    },
+    "executor": {
+      "id": "executor:gongbu:image",
+      "display_name": "Gongbu image executor"
+    },
+    "capability": {
+      "id": "capability:image:generate",
+      "display_name": "Generate image"
+    },
+    "billing_merchant": {
+      "id": "merchant:google",
+      "display_name": "Google"
+    }
+  },
+  "task": {
+    "task_id": "codex:tool-call:01JABC123",
+    "reason": "codex:tool-call:01JABC123",
+    "semantics": "reason is the executor task id and must equal operation_key"
+  },
+  "workload": {
+    "workload_type": "image_generation",
+    "profile": "image_generation"
+  },
+  "expiry": {
+    "authorization_ttl_seconds": 300,
+    "claim_ttl_seconds": 900,
+    "guidance": "issue immediately before admission; Gongbu must claim before authorization expiry"
+  }
+}

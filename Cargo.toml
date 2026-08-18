@@ -3,6 +3,7 @@ members = [
     "crates/gongbu-api",
     "crates/gongbu-build-info",
     "crates/gongbu-mcp",
+    "crates/hubu-executor-contract",
     "crates/hubu-api",
     "crates/hubu-bench",
     "crates/hubu-cli",
@@ -46,6 +47,7 @@ base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 
 gongbu-build-info = { path = "crates/gongbu-build-info" }
+hubu-executor-contract = { path = "crates/hubu-executor-contract" }
 hubu-common = { path = "crates/hubu-common" }
 hubu-core = { path = "crates/hubu-core" }
 hubu-wallet = { path = "crates/hubu-wallet" }

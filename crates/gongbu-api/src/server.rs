@@ -8,7 +8,9 @@ use crate::{
     application::{self, ApplicationDependencies, AuthenticationError, Authenticator},
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
     execution::Repository,
-    hubu::{HubuClient, ProductionHubuActivities},
+    execution_scope::{for_target, ExecutionScope, EXECUTION_SCOPE_SCHEMA_VERSION},
+    http::AuthorizationScopeContext,
+    hubu::{HubuClient, HubuExecutorGuidance, ProductionHubuActivities},
     provider::{
         contract::PricingCatalog,
         registry::{ProviderRegistry, ValidatedProviderCatalog},
@@ -20,6 +22,7 @@ use crate::{
 };
 use axum::http::{header, HeaderMap};
 use chrono::SecondsFormat;
+use hubu_executor_contract::{AuthorizationExpiryGuidance, AUTHORIZATION_SCOPE_SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -456,6 +459,25 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     let targets = ProviderTargetConfig::from_path(&config.providers.target_catalog_path)
         .map_err(|error| invalid(format!("provider target catalog: {error}")))?;
     reject_fixture_targets(&targets)?;
+    let mut expected_scopes = Vec::new();
+    let mut expected_workloads = Vec::new();
+    for target in targets
+        .revisions()
+        .filter(|target| target.is_execution_enabled())
+    {
+        let scope = for_target(&target.provider, &target.adapter).ok_or_else(|| {
+            invalid(format!(
+                "enabled provider target `{}` has no canonical Hubu execution scope",
+                target.target_key().canonical_name()
+            ))
+        })?;
+        if !expected_scopes.contains(&scope) {
+            expected_scopes.push(scope);
+        }
+        if !expected_workloads.contains(&target.workload_type) {
+            expected_workloads.push(target.workload_type.clone());
+        }
+    }
     let mut redaction_values = vec![
         caller_secret.expose().to_vec(),
         hubu_secret.expose().to_vec(),
@@ -493,15 +515,40 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
 
     let hubu_client =
         HubuClient::new(&config.hubu.endpoint).with_bearer_token(hubu_secret.expose().to_vec());
-    wait_for_hubu_compatibility(&config.hubu, &hubu_client).await?;
+    let guidance = wait_for_hubu_compatibility(
+        &config.hubu,
+        &hubu_client,
+        &expected_scopes,
+        &expected_workloads,
+    )
+    .await?;
     let health_client = hubu_client.clone();
     let expected_hubu_version = config.hubu.expected_product_version.clone();
     let expected_hubu_contract = config.hubu.expected_executor_contract.clone();
+    let expected_hubu_account = config.hubu.account_id.clone();
+    let expected_hubu_agent = config.hubu.agent_id.clone();
+    let health_expected_scopes = expected_scopes.clone();
+    let health_expected_workloads = expected_workloads.clone();
     let dependency_checker: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
         health_client.health().is_ok()
             && health_client.version().is_ok_and(|version| {
                 version.product_version == expected_hubu_version
                     && version.executor_contract == expected_hubu_contract
+            })
+            && health_client.guidance().is_ok_and(|guidance| {
+                guidance_compatible(
+                    &guidance,
+                    &health_expected_scopes,
+                    &health_expected_workloads,
+                )
+            })
+            && health_client.agents().is_ok_and(|agents| {
+                agents.agents.iter().any(|binding| {
+                    binding.account_id == expected_hubu_account
+                        && binding.agent_id == expected_hubu_agent
+                        && binding.status == "active"
+                        && binding.account_status == "active"
+                })
             })
     });
     let hubu = Arc::new(
@@ -564,6 +611,11 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
             config.execution.dependency_check_interval_ms,
         ),
         maximum_spend_minor: config.providers.maximum_spend_minor,
+        authorization_scope: authorization_scope_context(
+            &config.hubu.agent_id,
+            &guidance,
+            &expected_workloads,
+        )?,
         dependency_checker: Some(dependency_checker),
         worker_drain_timeout: Duration::from_millis(config.shutdown.worker_drain_timeout_ms),
         authenticator,
@@ -669,22 +721,79 @@ fn reject_fixture_targets(targets: &ProviderTargetConfig) -> Result<(), ServerEr
 async fn wait_for_hubu_compatibility(
     config: &HubuConfig,
     client: &HubuClient,
-) -> Result<(), BoxError> {
+    expected_scopes: &[ExecutionScope],
+    expected_workloads: &[String],
+) -> Result<HubuExecutorGuidance, BoxError> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(config.startup_timeout_ms);
     loop {
+        let guidance = client.guidance();
+        let binding = client.agents();
         let compatible = client.health().is_ok()
             && client.version().is_ok_and(|version| {
                 version.product_version == config.expected_product_version
                     && version.executor_contract == config.expected_executor_contract
+            })
+            && guidance.as_ref().is_ok_and(|guidance| {
+                guidance_compatible(guidance, expected_scopes, expected_workloads)
+            })
+            && binding.as_ref().is_ok_and(|agents| {
+                agents.agents.iter().any(|binding| {
+                    binding.account_id == config.account_id
+                        && binding.agent_id == config.agent_id
+                        && binding.status == "active"
+                        && binding.account_status == "active"
+                })
             });
         if compatible {
-            return Ok(());
+            return Ok(guidance.expect("compatible guidance"));
         }
         if config.startup_policy == StartupPolicy::Exit || tokio::time::Instant::now() >= deadline {
             return Err(io::Error::other("Hubu is unavailable or incompatible").into());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+fn guidance_compatible(
+    guidance: &HubuExecutorGuidance,
+    expected_scopes: &[ExecutionScope],
+    expected_workloads: &[String],
+) -> bool {
+    guidance.protocol_version == gongbu_build_info::HUBU_EXECUTOR_CONTRACT
+        && guidance.authorization_scope_schema_version == AUTHORIZATION_SCOPE_SCHEMA_VERSION
+        && guidance.execution_scope_schema_version == EXECUTION_SCOPE_SCHEMA_VERSION
+        && expected_scopes
+            .iter()
+            .all(|scope| guidance.execution_scope_catalog.contains(scope))
+        && expected_workloads
+            .iter()
+            .all(|profile| guidance.timing.profiles.contains_key(profile))
+}
+
+fn authorization_scope_context(
+    agent_id: &str,
+    guidance: &HubuExecutorGuidance,
+    workloads: &[String],
+) -> Result<AuthorizationScopeContext, ServerError> {
+    let mut expiry_by_workload = std::collections::HashMap::new();
+    for workload in workloads {
+        let profile =
+            guidance.timing.profiles.get(workload).ok_or_else(|| {
+                invalid(format!("Hubu has no `{workload}` workload timing profile"))
+            })?;
+        expiry_by_workload.insert(
+            workload.clone(),
+            AuthorizationExpiryGuidance {
+                authorization_ttl_seconds: profile.authorization_ttl_seconds,
+                claim_ttl_seconds: profile.claim_ttl_seconds,
+                guidance: "issue immediately before admission; Gongbu must claim before authorization expiry".into(),
+            },
+        );
+    }
+    Ok(AuthorizationScopeContext {
+        agent_id: agent_id.into(),
+        expiry_by_workload,
+    })
 }
 
 struct ManagedTemporalChild(Child);
@@ -965,5 +1074,41 @@ mod tests {
         headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
         assert!(authenticator.authenticate(&headers).is_ok());
         assert!(!format!("{:?}", authenticator.token_digest).contains("secret"));
+    }
+
+    #[test]
+    fn startup_guidance_rejects_contract_catalog_and_workload_drift() {
+        let scope = for_target("google", "gemini_developer_image").unwrap();
+        let workload = "image_generation".to_string();
+        let mut guidance = HubuExecutorGuidance {
+            protocol_version: gongbu_build_info::HUBU_EXECUTOR_CONTRACT.into(),
+            authorization_scope_schema_version: AUTHORIZATION_SCOPE_SCHEMA_VERSION,
+            execution_scope_schema_version: EXECUTION_SCOPE_SCHEMA_VERSION,
+            execution_scope_catalog: vec![scope.clone()],
+            timing: crate::hubu::HubuTimingConfig {
+                default_profile: workload.clone(),
+                profiles: std::collections::HashMap::from([(
+                    workload.clone(),
+                    crate::hubu::HubuTimingProfile {
+                        authorization_ttl_seconds: 300,
+                        claim_ttl_seconds: 900,
+                    },
+                )]),
+            },
+        };
+        assert!(guidance_compatible(
+            &guidance,
+            std::slice::from_ref(&scope),
+            std::slice::from_ref(&workload)
+        ));
+        guidance.authorization_scope_schema_version += 1;
+        assert!(!guidance_compatible(
+            &guidance,
+            std::slice::from_ref(&scope),
+            std::slice::from_ref(&workload)
+        ));
+        guidance.authorization_scope_schema_version = AUTHORIZATION_SCOPE_SCHEMA_VERSION;
+        guidance.execution_scope_catalog.clear();
+        assert!(!guidance_compatible(&guidance, &[scope], &[workload]));
     }
 }

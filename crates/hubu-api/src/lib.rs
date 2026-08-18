@@ -1501,6 +1501,7 @@ fn authenticate_reconciliation_capability(
 fn spend_executor_guidance(state: &ServerState) -> Value {
     json!({
         "protocol_version": EXECUTOR_CONTRACT,
+        "authorization_scope_schema_version": hubu_executor_contract::AUTHORIZATION_SCOPE_SCHEMA_VERSION,
         "role_boundary": {
             "hubu": [
                 "register agents and owners",
@@ -1583,6 +1584,30 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "merchant (legacy only)",
                 "workload_profile"
             ]
+        },
+        "authorization_scope_contract": {
+            "fixture": "fixtures/hubu-authorization-scope-v1.json",
+            "required": [
+                "schema_version",
+                "executor_contract",
+                "account_id",
+                "agent_id",
+                "operation_key",
+                "authorization",
+                "execution_scope",
+                "task",
+                "workload",
+                "expiry"
+            ],
+            "operator_owned": [
+                "account_id",
+                "agent_id",
+                "authorization",
+                "execution_scope",
+                "workload",
+                "expiry"
+            ],
+            "task_semantics": "reason is the executor task_id and must equal operation_key"
         },
         "claim_request": {
             "required": [
@@ -6250,6 +6275,15 @@ profiles:
 
     #[test]
     fn spend_executor_guidance_defines_external_work_boundary() {
+        let authorization_fixture: hubu_executor_contract::AuthorizationScope =
+            serde_json::from_str(include_str!(
+                "../../../fixtures/hubu-authorization-scope-v1.json"
+            ))
+            .expect("Hubu authorization scope fixture must match the shared contract");
+        assert_eq!(
+            authorization_fixture.schema_version,
+            hubu_executor_contract::AUTHORIZATION_SCOPE_SCHEMA_VERSION
+        );
         let path = std::env::temp_dir().join(format!(
             "hubu-api-executor-guidance-{}.sqlite",
             UserId::new()
@@ -6264,6 +6298,18 @@ profiles:
 
             assert_eq!(response.status, 200);
             assert_eq!(response.body["protocol_version"], "hubu-spend-executor-v4");
+            assert_eq!(response.body["authorization_scope_schema_version"], 1);
+            assert_eq!(
+                response.body["authorization_scope_contract"]["task_semantics"],
+                "reason is the executor task_id and must equal operation_key"
+            );
+            assert!(
+                response.body["authorization_scope_contract"]["operator_owned"]
+                    .as_array()
+                    .expect("operator-owned scope fields")
+                    .iter()
+                    .any(|item| item == "execution_scope")
+            );
             assert!(response.body["role_boundary"]["hubu"]
                 .as_array()
                 .expect("hubu role list should be an array")

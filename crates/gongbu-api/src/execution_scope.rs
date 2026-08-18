@@ -1,23 +1,4 @@
-use serde::{Deserialize, Serialize};
-
-pub const EXECUTION_SCOPE_SCHEMA_VERSION: u32 = 1;
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ScopeIdentity {
-    pub id: String,
-    pub display_name: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionScope {
-    pub schema_version: u32,
-    pub provider: ScopeIdentity,
-    pub executor: ScopeIdentity,
-    pub capability: ScopeIdentity,
-    pub billing_merchant: ScopeIdentity,
-}
+pub use hubu_executor_contract::{ExecutionScope, ScopeIdentity, EXECUTION_SCOPE_SCHEMA_VERSION};
 
 pub fn for_target(provider: &str, adapter: &str) -> Option<ExecutionScope> {
     let (provider_id, provider_name, merchant_id, merchant_name) = match (provider, adapter) {

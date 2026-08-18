@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-pub const EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4";
+pub const EXECUTOR_CONTRACT: &str = hubu_executor_contract::EXECUTOR_CONTRACT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct BuildInfo {

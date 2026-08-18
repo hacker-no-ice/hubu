@@ -131,6 +131,7 @@ impl GongbuClient {
 
     pub fn call_tool(&self, name: &str, arguments: Value) -> ToolResult {
         let result = match name {
+            "gongbu_preview_authorization_scope" => self.preview_authorization_scope(arguments),
             "gongbu_create_execution" => self.create(arguments),
             "gongbu_get_execution" => self.get_execution(arguments),
             "gongbu_list_artifacts" => self.list_artifacts(arguments),
@@ -138,6 +139,16 @@ impl GongbuClient {
             _ => Err(ToolError::new("unknown_tool", "unknown Gongbu tool")),
         };
         result.unwrap_or_else(ToolError::into_result)
+    }
+
+    fn preview_authorization_scope(&self, arguments: Value) -> Result<ToolResult, ToolError> {
+        let request: AuthorizationScopePreviewRequest = parse_arguments(arguments)?;
+        let response: Value = self.json_request(
+            reqwest::Method::POST,
+            "v1/authorization-scopes/preview",
+            Some(&request),
+        )?;
+        Ok(text_result(&response))
     }
 
     fn create(&self, arguments: Value) -> Result<ToolResult, ToolError> {
@@ -433,6 +444,19 @@ struct CreateExecutionRequest {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct AuthorizationScopePreviewRequest {
+    schema_version: u32,
+    operation_key: String,
+    input: Value,
+    input_schema_version: i64,
+    workload_type: String,
+    provider: String,
+    adapter: String,
+    model: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Money {
     amount_minor: i64,
     currency: String,
@@ -528,6 +552,16 @@ pub fn tool_definitions() -> Value {
         "model": {"type":"string","minLength":1}
     });
     json!([
+        {"name":"gongbu_preview_authorization_scope","description":"Derive the exact operator-owned Hubu authorization request for a planned Gongbu execution before token issuance.","inputSchema":{"type":"object","additionalProperties":false,"required":["schema_version","operation_key","input","input_schema_version","workload_type","provider","adapter","model"],"properties":{
+            "schema_version":{"type":"integer","const":1},
+            "operation_key":{"type":"string","minLength":1,"maxLength":255},
+            "input":{"type":"object"},
+            "input_schema_version":{"type":"integer","minimum":1},
+            "workload_type":{"type":"string","minLength":1},
+            "provider":{"type":"string","minLength":1},
+            "adapter":{"type":"string","minLength":1},
+            "model":{"type":"string","minLength":1}
+        }}},
         {"name":"gongbu_create_execution","description":"Create or replay a Gongbu execution using an existing Hubu authorization.","inputSchema":{"type":"object","additionalProperties":false,"required":["schema_version","operation_key","hubu_authorization_id","hubu_token_reference","authorization","input","input_schema_version","workload_type","provider","adapter","model"],"properties":create_properties}},
         {"name":"gongbu_get_execution","description":"Get coarse status and redacted outcome for an execution.","inputSchema":id_schema("execution_id")},
         {"name":"gongbu_list_artifacts","description":"List portable metadata for an execution's artifacts.","inputSchema":id_schema("execution_id")},
@@ -620,7 +654,23 @@ mod tests {
         json!({"schema_version":1,"operation_key":"op-1","hubu_authorization_id":"auth-1","hubu_claim_id":null,"hubu_token_reference":"hubu-ref-1","authorization":{"amount_minor":25,"currency":"USD"},"input":{"prompt":"circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"example","adapter":"fixture","model":"v1"})
     }
 
+    fn preview_arguments() -> Value {
+        json!({"schema_version":1,"operation_key":"op-1","input":{"prompt":"circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"example","adapter":"fixture","model":"v1"})
+    }
+
     const EXECUTION: &str = r#"{"schema_version":1,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":null,"failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
+
+    #[test]
+    fn authorization_preview_is_forwarded_without_operator_owned_overrides() {
+        let response = r#"{"authorization_scope":{"schema_version":1,"account_id":"operator-account"},"hubu_authorize_request":{"operation_key":"op-1"}}"#;
+        let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", response)]);
+        let result = client(&endpoint, "operator-secret")
+            .call_tool("gongbu_preview_authorization_scope", preview_arguments());
+        assert!(!result.is_error);
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].contains("POST /v1/authorization-scopes/preview"));
+        assert!(!requests[0].contains("account_id") && !requests[0].contains("agent_id"));
+    }
 
     #[test]
     fn create_replay_is_forwarded_once_per_call_and_returns_stable_id() {
@@ -692,6 +742,18 @@ mod tests {
             assert!(
                 client
                     .call_tool("gongbu_create_execution", arguments)
+                    .is_error
+            );
+        }
+        for field in ["account_id", "agent_id", "amount_minor", "execution_scope"] {
+            let mut arguments = preview_arguments();
+            arguments
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), json!("override"));
+            assert!(
+                client
+                    .call_tool("gongbu_preview_authorization_scope", arguments)
                     .is_error
             );
         }

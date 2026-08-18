@@ -8,7 +8,9 @@
 use crate::{
     artifact::ArtifactService,
     execution::{Execution, Repository},
-    http::{Api, AuthenticatedAccount, HttpResponse},
+    http::{
+        Api, AuthenticatedAccount, AuthorizationRuntime, AuthorizationScopeContext, HttpResponse,
+    },
     lifecycle::LifecycleReason,
     provider::{
         contract::{
@@ -359,6 +361,7 @@ pub struct ApplicationDependencies {
     pub temporal_startup_timeout: Duration,
     pub dependency_check_interval: Duration,
     pub maximum_spend_minor: i64,
+    pub authorization_scope: AuthorizationScopeContext,
     pub dependency_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     pub worker_drain_timeout: Duration,
     pub authenticator: Arc<dyn Authenticator>,
@@ -397,6 +400,7 @@ where
             move || now(),
         ))
     });
+    let admission_hubu = dependencies.hubu.clone();
     let execution_runner: Arc<dyn DurableExecutionRunner> =
         Arc::new(PersistedExecutionRunner::new(
             dependencies.repository.clone(),
@@ -435,12 +439,16 @@ where
             return Err(std::io::Error::other(error).into());
         }
     }
-    let api = Api::new_with_maximum_spend(
+    let api = Api::new_for_application(
         dependencies.repository,
         dependencies.artifacts,
         dependencies.providers,
         worker.scheduler.clone(),
         dependencies.maximum_spend_minor,
+        AuthorizationRuntime {
+            hubu: admission_hubu,
+            scope: dependencies.authorization_scope,
+        },
         move || (dependencies.now)(),
     );
     let ready = Arc::new(AtomicBool::new(true));

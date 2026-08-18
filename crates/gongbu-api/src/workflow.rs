@@ -7,6 +7,7 @@ use crate::{
         AttemptResult, CreateReceiptParams, Error as PersistenceError, Execution, ExecutionUpdate,
         Repository, StagedProviderArtifact,
     },
+    execution_scope::ExecutionScope,
     provider_contract::{NormalizedUsage, PricingSnapshot},
 };
 use serde::{Deserialize, Serialize};
@@ -44,7 +45,30 @@ pub enum ActivityError {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizationAdmissionRequest {
+    pub spend_auth_token_id: String,
+    pub account_id: String,
+    pub amount_minor: i64,
+    pub execution_scope: ExecutionScope,
+    pub operation_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizationAdmissionError {
+    pub diagnostic: String,
+}
+
 pub trait HubuActivities {
+    /// Validate the complete operator-owned Hubu scope before Gongbu persists
+    /// or schedules an execution. Test doubles default to accepting admission;
+    /// the production Hubu bridge always performs the remote validation.
+    fn validate_before_admission(
+        &self,
+        _request: &AuthorizationAdmissionRequest,
+    ) -> Result<(), AuthorizationAdmissionError> {
+        Ok(())
+    }
     fn preflight(&self, execution: &Execution) -> Result<(), ActivityError>;
     fn claim(&self, execution: &Execution) -> Result<String, ActivityError>;
     /// Confirm the persisted claim is still active immediately before paid work.

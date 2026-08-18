@@ -3,7 +3,7 @@ use gongbu_api::{
     application::{ApplicationDependencies, ArtifactServiceActivities, Authenticator},
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
     execution::{Execution, Repository},
-    http::{AuthenticatedAccount, ExecutionResponse, ExecutionStatus},
+    http::{AuthenticatedAccount, AuthorizationScopeContext, ExecutionResponse, ExecutionStatus},
     provider::{
         contract::{
             AdapterCapabilities, AdapterOutcome, NormalizedRequest, PricingCatalog,
@@ -103,6 +103,17 @@ async fn run() {
             temporal_startup_timeout: Duration::from_secs(15),
             dependency_check_interval: Duration::from_millis(100),
             maximum_spend_minor: 100,
+            authorization_scope: AuthorizationScopeContext {
+                agent_id: "agt_test".into(),
+                expiry_by_workload: std::collections::HashMap::from([(
+                    "image_generation".into(),
+                    hubu_executor_contract::AuthorizationExpiryGuidance {
+                        authorization_ttl_seconds: 300,
+                        claim_ttl_seconds: 900,
+                        guidance: "test guidance".into(),
+                    },
+                )]),
+            },
             dependency_checker: Some(Arc::new(move || health.load(Ordering::SeqCst))),
             worker_drain_timeout: Duration::from_secs(15),
             authenticator: Arc::new(TestAuthenticator),
