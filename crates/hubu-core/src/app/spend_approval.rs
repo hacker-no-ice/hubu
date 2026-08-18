@@ -755,20 +755,19 @@ impl SpendApprovalService {
                     }
                 };
 
-                if let Err(error) = governance.save_spend_auth_token(&token_record) {
+                let reasons = vec!["human approved the immutable spend request".to_string()];
+                if let Err(error) = governance.save_approved_spend_transition(
+                    &decision_record,
+                    &token_record,
+                    &budget_reservation.hold,
+                    &budget_reservation.balance,
+                    &reasons,
+                    Utc::now(),
+                ) {
                     let _ = budget_manager.release_budget(&budget_reservation.hold.id);
                     spend_manager.discard_auth_token_for_decision(approval_request_id);
                     return Err(error.into());
                 }
-                governance
-                    .save_budget_hold(&budget_reservation.hold, &budget_reservation.balance)?;
-                let reasons = vec!["human approved the immutable spend request".to_string()];
-                governance.record_spend_attempt_outcome(
-                    &decision_record,
-                    SpendAuthorizationDecision::Allowed,
-                    &reasons,
-                    Utc::now(),
-                )?;
                 let mut evaluation = evaluation_response_for_decision(
                     &decision_record,
                     Some(token.clone()),

@@ -107,6 +107,16 @@ pub trait SpendRepository {
     ) -> Result<bool, StorageError>;
     fn save_spend_decision(&mut self, record: &SpendDecisionRecord) -> Result<(), StorageError>;
     fn save_spend_auth_token(&mut self, record: &SpendAuthTokenRecord) -> Result<(), StorageError>;
+    #[allow(clippy::too_many_arguments)]
+    fn save_approved_spend_transition(
+        &mut self,
+        decision: &SpendDecisionRecord,
+        token: &SpendAuthTokenRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
     fn update_spend_auth_token(
         &mut self,
         record: &SpendAuthTokenRecord,
@@ -404,6 +414,73 @@ impl SqliteGovernanceRepository {
         )?;
         upsert_balance(&sqlite_tx, balance)?;
         refresh_persisted_budget_status(&sqlite_tx, &hold.budget_id.to_string(), hold.updated_at)?;
+        sqlite_tx.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_approved_spend_transition(
+        &mut self,
+        decision: &SpendDecisionRecord,
+        token: &SpendAuthTokenRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let sqlite_tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        sqlite_tx.execute(
+            "INSERT INTO spend_auth_tokens
+             (id, owner_user_id, spend_decision_id, expires_at, claim_ttl_seconds,
+              used_at, used_by_payment_id, revoked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                token.id.to_string(),
+                token.owner_user_id.to_string(),
+                token.spend_decision_id.to_string(),
+                token.expires_at.to_rfc3339(),
+                token.claim_ttl_seconds,
+                token.used_at.map(|timestamp| timestamp.to_rfc3339()),
+                token.used_by_payment_id.as_ref().map(ToString::to_string),
+                token.revoked_at.map(|timestamp| timestamp.to_rfc3339()),
+            ],
+        )?;
+        sqlite_tx.execute(
+            "INSERT INTO budget_holds
+             (id, budget_id, spend_decision_id, amount_cents, currency, status, executor_claim_id,
+              created_at, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                hold.id.to_string(),
+                hold.budget_id.to_string(),
+                hold.spend_decision_id.to_string(),
+                hold.amount_cents,
+                hold.currency.to_string(),
+                budget_hold_status(&hold.status),
+                hold.executor_claim_id.as_ref().map(ToString::to_string),
+                hold.created_at.to_rfc3339(),
+                hold.updated_at.to_rfc3339(),
+                hold.expires_at.to_rfc3339(),
+            ],
+        )?;
+        upsert_balance(&sqlite_tx, balance)?;
+        refresh_persisted_budget_status(&sqlite_tx, &hold.budget_id.to_string(), hold.updated_at)?;
+        sqlite_tx.execute(
+            "INSERT INTO spend_authorization_outcomes
+             (agent_id, operation_key, revision, spend_decision_id, decision,
+              reasons_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'allowed', ?5, ?6)",
+            params![
+                decision.request.agent_id.to_string(),
+                decision.operation_key,
+                decision.revision,
+                decision.id.to_string(),
+                serde_json::to_string(reasons)?,
+                decided_at.to_rfc3339(),
+            ],
+        )?;
         sqlite_tx.commit()?;
         Ok(())
     }
@@ -2605,6 +2682,20 @@ impl SpendRepository for SqliteGovernanceRepository {
         Ok(())
     }
 
+    fn save_approved_spend_transition(
+        &mut self,
+        decision: &SpendDecisionRecord,
+        token: &SpendAuthTokenRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        SqliteGovernanceRepository::save_approved_spend_transition(
+            self, decision, token, hold, balance, reasons, decided_at,
+        )
+    }
+
     fn update_spend_auth_token(
         &mut self,
         record: &SpendAuthTokenRecord,
@@ -3615,6 +3706,127 @@ mod tests {
         decision.evaluation.decision = Effect::Deny;
         decision.evaluation.reasons = vec!["policy denied spend".to_string()];
         decision
+    }
+
+    #[test]
+    fn approved_spend_transition_rolls_back_token_hold_and_balance_when_outcome_fails() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let request = spend_request();
+        let submitted_at = Utc::now();
+        let revision = match repo
+            .admit_spend_attempt(
+                &user_id(),
+                "approval-atomic-operation",
+                &request,
+                "test:owner",
+                submitted_at,
+            )
+            .unwrap()
+        {
+            SpendAttemptAdmission::Admitted { revision } => revision,
+            other => panic!("expected admitted attempt, got {other:?}"),
+        };
+        let mut decision = spend_decision();
+        decision.operation_key = "approval-atomic-operation".to_string();
+        decision.revision = revision;
+        decision.request = request;
+        decision.evaluation.decision = Effect::NeedsApproval;
+        decision.evaluation.reasons = vec!["human review required".to_string()];
+        repo.save_spend_decision(&decision).unwrap();
+
+        let budget = Budget::new(
+            BudgetId::new(),
+            decision.request.agent_id.clone(),
+            10_000,
+            Currency::Usd,
+            TimePeriod::new(
+                Utc::now() - Duration::hours(1),
+                Some(Utc::now() + Duration::hours(1)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let initial_balance = BudgetBalance {
+            budget_id: budget.id.clone(),
+            consumed_amount_cents: 0,
+            frozen_amount_cents: 0,
+            remaining_amount_cents: 10_000,
+        };
+        repo.save_budget_with_balance(&budget, &initial_balance)
+            .unwrap();
+        let approved_balance = BudgetBalance {
+            budget_id: budget.id.clone(),
+            consumed_amount_cents: 0,
+            frozen_amount_cents: decision.request.amount_cents,
+            remaining_amount_cents: 10_000 - decision.request.amount_cents,
+        };
+        let hold = BudgetHold {
+            id: BudgetHoldId::new(),
+            budget_id: budget.id.clone(),
+            spend_decision_id: decision.id.clone(),
+            amount_cents: decision.request.amount_cents,
+            currency: Currency::Usd,
+            status: BudgetHoldStatus::Frozen,
+            executor_claim_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(5),
+        };
+        let token = SpendAuthTokenRecord {
+            id: SpendAuthTokenId::new(),
+            owner_user_id: user_id(),
+            spend_decision_id: decision.id.clone(),
+            expires_at: hold.expires_at,
+            claim_ttl_seconds: 900,
+            used_at: None,
+            used_by_payment_id: None,
+            revoked_at: None,
+        };
+        repo.conn
+            .execute_batch(
+                "CREATE TRIGGER reject_allowed_approval_outcome
+                 BEFORE INSERT ON spend_authorization_outcomes
+                 WHEN NEW.decision = 'allowed'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected approval outcome failure');
+                 END;",
+            )
+            .unwrap();
+
+        let result = repo.save_approved_spend_transition(
+            &decision,
+            &token,
+            &hold,
+            &approved_balance,
+            &["human approved the immutable spend request".to_string()],
+            Utc::now(),
+        );
+        assert!(result.is_err());
+        assert!(repo.load_spend_auth_tokens().unwrap().is_empty());
+        assert!(repo.load_budget_holds().unwrap().is_empty());
+        let balances = repo.load_budget_balances().unwrap();
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances[0].budget_id, initial_balance.budget_id);
+        assert_eq!(
+            balances[0].consumed_amount_cents,
+            initial_balance.consumed_amount_cents
+        );
+        assert_eq!(
+            balances[0].frozen_amount_cents,
+            initial_balance.frozen_amount_cents
+        );
+        assert_eq!(
+            balances[0].remaining_amount_cents,
+            initial_balance.remaining_amount_cents
+        );
+        let history = repo
+            .load_spend_attempt_history(&decision.request.agent_id, &decision.operation_key)
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].final_decision,
+            SpendAuthorizationDecision::PendingApproval
+        );
     }
 
     fn persist_claimed_executor_spend(
