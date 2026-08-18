@@ -2172,11 +2172,12 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         .unwrap_or_else(|| declarative_key.clone());
     let policy_version = policy.version.clone();
     let default_decision = effect_name(policy.default_effect).to_string();
-    let result = state
-        .governance
-        .lock()
-        .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .apply_policy(
+    let (result, resource_assignments) = {
+        let mut governance = state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        let result = governance.apply_policy(
             &user.user_id,
             &declarative_key,
             &display_name,
@@ -2187,17 +2188,30 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
             &actor,
             request.source.as_deref().unwrap_or("api"),
         )?;
+        let resource_assignments = governance
+            .load_policy_assignments()?
+            .into_iter()
+            .filter(|assignment| {
+                assignment.owner_user_id == user.user_id
+                    && assignment.policy_id == result.resource.policy_id
+            })
+            .collect::<Vec<_>>();
+        (result, resource_assignments)
+    };
 
     let policy_id = result.resource.policy_id.clone();
 
-    state
+    let mut policies = state
         .policies
         .lock()
-        .map_err(|_| anyhow!("policy store lock poisoned"))?
-        .insert(
-            (user.user_id, scope.clone()),
-            result.assignment.policy.clone(),
+        .map_err(|_| anyhow!("policy store lock poisoned"))?;
+    for assignment in resource_assignments {
+        policies.insert(
+            (assignment.owner_user_id, assignment.scope),
+            assignment.policy,
         );
+    }
+    drop(policies);
 
     log_event(
         "info",
@@ -6838,6 +6852,100 @@ rules: []
             .unwrap()
             .iter()
             .any(|path| path == "default_effect"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn policy_revision_refreshes_every_cached_assignment_without_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-shared-policy-cache-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let first_agent = register_agent(
+            json!({
+                "name": "shared-policy-agent-one",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("first agent should register");
+        let second_agent = register_agent(
+            json!({
+                "name": "shared-policy-agent-two",
+                "version": "v1",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("second agent should register");
+        let yaml_v1 = r#"
+id: shared_policy
+version: authored-v1
+default_effect: allow
+rules: []
+"#;
+
+        let first = add_policy(
+            json!({
+                "agent_id": first_agent.agent_id,
+                "policy_yaml": yaml_v1,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("shared policy should attach to first agent");
+        let second = add_policy(
+            json!({
+                "agent_id": second_agent.agent_id,
+                "policy_yaml": yaml_v1,
+                "expected_revision": 1,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("shared policy should attach to second agent");
+        assert_eq!(second.policy_id, first.policy_id);
+
+        let revised = add_policy(
+            json!({
+                "agent_id": first_agent.agent_id,
+                "policy_yaml": r#"
+id: shared_policy
+version: authored-v2
+default_effect: deny
+rules: []
+"#,
+                "expected_revision": 1,
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("shared policy revision should apply");
+        assert_eq!(revised.revision, 2);
+
+        create_test_agent_budget(&state, &first_agent.agent_id, 10_000);
+        create_test_agent_budget(&state, &second_agent.agent_id, 10_000);
+        for (operation_key, account_id) in [
+            ("shared-policy-first-agent", first_agent.account_id),
+            ("shared-policy-second-agent", second_agent.account_id),
+        ] {
+            let response = spend(
+                json!({
+                    "operation_key": operation_key,
+                    "account_id": account_id,
+                    "amount_cents": 1_000,
+                    "reason": "evaluate revised shared policy",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("revised shared policy should evaluate");
+            assert_eq!(response.decision, "deny");
+            assert!(response.payment.is_none());
+        }
 
         std::fs::remove_file(path).unwrap();
     }
