@@ -548,24 +548,6 @@ fn error_response(id: Value, code: i32, message: &str) -> Value {
     })
 }
 
-fn backend_unconfigured_response(id: Value, tool: &str, owner: BackendOwner) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": -32010,
-            "message": "Owning backend is not configured",
-            "data": {
-                "code": "backend_unconfigured",
-                "tool": tool,
-                "owner": owner.as_str(),
-                "retryable": false,
-                "capabilities_changed": true
-            }
-        }
-    })
-}
-
 pub fn run_stdio_from_env(input: impl BufRead, output: impl Write) -> Result<(), StartupError> {
     let config = Config::from_env()?;
     Server::new(config)?.run(input, output)?;
