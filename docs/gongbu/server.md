@@ -8,11 +8,15 @@ stops, upgrades, provisions, migrates, or otherwise changes Hubu's lifecycle.
 
 ## Install and configure
 
-Build the operator binaries:
+Build the execution-plane operator binary:
 
 ```sh
-cargo build --release --locked --bin gongbu-server --bin gongbu-mcp
+cargo build --release --locked --bin gongbu-server
 ```
+
+The default agent-facing `hubu-unified-mcp` binary is distributed with the
+shared release. Build `gongbu-mcp` only for the explicit standalone
+compatibility path.
 
 Copy [the complete configuration example][server-example] to an operator-owned
 absolute path. Every field is required unless marked optional by the example.
@@ -94,19 +98,21 @@ credential references, paths, provider configuration, or account identity. All
 Execution and Artifact endpoints require the caller capability. A 503 from
 `/readyz` or execution creation means admission is closed.
 
-## Point MCP at the live server
+## Point the unified MCP surface at the live server
 
-`gongbu-mcp` remains a thin authenticated client and cannot choose an account.
-Resolve the same configured capability for the MCP process:
+Give `hubu-unified-mcp` the same configured caller capability. The router keeps
+it separate from the Hubu bearer credential and cannot choose an account:
 
 ```sh
-export GONGBU_MCP_ENDPOINT=http://127.0.0.1:8788
-export GONGBU_MCP_BEARER_TOKEN="$(security find-generic-password -s gongbu.caller -a local-mcp -w)"
-target/release/gongbu-mcp
+export HUBU_UNIFIED_GONGBU_ENDPOINT=http://127.0.0.1:8788
+export HUBU_UNIFIED_GONGBU_BEARER_TOKEN="$(security find-generic-password -s gongbu.caller -a local-mcp -w)"
+hubu-unified-mcp
 ```
 
 The server maps that capability to the operator-configured account. See
-[MCP usage](mcp.md) for the JSON-RPC tool schemas.
+[the unified MCP migration guide](../unified-mcp-migration.md) for the default
+client configuration. See [standalone MCP compatibility](mcp.md) only when
+validating or using the opt-in rollback surface.
 
 ## Submit, poll, retrieve, and replay
 

@@ -1,9 +1,14 @@
-# Gongbu MCP server
+# Standalone Gongbu MCP compatibility server
 
 `gongbu-mcp` is a local stdio MCP adapter over Gongbu's authenticated v1 HTTP
 API. It does not import Gongbu persistence, providers, pricing, workflows, or
 artifact storage. Replay and immutable-scope conflict behavior therefore remain
 identical to direct HTTP calls.
+
+The recommended agent setup uses `hubu-unified-mcp` and configures Gongbu in the
+same client entry as Hubu. Use this standalone adapter only for explicit
+compatibility or rollback during the migration window; see the
+[unified MCP migration guide](../unified-mcp-migration.md).
 
 ## Operator configuration
 
