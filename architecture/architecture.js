@@ -43,6 +43,8 @@ const sharedLinks = {
   gongbuHubu: ["Gongbu Hubu client", "crates/gongbu-api/src/hubu/mod.rs"],
   gongbuMcp: ["Gongbu MCP adapter", "crates/gongbu-mcp/src/lib.rs"],
   unifiedMcp: ["Unified MCP router", "crates/hubu-unified-mcp/src/lib.rs"],
+  unifiedMcpStdio: ["Unified MCP stdio lifecycle", "crates/hubu-unified-mcp/src/stdio.rs"],
+  unifiedMcpNotifications: ["Unified MCP catalog transitions", "crates/hubu-unified-mcp/src/notification.rs"],
   unifiedMcpContract: ["Unified MCP contract", "docs/unified-mcp-contract.md"],
   unifiedMcpMigration: ["Unified MCP migration", "docs/unified-mcp-migration.md"],
   gongbuConfig: ["Gongbu server example", "examples/gongbu/gongbu.server.json"],
@@ -467,8 +469,10 @@ const components = {
     copy:
       "The agent harness launches one default stdio server. That router probes and calls two isolated HTTP backends through separate clients and credentials; it owns discovery and routing, not governance, provider execution, storage, or artifacts.",
     responsibilities: [
-      "The unified server implements initialize, ping, tools/list, tools/call, startup validation, machine-readable capability snapshots, redacted backend-state errors, and graceful EOF shutdown over JSON-RPC stdio.",
+      "The unified server implements initialize, ping, tools/list, tools/call, startup validation, machine-readable capability snapshots, redacted backend-state errors, serialized list-changed notifications, and bounded monitor shutdown over JSON-RPC stdio.",
+      "Starts independent background probes only after the initialize/initialized handshake, baselines without an initial notification, and emits exactly one payload-free tools/list_changed event per effective callable-catalog transition.",
       "Configures separate Hubu and Gongbu endpoints, bearer credentials, bounded HTTP clients, and independently probed versioned adapter boundaries without cross-domain Cargo dependencies.",
+      "Coalesces concurrent monitor and request refreshes with independent per-backend single-flight gates whose bookkeeping locks are released before network I/O.",
       "Publishes and routes the four accepted gongbu_* execution and artifact tools with standalone schema, result, error, redaction, operation-key, and no-retry parity.",
       "Forwards only fixed relative Gongbu API routes and rejects caller attempts to override accounts, endpoints, credentials, retry controls, or artifact storage paths before network access.",
       "Fails closed on unknown or mismatched product, source-commit, executor-contract, MCP, and Gongbu schema versions while preserving healthy unrelated backend capabilities.",
@@ -485,7 +489,7 @@ const components = {
       "Leaves durable operation-key allocation and recovery to the client platform and HUB-31.",
       "Loads the local Hubu bearer and owner capability tokens, returns durable approval status, and protects approve-or-deny with both the trusted client gate and server-verified approval capability.",
     ],
-    links: [sharedLinks.unifiedMcp, sharedLinks.unifiedMcpContract, sharedLinks.unifiedMcpMigration, ["MCP transport doc", "docs/mcp-transport.md"], sharedLinks.api, sharedLinks.gongbuApplication, sharedLinks.mcp, sharedLinks.gongbuMcp],
+    links: [sharedLinks.unifiedMcp, sharedLinks.unifiedMcpStdio, sharedLinks.unifiedMcpNotifications, sharedLinks.unifiedMcpContract, sharedLinks.unifiedMcpMigration, ["MCP transport doc", "docs/mcp-transport.md"], sharedLinks.api, sharedLinks.gongbuApplication, sharedLinks.mcp, sharedLinks.gongbuMcp],
     zones: [
       { label: "hubu-unified-mcp process", x: 286, y: 44, w: 596, h: 670 },
       { label: "Hubu process + failure domain", x: 940, y: 44, w: 292, h: 280 },
@@ -494,6 +498,7 @@ const components = {
     nodes: [
       { id: "agent", label: "Agent harness", sub: "one stdio connection", x: 30, y: 318, w: 210, h: 96, tone: "agent" },
       { id: "tools", label: "Static router", sub: "28 Hubu + 4 Gongbu", x: 330, y: 118, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
+      { id: "notifications", label: "Catalog monitor", sub: "deduped list_changed", x: 330, y: 318, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/notification.rs" },
       { id: "capability", label: "Capability snapshot", sub: "isolated health + compatibility", x: 330, y: 520, w: 200, h: 96, tone: "core", path: "crates/hubu-unified-mcp/src/capability.rs" },
       { id: "hubuClient", label: "Hubu client", sub: "Hubu endpoint + credential", x: 650, y: 170, w: 200, h: 96, tone: "core", path: "crates/hubu-unified-mcp/src/hubu/transport.rs" },
       { id: "gongbuClient", label: "Gongbu client", sub: "Gongbu endpoint + credential", x: 650, y: 486, w: 200, h: 96, tone: "executor", path: "crates/hubu-unified-mcp/src/gongbu/transport.rs" },
@@ -502,11 +507,13 @@ const components = {
     ],
     edges: [
       ["agent", "tools", "stdio", { labelDy: -54 }],
+      ["notifications", "agent", "list_changed", { fromSide: "left", toSide: "right", labelDy: -18 }],
       ["agent", "capability", "status", { labelDy: 48 }],
       ["tools", "hubuClient", "hubu_*"],
       ["tools", "gongbuClient", "gongbu_*", { fromSide: "bottom", toSide: "top", waypoints: [{ x: 430, y: 350 }, { x: 750, y: 350 }], labelSegment: 1 }],
       ["capability", "hubuClient", "probe", { fromSide: "top", toSide: "bottom", waypoints: [{ x: 430, y: 410 }, { x: 750, y: 410 }], labelSegment: 1 }],
       ["capability", "gongbuClient", "probe"],
+      ["capability", "notifications", "catalog diff"],
       ["hubuClient", "approval", "bounded HTTP"],
       ["gongbuClient", "api", "bounded HTTP"],
     ],

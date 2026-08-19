@@ -32,6 +32,7 @@ fn server_with_backends(
             trusted_client_approval,
             reconciliation_capability.map(str::to_string),
         ),
+        ..Config::default()
     };
     let hubu_routing = config.hubu_routing.clone();
     let gongbu_state = if config.gongbu.is_some() {
@@ -39,13 +40,17 @@ fn server_with_backends(
     } else {
         BackendState::Unconfigured
     };
+    let snapshot = CapabilitySnapshot {
+        generated_at: "2026-08-18T00:00:00.000Z".into(),
+        hubu: test_backend_report(BackendState::Available, false),
+        gongbu: test_backend_report(gongbu_state, true),
+    };
+    let transition_state = TransitionState::new(&snapshot);
     Server {
         backends: BackendClients::new(config).unwrap(),
-        snapshot: Arc::new(Mutex::new(CapabilitySnapshot {
-            generated_at: "2026-08-18T00:00:00.000Z".into(),
-            hubu: test_backend_report(BackendState::Available, false),
-            gongbu: test_backend_report(gongbu_state, true),
-        })),
+        snapshot: Arc::new(Mutex::new(snapshot)),
+        transition_state: Arc::new(transition_state),
+        capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
         hubu_routing,
     }
 }

@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, BufReader};
 
 fn main() {
     if std::env::args()
@@ -19,7 +19,7 @@ fn main() {
     }
 
     if let Err(error) =
-        hubu_unified_mcp::run_stdio_from_env(io::stdin().lock(), io::stdout().lock())
+        hubu_unified_mcp::run_stdio_from_env(BufReader::new(io::stdin()), io::stdout().lock())
     {
         eprintln!("hubu-unified-mcp: {error}");
         std::process::exit(1);

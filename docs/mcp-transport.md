@@ -73,6 +73,11 @@ hubu-unified-mcp forwards independently to:
 Rerun `hubu init codex` after upgrading Hubu when the generated Codex MCP config
 changes. Reinstall `hubu-unified-mcp` after MCP server changes so new tool
 metadata, instructions, and approval profiles are available to agent harnesses.
+After initialization, the unified server monitors both backends independently
+and emits the payload-free MCP `notifications/tools/list_changed` signal once
+when the effective callable catalog changes. Clients should refresh
+`tools/list`; backend diagnostics remain available only through the sanitized
+`hubu_unified_capabilities` result.
 
 Approval behavior:
 

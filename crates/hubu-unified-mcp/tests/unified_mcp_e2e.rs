@@ -1,6 +1,10 @@
 mod support;
 
 use serde_json::{json, Value};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 use support::{assert_bearer_isolated, tool_names, BackendKind, BackendStub, McpProcess};
 
 const HUBU_TOKEN: &str = "hub93-hubu-credential-canary-4b1778";
@@ -184,6 +188,181 @@ fn backend_transport_stop_and_recovery_are_observed_on_refresh() {
         "available"
     );
 
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
+fn assert_list_changed(notification: &Value) {
+    assert_eq!(
+        notification,
+        &json!({
+            "jsonrpc":"2.0",
+            "method":"notifications/tools/list_changed"
+        })
+    );
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged migration canary"]
+fn initialized_lifecycle_establishes_the_notification_baseline() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+
+    mcp.initialize_protocol();
+    hubu.disconnect(true);
+    thread::sleep(Duration::from_millis(100));
+    mcp.assert_no_notification(Duration::from_millis(1_200));
+
+    mcp.send_notification("notifications/initialized");
+    mcp.assert_no_notification(Duration::from_millis(1_200));
+
+    hubu.disconnect(false);
+    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    mcp.assert_no_notification(Duration::from_millis(2_200));
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged migration canary"]
+fn out_of_order_initialized_does_not_start_the_monitor() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+
+    mcp.send_notification("notifications/initialized");
+    let barrier = mcp.request(json!({"jsonrpc":"2.0","id":90,"method":"ping"}));
+    assert_eq!(barrier["result"], json!({}));
+    hubu.disconnect(true);
+    thread::sleep(Duration::from_millis(100));
+    mcp.assert_no_notification(Duration::from_millis(1_200));
+
+    mcp.initialize_protocol();
+    mcp.send_notification("notifications/initialized");
+    let barrier = mcp.request(json!({"jsonrpc":"2.0","id":91,"method":"ping"}));
+    assert_eq!(barrier["result"], json!({}));
+    mcp.assert_no_notification(Duration::from_millis(1_200));
+
+    hubu.disconnect(false);
+    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged migration canary"]
+fn concurrent_monitor_and_request_refresh_are_single_flight_per_backend() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    mcp.initialize_with_monitor();
+
+    let baseline_health_requests = hubu.request_count("GET", "/health");
+    hubu.delay_response("GET", "/health", Duration::from_millis(800));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while hubu.request_count("GET", "/health") == baseline_health_requests {
+        assert!(Instant::now() < deadline, "monitor probe did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // The in-flight monitor already captured a healthy response. Change the
+    // next response so an overlapping request would otherwise race it.
+    hubu.respond_json("GET", "/health", 503, json!({"status":"stopped"}));
+
+    let started = Instant::now();
+    let healthy = mcp.call(
+        92,
+        "gongbu_get_execution",
+        json!({"execution_id":"exec-93"}),
+    );
+    assert!(healthy.get("result").is_some());
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "Hubu probe delayed the independent Gongbu read"
+    );
+
+    let coalesced = mcp.call(93, "hubu_list_budgets", json!({}));
+    assert_eq!(
+        coalesced["result"]["structuredContent"]["budgets"][0]["budget_id"], "hubu-state-marker",
+        "request refresh did not reuse the in-flight healthy Hubu probe: {coalesced}"
+    );
+
+    assert_list_changed(&mcp.notification(Duration::from_secs(3)));
+    mcp.assert_no_notification(Duration::from_millis(2_200));
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged migration canary"]
+fn catalog_transitions_emit_exactly_once_and_preserve_the_healthy_backend() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    mcp.initialize_with_monitor();
+
+    hubu.disconnect(true);
+    let healthy = mcp.call(
+        100,
+        "gongbu_get_execution",
+        json!({"execution_id":"exec-93"}),
+    );
+    assert!(healthy["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("gongbu-state-marker"));
+    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    mcp.assert_no_notification(Duration::from_millis(2_200));
+
+    hubu.disconnect(false);
+    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    mcp.assert_no_notification(Duration::from_millis(2_200));
+
+    gongbu.respond_json("GET", "/readyz", 503, json!({"status":"not_ready"}));
+    let healthy = mcp.call(101, "hubu_list_budgets", json!({}));
+    assert_eq!(
+        healthy["result"]["structuredContent"]["budgets"][0]["budget_id"], "hubu-state-marker",
+        "healthy Hubu call failed during Gongbu readiness transition: {healthy}"
+    );
+    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    mcp.assert_no_notification(Duration::from_millis(2_200));
+
+    gongbu.respond_json("GET", "/readyz", 200, json!({"status":"ready"}));
+    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+
+    gongbu.respond_json(
+        "GET",
+        "/version",
+        200,
+        json!({
+            "product_version":hubu_unified_mcp::product_version(),
+            "source_commit":hubu_unified_mcp::source_commit(),
+            "api_schema_version":99,
+            "mcp_schema_version":2,
+            "mcp_protocol_version":hubu_unified_mcp::MCP_PROTOCOL_VERSION,
+            "hubu_executor_contract":hubu_unified_mcp::EXECUTOR_CONTRACT_VERSION
+        }),
+    );
+    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    let healthy = mcp.call(102, "hubu_list_budgets", json!({}));
+    assert!(healthy.get("result").is_some());
+    mcp.assert_no_notification(Duration::from_millis(2_200));
+
+    gongbu.respond_json(
+        "GET",
+        "/version",
+        200,
+        json!({
+            "product_version":hubu_unified_mcp::product_version(),
+            "source_commit":hubu_unified_mcp::source_commit(),
+            "api_schema_version":2,
+            "mcp_schema_version":2,
+            "mcp_protocol_version":hubu_unified_mcp::MCP_PROTOCOL_VERSION,
+            "hubu_executor_contract":hubu_unified_mcp::EXECUTOR_CONTRACT_VERSION
+        }),
+    );
+    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    mcp.assert_no_notification(Duration::from_millis(2_200));
+
+    assert_bearer_isolated(&hubu, HUBU_TOKEN, GONGBU_TOKEN);
+    assert_bearer_isolated(&gongbu, GONGBU_TOKEN, HUBU_TOKEN);
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
 }
 

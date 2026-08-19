@@ -16,7 +16,6 @@ use std::{
     time::Duration,
 };
 
-use chrono::{SecondsFormat, Utc};
 use hubu_mcp::HUBU_ROUTING_CONTRACT_VERSION;
 use reqwest::{
     blocking::Client,
@@ -30,11 +29,14 @@ use thiserror::Error;
 mod capability;
 mod credential;
 mod diagnostics;
+mod notification;
 mod probe;
+mod stdio;
 
-use capability::{capabilities_value, BackendState, CapabilitySnapshot};
+use capability::{capabilities_value, CapabilitySnapshot};
 use diagnostics::{backend_error_response, tool_availability, ToolRejection};
 pub use hubu::RoutingConfig as HubuRoutingConfig;
+use notification::TransitionState;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
@@ -47,11 +49,15 @@ const HUBU_TOKEN_FILE_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE";
 const GONGBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_GONGBU_ENDPOINT";
 const GONGBU_TOKEN_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN";
 const GONGBU_TOKEN_FILE_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE";
+const CAPABILITY_POLL_INTERVAL_ENV: &str = "HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_CAPABILITY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const MIN_CAPABILITY_POLL_INTERVAL_MS: u64 = 10;
+const MAX_CAPABILITY_POLL_INTERVAL_MS: u64 = 60_000;
 
 const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("gongbu_create_execution", BackendOwner::Gongbu),
@@ -166,11 +172,23 @@ impl BackendConfig {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Config {
     pub hubu: Option<BackendConfig>,
     pub gongbu: Option<BackendConfig>,
     pub hubu_routing: HubuRoutingConfig,
+    pub capability_poll_interval: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            hubu: None,
+            gongbu: None,
+            hubu_routing: HubuRoutingConfig::default(),
+            capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
+        }
+    }
 }
 
 impl Config {
@@ -208,8 +226,23 @@ impl Config {
                 lookup(GONGBU_TOKEN_ENV),
             )?,
             hubu_routing,
+            capability_poll_interval: poll_interval(lookup(CAPABILITY_POLL_INTERVAL_ENV))?,
         })
     }
+}
+
+fn poll_interval(value: Option<String>) -> Result<Duration, ConfigError> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_CAPABILITY_POLL_INTERVAL);
+    };
+    let milliseconds = value
+        .parse::<u64>()
+        .map_err(|_| ConfigError::InvalidPollInterval)?;
+    if !(MIN_CAPABILITY_POLL_INTERVAL_MS..=MAX_CAPABILITY_POLL_INTERVAL_MS).contains(&milliseconds)
+    {
+        return Err(ConfigError::InvalidPollInterval);
+    }
+    Ok(Duration::from_millis(milliseconds))
 }
 
 fn env_flag_value(value: &str) -> bool {
@@ -262,6 +295,8 @@ pub enum ConfigError {
         "{0} backend endpoint must be an HTTP(S) base URL without credentials, query, or fragment"
     )]
     InvalidEndpoint(BackendOwner),
+    #[error("capability poll interval must be between 10 and 60000 milliseconds")]
+    InvalidPollInterval,
 }
 
 impl fmt::Display for BackendOwner {
@@ -357,6 +392,8 @@ impl BackendAdapter for BackendClient {
 pub struct BackendClients {
     pub hubu: Option<BackendClient>,
     pub gongbu: Option<BackendClient>,
+    hubu_probe_gate: Arc<probe::ProbeGate>,
+    gongbu_probe_gate: Arc<probe::ProbeGate>,
 }
 
 impl BackendClients {
@@ -364,6 +401,8 @@ impl BackendClients {
         Ok(Self {
             hubu: config.hubu.map(BackendClient::new).transpose()?,
             gongbu: config.gongbu.map(BackendClient::new).transpose()?,
+            hubu_probe_gate: Arc::new(probe::ProbeGate::default()),
+            gongbu_probe_gate: Arc::new(probe::ProbeGate::default()),
         })
     }
 }
@@ -372,37 +411,32 @@ impl BackendClients {
 pub struct Server {
     backends: BackendClients,
     snapshot: Arc<Mutex<CapabilitySnapshot>>,
+    transition_state: Arc<TransitionState>,
+    capability_poll_interval: Duration,
     hubu_routing: HubuRoutingConfig,
 }
 
 impl Server {
     pub fn new(config: Config) -> Result<Self, ConfigError> {
         let hubu_routing = config.hubu_routing.clone();
+        let capability_poll_interval = config.capability_poll_interval;
         let backends = BackendClients::new(config)?;
         let snapshot = backends.probe();
+        let transition_state = TransitionState::new(&snapshot);
         Ok(Self {
             backends,
             snapshot: Arc::new(Mutex::new(snapshot)),
+            transition_state: Arc::new(transition_state),
+            capability_poll_interval,
             hubu_routing,
         })
     }
 
-    pub fn run(self, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
-        for line in input.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Some(response) = self.handle_line(&line) {
-                serde_json::to_writer(&mut output, &response)?;
-                output.write_all(b"\n")?;
-                output.flush()?;
-            }
-        }
-        Ok(())
+    pub fn run(self, input: impl BufRead + Send, output: impl Write) -> io::Result<()> {
+        stdio::run(self, input, output)
     }
 
-    fn handle_line(&self, line: &str) -> Option<Value> {
+    pub(crate) fn handle_line(&self, line: &str) -> Option<Value> {
         let request: Request = match serde_json::from_str(line) {
             Ok(request) => request,
             Err(_) => return Some(error_response(Value::Null, -32700, "Parse error")),
@@ -480,7 +514,11 @@ impl Server {
             return error_response(id, -32602, "Invalid params");
         };
         if owner == BackendOwner::Gongbu {
-            self.refresh_capabilities();
+            if call.name == "gongbu_create_execution" {
+                self.refresh_capabilities();
+            } else {
+                self.refresh_gongbu_capability();
+            }
             let snapshot = self.snapshot();
             if let Err(rejection) = tool_availability(&call.name, owner, &snapshot) {
                 return backend_error_response(id, &call.name, owner, rejection);
@@ -575,32 +613,44 @@ impl Server {
             .clone()
     }
 
-    fn refresh_capabilities(&self) {
+    pub(crate) fn refresh_capabilities(&self) {
+        let probe_id = self.transition_state.next_probe_id();
         let refreshed = self.backends.probe();
-        *self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = refreshed;
+        self.transition_state
+            .apply_full(&self.snapshot, probe_id, refreshed);
     }
 
     fn refresh_hubu_capability(&self) {
+        let probe_id = self.transition_state.next_probe_id();
         let refreshed = self.backends.probe_hubu();
-        let mut snapshot = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snapshot.generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        snapshot.hubu = refreshed;
+        self.transition_state
+            .apply_hubu(&self.snapshot, probe_id, refreshed);
+    }
+
+    fn refresh_gongbu_capability(&self) {
+        let probe_id = self.transition_state.next_probe_id();
+        let refreshed = self.backends.probe_gongbu();
+        self.transition_state
+            .apply_gongbu(&self.snapshot, probe_id, refreshed);
     }
 
     fn mark_hubu_unavailable(&self) {
-        let mut snapshot = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snapshot.generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        snapshot.hubu.state = BackendState::Unavailable;
-        snapshot.hubu.reason_code = Some("health_unavailable");
+        let probe_id = self.transition_state.next_probe_id();
+        self.transition_state
+            .mark_hubu_unavailable(&self.snapshot, probe_id);
+    }
+
+    pub(crate) fn capability_poll_interval(&self) -> Duration {
+        self.capability_poll_interval
+    }
+
+    pub(crate) fn take_pending_catalog_transitions(&self) -> usize {
+        self.transition_state.take_pending()
+    }
+
+    pub(crate) fn reset_catalog_tracking(&self) {
+        let snapshot = self.snapshot();
+        self.transition_state.reset(&snapshot);
     }
 }
 
@@ -659,7 +709,10 @@ fn error_response(id: Value, code: i32, message: &str) -> Value {
     })
 }
 
-pub fn run_stdio_from_env(input: impl BufRead, output: impl Write) -> Result<(), StartupError> {
+pub fn run_stdio_from_env(
+    input: impl BufRead + Send,
+    output: impl Write,
+) -> Result<(), StartupError> {
     let config = Config::from_env()?;
     Server::new(config)?.run(input, output)?;
     Ok(())
@@ -704,6 +757,27 @@ mod tests {
         assert_eq!(
             config.gongbu.as_ref().unwrap().endpoint().as_str(),
             "http://127.0.0.1:8788/"
+        );
+    }
+
+    #[test]
+    fn validates_injectable_capability_poll_interval() {
+        assert_eq!(poll_interval(None).unwrap(), Duration::from_millis(250));
+        assert_eq!(
+            poll_interval(Some("10".into())).unwrap(),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            poll_interval(Some("60000".into())).unwrap(),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            poll_interval(Some("9".into())).unwrap_err(),
+            ConfigError::InvalidPollInterval
+        );
+        assert_eq!(
+            poll_interval(Some("secret/path".into())).unwrap_err(),
+            ConfigError::InvalidPollInterval
         );
     }
 
@@ -820,6 +894,7 @@ mod tests {
                     .unwrap(),
             ),
             hubu_routing: HubuRoutingConfig::default(),
+            ..Config::default()
         };
         let server = Server::new(config).unwrap();
         let capability = server.capabilities();

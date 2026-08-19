@@ -60,7 +60,7 @@ does not build release artifacts and is not enabled in ordinary PR CI.
 | Governed end-to-end workflow | PASS | Hubu authorization returned the fixture spend token, which was supplied to Gongbu execution; the resulting execution and artifact were then read through the same packaged unified process. |
 | Partial availability | PASS | Hubu-only, Gongbu-only, Hubu-unavailable, and Gongbu-unavailable cases preserved the healthy backend and rejected only unavailable routes. Gongbu execution remained fail-closed without Hubu. |
 | Version mismatch | PASS | Representative Hubu product-version and Gongbu API-schema mismatches reported `incompatible`, blocked the affected routes, and preserved the compatible backend. Unit coverage separately exercises every compatibility dimension. |
-| Backend transport stop/recovery | PASS with contract gap | Disabling each backend transport changed it to `unavailable`; restoring it returned it to `available` on bounded explicit capability refresh while the other backend remained independent. The required unsolicited `notifications/tools/list_changed` signal is absent; see HUB-106 and the failed gate below. |
+| Backend transport stop/recovery | PASS with contract gap at audit time | Disabling each backend transport changed it to `unavailable`; restoring it returned it to `available` on bounded explicit capability refresh while the other backend remained independent. The audited candidate lacked unsolicited `notifications/tools/list_changed`; HUB-106 implements the follow-up, but a new immutable canary is still required before this historical gate can change. |
 | Secret redaction and credential isolation | PASS | Distinct Hubu and Gongbu canary credentials appeared only in the owning fixture's Authorization header. Secret-bearing backend failures were sanitized, and the test process asserted neither secret appeared in MCP output or stderr. |
 | Migration refusal and success | PASS | Migration without replacement Gongbu settings failed without modifying the saved config. Supplying the distinct Gongbu endpoint/token file atomically replaced only the Hubu/Gongbu table families and preserved an unrelated MCP server. |
 | Documented rollback | PASS | The verifier restored the exact backed-up two-entry configuration, then initialized and listed the packaged standalone catalogs: 30 Hubu tools and exactly four Gongbu tools. Backend databases or artifacts were not copied or merged. |
@@ -106,8 +106,11 @@ tested as absent from the unified catalog.
 1. **Compatibility/failure gate: FAIL.** The server advertises
    `capabilities.tools.listChanged = true`, and the contract requires a
    `notifications/tools/list_changed` notification on catalog-affecting state
-   transitions. The stdio loop currently emits only request responses; there is
-   no notification implementation. [HUB-106](https://linear.app/hubu/issue/HUB-106/emit-unified-mcp-toolslist-changed-notifications-on-backend-state)
+   transitions. The audited stdio loop emitted only request responses and had
+   no notification implementation. HUB-106 subsequently added the initialized-lifecycle
+   monitor and effective-catalog notification path; this finding remains open for
+   a fresh immutable-candidate canary rather than rewriting the historical result.
+   [HUB-106](https://linear.app/hubu/issue/HUB-106/emit-unified-mcp-toolslist-changed-notifications-on-backend-state)
    is the bounded P1 blocker.
 2. **Behavior parity gate: FAIL.** Static catalog, schema, annotation, and route
    parity is exact, and representative behavior passed. The contract still
