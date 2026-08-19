@@ -1,9 +1,13 @@
 use serde_json::{json, Value};
 use std::{
+    collections::VecDeque,
     env,
     ffi::OsString,
     io::{BufRead, BufReader, Read, Write},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 use super::BackendStub;
@@ -17,8 +21,10 @@ const RECONCILIATION_TOKEN: &str = "hub107-reconciliation-capability";
 pub struct McpProcess {
     child: Child,
     stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    stdout: mpsc::Receiver<Value>,
+    stdout_thread: Option<thread::JoinHandle<()>>,
     transcript: Vec<Value>,
+    notifications: VecDeque<Value>,
 }
 
 impl McpProcess {
@@ -31,6 +37,7 @@ impl McpProcess {
             .env_remove("HUBU_UNIFIED_HUBU_BEARER_TOKEN")
             .env_remove("HUBU_UNIFIED_GONGBU_ENDPOINT")
             .env_remove("HUBU_UNIFIED_GONGBU_BEARER_TOKEN")
+            .env("HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS", "1000")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -82,30 +89,104 @@ impl McpProcess {
             .spawn()
             .unwrap();
         let stdin = child.stdin.take().unwrap();
-        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let child_stdout = BufReader::new(child.stdout.take().unwrap());
+        let (stdout_tx, stdout) = mpsc::channel();
+        let stdout_thread = thread::spawn(move || {
+            for line in child_stdout.lines() {
+                let line = line.expect("unified MCP stdout read failed");
+                let message = serde_json::from_str(&line).expect("unified MCP wrote invalid JSON");
+                if stdout_tx.send(message).is_err() {
+                    return;
+                }
+            }
+        });
         Self {
             child,
             stdin: Some(stdin),
             stdout,
+            stdout_thread: Some(stdout_thread),
             transcript: Vec::new(),
+            notifications: VecDeque::new(),
         }
     }
 
     pub fn request(&mut self, request: Value) -> Value {
+        let expected_id = request["id"].clone();
         let stdin = self.stdin.as_mut().unwrap();
         serde_json::to_writer(&mut *stdin, &request).unwrap();
         stdin.write_all(b"\n").unwrap();
         stdin.flush().unwrap();
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).unwrap();
-        assert!(!line.is_empty(), "unified MCP exited without a response");
-        let response: Value = serde_json::from_str(&line).unwrap();
-        self.transcript.push(response.clone());
-        response
+        loop {
+            let message = self
+                .stdout
+                .recv_timeout(Duration::from_secs(10))
+                .expect("unified MCP exited or timed out without a response");
+            self.transcript.push(message.clone());
+            if message.get("method").and_then(Value::as_str)
+                == Some("notifications/tools/list_changed")
+            {
+                self.notifications.push_back(message);
+                continue;
+            }
+            assert_eq!(message.get("id"), Some(&expected_id));
+            return message;
+        }
     }
 
     pub fn initialize(&mut self) -> Value {
+        self.initialize_protocol()
+    }
+
+    pub fn initialize_with_monitor(&mut self) -> Value {
+        let response = self.initialize_protocol();
+        self.send_notification("notifications/initialized");
+        let barrier = self.request(json!({"jsonrpc":"2.0","id":0,"method":"ping"}));
+        assert_eq!(barrier["result"], json!({}));
+        response
+    }
+
+    pub fn initialize_protocol(&mut self) -> Value {
         self.request(json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+    }
+
+    pub fn send_notification(&mut self, method: &str) {
+        let stdin = self.stdin.as_mut().unwrap();
+        serde_json::to_writer(&mut *stdin, &json!({"jsonrpc":"2.0","method":method})).unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    pub fn notification(&mut self, timeout: Duration) -> Value {
+        if let Some(notification) = self.notifications.pop_front() {
+            return notification;
+        }
+        let message = self
+            .stdout
+            .recv_timeout(timeout)
+            .expect("timed out waiting for tools/list_changed notification");
+        self.transcript.push(message.clone());
+        if message.get("method").and_then(Value::as_str) == Some("notifications/tools/list_changed")
+        {
+            return message;
+        }
+        panic!("unexpected MCP response while waiting for notification: {message}");
+    }
+
+    pub fn assert_no_notification(&mut self, timeout: Duration) {
+        assert!(
+            self.notifications.is_empty(),
+            "unexpected queued notification"
+        );
+        match self.stdout.recv_timeout(timeout) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("unified MCP exited while checking duplicate suppression")
+            }
+            Ok(message) => {
+                self.transcript.push(message.clone());
+                panic!("unexpected MCP message: {message}");
+            }
+        }
     }
 
     pub fn list_tools(&mut self) -> Value {
@@ -133,6 +214,12 @@ impl McpProcess {
     pub fn finish(mut self, secret_canaries: &[&str]) {
         drop(self.stdin.take());
         let status = self.child.wait().unwrap();
+        if let Some(stdout_thread) = self.stdout_thread.take() {
+            stdout_thread.join().unwrap();
+        }
+        while let Ok(message) = self.stdout.try_recv() {
+            self.transcript.push(message);
+        }
         let mut stderr = String::new();
         self.child
             .stderr

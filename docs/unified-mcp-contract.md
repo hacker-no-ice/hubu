@@ -294,9 +294,28 @@ Backend states and catalog behavior are deterministic:
 - `available`: compatible and healthy; all owned tools are listed.
 
 `hubu_unified_capabilities` is always listed. `tools/list` contains it plus only
-the backend tools whose snapshot says `available:true`. A state transition emits
-`notifications/tools/list_changed`. Calls re-check the selected backend state;
-a stale catalog never authorizes routing.
+the backend tools whose snapshot says `available:true`. After a successful
+`initialize` response and the client's `notifications/initialized` lifecycle
+notification, the router establishes the current catalog as its baseline and
+starts independently probing the two backends. It emits no initial-state or
+pre-initialized notification.
+
+Every subsequently observed change to the effective callable catalog emits
+exactly one serialized notification, interleaved with responses only at JSON
+line boundaries:
+
+```json
+{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}
+```
+
+The notification has no `params` and therefore cannot expose endpoints,
+credentials, paths, compatibility values, or raw backend errors. Repeated
+probes and raw health-detail changes that leave the effective catalog unchanged
+emit nothing. Calls still re-check the selected backend state; a stale catalog
+never authorizes routing. Independent per-backend single-flight gates coalesce
+concurrent monitor and request refreshes without holding a lock during network
+I/O; generation checks prevent an older observation from overwriting newer
+state. The monitoring worker is stopped and joined on stdio EOF or failure.
 
 ## Partial availability and fail-closed errors
 

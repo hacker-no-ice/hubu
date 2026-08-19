@@ -140,6 +140,19 @@ The fixed `reason_code` identifies the failed check without exposing endpoints,
 credentials, paths, or raw backend errors. `hubu_health` remains the Hubu-only
 health tool; use `hubu_unified_capabilities` for the cross-backend view.
 
+After the MCP initialize handshake completes, the client sends
+`notifications/initialized`. The router then records the current callable
+catalog without emitting an initial notification and begins background probes.
+Each later catalog change produces exactly one payload-free
+`notifications/tools/list_changed` notification. The client should respond by
+requesting `tools/list`; it should not infer backend details from the
+notification itself. An out-of-order lifecycle notification is ignored.
+
+The normal probe interval is 250 ms. Deterministic canaries may set
+`HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS` to an integer from 10 through 60000;
+production operators should keep the default unless diagnosing lifecycle
+timing. Polling never retries or replays a routed mutation.
+
 Partial availability is intentional. An unhealthy or unconfigured backend does
 not hide the router-owned capability tool or compatible tools owned by the
 other backend. `gongbu_create_execution` additionally requires Hubu to be
@@ -149,6 +162,13 @@ falls back to another backend, queues a call, or retries an ambiguous mutation.
 Complete a non-billable smoke before normal use: list tools, read Hubu health,
 and read an existing Gongbu execution or artifact if one is available. Do not
 use provider execution as a migration probe.
+
+For a restart/recovery smoke, stop one backend, wait for one list-changed
+notification, and confirm `tools/list` removes only the affected catalog. Call
+a read on the healthy backend, restart the stopped backend, then require one
+more notification and the restored catalog. Repeated notifications without an
+effective catalog change are a failure. Never put endpoint, credential, path,
+or raw error data into captured notification fixtures.
 
 ## Roll back
 

@@ -1,6 +1,9 @@
 //! Independent backend health probes and exact compatibility evaluation.
 
-use std::thread;
+use std::{
+    sync::{Condvar, Mutex},
+    thread,
+};
 
 use chrono::{SecondsFormat, Utc};
 use serde_json::Value;
@@ -20,6 +23,54 @@ struct ProbeResponse {
     body: Value,
 }
 
+#[derive(Debug, Default)]
+struct ProbeGateState {
+    in_flight: bool,
+    last_report: Option<BackendReport>,
+}
+
+/// Per-backend single-flight gate. The mutex only protects bookkeeping and is
+/// always released before the network probe runs.
+#[derive(Debug, Default)]
+pub(super) struct ProbeGate {
+    state: Mutex<ProbeGateState>,
+    completed: Condvar,
+}
+
+impl ProbeGate {
+    fn run(&self, probe: impl FnOnce() -> BackendReport) -> BackendReport {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.in_flight {
+            while state.in_flight {
+                state = self
+                    .completed
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            return state
+                .last_report
+                .clone()
+                .expect("completed probe publishes a report");
+        }
+        state.in_flight = true;
+        drop(state);
+
+        let report = probe();
+
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_report = Some(report.clone());
+        state.in_flight = false;
+        self.completed.notify_all();
+        report
+    }
+}
+
 impl BackendClient {
     fn probe(&self, path: &str) -> Result<ProbeResponse, ()> {
         let url = self.endpoint().join(path).map_err(|_| ())?;
@@ -32,21 +83,27 @@ impl BackendClient {
 
 impl BackendClients {
     pub(super) fn probe_hubu(&self) -> BackendReport {
-        self.hubu
-            .as_ref()
-            .map(probe_hubu)
-            .unwrap_or_else(BackendReport::unconfigured)
+        self.hubu_probe_gate.run(|| {
+            self.hubu
+                .as_ref()
+                .map(probe_hubu)
+                .unwrap_or_else(BackendReport::unconfigured)
+        })
+    }
+
+    pub(super) fn probe_gongbu(&self) -> BackendReport {
+        self.gongbu_probe_gate.run(|| {
+            self.gongbu
+                .as_ref()
+                .map(probe_gongbu)
+                .unwrap_or_else(BackendReport::unconfigured)
+        })
     }
 
     pub(super) fn probe(&self) -> CapabilitySnapshot {
         thread::scope(|scope| {
             let hubu = scope.spawn(|| self.probe_hubu());
-            let gongbu = scope.spawn(|| {
-                self.gongbu
-                    .as_ref()
-                    .map(probe_gongbu)
-                    .unwrap_or_else(BackendReport::unconfigured)
-            });
+            let gongbu = scope.spawn(|| self.probe_gongbu());
             CapabilitySnapshot {
                 generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
                 hubu: hubu.join().expect("Hubu capability probe must not panic"),

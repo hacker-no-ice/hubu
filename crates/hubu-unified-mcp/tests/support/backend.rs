@@ -61,6 +61,7 @@ struct StubState {
     disconnect: bool,
     responses: HashMap<(String, String), StubResponse>,
     response_sequences: HashMap<(String, String), VecDeque<StubResponse>>,
+    response_delays: HashMap<(String, String), Duration>,
     requests: Vec<CapturedRequest>,
 }
 
@@ -91,6 +92,7 @@ impl BackendStub {
             disconnect: false,
             responses: default_responses(kind),
             response_sequences: HashMap::new(),
+            response_delays: HashMap::new(),
             requests: Vec::new(),
         }));
         let stop = Arc::new(AtomicBool::new(false));
@@ -178,6 +180,14 @@ impl BackendStub {
             .insert((method.to_owned(), path.to_owned()), responses);
     }
 
+    pub fn delay_response(&self, method: &str, path: &str, delay: Duration) {
+        self.state
+            .lock()
+            .unwrap()
+            .response_delays
+            .insert((method.to_owned(), path.to_owned()), delay);
+    }
+
     fn respond(&self, method: &str, path: &str, response: StubResponse) {
         self.state
             .lock()
@@ -222,7 +232,7 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<StubState>>) {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_owned();
     let path = parts.next().unwrap_or_default().to_owned();
-    let response = {
+    let (response, delay) = {
         let mut state = state.lock().unwrap();
         state.requests.push(CapturedRequest {
             method: method.clone(),
@@ -230,10 +240,10 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<StubState>>) {
             raw,
         });
         if state.disconnect {
-            None
+            (None, Duration::ZERO)
         } else {
             let key = (method, path);
-            if let Some(sequence) = state.response_sequences.get_mut(&key) {
+            let response = if let Some(sequence) = state.response_sequences.get_mut(&key) {
                 let response = sequence.pop_front();
                 if sequence.is_empty() {
                     state.response_sequences.remove(&key);
@@ -241,12 +251,21 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<StubState>>) {
                 response
             } else {
                 state.responses.get(&key).cloned()
-            }
+            };
+            (
+                response,
+                state
+                    .response_delays
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(Duration::ZERO),
+            )
         }
     };
     let Some(response) = response else {
         return;
     };
+    thread::sleep(delay);
     let reason = match response.status {
         200 => "OK",
         400 => "Bad Request",

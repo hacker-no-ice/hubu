@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::{
     io::Write,
     process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 #[test]
@@ -41,6 +42,34 @@ fn binary_initializes_lists_tools_and_exits_on_stdin_close() {
         "hubu-unified-mcp"
     );
     assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn initialized_monitor_stops_cleanly_on_eof() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hubu-unified-mcp"))
+        .env_remove("HUBU_UNIFIED_HUBU_ENDPOINT")
+        .env_remove("HUBU_UNIFIED_HUBU_BEARER_TOKEN")
+        .env_remove("HUBU_UNIFIED_GONGBU_ENDPOINT")
+        .env_remove("HUBU_UNIFIED_GONGBU_BEARER_TOKEN")
+        .env("HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS", "10")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"initialize"}}"#).unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .unwrap();
+    drop(stdin);
+
+    let started = Instant::now();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
