@@ -92,8 +92,11 @@
     "The local release-mode archive is explicitly non-qualifying and is retained only as reproducible technical evidence."
   ],
   "review": {
-    "rounds": 0,
-    "status": "pending pull request review",
-    "unresolved_p0_p1": 0
+    "rounds": 1,
+    "status": "reviewed",
+    "reviewed_commit": "8ae8f53b73905790a9f4718ba792232b86120bf9",
+    "unresolved_p0_p1": 0,
+    "unresolved_p2_p3_optional": 1,
+    "unresolved_rationale": "The P2 command-reproduction recommendation remains unresolved because HUB-109 authorizes review fixes only for actionable P0/P1."
   }
 }

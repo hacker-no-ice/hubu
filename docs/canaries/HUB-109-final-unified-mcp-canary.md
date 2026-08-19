@@ -66,6 +66,15 @@ all cases remain available through HUB-98 removal verification.
 | Documentation and stale references | PASS | All 195 local documentation/architecture links passed. Retired Gongbu repository references are confined to the historical import audit and repository-cutover/rollback record; the only current `separate Gongbu checkout` hit explicitly says none is required. No stale operational dependency remains. |
 | Findings and decision | **NO-GO** | No runtime P0/P1 defect was observed. One non-waivable release-evidence gate is open: publish and smoke the expected immutable four-platform canary. HUB-97 remains blocked and the HUB-96 NO-GO remains unchanged. |
 
+## Review record
+
+Codex review round 1 reviewed commit
+`8ae8f53b73905790a9f4718ba792232b86120bf9` and reported zero P0/P1
+findings. One P2 recommendation to spell out the packaged-binary environment
+assignments in each manifest command remains unresolved under the HUB-109 rule
+to address only actionable P0/P1. It does not alter the NO-GO decision or the
+underlying packaged test results.
+
 ## Verification summary
 
 The exact commands, outcomes, artifact checksums, rollback identity, and
