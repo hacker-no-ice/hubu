@@ -14,20 +14,10 @@ pub(crate) struct UnifiedConfig<'a> {
     pub trust_client_approval: bool,
 }
 
-pub(crate) struct StandaloneConfig<'a> {
-    pub mcp_server: &'a Path,
-    pub hubu_endpoint: &'a str,
-    pub hubu_token_file: &'a Path,
-    pub approval_token_file: &'a Path,
-    pub reconciliation_token_file: &'a Path,
-    pub trust_client_approval: bool,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum UpdateMode {
     Unified,
     MigrateStandalone { gongbu_configured: bool },
-    StandaloneCompatibility,
 }
 
 pub(crate) fn write_config(
@@ -50,28 +40,6 @@ pub(crate) fn write_config(
     let updated = upsert(&existing, block, force, mode)?;
     fs::write(config_path, updated)
         .with_context(|| format!("write Codex config `{}`", config_path.display()))
-}
-
-pub(crate) fn standalone_block(config: StandaloneConfig<'_>) -> String {
-    let mut block = format!(
-        "{MANAGED_BEGIN}\n\
-         [mcp_servers.hubu]\n\
-         command = \"{}\"\n\
-         startup_timeout_sec = 10\n\
-         tool_timeout_sec = 60\n\n\
-         [mcp_servers.hubu.env]\n\
-         HUBU_URL = \"{}\"\n\
-         HUBU_AUTH_TOKEN_FILE = \"{}\"\n\
-         HUBU_APPROVAL_TOKEN_FILE = \"{}\"\n\
-         HUBU_RECONCILIATION_TOKEN_FILE = \"{}\"\n",
-        toml_string(&config.mcp_server.display().to_string()),
-        toml_string(config.hubu_endpoint),
-        toml_string(&config.hubu_token_file.display().to_string()),
-        toml_string(&config.approval_token_file.display().to_string()),
-        toml_string(&config.reconciliation_token_file.display().to_string()),
-    );
-    finish_block(&mut block, config.trust_client_approval);
-    block
 }
 
 pub(crate) fn unified_block(config: UnifiedConfig<'_>) -> String {
@@ -335,23 +303,5 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("--migrate-standalone"));
-    }
-
-    #[test]
-    fn standalone_block_remains_an_explicit_compatibility_surface() {
-        let block = standalone_block(StandaloneConfig {
-            mcp_server: Path::new("/tmp/hubu-mcp-server"),
-            hubu_endpoint: "http://127.0.0.1:8787",
-            hubu_token_file: Path::new("/tmp/hubu-token"),
-            approval_token_file: Path::new("/tmp/approval-token"),
-            reconciliation_token_file: Path::new("/tmp/reconciliation-token"),
-            trust_client_approval: true,
-        });
-        assert!(block.contains("command = \"/tmp/hubu-mcp-server\""));
-        assert!(block.contains("HUBU_MCP_TRUST_CLIENT_APPROVAL = \"1\""));
-
-        let existing = "[mcp_servers.gongbu]\ncommand = \"gongbu-mcp\"\n";
-        let updated = upsert(existing, &block, false, UpdateMode::StandaloneCompatibility).unwrap();
-        assert!(updated.contains("[mcp_servers.gongbu]"));
     }
 }

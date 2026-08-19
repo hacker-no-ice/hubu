@@ -133,14 +133,11 @@ Add `--gongbu-endpoint URL --gongbu-token-file FILE` to configure the separate
 Gongbu backend in the same MCP entry. Use `--migrate-standalone` to replace an
 existing `hubu-mcp-server` plus `gongbu-mcp` pair deterministically, together
 with those Gongbu options; migration refuses to change the config if replacement
-Gongbu settings are absent. The old
-Hubu-only entry remains available by explicit opt-in with
-`--compatibility-standalone`; manually configured `gongbu-mcp` remains supported
-during the same compatibility window.
+Gongbu settings are absent. The CLI does not generate standalone configuration:
+both old adapters are deprecated and unsupported.
 
 Follow the [unified MCP migration guide](unified-mcp-migration.md) for the
-supported preflight, exact health interpretation, validation, rollback, and
-compatibility-window behavior.
+supported preflight, exact health interpretation, validation, and cutover behavior.
 
 Leave `--trust-client-approval` off when approval decisions will be resolved
 directly with the Hubu CLI. Enable it when the Codex client is trusted to prompt
@@ -169,8 +166,7 @@ Then configure the harness from Hubu's MCP metadata:
 
 The unified server reads `HUBU_UNIFIED_HUBU_ENDPOINT` plus either
 `HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
-`HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`. The standalone compatibility server
-continues to read `HUBU_URL` and default to `http://127.0.0.1:8787`.
+`HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`.
 Protected write tools are disabled unless the MCP process is started with
 `HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. Only set that variable when the MCP client
 is trusted to show a human approval prompt before invoking destructive tools.

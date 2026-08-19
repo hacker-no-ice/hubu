@@ -14,9 +14,9 @@ Build the execution-plane operator binary:
 cargo build --release --locked --bin gongbu-server
 ```
 
-The default agent-facing `hubu-unified-mcp` binary is distributed with the
-shared release. Build `gongbu-mcp` only for the explicit standalone
-compatibility path.
+The only supported agent-facing `hubu-unified-mcp` binary is distributed with the
+shared release. The standalone `gongbu-mcp` adapter is deprecated, unsupported,
+and excluded from release archives; its source remains only until HUB-98.
 
 Copy [the complete configuration example][server-example] to an operator-owned
 absolute path. Every field is required unless marked optional by the example.
@@ -31,7 +31,8 @@ The configuration has one source and one precedence rule: the file passed to
 `--config` is authoritative. `gongbu-server` does not apply environment or CLI
 field overrides and does not reload the file. Any change requires a graceful
 restart. Build provenance environment variables are compile-time metadata only,
-and MCP client variables configure only `gongbu-mcp`.
+The deprecated adapter's environment remains source-level implementation detail
+until HUB-98 removes it.
 
 Raw tokens never belong in the JSON. Store three kinds of credentials in macOS
 Keychain: the scoped Hubu bearer, the caller capability, and every provider

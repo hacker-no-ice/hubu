@@ -37,7 +37,6 @@ const DEFAULT_POLICY_TEMPLATE_PATH: &str = "policies/policy.yaml";
 const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../policies/starter-policy.yaml");
 const CODEX_HOME_ENV: &str = "CODEX_HOME";
 const HUBU_HOME_ENV: &str = "HUBU_HOME";
-const HUBU_MCP_SERVER_ENV: &str = "HUBU_MCP_SERVER";
 const HUBU_UNIFIED_MCP_SERVER_ENV: &str = "HUBU_UNIFIED_MCP_SERVER";
 #[cfg(test)]
 const TEST_APPROVAL_TOKEN: &str = "test-human-approval-token";
@@ -109,21 +108,14 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let config_path = take_value(&mut args, "--config")
         .map(PathBuf::from)
         .unwrap_or_else(default_codex_config_path);
-    let compatibility_standalone = take_flag(&mut args, "--compatibility-standalone");
     let migrate_standalone = take_flag(&mut args, "--migrate-standalone");
-    if compatibility_standalone && migrate_standalone {
-        bail!("--compatibility-standalone and --migrate-standalone cannot be combined");
-    }
     let mcp_server = take_value(&mut args, "--mcp-server")
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_mcp_server_path(compatibility_standalone));
+        .unwrap_or_else(default_mcp_server_path);
     let gongbu_endpoint = take_value(&mut args, "--gongbu-endpoint");
     let gongbu_token_file = take_value(&mut args, "--gongbu-token-file").map(PathBuf::from);
     if gongbu_endpoint.is_some() != gongbu_token_file.is_some() {
         bail!("--gongbu-endpoint and --gongbu-token-file must be provided together");
-    }
-    if compatibility_standalone && gongbu_endpoint.is_some() {
-        bail!("Gongbu backend options apply only to the unified MCP surface");
     }
     let token_file = take_value(&mut args, "--token-file")
         .map(PathBuf::from)
@@ -139,9 +131,8 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let trust_client_approval = take_flag(&mut args, "--trust-client-approval");
     ensure_no_args(args)?;
 
-    let mcp_server =
-        absolute_existing_file(&mcp_server, mcp_server_bin_name(compatibility_standalone))
-            .with_context(|| format!("resolve MCP server path `{}`", mcp_server.display()))?;
+    let mcp_server = absolute_existing_file(&mcp_server, mcp_server_bin_name())
+        .with_context(|| format!("resolve MCP server path `{}`", mcp_server.display()))?;
 
     let token_file = if dry_run {
         absolute_path(&token_file)?
@@ -180,25 +171,14 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
         })
         .transpose()
         .context("resolve Gongbu token file")?;
-    let block = if compatibility_standalone {
-        codex_mcp::standalone_block(codex_mcp::StandaloneConfig {
-            mcp_server: &mcp_server,
-            hubu_endpoint: base_url,
-            hubu_token_file: &token_file,
-            approval_token_file: &approval_token_file,
-            reconciliation_token_file: &reconciliation_token_file,
-            trust_client_approval,
-        })
-    } else {
-        codex_mcp::unified_block(codex_mcp::UnifiedConfig {
-            mcp_server: &mcp_server,
-            hubu_endpoint: base_url,
-            hubu_token_file: &token_file,
-            reconciliation_token_file: &reconciliation_token_file,
-            gongbu: gongbu_endpoint.as_deref().zip(gongbu_token_file.as_deref()),
-            trust_client_approval,
-        })
-    };
+    let block = codex_mcp::unified_block(codex_mcp::UnifiedConfig {
+        mcp_server: &mcp_server,
+        hubu_endpoint: base_url,
+        hubu_token_file: &token_file,
+        reconciliation_token_file: &reconciliation_token_file,
+        gongbu: gongbu_endpoint.as_deref().zip(gongbu_token_file.as_deref()),
+        trust_client_approval,
+    });
 
     if dry_run {
         println!("{block}");
@@ -209,22 +189,13 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
         codex_mcp::UpdateMode::MigrateStandalone {
             gongbu_configured: gongbu_endpoint.is_some(),
         }
-    } else if compatibility_standalone {
-        codex_mcp::UpdateMode::StandaloneCompatibility
     } else {
         codex_mcp::UpdateMode::Unified
     };
     codex_mcp::write_config(&config_path, &block, force, update_mode)
         .with_context(|| format!("update Codex config `{}`", config_path.display()))?;
 
-    println!(
-        "Codex MCP configured for Hubu ({})",
-        if compatibility_standalone {
-            "standalone compatibility"
-        } else {
-            "unified"
-        }
-    );
+    println!("Codex MCP configured for Hubu (unified)");
     println!("  config: {}", config_path.display());
     println!("  mcp_server: {}", mcp_server.display());
     println!("  hubu_url: {base_url}");
@@ -309,33 +280,25 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn default_mcp_server_path(compatibility_standalone: bool) -> PathBuf {
-    let override_env = if compatibility_standalone {
-        HUBU_MCP_SERVER_ENV
-    } else {
-        HUBU_UNIFIED_MCP_SERVER_ENV
-    };
-    if let Ok(path) = env::var(override_env) {
+fn default_mcp_server_path() -> PathBuf {
+    if let Ok(path) = env::var(HUBU_UNIFIED_MCP_SERVER_ENV) {
         return PathBuf::from(path);
     }
 
     if let Ok(current_exe) = env::current_exe() {
-        let sibling = current_exe.with_file_name(mcp_server_bin_name(compatibility_standalone));
+        let sibling = current_exe.with_file_name(mcp_server_bin_name());
         if sibling.exists() {
             return sibling;
         }
     }
 
-    find_on_path(mcp_server_bin_name(compatibility_standalone))
-        .unwrap_or_else(|| PathBuf::from(mcp_server_bin_name(compatibility_standalone)))
+    find_on_path(mcp_server_bin_name()).unwrap_or_else(|| PathBuf::from(mcp_server_bin_name()))
 }
 
-fn mcp_server_bin_name(compatibility_standalone: bool) -> &'static str {
-    match (compatibility_standalone, cfg!(windows)) {
-        (true, true) => "hubu-mcp-server.exe",
-        (true, false) => "hubu-mcp-server",
-        (false, true) => "hubu-unified-mcp.exe",
-        (false, false) => "hubu-unified-mcp",
+fn mcp_server_bin_name() -> &'static str {
+    match cfg!(windows) {
+        true => "hubu-unified-mcp.exe",
+        false => "hubu-unified-mcp",
     }
 }
 
@@ -2698,7 +2661,7 @@ fn print_init_help() {
 
 Usage:
   hubu init [--policy FILE] [--force]
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--migrate-standalone] [--compatibility-standalone] [--force] [--dry-run]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--migrate-standalone] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
@@ -2719,7 +2682,7 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--migrate-standalone] [--compatibility-standalone] [--force] [--dry-run] [--trust-client-approval]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--migrate-standalone] [--force] [--dry-run] [--trust-client-approval]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
@@ -2732,15 +2695,13 @@ Options:
   --gongbu-endpoint URL     Optional Gongbu backend URL for the unified entry
   --gongbu-token-file FILE  Gongbu bearer token file; required with --gongbu-endpoint
   --migrate-standalone      Replace existing hubu-mcp-server and gongbu-mcp entries with the unified entry
-  --compatibility-standalone
-                             Opt into the standalone hubu-mcp-server configuration
   --force                   Replace an existing unmanaged [mcp_servers.hubu] config block
   --dry-run                 Print the managed Codex config block without writing files
   --trust-client-approval   Enable MCP setup/admin tools when the Codex client prompts for destructive tool approval
 
 Notes:
   Hubu spend tools are pre-approved in Codex; Hubu policy still controls needs_approval outcomes.
-  The default writes one unified MCP entry. Standalone adapters remain explicit compatibility options.
+  The command writes the only supported agent-facing surface, hubu-unified-mcp.
   Keep --trust-client-approval off for normal agent spend workflows.
   Use --trust-client-approval only when you want to ask Codex to perform setup/admin actions behind a human approval prompt.
   Start hubu-server with the same HUBU_AUTH_TOKEN_FILE, HUBU_APPROVAL_TOKEN_FILE, and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
@@ -2748,7 +2709,6 @@ Notes:
 Examples:
   hubu init codex --token-file ~/.hubu/hubu.auth-token
   hubu init codex --migrate-standalone
-  hubu init codex --compatibility-standalone
   hubu init codex --trust-client-approval
   hubu init codex --dry-run"
     );

@@ -30,9 +30,7 @@ expected_binaries=(
   hubu
   hubu-server
   hubu-unified-mcp
-  hubu-mcp-server
   gongbu-server
-  gongbu-mcp
 )
 expected_files=(
   Cargo.lock
@@ -52,8 +50,9 @@ for expected_file in "${expected_files[@]}"; do
     exit 1
   fi
 done
-if [[ -e "${package_dir}/hubu-bench" || -e "${package_dir}/gongbu-sandbox" ]]; then
-  echo "release archive contains a development-only binary" >&2
+if [[ -e "${package_dir}/hubu-bench" || -e "${package_dir}/gongbu-sandbox" || \
+      -e "${package_dir}/hubu-mcp-server" || -e "${package_dir}/gongbu-mcp" ]]; then
+  echo "release archive contains an excluded binary" >&2
   exit 1
 fi
 
@@ -74,9 +73,9 @@ jq -e \
    .source_commit == $source_commit and
    .executor_contract == "hubu-spend-executor-v4.2" and
    .target == $target and
-   .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
-   .default_agent_surface == "hubu-unified-mcp" and
-   .compatibility_agent_surfaces == ["hubu-mcp-server", "gongbu-mcp"] and
+   .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
+   .supported_agent_surfaces == ["hubu-unified-mcp"] and
+   .deprecated_agent_surfaces_excluded == ["hubu-mcp-server", "gongbu-mcp"] and
    .manifest == "MANIFEST.json" and
    .dependencies == "Cargo.lock" and
    .third_party_licenses == "THIRD-PARTY-LICENSES.txt"' \
@@ -91,9 +90,9 @@ jq -e \
    .source_commit == $source_commit and
    .executor_contract == "hubu-spend-executor-v4.2" and
    .target == $target and
-   .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
-   .default_agent_surface == "hubu-unified-mcp" and
-   .compatibility_agent_surfaces == ["hubu-mcp-server", "gongbu-mcp"] and
+   .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
+   .supported_agent_surfaces == ["hubu-unified-mcp"] and
+   .deprecated_agent_surfaces_excluded == ["hubu-mcp-server", "gongbu-mcp"] and
    .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
   "${package_dir}/MANIFEST.json" >/dev/null
 
@@ -193,7 +192,6 @@ printf '%s\n' \
   'GONGBU_MCP_ENDPOINT = "http://127.0.0.1:8788"' \
   '[mcp_servers.other]' \
   'command = "keep"' >"${migration_config}"
-cp "${migration_config}" "${smoke_dir}/codex-config.toml.pre-unified-mcp"
 if "${package_dir}/hubu" init codex \
   --config "${migration_config}" \
   --mcp-server "${package_dir}/hubu-unified-mcp" \
@@ -222,41 +220,9 @@ if grep -F 'hubu-mcp-server' "${migration_config}" >/dev/null || \
   exit 1
 fi
 
-compatibility_config="$("${package_dir}/hubu" init codex \
-  --dry-run \
-  --compatibility-standalone \
-  --mcp-server "${package_dir}/hubu-mcp-server" \
-  --token-file "${smoke_dir}/hubu.auth-token" \
-  --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
-  --approval-token-file "${smoke_dir}/hubu.approval-token")"
-grep -E 'command = ".*/hubu-mcp-server"' <<<"${compatibility_config}" >/dev/null
-grep -F 'HUBU_URL' <<<"${compatibility_config}" >/dev/null
+if "${package_dir}/hubu" init codex --compatibility-standalone >/dev/null 2>&1; then
+  echo "hubu still accepts the removed standalone compatibility configuration flag" >&2
+  exit 1
+fi
 
-# Restore the exact pre-migration two-entry configuration before validating both
-# packaged standalone rollback surfaces.
-cp "${smoke_dir}/codex-config.toml.pre-unified-mcp" "${migration_config}"
-grep -F 'command = "hubu-mcp-server"' "${migration_config}" >/dev/null
-grep -F 'command = "gongbu-mcp"' "${migration_config}" >/dev/null
-grep -F '[mcp_servers.other]' "${migration_config}" >/dev/null
-
-hubu_mcp_response="$(printf '%s\n%s\n' "${initialize}" "${tools_list}" | \
-  HUBU_URL="http://127.0.0.1:${port}" "${package_dir}/hubu-mcp-server")"
-jq -s -e \
-  --arg product_version "${product_version}" \
-  '.[0].result.serverInfo.name == "hubu-mcp-server" and
-   .[0].result.serverInfo.version == $product_version and
-   (.[1].result.tools | length) == 30 and
-   (.[1].result.tools | map(.name) | contains(["hubu_health", "hubu_get_spend_approval", "hubu_resolve_spend_approval"]))' \
-  <<<"${hubu_mcp_response}" >/dev/null
-gongbu_mcp_response="$(printf '%s\n%s\n' "${initialize}" "${tools_list}" | \
-  GONGBU_MCP_ENDPOINT="http://127.0.0.1:9" \
-  GONGBU_MCP_BEARER_TOKEN="archive-smoke-no-provider" \
-  "${package_dir}/gongbu-mcp")"
-jq -s -e \
-  --arg product_version "${product_version}" \
-  '.[0].result.serverInfo.name == "gongbu-mcp" and
-   .[0].result.serverInfo.version == $product_version and
-   (.[1].result.tools | map(.name) | sort) == ["gongbu_create_execution", "gongbu_get_artifact", "gongbu_get_execution", "gongbu_list_artifacts"]' \
-  <<<"${gongbu_mcp_response}" >/dev/null
-
-echo "Verified unified archive ${package_name}: six binaries, unified default discovery, distinct credentials, and two-entry standalone rollback catalogs; no provider call or spend was attempted"
+echo "Verified unified archive ${package_name}: four binaries, unified-only discovery, distinct credentials, and atomic standalone-config migration; no provider call or spend was attempted"

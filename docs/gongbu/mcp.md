@@ -1,16 +1,20 @@
-# Standalone Gongbu MCP compatibility server
+# Deprecated standalone Gongbu MCP server
 
-`gongbu-mcp` is a local stdio MCP adapter over Gongbu's authenticated v1 HTTP
-API. It does not import Gongbu persistence, providers, pricing, workflows, or
-artifact storage. Replay and immutable-scope conflict behavior therefore remain
-identical to direct HTTP calls.
+`gongbu-mcp` is deprecated and unsupported. It is excluded from release
+archives and default configuration. Use `hubu-unified-mcp`, the only supported
+agent-facing surface, and migrate an old two-entry configuration with:
 
-The recommended agent setup uses `hubu-unified-mcp` and configures Gongbu in the
-same client entry as Hubu. Use this standalone adapter only for explicit
-compatibility or rollback during the migration window; see the
-[unified MCP migration guide](../unified-mcp-migration.md).
+```sh
+hubu init codex --migrate-standalone \
+  --gongbu-endpoint URL \
+  --gongbu-token-file FILE
+```
 
-## Operator configuration
+See the [unified MCP migration guide](../unified-mcp-migration.md). The source
+below remains temporarily for test/reference continuity and will be removed by
+HUB-98; it is not a compatibility promise.
+
+## Retained source behavior (unsupported)
 
 Set these in the MCP server process environment, not in tool arguments:
 
@@ -24,18 +28,6 @@ Set these in the MCP server process environment, not in tool arguments:
 Timeouts must be 1–300000 ms. Redirects and automatic retries are disabled.
 The endpoint, credential, account identity, headers, pricing, artifact roots,
 deadlines, and retry behavior cannot be supplied or overridden by tool input.
-
-Run it with:
-
-```sh
-GONGBU_MCP_ENDPOINT=http://127.0.0.1:8787 \
-GONGBU_MCP_BEARER_TOKEN=operator-issued-token \
-cargo run -p gongbu-mcp
-```
-
-Configure an MCP client with command `cargo`, arguments
-`["run", "--quiet", "-p", "gongbu-mcp"]`, the repository as its working
-directory, and the two required environment variables above.
 
 ## Tools
 

@@ -75,13 +75,14 @@ minimum:
 - `hubu-api`: local HTTP API and `hubu-server` binary
 - `hubu-cli`: human developer `hubu` CLI binary
 - `hubu-bench`: local benchmark tool for spend approval throughput and correctness
-- `hubu-mcp`: MCP stdio transport adapter and `hubu-mcp-server` binary
+- `hubu-mcp`: deprecated standalone Hubu MCP adapter retained in source only
+  until HUB-98 removes it
 - `gongbu-api`: execution API, durable workflow, provider adapters, artifacts,
   and the `gongbu-server` and development-only `gongbu-sandbox` binaries
 - `gongbu-build-info`: Gongbu build and compatibility metadata shared by its
   production binaries
-- `gongbu-mcp`: Gongbu's standalone agent-facing compatibility adapter and
-  `gongbu-mcp` binary
+- `gongbu-mcp`: deprecated standalone Gongbu MCP adapter retained in source
+  only until HUB-98 removes it
 - `hubu-unified-mcp`: unified MCP server with isolated Hubu and Gongbu health,
   compatibility, and HTTP client boundaries plus the contract-approved Hubu
   governance and Gongbu execution/artifact routes
@@ -95,7 +96,7 @@ a second Gongbu checkout.
 ## Source, Distribution, and Runtime Boundaries
 
 Hubu and Gongbu share this source repository, product direction, and
-six-binary release archive. Neither the source nor packaging boundary
+four-binary release archive. Neither the source nor packaging boundary
 collapses runtime responsibilities:
 
 - `hubu-server` is the control-plane process. It owns identity, policy, budgets,
@@ -106,16 +107,14 @@ collapses runtime responsibilities:
 - They communicate only through the authenticated, versioned spend-executor
   contract. They do not share a database, credential store, provider execution
   boundary, or failure domain.
-- `hubu-unified-mcp` is the packaged default agent-facing surface.
-  `hubu-mcp-server` and `gongbu-mcp` remain packaged, implemented opt-in
-  compatibility surfaces during the migration window. The unified server
+- `hubu-unified-mcp` is the only supported and packaged agent-facing surface.
+  `hubu-mcp-server` and `gongbu-mcp` are deprecated, unsupported, and excluded
+  from release archives; their source remains temporarily for HUB-98. The unified server
   implements the accepted
   [unified MCP contract](docs/unified-mcp-contract.md) transport, isolated
   client boundaries, machine-readable health and compatibility reporting, and
   only the contract-approved Hubu governance and Gongbu execution/artifact
   catalogs and forwarding.
-  Standalone configuration remains supported until the explicit parity and
-  deprecation gates pass.
 
 ### Unified MCP server
 
@@ -166,8 +165,8 @@ cargo install --locked --path crates/gongbu-api --bin gongbu-server
 These source-install commands are convenient for development, but unstamped
 local builds intentionally fail unified source-commit compatibility. Use one
 verified release archive for an operator migration. Install
-`hubu-mcp-server` and `gongbu-mcp` only when testing the explicit
-migration-window compatibility or rollback path.
+only the four binaries shown above; standalone MCP adapters are not supported
+release artifacts.
 
 Start the local Hubu server:
 
@@ -294,9 +293,8 @@ To configure Gongbu in that same entry, add `--gongbu-endpoint URL` and
 `gongbu-mcp` configurations migrate deterministically with
 `hubu init codex --migrate-standalone --gongbu-endpoint URL
 --gongbu-token-file FILE`. Migration fails before changing the config if a
-standalone Gongbu entry has no replacement Gongbu settings. To retain the
-standalone Hubu adapter during the compatibility window, opt in with
-`hubu init codex --compatibility-standalone`.
+standalone Gongbu entry has no replacement Gongbu settings. The command no
+longer generates standalone adapter configurations.
 
 If the server from step 1 is already running with a different token file,
 restart it with the same auth, approval, and reconciliation token files before restarting Codex. Codex
@@ -305,7 +303,7 @@ holding wallet credentials. For other MCP clients, use Hubu's tool annotations
 or `hubu_client_approval_profile`; see
 [docs/mcp-transport.md](docs/mcp-transport.md). The
 [unified MCP migration guide](docs/unified-mcp-migration.md) provides the full
-preflight, migration, validation, compatibility-window, and rollback procedure.
+preflight, migration, validation, and cutover procedure.
 
 ## Releases
 
@@ -319,20 +317,18 @@ and installation steps, promotion workflow, and rollback/retention policy.
 Here, "stable" describes the version channel and immutable artifact identity;
 it does not approve Hubu for real-money production use.
 
-All six production binaries expose safe build metadata locally, and the Hubu
+All four packaged production binaries expose safe build metadata locally, and the Hubu
 server publishes the same metadata without authentication:
 
 ```sh
 hubu --version
 hubu-server --version
 hubu-unified-mcp --version
-hubu-mcp-server --version
 gongbu-server --version
-gongbu-mcp --version
 curl http://127.0.0.1:8787/version
 ```
 
-Release provenance binds all six production binaries to one product version
+Release provenance binds all four packaged production binaries to one product version
 and source commit. `executor_contract` remains the independently negotiated
 `hubu-spend-executor-v4.2` identifier; sharing source or a release version does
 not change that wire contract.
@@ -444,7 +440,7 @@ hubu ledger --help
 
 ## MCP Transport
 
-Hubu exposes one default agent-facing surface through `hubu-unified-mcp`, a
+Hubu exposes its only supported agent-facing surface through `hubu-unified-mcp`, a
 stdio router over the independently operated Hubu and Gongbu HTTP APIs. Any
 MCP-compatible harness can inspect its tool annotations and capability snapshot.
 Codex users can generate that setup with:
@@ -463,7 +459,7 @@ tools after the client shows a human approval prompt. If policy returns
 See [docs/mcp-transport.md](docs/mcp-transport.md) for install details,
 approval profiles, manual MCP setup, and the current tool map, and see
 [docs/unified-mcp-migration.md](docs/unified-mcp-migration.md) for migration,
-validation, compatibility-window behavior, and rollback.
+validation, and cutover behavior.
 
 ## Policy Engine
 
@@ -526,9 +522,9 @@ the hold lifecycle, and CLI examples.
 - [docs/mcp-transport.md](docs/mcp-transport.md): MCP stdio transport adapter
   and approval boundaries
 - [docs/unified-mcp-migration.md](docs/unified-mcp-migration.md): unified MCP
-  migration, validation, compatibility window, and rollback
+  migration, validation, and immediate cutover
 - [docs/gongbu/README.md](docs/gongbu/README.md): Gongbu execution-plane design,
-  operator configuration, persistent runtime, sandbox, and standalone MCP
-  compatibility adapter
+  operator configuration, persistent runtime, sandbox, and deprecated
+  standalone MCP source status
 - [docs/notes/](docs/notes/): non-normative planning, improvement, and handoff
   notes
