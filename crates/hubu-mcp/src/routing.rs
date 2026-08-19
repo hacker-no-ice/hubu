@@ -80,6 +80,13 @@ pub fn route_tool_call_v1(
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    if name == "hubu_client_approval_profile"
+        && arguments
+            .as_object()
+            .is_none_or(|arguments| !arguments.is_empty())
+    {
+        bail!("hubu_client_approval_profile does not accept arguments");
+    }
 
     let config = McpConfig {
         protected_tools_enabled,

@@ -216,7 +216,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
 }
 
 #[test]
-fn unified_approval_profile_contains_only_callable_continuations() {
+fn unified_approval_profile_matches_the_standalone_adapter() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -224,52 +224,11 @@ fn unified_approval_profile_contains_only_callable_continuations() {
 
     let response = tool_call(&server, "hubu_client_approval_profile", json!({}), None);
     let profile = &response["result"]["structuredContent"];
-    let serialized = profile.to_string();
-    assert!(!serialized.contains("hubu_get_spend_approval"));
-    assert!(!serialized.contains("hubu_resolve_spend_approval"));
-    assert_eq!(
-        profile["response_contract"]["agent_action"],
-        "Stop the spend workflow and surface approval_reason plus the structured response to the human."
-    );
+    assert_eq!(profile, &hubu_mcp::approval_profile());
     assert_eq!(
         response["result"]["content"][0]["text"],
         serde_json::to_string_pretty(profile).unwrap()
     );
-    let prompt_before_call = profile["client_policy"]["prompt_before_call_tools"]
-        .as_array()
-        .unwrap();
-    for protected in [
-        "hubu_revoke_budget",
-        "hubu_replace_budget",
-        "hubu_set_spending_target",
-        "hubu_revoke_spending_target",
-    ] {
-        assert!(prompt_before_call.iter().any(|name| name == protected));
-        assert!(profile["tools"][2]["names"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|name| name == protected));
-    }
-    for tool in hubu_mcp::tool_definitions()
-        .into_iter()
-        .filter(|tool| tool["name"].as_str().is_some_and(is_approved_hubu_tool))
-    {
-        let name = &tool["name"];
-        let client_mode = &tool["annotations"]["x_hubu_client_approval_mode"];
-        let expected_group = if client_mode == "prompt_before_call" {
-            &profile["tools"][2]["names"]
-        } else if tool["annotations"]["x_hubu_runtime_approval"] == "hubu_policy_needs_approval" {
-            &profile["tools"][1]["names"]
-        } else {
-            &profile["tools"][0]["names"]
-        };
-        assert!(expected_group
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|candidate| candidate == name));
-    }
     assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
 }
 

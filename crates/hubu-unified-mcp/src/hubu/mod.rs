@@ -2,7 +2,7 @@ mod catalog;
 mod response;
 mod transport;
 
-use hubu_mcp::{route_tool_call_v1, tool_result_v1};
+use hubu_mcp::route_tool_call_v1;
 use serde_json::{json, Value};
 
 use crate::{
@@ -29,9 +29,6 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
         );
     };
     let name = call.name;
-    if name == "hubu_client_approval_profile" {
-        return success_response(id, tool_result_v1(catalog::approval_profile()));
-    }
     let params = json!({
         "name": name,
         "arguments": call.arguments,

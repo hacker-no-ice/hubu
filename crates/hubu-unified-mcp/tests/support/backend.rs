@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
@@ -60,6 +60,7 @@ impl StubResponse {
 struct StubState {
     disconnect: bool,
     responses: HashMap<(String, String), StubResponse>,
+    response_sequences: HashMap<(String, String), VecDeque<StubResponse>>,
     requests: Vec<CapturedRequest>,
 }
 
@@ -90,6 +91,7 @@ impl BackendStub {
         let state = Arc::new(Mutex::new(StubState {
             disconnect: false,
             responses: default_responses(kind),
+            response_sequences: HashMap::new(),
             requests: Vec::new(),
         }));
         let stop = Arc::new(AtomicBool::new(false));
@@ -140,6 +142,41 @@ impl BackendStub {
 
     pub fn respond_raw(&self, method: &str, path: &str, status: u16, body: &str) {
         self.respond(method, path, StubResponse::raw(status, body.as_bytes()));
+    }
+
+    #[allow(dead_code)]
+    pub fn respond_bytes(
+        &self,
+        method: &str,
+        path: &str,
+        status: u16,
+        content_type: &'static str,
+        body: impl Into<Vec<u8>>,
+    ) {
+        self.respond(
+            method,
+            path,
+            StubResponse::bytes(status, content_type, body),
+        );
+    }
+
+    #[allow(dead_code)]
+    pub fn respond_sequence_json(
+        &self,
+        method: &str,
+        path: &str,
+        responses: impl IntoIterator<Item = (u16, Value)>,
+    ) {
+        let responses = responses
+            .into_iter()
+            .map(|(status, body)| StubResponse::json(status, body))
+            .collect::<VecDeque<_>>();
+        assert!(!responses.is_empty(), "response sequence must not be empty");
+        self.state
+            .lock()
+            .unwrap()
+            .response_sequences
+            .insert((method.to_owned(), path.to_owned()), responses);
     }
 
     fn respond(&self, method: &str, path: &str, response: StubResponse) {
@@ -195,7 +232,16 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<StubState>>) {
         if state.disconnect {
             None
         } else {
-            state.responses.get(&(method, path)).cloned()
+            let key = (method, path);
+            if let Some(sequence) = state.response_sequences.get_mut(&key) {
+                let response = sequence.pop_front();
+                if sequence.is_empty() {
+                    state.response_sequences.remove(&key);
+                }
+                response
+            } else {
+                state.responses.get(&key).cloned()
+            }
         }
     };
     let Some(response) = response else {

@@ -8,6 +8,12 @@ use std::{
 
 use super::BackendStub;
 
+#[allow(dead_code)]
+const HUBU_TOKEN: &str = "hub107-hubu-standalone-credential";
+#[allow(dead_code)]
+const GONGBU_TOKEN: &str = "hub107-gongbu-standalone-credential";
+const RECONCILIATION_TOKEN: &str = "hub107-reconciliation-capability";
+
 pub struct McpProcess {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -38,7 +44,43 @@ impl McpProcess {
                 .env("HUBU_UNIFIED_GONGBU_ENDPOINT", stub.endpoint())
                 .env("HUBU_UNIFIED_GONGBU_BEARER_TOKEN", token);
         }
-        let mut child = command.spawn().unwrap();
+        command
+            .env("HUBU_MCP_TRUST_CLIENT_APPROVAL", "1")
+            .env("HUBU_RECONCILIATION_TOKEN", RECONCILIATION_TOKEN);
+        Self::spawn(command)
+    }
+
+    #[allow(dead_code)]
+    pub fn start_standalone_hubu(hubu: &BackendStub) -> Self {
+        let executable = env::var_os("HUBU_STANDALONE_MCP_CANARY_BIN")
+            .expect("run the parity matrix through scripts/integration-unified-mcp.sh");
+        let mut command = Command::new(executable);
+        command
+            .env("HUBU_URL", hubu.endpoint())
+            .env("HUBU_AUTH_TOKEN", HUBU_TOKEN)
+            .env("HUBU_MCP_TRUST_CLIENT_APPROVAL", "1")
+            .env("HUBU_RECONCILIATION_TOKEN", RECONCILIATION_TOKEN);
+        Self::spawn(command)
+    }
+
+    #[allow(dead_code)]
+    pub fn start_standalone_gongbu(gongbu: &BackendStub) -> Self {
+        let executable = env::var_os("GONGBU_STANDALONE_MCP_CANARY_BIN")
+            .expect("run the parity matrix through scripts/integration-unified-mcp.sh");
+        let mut command = Command::new(executable);
+        command
+            .env("GONGBU_MCP_ENDPOINT", gongbu.endpoint())
+            .env("GONGBU_MCP_BEARER_TOKEN", GONGBU_TOKEN);
+        Self::spawn(command)
+    }
+
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Self {
