@@ -206,7 +206,9 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     }
 
     let update_mode = if migrate_standalone {
-        codex_mcp::UpdateMode::MigrateStandalone
+        codex_mcp::UpdateMode::MigrateStandalone {
+            gongbu_configured: gongbu_endpoint.is_some(),
+        }
     } else if compatibility_standalone {
         codex_mcp::UpdateMode::StandaloneCompatibility
     } else {

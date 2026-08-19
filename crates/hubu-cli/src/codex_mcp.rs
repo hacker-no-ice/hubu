@@ -26,7 +26,7 @@ pub(crate) struct StandaloneConfig<'a> {
 #[derive(Clone, Copy)]
 pub(crate) enum UpdateMode {
     Unified,
-    MigrateStandalone,
+    MigrateStandalone { gongbu_configured: bool },
     StandaloneCompatibility,
 }
 
@@ -116,7 +116,12 @@ fn finish_block(block: &mut String, trust_client_approval: bool) {
 }
 
 fn upsert(existing: &str, block: &str, force: bool, mode: UpdateMode) -> Result<String> {
-    if matches!(mode, UpdateMode::MigrateStandalone) {
+    if let UpdateMode::MigrateStandalone { gongbu_configured } = mode {
+        if contains_table(existing, is_gongbu_table) && !gongbu_configured {
+            bail!(
+                "Codex config contains a standalone [mcp_servers.gongbu] table; pass --gongbu-endpoint and --gongbu-token-file with --migrate-standalone"
+            );
+        }
         let without_managed = remove_managed_block(existing)?;
         let without_standalone = remove_tables(&without_managed, is_standalone_table);
         return Ok(append_block(&without_standalone, block));
@@ -284,12 +289,40 @@ mod tests {
         let block = format!(
             "{MANAGED_BEGIN}\n[mcp_servers.hubu]\ncommand = \"hubu-unified-mcp\"\n{MANAGED_END}\n"
         );
-        let updated = upsert(existing, &block, false, UpdateMode::MigrateStandalone).unwrap();
+        let updated = upsert(
+            existing,
+            &block,
+            false,
+            UpdateMode::MigrateStandalone {
+                gongbu_configured: true,
+            },
+        )
+        .unwrap();
         assert!(updated.contains("command = \"hubu-unified-mcp\""));
         assert!(updated.contains("[mcp_servers.other]"));
         assert!(!updated.contains("hubu-mcp-server"));
         assert!(!updated.contains("gongbu-mcp"));
         assert!(!updated.contains("GONGBU_MCP_ENDPOINT"));
+    }
+
+    #[test]
+    fn migration_preserves_standalone_gongbu_when_replacement_is_missing() {
+        let existing = "[mcp_servers.hubu]\ncommand = \"hubu-mcp-server\"\n\n[mcp_servers.gongbu]\ncommand = \"gongbu-mcp\"\n";
+        let block = format!(
+            "{MANAGED_BEGIN}\n[mcp_servers.hubu]\ncommand = \"hubu-unified-mcp\"\n{MANAGED_END}\n"
+        );
+        let error = upsert(
+            existing,
+            &block,
+            false,
+            UpdateMode::MigrateStandalone {
+                gongbu_configured: false,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--gongbu-endpoint"));
+        assert!(error.to_string().contains("--gongbu-token-file"));
+        assert!(existing.contains("command = \"gongbu-mcp\""));
     }
 
     #[test]

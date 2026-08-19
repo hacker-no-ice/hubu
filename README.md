@@ -289,8 +289,10 @@ This writes one `[mcp_servers.hubu]` entry that launches `hubu-unified-mcp`.
 To configure Gongbu in that same entry, add `--gongbu-endpoint URL` and
 `--gongbu-token-file FILE`. Existing two-entry `hubu-mcp-server` plus
 `gongbu-mcp` configurations migrate deterministically with
-`hubu init codex --migrate-standalone`. To retain the standalone Hubu adapter
-during the compatibility window, opt in with
+`hubu init codex --migrate-standalone --gongbu-endpoint URL
+--gongbu-token-file FILE`. Migration fails before changing the config if a
+standalone Gongbu entry has no replacement Gongbu settings. To retain the
+standalone Hubu adapter during the compatibility window, opt in with
 `hubu init codex --compatibility-standalone`.
 
 If the server from step 1 is already running with a different token file,

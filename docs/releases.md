@@ -135,8 +135,10 @@ install \
 
 Configure the default single agent entry after installation with
 `hubu init codex`. Migrate an existing two-entry configuration deterministically
-with `hubu init codex --migrate-standalone`. The packaged standalone binaries
-remain available only through explicit compatibility configuration such as
+with `hubu init codex --migrate-standalone --gongbu-endpoint URL
+--gongbu-token-file FILE`; migration refuses to change the config when a
+standalone Gongbu entry lacks replacement settings. The packaged standalone
+binaries remain available only through explicit compatibility configuration such as
 `hubu init codex --compatibility-standalone` or a manually retained
 `gongbu-mcp` entry.
 

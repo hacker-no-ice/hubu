@@ -119,7 +119,9 @@ hubu init codex --config ~/.codex/config.toml --mcp-server /path/to/hubu-unified
 
 Add `--gongbu-endpoint URL --gongbu-token-file FILE` to configure the separate
 Gongbu backend in the same MCP entry. Use `--migrate-standalone` to replace an
-existing `hubu-mcp-server` plus `gongbu-mcp` pair deterministically. The old
+existing `hubu-mcp-server` plus `gongbu-mcp` pair deterministically, together
+with those Gongbu options; migration refuses to change the config if replacement
+Gongbu settings are absent. The old
 Hubu-only entry remains available by explicit opt-in with
 `--compatibility-standalone`; manually configured `gongbu-mcp` remains supported
 during the same compatibility window.

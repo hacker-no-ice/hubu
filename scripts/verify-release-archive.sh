@@ -187,12 +187,25 @@ printf '%s\n' \
   'GONGBU_MCP_ENDPOINT = "http://127.0.0.1:8788"' \
   '[mcp_servers.other]' \
   'command = "keep"' >"${migration_config}"
+if "${package_dir}/hubu" init codex \
+  --config "${migration_config}" \
+  --mcp-server "${package_dir}/hubu-unified-mcp" \
+  --token-file "${smoke_dir}/hubu.auth-token" \
+  --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
+  --approval-token-file "${smoke_dir}/hubu.approval-token" \
+  --migrate-standalone >/dev/null 2>&1; then
+  echo "migration without replacement Gongbu settings unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -F 'command = "gongbu-mcp"' "${migration_config}" >/dev/null
 "${package_dir}/hubu" init codex \
   --config "${migration_config}" \
   --mcp-server "${package_dir}/hubu-unified-mcp" \
   --token-file "${smoke_dir}/hubu.auth-token" \
   --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
   --approval-token-file "${smoke_dir}/hubu.approval-token" \
+  --gongbu-endpoint "http://127.0.0.1:8788" \
+  --gongbu-token-file "${smoke_dir}/hubu.auth-token" \
   --migrate-standalone >/dev/null
 grep -E 'command = ".*/hubu-unified-mcp"' "${migration_config}" >/dev/null
 grep -F '[mcp_servers.other]' "${migration_config}" >/dev/null
