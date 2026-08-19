@@ -28,6 +28,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 mod capability;
+mod credential;
 mod diagnostics;
 mod probe;
 
@@ -42,8 +43,10 @@ pub const ROUTING_REVISION: u32 = 1;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
+const HUBU_TOKEN_FILE_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE";
 const GONGBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_GONGBU_ENDPOINT";
 const GONGBU_TOKEN_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN";
+const GONGBU_TOKEN_FILE_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
@@ -172,7 +175,18 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_lookup(|name| env::var(name).ok())
+        let hubu_token =
+            credential::from_env(BackendOwner::Hubu, HUBU_TOKEN_ENV, HUBU_TOKEN_FILE_ENV)?;
+        let gongbu_token = credential::from_env(
+            BackendOwner::Gongbu,
+            GONGBU_TOKEN_ENV,
+            GONGBU_TOKEN_FILE_ENV,
+        )?;
+        Self::from_lookup(|name| match name {
+            HUBU_TOKEN_ENV => hubu_token.clone(),
+            GONGBU_TOKEN_ENV => gongbu_token.clone(),
+            _ => env::var(name).ok(),
+        })
     }
 
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
@@ -242,6 +256,8 @@ pub enum ConfigError {
     MissingEndpoint(BackendOwner),
     #[error("{0} backend credential is required when its endpoint is configured")]
     MissingCredential(BackendOwner),
+    #[error("{0} backend credential file could not be read or was empty")]
+    CredentialFile(BackendOwner),
     #[error(
         "{0} backend endpoint must be an HTTP(S) base URL without credentials, query, or fragment"
     )]

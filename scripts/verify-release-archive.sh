@@ -29,6 +29,7 @@ package_dir="${smoke_dir}/${package_name}"
 expected_binaries=(
   hubu
   hubu-server
+  hubu-unified-mcp
   hubu-mcp-server
   gongbu-server
   gongbu-mcp
@@ -73,7 +74,9 @@ jq -e \
    .source_commit == $source_commit and
    .executor_contract == "hubu-spend-executor-v4.2" and
    .target == $target and
-   .binaries == ["hubu", "hubu-server", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
+   .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
+   .default_agent_surface == "hubu-unified-mcp" and
+   .compatibility_agent_surfaces == ["hubu-mcp-server", "gongbu-mcp"] and
    .manifest == "MANIFEST.json" and
    .dependencies == "Cargo.lock" and
    .third_party_licenses == "THIRD-PARTY-LICENSES.txt"' \
@@ -88,7 +91,9 @@ jq -e \
    .source_commit == $source_commit and
    .executor_contract == "hubu-spend-executor-v4.2" and
    .target == $target and
-   .binaries == ["hubu", "hubu-server", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
+   .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
+   .default_agent_surface == "hubu-unified-mcp" and
+   .compatibility_agent_surfaces == ["hubu-mcp-server", "gongbu-mcp"] and
    .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
   "${package_dir}/MANIFEST.json" >/dev/null
 
@@ -142,6 +147,85 @@ jq -e \
   <<<"${reported_version}" >/dev/null
 
 initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+tools_list='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+unified_mcp_response="$(printf '%s\n%s\n' "${initialize}" "${tools_list}" | \
+  HUBU_UNIFIED_HUBU_ENDPOINT="http://127.0.0.1:${port}" \
+  HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE="${smoke_dir}/hubu.auth-token" \
+  HUBU_RECONCILIATION_TOKEN_FILE="${smoke_dir}/hubu.reconciliation-token" \
+  "${package_dir}/hubu-unified-mcp")"
+jq -s -e \
+  --arg product_version "${product_version}" \
+  '.[0].result.serverInfo.name == "hubu-unified-mcp" and
+   .[0].result.serverInfo.version == $product_version and
+   (.[1].result.tools | map(.name) | contains(["hubu_health", "hubu_unified_capabilities"])) and
+   (.[1].result.tools | map(.name) | any(startswith("gongbu_")) | not)' \
+  <<<"${unified_mcp_response}" >/dev/null
+
+generated_config="$("${package_dir}/hubu" init codex \
+  --dry-run \
+  --mcp-server "${package_dir}/hubu-unified-mcp" \
+  --token-file "${smoke_dir}/hubu.auth-token" \
+  --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
+  --approval-token-file "${smoke_dir}/hubu.approval-token")"
+grep -F '[mcp_servers.hubu]' <<<"${generated_config}" >/dev/null
+grep -E 'command = ".*/hubu-unified-mcp"' <<<"${generated_config}" >/dev/null
+grep -F 'HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE' <<<"${generated_config}" >/dev/null
+if grep -F '[mcp_servers.gongbu]' <<<"${generated_config}" >/dev/null; then
+  echo "default agent config emitted a second MCP server entry" >&2
+  exit 1
+fi
+
+migration_config="${smoke_dir}/codex-config.toml"
+printf '%s\n' \
+  '[mcp_servers.hubu]' \
+  'command = "hubu-mcp-server"' \
+  '[mcp_servers.hubu.env]' \
+  'HUBU_URL = "http://127.0.0.1:8787"' \
+  '[mcp_servers.gongbu]' \
+  'command = "gongbu-mcp"' \
+  '[mcp_servers.gongbu.env]' \
+  'GONGBU_MCP_ENDPOINT = "http://127.0.0.1:8788"' \
+  '[mcp_servers.other]' \
+  'command = "keep"' >"${migration_config}"
+if "${package_dir}/hubu" init codex \
+  --config "${migration_config}" \
+  --mcp-server "${package_dir}/hubu-unified-mcp" \
+  --token-file "${smoke_dir}/hubu.auth-token" \
+  --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
+  --approval-token-file "${smoke_dir}/hubu.approval-token" \
+  --migrate-standalone >/dev/null 2>&1; then
+  echo "migration without replacement Gongbu settings unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -F 'command = "gongbu-mcp"' "${migration_config}" >/dev/null
+"${package_dir}/hubu" init codex \
+  --config "${migration_config}" \
+  --mcp-server "${package_dir}/hubu-unified-mcp" \
+  --token-file "${smoke_dir}/hubu.auth-token" \
+  --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
+  --approval-token-file "${smoke_dir}/hubu.approval-token" \
+  --gongbu-endpoint "http://127.0.0.1:8788" \
+  --gongbu-token-file "${smoke_dir}/hubu.auth-token" \
+  --migrate-standalone >/dev/null
+grep -E 'command = ".*/hubu-unified-mcp"' "${migration_config}" >/dev/null
+grep -F '[mcp_servers.other]' "${migration_config}" >/dev/null
+if grep -F 'hubu-mcp-server' "${migration_config}" >/dev/null || \
+   grep -F 'gongbu-mcp' "${migration_config}" >/dev/null; then
+  echo "standalone MCP entries remained after explicit migration" >&2
+  exit 1
+fi
+
+compatibility_config="$("${package_dir}/hubu" init codex \
+  --dry-run \
+  --compatibility-standalone \
+  --mcp-server "${package_dir}/hubu-mcp-server" \
+  --token-file "${smoke_dir}/hubu.auth-token" \
+  --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
+  --approval-token-file "${smoke_dir}/hubu.approval-token")"
+grep -E 'command = ".*/hubu-mcp-server"' <<<"${compatibility_config}" >/dev/null
+grep -F 'HUBU_URL' <<<"${compatibility_config}" >/dev/null
+
+# Both standalone adapters remain packaged, startable compatibility surfaces.
 hubu_mcp_response="$(printf '%s\n' "${initialize}" | \
   HUBU_URL="http://127.0.0.1:${port}" "${package_dir}/hubu-mcp-server")"
 jq -e \
@@ -159,4 +243,4 @@ jq -e \
    .result.serverInfo.version == $product_version' \
   <<<"${gongbu_mcp_response}" >/dev/null
 
-echo "Verified unified archive ${package_name}: five binaries, provenance, Hubu health, and separate MCP surfaces; no provider call or spend was attempted"
+echo "Verified unified archive ${package_name}: six binaries, unified default discovery, and opt-in standalone compatibility; no provider call or spend was attempted"

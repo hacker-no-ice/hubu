@@ -46,6 +46,7 @@ jobs:
           cargo build --release --locked
           --bin hubu
           --bin hubu-server
+          --bin hubu-unified-mcp
           --bin hubu-mcp-server
           --bin gongbu-server
           --bin gongbu-mcp

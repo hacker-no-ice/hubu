@@ -14,6 +14,7 @@ SMOKE_SCRIPT = ROOT / "scripts/verify-release-archive.sh"
 PRODUCTION_BINARIES = (
     "hubu",
     "hubu-server",
+    "hubu-unified-mcp",
     "hubu-mcp-server",
     "gongbu-server",
     "gongbu-mcp",
@@ -96,7 +97,7 @@ if unpinned:
     fail("actions must be pinned to full commit SHAs: " + "; ".join(unpinned))
 
 print(
-    "validated immutable release workflow: five production binaries, four native "
+    "validated immutable release workflow: six production binaries, four native "
     "targets, scheduled and explicit canaries, shared build identity, bounded "
     "permissions, and pinned actions"
 )
