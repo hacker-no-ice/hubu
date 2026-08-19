@@ -45,9 +45,13 @@ impl StubResponse {
     }
 
     pub(super) fn raw(status: u16, body: impl Into<Vec<u8>>) -> Self {
+        Self::bytes(status, "application/json", body)
+    }
+
+    pub(super) fn bytes(status: u16, content_type: &'static str, body: impl Into<Vec<u8>>) -> Self {
         Self {
             status,
-            content_type: "application/json",
+            content_type,
             body: body.into(),
         }
     }
@@ -217,7 +221,10 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<StubState>>) {
     {
         return;
     }
-    let _ = stream.write_all(&response.body);
+    if stream.write_all(&response.body).is_ok() {
+        let _ = stream.flush();
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+    }
 }
 
 fn read_request(stream: &mut TcpStream) -> Option<String> {

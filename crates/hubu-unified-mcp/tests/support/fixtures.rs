@@ -94,6 +94,37 @@ pub(super) fn default_responses(kind: BackendKind) -> HashMap<(String, String), 
                 StubResponse::json(200, execution.clone()),
             );
             insert("POST", "/v2/executions", StubResponse::json(200, execution));
+            insert(
+                "GET",
+                "/v1/executions/exec-93/artifacts",
+                StubResponse::json(
+                    200,
+                    json!({
+                        "schema_version":2,
+                        "execution_id":"exec-93",
+                        "artifacts":[{
+                            "artifact_id":"artifact-93",
+                            "execution_id":"exec-93",
+                            "kind":"image",
+                            "media_type":"image/png",
+                            "size_bytes":8,
+                            "sha256":"sha256:fixture",
+                            "metadata":{
+                                "fixture":"deterministic",
+                                "storage_path":"/must/not/escape",
+                                "provider_token":"must-not-escape"
+                            },
+                            "metadata_schema_version":1,
+                            "created_at":"2026-08-18T00:00:01Z"
+                        }]
+                    }),
+                ),
+            );
+            insert(
+                "GET",
+                "/v1/artifacts/artifact-93",
+                StubResponse::bytes(200, "image/png", b"\x89PNG\r\n\x1a\n"),
+            );
         }
     }
     responses
