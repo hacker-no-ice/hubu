@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 use std::{
+    env,
+    ffi::OsString,
     io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
@@ -15,7 +17,9 @@ pub struct McpProcess {
 
 impl McpProcess {
     pub fn start(hubu: Option<(&BackendStub, &str)>, gongbu: Option<(&BackendStub, &str)>) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_hubu-unified-mcp"));
+        let executable = env::var_os("HUBU_UNIFIED_MCP_CANARY_BIN")
+            .unwrap_or_else(|| OsString::from(env!("CARGO_BIN_EXE_hubu-unified-mcp")));
+        let mut command = Command::new(executable);
         command
             .env_remove("HUBU_UNIFIED_HUBU_ENDPOINT")
             .env_remove("HUBU_UNIFIED_HUBU_BEARER_TOKEN")

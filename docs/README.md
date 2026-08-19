@@ -27,6 +27,9 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
 - [unified-mcp-contract.md](unified-mcp-contract.md): accepted unified
   Hubu–Gongbu MCP names, schemas, backend routing, compatibility negotiation,
   partial availability, and standalone migration gates
+- [canaries/HUB-96-unified-mcp-migration-canary.md](canaries/HUB-96-unified-mcp-migration-canary.md):
+  packaged unified MCP migration evidence and the explicit standalone
+  deprecation no-go decision
 - [benchmarking.md](benchmarking.md): local benchmark usage and current MVP
   performance notes
 - [demo.md](demo.md): scripted local walkthrough and CLI reference

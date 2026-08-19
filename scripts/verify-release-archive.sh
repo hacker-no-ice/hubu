@@ -146,6 +146,9 @@ jq -e \
    .executor_contract == "hubu-spend-executor-v4.2"' \
   <<<"${reported_version}" >/dev/null
 
+printf '%s\n' 'archive-smoke-distinct-gongbu-capability' >"${smoke_dir}/gongbu.mcp-token"
+chmod 600 "${smoke_dir}/gongbu.mcp-token"
+
 initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 tools_list='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 unified_mcp_response="$(printf '%s\n%s\n' "${initialize}" "${tools_list}" | \
@@ -166,10 +169,13 @@ generated_config="$("${package_dir}/hubu" init codex \
   --mcp-server "${package_dir}/hubu-unified-mcp" \
   --token-file "${smoke_dir}/hubu.auth-token" \
   --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
-  --approval-token-file "${smoke_dir}/hubu.approval-token")"
+  --approval-token-file "${smoke_dir}/hubu.approval-token" \
+  --gongbu-endpoint "http://127.0.0.1:8788" \
+  --gongbu-token-file "${smoke_dir}/gongbu.mcp-token")"
 grep -F '[mcp_servers.hubu]' <<<"${generated_config}" >/dev/null
 grep -E 'command = ".*/hubu-unified-mcp"' <<<"${generated_config}" >/dev/null
 grep -F 'HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE' <<<"${generated_config}" >/dev/null
+grep -F 'HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE' <<<"${generated_config}" >/dev/null
 if grep -F '[mcp_servers.gongbu]' <<<"${generated_config}" >/dev/null; then
   echo "default agent config emitted a second MCP server entry" >&2
   exit 1
@@ -187,6 +193,7 @@ printf '%s\n' \
   'GONGBU_MCP_ENDPOINT = "http://127.0.0.1:8788"' \
   '[mcp_servers.other]' \
   'command = "keep"' >"${migration_config}"
+cp "${migration_config}" "${smoke_dir}/codex-config.toml.pre-unified-mcp"
 if "${package_dir}/hubu" init codex \
   --config "${migration_config}" \
   --mcp-server "${package_dir}/hubu-unified-mcp" \
@@ -205,7 +212,7 @@ grep -F 'command = "gongbu-mcp"' "${migration_config}" >/dev/null
   --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
   --approval-token-file "${smoke_dir}/hubu.approval-token" \
   --gongbu-endpoint "http://127.0.0.1:8788" \
-  --gongbu-token-file "${smoke_dir}/hubu.auth-token" \
+  --gongbu-token-file "${smoke_dir}/gongbu.mcp-token" \
   --migrate-standalone >/dev/null
 grep -E 'command = ".*/hubu-unified-mcp"' "${migration_config}" >/dev/null
 grep -F '[mcp_servers.other]' "${migration_config}" >/dev/null
@@ -225,22 +232,31 @@ compatibility_config="$("${package_dir}/hubu" init codex \
 grep -E 'command = ".*/hubu-mcp-server"' <<<"${compatibility_config}" >/dev/null
 grep -F 'HUBU_URL' <<<"${compatibility_config}" >/dev/null
 
-# Both standalone adapters remain packaged, startable compatibility surfaces.
-hubu_mcp_response="$(printf '%s\n' "${initialize}" | \
+# Restore the exact pre-migration two-entry configuration before validating both
+# packaged standalone rollback surfaces.
+cp "${smoke_dir}/codex-config.toml.pre-unified-mcp" "${migration_config}"
+grep -F 'command = "hubu-mcp-server"' "${migration_config}" >/dev/null
+grep -F 'command = "gongbu-mcp"' "${migration_config}" >/dev/null
+grep -F '[mcp_servers.other]' "${migration_config}" >/dev/null
+
+hubu_mcp_response="$(printf '%s\n%s\n' "${initialize}" "${tools_list}" | \
   HUBU_URL="http://127.0.0.1:${port}" "${package_dir}/hubu-mcp-server")"
-jq -e \
+jq -s -e \
   --arg product_version "${product_version}" \
-  '.result.serverInfo.name == "hubu-mcp-server" and
-   .result.serverInfo.version == $product_version' \
+  '.[0].result.serverInfo.name == "hubu-mcp-server" and
+   .[0].result.serverInfo.version == $product_version and
+   (.[1].result.tools | length) == 30 and
+   (.[1].result.tools | map(.name) | contains(["hubu_health", "hubu_get_spend_approval", "hubu_resolve_spend_approval"]))' \
   <<<"${hubu_mcp_response}" >/dev/null
-gongbu_mcp_response="$(printf '%s\n' "${initialize}" | \
+gongbu_mcp_response="$(printf '%s\n%s\n' "${initialize}" "${tools_list}" | \
   GONGBU_MCP_ENDPOINT="http://127.0.0.1:9" \
   GONGBU_MCP_BEARER_TOKEN="archive-smoke-no-provider" \
   "${package_dir}/gongbu-mcp")"
-jq -e \
+jq -s -e \
   --arg product_version "${product_version}" \
-  '.result.serverInfo.name == "gongbu-mcp" and
-   .result.serverInfo.version == $product_version' \
+  '.[0].result.serverInfo.name == "gongbu-mcp" and
+   .[0].result.serverInfo.version == $product_version and
+   (.[1].result.tools | map(.name) | sort) == ["gongbu_create_execution", "gongbu_get_artifact", "gongbu_get_execution", "gongbu_list_artifacts"]' \
   <<<"${gongbu_mcp_response}" >/dev/null
 
-echo "Verified unified archive ${package_name}: six binaries, unified default discovery, and opt-in standalone compatibility; no provider call or spend was attempted"
+echo "Verified unified archive ${package_name}: six binaries, unified default discovery, distinct credentials, and two-entry standalone rollback catalogs; no provider call or spend was attempted"

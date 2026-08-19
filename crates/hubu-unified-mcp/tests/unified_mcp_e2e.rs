@@ -27,6 +27,166 @@ fn execution_arguments() -> Value {
     })
 }
 
+fn routing_fixture() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../fixtures/unified-mcp-routing-v1.json"
+    ))
+    .unwrap()
+}
+
+fn wait_for_backend_states(
+    mcp: &mut McpProcess,
+    next_id: &mut u64,
+    expected_hubu: &str,
+    expected_gongbu: &str,
+) -> Value {
+    for _ in 0..6 {
+        let response = mcp.call(*next_id, "hubu_unified_capabilities", json!({}));
+        *next_id += 1;
+        let backends = &response["result"]["structuredContent"]["backends"];
+        if backends["hubu"]["state"] == expected_hubu
+            && backends["gongbu"]["state"] == expected_gongbu
+        {
+            return response;
+        }
+    }
+    panic!("backend states did not stabilize as {expected_hubu}/{expected_gongbu}")
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged HUB-96 canary"]
+fn exact_hub_88_catalog_and_representative_governed_artifact_flow() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+
+    let initialized = mcp.initialize();
+    assert_backend_state(&initialized, "hubu", "available");
+    assert_backend_state(&initialized, "gongbu", "available");
+
+    let fixture = routing_fixture();
+    let expected = fixture["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let listed = mcp.list_tools();
+    let mut listed_names = tool_names(&listed);
+    listed_names.sort_unstable();
+    assert_eq!(listed_names, expected);
+
+    let capabilities = mcp.call(3, "hubu_unified_capabilities", json!({}));
+    let observed = capabilities["result"]["structuredContent"]["tools"]
+        .as_array()
+        .unwrap();
+    assert_eq!(observed.len(), expected.len());
+    for (actual, expected) in observed.iter().zip(fixture["tools"].as_array().unwrap()) {
+        assert_eq!(actual["name"], expected["name"]);
+        assert_eq!(actual["owner"], expected["owner"]);
+        assert_eq!(actual["available"], true);
+    }
+
+    let budgets = mcp.call(4, "hubu_list_budgets", json!({}));
+    assert_eq!(
+        budgets["result"]["structuredContent"]["budgets"][0]["budget_id"],
+        "hubu-state-marker"
+    );
+    let authorized = mcp.call_with_meta(
+        5,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-93","amount_cents":25,"reason":"HUB-96 no-spend canary"}),
+        json!({"hubu.dev/platform-invocation":{
+            "platform":"codex",
+            "installation_id":"installation-96",
+            "invocation_id":"invocation-96",
+            "operation_key":"operation-96",
+            "task_id":"linear:HUB-96"
+        }}),
+    );
+    assert_eq!(
+        authorized["result"]["structuredContent"]["spend_auth_token_id"],
+        "hubu-spend-token-93"
+    );
+    let execution = mcp.call(6, "gongbu_create_execution", execution_arguments());
+    assert_eq!(execution["result"]["isError"], false);
+    let execution = mcp.call(7, "gongbu_get_execution", json!({"execution_id":"exec-93"}));
+    assert_eq!(execution["result"]["isError"], false);
+    let artifacts = mcp.call(
+        8,
+        "gongbu_list_artifacts",
+        json!({"execution_id":"exec-93"}),
+    );
+    let artifact_list: Value =
+        serde_json::from_str(artifacts["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(artifact_list["artifacts"][0]["metadata"]
+        .get("storage_path")
+        .is_none());
+    assert_eq!(
+        artifact_list["artifacts"][0]["metadata"]["provider_token"],
+        "[REDACTED]"
+    );
+    let artifact = mcp.call(
+        9,
+        "gongbu_get_artifact",
+        json!({"artifact_id":"artifact-93"}),
+    );
+    assert_eq!(artifact["result"]["isError"], false);
+    assert_eq!(artifact["result"]["content"][1]["type"], "image");
+    assert_eq!(artifact["result"]["content"][1]["mimeType"], "image/png");
+    assert_eq!(artifact["result"]["content"][1]["data"], "iVBORw0KGgo=");
+
+    assert_bearer_isolated(&hubu, HUBU_TOKEN, GONGBU_TOKEN);
+    assert_bearer_isolated(&gongbu, GONGBU_TOKEN, HUBU_TOKEN);
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged HUB-96 canary"]
+fn backend_transport_stop_and_recovery_are_observed_on_refresh() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    mcp.initialize();
+    let mut next_id = 3;
+
+    hubu.disconnect(true);
+    let unavailable = wait_for_backend_states(&mut mcp, &mut next_id, "unavailable", "available");
+    assert_eq!(
+        unavailable["result"]["structuredContent"]["backends"]["hubu"]["state"],
+        "unavailable"
+    );
+    assert_eq!(
+        unavailable["result"]["structuredContent"]["backends"]["gongbu"]["state"],
+        "available"
+    );
+    hubu.disconnect(false);
+    let recovered = wait_for_backend_states(&mut mcp, &mut next_id, "available", "available");
+    assert_eq!(
+        recovered["result"]["structuredContent"]["backends"]["hubu"]["state"],
+        "available"
+    );
+
+    gongbu.disconnect(true);
+    let unavailable = wait_for_backend_states(&mut mcp, &mut next_id, "available", "unavailable");
+    assert_eq!(
+        unavailable["result"]["structuredContent"]["backends"]["gongbu"]["state"],
+        "unavailable"
+    );
+    assert_eq!(
+        unavailable["result"]["structuredContent"]["backends"]["hubu"]["state"],
+        "available"
+    );
+    gongbu.disconnect(false);
+    let recovered = wait_for_backend_states(&mut mcp, &mut next_id, "available", "available");
+    assert_eq!(
+        recovered["result"]["structuredContent"]["backends"]["gongbu"]["state"],
+        "available"
+    );
+
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
 #[test]
 #[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn hubu_only_initialize_discovery_and_call() {
