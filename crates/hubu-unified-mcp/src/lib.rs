@@ -1,11 +1,13 @@
-//! Unified MCP transport shell for the separate Hubu and Gongbu services.
+//! Unified MCP server for the separate Hubu and Gongbu services.
 //!
 //! This crate deliberately has no dependency on either backend's domain or
 //! server crate. Backend clients hold independent endpoints, credentials, HTTP
-//! clients, and failure boundaries. Gongbu-owned tool forwarding is implemented
-//! over its public versioned HTTP contract; Hubu-owned routing remains separate.
+//! clients, and failure boundaries. Both approved domain catalogs route through
+//! public, versioned adapter contracts without importing backend implementation
+//! crates.
 
 mod gongbu;
+mod hubu;
 
 use std::{
     env, fmt,
@@ -14,6 +16,8 @@ use std::{
     time::Duration,
 };
 
+use chrono::{SecondsFormat, Utc};
+use hubu_mcp::HUBU_ROUTING_CONTRACT_VERSION;
 use reqwest::{
     blocking::Client,
     header::{self, HeaderMap, HeaderValue},
@@ -27,8 +31,9 @@ mod capability;
 mod diagnostics;
 mod probe;
 
-use capability::{capabilities_value, CapabilitySnapshot};
-use diagnostics::{backend_error_response, tool_availability};
+use capability::{capabilities_value, BackendState, CapabilitySnapshot};
+use diagnostics::{backend_error_response, tool_availability, ToolRejection};
+pub use hubu::RoutingConfig as HubuRoutingConfig;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
@@ -39,6 +44,9 @@ const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
 const GONGBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_GONGBU_ENDPOINT";
 const GONGBU_TOKEN_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN";
+const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
+const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
+const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -159,6 +167,7 @@ impl BackendConfig {
 pub struct Config {
     pub hubu: Option<BackendConfig>,
     pub gongbu: Option<BackendConfig>,
+    pub hubu_routing: HubuRoutingConfig,
 }
 
 impl Config {
@@ -167,6 +176,12 @@ impl Config {
     }
 
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let mut hubu_routing = HubuRoutingConfig::new(
+            lookup(TRUST_CLIENT_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
+            lookup(RECONCILIATION_TOKEN_ENV),
+        );
+        hubu_routing.reconciliation_capability_file = lookup(RECONCILIATION_TOKEN_FILE_ENV)
+            .unwrap_or_else(|| "hubu.reconciliation-token".to_string());
         Ok(Self {
             hubu: backend_from_values(
                 BackendOwner::Hubu,
@@ -178,8 +193,13 @@ impl Config {
                 lookup(GONGBU_ENDPOINT_ENV),
                 lookup(GONGBU_TOKEN_ENV),
             )?,
+            hubu_routing,
         })
     }
+}
+
+fn env_flag_value(value: &str) -> bool {
+    matches!(value, "1" | "true" | "TRUE" | "yes" | "YES")
 }
 
 fn backend_from_values(
@@ -238,6 +258,7 @@ impl fmt::Display for BackendOwner {
 pub struct BackendClient {
     owner: BackendOwner,
     endpoint: Url,
+    bearer_token: Secret,
     http: Client,
 }
 
@@ -248,6 +269,7 @@ impl fmt::Debug for BackendClient {
             .field("owner", &self.owner)
             .field("endpoint", &self.endpoint)
             .field("executor_contract", &EXECUTOR_CONTRACT_VERSION)
+            .field("hubu_routing_contract", &HUBU_ROUTING_CONTRACT_VERSION)
             .finish_non_exhaustive()
     }
 }
@@ -269,6 +291,7 @@ impl BackendClient {
         Ok(Self {
             owner: config.owner,
             endpoint: config.endpoint,
+            bearer_token: config.bearer_token,
             http,
         })
     }
@@ -333,15 +356,18 @@ impl BackendClients {
 pub struct Server {
     backends: BackendClients,
     snapshot: Arc<Mutex<CapabilitySnapshot>>,
+    hubu_routing: HubuRoutingConfig,
 }
 
 impl Server {
     pub fn new(config: Config) -> Result<Self, ConfigError> {
+        let hubu_routing = config.hubu_routing.clone();
         let backends = BackendClients::new(config)?;
         let snapshot = backends.probe();
         Ok(Self {
             backends,
             snapshot: Arc::new(Mutex::new(snapshot)),
+            hubu_routing,
         })
     }
 
@@ -402,39 +428,85 @@ impl Server {
     }
 
     fn call_tool(&self, id: Value, params: Value) -> Value {
-        let call: ToolCall = match serde_json::from_value(params) {
+        let call: ToolCall = match serde_json::from_value::<ToolCall>(params) {
             Ok(call) => call,
             Err(_) => return error_response(id, -32602, "Invalid params"),
         };
-        // Parsed at the shared boundary so future routed tools can consume
-        // trusted platform metadata without placing it in model arguments.
-        let _trusted_meta = &call.meta;
-        if call.arguments.as_object().is_none() {
+        if !call.arguments.is_object() {
             return error_response(id, -32602, "Invalid params");
         }
-        self.refresh_capabilities();
+        if call.name == "hubu_unified_capabilities" {
+            self.refresh_capabilities();
+            if call
+                .arguments
+                .as_object()
+                .is_some_and(|arguments| arguments.is_empty())
+            {
+                let capability = self.capabilities();
+                return success_response(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&capability)
+                                .expect("capability snapshot serializes")
+                        }],
+                        "structuredContent": capability
+                    }),
+                );
+            }
+            return error_response(id, -32602, "Invalid params");
+        }
+        let Some(owner) = DOMAIN_TOOLS
+            .iter()
+            .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
+        else {
+            return error_response(id, -32602, "Invalid params");
+        };
+        if owner == BackendOwner::Gongbu {
+            self.refresh_capabilities();
+            let snapshot = self.snapshot();
+            if let Err(rejection) = tool_availability(&call.name, owner, &snapshot) {
+                return backend_error_response(id, &call.name, owner, rejection);
+            }
+            let client = self
+                .backends
+                .gongbu
+                .as_ref()
+                .expect("available Gongbu route has a configured client");
+            return success_response(id, gongbu::call_tool(client, &call.name, call.arguments));
+        }
+        self.refresh_hubu_capability();
+        hubu::call_tool(self, id, call)
+    }
+
+    #[cfg(test)]
+    fn call_tool_from_snapshot(&self, id: Value, params: Value) -> Value {
+        let call: ToolCall = match serde_json::from_value::<ToolCall>(params) {
+            Ok(call) if call.arguments.is_object() => call,
+            _ => return error_response(id, -32602, "Invalid params"),
+        };
         if call.name == "hubu_unified_capabilities" {
             if call
                 .arguments
                 .as_object()
-                .is_some_and(|arguments| !arguments.is_empty())
+                .is_some_and(|value| value.is_empty())
             {
-                return error_response(id, -32602, "Invalid params");
+                let capability = self.capabilities();
+                return success_response(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&capability)
+                                .expect("capability snapshot serializes")
+                        }],
+                        "structuredContent": capability
+                    }),
+                );
             }
-            let capability = self.capabilities();
-            return success_response(
-                id,
-                json!({
-                    "content": [{
-                        "type": "text",
-                        "text": serde_json::to_string_pretty(&capability)
-                            .expect("capability snapshot serializes")
-                    }],
-                    "structuredContent": capability
-                }),
-            );
+            return error_response(id, -32602, "Invalid params");
         }
-
         let Some(owner) = DOMAIN_TOOLS
             .iter()
             .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
@@ -453,17 +525,20 @@ impl Server {
                 .expect("available Gongbu route has a configured client");
             return success_response(id, gongbu::call_tool(client, &call.name, call.arguments));
         }
-        error_response(
-            id,
-            -32601,
-            "Hubu tool routing is not implemented by this release",
-        )
+        hubu::call_tool(self, id, call)
     }
 
     fn list_tools(&self) -> Vec<Value> {
         self.refresh_capabilities();
+        self.list_tools_for_snapshot()
+    }
+
+    fn list_tools_for_snapshot(&self) -> Vec<Value> {
         let snapshot = self.snapshot();
         let mut tools = vec![capability_tool()];
+        if tool_availability("hubu_health", BackendOwner::Hubu, &snapshot).is_ok() {
+            tools.extend(hubu::tool_definitions());
+        }
         tools.extend(gongbu::tool_definitions().into_iter().filter(|tool| {
             let name = tool["name"]
                 .as_str()
@@ -490,6 +565,26 @@ impl Server {
             .snapshot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = refreshed;
+    }
+
+    fn refresh_hubu_capability(&self) {
+        let refreshed = self.backends.probe_hubu();
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        snapshot.hubu = refreshed;
+    }
+
+    fn mark_hubu_unavailable(&self) {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        snapshot.hubu.state = BackendState::Unavailable;
+        snapshot.hubu.reason_code = Some("health_unavailable");
     }
 }
 
@@ -636,6 +731,9 @@ mod tests {
             .to_string();
         assert!(!error.contains("url-secret"));
         assert!(!error.contains(secret));
+
+        let routing = HubuRoutingConfig::new(true, Some(secret.to_string()));
+        assert!(!format!("{routing:?}").contains(secret));
     }
 
     #[test]
@@ -705,6 +803,7 @@ mod tests {
                 BackendConfig::new(BackendOwner::Gongbu, "https://gongbu.test", "gongbu-secret")
                     .unwrap(),
             ),
+            hubu_routing: HubuRoutingConfig::default(),
         };
         let server = Server::new(config).unwrap();
         let capability = server.capabilities();

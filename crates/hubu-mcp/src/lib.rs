@@ -7,9 +7,15 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
+mod routing;
 mod trusted_identity;
 
-use trusted_identity::TrustedSpendIdentity;
+pub use routing::{route_tool_call_v1, tool_result_v1, HubuHttpRequestV1, HubuRequestCapabilityV1};
+
+#[cfg(test)]
+use routing::{
+    require_trusted_client_approval, spend_response_with_approval_hint, trusted_spend_arguments,
+};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
@@ -24,6 +30,7 @@ const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
 const RECONCILIATION_CAPABILITY_HEADER: &str = "X-Hubu-Reconciliation-Capability";
 const PROTOCOL_VERSION: &str = "2024-11-05";
+pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
 const HUBU_APPROVAL_PROFILE_VERSION: &str = "hubu-mcp-client-approval-v1";
 const HUBU_MCP_INSTRUCTIONS: &str = "Hubu approval policy: clients should allow read tools and hubu_authorize_spend/hubu_submit_spend without a pre-call human prompt. Every spend call must attach platform-owned operation_key and optional task_id under trusted params._meta['hubu.dev/platform-invocation']; Hubu MCP injects them outside model-authored arguments. The platform remains responsible for stable allocation and retry recovery. Protected setup/admin tools and hubu_resolve_spend_approval require a human approval prompt before tools/call. Approval resolution and expired-claim reconciliation also require distinct server-verified human capabilities that are never sent on executor requests. If a spend response has requires_human_approval=true, no payment was executed; show approval.review to the human and wait for approve or deny. After the human chooses, call hubu_resolve_spend_approval with the returned approval_request_id and explicit decision.";
 #[cfg(test)]
@@ -149,7 +156,7 @@ fn handle_json_rpc(base_url: &str, config: McpConfig, request: Value) -> Option<
     })
 }
 
-fn tool_definitions() -> Vec<Value> {
+pub fn tool_definitions() -> Vec<Value> {
     vec![
         read_tool(
             "hubu_health",
@@ -515,7 +522,7 @@ fn tool(name: &str, description: &str, input_schema: Value, annotations: ToolAnn
     })
 }
 
-fn approval_profile() -> Value {
+pub fn approval_profile() -> Value {
     let auto_approve_tools = READ_TOOL_NAMES
         .iter()
         .chain(SPEND_TOOL_NAMES.iter())
@@ -560,253 +567,16 @@ fn approval_profile() -> Value {
 }
 
 fn call_tool(base_url: &str, config: McpConfig, params: Value) -> Result<Value> {
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("tools/call missing params.name"))?;
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-
-    let response = match name {
-        "hubu_health" => get_json(base_url, "/health")?,
-        "hubu_registration_guidance" => get_json(base_url, "/registration/guidance")?,
-        "hubu_client_approval_profile" => approval_profile(),
-        "hubu_list_users" => get_json(base_url, "/users")?,
-        "hubu_register_human" => {
-            require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/init", arguments)?
-        }
-        "hubu_register_agent" => {
-            require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/agents/register", arguments)?
-        }
-        "hubu_add_policy" => {
-            require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/policies", arguments)?
-        }
-        "hubu_apply_policy" => {
-            require_trusted_client_approval(config, name)?;
-            let mut arguments = arguments;
-            arguments["source"] = json!("mcp");
-            post_json(base_url, "/policies", arguments)?
-        }
-        "hubu_show_policy" => get_json(base_url, &policy_inspection_path("show", &arguments)?)?,
-        "hubu_export_policy" => get_json(base_url, &policy_inspection_path("export", &arguments)?)?,
-        "hubu_policy_history" => {
-            get_json(base_url, &policy_inspection_path("history", &arguments)?)?
-        }
-        "hubu_policy_diff" => {
-            let mut path = policy_inspection_path("diff", &arguments)?;
-            let separator = if path.contains('?') { '&' } else { '?' };
-            let from = arguments
-                .get("from_revision")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| anyhow!("hubu_policy_diff requires from_revision"))?;
-            path.push(separator);
-            path.push_str(&format!("from_revision={from}"));
-            if let Some(to) = arguments.get("to_revision").and_then(Value::as_u64) {
-                path.push_str(&format!("&to_revision={to}"));
-            }
-            get_json(base_url, &path)?
-        }
-        "hubu_create_budget" => {
-            require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/budgets", arguments)?
-        }
-        "hubu_create_recurring_budget" => {
-            require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/budgets/series", arguments)?
-        }
-        "hubu_revoke_budget" => {
-            require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/budgets/revoke", arguments)?
-        }
-        "hubu_replace_budget" => {
-            require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/budgets/replace", arguments)?
-        }
-        "hubu_set_spending_target" => {
-            require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/user/spending-target", arguments)?
-        }
-        "hubu_revoke_spending_target" => {
-            require_trusted_client_approval(config, name)?;
-            post_json(base_url, "/user/spending-target/revoke", arguments)?
-        }
-        "hubu_show_spending_targets" => {
-            if arguments
-                .get("include_all")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                get_json(base_url, "/user/spending-target?all=true")?
-            } else {
-                get_json(base_url, "/user/spending-target")?
-            }
-        }
-        "hubu_submit_spend" => {
-            let arguments = trusted_spend_arguments(&params, arguments)?;
-            let response = post_json(base_url, "/spend", arguments)?;
-            return Ok(tool_result(spend_response_with_approval_hint(response)));
-        }
-        "hubu_authorize_spend" => {
-            let arguments = trusted_spend_arguments(&params, arguments)?;
-            let response = post_json(base_url, "/spend/authorize", arguments)?;
-            return Ok(tool_result(spend_response_with_approval_hint(response)));
-        }
-        "hubu_get_spend_approval" => {
-            let approval_request_id = arguments
-                .get("approval_request_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("hubu_get_spend_approval requires approval_request_id"))?;
-            get_json(
-                base_url,
-                &format!("/spend/approval?approval_request_id={approval_request_id}"),
-            )?
-        }
-        "hubu_resolve_spend_approval" => {
-            require_trusted_client_approval(config, name)?;
-            let response = post_approval_json(base_url, "/spend/approval/resolve", arguments)?;
-            return Ok(tool_result(spend_response_with_approval_hint(response)));
-        }
-        "hubu_list_agents" => get_json(base_url, "/agents")?,
-        "hubu_list_budgets" => {
-            if arguments
-                .get("include_all")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                get_json(base_url, "/budgets?all=true")?
-            } else {
-                get_json(base_url, "/budgets")?
-            }
-        }
-        "hubu_list_ledger" => get_json(base_url, "/ledger")?,
-        "hubu_get_executor_claim" => {
-            let claim_id = arguments
-                .get("claim_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("hubu_get_executor_claim requires claim_id"))?;
-            get_json(
-                base_url,
-                &format!("/spend/executor/claim?claim_id={claim_id}"),
-            )?
-        }
-        "hubu_list_claims_requiring_reconciliation" => {
-            get_json(base_url, "/spend/executor/reconciliation")?
-        }
-        "hubu_reconcile_vendor_billed_claim" => {
-            require_trusted_client_approval(config, name)?;
-            post_reconciliation_json(base_url, "/spend/executor/settle", arguments)?
-        }
-        "hubu_reconcile_vendor_did_not_bill_claim" => {
-            require_trusted_client_approval(config, name)?;
-            post_reconciliation_json(base_url, "/spend/executor/release", arguments)?
-        }
-        _ => bail!("unknown Hubu MCP tool `{name}`"),
-    };
-
-    Ok(tool_result(response))
-}
-
-fn trusted_spend_arguments(params: &Value, mut arguments: Value) -> Result<Value> {
-    let arguments = arguments
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("Hubu spend tool arguments must be an object"))?;
-    for protected in ["operation_key", "task_id"] {
-        if arguments.contains_key(protected) {
-            bail!(
-                "{protected} is trusted platform state and must not be supplied in model-authored arguments"
-            );
-        }
-    }
-    let trusted = TrustedSpendIdentity::from_call_params(params)?;
-    arguments.insert(
-        "operation_key".to_string(),
-        Value::String(trusted.operation_key),
-    );
-    arguments.insert(
-        "task_id".to_string(),
-        trusted.task_id.map_or(Value::Null, Value::String),
-    );
-    Ok(Value::Object(arguments.clone()))
-}
-
-fn policy_inspection_path(action: &str, arguments: &Value) -> Result<String> {
-    let policy_id = arguments.get("policy_id").and_then(Value::as_str);
-    let agent_id = arguments.get("agent_id").and_then(Value::as_str);
-    if policy_id.is_some() && agent_id.is_some() {
-        bail!("pass only one of policy_id or agent_id");
-    }
-    let query = policy_id
-        .map(|value| format!("?policy_id={value}"))
-        .or_else(|| agent_id.map(|value| format!("?agent_id={value}")))
-        .unwrap_or_default();
-    Ok(format!("/policies/{action}{query}"))
-}
-
-fn require_trusted_client_approval(config: McpConfig, tool_name: &str) -> Result<()> {
-    if config.protected_tools_enabled {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "{tool_name} requires a trusted MCP client approval gate; set HUBU_MCP_TRUST_CLIENT_APPROVAL=1 only when the MCP client prompts a human before invoking destructive tools"
-        ))
-    }
-}
-
-fn spend_response_with_approval_hint(mut response: Value) -> Value {
-    let requires_human_approval = response
-        .get("decision")
-        .and_then(Value::as_str)
-        .map(|decision| decision == "needs_approval")
-        .unwrap_or(false);
-    if let Some(object) = response.as_object_mut() {
-        object.insert(
-            "requires_human_approval".to_string(),
-            Value::Bool(requires_human_approval),
-        );
-        if requires_human_approval {
-            object.insert(
-                "approval_reason".to_string(),
-                Value::String(
-                    "policy returned needs_approval; Hubu did not execute payment".to_string(),
-                ),
-            );
-        }
-    }
-    response
-}
-
-fn tool_result(value: Value) -> Value {
-    json!({
-        "content": [
-            {
-                "type": "text",
-                "text": serde_json::to_string_pretty(&value)
-                    .expect("tool response should serialize")
-            }
-        ],
-        "structuredContent": value
+    route_tool_call_v1(params, config.protected_tools_enabled, |request| {
+        request_json(
+            base_url,
+            request.method,
+            &request.path,
+            request.body,
+            request.capability == HubuRequestCapabilityV1::Approval,
+            request.capability == HubuRequestCapabilityV1::Reconciliation,
+        )
     })
-}
-
-fn get_json(base_url: &str, path: &str) -> Result<Value> {
-    request_json(base_url, "GET", path, None, false, false)
-}
-
-fn post_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body), false, false)
-}
-
-fn post_approval_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body), true, false)
-}
-
-fn post_reconciliation_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body), false, true)
 }
 
 fn request_json(
