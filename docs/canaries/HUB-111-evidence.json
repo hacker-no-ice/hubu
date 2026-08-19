@@ -75,6 +75,19 @@
     "review_rounds": 2,
     "unresolved_p0_p1": 0,
     "unresolved_p2_plus": 1,
+    "accepted_lower_priority_findings": [
+      {
+        "id": "HUB-109-P2-packaged-command-environment",
+        "priority": "P2",
+        "status": "accepted-unresolved",
+        "source": "https://github.com/hacker-no-ice/hubu/pull/157#discussion_r3810520311",
+        "summary": "The historical HUB-109 manifest omits packaged-binary environment assignments from two recorded test commands.",
+        "owner": "Hubu product owner through HUB-111",
+        "acceptance_rationale": "This affects copy-paste completeness of the immutable historical NO-GO record, not the reviewed packaged test results, runtime behavior, archive identity, checksum verification, or release smoke conclusions. PR #157 and its commits remain unchanged and are superseded by this fresh evidence record.",
+        "target_release": "main-aa88744c2fde2ed1b1f4ecaa05949422aee41c91",
+        "disposition": "Accepted for the target release; preserve the historical comment and rationale when closing PR #157 as superseded."
+      }
+    ],
     "passed_rows": [
       "package identity and complete catalog except the then-missing immutable release",
       "32-tool packaged golden success/error behavior parity",

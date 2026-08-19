@@ -43,6 +43,13 @@ provider-safety, and documentation checks with zero unresolved P0/P1 findings.
 Its sole non-waivable open gate was the then-absent immutable release. The
 evidence above closes that gate for the unchanged candidate.
 
+The one inherited P2 concerns omitted packaged-binary environment assignments
+in two historical HUB-109 command strings. The manifest records its source,
+owner, acceptance rationale, and exact target release. It affects copy-paste
+completeness, not the reviewed packaged results or this release's identity,
+checksums, provenance, or smoke conclusions, and is accepted unresolved while
+the historical PR and commits remain unchanged.
+
 The rollback release
 [`main-959018f1dacc5e80f60cec209da5a5b360e9f095`](https://github.com/hacker-no-ice/hubu/releases/tag/main-959018f1dacc5e80f60cec209da5a5b360e9f095)
 was rechecked as present with four non-empty archives and `SHA256SUMS`. Preserve
