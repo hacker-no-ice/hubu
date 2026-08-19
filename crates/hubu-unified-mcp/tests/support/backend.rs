@@ -86,7 +86,6 @@ impl BackendStub {
         );
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let state = Arc::new(Mutex::new(StubState {
             disconnect: false,
@@ -105,14 +104,14 @@ impl BackendStub {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        if thread_stop.load(Ordering::Relaxed) {
+                            break;
+                        }
                         let connection_state = thread_state.clone();
                         thread_workers
                             .lock()
                             .unwrap()
                             .push(thread::spawn(move || serve(stream, &connection_state)));
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(2));
                     }
                     Err(error) => panic!("backend stub accept failed: {error}"),
                 }
@@ -202,6 +201,7 @@ impl BackendStub {
 impl Drop for BackendStub {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.endpoint.trim_start_matches("http://"));
         if let Some(thread) = self.thread.take() {
             thread.join().unwrap();
         }

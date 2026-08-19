@@ -216,7 +216,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
 }
 
 #[test]
-fn unified_approval_profile_matches_the_standalone_adapter() {
+fn unified_approval_profile_contains_only_callable_continuations() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -224,11 +224,41 @@ fn unified_approval_profile_matches_the_standalone_adapter() {
 
     let response = tool_call(&server, "hubu_client_approval_profile", json!({}), None);
     let profile = &response["result"]["structuredContent"];
-    assert_eq!(profile, &hubu_mcp::approval_profile());
+    let serialized = profile.to_string();
+    assert!(!serialized.contains("hubu_get_spend_approval"));
+    assert!(!serialized.contains("hubu_resolve_spend_approval"));
+    assert_eq!(
+        profile["response_contract"]["agent_action"],
+        "Stop the spend workflow and surface approval_reason plus the structured response to the human."
+    );
     assert_eq!(
         response["result"]["content"][0]["text"],
         serde_json::to_string_pretty(profile).unwrap()
     );
+    let callable = server
+        .list_tools_for_snapshot()
+        .into_iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>();
+    for names in [
+        &profile["client_policy"]["auto_approve_tools"],
+        &profile["client_policy"]["hubu_policy_conditional_tools"],
+        &profile["client_policy"]["prompt_before_call_tools"],
+        &profile["tools"][0]["names"],
+        &profile["tools"][1]["names"],
+        &profile["tools"][2]["names"],
+    ] {
+        for name in names.as_array().unwrap() {
+            assert!(
+                callable.contains(name.as_str().unwrap()),
+                "approval profile advertises unavailable tool {name}"
+            );
+        }
+    }
+    assert!(!profile["response_contract"]["agent_action"]
+        .as_str()
+        .unwrap()
+        .contains("hubu_"));
     assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
 }
 

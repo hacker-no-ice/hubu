@@ -415,6 +415,68 @@ fn call_error(process: &mut McpProcess, id: u64, case: &GoldenCase) -> Value {
     call(process, id, case)
 }
 
+fn contract_normalized_approval_profile(mut standalone: Value) -> Value {
+    let profile = &mut standalone["result"]["structuredContent"];
+    profile["client_policy"]["auto_approve_tools"] = json!([
+        "hubu_health",
+        "hubu_registration_guidance",
+        "hubu_client_approval_profile",
+        "hubu_list_users",
+        "hubu_show_policy",
+        "hubu_export_policy",
+        "hubu_policy_history",
+        "hubu_policy_diff",
+        "hubu_show_spending_targets",
+        "hubu_submit_spend",
+        "hubu_authorize_spend",
+        "hubu_list_agents",
+        "hubu_list_budgets",
+        "hubu_list_ledger",
+        "hubu_get_executor_claim",
+        "hubu_list_claims_requiring_reconciliation"
+    ]);
+    profile["client_policy"]["hubu_policy_conditional_tools"] =
+        json!(["hubu_submit_spend", "hubu_authorize_spend"]);
+    profile["client_policy"]["prompt_before_call_tools"] = json!([
+        "hubu_register_human",
+        "hubu_register_agent",
+        "hubu_add_policy",
+        "hubu_apply_policy",
+        "hubu_create_budget",
+        "hubu_create_recurring_budget",
+        "hubu_revoke_budget",
+        "hubu_replace_budget",
+        "hubu_set_spending_target",
+        "hubu_revoke_spending_target",
+        "hubu_reconcile_vendor_billed_claim",
+        "hubu_reconcile_vendor_did_not_bill_claim"
+    ]);
+    profile["tools"][0]["names"] = json!([
+        "hubu_health",
+        "hubu_registration_guidance",
+        "hubu_client_approval_profile",
+        "hubu_list_users",
+        "hubu_show_policy",
+        "hubu_export_policy",
+        "hubu_policy_history",
+        "hubu_policy_diff",
+        "hubu_show_spending_targets",
+        "hubu_list_agents",
+        "hubu_list_budgets",
+        "hubu_list_ledger",
+        "hubu_get_executor_claim",
+        "hubu_list_claims_requiring_reconciliation"
+    ]);
+    profile["tools"][1]["names"] = json!(["hubu_submit_spend", "hubu_authorize_spend"]);
+    profile["tools"][2]["names"] = profile["client_policy"]["prompt_before_call_tools"].clone();
+    profile["response_contract"]["agent_action"] = json!(
+        "Stop the spend workflow and surface approval_reason plus the structured response to the human."
+    );
+    standalone["result"]["content"][0]["text"] =
+        json!(serde_json::to_string_pretty(profile).unwrap());
+    standalone
+}
+
 fn configure_success(case: &GoldenCase, unified: &BackendStub, standalone: &BackendStub) {
     if case.name == "hubu_client_approval_profile" {
         return;
@@ -490,6 +552,8 @@ fn all_mapped_tools_have_golden_success_and_error_parity() {
     gongbu.initialize();
 
     let mut id = 10;
+    let mut raw_success_comparisons = 0;
+    let mut raw_error_comparisons = 0;
     for case in &cases {
         let (unified_backend, standalone_backend, standalone) = match case.owner {
             Owner::Hubu => (&unified_hubu, &standalone_hubu, &mut hubu),
@@ -498,20 +562,31 @@ fn all_mapped_tools_have_golden_success_and_error_parity() {
         configure_success(case, unified_backend, standalone_backend);
         let expected = call(standalone, id, case);
         let actual = call(&mut unified, id, case);
-        assert_eq!(
-            actual,
-            expected,
-            "{} success parity; unified requests: {:?}; standalone requests: {:?}",
-            case.name,
-            unified_backend.requests(),
-            standalone_backend.requests()
-        );
+        if case.name == "hubu_client_approval_profile" {
+            let normalized = contract_normalized_approval_profile(expected.clone());
+            assert_ne!(
+                normalized, expected,
+                "profile must remain an explicit exception"
+            );
+            assert_eq!(actual, normalized, "approval profile contract projection");
+        } else {
+            assert_eq!(
+                actual,
+                expected,
+                "{} success parity; unified requests: {:?}; standalone requests: {:?}",
+                case.name,
+                unified_backend.requests(),
+                standalone_backend.requests()
+            );
+            raw_success_comparisons += 1;
+        }
         id += 1;
 
         configure_error(case, unified_backend, standalone_backend);
         let expected = call_error(standalone, id, case);
         let actual = call_error(&mut unified, id, case);
         assert_eq!(actual, expected, "{} error parity", case.name);
+        raw_error_comparisons += 1;
         match case.owner {
             Owner::Hubu => assert!(
                 expected.get("error").is_some(),
@@ -526,6 +601,8 @@ fn all_mapped_tools_have_golden_success_and_error_parity() {
         }
         id += 1;
     }
+    assert_eq!(raw_success_comparisons, 31);
+    assert_eq!(raw_error_comparisons, 32);
 
     unified.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
     hubu.finish(&["hub107-hubu-standalone-credential"]);
