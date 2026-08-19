@@ -135,20 +135,34 @@ fn is_approved_hubu_http_route(method: &str, path: &str) -> bool {
 
 fn unified_approval_profile() -> Value {
     let mut profile = hubu_mcp::approval_profile();
-    for pointer in [
-        "/client_policy/auto_approve_tools",
-        "/client_policy/prompt_before_call_tools",
-        "/client_policy/hubu_policy_conditional_tools",
-        "/tools/0/names",
-        "/tools/1/names",
-        "/tools/2/names",
-    ] {
-        profile
-            .pointer_mut(pointer)
-            .and_then(Value::as_array_mut)
-            .expect("standalone approval profile contract contains tool names")
-            .retain(|name| name.as_str().is_some_and(is_approved_hubu_tool));
-    }
+    let definitions = hubu_mcp::tool_definitions()
+        .into_iter()
+        .filter(|tool| tool["name"].as_str().is_some_and(is_approved_hubu_tool))
+        .collect::<Vec<_>>();
+    let names_matching = |client_mode: &str, runtime_approval: Option<&str>| {
+        definitions
+            .iter()
+            .filter(|tool| {
+                tool["annotations"]["x_hubu_client_approval_mode"] == client_mode
+                    && runtime_approval.is_none_or(|runtime| {
+                        tool["annotations"]["x_hubu_runtime_approval"] == runtime
+                    })
+            })
+            .map(|tool| tool["name"].clone())
+            .collect::<Vec<_>>()
+    };
+    profile["client_policy"]["auto_approve_tools"] = json!(names_matching("auto", None));
+    profile["client_policy"]["prompt_before_call_tools"] =
+        json!(names_matching("prompt_before_call", None));
+    profile["client_policy"]["hubu_policy_conditional_tools"] =
+        json!(names_matching("auto", Some("hubu_policy_needs_approval")));
+    profile["tools"][0]["names"] = json!(names_matching("auto", Some("none")));
+    profile["tools"][1]["names"] =
+        json!(names_matching("auto", Some("hubu_policy_needs_approval")));
+    profile["tools"][2]["names"] = json!(names_matching(
+        "prompt_before_call",
+        Some("client_human_approval_required")
+    ));
     profile["response_contract"]["agent_action"] = json!(
         "Stop the spend workflow and surface approval_reason plus the structured response to the human."
     );
@@ -1319,6 +1333,42 @@ mod tests {
             response["result"]["content"][0]["text"],
             serde_json::to_string_pretty(profile).unwrap()
         );
+        let prompt_before_call = profile["client_policy"]["prompt_before_call_tools"]
+            .as_array()
+            .unwrap();
+        for protected in [
+            "hubu_revoke_budget",
+            "hubu_replace_budget",
+            "hubu_set_spending_target",
+            "hubu_revoke_spending_target",
+        ] {
+            assert!(prompt_before_call.iter().any(|name| name == protected));
+            assert!(profile["tools"][2]["names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|name| name == protected));
+        }
+        for tool in hubu_mcp::tool_definitions()
+            .into_iter()
+            .filter(|tool| tool["name"].as_str().is_some_and(is_approved_hubu_tool))
+        {
+            let name = &tool["name"];
+            let client_mode = &tool["annotations"]["x_hubu_client_approval_mode"];
+            let expected_group = if client_mode == "prompt_before_call" {
+                &profile["tools"][2]["names"]
+            } else if tool["annotations"]["x_hubu_runtime_approval"] == "hubu_policy_needs_approval"
+            {
+                &profile["tools"][1]["names"]
+            } else {
+                &profile["tools"][0]["names"]
+            };
+            assert!(expected_group
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|candidate| candidate == name));
+        }
         assert!(
             matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
         );
