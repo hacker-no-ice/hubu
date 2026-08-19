@@ -41,6 +41,7 @@ jobs:
         run: cargo test --workspace --all-targets --locked
 
       - name: Build all production binaries with locked dependencies
+        if: github.event_name == 'push'
         run: >-
           cargo build --release --locked
           --bin hubu
