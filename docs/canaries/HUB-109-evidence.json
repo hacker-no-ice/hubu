@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "issue": "HUB-109",
+  "recorded_at": "2026-08-18T23:07:47-07:00",
+  "decision": "NO-GO",
+  "candidate": {
+    "source_commit": "aa88744c2fde2ed1b1f4ecaa05949422aee41c91",
+    "origin_main_at_start": "aa88744c2fde2ed1b1f4ecaa05949422aee41c91",
+    "product_version": "0.1.0-main.aa88744c2fde",
+    "executor_contract": "hubu-spend-executor-v4.2",
+    "includes": {
+      "HUB-107": "66f6894",
+      "HUB-106": "fdc2bbecc0eee3402892fce6046262a14b916bc9",
+      "HUB-108": "aa88744c2fde2ed1b1f4ecaa05949422aee41c91"
+    }
+  },
+  "required_release": {
+    "expected_tag": "main-aa88744c2fde2ed1b1f4ecaa05949422aee41c91",
+    "expected_url": "https://github.com/hacker-no-ice/hubu/releases/tag/main-aa88744c2fde2ed1b1f4ecaa05949422aee41c91",
+    "status": "missing",
+    "verification": "git ls-remote returned no matching tag",
+    "required_assets": [
+      "SHA256SUMS",
+      "hubu-0.1.0-main.aa88744c2fde-x86_64-unknown-linux-gnu.tar.gz",
+      "hubu-0.1.0-main.aa88744c2fde-aarch64-unknown-linux-gnu.tar.gz",
+      "hubu-0.1.0-main.aa88744c2fde-x86_64-apple-darwin.tar.gz",
+      "hubu-0.1.0-main.aa88744c2fde-aarch64-apple-darwin.tar.gz"
+    ],
+    "required_smoke_jobs": 4
+  },
+  "local_artifact": {
+    "qualifying_immutable_release": false,
+    "target": "aarch64-apple-darwin",
+    "archive": "hubu-0.1.0-main.aa88744c2fde-aarch64-apple-darwin.tar.gz",
+    "sha256": "9155ffc4e3568deab3440a0c2c05933127fd62c79b61a8b91b5a3e64fe4a5aa6",
+    "binary_sha256": {
+      "hubu": "76ebbf1aed1a40d0731bca36b09d5588de8a349086349a883f45778b8998c49b",
+      "hubu-server": "78bb4c647a82ac5c2399cc0c995b8b48d1ccd9e3014d5c801b4c577e163dfc2f",
+      "hubu-unified-mcp": "7ace50bc123a009f94e2cf3d2c9fc941689f2916356a07503d84967e360a2b29",
+      "hubu-mcp-server": "4143fd9563cd02e1e2a8aa76036de01096d541950037645d847d4366ece729a1",
+      "gongbu-server": "2359b1451917c5062d1ff79b9280ced818e9ff8c36993d020e8e86bd9e0f9d0c",
+      "gongbu-mcp": "50a098aa131a1b57a4c940edd88dcecda32bb08bc2c7d8dee59a7a3449ff6b09"
+    }
+  },
+  "rollback_artifact": {
+    "tag": "main-959018f1dacc5e80f60cec209da5a5b360e9f095",
+    "source_commit": "959018f1dacc5e80f60cec209da5a5b360e9f095",
+    "url": "https://github.com/hacker-no-ice/hubu/releases/tag/main-959018f1dacc5e80f60cec209da5a5b360e9f095",
+    "retention": "indefinite under current policy and at least through HUB-98 removal verification",
+    "archive_sha256": {
+      "aarch64-apple-darwin": "f3dfd6a8b5197e62246485230376378efb705f1e89495bf3b2bf258e1f1da868",
+      "aarch64-unknown-linux-gnu": "4e0a5110cc6270e622f928db21e1285318673cb0f245bdafd72aab176ed0c6d3",
+      "x86_64-apple-darwin": "6566ca4fde5f0a9ca06b2864d62ebcc76db0797378cfb4ec14d936bedd16f568",
+      "x86_64-unknown-linux-gnu": "50a746b207f5636afeabbac19e0c53a8af05ae73a0cca4a75f372dabca4c4ac0"
+    }
+  },
+  "provider_safety": {
+    "provider_credentials_configured": false,
+    "live_provider_calls": 0,
+    "billable_operations": 0,
+    "spend_acknowledgements_configured": false
+  },
+  "evidence": [
+    {"name":"candidate ancestry","result":"PASS","command":"git rev-parse HEAD origin/main; git merge-base --is-ancestor <HUB-106/HUB-107 SHA> HEAD"},
+    {"name":"release build","result":"PASS","command":"cargo build --release --locked --bin hubu --bin hubu-server --bin hubu-unified-mcp --bin hubu-mcp-server --bin gongbu-server --bin gongbu-mcp"},
+    {"name":"packaged archive canary","result":"PASS","command":"scripts/run-unified-mcp-migration-canary.sh <archive> 0.1.0-main.aa88744c2fde aa88744c2fde2ed1b1f4ecaa05949422aee41c91","tests":"13 passed"},
+    {"name":"32-tool packaged golden parity","result":"PASS","command":"cargo test --locked -p hubu-unified-mcp --test golden_parity -- --ignored --nocapture --test-threads=1","tests":"3 passed; 32 success rows and 32 error rows"},
+    {"name":"packaged stdio lifecycle","result":"PASS","command":"cargo test --locked -p hubu-unified-mcp --test stdio_lifecycle -- --nocapture --test-threads=1","tests":"3 passed"},
+    {"name":"locked workspace","result":"PASS","command":"cargo test --workspace --all-targets --locked","tests":"472 passed; 20 ignored, including 2 live-provider tests and 18 separately-run integration tests"},
+    {"name":"format","result":"PASS","command":"cargo fmt --all -- --check"},
+    {"name":"clippy","result":"PASS","command":"cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"},
+    {"name":"MSRV","result":"PASS","command":"cargo +1.88.0 check --workspace --all-targets --all-features --locked"},
+    {"name":"core integration","result":"PASS","command":"scripts/integration-core-flow.sh"},
+    {"name":"executor integration","result":"PASS","command":"scripts/integration-hubu-gongbu-executor.sh","tests":"1 passed"},
+    {"name":"unified routing and failure isolation","result":"PASS","command":"scripts/integration-unified-mcp.sh","tests":"16 passed across golden and end-to-end matrices"},
+    {"name":"persistent terminal failure isolation","result":"PASS","command":"scripts/integration-hub-71-terminal-failure-isolation.sh","tests":"1 passed"},
+    {"name":"four-target packaging","result":"PASS","command":"scripts/test-release-packaging.sh"},
+    {"name":"native archive runtime","result":"PASS","command":"scripts/test-release-archive-runtime.sh 0.1.0-main.aa88744c2fde aa88744c2fde2ed1b1f4ecaa05949422aee41c91"},
+    {"name":"release policy","result":"PASS","command":"python3 scripts/check-release-workflow.py"},
+    {"name":"provider safety","result":"PASS","command":"python3 scripts/check-ci-provider-safety.py"},
+    {"name":"Cargo metadata","result":"PASS","command":"python3 scripts/check-cargo-metadata.py","packages":11},
+    {"name":"workspace boundary","result":"PASS","command":"python3 scripts/check-workspace-boundary.py"},
+    {"name":"credential isolation","result":"PASS","command":"scripts/check-default-credential-ignore.sh"},
+    {"name":"documentation links","result":"PASS","command":"python3 scripts/check-doc-links.py","links":195},
+    {"name":"Rust documentation","result":"PASS","command":"cargo doc --workspace --no-deps --locked"},
+    {"name":"repository security","result":"PASS","command":"cargo deny --all-features check advisories licenses sources"},
+    {"name":"stale operational references","result":"PASS","command":"rg retired Gongbu repository patterns with historical audit and cutover records excluded"},
+    {"name":"immutable published release","result":"FAIL","command":"git ls-remote --tags origin refs/tags/main-aa88744c2fde2ed1b1f4ecaa05949422aee41c91","finding":"Expected tag, four archives, top-level checksums, workflow run, and four smoke jobs are absent"}
+  ],
+  "deviations": [
+    "Workflow dispatch was unavailable because the local GitHub CLI credential and in-app browser session were not authenticated; no release identity or result was invented.",
+    "The local release-mode archive is explicitly non-qualifying and is retained only as reproducible technical evidence."
+  ],
+  "review": {
+    "rounds": 0,
+    "status": "pending pull request review",
+    "unresolved_p0_p1": 0
+  }
+}

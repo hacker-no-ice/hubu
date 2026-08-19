@@ -216,7 +216,23 @@ fn cases() -> Vec<GoldenCase> {
             owner: hubu,
             method: "POST",
             path: "/spend/executor/settle",
-            arguments: json!({}),
+            arguments: json!({
+                "claim_id":"claim-107-billed",
+                "provider_reference":"provider-reference-107",
+                "evidence":"human-reviewed no-spend fixture",
+                "receipt":{
+                    "actual_vendor_cost_cents":0,
+                    "provider_request_id":"provider-request-107",
+                    "price_model_snapshot":{
+                        "provider":"fixture",
+                        "model":"fixture-v1",
+                        "unit_price_cents":0,
+                        "pricing_unit":"request",
+                        "currency":"usd"
+                    },
+                    "artifact_reference":"artifact-107"
+                }
+            }),
             meta: None,
         },
         GoldenCase {
@@ -224,7 +240,11 @@ fn cases() -> Vec<GoldenCase> {
             owner: hubu,
             method: "POST",
             path: "/spend/executor/release",
-            arguments: json!({}),
+            arguments: json!({
+                "claim_id":"claim-107-not-billed",
+                "provider_reference":"provider-reference-107",
+                "evidence":"human-reviewed no-spend fixture"
+            }),
             meta: None,
         },
         GoldenCase {
