@@ -5,7 +5,16 @@ fn main() {
         .nth(1)
         .is_some_and(|argument| matches!(argument.as_str(), "version" | "--version" | "-V"))
     {
-        println!("{}", hubu_unified_mcp::product_version());
+        println!(
+            "{}",
+            serde_json::json!({
+                "product": "hubu-unified-mcp",
+                "product_version": hubu_unified_mcp::product_version(),
+                "source_commit": hubu_unified_mcp::source_commit(),
+                "executor_contract": hubu_unified_mcp::EXECUTOR_CONTRACT_VERSION,
+                "unified_mcp_contract": hubu_unified_mcp::UNIFIED_CONTRACT_VERSION,
+            })
+        );
         return;
     }
 

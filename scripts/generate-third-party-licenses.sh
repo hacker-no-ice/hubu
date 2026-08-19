@@ -17,6 +17,7 @@ active_packages="$(
     -p hubu-cli \
     -p hubu-api \
     -p hubu-mcp \
+    -p hubu-unified-mcp \
     -p gongbu-api \
     -p gongbu-mcp \
     --edges normal \
@@ -32,7 +33,7 @@ shopt -s nullglob
   printf '%s\n' 'Hubu Third-Party Dependency Licenses'
   printf '%s\n' '===================================='
   printf '\nTarget: %s\n' "${target}"
-  printf '%s\n' 'Graph: locked normal dependencies of the five production Hubu and Gongbu binaries'
+  printf '%s\n' 'Graph: locked normal dependencies of the six production Hubu and Gongbu binaries'
 
   while IFS=$'\t' read -r package_name package_version declared_license source manifest_path; do
     package_key="${package_name} v${package_version}"

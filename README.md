@@ -95,7 +95,7 @@ a second Gongbu checkout.
 ## Source, Distribution, and Runtime Boundaries
 
 Hubu and Gongbu share this source repository, product direction, and
-five-binary release archive. Neither the source nor packaging boundary
+six-binary release archive. Neither the source nor packaging boundary
 collapses runtime responsibilities:
 
 - `hubu-server` is the control-plane process. It owns identity, policy, budgets,
@@ -106,14 +106,16 @@ collapses runtime responsibilities:
 - They communicate only through the authenticated, versioned spend-executor
   contract. They do not share a database, credential store, provider execution
   boundary, or failure domain.
-- `hubu-mcp-server` and `gongbu-mcp` remain separate implemented agent-facing
-  surfaces. `hubu-unified-mcp` implements the accepted
+- `hubu-unified-mcp` is the packaged default agent-facing surface.
+  `hubu-mcp-server` and `gongbu-mcp` remain packaged, implemented opt-in
+  compatibility surfaces during the migration window. The unified server
+  implements the accepted
   [unified MCP contract](docs/unified-mcp-contract.md) transport, isolated
   client boundaries, machine-readable health and compatibility reporting, and
   only the contract-approved Hubu governance and Gongbu execution/artifact
   catalogs and forwarding.
   Standalone configuration remains supported until the explicit parity and
-  deprecation gates pass; the unified shell is not yet part of release packaging.
+  deprecation gates pass.
 
 ### Unified MCP server
 
@@ -122,10 +124,12 @@ The unified server can be exercised from the workspace root with
 clients can complete MCP initialization and inspect the capability snapshot.
 Configure each backend independently by setting both variables in its pair:
 
-- Hubu: `HUBU_UNIFIED_HUBU_ENDPOINT` and
-  `HUBU_UNIFIED_HUBU_BEARER_TOKEN`
-- Gongbu: `HUBU_UNIFIED_GONGBU_ENDPOINT` and
-  `HUBU_UNIFIED_GONGBU_BEARER_TOKEN`
+- Hubu: `HUBU_UNIFIED_HUBU_ENDPOINT` and either
+  `HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
+  `HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`
+- Gongbu: `HUBU_UNIFIED_GONGBU_ENDPOINT` and either
+  `HUBU_UNIFIED_GONGBU_BEARER_TOKEN` or
+  `HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE`
 
 Endpoints must be HTTP(S) base URLs without embedded credentials, queries, or
 fragments. Supplying only one variable in a pair leaves that backend
@@ -149,12 +153,14 @@ gate, and the two reconciliation mutations additionally load the distinct
 ### 1. Set Up the Project and Binaries
 
 From the repository root, install `protoc` (required by the Temporal Rust SDK),
-verify the locked workspace, and install the five production binaries:
+verify the locked workspace, and install the six production binaries:
 
 ```sh
 cargo test --workspace --locked
 cargo install --locked --path crates/hubu-cli --bin hubu
 cargo install --locked --path crates/hubu-api --bin hubu-server
+cargo install --locked --path crates/hubu-unified-mcp --bin hubu-unified-mcp
+# Explicit migration-window compatibility surfaces:
 cargo install --locked --path crates/hubu-mcp --bin hubu-mcp-server
 cargo install --locked --path crates/gongbu-api --bin gongbu-server
 cargo install --locked --path crates/gongbu-mcp --bin gongbu-mcp
@@ -279,6 +285,14 @@ HUBU_RECONCILIATION_TOKEN_FILE=~/.hubu/hubu.reconciliation-token \
 hubu-server
 ```
 
+This writes one `[mcp_servers.hubu]` entry that launches `hubu-unified-mcp`.
+To configure Gongbu in that same entry, add `--gongbu-endpoint URL` and
+`--gongbu-token-file FILE`. Existing two-entry `hubu-mcp-server` plus
+`gongbu-mcp` configurations migrate deterministically with
+`hubu init codex --migrate-standalone`. To retain the standalone Hubu adapter
+during the compatibility window, opt in with
+`hubu init codex --compatibility-standalone`.
+
 If the server from step 1 is already running with a different token file,
 restart it with the same auth, approval, and reconciliation token files before restarting Codex. Codex
 should then be able to discover Hubu MCP tools and call spend tools without
@@ -298,19 +312,20 @@ and installation steps, promotion workflow, and rollback/retention policy.
 Here, "stable" describes the version channel and immutable artifact identity;
 it does not approve Hubu for real-money production use.
 
-All five production binaries expose safe build metadata locally, and the Hubu
+All six production binaries expose safe build metadata locally, and the Hubu
 server publishes the same metadata without authentication:
 
 ```sh
 hubu --version
 hubu-server --version
+hubu-unified-mcp --version
 hubu-mcp-server --version
 gongbu-server --version
 gongbu-mcp --version
 curl http://127.0.0.1:8787/version
 ```
 
-Release provenance binds all five production binaries to one product version
+Release provenance binds all six production binaries to one product version
 and source commit. `executor_contract` remains the independently negotiated
 `hubu-spend-executor-v4.2` identifier; sharing source or a release version does
 not change that wire contract.

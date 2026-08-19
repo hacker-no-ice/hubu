@@ -8,6 +8,7 @@ trap 'rm -rf "${test_dir}"' EXIT
 production_binaries=(
   hubu
   hubu-server
+  hubu-unified-mcp
   hubu-mcp-server
   gongbu-server
   gongbu-mcp
@@ -47,6 +48,7 @@ verify_package() {
     hubu
     hubu-mcp-server
     hubu-server
+    hubu-unified-mcp
   )
   actual_files="$(find "${package_dir}" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)"
   expected_listing="$(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort)"
@@ -66,7 +68,9 @@ verify_package() {
      .source_commit == "0000000000000000000000000000000000000000" and
      .executor_contract == "hubu-spend-executor-v4.2" and
      .target == $target and
-     .binaries == ["hubu", "hubu-server", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
+     .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
+     .default_agent_surface == "hubu-unified-mcp" and
+     .compatibility_agent_surfaces == ["hubu-mcp-server", "gongbu-mcp"] and
      .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
     "${package_dir}/MANIFEST.json" >/dev/null
   jq -e \
@@ -78,7 +82,9 @@ verify_package() {
      .executor_contract == "hubu-spend-executor-v4.2" and
      .target == $target and
      .repository == "hacker-no-ice/hubu" and
-     .binaries == ["hubu", "hubu-server", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
+     .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
+     .default_agent_surface == "hubu-unified-mcp" and
+     .compatibility_agent_surfaces == ["hubu-mcp-server", "gongbu-mcp"] and
      .manifest == "MANIFEST.json" and
      .dependencies == "Cargo.lock"' \
     "${package_dir}/PROVENANCE.json" >/dev/null
@@ -129,7 +135,7 @@ fi
 empty_dir="${test_dir}/empty-bin"
 mkdir -p "${empty_dir}"
 cp "${test_dir}/bin/"* "${empty_dir}/"
-: > "${empty_dir}/hubu-mcp-server"
+: > "${empty_dir}/hubu-unified-mcp"
 if "${root_dir}/scripts/package-release-archive.sh" \
   "0.0.0-empty" \
   "0000000000000000000000000000000000000000" \

@@ -84,7 +84,7 @@ Approval behavior:
 
 ## Codex Setup
 
-After installing the `hubu` CLI and `hubu-mcp-server` binary, configure Codex
+After installing the `hubu` CLI and `hubu-unified-mcp` binary, configure Codex
 with:
 
 ```sh
@@ -92,7 +92,7 @@ hubu init codex
 ```
 
 The command writes a managed `[mcp_servers.hubu]` block to
-`~/.codex/config.toml` by default, points it at the local `hubu-mcp-server`
+`~/.codex/config.toml` by default, points it at the local `hubu-unified-mcp`
 executable, creates or reuses a Hubu auth token file, and renders Hubu's generic
 approval profile into Codex per-tool approval overrides. `hubu_authorize_spend`
 and `hubu_submit_spend` can run without an extra Codex approval prompt; Hubu
@@ -114,8 +114,15 @@ hubu init codex --trust-client-approval
 For a custom Codex config or prebuilt MCP server path:
 
 ```sh
-hubu init codex --config ~/.codex/config.toml --mcp-server /path/to/hubu-mcp-server
+hubu init codex --config ~/.codex/config.toml --mcp-server /path/to/hubu-unified-mcp
 ```
+
+Add `--gongbu-endpoint URL --gongbu-token-file FILE` to configure the separate
+Gongbu backend in the same MCP entry. Use `--migrate-standalone` to replace an
+existing `hubu-mcp-server` plus `gongbu-mcp` pair deterministically. The old
+Hubu-only entry remains available by explicit opt-in with
+`--compatibility-standalone`; manually configured `gongbu-mcp` remains supported
+during the same compatibility window.
 
 Leave `--trust-client-approval` off when approval decisions will be resolved
 directly with the Hubu CLI. Enable it when the Codex client is trusted to prompt
@@ -123,10 +130,10 @@ a human before invoking `hubu_resolve_spend_approval` or other protected tools.
 
 ## Manual MCP Setup
 
-For other MCP clients, configure the client to launch:
+For other MCP clients, configure the client to launch the unified surface:
 
 ```sh
-cargo run --bin hubu-mcp-server
+cargo run --bin hubu-unified-mcp
 ```
 
 Then configure the harness from Hubu's MCP metadata:
@@ -142,7 +149,10 @@ Then configure the harness from Hubu's MCP metadata:
 - Prompt before setup/admin tools such as registration, policy changes, and
   spending-target or budget creation.
 
-The MCP server reads `HUBU_URL` and defaults to `http://127.0.0.1:8787`.
+The unified server reads `HUBU_UNIFIED_HUBU_ENDPOINT` plus either
+`HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
+`HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`. The standalone compatibility server
+continues to read `HUBU_URL` and default to `http://127.0.0.1:8787`.
 Protected write tools are disabled unless the MCP process is started with
 `HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. Only set that variable when the MCP client
 is trusted to show a human approval prompt before invoking destructive tools.

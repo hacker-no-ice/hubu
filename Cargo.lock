@@ -997,14 +997,15 @@ dependencies = [
 name = "hubu-unified-mcp"
 version = "0.1.0"
 dependencies = [
- "base64",
  "anyhow",
+ "base64",
  "chrono",
  "hubu-mcp",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 

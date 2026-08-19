@@ -1,7 +1,7 @@
 # Unified Hubu–Gongbu MCP contract
 
-Status: accepted design for `hubu-gongbu-mcp-v1`; routing is not implemented by
-this document.
+Status: implemented as `hubu-gongbu-mcp-v1`; this document remains the routing
+contract rather than an implementation guide.
 
 This document fixes the public names, schemas, ownership, discovery handshake,
 compatibility rules, and standalone-server migration gates for one supported MCP

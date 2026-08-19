@@ -15,7 +15,7 @@ not mean production security, capacity, or payment-rail readiness.
 
 The distribution has two independently visible versions:
 
-- `product_version` identifies all five production binaries. Stable releases
+- `product_version` identifies all six production binaries. Stable releases
   use SemVer tags such as `v0.1.0`; `main` builds use
   `<cargo-version>-main.<12-character-commit>`.
 - `executor_contract` identifies the negotiated external execution protocol.
@@ -63,20 +63,22 @@ money movement.
 
 ## Supported binary targets
 
-Each release contains exactly five production binaries in a target-specific
+Each release contains exactly six production binaries in a target-specific
 archive:
 
 | Binary | Separate runtime responsibility |
 | --- | --- |
 | `hubu` | Human/developer control-plane CLI |
 | `hubu-server` | Hubu control-plane HTTP process, governance database, policy, budgets, claims, settlement, and ledger |
-| `hubu-mcp-server` | Hubu's agent-facing MCP adapter to the control plane |
+| `hubu-unified-mcp` | Default agent-facing MCP router over independently configured Hubu and Gongbu backends |
+| `hubu-mcp-server` | Opt-in compatibility Hubu MCP adapter to the control plane |
 | `gongbu-server` | Gongbu execution-plane HTTP process, database, Temporal worker, provider credentials/calls, artifacts, and recovery |
-| `gongbu-mcp` | Gongbu's separate agent-facing MCP adapter to the execution plane |
+| `gongbu-mcp` | Opt-in compatibility Gongbu MCP adapter to the execution plane |
 
 `hubu-bench` and `gongbu-sandbox` are development tools and are explicitly
-excluded. A shared archive does not merge processes, databases, credentials,
-provider execution, failure domains, or MCP surfaces.
+excluded. A shared archive does not merge backend processes, databases,
+credentials, provider execution, artifacts, or failure domains. The unified MCP
+binary communicates with each backend only through its versioned HTTP contract.
 
 | Platform | Target | Asset suffix |
 | --- | --- | --- |
@@ -86,13 +88,14 @@ provider execution, failure domains, or MCP surfaces.
 | macOS Apple silicon | `aarch64-apple-darwin` | `aarch64-apple-darwin.tar.gz` |
 
 Every archive includes `MANIFEST.json` and `PROVENANCE.json`. Both enumerate the
-five binaries, product version, full source commit, executor contract, and Rust
-target; provenance also records the repository, workflow run, and locked
+six binaries, the default and compatibility agent surfaces, product version,
+full source commit, executor contract, and Rust target; provenance also records
+the repository, workflow run, and locked
 dependency declaration. The archive carries its own `SHA256SUMS` for every
 manifested file plus `LICENSE-MIT`, `LICENSE-APACHE`,
 `THIRD-PARTY-NOTICES.md`, a target-specific `THIRD-PARTY-LICENSES.txt` bundle,
 and the exact `Cargo.lock` dependency inventory. License generation covers the
-locked normal dependency graph of all five production binaries and fails when
+locked normal dependency graph of all six production binaries and fails when
 an included third-party crate lacks license material. The GitHub Release also
 publishes a top-level `SHA256SUMS` covering all four target archives.
 
@@ -117,17 +120,25 @@ provenance before installing:
 package=${asset%.tar.gz}
 cat "$package/PROVENANCE.json"
 cat "$package/MANIFEST.json"
-for binary in hubu hubu-server hubu-mcp-server gongbu-server gongbu-mcp; do
+for binary in hubu hubu-server hubu-unified-mcp hubu-mcp-server gongbu-server gongbu-mcp; do
   "$package/$binary" --version
 done
 install \
   "$package/hubu" \
   "$package/hubu-server" \
+  "$package/hubu-unified-mcp" \
   "$package/hubu-mcp-server" \
   "$package/gongbu-server" \
   "$package/gongbu-mcp" \
   /usr/local/bin/
 ```
+
+Configure the default single agent entry after installation with
+`hubu init codex`. Migrate an existing two-entry configuration deterministically
+with `hubu init codex --migrate-standalone`. The packaged standalone binaries
+remain available only through explicit compatibility configuration such as
+`hubu init codex --compatibility-standalone` or a manually retained
+`gongbu-mcp` entry.
 
 Every binary's reported `product_version` and `source_commit` must match the
 archive provenance. Its `executor_contract` (or Gongbu's equivalent
@@ -151,14 +162,17 @@ gh workflow run release.yml \
 
 The source must be an ancestor of `main`. Promotion reruns formatting, Clippy,
 the locked all-target workspace tests, the core integration flow, packaging
-negative tests, and a locked five-binary release build before creating platform
+negative tests, and a locked six-binary release build before creating platform
 artifacts. Before publication, a deterministic native archive smoke verifies
-the five binaries, starts an isolated `hubu-server`, and initializes the two
-separate MCP adapters without making provider calls or spend requests. After
+the six binaries, starts an isolated `hubu-server`, initializes the unified MCP
+server, verifies default config generation and unified tool discovery, then
+initializes both standalone compatibility adapters without making provider
+calls or spend requests. After
 publication, native runners for all four supported targets download the release,
 verify both checksum layers, manifests, provenance, licenses, notices, lockfile,
-all five `--version` surfaces, Hubu `/health` and `/version`, and both MCP
-initialization surfaces. No smoke test enables provider credentials or spend.
+all six `--version` surfaces, Hubu `/health` and `/version`, unified MCP tool
+discovery, and standalone compatibility initialization. No smoke test enables
+provider credentials or spend.
 HTTP probes use bounded connection and total-request timeouts so an unavailable
 or non-responsive server fails the smoke job promptly.
 
