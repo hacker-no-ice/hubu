@@ -1,8 +1,9 @@
 # MCP Transport
 
-Hubu's MCP transport is a thin stdio adapter over the local `hubu-server` HTTP
-API. It is meant to make Hubu easy for agents to use without moving registration,
-policy, budget, spend, payment, or ledger logic out of the existing server.
+Hubu's default MCP transport is `hubu-unified-mcp`, a thin stdio router over the
+separate Hubu and Gongbu HTTP APIs. It is meant to make both backends easy for
+agents to use without moving governance into the router or moving provider
+execution and artifacts out of Gongbu.
 The MCP server publishes an approval profile so agent harnesses can configure
 tool approvals up front instead of prompting for every spend request.
 
@@ -12,12 +13,14 @@ Run the HTTP server first:
 cargo run --bin hubu-server
 ```
 
-The HTTP server reads `HUBU_AUTH_TOKEN`, or creates/reads `hubu.auth-token` in
-its current directory. The MCP adapter reads `HUBU_AUTH_TOKEN` or the same token
-file and forwards protected HTTP requests with `Authorization: Bearer ...`.
-Use `HUBU_AUTH_TOKEN_FILE` when the server and adapter run from different
-working directories. Approval resolution also uses a separate
-`HUBU_APPROVAL_TOKEN_FILE`; `hubu init codex` creates and configures both.
+The Hubu HTTP server reads `HUBU_AUTH_TOKEN`, or creates/reads
+`hubu.auth-token` in its current directory. The unified router reads
+`HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
+`HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE` and forwards protected Hubu requests with
+that bearer credential. Protected reconciliation additionally uses
+`HUBU_RECONCILIATION_TOKEN` or `HUBU_RECONCILIATION_TOKEN_FILE`.
+`hubu init codex` creates the local capability files and maps the required ones
+into the generated unified entry.
 
 ## Cheatsheet
 
@@ -26,8 +29,12 @@ First install or rebuild the local binaries:
 ```sh
 cargo install --path crates/hubu-cli
 cargo install --path crates/hubu-api
-cargo install --path crates/hubu-mcp
+cargo install --path crates/hubu-unified-mcp
 ```
+
+Unstamped local builds are for development and intentionally fail the unified
+source-commit compatibility check. Use all binaries from one verified release
+archive for an operator migration.
 
 Configure Codex once so agents in any project can discover Hubu MCP tools:
 
@@ -44,8 +51,8 @@ HUBU_RECONCILIATION_TOKEN_FILE=~/.hubu/hubu.reconciliation-token \
 hubu-server
 ```
 
-Then restart Codex. You do not normally start `hubu-mcp-server` yourself; Codex
-starts it from the generated MCP config when a session begins.
+Then restart Codex. You do not normally start `hubu-unified-mcp` yourself;
+Codex starts it from the generated MCP config when a session begins.
 
 Use this mental model:
 
@@ -54,17 +61,17 @@ You start:
   hubu-server
 
 The agent harness starts:
-  hubu-mcp-server
+  hubu-unified-mcp
 
 The agent sees:
-  hubu_* MCP tools
+  hubu_* and configured gongbu_* MCP tools
 
-hubu-mcp-server forwards to:
-  hubu-server
+hubu-unified-mcp forwards independently to:
+  hubu-server and gongbu-server
 ```
 
 Rerun `hubu init codex` after upgrading Hubu when the generated Codex MCP config
-changes. Reinstall `hubu-mcp-server` after MCP server changes so new tool
+changes. Reinstall `hubu-unified-mcp` after MCP server changes so new tool
 metadata, instructions, and approval profiles are available to agent harnesses.
 
 Approval behavior:
@@ -125,6 +132,10 @@ Gongbu settings are absent. The old
 Hubu-only entry remains available by explicit opt-in with
 `--compatibility-standalone`; manually configured `gongbu-mcp` remains supported
 during the same compatibility window.
+
+Follow the [unified MCP migration guide](unified-mcp-migration.md) for the
+supported preflight, exact health interpretation, validation, rollback, and
+compatibility-window behavior.
 
 Leave `--trust-client-approval` off when approval decisions will be resolved
 directly with the Hubu CLI. Enable it when the Codex client is trusted to prompt

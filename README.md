@@ -80,8 +80,8 @@ minimum:
   and the `gongbu-server` and development-only `gongbu-sandbox` binaries
 - `gongbu-build-info`: Gongbu build and compatibility metadata shared by its
   production binaries
-- `gongbu-mcp`: Gongbu's separate agent-facing MCP adapter and `gongbu-mcp`
-  binary
+- `gongbu-mcp`: Gongbu's standalone agent-facing compatibility adapter and
+  `gongbu-mcp` binary
 - `hubu-unified-mcp`: unified MCP server with isolated Hubu and Gongbu health,
   compatibility, and HTTP client boundaries plus the contract-approved Hubu
   governance and Gongbu execution/artifact routes
@@ -153,18 +153,21 @@ gate, and the two reconciliation mutations additionally load the distinct
 ### 1. Set Up the Project and Binaries
 
 From the repository root, install `protoc` (required by the Temporal Rust SDK),
-verify the locked workspace, and install the six production binaries:
+verify the locked workspace, and install the default runtime binaries:
 
 ```sh
 cargo test --workspace --locked
 cargo install --locked --path crates/hubu-cli --bin hubu
 cargo install --locked --path crates/hubu-api --bin hubu-server
 cargo install --locked --path crates/hubu-unified-mcp --bin hubu-unified-mcp
-# Explicit migration-window compatibility surfaces:
-cargo install --locked --path crates/hubu-mcp --bin hubu-mcp-server
 cargo install --locked --path crates/gongbu-api --bin gongbu-server
-cargo install --locked --path crates/gongbu-mcp --bin gongbu-mcp
 ```
+
+These source-install commands are convenient for development, but unstamped
+local builds intentionally fail unified source-commit compatibility. Use one
+verified release archive for an operator migration. Install
+`hubu-mcp-server` and `gongbu-mcp` only when testing the explicit
+migration-window compatibility or rollback path.
 
 Start the local Hubu server:
 
@@ -300,7 +303,9 @@ restart it with the same auth, approval, and reconciliation token files before r
 should then be able to discover Hubu MCP tools and call spend tools without
 holding wallet credentials. For other MCP clients, use Hubu's tool annotations
 or `hubu_client_approval_profile`; see
-[docs/mcp-transport.md](docs/mcp-transport.md).
+[docs/mcp-transport.md](docs/mcp-transport.md). The
+[unified MCP migration guide](docs/unified-mcp-migration.md) provides the full
+preflight, migration, validation, compatibility-window, and rollback procedure.
 
 ## Releases
 
@@ -439,10 +444,10 @@ hubu ledger --help
 
 ## MCP Transport
 
-Hubu exposes agent-facing tools through a thin MCP stdio adapter over the local
-HTTP API. Any MCP-compatible harness can launch `hubu-mcp-server`, inspect the
-tool annotations, and apply Hubu's approval profile. Codex users can generate
-that setup with:
+Hubu exposes one default agent-facing surface through `hubu-unified-mcp`, a
+stdio router over the independently operated Hubu and Gongbu HTTP APIs. Any
+MCP-compatible harness can inspect its tool annotations and capability snapshot.
+Codex users can generate that setup with:
 
 ```sh
 hubu init codex
@@ -456,7 +461,9 @@ tools after the client shows a human approval prompt. If policy returns
 `needs_approval`, the MCP response reports that no payment was executed.
 
 See [docs/mcp-transport.md](docs/mcp-transport.md) for install details,
-approval profiles, manual MCP setup, and the current tool map.
+approval profiles, manual MCP setup, and the current tool map, and see
+[docs/unified-mcp-migration.md](docs/unified-mcp-migration.md) for migration,
+validation, compatibility-window behavior, and rollback.
 
 ## Policy Engine
 
@@ -518,7 +525,10 @@ the hold lifecycle, and CLI examples.
   orchestration and ledger recording flow
 - [docs/mcp-transport.md](docs/mcp-transport.md): MCP stdio transport adapter
   and approval boundaries
+- [docs/unified-mcp-migration.md](docs/unified-mcp-migration.md): unified MCP
+  migration, validation, compatibility window, and rollback
 - [docs/gongbu/README.md](docs/gongbu/README.md): Gongbu execution-plane design,
-  operator configuration, persistent runtime, sandbox, and separate MCP adapter
+  operator configuration, persistent runtime, sandbox, and standalone MCP
+  compatibility adapter
 - [docs/notes/](docs/notes/): non-normative planning, improvement, and handoff
   notes

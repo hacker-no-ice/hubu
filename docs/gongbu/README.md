@@ -248,6 +248,7 @@ cargo build --release --locked --bin gongbu-server --bin gongbu-mcp
 ```
 
 Use `cargo test --workspace --locked` before repository-wide changes. The
-production `gongbu-server` and `gongbu-mcp` binaries remain separate runtime
-processes and ship in the Hubu release archive; `gongbu-sandbox` remains a
-development-only binary.
+production `gongbu-server` and compatibility `gongbu-mcp` binaries remain
+separate runtime processes and ship in the Hubu release archive. The default
+agent surface is `hubu-unified-mcp`; `gongbu-mcp` is an explicit migration-window
+compatibility path. `gongbu-sandbox` remains a development-only binary.

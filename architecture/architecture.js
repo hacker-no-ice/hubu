@@ -4,7 +4,7 @@ const sharedLinks = {
   appSpend: ["Spend approval service", "crates/hubu-core/src/app/spend_approval.rs"],
   appClaims: ["Executor claim service", "crates/hubu-core/src/app/executor_claim.rs"],
   cli: ["CLI", "crates/hubu-cli/src/main.rs"],
-  mcp: ["MCP adapter", "crates/hubu-mcp/src/lib.rs"],
+  mcp: ["Standalone Hubu MCP compatibility adapter", "crates/hubu-mcp/src/lib.rs"],
   operationKeySkill: ["Operation-key skill", "skills/generate-hubu-operation-key/SKILL.md"],
   operationKeyHelper: ["Operation-key helper", "skills/generate-hubu-operation-key/scripts/operation_keys.py"],
   common: ["Shared models", "crates/hubu-common/src/lib.rs"],
@@ -42,8 +42,9 @@ const sharedLinks = {
   gongbuProvider: ["Gongbu provider boundary", "crates/gongbu-api/src/provider/mod.rs"],
   gongbuHubu: ["Gongbu Hubu client", "crates/gongbu-api/src/hubu/mod.rs"],
   gongbuMcp: ["Gongbu MCP adapter", "crates/gongbu-mcp/src/lib.rs"],
-  unifiedMcp: ["Unified MCP shell", "crates/hubu-unified-mcp/src/lib.rs"],
+  unifiedMcp: ["Unified MCP router", "crates/hubu-unified-mcp/src/lib.rs"],
   unifiedMcpContract: ["Unified MCP contract", "docs/unified-mcp-contract.md"],
+  unifiedMcpMigration: ["Unified MCP migration", "docs/unified-mcp-migration.md"],
   gongbuConfig: ["Gongbu server example", "examples/gongbu/gongbu.server.json"],
 };
 
@@ -53,74 +54,66 @@ const components = {
     kind: "Overview",
     viewBox: "0 0 1440 900",
     copy:
-      "Hubu and Gongbu share one source repository, locked workspace, and five-binary release archive. Their binaries remain separate at runtime: Hubu governs spend in the control plane, while Gongbu executes provider work across an authenticated contract.",
+      "Agents use one default MCP surface. The router reaches independently operated Hubu and Gongbu HTTP processes with separate credentials; shared source and packaging do not merge their storage, provider work, artifacts, or failure domains.",
     responsibilities: [
       "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, approve or deny pending spend, review protected actions, and reconcile uncertain expired claims.",
-      "Agents discover Hubu through configured MCP tools; trusted client metadata supplies operation and optional task identity outside model-authored arguments, while pending spend waits for a durable human approve-or-deny result.",
+      "Agents discover Hubu governance and Gongbu execution/artifact tools through one `hubu-unified-mcp` process; trusted client metadata supplies operation and optional task identity outside model-authored arguments.",
       "For local dogfooding, a repository Codex skill allocates a model-managed operation key once, binds it to immutable spend scope, and persists recovery state outside the Hubu server.",
-      "The CLI and MCP adapter are part of broader Hubu, but they are not the Hubu server.",
+      "The CLI and unified MCP router are client surfaces, not either backend server.",
       "Local HTTP callers reach the API with the Hubu bearer token before protected routes resolve user authority.",
       "Hubu resolves typed provider, executor, capability, and billing identities against its trusted catalog before policy evaluation and binds the canonical scope to authorization.",
-      "Release archives contain all five production binaries under one product version and source provenance identity.",
+      "Release archives contain all six production binaries under one product version and source provenance identity; standalone MCP adapters remain opt-in compatibility surfaces.",
       "Gongbu exclusively claims, then settles actual vendor cost with receipt metadata or releases active authorized spend without Hubu performing provider work; expired uncertainty returns to a human decision.",
       "The API handles local HTTP concerns and delegates spend approval, payment, and executor claim lifecycle orchestration to core app services.",
       "Gongbu owns its process, database, Temporal workflow state, vendor credentials, provider adapters, model calls, artifacts, retries, and failure domain; Hubu stores only governance state and compact provider/artifact references.",
       "SQLite-backed records preserve users, agents, advisory spending targets, budgets, policies, executor claims and receipts, reconciliation evidence, payments, and ledger entries.",
-      "The unified MCP surface routes the approved Hubu governance and Gongbu execution/artifact tools through independently configured backend clients; the standalone adapters remain supported until parity and deprecation gates pass.",
+      "The unified MCP surface routes the approved Hubu governance and Gongbu execution/artifact tools through independently configured backend clients; standalone adapters remain supported only as explicit compatibility choices until the migration gates pass.",
     ],
-    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp, sharedLinks.unifiedMcp, sharedLinks.unifiedMcpContract, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.scopeModel],
+    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.unifiedMcp, sharedLinks.unifiedMcpContract, sharedLinks.unifiedMcpMigration, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.scopeModel],
     zones: [
-      { label: "One source repository + locked workspace", x: 310, y: 24, w: 1070, h: 846 },
-      { label: "Hubu control-plane process", x: 650, y: 48, w: 730, h: 802, labelX: 692, labelY: 88 },
-      { label: "Gongbu execution-plane process", x: 326, y: 738, w: 292, h: 112, labelY: 766 },
+      { label: "Hubu control-plane process + owned state", x: 650, y: 48, w: 730, h: 366, labelX: 682, labelY: 84 },
+      { label: "Gongbu execution-plane process + owned state", x: 650, y: 484, w: 730, h: 366, labelX: 682, labelY: 520 },
     ],
     nodes: [
-      { id: "human", label: "Human owner", sub: "funds + decisions", x: 48, y: 112, w: 212, h: 100, tone: "human" },
-      { id: "agent", label: "AI agent", sub: "spend requests", x: 48, y: 404, w: 212, h: 100, tone: "agent" },
-      { id: "cli", label: "Hubu CLI", sub: "developer commands", x: 350, y: 116, w: 218, h: 96, tone: "surface" },
-      { id: "operationKeys", label: "Operation-key skill", sub: "local recipe + SQLite", x: 350, y: 306, w: 218, h: 90, tone: "data", path: "skills/generate-hubu-operation-key/SKILL.md" },
-      { id: "mcp", label: "MCP adapter", sub: "agent tools", x: 350, y: 438, w: 218, h: 96, tone: "surface" },
-      { id: "release", label: "Release artifacts", sub: "pinned + checksummed", x: 350, y: 606, w: 218, h: 96, tone: "surface" },
-      { id: "api", label: "Local HTTP API", sub: "routes + auth", x: 720, y: 214, w: 226, h: 104, tone: "core" },
-      { id: "app", label: "App services", sub: "approval + claims", x: 720, y: 444, w: 226, h: 104, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },
-      { id: "gongbu", label: "Gongbu server", sub: "separate executor", x: 350, y: 778, w: 242, h: 64, tone: "executor", path: "crates/gongbu-api/src/bin/gongbu-server.rs" },
-      { id: "registration", label: "Registration", sub: "identity + sessions", x: 1080, y: 102, w: 244, h: 94, tone: "core" },
-      { id: "policy", label: "Policy resources", sub: "revisions + evaluation", x: 1080, y: 248, w: 244, h: 94, tone: "core" },
-      { id: "budget", label: "Budgets + targets", sub: "warn + reserve", x: 1080, y: 449, w: 244, h: 94, tone: "core" },
-      { id: "payment", label: "Payment manager", sub: "rail boundary", x: 1080, y: 580, w: 244, h: 94, tone: "wallet" },
-      { id: "ledger", label: "SQLite ledger", sub: "double-entry audit", x: 1080, y: 730, w: 244, h: 96, tone: "data" },
+      { id: "human", label: "Human owner", sub: "setup + decisions", x: 42, y: 108, w: 212, h: 100, tone: "human" },
+      { id: "agent", label: "AI agent", sub: "one MCP connection", x: 42, y: 380, w: 212, h: 100, tone: "agent" },
+      { id: "cli", label: "Hubu CLI", sub: "human/admin surface", x: 340, y: 110, w: 230, h: 96, tone: "surface" },
+      { id: "mcp", label: "Unified MCP", sub: "default agent surface", x: 340, y: 382, w: 230, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
+      { id: "release", label: "Release artifacts", sub: "six pinned binaries", x: 340, y: 708, w: 230, h: 96, tone: "surface" },
+      { id: "api", label: "Hubu HTTP API", sub: "Hubu bearer", x: 706, y: 132, w: 226, h: 104, tone: "core" },
+      { id: "app", label: "Governance services", sub: "policy + budgets + claims", x: 1010, y: 132, w: 250, h: 104, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },
+      { id: "ledger", label: "Hubu SQLite", sub: "governance + ledger", x: 1010, y: 286, w: 250, h: 96, tone: "data", path: "crates/hubu-core/src/storage.rs" },
+      { id: "gongbu", label: "Gongbu HTTP API", sub: "distinct caller capability", x: 706, y: 570, w: 226, h: 104, tone: "executor", path: "crates/gongbu-api/src/http/mod.rs" },
+      { id: "workflow", label: "Provider execution", sub: "workflow + adapters", x: 1010, y: 548, w: 250, h: 104, tone: "executor", path: "crates/gongbu-api/src/workflow.rs" },
+      { id: "gongbuData", label: "Gongbu state", sub: "SQLite + artifacts + credentials", x: 1010, y: 716, w: 250, h: 96, tone: "data", path: "crates/gongbu-api/src/application.rs" },
     ],
     edges: [
-      ["human", "cli", "approve/deny/reconcile", { labelDy: -56 }],
-      ["agent", "operationKeys", "begin/reuse", { fromSide: "right", toSide: "left", waypoints: [{ x: 302, y: 454 }, { x: 302, y: 351 }], labelSegment: 1, labelDx: -28 }],
-      ["operationKeys", "mcp", "operation key", { labelDx: 176 }],
-      ["cli", "api", "token", { fromSide: "right", toSide: "top", waypoints: [{ x: 650, y: 164 }, { x: 650, y: 190 }, { x: 833, y: 190 }], labelSegment: 2 }],
-      ["mcp", "api", "token", { fromSide: "right", toSide: "left", waypoints: [{ x: 620, y: 486 }, { x: 620, y: 266 }], labelSegment: 1 }],
-      ["agent", "gongbu", "work + token", { fromSide: "bottom", toSide: "left", waypoints: [{ x: 154, y: 810 }], labelSegment: 0 }],
-      ["gongbu", "api", "canonical scope + claim/receipt", { fromSide: "right", toSide: "bottom", waypoints: [{ x: 690, y: 810 }, { x: 690, y: 350 }, { x: 833, y: 350 }], labelSegment: 1 }],
-      ["api", "registration", "register", { fromSide: "right", toSide: "left", waypoints: [{ x: 1000, y: 266 }, { x: 1000, y: 149 }], labelSegment: 1 }],
-      ["api", "app", "dispatch"],
-      ["app", "policy", "evaluate", { fromSide: "top", toSide: "left", waypoints: [{ x: 970, y: 444 }, { x: 970, y: 295 }], labelSegment: 1 }],
-      ["app", "budget", "reserve/settle"],
-      ["app", "payment", "submit payment", { fromSide: "bottom", toSide: "left", waypoints: [{ x: 970, y: 548 }, { x: 970, y: 627 }], labelSegment: 1 }],
-      ["payment", "ledger", "ledger"],
-      ["budget", "ledger", "audit", { fromSide: "right", toSide: "right", waypoints: [{ x: 1360, y: 451 }, { x: 1360, y: 778 }], labelSegment: 1 }],
+      ["human", "cli", "operate"],
+      ["agent", "mcp", "initialize + tools"],
+      ["cli", "api", "Hubu credential"],
+      ["mcp", "api", "hubu_* + Hubu credential", { fromSide: "right", toSide: "left", waypoints: [{ x: 610, y: 430 }, { x: 610, y: 184 }], labelSegment: 1, labelDx: 34 }],
+      ["mcp", "gongbu", "gongbu_* + Gongbu credential", { fromSide: "right", toSide: "left", waypoints: [{ x: 610, y: 430 }, { x: 610, y: 622 }], labelSegment: 1, labelDx: 42 }],
+      ["api", "app", "govern"],
+      ["app", "ledger", "persist"],
+      ["gongbu", "workflow", "execute"],
+      ["workflow", "gongbuData", "own state + artifacts"],
+      ["gongbu", "api", "versioned executor contract", { fromSide: "top", toSide: "bottom", waypoints: [{ x: 819, y: 458 }, { x: 819, y: 430 }], labelSegment: 1, labelDx: 150 }],
     ],
   },
   release: {
     title: "Immutable Releases",
     kind: "Component",
     copy:
-      "The release workflow turns one exact main commit into target-specific archives containing all five production binaries from the unified workspace.",
+      "The release workflow turns one exact main commit into target-specific archives containing all six production binaries from the unified workspace.",
     responsibilities: [
       "Creates a commit-addressed prerelease for each eligible main build and accepts explicit stable SemVer promotion for an exact main revision.",
       "Runs formatting, Clippy, workspace tests, the core integration flow, and locked release builds before publication.",
-      "Builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, hubu-mcp-server, gongbu-server, gongbu-mcp, licenses, notices, the lockfile, manifest, and per-target provenance.",
+      "Builds native Linux and macOS archives for x86-64 and ARM64 with hubu, hubu-server, hubu-unified-mcp, hubu-mcp-server, gongbu-server, gongbu-mcp, licenses, notices, the lockfile, manifest, and per-target provenance.",
       "Preserves separate Hubu and Gongbu runtime boundaries while sharing one product version and source provenance identity.",
-      "Publishes SHA-256 checksums without overwriting existing tags or assets, then smoke-tests downloads, legal files, manifests, startup, MCP initialization, and all five version surfaces.",
+      "Publishes SHA-256 checksums without overwriting existing tags or assets, then smoke-tests downloads, legal files, manifests, startup, unified and compatibility MCP initialization, and all six version surfaces.",
       "Keeps the Hubu product version separate from the hubu-spend-executor-v4.2 contract identifier so consumers can negotiate compatibility explicitly.",
     ],
-    links: [sharedLinks.releaseWorkflow, sharedLinks.releases, sharedLinks.common, sharedLinks.api, sharedLinks.cli, sharedLinks.mcp, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp],
+    links: [sharedLinks.releaseWorkflow, sharedLinks.releases, sharedLinks.common, sharedLinks.api, sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.mcp, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp],
     nodes: [
       { id: "source", label: "Exact main commit", sub: "40-character SHA", x: 62, y: 224, w: 210, h: 92, tone: "data" },
       { id: "checks", label: "Release gates", sub: "fmt + lint + tests", x: 352, y: 224, w: 210, h: 92, tone: "core" },
@@ -468,10 +461,11 @@ const components = {
     ],
   },
   mcp: {
-    title: "MCP Surfaces",
+    title: "Unified MCP Surface",
     kind: "Interface",
+    viewBox: "0 0 1280 760",
     copy:
-      "The Hubu and Gongbu stdio adapters stay separate. The unified server probes isolated backends, publishes router-owned capability diagnostics, and routes the approved Hubu governance and Gongbu execution/artifact tools over their authenticated versioned interfaces.",
+      "The agent harness launches one default stdio server. That router probes and calls two isolated HTTP backends through separate clients and credentials; it owns discovery and routing, not governance, provider execution, storage, or artifacts.",
     responsibilities: [
       "The unified server implements initialize, ping, tools/list, tools/call, startup validation, machine-readable capability snapshots, redacted backend-state errors, and graceful EOF shutdown over JSON-RPC stdio.",
       "Configures separate Hubu and Gongbu endpoints, bearer credentials, bounded HTTP clients, and independently probed versioned adapter boundaries without cross-domain Cargo dependencies.",
@@ -483,7 +477,7 @@ const components = {
       "Uses only fixed Hubu routes and the Hubu credential, keeps the trusted client approval gate, and sends the separate reconciliation capability only on the two reconciliation mutations.",
       "Rejects unknown and out-of-map tool calls before domain network access, never falls back across backends, never retries ambiguous mutations, and sanitizes backend outages.",
       "Preserves independent failure domains without fallback, queuing, or cross-boundary retries; backend transport and application failures retain their standalone MCP contracts.",
-      "Can be wired into Codex by `hubu init codex` so agents outside the Hubu repository see Hubu tools at session startup.",
+      "Is the default surface written by `hubu init codex`; `hubu-mcp-server` and `gongbu-mcp` remain opt-in compatibility and rollback binaries during the migration window.",
       "Publishes a generic client approval profile so any harness can auto-approve reads and spend submission but prompt before resolving a needs_approval decision.",
       "Uses Codex per-tool approval overrides as one rendering of that profile while leaving Hubu policy responsible for creating needs_approval outcomes.",
       "Annotates tools with read-only, destructive, idempotent, open-world, and Hubu approval hints.",
@@ -491,17 +485,30 @@ const components = {
       "Leaves durable operation-key allocation and recovery to the client platform and HUB-31.",
       "Loads the local Hubu bearer and owner capability tokens, returns durable approval status, and protects approve-or-deny with both the trusted client gate and server-verified approval capability.",
     ],
-    links: [sharedLinks.mcp, sharedLinks.gongbuMcp, sharedLinks.unifiedMcp, sharedLinks.unifiedMcpContract, ["MCP transport doc", "docs/mcp-transport.md"], sharedLinks.api],
+    links: [sharedLinks.unifiedMcp, sharedLinks.unifiedMcpContract, sharedLinks.unifiedMcpMigration, ["MCP transport doc", "docs/mcp-transport.md"], sharedLinks.api, sharedLinks.gongbuApplication, sharedLinks.mcp, sharedLinks.gongbuMcp],
+    zones: [
+      { label: "hubu-unified-mcp process", x: 286, y: 44, w: 596, h: 670 },
+      { label: "Hubu process + failure domain", x: 940, y: 44, w: 292, h: 280 },
+      { label: "Gongbu process + failure domain", x: 940, y: 434, w: 292, h: 280 },
+    ],
     nodes: [
-      { id: "agent", label: "Agent client", sub: "args + trusted metadata", x: 78, y: 134, w: 220, h: 92, tone: "agent" },
-      { id: "tools", label: "Unified router", sub: "28 Hubu + 4 Gongbu", x: 430, y: 134, w: 230, h: 92, tone: "core", path: "crates/hubu-unified-mcp/src/lib.rs" },
-      { id: "approval", label: "Hubu API", sub: "governance boundary", x: 430, y: 356, w: 230, h: 92, tone: "human", path: "crates/hubu-api/src/lib.rs" },
-      { id: "api", label: "Gongbu API", sub: "execution + artifacts", x: 802, y: 244, w: 220, h: 92, tone: "executor", path: "crates/hubu-unified-mcp/src/gongbu/mod.rs" },
+      { id: "agent", label: "Agent harness", sub: "one stdio connection", x: 30, y: 318, w: 210, h: 96, tone: "agent" },
+      { id: "tools", label: "Static router", sub: "28 Hubu + 4 Gongbu", x: 330, y: 118, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
+      { id: "capability", label: "Capability snapshot", sub: "isolated health + compatibility", x: 330, y: 520, w: 200, h: 96, tone: "core", path: "crates/hubu-unified-mcp/src/capability.rs" },
+      { id: "hubuClient", label: "Hubu client", sub: "Hubu endpoint + credential", x: 650, y: 170, w: 200, h: 96, tone: "core", path: "crates/hubu-unified-mcp/src/hubu/transport.rs" },
+      { id: "gongbuClient", label: "Gongbu client", sub: "Gongbu endpoint + credential", x: 650, y: 486, w: 200, h: 96, tone: "executor", path: "crates/hubu-unified-mcp/src/gongbu/transport.rs" },
+      { id: "approval", label: "Hubu HTTP API", sub: "governance + Hubu SQLite", x: 974, y: 138, w: 224, h: 104, tone: "human", path: "crates/hubu-api/src/lib.rs" },
+      { id: "api", label: "Gongbu HTTP API", sub: "execution + Gongbu state", x: 974, y: 528, w: 224, h: 104, tone: "executor", path: "crates/gongbu-api/src/http/mod.rs" },
     ],
     edges: [
-      ["agent", "tools", "discover + call"],
-      ["tools", "approval", "fixed hubu_* HTTP"],
-      ["tools", "api", "fixed gongbu_* HTTP"],
+      ["agent", "tools", "stdio", { labelDy: -54 }],
+      ["agent", "capability", "status", { labelDy: 48 }],
+      ["tools", "hubuClient", "hubu_*"],
+      ["tools", "gongbuClient", "gongbu_*", { fromSide: "bottom", toSide: "top", waypoints: [{ x: 430, y: 350 }, { x: 750, y: 350 }], labelSegment: 1 }],
+      ["capability", "hubuClient", "probe", { fromSide: "top", toSide: "bottom", waypoints: [{ x: 430, y: 410 }, { x: 750, y: 410 }], labelSegment: 1 }],
+      ["capability", "gongbuClient", "probe"],
+      ["hubuClient", "approval", "bounded HTTP"],
+      ["gongbuClient", "api", "bounded HTTP"],
     ],
   },
   agent: {
@@ -581,7 +588,7 @@ const sidebarHighlights = {
     "Runtime, data, credential, and failure boundaries stay separate.",
   ],
   release: [
-    "One exact commit builds all five production binaries.",
+    "One exact commit builds all six production binaries.",
     "Formatting, lint, tests, and integration gates run before publication.",
     "Archives carry checksums, manifests, and source provenance.",
   ],
@@ -631,10 +638,10 @@ const sidebarHighlights = {
     "It exposes policy, budget, spend, ledger, and health workflows.",
   ],
   mcp: [
-    "The accepted unified contract keeps all existing public tool names stable.",
+    "The agent harness starts one default unified MCP process.",
     "A static routing map sends each call to exactly one owning backend.",
-    "Compatibility and partial availability fail closed without merging failure domains.",
-    "Pending spend waits for an explicit protected approve or deny.",
+    "Separate clients, credentials, probes, and failures preserve backend boundaries.",
+    "Standalone adapters remain explicit compatibility and rollback surfaces.",
   ],
   agent: [
     "The agent reuses a scope-bound operation key.",
@@ -655,7 +662,10 @@ const title = document.getElementById("diagram-title");
 const crumb = document.getElementById("diagram-crumb");
 const detailsTitle = document.getElementById("details-title");
 const detailsKind = document.getElementById("details-kind");
+const detailsCopy = document.getElementById("details-copy");
+const highlights = document.getElementById("highlights");
 const responsibilities = document.getElementById("responsibilities");
+const sourceLinks = document.getElementById("source-links");
 const topButtons = [
   document.getElementById("top-view-button"),
   document.getElementById("details-back-button"),
@@ -670,16 +680,33 @@ function showView(viewId) {
   crumb.textContent = view.kind;
   detailsTitle.textContent = view.title;
   detailsKind.textContent = view.kind;
-  renderResponsibilities(sidebarHighlights[viewId]);
+  detailsCopy.textContent = view.copy;
+  renderList(highlights, sidebarHighlights[viewId]);
+  renderList(responsibilities, view.responsibilities);
+  renderSourceLinks(view.links);
   renderDiagram(view);
 }
 
-function renderResponsibilities(items) {
-  responsibilities.innerHTML = "";
+function renderList(list, items) {
+  list.innerHTML = "";
   items.forEach((item) => {
     const li = document.createElement("li");
     li.textContent = item;
-    responsibilities.appendChild(li);
+    list.appendChild(li);
+  });
+}
+
+function renderSourceLinks(links) {
+  sourceLinks.innerHTML = "";
+  links.forEach(([label, path]) => {
+    const li = document.createElement("li");
+    const anchor = document.createElement("a");
+    anchor.href = `https://github.com/hacker-no-ice/hubu/blob/main/${path}`;
+    anchor.target = "_blank";
+    anchor.rel = "noreferrer";
+    anchor.textContent = `${label} — ${path}`;
+    li.appendChild(anchor);
+    sourceLinks.appendChild(li);
   });
 }
 
