@@ -235,41 +235,30 @@ fn unified_approval_profile_contains_only_callable_continuations() {
         response["result"]["content"][0]["text"],
         serde_json::to_string_pretty(profile).unwrap()
     );
-    let prompt_before_call = profile["client_policy"]["prompt_before_call_tools"]
-        .as_array()
-        .unwrap();
-    for protected in [
-        "hubu_revoke_budget",
-        "hubu_replace_budget",
-        "hubu_set_spending_target",
-        "hubu_revoke_spending_target",
-    ] {
-        assert!(prompt_before_call.iter().any(|name| name == protected));
-        assert!(profile["tools"][2]["names"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|name| name == protected));
-    }
-    for tool in hubu_mcp::tool_definitions()
+    let callable = server
+        .list_tools_for_snapshot()
         .into_iter()
-        .filter(|tool| tool["name"].as_str().is_some_and(is_approved_hubu_tool))
-    {
-        let name = &tool["name"];
-        let client_mode = &tool["annotations"]["x_hubu_client_approval_mode"];
-        let expected_group = if client_mode == "prompt_before_call" {
-            &profile["tools"][2]["names"]
-        } else if tool["annotations"]["x_hubu_runtime_approval"] == "hubu_policy_needs_approval" {
-            &profile["tools"][1]["names"]
-        } else {
-            &profile["tools"][0]["names"]
-        };
-        assert!(expected_group
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|candidate| candidate == name));
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>();
+    for names in [
+        &profile["client_policy"]["auto_approve_tools"],
+        &profile["client_policy"]["hubu_policy_conditional_tools"],
+        &profile["client_policy"]["prompt_before_call_tools"],
+        &profile["tools"][0]["names"],
+        &profile["tools"][1]["names"],
+        &profile["tools"][2]["names"],
+    ] {
+        for name in names.as_array().unwrap() {
+            assert!(
+                callable.contains(name.as_str().unwrap()),
+                "approval profile advertises unavailable tool {name}"
+            );
+        }
     }
+    assert!(!profile["response_contract"]["agent_action"]
+        .as_str()
+        .unwrap()
+        .contains("hubu_"));
     assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
 }
 

@@ -29,7 +29,12 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
         );
     };
     let name = call.name;
-    if name == "hubu_client_approval_profile" {
+    if name == "hubu_client_approval_profile"
+        && call
+            .arguments
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+    {
         return success_response(id, tool_result_v1(catalog::approval_profile()));
     }
     let params = json!({
