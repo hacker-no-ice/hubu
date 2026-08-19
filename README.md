@@ -82,8 +82,9 @@ minimum:
   production binaries
 - `gongbu-mcp`: Gongbu's separate agent-facing MCP adapter and `gongbu-mcp`
   binary
-- `hubu-unified-mcp`: unified MCP transport/configuration shell with isolated
-  Hubu and Gongbu HTTP client boundaries; domain routing remains follow-up work
+- `hubu-unified-mcp`: unified MCP transport and capability surface with isolated
+  Hubu and Gongbu health, compatibility, and HTTP client boundaries; domain
+  routing remains follow-up work
 
 All crates use one root `Cargo.toml`, `Cargo.lock`, and Rust 1.88 minimum
 supported Rust version (MSRV). The checked-in toolchain may be newer so local
@@ -108,7 +109,8 @@ collapses runtime responsibilities:
 - `hubu-mcp-server` and `gongbu-mcp` remain separate implemented agent-facing
   surfaces. The `hubu-unified-mcp` shell implements the accepted
   [unified MCP contract](docs/unified-mcp-contract.md) transport and isolated
-  client boundaries, but domain catalogs and forwarding remain follow-up work.
+  client boundaries plus machine-readable health and compatibility reporting,
+  but domain catalogs and forwarding remain follow-up work.
   Standalone configuration remains supported until the explicit parity and
   deprecation gates pass; the unified shell is not yet part of release packaging.
 
@@ -116,7 +118,7 @@ collapses runtime responsibilities:
 
 The transport shell can be exercised from the workspace root with
 `cargo run -p hubu-unified-mcp`. It starts with either backend unconfigured so
-clients can complete MCP initialization and inspect the capability placeholder.
+clients can complete MCP initialization and inspect the capability snapshot.
 Configure each backend independently by setting both variables in its pair:
 
 - Hubu: `HUBU_UNIFIED_HUBU_ENDPOINT` and
@@ -128,9 +130,15 @@ Endpoints must be HTTP(S) base URLs without embedded credentials, queries, or
 fragments. Supplying only one variable in a pair leaves that backend
 `unconfigured` without blocking the other backend. Invalid complete pairs fail
 startup with diagnostics that identify the affected backend but never include
-endpoint input or credentials. The shell currently lists only
-`hubu_unified_capabilities`; health negotiation and the Hubu/Gongbu domain
-catalogs remain follow-up work.
+endpoint input or credentials. The shell probes Hubu health/version and Gongbu
+liveness/readiness/version independently, then reports `available`, `degraded`,
+`unavailable`, `incompatible`, or `unconfigured` with fixed, redacted reason
+codes. Exact product, source-commit, executor-contract, MCP, and schema matches
+are required; unstamped local builds fail closed as incompatible. The shell
+currently lists only `hubu_unified_capabilities`; domain entries remain
+`available:false` with `routing_not_implemented` even when their backend safety
+preconditions pass. Backend domain catalogs and forwarding remain follow-up
+work.
 
 ## Quick Start
 

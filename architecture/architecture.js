@@ -471,12 +471,13 @@ const components = {
     title: "MCP Surfaces",
     kind: "Interface",
     copy:
-      "The Hubu and Gongbu stdio adapters stay separate while the unified transport shell establishes isolated backend clients and the router-owned capability placeholder. Canonical domain routing remains follow-up work.",
+      "The Hubu and Gongbu stdio adapters stay separate while the unified transport shell probes isolated backends and publishes router-owned capability, health, and compatibility diagnostics. Canonical domain routing remains follow-up work.",
     responsibilities: [
-      "The unified shell implements initialize, ping, tools/list, tools/call, startup validation, redacted errors, and graceful EOF shutdown over JSON-RPC stdio.",
-      "Configures separate Hubu and Gongbu endpoints, bearer credentials, bounded HTTP clients, and versioned adapter boundaries without cross-domain Cargo dependencies.",
+      "The unified shell implements initialize, ping, tools/list, tools/call, startup validation, machine-readable capability snapshots, redacted backend-state errors, and graceful EOF shutdown over JSON-RPC stdio.",
+      "Configures separate Hubu and Gongbu endpoints, bearer credentials, bounded HTTP clients, and independently probed versioned adapter boundaries without cross-domain Cargo dependencies.",
       "The accepted contract reserves all 28 hubu_* and 4 gongbu_* tool names, schemas, response shapes, and owners for later routing work.",
-      "The capability/health follow-up will fail closed on unknown backend versions or schemas and advertise only tools whose owning backend is compatible and callable.",
+      "Fails closed on unknown or mismatched product, source-commit, executor-contract, MCP, and Gongbu schema versions while preserving healthy unrelated backend capabilities.",
+      "Keeps compatible Gongbu read and artifact capabilities available during degraded readiness, but blocks governed execution admission unless both required backend boundaries are safe.",
       "Domain routing follow-ups will preserve independent failure domains without fallback, queuing, or cross-boundary retries.",
       "Can be wired into Codex by `hubu init codex` so agents outside the Hubu repository see Hubu tools at session startup.",
       "Publishes a generic client approval profile so any harness can auto-approve reads and spend submission but prompt before resolving a needs_approval decision.",

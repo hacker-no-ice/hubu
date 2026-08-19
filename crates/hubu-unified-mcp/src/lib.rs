@@ -6,13 +6,12 @@
 //! implemented by follow-up issues.
 
 use std::{
-    collections::BTreeMap,
     env, fmt,
     io::{self, BufRead, Write},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
-use chrono::{SecondsFormat, Utc};
 use reqwest::{
     blocking::Client,
     header::{self, HeaderMap, HeaderValue},
@@ -21,6 +20,13 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use thiserror::Error;
+
+mod capability;
+mod diagnostics;
+mod probe;
+
+use capability::{capabilities_value, CapabilitySnapshot};
+use diagnostics::{backend_error_response, tool_availability};
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
@@ -32,7 +38,7 @@ const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
 const GONGBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_GONGBU_ENDPOINT";
 const GONGBU_TOKEN_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("gongbu_create_execution", BackendOwner::Gongbu),
@@ -77,6 +83,10 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
 
 pub fn product_version() -> &'static str {
     option_env!("HUBU_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+pub fn source_commit() -> &'static str {
+    option_env!("HUBU_SOURCE_COMMIT").unwrap_or("unknown")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -320,12 +330,16 @@ impl BackendClients {
 #[derive(Clone, Debug)]
 pub struct Server {
     backends: BackendClients,
+    snapshot: Arc<Mutex<CapabilitySnapshot>>,
 }
 
 impl Server {
     pub fn new(config: Config) -> Result<Self, ConfigError> {
+        let backends = BackendClients::new(config)?;
+        let snapshot = backends.probe();
         Ok(Self {
-            backends: BackendClients::new(config)?,
+            backends,
+            snapshot: Arc::new(Mutex::new(snapshot)),
         })
     }
 
@@ -364,6 +378,7 @@ impl Server {
     }
 
     fn initialize_result(&self) -> Value {
+        self.refresh_capabilities();
         let mut capability = self.capabilities();
         capability
             .as_object_mut()
@@ -392,96 +407,67 @@ impl Server {
         // Parsed at the shared boundary so future routed tools can consume
         // trusted platform metadata without placing it in model arguments.
         let _trusted_meta = &call.meta;
-        if call.name != "hubu_unified_capabilities"
-            || call
-                .arguments
-                .as_object()
-                .is_none_or(|arguments| !arguments.is_empty())
-        {
+        if call.arguments.as_object().is_none() {
             return error_response(id, -32602, "Invalid params");
         }
-        let capability = self.capabilities();
-        success_response(
+        self.refresh_capabilities();
+        if call.name == "hubu_unified_capabilities" {
+            if call
+                .arguments
+                .as_object()
+                .is_some_and(|arguments| !arguments.is_empty())
+            {
+                return error_response(id, -32602, "Invalid params");
+            }
+            let capability = self.capabilities();
+            return success_response(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&capability)
+                            .expect("capability snapshot serializes")
+                    }],
+                    "structuredContent": capability
+                }),
+            );
+        }
+
+        let Some(owner) = DOMAIN_TOOLS
+            .iter()
+            .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
+        else {
+            return error_response(id, -32602, "Invalid params");
+        };
+        let snapshot = self.snapshot();
+        if let Err(rejection) = tool_availability(&call.name, owner, &snapshot) {
+            return backend_error_response(id, &call.name, owner, rejection);
+        }
+        error_response(
             id,
-            json!({
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&capability)
-                        .expect("capability snapshot serializes")
-                }],
-                "structuredContent": capability
-            }),
+            -32601,
+            "Domain tool routing is not implemented by this capability release",
         )
     }
 
     fn capabilities(&self) -> Value {
-        let mut tools = DOMAIN_TOOLS
-            .iter()
-            .map(|(name, owner)| {
-                let configured = match owner {
-                    BackendOwner::Hubu => self.backends.hubu.is_some(),
-                    BackendOwner::Gongbu => self.backends.gongbu.is_some(),
-                };
-                json!({
-                    "name": name,
-                    "owner": owner.as_str(),
-                    "available": false,
-                    "reason_code": if configured {
-                        "capability_probe_pending"
-                    } else {
-                        "configuration_missing"
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        tools.push(json!({
-            "name": "hubu_unified_capabilities",
-            "owner": "router",
-            "available": true,
-            "reason_code": null
-        }));
-        tools.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
-
-        json!({
-            "contract_version": UNIFIED_CONTRACT_VERSION,
-            "routing_revision": ROUTING_REVISION,
-            "generated_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-            "backends": {
-                "hubu": backend_placeholder(self.backends.hubu.is_some(), false),
-                "gongbu": backend_placeholder(self.backends.gongbu.is_some(), true)
-            },
-            "tools": tools
-        })
+        capabilities_value(&self.snapshot())
     }
-}
 
-fn backend_placeholder(configured: bool, gongbu: bool) -> Value {
-    let mut backend = BTreeMap::from([
-        (
-            "state",
-            json!(if configured {
-                "unavailable"
-            } else {
-                "unconfigured"
-            }),
-        ),
-        ("product_version", Value::Null),
-        ("source_commit", Value::Null),
-        ("contract_versions", json!({ "executor": Value::Null })),
-        (
-            "reason_code",
-            json!(if configured {
-                "capability_probe_pending"
-            } else {
-                "configuration_missing"
-            }),
-        ),
-    ]);
-    if gongbu {
-        backend.insert("api_schema_version", Value::Null);
-        backend.insert("mcp_schema_version", Value::Null);
+    fn snapshot(&self) -> CapabilitySnapshot {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
-    serde_json::to_value(backend).expect("backend placeholder serializes")
+
+    fn refresh_capabilities(&self) {
+        let refreshed = self.backends.probe();
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = refreshed;
+    }
 }
 
 fn capability_tool() -> Value {
@@ -707,6 +693,17 @@ mod tests {
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));
         assert!(!serialized.contains("secret"));
+    }
+
+    #[test]
+    fn initialize_extension_matches_capability_schema_without_timestamp() {
+        let server = Server::new(Config::default()).unwrap();
+        let mut capability = server.capabilities();
+        capability.as_object_mut().unwrap().remove("generated_at");
+        assert_eq!(
+            server.initialize_result()["capabilities"]["experimental"]["hubu.dev/unified-mcp"],
+            capability
+        );
     }
 
     #[test]
