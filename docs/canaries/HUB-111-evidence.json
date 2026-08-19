@@ -87,6 +87,12 @@
     ],
     "reconciliation": "The only non-waivable HUB-109 gate was the absent immutable published release. This manifest supplies that release, checksum, provenance, publication, and four-platform smoke evidence for the unchanged candidate."
   },
+  "release_policy_reconciliation": {
+    "candidate_workflow_asset_gate": "SHA256SUMS plus four platform archives",
+    "candidate_workflow_smoke_gate": "four published-archive smoke jobs",
+    "later_HUB_110_prelaunch_gate": "SHA256SUMS plus two macOS archives and two smoke jobs",
+    "conclusion": "The immutable candidate was published by its four-platform workflow before the later temporary macOS-only exception. Its verified superset satisfies the owner-approved canary gate; the later rule governs subsequent pre-launch canaries and does not retroactively invalidate this release."
+  },
   "rollback_artifact": {
     "tag": "main-959018f1dacc5e80f60cec209da5a5b360e9f095",
     "source_commit": "959018f1dacc5e80f60cec209da5a5b360e9f095",

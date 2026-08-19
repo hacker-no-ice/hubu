@@ -26,6 +26,12 @@ candidate, workflow attempt, product version, repository, and expected target.
 Exact job IDs, asset sizes, and hashes are in the adjacent
 [machine-readable manifest](HUB-111-evidence.json).
 
+This candidate was published before HUB-110 introduced the temporary exact
+two-macOS-archive rule for subsequent pre-launch canaries. The candidate-pinned
+workflow instead required four archives and four smoke jobs, all of which
+passed. That immutable verified superset satisfies the gate without changing
+the current macOS-only workflow policy or runtime behavior.
+
 ## Reconciliation and rollback
 
 This is a fresh GO record. It does not modify PR

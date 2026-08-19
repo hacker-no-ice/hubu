@@ -215,8 +215,11 @@ show zero unresolved P0/P1 findings, and receive an explicit GO before HUB-97.
 HUB-109 recorded the historical NO-GO while the immutable release gate was
 open. The fresh [HUB-111 GO record](canaries/HUB-111-final-unified-mcp-cutover-go.md)
 verifies that the exact four-platform release and all published-archive smoke
-jobs subsequently passed. HUB-97 remains blocked until the HUB-111 GO pull
-request is explicitly approved and merged.
+jobs subsequently passed under the candidate-pinned workflow. That immutable
+release predates the temporary exact two-macOS-archive exception, which governs
+subsequent pre-launch canaries and does not invalidate this verified superset.
+HUB-97 remains blocked until the HUB-111 GO pull request is explicitly approved
+and merged.
 
 After GO, HUB-97 and then HUB-98 may proceed sequentially without the former
 90-day/two-stable-release wait. At least one immutable rollback release with

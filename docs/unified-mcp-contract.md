@@ -405,6 +405,13 @@ accepted. Gates are cumulative and require recorded evidence:
    exactly the macOS Intel and Apple silicon archives, and both published-asset
    smoke jobs must pass. Linux release targets must be restored and verified
    before the first supported Linux user or public availability.
+   The exact HUB-108 candidate was published before that exception took effect:
+   its candidate-pinned workflow required four platform archives and all four
+   published-asset smoke jobs. That already-immutable superset satisfies this
+   gate when its fresh evidence record verifies the exact asset set, checksums,
+   provenance, and successful jobs. The later two-archive rule governs any
+   subsequent pre-launch canary and does not retroactively invalidate the
+   candidate-pinned release.
 6. **GO gate:** the fresh canary must pass every row in the evidence matrix
    below, have zero unresolved P0/P1 findings, and receive a separately recorded
    explicit **GO** decision. A partial pass, a locally rebuilt candidate, an
