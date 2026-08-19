@@ -66,7 +66,7 @@ const components = {
       "The API handles local HTTP concerns and delegates spend approval, payment, and executor claim lifecycle orchestration to core app services.",
       "Gongbu owns its process, database, Temporal workflow state, vendor credentials, provider adapters, model calls, artifacts, retries, and failure domain; Hubu stores only governance state and compact provider/artifact references.",
       "SQLite-backed records preserve users, agents, advisory spending targets, budgets, policies, executor claims and receipts, reconciliation evidence, payments, and ledger entries.",
-      "The unified MCP transport shell now holds independently configured Hubu and Gongbu HTTP clients without domain routing; the standalone adapters remain supported until parity and deprecation gates pass.",
+      "The unified MCP surface now routes the approved Gongbu execution and artifact tools through its independently configured Gongbu HTTP client; Hubu governance routing remains separate, and the standalone adapters remain supported until parity and deprecation gates pass.",
     ],
     links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.mcp, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.gongbuMcp, sharedLinks.unifiedMcp, sharedLinks.unifiedMcpContract, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.scopeModel],
     zones: [
@@ -471,14 +471,16 @@ const components = {
     title: "MCP Surfaces",
     kind: "Interface",
     copy:
-      "The Hubu and Gongbu stdio adapters stay separate while the unified transport shell probes isolated backends and publishes router-owned capability, health, and compatibility diagnostics. Canonical domain routing remains follow-up work.",
+      "The Hubu and Gongbu stdio adapters stay separate while the unified transport probes isolated backends and routes the approved Gongbu execution and artifact calls over Gongbu's authenticated versioned HTTP interface. Hubu routing remains a separate slice.",
     responsibilities: [
       "The unified shell implements initialize, ping, tools/list, tools/call, startup validation, machine-readable capability snapshots, redacted backend-state errors, and graceful EOF shutdown over JSON-RPC stdio.",
       "Configures separate Hubu and Gongbu endpoints, bearer credentials, bounded HTTP clients, and independently probed versioned adapter boundaries without cross-domain Cargo dependencies.",
-      "The accepted contract reserves all 28 hubu_* and 4 gongbu_* tool names, schemas, response shapes, and owners for later routing work.",
+      "Publishes and routes the four accepted gongbu_* execution and artifact tools with standalone schema, result, error, redaction, operation-key, and no-retry parity.",
+      "Forwards only fixed relative Gongbu API routes and rejects caller attempts to override accounts, endpoints, credentials, retry controls, or artifact storage paths before network access.",
+      "The accepted contract reserves all 28 hubu_* tool names and ownership for the separate Hubu routing slice.",
       "Fails closed on unknown or mismatched product, source-commit, executor-contract, MCP, and Gongbu schema versions while preserving healthy unrelated backend capabilities.",
       "Keeps compatible Gongbu read and artifact capabilities available during degraded readiness, but blocks governed execution admission unless both required backend boundaries are safe.",
-      "Domain routing follow-ups will preserve independent failure domains without fallback, queuing, or cross-boundary retries.",
+      "Preserves independent failure domains without fallback, queuing, or cross-boundary retries; Gongbu transport and application failures retain the standalone MCP result contract.",
       "Can be wired into Codex by `hubu init codex` so agents outside the Hubu repository see Hubu tools at session startup.",
       "Publishes a generic client approval profile so any harness can auto-approve reads and spend submission but prompt before resolving a needs_approval decision.",
       "Uses Codex per-tool approval overrides as one rendering of that profile while leaving Hubu policy responsible for creating needs_approval outcomes.",

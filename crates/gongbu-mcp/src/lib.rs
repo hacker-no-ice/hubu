@@ -612,6 +612,14 @@ mod tests {
     const EXECUTION: &str = r#"{"schema_version":2,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":null,"failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
 
     #[test]
+    fn public_tool_definitions_match_the_versioned_contract_fixture() {
+        let expected: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/tool-definitions-v2.json"))
+                .unwrap();
+        assert_eq!(tool_definitions(), expected);
+    }
+
+    #[test]
     fn create_replay_is_forwarded_once_per_call_and_returns_stable_id() {
         let (endpoint, requests) = mock_server(vec![
             ("200 OK", "application/json", EXECUTION),

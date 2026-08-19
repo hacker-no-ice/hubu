@@ -2,8 +2,10 @@
 //!
 //! This crate deliberately has no dependency on either backend's domain or
 //! server crate. Backend clients hold independent endpoints, credentials, HTTP
-//! clients, and failure boundaries. Domain tool catalogs and forwarding are
-//! implemented by follow-up issues.
+//! clients, and failure boundaries. Gongbu-owned tool forwarding is implemented
+//! over its public versioned HTTP contract; Hubu-owned routing remains separate.
+
+mod gongbu;
 
 use std::{
     env, fmt,
@@ -370,7 +372,7 @@ impl Server {
         let response = match request.method.as_str() {
             "initialize" => success_response(id, self.initialize_result()),
             "ping" => success_response(id, json!({})),
-            "tools/list" => success_response(id, json!({ "tools": [capability_tool()] })),
+            "tools/list" => success_response(id, json!({ "tools": self.list_tools() })),
             "tools/call" => self.call_tool(id, request.params),
             _ => error_response(id, -32601, "Method not found"),
         };
@@ -443,11 +445,32 @@ impl Server {
         if let Err(rejection) = tool_availability(&call.name, owner, &snapshot) {
             return backend_error_response(id, &call.name, owner, rejection);
         }
+        if owner == BackendOwner::Gongbu {
+            let client = self
+                .backends
+                .gongbu
+                .as_ref()
+                .expect("available Gongbu route has a configured client");
+            return success_response(id, gongbu::call_tool(client, &call.name, call.arguments));
+        }
         error_response(
             id,
             -32601,
-            "Domain tool routing is not implemented by this capability release",
+            "Hubu tool routing is not implemented by this release",
         )
+    }
+
+    fn list_tools(&self) -> Vec<Value> {
+        self.refresh_capabilities();
+        let snapshot = self.snapshot();
+        let mut tools = vec![capability_tool()];
+        tools.extend(gongbu::tool_definitions().into_iter().filter(|tool| {
+            let name = tool["name"]
+                .as_str()
+                .expect("Gongbu tool definition has a name");
+            tool_availability(name, BackendOwner::Gongbu, &snapshot).is_ok()
+        }));
+        tools
     }
 
     fn capabilities(&self) -> Value {
