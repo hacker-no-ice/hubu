@@ -401,6 +401,10 @@ accepted. Gates are cumulative and require recorded evidence:
    final `main` commit containing HUB-106, HUB-107, and this HUB-108 amendment.
    The release tag, source SHA, workflow run, archive checksums, and evidence
    bundle are immutable and identify the same commit.
+   During the temporary zero-user pre-launch exception, that bundle contains
+   exactly the macOS Intel and Apple silicon archives, and both published-asset
+   smoke jobs must pass. Linux release targets must be restored and verified
+   before the first supported Linux user or public availability.
 6. **GO gate:** the fresh canary must pass every row in the evidence matrix
    below, have zero unresolved P0/P1 findings, and receive a separately recorded
    explicit **GO** decision. A partial pass, a locally rebuilt candidate, an
@@ -432,7 +436,7 @@ as specified; a prose assertion alone is not evidence.
 
 | Evidence | Required result |
 | --- | --- |
-| Package identity and complete catalog | The immutable release workflow and archive verifier pass for all supported targets; all six binaries share the final source SHA; unified `tools/list` exactly matches the 33-name approved catalog (32 standalone mappings plus the router-owned tool), schemas, annotations, and ownership. |
+| Package identity and complete catalog | The immutable release workflow and archive verifier pass for both temporary macOS targets; all six binaries share the final source SHA; unified `tools/list` exactly matches the 33-name approved catalog (32 standalone mappings plus the router-owned tool), schemas, annotations, and ownership. Linux release targets must be restored and verified before the first supported Linux user or public availability. |
 | Golden behavior parity | All 32 mapped tools pass golden success and representative backend/application error parity, including approval metadata and artifact image content, with no response translation. |
 | `tools/list_changed` notification | After `notifications/initialized`, each effective catalog transition emits exactly one `notifications/tools/list_changed`, no unchanged refresh emits one, and the notification contains no backend payload or secret. Stop and recovery are both covered. |
 | Failure isolation | The complete backend-state and compatibility matrix passes; one-backend outages, not-ready behavior, list/call races, and ambiguous mutation failures preserve the healthy backend and never retry or cross-route a mutation. |

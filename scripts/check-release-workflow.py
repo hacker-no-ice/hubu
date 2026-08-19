@@ -20,11 +20,13 @@ PRODUCTION_BINARIES = (
     "gongbu-mcp",
 )
 DEVELOPMENT_BINARIES = ("hubu-bench", "gongbu-sandbox")
-TARGETS = (
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
+RELEASE_TARGETS = (
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
+)
+DEFERRED_LINUX_TARGETS = (
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
 )
 
 
@@ -53,9 +55,20 @@ for binary in DEVELOPMENT_BINARIES:
     if re.search(rf'cp .*[/"]{re.escape(binary)}', package_script):
         fail(f"development tool {binary} must not be copied into release archives")
 
-for target in TARGETS:
-    if workflow.count(f"target: {target}") != 2:
-        fail(f"{target} must appear once in build and once in published smoke matrices")
+matrix_targets = re.findall(r"(?m)^\s+target: (\S+)$", workflow)
+expected_matrix_targets = [*RELEASE_TARGETS, *RELEASE_TARGETS]
+if matrix_targets != expected_matrix_targets:
+    fail(
+        "release build and published smoke matrices must each contain exactly "
+        f"{RELEASE_TARGETS!r}; found {matrix_targets!r}"
+    )
+for target in DEFERRED_LINUX_TARGETS:
+    if target in workflow:
+        fail(f"deferred pre-launch Linux target remains in release workflow: {target}")
+for target in RELEASE_TARGETS:
+    asset = f'hubu-${{version}}-{target}.tar.gz'
+    if workflow.count(asset) != 1:
+        fail(f"complete-canary validation must require exactly one {target} asset")
 
 for required in (
     "channel:",
@@ -97,7 +110,7 @@ if unpinned:
     fail("actions must be pinned to full commit SHAs: " + "; ".join(unpinned))
 
 print(
-    "validated immutable release workflow: six production binaries, four native "
-    "targets, scheduled and explicit canaries, shared build identity, bounded "
-    "permissions, and pinned actions"
+    "validated immutable release workflow: six production binaries, exactly two "
+    "temporary pre-launch macOS targets, scheduled and explicit canaries, shared "
+    "build identity, bounded permissions, and pinned actions"
 )
