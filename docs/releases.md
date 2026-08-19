@@ -212,10 +212,14 @@ URL, tag, full source SHA, workflow run, platform archives, `SHA256SUMS`, and
 evidence index form one immutable candidate. The canary must satisfy the
 [complete retirement evidence matrix](unified-mcp-contract.md#fresh-packaged-canary-evidence-matrix),
 show zero unresolved P0/P1 findings, and receive an explicit GO before HUB-97.
-HUB-109 remains NO-GO until a fresh immutable macOS canary publishes and both
-archive smoke jobs pass. This policy change does not itself run or approve that
-canary. Linux targets must be restored and verified before the first supported
-Linux user or public availability.
+HUB-109 recorded the historical NO-GO while the immutable release gate was
+open. The fresh [HUB-111 GO record](canaries/HUB-111-final-unified-mcp-cutover-go.md)
+verifies that the exact four-platform release and all published-archive smoke
+jobs subsequently passed under the candidate-pinned workflow. That immutable
+release predates the temporary exact two-macOS-archive exception, which governs
+subsequent pre-launch canaries and does not invalidate this verified superset.
+HUB-97 remains blocked until the HUB-111 GO pull request is explicitly approved
+and merged.
 
 After GO, HUB-97 and then HUB-98 may proceed sequentially without the former
 90-day/two-stable-release wait. At least one immutable rollback release with

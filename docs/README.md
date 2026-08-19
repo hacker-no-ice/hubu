@@ -30,6 +30,8 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
 - [canaries/HUB-96-unified-mcp-migration-canary.md](canaries/HUB-96-unified-mcp-migration-canary.md):
   packaged unified MCP migration evidence and the explicit standalone
   deprecation no-go decision
+- [canaries/HUB-111-final-unified-mcp-cutover-go.md](canaries/HUB-111-final-unified-mcp-cutover-go.md):
+  final immutable-release evidence and conditional zero-user cutover GO
 - [benchmarking.md](benchmarking.md): local benchmark usage and current MVP
   performance notes
 - [demo.md](demo.md): scripted local walkthrough and CLI reference
