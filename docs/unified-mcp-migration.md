@@ -198,19 +198,38 @@ router, roll every consumer binary back to one older validated release tag and
 checksum according to [the release rollback procedure](releases.md); never mix
 product versions or source commits.
 
-## Compatibility-window behavior
+## Owner-approved zero-user cutover
 
-The unified entry is the documented default immediately. Standalone binaries
-remain packaged and supported as explicit compatibility surfaces until the
-cumulative canary, deprecation, and removal gates in
-[the unified MCP contract](unified-mcp-contract.md) pass. In particular:
+On 2026-08-18 (America/Los_Angeles), the product owner confirmed that there are
+no active or supported consumers of the standalone `hubu-mcp-server` or
+`gongbu-mcp` agent surfaces. This dated decision replaces the former
+general-purpose two-canary/14-day pre-deprecation window and 90-day/two-stable-
+release post-deprecation window for this cutover only. The former windows remain
+historical context for the unchanged
+[HUB-96 NO-GO record](canaries/HUB-96-unified-mcp-migration-canary.md).
 
-- standalone configuration is not yet deprecated;
-- a failed gate pauses deprecation or removal;
-- after deprecation, standalone client configuration remains supported for at
-  least 90 days and two stable releases;
-- removal requires updated installers, operator sign-off, no unresolved P0/P1
-  migration defects, and a retained rollback path.
+The unified entry remains the documented default, but standalone configuration
+is not yet deprecated. The sequence is:
 
-Do not remove standalone binaries, delete their saved configuration, or merge
-Hubu/Gongbu operational state merely because the default client entry changed.
+1. Merge HUB-106, HUB-107, and the HUB-108 policy amendment to `main`.
+2. From that exact final `main` commit, publish one fresh immutable packaged
+   canary. Do not reuse the HUB-96 local package or an earlier release.
+3. Record the complete catalog, golden behavior parity,
+   `notifications/tools/list_changed`, failure-isolation, redaction,
+   migration, rollback, workspace/release-policy, documentation, and
+   stale-reference evidence required by
+   [the contract matrix](unified-mcp-contract.md#fresh-packaged-canary-evidence-matrix).
+4. Confirm zero unresolved P0/P1 findings and record an explicit GO tied to the
+   immutable release URL and exact source SHA. Any failed row is a NO-GO and
+   keeps HUB-97 blocked.
+5. After GO, execute HUB-97. Then, and only then, HUB-98 may execute without an
+   elapsed-time or stable-release-count wait. Retain one immutable packaged
+   rollback artifact through HUB-98 removal verification.
+
+HUB-98 still requires zero unresolved P0/P1 findings plus successful workspace,
+document-link, installer/example, architecture-responsibility, and retired-
+repository stale-reference verification. Do not remove standalone binaries,
+change runtime routing, or delete saved configuration before the applicable
+HUB-97/HUB-98 step. Deprecation and removal affect only the standalone
+agent-facing adapters: Hubu and Gongbu retain separate processes, credentials,
+storage, provider execution, artifacts, and failure domains.

@@ -393,18 +393,54 @@ accepted. Gates are cumulative and require recorded evidence:
    mismatches, state changes between list and call, one-backend outages,
    Gongbu-not-ready behavior, credential isolation, and ambiguous mutation
    transport failure with no automatic retry.
-5. **Canary gate:** at least two consecutive immutable canary releases and 14
-   calendar days complete with zero unresolved P0/P1 unified-surface defects,
-   successful migration of at least one Hubu and one Gongbu client workflow,
-   and a verified rollback to both standalone server configurations.
-6. **Deprecation gate:** only after gates 1–5 may release notes and docs mark
-   direct standalone configuration deprecated. A stable unified release must be
-   available first. Deprecation does not remove either backend process or
-   boundary.
-7. **Removal gate:** standalone client configuration remains supported for at
-   least 90 days and two stable releases after deprecation. Removal additionally
-   requires zero unresolved P0/P1 migration defects, updated examples and
-   installers, documented operator sign-off, and a retained rollback path.
+5. **Owner-approved canary gate:** on 2026-08-18 (America/Los_Angeles), the
+   product owner confirmed that there are no active or supported consumers of
+   the standalone `hubu-mcp-server` or `gongbu-mcp` agent surfaces. For this
+   zero-user cutover, one fresh immutable packaged canary replaces the former
+   two-release and 14-completed-calendar-day gate. Its source must be the exact
+   final `main` commit containing HUB-106, HUB-107, and this HUB-108 amendment.
+   The release tag, source SHA, workflow run, archive checksums, and evidence
+   bundle are immutable and identify the same commit.
+6. **GO gate:** the fresh canary must pass every row in the evidence matrix
+   below, have zero unresolved P0/P1 findings, and receive a separately recorded
+   explicit **GO** decision. A partial pass, a locally rebuilt candidate, an
+   earlier canary, or elapsed time is not a substitute. The historical HUB-96
+   **NO-GO** record remains unchanged and cannot be promoted or rewritten into
+   this decision.
+7. **Deprecation and removal gates:** after the explicit GO, HUB-97 may
+   deprecate the two standalone agent surfaces. HUB-98 may follow HUB-97
+   sequentially without a 90-day or two-stable-release wait. HUB-98 still
+   requires zero unresolved P0/P1 findings, successful workspace and
+   stale-reference verification, and one immutable rollback artifact retained
+   until removal verification completes. Neither gate removes or merges the
+   Hubu or Gongbu backend process, credential, storage, provider-execution,
+   artifact, or failure-domain boundaries.
+
+The superseded general-purpose policy required two consecutive immutable
+canaries, 14 completed calendar days before deprecation, and 90 days plus two
+stable releases before removal. Those waits remain part of the historical
+context for the HUB-96 NO-GO decision, but they do not apply to this dated,
+product-owner-approved zero-user cutover. Any future retirement with active or
+supported consumers requires a new owner-approved migration policy; HUB-108 is
+not a reusable waiver.
+
+### Fresh packaged canary evidence matrix
+
+The GO record must link durable logs or artifacts for every row. Automated
+checks must run against the exact packaged candidate or its exact source commit
+as specified; a prose assertion alone is not evidence.
+
+| Evidence | Required result |
+| --- | --- |
+| Package identity and complete catalog | The immutable release workflow and archive verifier pass for all supported targets; all six binaries share the final source SHA; unified `tools/list` exactly matches the 33-name approved catalog (32 standalone mappings plus the router-owned tool), schemas, annotations, and ownership. |
+| Golden behavior parity | All 32 mapped tools pass golden success and representative backend/application error parity, including approval metadata and artifact image content, with no response translation. |
+| `tools/list_changed` notification | After `notifications/initialized`, each effective catalog transition emits exactly one `notifications/tools/list_changed`, no unchanged refresh emits one, and the notification contains no backend payload or secret. Stop and recovery are both covered. |
+| Failure isolation | The complete backend-state and compatibility matrix passes; one-backend outages, not-ready behavior, list/call races, and ambiguous mutation failures preserve the healthy backend and never retry or cross-route a mutation. |
+| Redaction and credential isolation | Distinct Hubu and Gongbu credentials reach only their owning backend, and MCP output, diagnostics, stderr, notifications, and stored evidence contain no credential, endpoint secret, path, or raw backend error. |
+| Migration and rollback | Unified-only configuration and atomic two-entry migration pass, refusal leaves configuration unchanged, unrelated entries are preserved, and rollback restores and initializes both packaged standalone catalogs without copying backend state. |
+| Workspace and release policy | Locked workspace tests, Rust 1.88 MSRV, formatting, Clippy, release-workflow policy, packaging/archive checks, repository security, and ordinary-CI provider-safety checks pass for the candidate commit. No provider credentials, live provider call, or spend are used as canary evidence. |
+| Documentation and stale references | Markdown links pass; current docs, examples, installers, manifests, and architecture responsibility text match the intended stage; every retired-Gongbu-repository search hit is either removed or explicitly classified as historical evidence, leaving zero stale operational references. |
+| Findings and decision | The evidence index lists all findings and shows zero unresolved P0/P1. The product owner records a new explicit GO tied to the immutable release URL and source SHA; the HUB-96 NO-GO remains a separate historical record. |
 
 Failure of any gate pauses deprecation or removal. Lower-priority findings may
 be accepted only with an owner, rationale, and target release; security,

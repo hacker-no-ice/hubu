@@ -196,3 +196,21 @@ GitHub Releases are retained indefinitely under the current policy; temporary
 Actions build artifacts are retained for seven days because the release assets
 are the durable copies. Any future retention change must preserve tags,
 checksums, and provenance and be announced before assets are removed.
+
+### Unified MCP zero-user retirement canary
+
+For the dated HUB-108 owner-approved zero-user cutover, one fresh immutable
+packaged canary from the final `main` commit containing HUB-106, HUB-107, and
+HUB-108 replaces the former two-canary/14-day pre-deprecation wait. Its release
+URL, tag, full source SHA, workflow run, platform archives, `SHA256SUMS`, and
+evidence index form one immutable candidate. The canary must satisfy the
+[complete retirement evidence matrix](unified-mcp-contract.md#fresh-packaged-canary-evidence-matrix),
+show zero unresolved P0/P1 findings, and receive an explicit GO before HUB-97.
+This policy change does not itself run or approve that canary.
+
+After GO, HUB-97 and then HUB-98 may proceed sequentially without the former
+90-day/two-stable-release wait. At least one immutable rollback release with
+checksums and provenance must remain available until HUB-98 verifies removal,
+workspace integrity, and stale operational references. Retaining that artifact
+does not permit mixed Hubu/Gongbu versions or merged backend state; rollback
+continues to change consumer pins and MCP configuration only.
