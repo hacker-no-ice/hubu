@@ -12,7 +12,7 @@ Gongbu processes or allow either backend to import the other.
 
 The supported unified binary and MCP server are named `hubu-unified-mcp`; it
 reports `serverInfo.name = "hubu-unified-mcp"`. The distinct name is required
-because `hubu-mcp-server` and `gongbu-mcp` are the standalone compatibility
+because `hubu-mcp-server` and `gongbu-mcp` were the pre-cutover standalone
 surfaces. The unified server exposes the union of their current
 ownership-qualified `hubu_*` and `gongbu_*` names unchanged. Existing names are
 already collision-free and make the security boundary visible; a new generic
@@ -23,10 +23,10 @@ governance or execution data. A tool call is validated against the public schema
 and forwarded to exactly one owning backend. The router must not compose a
 governance mutation and an execution mutation into one tool call.
 
-The existing `hubu-mcp-server` and `gongbu-mcp` binaries remain supported during
-the parity and deprecation gates below. Default client configuration may switch
-to `hubu-unified-mcp` only at the packaging and migration gates; neither
-standalone binary is replaced or removed by this design.
+HUB-111 passed the parity and GO gates below. Effective with HUB-97,
+`hubu-mcp-server` and `gongbu-mcp` are deprecated and unsupported;
+`hubu-unified-mcp` is the only supported agent-facing surface. Their source
+remains temporarily for HUB-98 removal staging, not compatibility.
 
 ## Boundaries and non-goals
 
@@ -377,8 +377,7 @@ transport health with product operations.
 
 ## Parity, deprecation, and removal gates
 
-Standalone MCP servers are not deprecated merely because this decision is
-accepted. Gates are cumulative and require recorded evidence:
+The cumulative gates required before deprecation were:
 
 1. **Contract gate:** this document is merged and implementation issues cite
    `hubu-gongbu-mcp-v1` without changing names, ownership, or schemas.
@@ -443,12 +442,12 @@ as specified; a prose assertion alone is not evidence.
 
 | Evidence | Required result |
 | --- | --- |
-| Package identity and complete catalog | The immutable release workflow and archive verifier pass for both temporary macOS targets; all six binaries share the final source SHA; unified `tools/list` exactly matches the 33-name approved catalog (32 standalone mappings plus the router-owned tool), schemas, annotations, and ownership. Linux release targets must be restored and verified before the first supported Linux user or public availability. |
+| Package identity and complete catalog | The immutable HUB-111 candidate and archive verifier passed for both temporary macOS targets; its six historical candidate binaries share the final source SHA; unified `tools/list` exactly matches the 33-name approved catalog (32 standalone mappings plus the router-owned tool), schemas, annotations, and ownership. HUB-97 release archives contain four production binaries and exclude both deprecated adapters. Linux release targets must be restored and verified before the first supported Linux user or public availability. |
 | Golden behavior parity | All 32 mapped tools pass golden success and representative backend/application error parity, including approval metadata and artifact image content, with no response translation. |
 | `tools/list_changed` notification | After `notifications/initialized`, each effective catalog transition emits exactly one `notifications/tools/list_changed`, no unchanged refresh emits one, and the notification contains no backend payload or secret. Stop and recovery are both covered. |
 | Failure isolation | The complete backend-state and compatibility matrix passes; one-backend outages, not-ready behavior, list/call races, and ambiguous mutation failures preserve the healthy backend and never retry or cross-route a mutation. |
 | Redaction and credential isolation | Distinct Hubu and Gongbu credentials reach only their owning backend, and MCP output, diagnostics, stderr, notifications, and stored evidence contain no credential, endpoint secret, path, or raw backend error. |
-| Migration and rollback | Unified-only configuration and atomic two-entry migration pass, refusal leaves configuration unchanged, unrelated entries are preserved, and rollback restores and initializes both packaged standalone catalogs without copying backend state. |
+| Migration and rollback | Unified-only configuration and atomic two-entry migration pass, refusal leaves configuration unchanged, and unrelated entries are preserved. The historical HUB-111 candidate proved standalone rollback before cutover; after HUB-97, supported recovery pins a validated unified release and never copies backend state. |
 | Workspace and release policy | Locked workspace tests, Rust 1.88 MSRV, formatting, Clippy, release-workflow policy, packaging/archive checks, repository security, and ordinary-CI provider-safety checks pass for the candidate commit. No provider credentials, live provider call, or spend are used as canary evidence. |
 | Documentation and stale references | Markdown links pass; current docs, examples, installers, manifests, and architecture responsibility text match the intended stage; every retired-Gongbu-repository search hit is either removed or explicitly classified as historical evidence, leaving zero stale operational references. |
 | Findings and decision | The evidence index lists all findings and shows zero unresolved P0/P1. The product owner records a new explicit GO tied to the immutable release URL and source SHA; the HUB-96 NO-GO remains a separate historical record. |

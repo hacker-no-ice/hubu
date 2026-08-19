@@ -20,9 +20,7 @@ production_binaries=(
   hubu
   hubu-server
   hubu-unified-mcp
-  hubu-mcp-server
   gongbu-server
-  gongbu-mcp
 )
 
 if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -58,7 +56,7 @@ jq -n \
   --arg source_commit "${source_commit}" \
   --arg executor_contract "hubu-spend-executor-v4.2" \
   --arg target "${target}" \
-  '{schema_version: 1, product: "hubu", product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, binaries: ["hubu", "hubu-server", "hubu-unified-mcp", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"], default_agent_surface: "hubu-unified-mcp", compatibility_agent_surfaces: ["hubu-mcp-server", "gongbu-mcp"], development_tools_excluded: ["hubu-bench", "gongbu-sandbox"], files: ["Cargo.lock", "LICENSE-APACHE", "LICENSE-MIT", "PROVENANCE.json", "SHA256SUMS", "THIRD-PARTY-LICENSES.txt", "THIRD-PARTY-NOTICES.md", "gongbu-mcp", "gongbu-server", "hubu", "hubu-mcp-server", "hubu-server", "hubu-unified-mcp"]}' \
+  '{schema_version: 1, product: "hubu", product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, binaries: ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"], supported_agent_surfaces: ["hubu-unified-mcp"], deprecated_agent_surfaces_excluded: ["hubu-mcp-server", "gongbu-mcp"], development_tools_excluded: ["hubu-bench", "gongbu-sandbox"], files: ["Cargo.lock", "LICENSE-APACHE", "LICENSE-MIT", "PROVENANCE.json", "SHA256SUMS", "THIRD-PARTY-LICENSES.txt", "THIRD-PARTY-NOTICES.md", "gongbu-server", "hubu", "hubu-server", "hubu-unified-mcp"]}' \
   > "${package_dir}/MANIFEST.json"
 jq -n \
   --arg product_version "${release_version}" \
@@ -67,7 +65,7 @@ jq -n \
   --arg target "${target}" \
   --arg repository "${repository}" \
   --arg workflow_run "${workflow_run}" \
-  '{schema_version: 1, product: "hubu", product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, repository: $repository, workflow_run: $workflow_run, binaries: ["hubu", "hubu-server", "hubu-unified-mcp", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"], default_agent_surface: "hubu-unified-mcp", compatibility_agent_surfaces: ["hubu-mcp-server", "gongbu-mcp"], manifest: "MANIFEST.json", dependencies: "Cargo.lock", third_party_licenses: "THIRD-PARTY-LICENSES.txt"}' \
+  '{schema_version: 1, product: "hubu", product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, repository: $repository, workflow_run: $workflow_run, binaries: ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"], supported_agent_surfaces: ["hubu-unified-mcp"], deprecated_agent_surfaces_excluded: ["hubu-mcp-server", "gongbu-mcp"], manifest: "MANIFEST.json", dependencies: "Cargo.lock", third_party_licenses: "THIRD-PARTY-LICENSES.txt"}' \
   > "${package_dir}/PROVENANCE.json"
 
 checksum_files=(
@@ -78,10 +76,8 @@ checksum_files=(
   PROVENANCE.json
   THIRD-PARTY-LICENSES.txt
   THIRD-PARTY-NOTICES.md
-  gongbu-mcp
   gongbu-server
   hubu
-  hubu-mcp-server
   hubu-server
   hubu-unified-mcp
 )

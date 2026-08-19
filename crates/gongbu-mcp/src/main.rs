@@ -3,6 +3,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
+const UNSUPPORTED_NOTICE: &str = "WARNING: gongbu-mcp is deprecated and unsupported. Migrate to the only supported agent-facing surface, hubu-unified-mcp: run `hubu init codex --migrate-standalone --gongbu-endpoint URL --gongbu-token-file FILE` or see docs/unified-mcp-migration.md. Standalone source remains only for HUB-98 removal staging.";
+
 #[derive(Deserialize)]
 struct Request {
     jsonrpc: Option<String>,
@@ -27,6 +29,18 @@ fn empty_object() -> Value {
 }
 
 fn main() {
+    eprintln!("{UNSUPPORTED_NOTICE}");
+
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|argument| matches!(argument.as_str(), "help" | "--help" | "-h"))
+    {
+        println!(
+            "gongbu-mcp (unsupported)\n\nUse hubu-unified-mcp instead.\nMigration: hubu init codex --migrate-standalone --gongbu-endpoint URL --gongbu-token-file FILE\nGuide: docs/unified-mcp-migration.md"
+        );
+        return;
+    }
+
     if std::env::args()
         .nth(1)
         .is_some_and(|argument| matches!(argument.as_str(), "version" | "--version" | "-V"))
@@ -99,4 +113,18 @@ fn write_message(output: &mut impl Write, message: Value) -> io::Result<()> {
     serde_json::to_writer(&mut *output, &message)?;
     output.write_all(b"\n")?;
     output.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UNSUPPORTED_NOTICE;
+
+    #[test]
+    fn unsupported_notice_is_actionable_and_contains_no_configuration_values() {
+        assert!(UNSUPPORTED_NOTICE.contains("deprecated and unsupported"));
+        assert!(UNSUPPORTED_NOTICE.contains("hubu-unified-mcp"));
+        assert!(UNSUPPORTED_NOTICE.contains("--migrate-standalone"));
+        assert!(!UNSUPPORTED_NOTICE.contains("GONGBU_"));
+        assert!(!UNSUPPORTED_NOTICE.contains("bearer"));
+    }
 }

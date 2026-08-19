@@ -1,15 +1,14 @@
 # Unified MCP migration
 
-`hubu-unified-mcp` is the default agent-facing surface. It gives an MCP client
+`hubu-unified-mcp` is the only supported agent-facing surface. It gives an MCP client
 one stdio server while preserving two independently operated HTTP backends:
 `hubu-server` owns governance and `gongbu-server` owns provider execution and
 artifacts. The router has separate endpoints, bearer credentials, health
 probes, and failure handling for each backend.
 
-The standalone `hubu-mcp-server` and `gongbu-mcp` binaries remain operational
-during the compatibility window. They are opt-in rollback surfaces, not the
-recommended setup, and this migration does not stop, combine, or migrate either
-backend process or database.
+The standalone `hubu-mcp-server` and `gongbu-mcp` adapters are deprecated and
+unsupported. Their source remains only until HUB-98; this migration does not
+stop, combine, or migrate either backend process or database.
 
 ## Compatibility requirements
 
@@ -35,9 +34,8 @@ Keep the runtime boundaries unchanged:
 
 Download one target-specific release archive, verify both checksum layers, and
 install `hubu`, `hubu-server`, `hubu-unified-mcp`, and `gongbu-server` from that
-archive as described in [the release runbook](releases.md). Keep
-`hubu-mcp-server` and `gongbu-mcp` from the same archive available until rollback
-has been tested and the compatibility window closes.
+archive as described in [the release runbook](releases.md). Current archives do
+not contain standalone MCP adapters.
 
 Start Hubu with its existing database and capability files. Start Gongbu with
 its existing configuration, database, artifact root, provider credentials, and
@@ -170,33 +168,14 @@ more notification and the restored catalog. Repeated notifications without an
 effective catalog change are a failure. Never put endpoint, credential, path,
 or raw error data into captured notification fixtures.
 
-## Roll back
+## Recover after cutover
 
-Rollback changes only the MCP client configuration. It does not roll back or
-copy backend state.
-
-1. Stop new agent work and preserve the exact error and capability snapshot.
-2. Restore the backed-up two-entry client configuration, or generate the Hubu
-   compatibility entry with:
-
-   ```sh
-   hubu init codex \
-     --compatibility-standalone \
-     --token-file ~/.hubu/hubu.auth-token \
-     --reconciliation-token-file ~/.hubu/hubu.reconciliation-token
-   ```
-
-3. Retain or restore the separately configured `[mcp_servers.gongbu]` entry
-   using `gongbu-mcp`, `GONGBU_MCP_ENDPOINT`, and
-   `GONGBU_MCP_BEARER_TOKEN` from the pre-migration configuration.
-4. Restart Codex and verify both standalone servers initialize and list their
-   existing tool catalogs.
-
-Use the standalone binaries from the same pinned release as the running
-backends. If the regression is in the release rather than only the unified
-router, roll every consumer binary back to one older validated release tag and
+Stop new agent work and preserve the exact error and capability snapshot. Fix
+or roll back the unified MCP version using one validated release tag and
 checksum according to [the release rollback procedure](releases.md); never mix
-product versions or source commits.
+product versions or source commits. Do not restore standalone MCP entries:
+`hubu-mcp-server` and `gongbu-mcp` are unsupported after HUB-97. Backend state is
+not copied or merged during MCP recovery.
 
 ## Owner-approved zero-user cutover
 
@@ -208,8 +187,9 @@ release post-deprecation window for this cutover only. The former windows remain
 historical context for the unchanged
 [HUB-96 NO-GO record](canaries/HUB-96-unified-mcp-migration-canary.md).
 
-The unified entry remains the documented default, but standalone configuration
-is not yet deprecated. The sequence is:
+HUB-111 completed the sequence below with a reviewed GO. Effective when HUB-97
+merges, the unified entry is the only supported agent-facing surface and
+standalone configuration is deprecated and unsupported:
 
 1. Merge HUB-106, HUB-107, and the HUB-108 policy amendment to `main`.
 2. From that exact final `main` commit, publish one fresh immutable packaged

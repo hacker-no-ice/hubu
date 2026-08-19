@@ -15,8 +15,8 @@ not mean production security, capacity, or payment-rail readiness.
 
 The distribution has two independently visible versions:
 
-- `product_version` identifies all six production binaries. Stable releases
-  use SemVer tags such as `v0.1.0`; `main` builds use
+- `product_version` identifies all four packaged production binaries. Stable
+  releases use SemVer tags such as `v0.1.0`; `main` builds use
   `<cargo-version>-main.<12-character-commit>`.
 - `executor_contract` identifies the negotiated external execution protocol.
   It is `hubu-spend-executor-v4.2` and does not change merely because the
@@ -63,22 +63,22 @@ money movement.
 
 ## Supported binary targets
 
-Each release contains exactly six production binaries in a target-specific
+Each release contains exactly four production binaries in a target-specific
 archive:
 
 | Binary | Separate runtime responsibility |
 | --- | --- |
 | `hubu` | Human/developer control-plane CLI |
 | `hubu-server` | Hubu control-plane HTTP process, governance database, policy, budgets, claims, settlement, and ledger |
-| `hubu-unified-mcp` | Default agent-facing MCP router over independently configured Hubu and Gongbu backends |
-| `hubu-mcp-server` | Opt-in compatibility Hubu MCP adapter to the control plane |
+| `hubu-unified-mcp` | Only supported agent-facing MCP router over independently configured Hubu and Gongbu backends |
 | `gongbu-server` | Gongbu execution-plane HTTP process, database, Temporal worker, provider credentials/calls, artifacts, and recovery |
-| `gongbu-mcp` | Opt-in compatibility Gongbu MCP adapter to the execution plane |
 
-`hubu-bench` and `gongbu-sandbox` are development tools and are explicitly
-excluded. A shared archive does not merge backend processes, databases,
-credentials, provider execution, artifacts, or failure domains. The unified MCP
-binary communicates with each backend only through its versioned HTTP contract.
+`hubu-mcp-server` and `gongbu-mcp` are deprecated standalone adapters excluded
+from primary archives. `hubu-bench` and `gongbu-sandbox` are development tools
+and are also excluded. A shared archive does not merge backend processes,
+databases, credentials, provider execution, artifacts, or failure domains. The
+unified MCP binary communicates with each backend only through its versioned
+HTTP contract.
 
 | Platform | Target | Asset suffix |
 | --- | --- | --- |
@@ -93,14 +93,15 @@ Linux release targets must be restored and verified before the first supported
 Linux user or public availability.
 
 Every archive includes `MANIFEST.json` and `PROVENANCE.json`. Both enumerate the
-six binaries, the default and compatibility agent surfaces, product version,
+four binaries, the one supported agent surface, the deprecated surfaces that
+were excluded, product version,
 full source commit, executor contract, and Rust target; provenance also records
 the repository, workflow run, and locked
 dependency declaration. The archive carries its own `SHA256SUMS` for every
 manifested file plus `LICENSE-MIT`, `LICENSE-APACHE`,
 `THIRD-PARTY-NOTICES.md`, a target-specific `THIRD-PARTY-LICENSES.txt` bundle,
 and the exact `Cargo.lock` dependency inventory. License generation covers the
-locked normal dependency graph of all six production binaries and fails when
+locked normal dependency graph of all four production binaries and fails when
 an included third-party crate lacks license material. The GitHub Release also
 publishes a top-level `SHA256SUMS` covering both macOS target archives during
 this temporary exception.
@@ -126,27 +127,23 @@ provenance before installing:
 package=${asset%.tar.gz}
 cat "$package/PROVENANCE.json"
 cat "$package/MANIFEST.json"
-for binary in hubu hubu-server hubu-unified-mcp hubu-mcp-server gongbu-server gongbu-mcp; do
+for binary in hubu hubu-server hubu-unified-mcp gongbu-server; do
   "$package/$binary" --version
 done
 install \
   "$package/hubu" \
   "$package/hubu-server" \
   "$package/hubu-unified-mcp" \
-  "$package/hubu-mcp-server" \
   "$package/gongbu-server" \
-  "$package/gongbu-mcp" \
   /usr/local/bin/
 ```
 
-Configure the default single agent entry after installation with
+Configure the single supported agent entry after installation with
 `hubu init codex`. Migrate an existing two-entry configuration deterministically
 with `hubu init codex --migrate-standalone --gongbu-endpoint URL
 --gongbu-token-file FILE`; migration refuses to change the config when a
-standalone Gongbu entry lacks replacement settings. The packaged standalone
-binaries remain available only through explicit compatibility configuration such as
-`hubu init codex --compatibility-standalone` or a manually retained
-`gongbu-mcp` entry.
+standalone Gongbu entry lacks replacement settings. Release archives do not
+contain standalone MCP adapters, and the CLI does not generate their config.
 
 Every binary's reported `product_version` and `source_commit` must match the
 archive provenance. Its `executor_contract` (or Gongbu's equivalent
@@ -170,16 +167,14 @@ gh workflow run release.yml \
 
 The source must be an ancestor of `main`. Promotion reruns formatting, Clippy,
 the locked all-target workspace tests, the core integration flow, packaging
-negative tests, and a locked six-binary release build before creating platform
+negative tests, and a locked four-binary release build before creating platform
 artifacts. Before publication, a deterministic native archive smoke verifies
-the six binaries, starts an isolated `hubu-server`, initializes the unified MCP
-server, verifies default config generation and unified tool discovery, then
-initializes both standalone compatibility adapters without making provider
-calls or spend requests. After
+the four binaries, starts an isolated `hubu-server`, initializes the unified MCP
+server, and verifies default config generation and unified tool discovery. After
 publication, native runners for both temporary macOS targets download the release,
 verify both checksum layers, manifests, provenance, licenses, notices, lockfile,
-all six `--version` surfaces, Hubu `/health` and `/version`, unified MCP tool
-discovery, and standalone compatibility initialization. No smoke test enables
+all four `--version` surfaces, Hubu `/health` and `/version`, and unified MCP tool
+discovery. No smoke test enables
 provider credentials or spend.
 HTTP probes use bounded connection and total-request timeouts so an unavailable
 or non-responsive server fails the smoke job promptly.
@@ -191,9 +186,9 @@ substitute for those deployment gates.
 
 ## Rollback, deprecation, and retention
 
-Rollback means changing the consumer pin to an older validated tag and
-checksum. Never move a tag, replace an asset, or edit an old checksum to perform
-a rollback.
+Rollback means changing the consumer pin to an older validated unified MCP tag
+and checksum. It does not restore deprecated standalone MCP configuration.
+Never move a tag, replace an asset, or edit an old checksum to perform a rollback.
 
 If a release is unsafe, mark it deprecated in its GitHub Release notes and
 publish a replacement version. Leave its tag and artifacts intact so existing
@@ -218,10 +213,11 @@ verifies that the exact four-platform release and all published-archive smoke
 jobs subsequently passed under the candidate-pinned workflow. That immutable
 release predates the temporary exact two-macOS-archive exception, which governs
 subsequent pre-launch canaries and does not invalidate this verified superset.
-HUB-97 remains blocked until the HUB-111 GO pull request is explicitly approved
-and merged.
+The HUB-111 GO pull request was reviewed and merged as squash
+`7b34e22c6ceb055818e829a0573f23ad21a2de3c`, authorizing HUB-97.
 
-After GO, HUB-97 and then HUB-98 may proceed sequentially without the former
+HUB-97 makes the unsupported cutover immediately on merge; HUB-98 then removes
+the retained standalone source. They proceed sequentially without the former
 90-day/two-stable-release wait. At least one immutable rollback release with
 checksums and provenance must remain available until HUB-98 verifies removal,
 workspace integrity, and stale operational references. Retaining that artifact

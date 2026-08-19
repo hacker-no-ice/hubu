@@ -15,11 +15,14 @@ PRODUCTION_BINARIES = (
     "hubu",
     "hubu-server",
     "hubu-unified-mcp",
-    "hubu-mcp-server",
     "gongbu-server",
+)
+EXCLUDED_BINARIES = (
+    "hubu-bench",
+    "gongbu-sandbox",
+    "hubu-mcp-server",
     "gongbu-mcp",
 )
-DEVELOPMENT_BINARIES = ("hubu-bench", "gongbu-sandbox")
 RELEASE_TARGETS = (
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
@@ -49,11 +52,11 @@ for binary in PRODUCTION_BINARIES:
     if not re.search(rf"(?m)^  {re.escape(binary)}$", smoke_script):
         fail(f"archive smoke does not enumerate {binary}")
 
-for binary in DEVELOPMENT_BINARIES:
+for binary in EXCLUDED_BINARIES:
     if f"--bin {binary}" in workflow_lines:
-        fail(f"development tool {binary} must not be built for release")
+        fail(f"excluded binary {binary} must not be built for release")
     if re.search(rf'cp .*[/"]{re.escape(binary)}', package_script):
-        fail(f"development tool {binary} must not be copied into release archives")
+        fail(f"excluded binary {binary} must not be copied into release archives")
 
 matrix_targets = re.findall(r"(?m)^\s+target: (\S+)$", workflow)
 expected_matrix_targets = [*RELEASE_TARGETS, *RELEASE_TARGETS]
@@ -110,7 +113,7 @@ if unpinned:
     fail("actions must be pinned to full commit SHAs: " + "; ".join(unpinned))
 
 print(
-    "validated immutable release workflow: six production binaries, exactly two "
+    "validated immutable release workflow: four production binaries, exactly two "
     "temporary pre-launch macOS targets, scheduled and explicit canaries, shared "
     "build identity, bounded permissions, and pinned actions"
 )

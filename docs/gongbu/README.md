@@ -18,9 +18,9 @@ Execution and Artifact HTTP contract, and the first single-provider durable
 execution workflow, plus operator-selected Google Gemini and Ideogram image
 adapters.
 
-The separate `gongbu-mcp` crate exposes the authenticated HTTP contract to local
-agent platforms over MCP stdio. See [mcp.md](mcp.md) for operator
-configuration, tool examples, and its opt-in integration test.
+The `gongbu-mcp` crate is a deprecated, unsupported standalone adapter retained
+only until HUB-98 removes its source. Agents use `hubu-unified-mcp`; see
+[mcp.md](mcp.md) for the source-retention notice.
 
 ## Versioned execution boundary
 
@@ -243,12 +243,11 @@ build, so install `protoc` first (`brew install protobuf` on macOS or
 `apt-get install protobuf-compiler` on Debian/Ubuntu).
 
 ```sh
-cargo test -p gongbu-api -p gongbu-build-info -p gongbu-mcp --locked
-cargo build --release --locked --bin gongbu-server --bin gongbu-mcp
+cargo test -p gongbu-api -p gongbu-build-info --locked
+cargo build --release --locked --bin gongbu-server
 ```
 
 Use `cargo test --workspace --locked` before repository-wide changes. The
-production `gongbu-server` and compatibility `gongbu-mcp` binaries remain
-separate runtime processes and ship in the Hubu release archive. The default
-agent surface is `hubu-unified-mcp`; `gongbu-mcp` is an explicit migration-window
-compatibility path. `gongbu-sandbox` remains a development-only binary.
+production `gongbu-server` remains a separate runtime process and ships in the
+Hubu release archive. The only supported agent surface is `hubu-unified-mcp`;
+`gongbu-mcp` is excluded. `gongbu-sandbox` remains a development-only binary.

@@ -1,10 +1,12 @@
 # Gongbu-to-Hubu Cutover Runbook
 
-This runbook completes the repository migration only after one immutable unified
-Hubu canary proves the six-binary distribution from an exact commit on `main`.
-It does not authorize a live provider call or real spend.
+This historical runbook recorded the repository migration after one immutable
+unified Hubu canary proved the then-current six-binary distribution from an
+exact commit on `main`. HUB-97 now packages four binaries and excludes the two
+deprecated standalone MCP adapters. This record does not authorize a live
+provider call or real spend.
 
-## Ordered cutover gates
+## Historical ordered cutover gates
 
 1. Record the exact `main` commit and confirm the unified CI jobs for workspace
    tests, Rust 1.88 MSRV, and repository security succeeded for that commit.
@@ -22,12 +24,10 @@ It does not authorize a live provider call or real spend.
    invoke a provider, or submit spend.
 6. Complete the compatibility inventory below and record the evidence in
    Linear HUB-86 before changing the legacy repository.
-7. Change the private `hacker-no-ice/gongbu` README to a short archival pointer
-   to `https://github.com/hacker-no-ice/hubu`. Merge that pointer while the
-   repository is still writable.
-8. Re-read the repository settings, default-branch tip, README, open pull
-   requests, releases, and tags. Archive the legacy repository only after the
-   preceding gates pass, then verify it is read-only and still accessible.
+7. The private `hacker-no-ice/gongbu` README was changed to a short archival
+   pointer to `https://github.com/hacker-no-ice/hubu` while it was writable.
+8. The legacy repository settings and contents were re-read before archival;
+   the archived repository was then verified read-only and accessible.
 
 The canary tag is `main-<full-source-commit>` and must never be moved or have an
 asset replaced. Record the release URL, workflow run URL, source commit, product
@@ -42,7 +42,7 @@ contract. Confirm all of these before archiving the legacy repository:
 
 | Surface | Required invariant |
 | --- | --- |
-| Binaries | `hubu`, `hubu-server`, `hubu-mcp-server`, `gongbu-server`, and `gongbu-mcp` retain their names; development-only `hubu-bench` and `gongbu-sandbox` are absent from release archives. |
+| Binaries | Historical evidence used `hubu`, `hubu-server`, `hubu-mcp-server`, `gongbu-server`, and `gongbu-mcp`; current HUB-97 archives retain only `hubu`, `hubu-server`, `hubu-unified-mcp`, and `gongbu-server`. |
 | Configuration | Existing Gongbu server JSON remains accepted; provider and pricing configuration schemas are not rewritten by the repository move. |
 | Environment | Existing `GONGBU_*`, Hubu URL/token, provider-secret, artifact-root, and Temporal settings retain their meanings. Build-only product/source metadata remains separate from runtime secrets. |
 | Databases | Hubu and Gongbu continue to use separate operator-selected SQLite files. Neither process opens or migrates the other's database. |

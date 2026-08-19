@@ -9,9 +9,7 @@ production_binaries=(
   hubu
   hubu-server
   hubu-unified-mcp
-  hubu-mcp-server
   gongbu-server
-  gongbu-mcp
 )
 packaging_test_targets=(
   x86_64-unknown-linux-gnu
@@ -43,10 +41,8 @@ verify_package() {
     SHA256SUMS
     THIRD-PARTY-LICENSES.txt
     THIRD-PARTY-NOTICES.md
-    gongbu-mcp
     gongbu-server
     hubu
-    hubu-mcp-server
     hubu-server
     hubu-unified-mcp
   )
@@ -59,6 +55,8 @@ verify_package() {
   done
   test ! -e "${package_dir}/hubu-bench"
   test ! -e "${package_dir}/gongbu-sandbox"
+  test ! -e "${package_dir}/hubu-mcp-server"
+  test ! -e "${package_dir}/gongbu-mcp"
 
   jq -e \
     --arg target "${target}" \
@@ -68,9 +66,9 @@ verify_package() {
      .source_commit == "0000000000000000000000000000000000000000" and
      .executor_contract == "hubu-spend-executor-v4.2" and
      .target == $target and
-     .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
-     .default_agent_surface == "hubu-unified-mcp" and
-     .compatibility_agent_surfaces == ["hubu-mcp-server", "gongbu-mcp"] and
+     .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
+     .supported_agent_surfaces == ["hubu-unified-mcp"] and
+     .deprecated_agent_surfaces_excluded == ["hubu-mcp-server", "gongbu-mcp"] and
      .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
     "${package_dir}/MANIFEST.json" >/dev/null
   jq -e \
@@ -82,9 +80,9 @@ verify_package() {
      .executor_contract == "hubu-spend-executor-v4.2" and
      .target == $target and
      .repository == "hacker-no-ice/hubu" and
-     .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "hubu-mcp-server", "gongbu-server", "gongbu-mcp"] and
-     .default_agent_surface == "hubu-unified-mcp" and
-     .compatibility_agent_surfaces == ["hubu-mcp-server", "gongbu-mcp"] and
+     .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
+     .supported_agent_surfaces == ["hubu-unified-mcp"] and
+     .deprecated_agent_surfaces_excluded == ["hubu-mcp-server", "gongbu-mcp"] and
      .manifest == "MANIFEST.json" and
      .dependencies == "Cargo.lock"' \
     "${package_dir}/PROVENANCE.json" >/dev/null
@@ -119,7 +117,7 @@ done
 missing_dir="${test_dir}/missing-bin"
 mkdir -p "${missing_dir}"
 cp "${test_dir}/bin/"* "${missing_dir}/"
-rm "${missing_dir}/gongbu-mcp"
+rm "${missing_dir}/gongbu-server"
 if "${root_dir}/scripts/package-release-archive.sh" \
   "0.0.0-missing" \
   "0000000000000000000000000000000000000000" \
