@@ -213,7 +213,8 @@ is not yet deprecated. The sequence is:
 
 1. Merge HUB-106, HUB-107, and the HUB-108 policy amendment to `main`.
 2. From that exact final `main` commit, publish one fresh immutable packaged
-   canary. Do not reuse the HUB-96 local package or an earlier release.
+   canary with both temporary macOS archives. Both macOS published-asset smoke
+   jobs must pass. Do not reuse the HUB-96 local package or an earlier release.
 3. Record the complete catalog, golden behavior parity,
    `notifications/tools/list_changed`, failure-isolation, redaction,
    migration, rollback, workspace/release-policy, documentation, and
@@ -225,6 +226,10 @@ is not yet deprecated. The sequence is:
 5. After GO, execute HUB-97. Then, and only then, HUB-98 may execute without an
    elapsed-time or stable-release-count wait. Retain one immutable packaged
    rollback artifact through HUB-98 removal verification.
+
+This two-platform canary is a temporary zero-user pre-launch exception. Linux
+release targets must be restored and verified before the first supported Linux
+user or public availability.
 
 HUB-98 still requires zero unresolved P0/P1 findings plus successful workspace,
 document-link, installer/example, architecture-responsibility, and retired-

@@ -1,7 +1,7 @@
 # Gongbu-to-Hubu Cutover Runbook
 
 This runbook completes the repository migration only after one immutable unified
-Hubu canary proves the five-binary distribution from an exact commit on `main`.
+Hubu canary proves the six-binary distribution from an exact commit on `main`.
 It does not authorize a live provider call or real spend.
 
 ## Ordered cutover gates
@@ -10,11 +10,12 @@ It does not authorize a live provider call or real spend.
    tests, Rust 1.88 MSRV, and repository security succeeded for that commit.
 2. Dispatch the `canary` channel in [the release workflow](../.github/workflows/release.yml)
    with that exact 40-character `source_commit`.
-3. Wait for every required release check, four native builds, publication, and
-   all four published-asset smoke jobs to succeed.
-4. Download `SHA256SUMS` plus every Linux and macOS x86-64/ARM64 archive. Verify
+3. Under the temporary zero-user pre-launch exception, wait for every required
+   release check, both macOS native builds, publication, and both macOS
+   published-asset smoke jobs to succeed.
+4. Download `SHA256SUMS` plus both macOS Intel and Apple silicon archives. Verify
    the top-level archive checksum and each archive's internal checksums,
-   manifest, provenance, legal files, lockfile, five version surfaces, Hubu
+   manifest, provenance, legal files, lockfile, six version surfaces, Hubu
    health/version endpoints, and both separate MCP initialization surfaces.
 5. Run the deterministic native packaged-stack smoke. It may start isolated
    Hubu and Gongbu processes, but it must not configure provider credentials,
@@ -30,8 +31,9 @@ It does not authorize a live provider call or real spend.
 
 The canary tag is `main-<full-source-commit>` and must never be moved or have an
 asset replaced. Record the release URL, workflow run URL, source commit, product
-version, four archive names and SHA-256 values, and the result of every smoke
-job in HUB-86.
+version, both macOS archive names and SHA-256 values, and the result of every
+smoke job in HUB-86. The Linux release targets must be restored and verified
+before the first supported Linux user or public availability.
 
 ## Compatibility inventory
 

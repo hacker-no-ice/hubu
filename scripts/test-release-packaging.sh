@@ -13,7 +13,7 @@ production_binaries=(
   gongbu-server
   gongbu-mcp
 )
-supported_targets=(
+packaging_test_targets=(
   x86_64-unknown-linux-gnu
   aarch64-unknown-linux-gnu
   x86_64-apple-darwin
@@ -103,7 +103,7 @@ verify_package() {
     "${package_dir}/THIRD-PARTY-LICENSES.txt" >/dev/null
 }
 
-for target in "${supported_targets[@]}"; do
+for target in "${packaging_test_targets[@]}"; do
   mkdir -p "${test_dir}/dist-${target}"
   "${root_dir}/scripts/package-release-archive.sh" \
     "0.0.0-test" \
@@ -148,4 +148,4 @@ if "${root_dir}/scripts/package-release-archive.sh" \
   exit 1
 fi
 
-echo "Release packaging tests passed for all four supported targets"
+echo "Release packaging format tests passed for four target strings; release matrix policy is validated separately"

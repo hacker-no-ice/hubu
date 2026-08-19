@@ -44,7 +44,7 @@ gh workflow run release.yml \
 The resulting tag remains `main-<full-source-commit>`. Repeating the request
 does not replace the tag or assets. The workflow exits without publishing only
 after it confirms that the existing release is a published prerelease targeting
-the requested commit with all four non-empty archives and `SHA256SUMS`; a draft,
+the requested commit with both non-empty macOS archives and `SHA256SUMS`; a draft,
 partial, or mismatched release fails closed for operator recovery. Use this path
 for a time-sensitive cutover instead of waiting for the next scheduled run.
 
@@ -82,10 +82,15 @@ binary communicates with each backend only through its versioned HTTP contract.
 
 | Platform | Target | Asset suffix |
 | --- | --- | --- |
-| Linux x86-64 | `x86_64-unknown-linux-gnu` | `x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `aarch64-unknown-linux-gnu` | `aarch64-unknown-linux-gnu.tar.gz` |
 | macOS Intel | `x86_64-apple-darwin` | `x86_64-apple-darwin.tar.gz` |
 | macOS Apple silicon | `aarch64-apple-darwin` | `aarch64-apple-darwin.tar.gz` |
+
+This two-platform contract is a temporary zero-user pre-launch exception for
+the immutable unified MCP canary. The release build and published-archive smoke
+matrices intentionally omit `x86_64-unknown-linux-gnu` and
+`aarch64-unknown-linux-gnu`; packaging and runtime behavior are unchanged. Both
+Linux release targets must be restored and verified before the first supported
+Linux user or public availability.
 
 Every archive includes `MANIFEST.json` and `PROVENANCE.json`. Both enumerate the
 six binaries, the default and compatibility agent surfaces, product version,
@@ -97,7 +102,8 @@ manifested file plus `LICENSE-MIT`, `LICENSE-APACHE`,
 and the exact `Cargo.lock` dependency inventory. License generation covers the
 locked normal dependency graph of all six production binaries and fails when
 an included third-party crate lacks license material. The GitHub Release also
-publishes a top-level `SHA256SUMS` covering all four target archives.
+publishes a top-level `SHA256SUMS` covering both macOS target archives during
+this temporary exception.
 
 ## Pin, verify, and install
 
@@ -170,7 +176,7 @@ the six binaries, starts an isolated `hubu-server`, initializes the unified MCP
 server, verifies default config generation and unified tool discovery, then
 initializes both standalone compatibility adapters without making provider
 calls or spend requests. After
-publication, native runners for all four supported targets download the release,
+publication, native runners for both temporary macOS targets download the release,
 verify both checksum layers, manifests, provenance, licenses, notices, lockfile,
 all six `--version` surfaces, Hubu `/health` and `/version`, unified MCP tool
 discovery, and standalone compatibility initialization. No smoke test enables
@@ -206,7 +212,10 @@ URL, tag, full source SHA, workflow run, platform archives, `SHA256SUMS`, and
 evidence index form one immutable candidate. The canary must satisfy the
 [complete retirement evidence matrix](unified-mcp-contract.md#fresh-packaged-canary-evidence-matrix),
 show zero unresolved P0/P1 findings, and receive an explicit GO before HUB-97.
-This policy change does not itself run or approve that canary.
+HUB-109 remains NO-GO until a fresh immutable macOS canary publishes and both
+archive smoke jobs pass. This policy change does not itself run or approve that
+canary. Linux targets must be restored and verified before the first supported
+Linux user or public availability.
 
 After GO, HUB-97 and then HUB-98 may proceed sequentially without the former
 90-day/two-stable-release wait. At least one immutable rollback release with
