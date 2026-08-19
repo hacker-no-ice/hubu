@@ -74,6 +74,9 @@ jobs:
       - name: Run Hubu-to-Gongbu executor E2E
         run: ./scripts/integration-hubu-gongbu-executor.sh
 
+      - name: Run unified MCP routing and failure-isolation matrix
+        run: ./scripts/integration-unified-mcp.sh
+
       - name: Build docs
         run: cargo doc --workspace --no-deps --locked
 
