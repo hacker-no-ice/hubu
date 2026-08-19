@@ -83,7 +83,7 @@ minimum:
 - `gongbu-mcp`: Gongbu's separate agent-facing MCP adapter and `gongbu-mcp`
   binary
 - `hubu-unified-mcp`: unified MCP server with isolated Hubu and Gongbu health,
-  compatibility, and HTTP client boundaries plus the HUB-88-approved Hubu
+  compatibility, and HTTP client boundaries plus the contract-approved Hubu
   governance and Gongbu execution/artifact routes
 
 All crates use one root `Cargo.toml`, `Cargo.lock`, and Rust 1.88 minimum
@@ -110,7 +110,7 @@ collapses runtime responsibilities:
   surfaces. `hubu-unified-mcp` implements the accepted
   [unified MCP contract](docs/unified-mcp-contract.md) transport, isolated
   client boundaries, machine-readable health and compatibility reporting, and
-  only the HUB-88-approved Hubu governance and Gongbu execution/artifact
+  only the contract-approved Hubu governance and Gongbu execution/artifact
   catalogs and forwarding.
   Standalone configuration remains supported until the explicit parity and
   deprecation gates pass; the unified shell is not yet part of release packaging.
@@ -136,7 +136,7 @@ liveness/readiness/version independently, then reports `available`, `degraded`,
 `unavailable`, `incompatible`, or `unconfigured` with fixed, redacted reason
 codes. Exact product, source-commit, executor-contract, MCP, and schema matches
 are required; unstamped local builds fail closed as incompatible. The shell
-lists exactly the 28 HUB-88-approved Hubu tools only while the Hubu backend is
+lists exactly the 28 approved Hubu tools only while the Hubu backend is
 compatible and available. It lists the four approved Gongbu tools according to
 Gongbu readiness; execution creation additionally requires Hubu to be available,
 while compatible degraded Gongbu keeps read and artifact tools available.
