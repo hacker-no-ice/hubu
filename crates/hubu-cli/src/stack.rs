@@ -912,17 +912,173 @@ fn validate_topology(stack: &StackSource) -> Result<()> {
             "gongbu",
         )?;
     }
-    if hubu.ownership == Some(Ownership::Managed) && gongbu.ownership == Some(Ownership::Managed) {
-        if hubu.listen.expect("checked") == gongbu.listen.expect("checked") {
-            bail!("stack.toml:hubu.listen and gongbu.listen must be distinct managed sockets");
+    validate_managed_ports(stack)?;
+    validate_managed_resources(stack)?;
+    Ok(())
+}
+
+fn validate_managed_ports(stack: &StackSource) -> Result<()> {
+    let mut sockets = Vec::new();
+    if let Some(hubu) = stack
+        .hubu
+        .as_ref()
+        .filter(|service| service.ownership == Some(Ownership::Managed))
+    {
+        if let Some(listen) = hubu.listen {
+            sockets.push(("stack.toml:hubu.listen", listen));
         }
-        let hubu_database = hubu.database_path.as_ref().expect("checked");
-        let gongbu_database = gongbu.database_path.as_ref().expect("checked");
-        if paths_resolve_to_same_resource(hubu_database, gongbu_database)? {
-            bail!("stack.toml:hubu.database_path and gongbu.database_path must be distinct managed state files");
+    }
+    if let Some(gongbu) = stack
+        .gongbu
+        .as_ref()
+        .filter(|service| service.ownership == Some(Ownership::Managed))
+    {
+        if let Some(listen) = gongbu.listen {
+            sockets.push(("stack.toml:gongbu.listen", listen));
+        }
+    }
+    for index in 0..sockets.len() {
+        for other in &sockets[index + 1..] {
+            if sockets[index].1 == other.1 {
+                bail!(
+                    "{} and {} must be distinct managed sockets",
+                    sockets[index].0,
+                    other.0
+                );
+            }
+        }
+    }
+
+    let Some(temporal) = stack
+        .temporal
+        .as_ref()
+        .filter(|temporal| temporal.mode == Some(TemporalMode::ManagedLocal))
+    else {
+        return Ok(());
+    };
+    let temporal_ports = [
+        ("stack.toml:temporal.rpc_port", temporal.rpc_port),
+        ("stack.toml:temporal.ui_port", temporal.ui_port),
+    ];
+    if temporal_ports[0].1.is_some() && temporal_ports[0].1 == temporal_ports[1].1 {
+        bail!("stack.toml:temporal.rpc_port and temporal.ui_port must be distinct managed ports");
+    }
+    for (field, port) in temporal_ports {
+        let Some(port) = port else { continue };
+        for (socket_field, socket) in &sockets {
+            if socket.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                && socket.port() == port
+            {
+                bail!("{field} conflicts with managed socket {socket_field}");
+            }
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ManagedResourceKind {
+    File,
+    Directory,
+}
+
+fn validate_managed_resources(stack: &StackSource) -> Result<()> {
+    let mut resources = Vec::new();
+    if let Some(hubu) = stack
+        .hubu
+        .as_ref()
+        .filter(|service| service.ownership == Some(Ownership::Managed))
+    {
+        push_resource(
+            &mut resources,
+            "stack.toml:hubu.database_path",
+            hubu.database_path.as_deref(),
+            ManagedResourceKind::File,
+        );
+        push_resource(
+            &mut resources,
+            "stack.toml:hubu.log_file",
+            hubu.log_file.as_deref(),
+            ManagedResourceKind::File,
+        );
+    }
+    if let Some(gongbu) = stack
+        .gongbu
+        .as_ref()
+        .filter(|service| service.ownership == Some(Ownership::Managed))
+    {
+        push_resource(
+            &mut resources,
+            "stack.toml:gongbu.database_path",
+            gongbu.database_path.as_deref(),
+            ManagedResourceKind::File,
+        );
+        push_resource(
+            &mut resources,
+            "stack.toml:gongbu.artifact_root",
+            gongbu.artifact_root.as_deref(),
+            ManagedResourceKind::Directory,
+        );
+        push_resource(
+            &mut resources,
+            "stack.toml:gongbu.log_file",
+            gongbu.log_file.as_deref(),
+            ManagedResourceKind::File,
+        );
+    }
+    if let Some(temporal) = stack
+        .temporal
+        .as_ref()
+        .filter(|temporal| temporal.mode == Some(TemporalMode::ManagedLocal))
+    {
+        push_resource(
+            &mut resources,
+            "stack.toml:temporal.data_path",
+            temporal.data_path.as_deref(),
+            ManagedResourceKind::Directory,
+        );
+    }
+
+    for index in 0..resources.len() {
+        for other in &resources[index + 1..] {
+            if managed_resources_overlap(&resources[index], other)? {
+                bail!(
+                    "{} and {} must not overlap managed resources",
+                    resources[index].0,
+                    other.0
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_resource<'a>(
+    resources: &mut Vec<(&'static str, &'a Path, ManagedResourceKind)>,
+    field: &'static str,
+    path: Option<&'a Path>,
+    kind: ManagedResourceKind,
+) {
+    if let Some(path) = path {
+        resources.push((field, path, kind));
+    }
+}
+
+fn managed_resources_overlap(
+    left: &(&str, &Path, ManagedResourceKind),
+    right: &(&str, &Path, ManagedResourceKind),
+) -> Result<bool> {
+    if paths_resolve_to_same_resource(left.1, right.1)? {
+        return Ok(true);
+    }
+    if matches!(left.2, ManagedResourceKind::Directory)
+        || matches!(right.2, ManagedResourceKind::Directory)
+    {
+        let left = resolve_existing_prefix(left.1)?;
+        let right = resolve_existing_prefix(right.1)?;
+        return Ok(left.starts_with(&right) || right.starts_with(&left));
+    }
+    Ok(false)
 }
 
 fn validate_renderer_identity(renderer: &Path, configured_hubu: &Path) -> Result<()> {
@@ -948,6 +1104,21 @@ fn validate_renderer_identity(renderer: &Path, configured_hubu: &Path) -> Result
 }
 
 fn paths_resolve_to_same_resource(left: &Path, right: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        if left.exists() && right.exists() {
+            let left_metadata = fs::metadata(left)
+                .with_context(|| format!("read metadata for `{}`", left.display()))?;
+            let right_metadata = fs::metadata(right)
+                .with_context(|| format!("read metadata for `{}`", right.display()))?;
+            use std::os::unix::fs::MetadataExt;
+            if left_metadata.dev() == right_metadata.dev()
+                && left_metadata.ino() == right_metadata.ino()
+            {
+                return Ok(true);
+            }
+        }
+    }
     Ok(resolve_existing_prefix(left)? == resolve_existing_prefix(right)?)
 }
 
@@ -1874,7 +2045,82 @@ database_path = {gongbu_database}
         assert!(validate_topology(&shared_state)
             .unwrap_err()
             .to_string()
-            .contains("distinct managed state files"));
+            .contains("must not overlap managed resources"));
+    }
+
+    #[test]
+    fn managed_temporal_ports_reject_service_and_each_other_collisions() {
+        let root = tempdir().unwrap();
+        let stack = |rpc_port: u16, ui_port: u16| {
+            toml::from_str::<StackSource>(&format!(
+                r#"schema_version = 1
+[hubu]
+ownership = "managed"
+endpoint = "http://127.0.0.1:8787"
+listen = "127.0.0.1:8787"
+database_path = {}
+[gongbu]
+ownership = "managed"
+endpoint = "http://127.0.0.1:8788"
+listen = "127.0.0.1:8788"
+database_path = {}
+artifact_root = {}
+[temporal]
+mode = "managed_local"
+rpc_port = {rpc_port}
+ui_port = {ui_port}
+"#,
+                quote(root.path().join("hubu.sqlite3").display().to_string()),
+                quote(root.path().join("gongbu.sqlite3").display().to_string()),
+                quote(root.path().join("artifacts").display().to_string())
+            ))
+            .unwrap()
+        };
+
+        assert!(validate_topology(&stack(8787, 8233))
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts with managed socket"));
+        assert!(validate_topology(&stack(7233, 7233))
+            .unwrap_err()
+            .to_string()
+            .contains("must be distinct managed ports"));
+    }
+
+    #[test]
+    fn managed_gongbu_database_must_not_overlap_artifact_root() {
+        let root = tempdir().unwrap();
+        let shared = quote(root.path().join("gongbu-resource").display().to_string());
+        let stack: StackSource = toml::from_str(&format!(
+            r#"schema_version = 1
+[hubu]
+ownership = "external"
+endpoint = "http://127.0.0.1:8787"
+[gongbu]
+ownership = "managed"
+endpoint = "http://127.0.0.1:8788"
+listen = "127.0.0.1:8788"
+database_path = {shared}
+artifact_root = {shared}
+"#
+        ))
+        .unwrap();
+
+        let error = validate_topology(&stack).unwrap_err().to_string();
+        assert!(error.contains("gongbu.database_path"));
+        assert!(error.contains("gongbu.artifact_root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_database_hard_links_are_the_same_resource() {
+        let root = tempdir().unwrap();
+        let hubu_database = root.path().join("hubu.sqlite3");
+        let gongbu_database = root.path().join("gongbu.sqlite3");
+        fs::write(&hubu_database, b"").unwrap();
+        fs::hard_link(&hubu_database, &gongbu_database).unwrap();
+
+        assert!(paths_resolve_to_same_resource(&hubu_database, &gongbu_database).unwrap());
     }
 
     #[test]
