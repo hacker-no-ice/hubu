@@ -178,6 +178,36 @@ work without being live-provider ready. Production Gongbu execution remains
 closed until explicit target, pricing, credential-reference, maximum-spend, and
 live-spend gates all pass.
 
+Run the human-readable report with:
+
+```sh
+hubu stack doctor --profile /absolute/path/to/profile
+```
+
+Automation can request a redacted, versioned report:
+
+```sh
+hubu stack doctor --profile /absolute/path/to/profile --json
+```
+
+The JSON report contains `schema_version`, `classification`,
+`provider_readiness`, and ordered checks. Each check identifies its layer,
+status, stable reason `code`, owning component, optional starter-file field,
+and a concise remedy. It intentionally omits profile paths, configured
+endpoints, binary paths, opaque service/account values, and credential values.
+The human report may show the local profile path, but uses the same redacted
+checks and never prints a secret or service response body.
+
+For a complete source profile, doctor probes safe binary provenance and opaque
+credential-reference existence. When an active generation matches the source,
+doctor verifies every recorded digest, invokes the selected Hubu and Gongbu
+production validators, checks the unified-MCP client handoff, and validates
+provider/catalog and artifact contracts. Bounded runtime probes then check
+Hubu liveness, version, and protected read access; Gongbu liveness, worker
+readiness, version, and protected read access; and required Temporal
+reachability. Connection failures never cause doctor to start or repair a
+component.
+
 Human output may show operator-owned paths because doctor is a local operator
 surface. Machine-readable and public server surfaces must use stable reason
 codes and omit raw secret values. Secret values must never appear in either
@@ -234,6 +264,12 @@ release lineage:
 - `hubu-server`;
 - `gongbu-server`; and
 - `hubu-unified-mcp`.
+
+When Hubu or Gongbu ownership is `external`, that service's local server binary
+is not required or probed. The local `hubu` and `hubu-unified-mcp` binaries
+still establish the selected client release lineage, and doctor compares the
+external service's safe `/version` response with that lineage before reporting
+runtime readiness.
 
 Doctor and render compare safe `--version` metadata. Product version and source
 commit must match for a packaged local stack unless a development-only override
