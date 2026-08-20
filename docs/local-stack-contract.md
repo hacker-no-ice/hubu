@@ -43,23 +43,15 @@ combined server:
 | `gongbu-server` | Gongbu execution plane | Stack-managed or explicitly external | Gongbu database, provider credentials, pricing, and artifacts |
 | Gongbu Temporal worker | Gongbu | Always owned by `gongbu-server` | Gongbu workflow/activity code |
 | Temporal service/UI | Gongbu or external operator | `managed_local` child of Gongbu, or external | Temporal workflow history and service data |
-| `hubu-unified-mcp` | Agent client, or optional stack wrapper | Client-owned stdio by default; optional foreground child | Two isolated backend clients; no domain data |
+| `hubu-unified-mcp` | Agent client | Client-owned stdio process | Two isolated backend clients; no domain data |
 
-The stack command may launch `hubu-server` and `gongbu-server`. By default it
-does not launch an orphaned `hubu-unified-mcp` daemon: Codex or another MCP
-client owns that stdio process. Stack setup renders the client launch
-configuration and stack diagnostics verify the binary, configuration, backend
-compatibility, and capability contract.
-
-For agent-harness testing, `hubu stack start --with-mcp` is the optional MCP
-entry point. An MCP client may configure that command instead of invoking
-`hubu-unified-mcp` directly. The wrapper first reconciles the backend stack,
-then launches the unified MCP as a foreground child with stdin and stdout
-reserved for MCP transport. It must not mix lifecycle output into MCP stdout;
-operator diagnostics go to stderr or the profile logs. The wrapper remains
-alive for the MCP child and forwards normal termination. This mode does not
-turn the stdio server into a background daemon or make the unified MCP own
-either backend.
+The stack command may launch `hubu-server` and `gongbu-server`. It never launches
+`hubu-unified-mcp`: Codex or another MCP client owns that stdio process and
+starts it from client configuration. After the backend stack is running, the
+operator uses `hubu init codex --stack-profile PROFILE` to write a managed Codex
+MCP entry from the selected rendered profile. The entry supplies the unified
+binary path plus separate Hubu and Gongbu endpoint and credential-file
+references. It never copies raw credential values into Codex configuration.
 
 Gongbu remains the only process that starts or stops its Temporal worker. In
 `managed_local` mode, Gongbu also owns its Temporal child. The outer stack
@@ -247,21 +239,41 @@ For stack-managed backends, startup order is:
 2. start Gongbu, which starts or connects to Temporal and starts its own worker;
 3. wait for Gongbu readiness, including Hubu compatibility, provider policy,
    Temporal readiness, and a polling Gongbu worker; and
-4. verify the unified MCP executable and rendered client configuration. If an
-   MCP client is already running, its existing capability monitor reports the
-   backend catalog transition; with `--with-mcp`, launch the foreground MCP
-   child only after the backend gates pass.
+4. verify that the rendered client handoff contains compatible unified MCP
+   binary provenance and separate backend endpoint and credential references.
 
 Stack readiness means every selected managed backend is ready and every
-external dependency is compatible. Default start does not claim that a
-client-owned MCP process is currently running. With `--with-mcp`, the wrapper
-also reports the optional child lifecycle through stderr/status metadata while
-leaving MCP stdout protocol-clean.
+external dependency is compatible. It does not claim that a client-owned MCP
+process is currently running or that an agent client has loaded its generated
+configuration.
 
 If startup fails, the launcher stops only children started by that invocation,
 in reverse dependency order. It retains databases, artifacts, Temporal state,
 generated configuration, and logs. Processes that were already running or are
 configured as external remain untouched.
+
+## Codex client handoff
+
+Once the stack reaches `running_ready`, the recommended next command is:
+
+```sh
+hubu init codex --stack-profile PROFILE
+```
+
+The command consumes the selected profile's active generated manifest instead
+of asking the operator to re-enter backend locations or credential paths. It
+validates the unified MCP binary against the stack release lineage, verifies
+the running backend locations when reachable, and writes the managed
+`[mcp_servers.hubu]` entry using the existing Codex initialization safeguards.
+It reports the Codex configuration path and that Codex must be restarted or
+reloaded before a new session can discover the tools.
+
+Initialization does not start, probe through, or supervise the stdio MCP
+process. Codex starts `hubu-unified-mcp` when it opens the configured MCP
+session; the router then discovers the running backends and exposes their
+available `hubu_*` and `gongbu_*` tools. Re-running initialization after a
+profile change updates only the managed entry through the existing reviewed
+replacement flow.
 
 ## Status and logs
 
@@ -271,8 +283,8 @@ visible. At minimum it reports:
 - profile and generated-manifest identity;
 - source/render drift and restart requirements;
 - Hubu and Gongbu liveness, readiness, safe versions, and ownership mode;
-- unified MCP binary/configuration compatibility and whether it is client-owned
-  or an optional stack-launched foreground child;
+- unified MCP binary/configuration compatibility, its client-owned lifecycle,
+  and the exact Codex initialization command for the selected profile;
 - Temporal ownership mode, safe UI URL, namespace, and task queue;
 - whether the Gongbu worker is polling; and
 - exact local commands for relevant logs, doctor, repeated start, Temporal
@@ -305,11 +317,9 @@ Normal managed shutdown proceeds in reverse dependency order:
 3. the stack launcher waits for Gongbu to exit; and
 4. the launcher stops Hubu only when this profile owns the Hubu process.
 
-The agent client owns the normal stdio MCP process and its session lifecycle.
-Stack shutdown does not kill Codex or another MCP client. When the optional
-foreground wrapper launched the MCP child, it may stop only that child and
-must leave the agent harness itself untouched. External Hubu, Gongbu, and
-Temporal processes are never stopped by the stack command.
+The agent client owns the stdio MCP process and its session lifecycle. Stack
+shutdown does not kill Codex, another MCP client, or its MCP child. External
+Hubu, Gongbu, and Temporal processes are never stopped by the stack command.
 
 Hard termination may bypass graceful cleanup. The next doctor/status run must
 detect stale ownership metadata, validate the real process identity before
