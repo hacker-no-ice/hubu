@@ -4,9 +4,8 @@ Hubu's policy engine is a deterministic rules engine for agent spending. It
 takes a structured `SpendRequest`, evaluates it against a human-authored
 `Policy`, and returns an auditable `Evaluation`.
 
-The current v1 engine supports one policy at a time. Mandates and multi-policy
-evaluation can be layered on top later by reusing the same `Rule` and
-`Condition` model.
+The v1 engine evaluates one policy at a time. Mandate aggregation and
+multi-policy evaluation are outside this contract.
 
 ## Declarative Resources
 
@@ -186,7 +185,8 @@ category    -> string
 ```
 
 `merchant` is retained only for legacy policies. New execution policies should
-target the four typed scope fields; see [Trusted execution scope](execution-scope.md).
+target the four typed scope fields; see the
+[trusted execution scope](spend-lifecycle.md#trusted-execution-scope).
 
 Ordered comparisons are currently only valid for `amount`.
 
@@ -265,8 +265,7 @@ assert_eq!(evaluation.reasons, vec!["Meals under $50 are pre-approved"]);
 
 ## Human-Authored Policy Shape
 
-The Rust model is designed for future YAML/TOML/JSON policy files. A YAML policy
-would look roughly like this:
+Policies are authored as YAML. The corresponding shape is:
 
 ```yaml
 id: base_spending_policy
@@ -314,13 +313,3 @@ read file -> parse yaml -> validate policy
 
 If the YAML parses but the policy is invalid, loading returns a validation
 error before the policy can be used for evaluation.
-
-## Future Extensions
-
-The v1 API intentionally keeps the core small. Natural next steps:
-
-- return policy id/version on each individual `RuleResult`
-- validate duplicate rule ids
-- add mandate context with the same rule/condition model
-- add multi-policy evaluation by evaluating each policy and merging all matched
-  effects with the same precedence

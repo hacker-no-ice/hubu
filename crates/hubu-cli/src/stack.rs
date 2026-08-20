@@ -1913,7 +1913,7 @@ is `ready_to_render`, run
 `hubu stack render --profile /absolute/path/to/this/profile`, followed by doctor
 again to validate the active generation and runtime readiness.
 
-Durable contract: `docs/local-stack-contract.md` in the Hubu repository.
+Durable contract: `docs/local-stack.md` in the Hubu repository.
 "#
     .into()
 }

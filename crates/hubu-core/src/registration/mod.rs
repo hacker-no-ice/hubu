@@ -23,7 +23,7 @@
 //! still owning separate version records. This keeps audit history and ownership
 //! boundaries simple for the in-memory prototype.
 //!
-//! See `docs/registration-flow.md` for a fuller guide.
+//! See `docs/agent-registration.md` for a fuller guide.
 //!
 //! # Example
 //!
