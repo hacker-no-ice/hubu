@@ -2494,7 +2494,7 @@ Usage:
   hubu [--url URL] <command>
 
 Commands:
-  stack      Scaffold and render a unified local stack profile
+  stack      Scaffold, diagnose, and render a unified local stack profile
   register   Register human users and agents
   protocol   Read Hubu protocol payloads
   user       List human users and manage advisory spending targets
@@ -2512,6 +2512,7 @@ Global options:
 
 Examples:
   hubu stack init
+  hubu stack doctor --json
   hubu init codex --token-file ~/.hubu/hubu.auth-token
   hubu register human --username alice-example --display-name \"Alice Example\"
   hubu register agent --name local-agent --version local-dev

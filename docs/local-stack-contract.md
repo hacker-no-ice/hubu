@@ -155,8 +155,9 @@ multiple sessions:
 2. **Completeness**: missing decisions are reported by source filename and
    stable field path with a concise remedy.
 3. **Renderability**: paths, ports, binary provenance, component compatibility,
-   catalog coverage, pricing, spend gates, identities, and opaque credential
-   references satisfy the target runtime schemas.
+   identities, and opaque credential references satisfy the selected topology;
+   managed Gongbu catalog coverage, pricing, spend gates, and artifact limits
+   also satisfy its service-owned runtime schema.
 4. **Runtime readiness**: when components are already running, doctor performs
    safe liveness/version checks and authenticated protected checks without
    exposing operator details.
@@ -172,11 +173,46 @@ success or failure:
   dependencies are reachable; or
 - `running_ready`: all selected components pass their readiness contract.
 
-Provider readiness is reported separately as `disabled`, `fixture_only`, or
-`live_ready`. A profile may be useful for no-spend configuration and dependency
-work without being live-provider ready. Production Gongbu execution remains
-closed until explicit target, pricing, credential-reference, maximum-spend, and
-live-spend gates all pass.
+Provider readiness is reported separately as `unknown`, `disabled`,
+`fixture_only`, or `live_ready`. A profile may be useful for no-spend
+configuration and dependency work without being live-provider ready.
+Production managed-Gongbu execution remains closed until explicit target,
+pricing, credential-reference, maximum-spend, and live-spend gates all pass.
+For external Gongbu, its independently owned configuration and validation
+interface remain authoritative, so doctor reports local provider readiness as
+`unknown` instead of certifying the profile's unused provider source.
+
+Run the human-readable report with:
+
+```sh
+hubu stack doctor --profile /absolute/path/to/profile
+```
+
+Automation can request a redacted, versioned report:
+
+```sh
+hubu stack doctor --profile /absolute/path/to/profile --json
+```
+
+The JSON report contains `schema_version`, `classification`,
+`provider_readiness`, and ordered checks. Each check identifies its layer,
+status, stable reason `code`, owning component, optional starter-file field,
+and a concise remedy. It intentionally omits profile paths, configured
+endpoints, binary paths, opaque service/account values, and credential values.
+The human report may show the local profile path, but uses the same redacted
+checks and never prints a secret or service response body.
+
+For a complete source profile, doctor uses deadline-bounded subprocesses to
+probe safe binary provenance and opaque credential-reference existence. When
+an active generation matches the source, doctor verifies every recorded
+digest, invokes production validators for managed Hubu and Gongbu inputs,
+checks the unified-MCP client handoff, and validates managed-Gongbu
+provider/catalog and artifact contracts. External Gongbu owns those contracts,
+so doctor skips local certification rather than inferring it from `/readyz`.
+Bounded runtime probes then check Hubu liveness, version, and protected read
+access; Gongbu liveness, worker readiness, version, and protected read access;
+and required Temporal reachability. Connection failures never cause doctor to
+start or repair a component.
 
 Human output may show operator-owned paths because doctor is a local operator
 surface. Machine-readable and public server surfaces must use stable reason
@@ -234,6 +270,12 @@ release lineage:
 - `hubu-server`;
 - `gongbu-server`; and
 - `hubu-unified-mcp`.
+
+When Hubu or Gongbu ownership is `external`, that service's local server binary
+is not required or probed. The local `hubu` and `hubu-unified-mcp` binaries
+still establish the selected client release lineage, and doctor compares the
+external service's safe `/version` response with that lineage before reporting
+runtime readiness.
 
 Doctor and render compare safe `--version` metadata. Product version and source
 commit must match for a packaged local stack unless a development-only override

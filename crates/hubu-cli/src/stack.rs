@@ -13,6 +13,8 @@ use std::{
 };
 use uuid::Uuid;
 
+mod doctor;
+
 const SOURCE_SCHEMA_VERSION: u32 = 1;
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_PROFILE: &str = "default";
@@ -226,6 +228,7 @@ struct ActiveManifest {
     schema_version: u32,
     generation_id: String,
     generation: String,
+    source_digests: BTreeMap<String, String>,
     generated_file_digests: BTreeMap<String, String>,
     binary_provenance: Vec<BinaryProvenance>,
     process_log_files: BTreeMap<String, Option<PathBuf>>,
@@ -239,6 +242,7 @@ pub(crate) fn command(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     args.remove(0);
     match subcommand.as_str() {
         "init" => init(args, hubu_home),
+        "doctor" => doctor::command(args, hubu_home),
         "render" => render(args, hubu_home),
         "help" | "--help" | "-h" => {
             print_help();
@@ -296,7 +300,7 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         }
     }
     println!(
-        "next: edit the annotated files, then run `hubu stack render --profile {}`",
+        "next: edit the annotated files, then run `hubu stack doctor --profile {}`",
         profile.display()
     );
     Ok(())
@@ -395,24 +399,36 @@ fn render_profile_with_renderer(profile: &Path, renderer: &Path) -> Result<()> {
     let binaries = stack.binaries.as_ref().expect("checked");
     let hubu_bin = existing_absolute(binaries.hubu.as_deref().expect("checked"), "binaries.hubu")?;
     validate_renderer_identity(renderer, &hubu_bin)?;
-    let hubu_server = existing_absolute(
-        binaries.hubu_server.as_deref().expect("checked"),
-        "binaries.hubu_server",
-    )?;
-    let gongbu_server = existing_absolute(
-        binaries.gongbu_server.as_deref().expect("checked"),
-        "binaries.gongbu_server",
-    )?;
+    let hubu_server =
+        if stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+            Some(existing_absolute(
+                binaries.hubu_server.as_deref().expect("checked"),
+                "binaries.hubu_server",
+            )?)
+        } else {
+            None
+        };
+    let gongbu_server =
+        if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+            Some(existing_absolute(
+                binaries.gongbu_server.as_deref().expect("checked"),
+                "binaries.gongbu_server",
+            )?)
+        } else {
+            None
+        };
     let unified_mcp = existing_absolute(
         binaries.hubu_unified_mcp.as_deref().expect("checked"),
         "binaries.hubu_unified_mcp",
     )?;
-    let provenances = vec![
-        binary_provenance("hubu", &hubu_bin)?,
-        binary_provenance("hubu-server", &hubu_server)?,
-        binary_provenance("gongbu-server", &gongbu_server)?,
-        binary_provenance("hubu-unified-mcp", &unified_mcp)?,
-    ];
+    let mut provenances = vec![binary_provenance("hubu", &hubu_bin)?];
+    if let Some(path) = &hubu_server {
+        provenances.push(binary_provenance("hubu-server", path)?);
+    }
+    if let Some(path) = &gongbu_server {
+        provenances.push(binary_provenance("gongbu-server", path)?);
+    }
+    provenances.push(binary_provenance("hubu-unified-mcp", &unified_mcp)?);
     validate_release_lineage(&provenances, stack.allow_development_builds)?;
 
     let files = credentials.files.as_ref().expect("checked");
@@ -471,11 +487,14 @@ fn render_profile_with_renderer(profile: &Path, renderer: &Path) -> Result<()> {
                 verify_generated_file(&active_generation, active, name)?;
             }
             if stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
-                validate_with_binary(&hubu_server, &active_generation.join("hubu-launch.json"))?;
+                validate_with_binary(
+                    hubu_server.as_ref().expect("selected managed binary"),
+                    &active_generation.join("hubu-launch.json"),
+                )?;
             }
             if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
                 validate_with_binary(
-                    &gongbu_server,
+                    gongbu_server.as_ref().expect("selected managed binary"),
                     &active_generation.join("gongbu-server.json"),
                 )?;
             }
@@ -498,8 +517,8 @@ fn render_profile_with_renderer(profile: &Path, renderer: &Path) -> Result<()> {
         &credentials,
         &providers,
         &provenances,
-        &hubu_server,
-        &gongbu_server,
+        hubu_server.as_deref(),
+        gongbu_server.as_deref(),
         &unified_mcp,
         &hubu_auth,
         &hubu_approval,
@@ -526,8 +545,8 @@ fn render_generation(
     credentials: &CredentialsSource,
     providers: &ProvidersSource,
     provenances: &[BinaryProvenance],
-    hubu_server: &Path,
-    gongbu_server: &Path,
+    hubu_server: Option<&Path>,
+    gongbu_server: Option<&Path>,
     unified_mcp: &Path,
     hubu_auth: &Path,
     hubu_approval: &Path,
@@ -541,12 +560,12 @@ fn render_generation(
 ) -> Result<()> {
     let hubu = stack.hubu.as_ref().expect("checked");
     let gongbu = stack.gongbu.as_ref().expect("checked");
-    let identity = stack.identity.as_ref().expect("checked");
     let hubu_endpoint = hubu.endpoint.as_ref().expect("checked");
     let gongbu_endpoint = gongbu.endpoint.as_ref().expect("checked");
     let mut generated_files = BTreeMap::<String, String>::new();
 
     if hubu.ownership == Some(Ownership::Managed) {
+        let hubu_server = hubu_server.expect("selected managed binary");
         let launch = json!({
             "schema_version": 1,
             "listen": hubu.listen.expect("checked"),
@@ -588,12 +607,14 @@ fn render_generation(
     }
 
     if gongbu.ownership == Some(Ownership::Managed) {
+        let gongbu_server = gongbu_server.expect("selected managed binary");
+        let identity = stack.identity.as_ref().expect("checked");
         let gongbu_hubu = credentials.opaque.get("gongbu_hubu").expect("checked");
         let gongbu_caller = credentials.opaque.get("gongbu_caller").expect("checked");
         let temporal = render_temporal(stack.temporal.as_ref().expect("checked"))?;
         let gongbu_version = provenances
             .iter()
-            .find(|item| item.path == gongbu_server)
+            .find(|item| item.component == "gongbu-server")
             .expect("probed");
         let gongbu_schema_version = gongbu_version.server_config_schema_version.unwrap_or(1);
         let provider_json = render_provider_config(providers, gongbu_schema_version, generation)?;
@@ -1202,37 +1223,42 @@ fn missing_fields(
 ) -> Vec<String> {
     let mut missing = Vec::new();
     if let Some(binaries) = stack.binaries.as_ref() {
-        for (value, path) in [
-            (binaries.hubu.as_ref(), "stack.toml:binaries.hubu"),
+        for (value, path, required) in [
+            (binaries.hubu.as_ref(), "stack.toml:binaries.hubu", true),
             (
                 binaries.hubu_server.as_ref(),
                 "stack.toml:binaries.hubu_server",
+                stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed),
             ),
             (
                 binaries.gongbu_server.as_ref(),
                 "stack.toml:binaries.gongbu_server",
+                stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed),
             ),
             (
                 binaries.hubu_unified_mcp.as_ref(),
                 "stack.toml:binaries.hubu_unified_mcp",
+                true,
             ),
         ] {
-            if value.is_none() {
+            if required && value.is_none() {
                 missing.push(path.into());
             }
         }
     } else {
         missing.push("stack.toml:binaries".into());
     }
-    if let Some(identity) = stack.identity.as_ref() {
-        if identity.account_id.as_deref().is_none_or(str::is_empty) {
-            missing.push("stack.toml:identity.account_id".into());
+    if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+        if let Some(identity) = stack.identity.as_ref() {
+            if identity.account_id.as_deref().is_none_or(str::is_empty) {
+                missing.push("stack.toml:identity.account_id".into());
+            }
+            if identity.agent_id.as_deref().is_none_or(str::is_empty) {
+                missing.push("stack.toml:identity.agent_id".into());
+            }
+        } else {
+            missing.push("stack.toml:identity".into());
         }
-        if identity.agent_id.as_deref().is_none_or(str::is_empty) {
-            missing.push("stack.toml:identity.agent_id".into());
-        }
-    } else {
-        missing.push("stack.toml:identity".into());
     }
     check_service_missing(stack.hubu.as_ref(), "hubu", &mut missing);
     check_gongbu_missing(stack.gongbu.as_ref(), &mut missing);
@@ -1321,6 +1347,12 @@ fn missing_fields(
                 }
                 if target.settings.is_none() {
                     missing.push(format!("providers.toml:targets[{index}].settings"));
+                }
+                if let Some(key) = target.credential.as_deref().filter(|key| !key.is_empty()) {
+                    let field = format!("credentials.toml:opaque.{key}");
+                    if !credentials.opaque.contains_key(key) && !missing.contains(&field) {
+                        missing.push(field);
+                    }
                 }
             }
             if providers.pricing_rules.is_empty() {
@@ -1426,7 +1458,15 @@ fn binary_provenance(component: &str, path: &Path) -> Result<BinaryProvenance> {
     if !output.status.success() {
         bail!("`{}` --version failed", path.display());
     }
-    let value: Value = serde_json::from_slice(&output.stdout)
+    binary_provenance_from_output(component, path, &output.stdout)
+}
+
+fn binary_provenance_from_output(
+    component: &str,
+    path: &Path,
+    stdout: &[u8],
+) -> Result<BinaryProvenance> {
+    let value: Value = serde_json::from_slice(stdout)
         .with_context(|| format!("parse safe version output from `{}`", path.display()))?;
     let field = |name: &str| {
         value
@@ -1868,7 +1908,10 @@ files and never starts a service.
 
 Start with every uncommented example that matches your topology, fill the
 commented fields you choose, and leave unrelated examples commented. Then run
-`hubu stack render --profile /absolute/path/to/this/profile`.
+`hubu stack doctor --profile /absolute/path/to/this/profile`. When the profile
+is `ready_to_render`, run
+`hubu stack render --profile /absolute/path/to/this/profile`, followed by doctor
+again to validate the active generation and runtime readiness.
 
 Durable contract: `docs/local-stack-contract.md` in the Hubu repository.
 "#
@@ -1877,7 +1920,7 @@ Durable contract: `docs/local-stack-contract.md` in the Hubu repository.
 
 fn print_help() {
     println!(
-        "Manage the local Hubu stack profile\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack render [--profile ABSOLUTE_DIR]"
+        "Manage the local Hubu stack profile\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]"
     );
 }
 
@@ -1979,7 +2022,8 @@ mod tests {
         )
         .unwrap();
         let error = render_profile(&profile).unwrap_err().to_string();
-        assert!(error.contains("stack.toml:identity.account_id"));
+        assert!(error.contains("stack.toml:hubu.ownership"));
+        assert!(error.contains("stack.toml:gongbu.ownership"));
         assert!(error.contains("credentials.toml:files.hubu_auth"));
         assert!(error.contains("providers.toml:mode"));
         assert!(!profile.join("generated/active-manifest.json").exists());
@@ -2152,6 +2196,94 @@ artifact_root = {shared}
         let disabled: ProvidersSource =
             toml::from_str("schema_version = 1\nmode = \"disabled\"\n").unwrap();
         assert!(render_provider_config(&disabled, 1, Path::new("/tmp/generation")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_backends_do_not_require_unused_local_server_binaries() {
+        let root = tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let binaries = root.path().join("bin");
+        let credentials = root.path().join("credentials");
+        fs::create_dir(&profile).unwrap();
+        fs::create_dir(&binaries).unwrap();
+        fs::create_dir(&credentials).unwrap();
+        for name in ["hubu", "hubu-unified-mcp"] {
+            write_fake_binary(&binaries.join(name), false);
+        }
+        for name in ["auth", "approval", "reconciliation", "gongbu-caller"] {
+            fs::write(credentials.join(name), format!("{name}-secret")).unwrap();
+        }
+        fs::write(
+            profile.join("stack.toml"),
+            format!(
+                r#"schema_version = 1
+allow_development_builds = true
+[binaries]
+hubu = {}
+hubu_unified_mcp = {}
+[hubu]
+ownership = "external"
+endpoint = "http://127.0.0.1:42001"
+[gongbu]
+ownership = "external"
+endpoint = "http://127.0.0.1:42002"
+"#,
+                quote(binaries.join("hubu").display().to_string()),
+                quote(binaries.join("hubu-unified-mcp").display().to_string()),
+            ),
+        )
+        .unwrap();
+        fs::write(
+            profile.join("credentials.toml"),
+            format!(
+                r#"schema_version = 1
+[files]
+hubu_auth = {}
+hubu_approval = {}
+hubu_reconciliation = {}
+gongbu_caller = {}
+"#,
+                quote(credentials.join("auth").display().to_string()),
+                quote(credentials.join("approval").display().to_string()),
+                quote(credentials.join("reconciliation").display().to_string()),
+                quote(credentials.join("gongbu-caller").display().to_string()),
+            ),
+        )
+        .unwrap();
+        fs::write(
+            profile.join("providers.toml"),
+            "schema_version = 1\nmode = \"disabled\"\n",
+        )
+        .unwrap();
+
+        let stack: StackSource =
+            toml::from_str(&fs::read_to_string(profile.join("stack.toml")).unwrap()).unwrap();
+        let credential_source: CredentialsSource =
+            toml::from_str(&fs::read_to_string(profile.join("credentials.toml")).unwrap()).unwrap();
+        let providers: ProvidersSource =
+            toml::from_str(&fs::read_to_string(profile.join("providers.toml")).unwrap()).unwrap();
+        assert!(missing_fields(&stack, &credential_source, &providers).is_empty());
+
+        render_profile_with_renderer(&profile, &binaries.join("hubu")).unwrap();
+        let manifest: ActiveManifest =
+            read_json(&profile.join("generated/active-manifest.json")).unwrap();
+        assert_eq!(
+            manifest
+                .binary_provenance
+                .iter()
+                .map(|item| item.component.as_str())
+                .collect::<Vec<_>>(),
+            ["hubu", "hubu-unified-mcp"]
+        );
+        assert_eq!(
+            manifest
+                .generated_file_digests
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["client-handoff.json"]
+        );
     }
 
     #[cfg(unix)]
