@@ -941,6 +941,7 @@ dependencies = [
  "dirs",
  "hubu-common",
  "hubu-core",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

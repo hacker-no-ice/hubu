@@ -101,6 +101,16 @@ impl DoctorReport {
         self.classification == ProfileClassification::RunningReady
     }
 
+    pub(super) fn is_renderable(&self) -> bool {
+        !self.checks.iter().any(|check| {
+            check.status == CheckStatus::Fail
+                && matches!(
+                    check.layer,
+                    CheckLayer::SourceSyntax | CheckLayer::Completeness | CheckLayer::Renderability
+                )
+        })
+    }
+
     pub(super) fn component_ready(&self, component: &str) -> bool {
         self.checks.iter().any(|check| {
             check.status == CheckStatus::Pass

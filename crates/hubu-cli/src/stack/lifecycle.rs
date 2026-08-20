@@ -106,6 +106,7 @@ pub(super) fn start(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     let confirm_restart = take_flag(&mut args, "--confirm-restart");
     let profile = take_profile(&mut args, hubu_home)?;
     ensure_no_args(args)?;
+    let _lock = acquire_lifecycle_lock(&profile)?;
     start_profile(&profile, confirm_restart)
 }
 
@@ -161,6 +162,7 @@ pub(super) fn restart(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         .unwrap_or(ComponentSelection::All);
     let profile = take_profile(&mut args, hubu_home)?;
     ensure_no_args(args)?;
+    let _lock = acquire_lifecycle_lock(&profile)?;
     restart_profile(&profile, component)
 }
 
@@ -172,6 +174,7 @@ pub(super) fn stop(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     let forget_stale = take_flag(&mut args, "--forget-stale");
     let profile = take_profile(&mut args, hubu_home)?;
     ensure_no_args(args)?;
+    let _lock = acquire_lifecycle_lock(&profile)?;
     stop_profile(&profile, ComponentSelection::All, forget_stale)
 }
 
@@ -539,6 +542,7 @@ fn start_missing_components(
         if stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed)
             && !doctor::inspect_profile(profile).component_ready("hubu")
         {
+            refuse_duplicate_owned_spawn(&state, "hubu-server")?;
             let process = spawn_component(profile, manifest, "hubu-server")?;
             state
                 .processes
@@ -558,6 +562,7 @@ fn start_missing_components(
         if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed)
             && !doctor::inspect_profile(profile).component_ready("gongbu")
         {
+            refuse_duplicate_owned_spawn(&state, "gongbu-server")?;
             if !doctor::inspect_profile(profile).component_ready("hubu") {
                 bail!("Hubu did not pass its dependency gate before Gongbu startup");
             }
@@ -601,17 +606,19 @@ fn start_missing_components(
 }
 
 fn restart_profile(profile: &Path, selection: ComponentSelection) -> Result<()> {
-    prepare_startable_profile(profile)?;
+    prepare_rendered_profile(profile)?;
+    let stack = read_toml::<StackSource>(&profile.join("stack.toml"))?;
+    let expanded = if selection == ComponentSelection::Hubu {
+        ComponentSelection::All
+    } else {
+        selection
+    };
+    validate_restart_dependencies(profile, &stack, expanded)?;
     if let Some(state) = read_runtime_state(profile)? {
         refuse_identity_mismatches(&state)?;
-        let stack = read_toml::<StackSource>(&profile.join("stack.toml"))?;
         let manifest = read_active_manifest(profile)?;
         let drift = required_restart_plan(profile, &stack, &manifest, &state)?;
-        let allowed = selected_components(if selection == ComponentSelection::Hubu {
-            ComponentSelection::All
-        } else {
-            selection
-        });
+        let allowed = selected_components(expanded);
         let outside_selection = drift
             .iter()
             .filter(|component| !allowed.contains(component.as_str()))
@@ -624,13 +631,62 @@ fn restart_profile(profile: &Path, selection: ComponentSelection) -> Result<()> 
             );
         }
     }
-    let expanded = if selection == ComponentSelection::Hubu {
-        ComponentSelection::All
-    } else {
-        selection
-    };
     stop_components(profile, expanded, false)?;
     start_profile(profile, true)
+}
+
+fn prepare_rendered_profile(profile: &Path) -> Result<()> {
+    let renderer = env::current_exe().context("locate the running hubu executable")?;
+    let initial = doctor::inspect_profile(profile);
+    if !initial.is_source_complete() {
+        doctor::print_human(profile, &initial);
+        bail!("stack source is incomplete or invalid; no process was stopped");
+    }
+    if !initial.check_passed("active_render_valid") {
+        render_profile_with_renderer(profile, &renderer)?;
+    }
+    let rendered = doctor::inspect_profile(profile);
+    if !rendered.is_renderable() || !rendered.check_passed("active_render_valid") {
+        doctor::print_human(profile, &rendered);
+        bail!("stack inputs are not renderable; no process was stopped");
+    }
+    Ok(())
+}
+
+fn validate_restart_dependencies(
+    profile: &Path,
+    stack: &StackSource,
+    selection: ComponentSelection,
+) -> Result<()> {
+    let selected = selected_components(selection);
+    let gongbu_managed =
+        stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed);
+    if !gongbu_managed || !selected.contains("gongbu-server") {
+        return Ok(());
+    }
+    let report = doctor::inspect_profile(profile);
+    let hubu_selected = stack.hubu.as_ref().and_then(|value| value.ownership)
+        == Some(Ownership::Managed)
+        && selected.contains("hubu-server");
+    if !hubu_selected && !report.component_ready("hubu") {
+        bail!("Hubu dependency is not ready; no managed process was stopped");
+    }
+    if stack.temporal.as_ref().and_then(|value| value.mode) == Some(TemporalMode::External)
+        && !report.check_passed("temporal_reachable")
+    {
+        bail!("external Temporal dependency is not reachable; no managed process was stopped");
+    }
+    Ok(())
+}
+
+fn refuse_duplicate_owned_spawn(state: &RuntimeState, component: &str) -> Result<()> {
+    if let Some(process) = state.processes.get(component) {
+        bail!(
+            "refusing to start a duplicate {component}: launcher-owned PID {} is alive but not ready; use stack restart after inspecting status and logs",
+            process.pid
+        );
+    }
+    Ok(())
 }
 
 fn stop_profile(profile: &Path, selection: ComponentSelection, forget_stale: bool) -> Result<()> {
@@ -921,7 +977,7 @@ fn open_append_secure(path: &Path) -> Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options
         .open(path)
@@ -1083,6 +1139,54 @@ fn tail_lines(path: &Path, filter: Option<&str>, limit: usize) -> Result<Vec<Str
 
 fn runtime_dir(profile: &Path) -> PathBuf {
     profile.join("runtime")
+}
+
+#[derive(Debug)]
+struct LifecycleLock {
+    _file: File,
+}
+
+fn acquire_lifecycle_lock(profile: &Path) -> Result<LifecycleLock> {
+    if !profile.is_dir() {
+        bail!(
+            "stack profile `{}` does not exist; run stack init first",
+            profile.display()
+        );
+    }
+    create_secure_dir(&runtime_dir(profile))?;
+    let path = runtime_dir(profile).join("lifecycle.lock");
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let file = options
+            .open(&path)
+            .with_context(|| format!("open lifecycle lock `{}`", path.display()))?;
+        // SAFETY: flock only observes this live file descriptor; LifecycleLock owns the
+        // File for the full mutation and Drop closes it, releasing the kernel lock.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                bail!(
+                    "another lifecycle command is already operating on profile `{}`",
+                    profile.display()
+                );
+            }
+            return Err(error).with_context(|| format!("lock `{}`", path.display()));
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok(LifecycleLock { _file: file })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = options;
+        bail!("stack lifecycle locking is not supported on this platform")
+    }
 }
 
 fn runtime_state_path(profile: &Path) -> PathBuf {
@@ -1450,6 +1554,37 @@ ownership = "managed"
                 .to_string()
                 .contains("missing value"));
         }
+    }
+
+    #[test]
+    fn lifecycle_lock_rejects_a_concurrent_mutation_and_releases_on_drop() {
+        let temp = tempdir().unwrap();
+        let first = acquire_lifecycle_lock(temp.path()).unwrap();
+        assert!(acquire_lifecycle_lock(temp.path())
+            .unwrap_err()
+            .to_string()
+            .contains("already operating"));
+        drop(first);
+        acquire_lifecycle_lock(temp.path()).unwrap();
+    }
+
+    #[test]
+    fn live_owned_record_blocks_duplicate_spawn() {
+        let state = RuntimeState {
+            schema_version: RUNTIME_STATE_SCHEMA_VERSION,
+            profile: PathBuf::from("/tmp/profile"),
+            generation_id: "generation".into(),
+            launch_id: "launch".into(),
+            processes: BTreeMap::from([(
+                "hubu-server".into(),
+                process("hubu-server", 42, "identity".into()),
+            )]),
+        };
+        assert!(refuse_duplicate_owned_spawn(&state, "hubu-server")
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate"));
+        assert!(refuse_duplicate_owned_spawn(&state, "gongbu-server").is_ok());
     }
 
     #[cfg(unix)]

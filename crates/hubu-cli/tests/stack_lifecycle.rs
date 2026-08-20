@@ -163,14 +163,18 @@ fn managed_hubu_lifecycle_is_idempotent_and_never_owns_external_gongbu() {
     let hubu_address = reserve_addr();
 
     let python = root.path().join("hubu_server.py");
+    let unhealthy_marker = root.path().join("hubu-unhealthy");
     fs::write(
         &python,
         format!(
-            r#"import http.server, json
+            r#"import http.server, json, os
 VERSION = json.loads({})
+UNHEALTHY_MARKER = {}
+if os.path.exists(UNHEALTHY_MARKER): os.unlink(UNHEALTHY_MARKER)
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/health": status, body = 200, {{"status":"ok"}}
+        if self.path == "/health" and os.path.exists(UNHEALTHY_MARKER): status, body = 503, {{"status":"unhealthy"}}
+        elif self.path == "/health": status, body = 200, {{"status":"ok"}}
         elif self.path == "/version": status, body = 200, VERSION
         elif self.path == "/agents": status, body = 200, []
         else: status, body = 404, {{"error":"not_found"}}
@@ -183,6 +187,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 http.server.ThreadingHTTPServer(("127.0.0.1", {}), Handler).serve_forever()
 "#,
             serde_json::to_string(version_json.trim()).unwrap(),
+            serde_json::to_string(&unhealthy_marker.display().to_string()).unwrap(),
             hubu_address.port()
         ),
     )
@@ -331,6 +336,23 @@ gongbu_caller = {}
         .unwrap();
     assert_ne!(restarted_pid, first_pid);
     assert_eq!(fs::read(&database).unwrap(), b"durable-state-canary");
+
+    fs::write(&unhealthy_marker, "force one unhealthy generation").unwrap();
+    let recovered = run(&[
+        "stack",
+        "restart",
+        "--component",
+        "hubu",
+        "--profile",
+        profile_arg,
+    ]);
+    assert_success(&recovered);
+    let recovered_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_ne!(
+        recovered_state["processes"]["hubu-server"]["pid"].as_u64(),
+        Some(restarted_pid)
+    );
+    assert!(!unhealthy_marker.exists());
 
     let status = run(&["stack", "status", "--json", "--profile", profile_arg]);
     assert_success(&status);
