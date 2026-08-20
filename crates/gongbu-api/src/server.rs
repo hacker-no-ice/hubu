@@ -776,15 +776,24 @@ fn validate_managed_temporal_cli(config: &TemporalConfig) -> Result<(), ServerEr
         .arg("--version")
         .output()
         .map_err(|_| invalid("managed Temporal CLI version probe failed"))?;
-    let reported = format!(
-        "{}{}",
-        String::from_utf8_lossy(&version.stdout),
-        String::from_utf8_lossy(&version.stderr)
-    );
+    let stdout = std::str::from_utf8(&version.stdout)
+        .map_err(|_| invalid("managed Temporal CLI version output is not UTF-8"))?;
+    let mut fields = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .split_whitespace();
+    let reported_cli_version = match (fields.next(), fields.next(), fields.next()) {
+        (Some("temporal"), Some("version"), Some(value)) => value,
+        _ => {
+            return Err(invalid(
+                "managed Temporal CLI version output has an unsupported format",
+            ))
+        }
+    };
     if !version.status.success()
-        || !reported.split_whitespace().any(|part| {
-            part.trim_start_matches('v') == expected_cli_version.trim_start_matches('v')
-        })
+        || reported_cli_version.trim_start_matches('v')
+            != expected_cli_version.trim_start_matches('v')
     {
         return Err(invalid(
             "managed Temporal CLI version does not match the configured pin",
@@ -977,7 +986,11 @@ mod tests {
         let binary = root.join("temporal-cli");
         fs::write(&targets, "{}").unwrap();
         fs::write(&prices, "{}").unwrap();
-        fs::write(&binary, "#!/bin/sh\necho 'temporal version 1.0.0'\n").unwrap();
+        fs::write(
+            &binary,
+            "#!/bin/sh\necho 'temporal version 1.0.0 (Server 9.9.9, UI 8.8.8)'\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

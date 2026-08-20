@@ -210,8 +210,9 @@ pub(crate) struct CodexHandoff {
     pub gongbu_token_file: PathBuf,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct BinaryProvenance {
+    component: String,
     path: PathBuf,
     product_version: String,
     source_commit: String,
@@ -226,6 +227,8 @@ struct ActiveManifest {
     generation_id: String,
     generation: String,
     generated_file_digests: BTreeMap<String, String>,
+    binary_provenance: Vec<BinaryProvenance>,
+    process_log_files: BTreeMap<String, Option<PathBuf>>,
 }
 
 pub(crate) fn command(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
@@ -397,10 +400,10 @@ fn render_profile(profile: &Path) -> Result<()> {
         "binaries.hubu_unified_mcp",
     )?;
     let provenances = vec![
-        binary_provenance(&hubu_bin)?,
-        binary_provenance(&hubu_server)?,
-        binary_provenance(&gongbu_server)?,
-        binary_provenance(&unified_mcp)?,
+        binary_provenance("hubu", &hubu_bin)?,
+        binary_provenance("hubu-server", &hubu_server)?,
+        binary_provenance("gongbu-server", &gongbu_server)?,
+        binary_provenance("hubu-unified-mcp", &unified_mcp)?,
     ];
     validate_release_lineage(&provenances, stack.allow_development_builds)?;
 
@@ -452,9 +455,21 @@ fn render_profile(profile: &Path) -> Result<()> {
     if let Some(active) = &previous_active {
         if active.generation_id == generation_id {
             let active_generation = active_generation_path(&generated, active)?;
-            verify_generated_file(&active_generation, active, "client-handoff.json")?;
-            for name in active.generated_file_digests.keys() {
+            let expected = expected_generated_files(&stack, &providers);
+            if active.generated_file_digests.len() != expected.len() {
+                bail!("active manifest does not describe the complete generated artifact set");
+            }
+            for name in expected {
                 verify_generated_file(&active_generation, active, name)?;
+            }
+            if stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+                validate_with_binary(&hubu_server, &active_generation.join("hubu-launch.json"))?;
+            }
+            if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+                validate_with_binary(
+                    &gongbu_server,
+                    &active_generation.join("gongbu-server.json"),
+                )?;
             }
             println!("render unchanged: {generation_id}");
             println!("active manifest: {}", active_path.display());
@@ -568,22 +583,14 @@ fn render_generation(
         let gongbu_hubu = credentials.opaque.get("gongbu_hubu").expect("checked");
         let gongbu_caller = credentials.opaque.get("gongbu_caller").expect("checked");
         let temporal = render_temporal(stack.temporal.as_ref().expect("checked"))?;
-        let provider_json = match provider_mode {
-            ProviderMode::Disabled => json!({"mode": "disabled"}),
-            ProviderMode::Live => json!({
-                "mode": "live",
-                "target_catalog_path": generation.join("provider-targets.json"),
-                "pricing_catalog_path": generation.join("pricing-catalog.json"),
-                "maximum_spend_minor": providers.maximum_spend_minor.expect("checked"),
-                "live_spend_acknowledgement": providers.live_spend_acknowledgement.as_ref().expect("checked"),
-            }),
-        };
         let gongbu_version = provenances
             .iter()
             .find(|item| item.path == gongbu_server)
             .expect("probed");
+        let gongbu_schema_version = gongbu_version.server_config_schema_version.unwrap_or(1);
+        let provider_json = render_provider_config(providers, gongbu_schema_version, generation)?;
         let config = json!({
-            "schema_version": gongbu_version.server_config_schema_version.unwrap_or(1),
+            "schema_version": gongbu_schema_version,
             "http": {"listen": gongbu.listen.expect("checked")},
             "state": {
                 "database_path": gongbu.database_path.as_ref().expect("checked"),
@@ -647,22 +654,50 @@ fn render_generation(
         &mut generated_files,
     )?;
 
+    let mut process_log_files = BTreeMap::new();
+    if hubu.ownership == Some(Ownership::Managed) {
+        process_log_files.insert("hubu-server".to_string(), hubu.log_file.clone());
+    }
+    if gongbu.ownership == Some(Ownership::Managed) {
+        process_log_files.insert("gongbu-server".to_string(), gongbu.log_file.clone());
+    }
+    let hubu_lifecycle_relevant = hubu.ownership == Some(Ownership::Managed)
+        || previous_active.is_some_and(|manifest| {
+            manifest
+                .generated_file_digests
+                .contains_key("hubu-launch.json")
+        });
+    let gongbu_lifecycle_relevant = gongbu.ownership == Some(Ownership::Managed)
+        || previous_active.is_some_and(|manifest| {
+            manifest
+                .generated_file_digests
+                .contains_key("gongbu-server.json")
+        });
     let mut restart_impact = Vec::new();
-    if generated_digest_changed(previous_active, &generated_files, &["hubu-launch.json"]) {
+    if hubu_lifecycle_relevant
+        && (generated_digest_changed(previous_active, &generated_files, &["hubu-launch.json"])
+            || binary_provenance_changed(previous_active, provenances, "hubu-server")
+            || process_log_file_changed(previous_active, &process_log_files, "hubu-server"))
+    {
         restart_impact.push("hubu-server");
     }
-    if generated_digest_changed(
-        previous_active,
-        &generated_files,
-        &[
-            "gongbu-server.json",
-            "provider-targets.json",
-            "pricing-catalog.json",
-        ],
-    ) {
+    if gongbu_lifecycle_relevant
+        && (generated_digest_changed(
+            previous_active,
+            &generated_files,
+            &[
+                "gongbu-server.json",
+                "provider-targets.json",
+                "pricing-catalog.json",
+            ],
+        ) || binary_provenance_changed(previous_active, provenances, "gongbu-server")
+            || process_log_file_changed(previous_active, &process_log_files, "gongbu-server"))
+    {
         restart_impact.push("gongbu-server");
     }
-    if generated_digest_changed(previous_active, &generated_files, &["client-handoff.json"]) {
+    if generated_digest_changed(previous_active, &generated_files, &["client-handoff.json"])
+        || binary_provenance_changed(previous_active, provenances, "hubu-unified-mcp")
+    {
         restart_impact.push("hubu-unified-mcp-client-config");
     }
     let manifest = json!({
@@ -674,10 +709,7 @@ fn render_generation(
         "binary_provenance": provenances,
         "generated_file_digests": generated_files,
         "restart_impact": restart_impact,
-        "process_log_files": {
-            "hubu-server": hubu.log_file,
-            "gongbu-server": gongbu.log_file,
-        },
+        "process_log_files": process_log_files,
     });
     let temp_manifest = active_path.with_extension(format!("json.{}.tmp", Uuid::new_v4()));
     write_json_secure(&temp_manifest, &manifest)?;
@@ -698,6 +730,32 @@ fn render_generation(
     Ok(())
 }
 
+fn render_provider_config(
+    providers: &ProvidersSource,
+    gongbu_schema_version: u32,
+    generation: &Path,
+) -> Result<Value> {
+    match (providers.mode.expect("checked"), gongbu_schema_version) {
+        (ProviderMode::Disabled, version) if version < 2 => {
+            bail!("disabled provider mode requires a Gongbu binary with server config schema version 2")
+        }
+        (ProviderMode::Disabled, _) => Ok(json!({"mode": "disabled"})),
+        (ProviderMode::Live, 1) => Ok(json!({
+            "target_catalog_path": generation.join("provider-targets.json"),
+            "pricing_catalog_path": generation.join("pricing-catalog.json"),
+            "maximum_spend_minor": providers.maximum_spend_minor.expect("checked"),
+            "live_spend_acknowledgement": providers.live_spend_acknowledgement.as_ref().expect("checked"),
+        })),
+        (ProviderMode::Live, _) => Ok(json!({
+            "mode": "live",
+            "target_catalog_path": generation.join("provider-targets.json"),
+            "pricing_catalog_path": generation.join("pricing-catalog.json"),
+            "maximum_spend_minor": providers.maximum_spend_minor.expect("checked"),
+            "live_spend_acknowledgement": providers.live_spend_acknowledgement.as_ref().expect("checked"),
+        })),
+    }
+}
+
 fn generated_digest_changed(
     previous: Option<&ActiveManifest>,
     current: &BTreeMap<String, String>,
@@ -709,6 +767,44 @@ fn generated_digest_changed(
     names
         .iter()
         .any(|name| previous.generated_file_digests.get(*name) != current.get(*name))
+}
+
+fn binary_provenance_changed(
+    previous: Option<&ActiveManifest>,
+    current: &[BinaryProvenance],
+    component: &str,
+) -> bool {
+    let current = current.iter().find(|item| item.component == component);
+    let previous = previous.and_then(|manifest| {
+        manifest
+            .binary_provenance
+            .iter()
+            .find(|item| item.component == component)
+    });
+    previous != current
+}
+
+fn process_log_file_changed(
+    previous: Option<&ActiveManifest>,
+    current: &BTreeMap<String, Option<PathBuf>>,
+    component: &str,
+) -> bool {
+    previous.and_then(|manifest| manifest.process_log_files.get(component))
+        != current.get(component)
+}
+
+fn expected_generated_files(stack: &StackSource, providers: &ProvidersSource) -> Vec<&'static str> {
+    let mut files = vec!["client-handoff.json"];
+    if stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+        files.push("hubu-launch.json");
+    }
+    if providers.mode == Some(ProviderMode::Live) {
+        files.extend(["provider-targets.json", "pricing-catalog.json"]);
+    }
+    if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+        files.push("gongbu-server.json");
+    }
+    files
 }
 
 fn render_targets(providers: &ProvidersSource, credentials: &CredentialsSource) -> Result<Value> {
@@ -1086,7 +1182,7 @@ fn check_temporal_missing(source: Option<&TemporalSource>, missing: &mut Vec<Str
     }
 }
 
-fn binary_provenance(path: &Path) -> Result<BinaryProvenance> {
+fn binary_provenance(component: &str, path: &Path) -> Result<BinaryProvenance> {
     let output = Command::new(path)
         .arg("--version")
         .output()
@@ -1105,6 +1201,7 @@ fn binary_provenance(path: &Path) -> Result<BinaryProvenance> {
             .ok_or_else(|| anyhow!("`{}` version output is missing `{name}`", path.display()))
     };
     Ok(BinaryProvenance {
+        component: component.to_owned(),
         path: path.to_path_buf(),
         product_version: field("product_version")?,
         source_commit: field("source_commit")?,
@@ -1679,6 +1776,22 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn provider_render_preserves_v1_live_shape_and_versions_disabled_mode() {
+        let live: ProvidersSource = toml::from_str(&format!(
+            "schema_version = 1\nmode = \"live\"\nmaximum_spend_minor = 10\nlive_spend_acknowledgement = \"{LIVE_SPEND_ACKNOWLEDGEMENT}\"\n"
+        ))
+        .unwrap();
+        let v1 = render_provider_config(&live, 1, Path::new("/tmp/generation")).unwrap();
+        assert!(v1.get("mode").is_none());
+        let v2 = render_provider_config(&live, 2, Path::new("/tmp/generation")).unwrap();
+        assert_eq!(v2["mode"], "live");
+
+        let disabled: ProvidersSource =
+            toml::from_str("schema_version = 1\nmode = \"disabled\"\n").unwrap();
+        assert!(render_provider_config(&disabled, 1, Path::new("/tmp/generation")).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn disabled_profile_renders_idempotently_and_failed_validation_preserves_active() {
@@ -1776,6 +1889,9 @@ account = "gongbu-caller"
         assert_eq!(handoff.hubu_endpoint, "http://127.0.0.1:8787");
         render_profile(&profile).unwrap();
         assert_eq!(fs::read(&active_path).unwrap(), active);
+        write_fake_binary(&binaries.join("gongbu-server"), true);
+        assert!(render_profile(&profile).is_err());
+        write_fake_binary(&binaries.join("gongbu-server"), false);
 
         fs::write(
             profile.join("providers.toml"),
@@ -1795,6 +1911,25 @@ account = "gongbu-caller"
         write_fake_binary(&binaries.join("gongbu-server"), true);
         assert!(render_profile(&profile).is_err());
         assert_eq!(fs::read(&active_path).unwrap(), comment_only_active);
+
+        write_fake_binary(&binaries.join("gongbu-server"), false);
+        fs::write(
+            profile.join("providers.toml"),
+            "schema_version = 1\nmode = \"disabled\"\n# changed\n",
+        )
+        .unwrap();
+        let mut incomplete_manifest: Value = read_json(&active_path).unwrap();
+        incomplete_manifest["generated_file_digests"]
+            .as_object_mut()
+            .unwrap()
+            .remove("gongbu-server.json");
+        fs::write(
+            &active_path,
+            serde_json::to_vec_pretty(&incomplete_manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(render_profile(&profile).is_err());
+        fs::write(&active_path, &comment_only_active).unwrap();
 
         let manifest: ActiveManifest = read_json(&active_path).unwrap();
         let handoff_path = profile
