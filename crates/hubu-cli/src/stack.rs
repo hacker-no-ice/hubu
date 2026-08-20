@@ -1452,7 +1452,15 @@ fn binary_provenance(component: &str, path: &Path) -> Result<BinaryProvenance> {
     if !output.status.success() {
         bail!("`{}` --version failed", path.display());
     }
-    let value: Value = serde_json::from_slice(&output.stdout)
+    binary_provenance_from_output(component, path, &output.stdout)
+}
+
+fn binary_provenance_from_output(
+    component: &str,
+    path: &Path,
+    stdout: &[u8],
+) -> Result<BinaryProvenance> {
+    let value: Value = serde_json::from_slice(stdout)
         .with_context(|| format!("parse safe version output from `{}`", path.display()))?;
     let field = |name: &str| {
         value

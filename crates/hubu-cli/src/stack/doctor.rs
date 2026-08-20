@@ -1,9 +1,14 @@
 use super::*;
 use reqwest::{blocking::Client, redirect::Policy, StatusCode};
 use serde::Serialize;
-#[cfg(target_os = "macos")]
-use std::time::Instant;
-use std::{collections::BTreeSet, net::ToSocketAddrs, time::Duration};
+use std::{
+    collections::BTreeSet,
+    io::Read,
+    net::ToSocketAddrs,
+    process::{ExitStatus, Stdio},
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
@@ -50,6 +55,12 @@ enum ServiceProbe {
     NotRunning,
     Failed,
     Ready,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubprocessProbeError {
+    Failed,
+    TimedOut,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -219,7 +230,10 @@ fn inspect_profile_with(
             "fixture adapters are suitable only for deterministic fixture execution",
         ));
     }
-    if source_constraints_valid && providers.mode == Some(ProviderMode::Live) {
+    if source_constraints_valid
+        && providers.mode == Some(ProviderMode::Live)
+        && stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed)
+    {
         report.provider_readiness = ProviderReadiness::LiveReady;
     }
     if validate_topology(&stack).is_err() {
@@ -283,16 +297,27 @@ fn inspect_profile_with(
             ));
             continue;
         };
-        let Ok(provenance) = binary_provenance(component, &path) else {
-            report.checks.push(check(
-                CheckLayer::Renderability,
-                CheckStatus::Fail,
-                "binary_version_probe_failed",
-                component,
-                Some(field.to_owned()),
-                "the selected binary did not return valid safe version metadata",
-            ));
-            continue;
+        let provenance = match binary_provenance_bounded(component, &path) {
+            Ok(provenance) => provenance,
+            Err(error) => {
+                report.checks.push(check(
+                    CheckLayer::Renderability,
+                    CheckStatus::Fail,
+                    if error == SubprocessProbeError::TimedOut {
+                        "binary_version_probe_timed_out"
+                    } else {
+                        "binary_version_probe_failed"
+                    },
+                    component,
+                    Some(field.to_owned()),
+                    if error == SubprocessProbeError::TimedOut {
+                        "the selected binary did not return safe version metadata before the diagnostic deadline"
+                    } else {
+                        "the selected binary did not return valid safe version metadata"
+                    },
+                ));
+                continue;
+            }
         };
         resolved_binaries.insert(component, path);
         provenances.push(provenance);
@@ -500,7 +525,7 @@ fn inspect_profile_with(
         "active_render_valid",
         "generated",
         None,
-        "active generated files are current and accepted by service-owned validators",
+        "active generated files are current and managed service files are accepted by their owning validators",
     ));
     report.checks.push(check(
         CheckLayer::Renderability,
@@ -510,26 +535,47 @@ fn inspect_profile_with(
         None,
         "unified MCP binary, endpoint, and separate credential references match the active profile",
     ));
-    report.checks.push(check(
-        CheckLayer::Renderability,
-        CheckStatus::Pass,
-        "provider_catalog_contract_valid",
-        "providers",
-        None,
-        if providers.mode == Some(ProviderMode::Disabled) {
-            "provider execution is disabled and no catalog or pricing input is active"
-        } else {
-            "provider targets, frozen pricing, spend gate, and catalog coverage passed production validation"
-        },
-    ));
-    report.checks.push(check(
-        CheckLayer::Renderability,
-        CheckStatus::Pass,
-        "artifact_contract_valid",
-        "gongbu",
-        None,
-        "artifact destination and safety limits passed the selected Gongbu validator",
-    ));
+    let gongbu_managed =
+        stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed);
+    if gongbu_managed {
+        report.checks.push(check(
+            CheckLayer::Renderability,
+            CheckStatus::Pass,
+            "provider_catalog_contract_valid",
+            "providers",
+            None,
+            if providers.mode == Some(ProviderMode::Disabled) {
+                "provider execution is disabled and no catalog or pricing input is active"
+            } else {
+                "provider targets, frozen pricing, spend gate, and catalog coverage passed production validation"
+            },
+        ));
+        report.checks.push(check(
+            CheckLayer::Renderability,
+            CheckStatus::Pass,
+            "artifact_contract_valid",
+            "gongbu",
+            None,
+            "artifact destination and safety limits passed the selected Gongbu validator",
+        ));
+    } else {
+        report.checks.push(check(
+            CheckLayer::Renderability,
+            CheckStatus::Skipped,
+            "provider_catalog_owned_by_external_gongbu",
+            "providers",
+            None,
+            "external Gongbu owns provider catalog, pricing, and spend-gate validation; this profile is not locally certified",
+        ));
+        report.checks.push(check(
+            CheckLayer::Renderability,
+            CheckStatus::Skipped,
+            "artifact_contract_owned_by_external_gongbu",
+            "gongbu",
+            None,
+            "external Gongbu owns artifact destination and safety-limit validation",
+        ));
+    }
 
     let client = match Client::builder()
         .timeout(PROBE_TIMEOUT)
@@ -708,41 +754,156 @@ fn inspect_active_generation(
         ));
         return None;
     }
-    if stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed)
-        && validate_with_binary(
+    if stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+        if let Err(error) = validate_with_binary_bounded(
             binaries.get("hubu-server").expect("resolved"),
             &generation.join("hubu-launch.json"),
-        )
-        .is_err()
-    {
-        checks.push(check(
-            CheckLayer::Renderability,
-            CheckStatus::Fail,
-            "hubu_runtime_validation_failed",
-            "hubu-server",
-            None,
-            "the selected Hubu server rejected its active generated configuration",
-        ));
-        return None;
+        ) {
+            checks.push(check(
+                CheckLayer::Renderability,
+                CheckStatus::Fail,
+                if error == SubprocessProbeError::TimedOut {
+                    "hubu_runtime_validation_timed_out"
+                } else {
+                    "hubu_runtime_validation_failed"
+                },
+                "hubu-server",
+                None,
+                if error == SubprocessProbeError::TimedOut {
+                    "the selected Hubu server validator exceeded the diagnostic deadline"
+                } else {
+                    "the selected Hubu server rejected its active generated configuration"
+                },
+            ));
+            return None;
+        }
     }
-    if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed)
-        && validate_with_binary(
+    if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+        if let Err(error) = validate_with_binary_bounded(
             binaries.get("gongbu-server").expect("resolved"),
             &generation.join("gongbu-server.json"),
-        )
-        .is_err()
-    {
-        checks.push(check(
-            CheckLayer::Renderability,
-            CheckStatus::Fail,
-            "gongbu_runtime_validation_failed",
-            "gongbu-server",
-            None,
-            "the selected Gongbu server rejected its active generated configuration",
-        ));
-        return None;
+        ) {
+            checks.push(check(
+                CheckLayer::Renderability,
+                CheckStatus::Fail,
+                if error == SubprocessProbeError::TimedOut {
+                    "gongbu_runtime_validation_timed_out"
+                } else {
+                    "gongbu_runtime_validation_failed"
+                },
+                "gongbu-server",
+                None,
+                if error == SubprocessProbeError::TimedOut {
+                    "the selected Gongbu server validator exceeded the diagnostic deadline"
+                } else {
+                    "the selected Gongbu server rejected its active generated configuration"
+                },
+            ));
+            return None;
+        }
     }
     Some((generation, manifest))
+}
+
+fn binary_provenance_bounded(
+    component: &str,
+    path: &Path,
+) -> std::result::Result<BinaryProvenance, SubprocessProbeError> {
+    let mut command = Command::new(path);
+    command.arg("--version");
+    let (status, stdout) = command_stdout_bounded(&mut command)?;
+    if !status.success() {
+        return Err(SubprocessProbeError::Failed);
+    }
+    binary_provenance_from_output(component, path, &stdout)
+        .map_err(|_| SubprocessProbeError::Failed)
+}
+
+fn validate_with_binary_bounded(
+    binary: &Path,
+    config: &Path,
+) -> std::result::Result<(), SubprocessProbeError> {
+    let mut command = Command::new(binary);
+    command.args(["validate-config", "--config"]).arg(config);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    prepare_bounded_command(&mut command);
+    let mut child = command.spawn().map_err(|_| SubprocessProbeError::Failed)?;
+    let status = wait_for_bounded_child(&mut child, Instant::now() + PROBE_TIMEOUT)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(SubprocessProbeError::Failed)
+    }
+}
+
+fn command_stdout_bounded(
+    command: &mut Command,
+) -> std::result::Result<(ExitStatus, Vec<u8>), SubprocessProbeError> {
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    prepare_bounded_command(command);
+    let mut child = command.spawn().map_err(|_| SubprocessProbeError::Failed)?;
+    let mut stdout = child.stdout.take().ok_or(SubprocessProbeError::Failed)?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.read_to_end(&mut bytes).map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let status = wait_for_bounded_child(&mut child, deadline)?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match receiver.recv_timeout(remaining) {
+        Ok(Ok(stdout)) => Ok((status, stdout)),
+        Ok(Err(_)) => Err(SubprocessProbeError::Failed),
+        Err(_) => {
+            terminate_bounded_child(&mut child);
+            Err(SubprocessProbeError::TimedOut)
+        }
+    }
+}
+
+fn prepare_bounded_command(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+}
+
+fn wait_for_bounded_child(
+    child: &mut std::process::Child,
+    deadline: Instant,
+) -> std::result::Result<ExitStatus, SubprocessProbeError> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                terminate_bounded_child(child);
+                return Err(SubprocessProbeError::TimedOut);
+            }
+            Err(_) => {
+                terminate_bounded_child(child);
+                return Err(SubprocessProbeError::Failed);
+            }
+        }
+    }
+}
+
+fn terminate_bounded_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let process_group = format!("-{}", child.id());
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", "--", &process_group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn validate_handoff(
@@ -1307,6 +1468,20 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_hanging_binary(path: &Path, hang_on: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"{hang_on}\" ]; then\n  while :; do :; done\nfi\nif [ \"$1\" = \"--version\" ]; then\n  echo '{{\"product_version\":\"0.1.0\",\"source_commit\":\"unknown\",\"executor_contract\":\"hubu-executor.v1\",\"server_config_schema_version\":2}}'\n  exit 0\nfi\nif [ \"$1\" = \"validate-config\" ]; then\n  exit 0\nfi\nexit 2\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
     fn write_complete_managed_profile(root: &Path) -> (PathBuf, PathBuf) {
         let profile = root.join("profile");
         let binaries = root.join("bin");
@@ -1508,6 +1683,132 @@ account = "gongbu-caller"
             provider_readiness(&providers),
             ProviderReadiness::FixtureOnly
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_gongbu_does_not_certify_local_provider_or_artifact_contracts() {
+        let root = tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let binaries = root.path().join("bin");
+        let credentials = root.path().join("credentials");
+        fs::create_dir(&profile).unwrap();
+        fs::create_dir(&binaries).unwrap();
+        fs::create_dir(&credentials).unwrap();
+        for name in ["hubu", "hubu-unified-mcp"] {
+            write_fake_binary(&binaries.join(name), false);
+        }
+        for name in ["auth", "approval", "reconciliation", "gongbu-caller"] {
+            fs::write(credentials.join(name), format!("{name}-secret")).unwrap();
+        }
+        fs::write(
+            profile.join("stack.toml"),
+            format!(
+                r#"schema_version = 1
+allow_development_builds = true
+[binaries]
+hubu = {}
+hubu_unified_mcp = {}
+[hubu]
+ownership = "external"
+endpoint = "http://127.0.0.1:42001"
+[gongbu]
+ownership = "external"
+endpoint = "http://127.0.0.1:42002"
+"#,
+                quote(binaries.join("hubu").display().to_string()),
+                quote(binaries.join("hubu-unified-mcp").display().to_string()),
+            ),
+        )
+        .unwrap();
+        fs::write(
+            profile.join("credentials.toml"),
+            format!(
+                r#"schema_version = 1
+[files]
+hubu_auth = {}
+hubu_approval = {}
+hubu_reconciliation = {}
+gongbu_caller = {}
+[opaque.provider]
+service = "provider-test"
+account = "provider-account"
+"#,
+                quote(credentials.join("auth").display().to_string()),
+                quote(credentials.join("approval").display().to_string()),
+                quote(credentials.join("reconciliation").display().to_string()),
+                quote(credentials.join("gongbu-caller").display().to_string()),
+            ),
+        )
+        .unwrap();
+        fs::write(
+            profile.join("providers.toml"),
+            format!(
+                r#"schema_version = 1
+mode = "live"
+catalog_version = "external-v1"
+maximum_spend_minor = 10
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+[[targets]]
+provider_config_version = "provider.v1"
+workload_type = "image.generate"
+provider = "external"
+adapter = "http_json"
+model = "model"
+credential = "provider"
+active = true
+execution_enabled = true
+settings = {{ base_url = "https://example.invalid" }}
+[[pricing_rules]]
+deliberately_unvalidated_external_shape = true
+"#
+            ),
+        )
+        .unwrap();
+
+        let renderer = binaries.join("hubu");
+        render_profile_with_renderer(&profile, &renderer).unwrap();
+        let report = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+        assert_eq!(report.provider_readiness, ProviderReadiness::Unknown);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "provider_catalog_owned_by_external_gongbu"
+                && check.status == CheckStatus::Skipped
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.code == "artifact_contract_owned_by_external_gongbu"
+                && check.status == CheckStatus::Skipped
+        }));
+        assert!(!report
+            .checks
+            .iter()
+            .any(|check| check.code == "provider_catalog_contract_valid"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_binary_and_validator_probes_are_bounded() {
+        let root = tempdir().unwrap();
+        let (profile, renderer) = write_complete_managed_profile(root.path());
+        let unified = root.path().join("bin/hubu-unified-mcp");
+        write_hanging_binary(&unified, "--version");
+        let started = Instant::now();
+        let version_timeout = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+        assert!(started.elapsed() < PROBE_TIMEOUT * 3);
+        assert!(version_timeout
+            .checks
+            .iter()
+            .any(|check| check.code == "binary_version_probe_timed_out"));
+
+        write_fake_binary(&unified, false);
+        render_profile_with_renderer(&profile, &renderer).unwrap();
+        write_hanging_binary(&root.path().join("bin/hubu-server"), "validate-config");
+        let started = Instant::now();
+        let validator_timeout = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+        assert!(started.elapsed() < PROBE_TIMEOUT * 3);
+        assert!(validator_timeout
+            .checks
+            .iter()
+            .any(|check| check.code == "hubu_runtime_validation_timed_out"));
     }
 
     #[cfg(unix)]
