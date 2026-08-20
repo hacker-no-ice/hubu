@@ -378,11 +378,37 @@ gongbu_caller = {}
     assert_success(&logs);
     assert!(String::from_utf8_lossy(&logs.stdout).contains("hubu"));
 
+    assert!(TcpStream::connect_timeout(&gongbu.address, Duration::from_secs(1)).is_ok());
+    let before_external_failure: Value =
+        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let before_external_failure_pid = before_external_failure["processes"]["hubu-server"]["pid"]
+        .as_u64()
+        .unwrap();
+    let gongbu_address = gongbu.address;
+    drop(gongbu);
+    let blocked_restart = run(&[
+        "stack",
+        "restart",
+        "--component",
+        "hubu",
+        "--profile",
+        profile_arg,
+    ]);
+    assert!(!blocked_restart.status.success());
+    assert!(String::from_utf8_lossy(&blocked_restart.stderr).contains("external gongbu"));
+    let after_external_failure: Value =
+        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(
+        after_external_failure["processes"]["hubu-server"]["pid"].as_u64(),
+        Some(before_external_failure_pid)
+    );
+    assert!(TcpStream::connect_timeout(&hubu_address, Duration::from_secs(1)).is_ok());
+    assert!(TcpStream::connect_timeout(&gongbu_address, Duration::from_millis(100)).is_err());
+
     let stopped = run(&["stack", "stop", "--profile", profile_arg]);
     assert_success(&stopped);
     wait_until_closed(hubu_address);
     assert!(!state_path.exists());
-    assert!(TcpStream::connect_timeout(&gongbu.address, Duration::from_secs(1)).is_ok());
 }
 
 #[test]

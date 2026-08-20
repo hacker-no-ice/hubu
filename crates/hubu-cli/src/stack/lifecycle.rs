@@ -659,12 +659,26 @@ fn validate_restart_dependencies(
     selection: ComponentSelection,
 ) -> Result<()> {
     let selected = selected_components(selection);
+    let report = doctor::inspect_profile(profile);
+    for (component, ownership) in [
+        (
+            "hubu",
+            stack.hubu.as_ref().and_then(|value| value.ownership),
+        ),
+        (
+            "gongbu",
+            stack.gongbu.as_ref().and_then(|value| value.ownership),
+        ),
+    ] {
+        if ownership == Some(Ownership::External) && !report.component_ready(component) {
+            bail!("external {component} is not ready; no launcher-owned process was stopped");
+        }
+    }
     let gongbu_managed =
         stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed);
     if !gongbu_managed || !selected.contains("gongbu-server") {
         return Ok(());
     }
-    let report = doctor::inspect_profile(profile);
     let hubu_selected = stack.hubu.as_ref().and_then(|value| value.ownership)
         == Some(Ownership::Managed)
         && selected.contains("hubu-server");
