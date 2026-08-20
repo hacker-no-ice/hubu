@@ -36,8 +36,6 @@ pub(super) enum ForwardError {
     MissingReconciliationCapability,
     #[error("Hubu reconciliation credential is invalid")]
     InvalidReconciliationCapability,
-    #[error("Hubu approval capability is not supported by the HUB-88 routing contract")]
-    UnsupportedCapability,
     #[error("Hubu server returned HTTP {status}: {message}")]
     Application { status: u16, message: String },
 }

@@ -1,4 +1,4 @@
-# HUB-97 unified MCP immediate cutover
+# HUB-97 unified MCP immediate cutover (historical)
 
 Effective when HUB-97 merges, `hubu-unified-mcp` is the only supported
 agent-facing MCP surface. The reviewed
@@ -7,16 +7,14 @@ this immediate zero-user cutover.
 
 Release archives and generated client configuration include only the unified
 agent surface. `hubu-mcp-server` and `gongbu-mcp` are deprecated, unsupported,
-and excluded from primary packaging. Direct source-built invocation prints a
-static warning and points to the
-[migration guide](unified-mcp-migration.md); it never prints configuration or
-credential values.
+and excluded from primary packaging. At that stage, direct source-built
+invocation printed a static warning directing operators to the migration
+procedure without printing configuration or credential values.
 
 This cutover does not merge runtimes. `hubu-server` and `gongbu-server` remain
 separate supported processes with separate credentials, databases, provider
 execution, artifacts, lifecycle, and failure domains.
 
-Standalone adapter source remains only as removal staging. HUB-98 removes it
-after this cutover; retaining source until then is not a support or
-compatibility commitment. The reviewed HUB-111 artifact remains the immutable
-rollback evidence required through HUB-98 verification.
+Standalone adapter source remained only as removal staging until HUB-98 removed
+it. The reviewed HUB-111 artifact is the immutable rollback evidence retained
+through HUB-98 verification.

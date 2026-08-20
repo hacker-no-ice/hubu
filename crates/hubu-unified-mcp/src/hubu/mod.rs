@@ -1,8 +1,9 @@
 mod catalog;
 mod response;
+mod routing;
 mod transport;
+mod trusted_identity;
 
-use hubu_mcp::{route_tool_call_v1, tool_result_v1};
 use serde_json::{json, Value};
 
 use crate::{
@@ -11,6 +12,7 @@ use crate::{
 };
 
 use response::ForwardError;
+use routing::{route_tool_call_v1, tool_result_v1};
 pub use transport::RoutingConfig;
 
 pub(crate) use catalog::tool_definitions;

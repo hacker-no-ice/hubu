@@ -58,7 +58,7 @@ fn wait_for_backend_states(
 }
 
 #[test]
-#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged HUB-96 canary"]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn exact_hub_88_catalog_and_representative_governed_artifact_flow() {
     let hubu = BackendStub::start(BackendKind::Hubu);
     let gongbu = BackendStub::start(BackendKind::Gongbu);
@@ -146,7 +146,7 @@ fn exact_hub_88_catalog_and_representative_governed_artifact_flow() {
 }
 
 #[test]
-#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged HUB-96 canary"]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn backend_transport_stop_and_recovery_are_observed_on_refresh() {
     let hubu = BackendStub::start(BackendKind::Hubu);
     let gongbu = BackendStub::start(BackendKind::Gongbu);
@@ -202,7 +202,7 @@ fn assert_list_changed(notification: &Value) {
 }
 
 #[test]
-#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged migration canary"]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn initialized_lifecycle_establishes_the_notification_baseline() {
     let hubu = BackendStub::start(BackendKind::Hubu);
     let gongbu = BackendStub::start(BackendKind::Gongbu);
@@ -223,7 +223,7 @@ fn initialized_lifecycle_establishes_the_notification_baseline() {
 }
 
 #[test]
-#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged migration canary"]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn out_of_order_initialized_does_not_start_the_monitor() {
     let hubu = BackendStub::start(BackendKind::Hubu);
     let gongbu = BackendStub::start(BackendKind::Gongbu);
@@ -248,7 +248,7 @@ fn out_of_order_initialized_does_not_start_the_monitor() {
 }
 
 #[test]
-#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged migration canary"]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn concurrent_monitor_and_request_refresh_are_single_flight_per_backend() {
     let hubu = BackendStub::start(BackendKind::Hubu);
     let gongbu = BackendStub::start(BackendKind::Gongbu);
@@ -291,7 +291,7 @@ fn concurrent_monitor_and_request_refresh_are_single_flight_per_backend() {
 }
 
 #[test]
-#[ignore = "runs through scripts/integration-unified-mcp.sh or the packaged migration canary"]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn catalog_transitions_emit_exactly_once_and_preserve_the_healthy_backend() {
     let hubu = BackendStub::start(BackendKind::Hubu);
     let gongbu = BackendStub::start(BackendKind::Gongbu);

@@ -108,7 +108,6 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let config_path = take_value(&mut args, "--config")
         .map(PathBuf::from)
         .unwrap_or_else(default_codex_config_path);
-    let migrate_standalone = take_flag(&mut args, "--migrate-standalone");
     let mcp_server = take_value(&mut args, "--mcp-server")
         .map(PathBuf::from)
         .unwrap_or_else(default_mcp_server_path);
@@ -185,14 +184,7 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
-    let update_mode = if migrate_standalone {
-        codex_mcp::UpdateMode::MigrateStandalone {
-            gongbu_configured: gongbu_endpoint.is_some(),
-        }
-    } else {
-        codex_mcp::UpdateMode::Unified
-    };
-    codex_mcp::write_config(&config_path, &block, force, update_mode)
+    codex_mcp::write_config(&config_path, &block, force)
         .with_context(|| format!("update Codex config `{}`", config_path.display()))?;
 
     println!("Codex MCP configured for Hubu (unified)");
@@ -2661,7 +2653,7 @@ fn print_init_help() {
 
 Usage:
   hubu init [--policy FILE] [--force]
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--migrate-standalone] [--force] [--dry-run]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
@@ -2682,7 +2674,7 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--migrate-standalone] [--force] [--dry-run] [--trust-client-approval]
+  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
@@ -2694,7 +2686,6 @@ Options:
                              Separate human reconciliation capability file (default: beside --token-file)
   --gongbu-endpoint URL     Optional Gongbu backend URL for the unified entry
   --gongbu-token-file FILE  Gongbu bearer token file; required with --gongbu-endpoint
-  --migrate-standalone      Replace existing hubu-mcp-server and gongbu-mcp entries with the unified entry
   --force                   Replace an existing unmanaged [mcp_servers.hubu] config block
   --dry-run                 Print the managed Codex config block without writing files
   --trust-client-approval   Enable MCP setup/admin tools when the Codex client prompts for destructive tool approval
@@ -2708,7 +2699,6 @@ Notes:
 
 Examples:
   hubu init codex --token-file ~/.hubu/hubu.auth-token
-  hubu init codex --migrate-standalone
   hubu init codex --trust-client-approval
   hubu init codex --dry-run"
     );

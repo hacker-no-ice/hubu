@@ -75,14 +75,10 @@ minimum:
 - `hubu-api`: local HTTP API and `hubu-server` binary
 - `hubu-cli`: human developer `hubu` CLI binary
 - `hubu-bench`: local benchmark tool for spend approval throughput and correctness
-- `hubu-mcp`: deprecated standalone Hubu MCP adapter retained in source only
-  until HUB-98 removes it
 - `gongbu-api`: execution API, durable workflow, provider adapters, artifacts,
   and the `gongbu-server` and development-only `gongbu-sandbox` binaries
 - `gongbu-build-info`: Gongbu build and compatibility metadata shared by its
   production binaries
-- `gongbu-mcp`: deprecated standalone Gongbu MCP adapter retained in source
-  only until HUB-98 removes it
 - `hubu-unified-mcp`: unified MCP server with isolated Hubu and Gongbu health,
   compatibility, and HTTP client boundaries plus the contract-approved Hubu
   governance and Gongbu execution/artifact routes
@@ -108,9 +104,7 @@ collapses runtime responsibilities:
   contract. They do not share a database, credential store, provider execution
   boundary, or failure domain.
 - `hubu-unified-mcp` is the only supported and packaged agent-facing surface.
-  `hubu-mcp-server` and `gongbu-mcp` are deprecated, unsupported, and excluded
-  from release archives; their source remains temporarily for HUB-98. The unified server
-  implements the accepted
+  The unified server implements the accepted
   [unified MCP contract](docs/unified-mcp-contract.md) transport, isolated
   client boundaries, machine-readable health and compatibility reporting, and
   only the contract-approved Hubu governance and Gongbu execution/artifact
@@ -143,8 +137,8 @@ lists exactly the 28 approved Hubu tools only while the Hubu backend is
 compatible and available. It lists the four approved Gongbu tools according to
 Gongbu readiness; execution creation additionally requires Hubu to be available,
 while compatible degraded Gongbu keeps read and artifact tools available.
-Protected Hubu mutations retain the standalone `HUBU_MCP_TRUST_CLIENT_APPROVAL`
-gate, and the two reconciliation mutations additionally load the distinct
+Protected Hubu mutations retain the `HUBU_MCP_TRUST_CLIENT_APPROVAL` gate, and
+the two reconciliation mutations additionally load the distinct
 `HUBU_RECONCILIATION_TOKEN` or `HUBU_RECONCILIATION_TOKEN_FILE` capability.
 
 ## Quick Start
@@ -164,9 +158,8 @@ cargo install --locked --path crates/gongbu-api --bin gongbu-server
 
 These source-install commands are convenient for development, but unstamped
 local builds intentionally fail unified source-commit compatibility. Use one
-verified release archive for an operator migration. Install
-only the four binaries shown above; standalone MCP adapters are not supported
-release artifacts.
+verified release archive for an operator deployment. Install only the four
+binaries shown above.
 
 Start the local Hubu server:
 
@@ -289,21 +282,15 @@ hubu-server
 
 This writes one `[mcp_servers.hubu]` entry that launches `hubu-unified-mcp`.
 To configure Gongbu in that same entry, add `--gongbu-endpoint URL` and
-`--gongbu-token-file FILE`. Existing two-entry `hubu-mcp-server` plus
-`gongbu-mcp` configurations migrate deterministically with
-`hubu init codex --migrate-standalone --gongbu-endpoint URL
---gongbu-token-file FILE`. Migration fails before changing the config if a
-standalone Gongbu entry has no replacement Gongbu settings. The command no
-longer generates standalone adapter configurations.
+`--gongbu-token-file FILE`.
 
 If the server from step 1 is already running with a different token file,
 restart it with the same auth, approval, and reconciliation token files before restarting Codex. Codex
 should then be able to discover Hubu MCP tools and call spend tools without
 holding wallet credentials. For other MCP clients, use Hubu's tool annotations
 or `hubu_client_approval_profile`; see
-[docs/mcp-transport.md](docs/mcp-transport.md). The
-[unified MCP migration guide](docs/unified-mcp-migration.md) provides the full
-preflight, migration, validation, and cutover procedure.
+[docs/mcp-transport.md](docs/mcp-transport.md) for setup, validation, and
+backend-state guidance.
 
 ## Releases
 
@@ -457,9 +444,8 @@ tools after the client shows a human approval prompt. If policy returns
 `needs_approval`, the MCP response reports that no payment was executed.
 
 See [docs/mcp-transport.md](docs/mcp-transport.md) for install details,
-approval profiles, manual MCP setup, and the current tool map, and see
-[docs/unified-mcp-migration.md](docs/unified-mcp-migration.md) for migration,
-validation, and cutover behavior.
+approval profiles, manual MCP setup, backend validation, and the current tool
+map.
 
 ## Policy Engine
 
@@ -521,10 +507,7 @@ the hold lifecycle, and CLI examples.
   orchestration and ledger recording flow
 - [docs/mcp-transport.md](docs/mcp-transport.md): MCP stdio transport adapter
   and approval boundaries
-- [docs/unified-mcp-migration.md](docs/unified-mcp-migration.md): unified MCP
-  migration, validation, and immediate cutover
 - [docs/gongbu/README.md](docs/gongbu/README.md): Gongbu execution-plane design,
-  operator configuration, persistent runtime, sandbox, and deprecated
-  standalone MCP source status
+  operator configuration, persistent runtime, and sandbox
 - [docs/notes/](docs/notes/): non-normative planning, improvement, and handoff
   notes

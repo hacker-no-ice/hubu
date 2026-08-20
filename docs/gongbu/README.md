@@ -18,9 +18,9 @@ Execution and Artifact HTTP contract, and the first single-provider durable
 execution workflow, plus operator-selected Google Gemini and Ideogram image
 adapters.
 
-The `gongbu-mcp` crate is a deprecated, unsupported standalone adapter retained
-only until HUB-98 removes its source. Agents use `hubu-unified-mcp`; see
-[mcp.md](mcp.md) for the source-retention notice.
+Agents use `hubu-unified-mcp`, which routes Gongbu execution and artifact tools
+to the authenticated Gongbu HTTP API while keeping Gongbu's process, state,
+credentials, and failure domain independent from Hubu.
 
 ## Versioned execution boundary
 
@@ -249,5 +249,5 @@ cargo build --release --locked --bin gongbu-server
 
 Use `cargo test --workspace --locked` before repository-wide changes. The
 production `gongbu-server` remains a separate runtime process and ships in the
-Hubu release archive. The only supported agent surface is `hubu-unified-mcp`;
-`gongbu-mcp` is excluded. `gongbu-sandbox` remains a development-only binary.
+Hubu release archive. The agent surface is `hubu-unified-mcp`;
+`gongbu-sandbox` remains a development-only binary.

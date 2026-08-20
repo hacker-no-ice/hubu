@@ -1,10 +1,10 @@
 use std::{fs, io};
 
 use crate::{BackendClient, BackendOwner, Secret};
-use hubu_mcp::{HubuHttpRequestV1, HubuRequestCapabilityV1};
 use serde_json::Value;
 
 use super::response::{redact_backend_message, ForwardError};
+use super::routing::{HubuHttpRequestV1, HubuRequestCapabilityV1};
 
 const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
 const RECONCILIATION_CAPABILITY_HEADER: &str = "X-Hubu-Reconciliation-Capability";
@@ -81,9 +81,6 @@ impl BackendClient {
                 let capability = routing.reconciliation_capability()?;
                 builder = builder.header(RECONCILIATION_CAPABILITY_HEADER, capability.expose());
                 used_reconciliation_capability = Some(capability);
-            }
-            HubuRequestCapabilityV1::Approval => {
-                return Err(ForwardError::UnsupportedCapability.into());
             }
         }
 

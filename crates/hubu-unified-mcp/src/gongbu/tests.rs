@@ -74,9 +74,9 @@ fn create_arguments() -> Value {
 }
 
 #[test]
-fn catalog_matches_standalone_gongbu_v2_contract() {
+fn catalog_matches_owned_gongbu_v2_contract() {
     let expected: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../gongbu-mcp/tests/fixtures/tool-definitions-v2.json"
+        "../../tests/fixtures/gongbu-tool-definitions-v2.json"
     ))
     .unwrap();
     assert_eq!(tool_definitions(), expected);
@@ -163,7 +163,7 @@ fn artifacts_preserve_safe_metadata_and_image_content() {
 }
 
 #[test]
-fn application_and_transport_failures_match_standalone_without_retry() {
+fn application_and_transport_failures_preserve_contract_without_retry() {
     let conflict = r#"{"error":{"code":"immutable_scope_conflict","message":"provider-secret /private/path"}}"#;
     let (endpoint, _) = mock_server(vec![("409 Conflict", "application/json", conflict)]);
     let rejected = call_tool(

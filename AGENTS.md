@@ -29,8 +29,8 @@ Shared source and packaging do not authorize cross-boundary coupling. Preserve
 separate Hubu and Gongbu processes, databases, credentials, provider execution,
 artifacts, and failure domains. Do not add direct Cargo dependencies across the
 Hubu/Gongbu boundary; communicate through the versioned executor contract.
-Keep `hubu-mcp-server` and `gongbu-mcp` as separate agent-facing surfaces unless
-an explicit protocol redesign says otherwise.
+Keep `hubu-unified-mcp` as the only agent-facing MCP surface. Its unified
+routing must not collapse the separate Hubu and Gongbu backend boundaries.
 
 After changing Markdown or the architecture visualizer, run
 `python3 scripts/check-doc-links.py` and search the repository for stale

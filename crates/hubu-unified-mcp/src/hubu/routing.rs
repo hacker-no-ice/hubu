@@ -1,17 +1,21 @@
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
-use crate::{approval_profile, trusted_identity::TrustedSpendIdentity, McpConfig};
+use super::{catalog::approval_profile, trusted_identity::TrustedSpendIdentity};
+
+#[derive(Debug, Clone, Copy)]
+struct McpConfig {
+    protected_tools_enabled: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HubuRequestCapabilityV1 {
+pub(super) enum HubuRequestCapabilityV1 {
     None,
-    Approval,
     Reconciliation,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct HubuHttpRequestV1 {
+pub(super) struct HubuHttpRequestV1 {
     pub method: &'static str,
     pub path: String,
     pub body: Option<Value>,
@@ -67,7 +71,7 @@ fn post_request_with(
     )
 }
 
-pub fn route_tool_call_v1(
+pub(super) fn route_tool_call_v1(
     params: Value,
     protected_tools_enabled: bool,
     execute: impl FnOnce(HubuHttpRequestV1) -> Result<Value>,
@@ -184,24 +188,6 @@ pub fn route_tool_call_v1(
                 HubuResponseTransformV1::SpendApprovalHint,
             )
         }
-        "hubu_get_spend_approval" => {
-            let approval_request_id = arguments
-                .get("approval_request_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("hubu_get_spend_approval requires approval_request_id"))?;
-            get_request(format!(
-                "/spend/approval?approval_request_id={approval_request_id}"
-            ))
-        }
-        "hubu_resolve_spend_approval" => {
-            require_trusted_client_approval(config, name)?;
-            post_request_with(
-                "/spend/approval/resolve",
-                arguments,
-                HubuRequestCapabilityV1::Approval,
-                HubuResponseTransformV1::SpendApprovalHint,
-            )
-        }
         "hubu_list_agents" => get_request("/agents"),
         "hubu_list_budgets" => {
             if arguments
@@ -297,7 +283,7 @@ fn policy_inspection_path(action: &str, arguments: &Value) -> Result<String> {
     Ok(format!("/policies/{action}{query}"))
 }
 
-pub(crate) fn require_trusted_client_approval(config: McpConfig, tool_name: &str) -> Result<()> {
+fn require_trusted_client_approval(config: McpConfig, tool_name: &str) -> Result<()> {
     if config.protected_tools_enabled {
         Ok(())
     } else {
@@ -330,7 +316,7 @@ pub(crate) fn spend_response_with_approval_hint(mut response: Value) -> Value {
     response
 }
 
-pub fn tool_result_v1(value: Value) -> Value {
+pub(super) fn tool_result_v1(value: Value) -> Value {
     json!({
         "content": [
             {

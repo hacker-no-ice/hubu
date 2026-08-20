@@ -6,10 +6,9 @@ use std::{
     time::Duration,
 };
 
-use hubu_mcp::{route_tool_call_v1, HubuRequestCapabilityV1};
 use serde_json::{json, Value};
 
-use super::catalog::is_approved_tool as is_approved_hubu_tool;
+use super::routing::{route_tool_call_v1, HubuRequestCapabilityV1};
 use crate::{
     capability::{BackendReport, BackendState, CapabilitySnapshot, ContractVersions},
     *,
@@ -143,15 +142,12 @@ fn disconnect_after_request_server() -> (String, Receiver<String>, thread::JoinH
 }
 
 #[test]
-fn configured_catalog_matches_the_approved_standalone_hubu_contract() {
+fn configured_catalog_matches_the_owned_hubu_contract() {
     let server = server_with_backends("http://127.0.0.1:1", None, false, None);
     let actual = server.list_tools_for_snapshot();
     assert_eq!(actual[0], capability_tool());
 
-    let expected = hubu_mcp::tool_definitions()
-        .into_iter()
-        .filter(|tool| tool["name"].as_str().is_some_and(is_approved_hubu_tool))
-        .collect::<Vec<_>>();
+    let expected = super::catalog::tool_definitions();
     assert_eq!(&actual[1..], expected.as_slice());
     assert_eq!(expected.len(), 28);
     assert!(!actual.iter().any(|tool| {
@@ -175,9 +171,8 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
     );
     let tools = server.list_tools_for_snapshot();
     assert_eq!(tools.len(), 33);
-    for definition in hubu_mcp::tool_definitions()
+    for definition in super::catalog::tool_definitions()
         .into_iter()
-        .filter(|tool| tool["name"].as_str().is_some_and(is_approved_hubu_tool))
         .chain(gongbu::tool_definitions())
     {
         assert!(tools.contains(&definition), "{}", definition["name"]);
@@ -520,11 +515,14 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
     )
     .unwrap();
     assert!(!called);
-    assert_eq!(local["structuredContent"], hubu_mcp::approval_profile());
+    assert_eq!(
+        local["structuredContent"],
+        super::catalog::approval_profile()
+    );
 }
 
 #[test]
-fn approved_query_variants_match_standalone_routing() {
+fn approved_query_variants_match_owned_routing_contract() {
     let cases = [
         (
             "hubu_show_policy",
@@ -591,7 +589,7 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
         "operation_key":"operation-1",
         "task_id":"linear:HUB-91"
     }});
-    let standalone_result = route_tool_call_v1(
+    let owned_routing_result = route_tool_call_v1(
         json!({
             "name":"hubu_authorize_spend",
             "arguments":arguments.clone(),
@@ -613,7 +611,7 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
     assert_eq!(body["task_id"], "linear:HUB-91");
     assert!(body.get("_meta").is_none());
     assert!(body.get("platform").is_none());
-    assert_eq!(response["result"], standalone_result);
+    assert_eq!(response["result"], owned_routing_result);
     assert_eq!(
         response["result"]["structuredContent"]["requires_human_approval"],
         true
@@ -793,16 +791,7 @@ fn connected_read_outage_is_retryable_and_never_reaches_gongbu() {
 #[test]
 fn production_dependencies_exclude_backend_implementation_crates() {
     let unified_manifest = include_str!("../../Cargo.toml");
-    let hubu_adapter_manifest = include_str!("../../../hubu-mcp/Cargo.toml");
-    for forbidden in [
-        "hubu-api",
-        "hubu-core",
-        "hubu-wallet",
-        "gongbu-api",
-        "gongbu-mcp",
-    ] {
+    for forbidden in ["hubu-api", "hubu-core", "hubu-wallet", "gongbu-api"] {
         assert!(!unified_manifest.contains(forbidden), "{forbidden}");
-        assert!(!hubu_adapter_manifest.contains(forbidden), "{forbidden}");
     }
-    assert!(unified_manifest.contains("hubu-mcp"));
 }
