@@ -46,6 +46,15 @@ Requests contain no account override. Provider endpoints, credentials, target
 revisions, prices, spend ceiling, Hubu endpoint, and Hubu agent identity are all
 operator-owned and cannot be changed by HTTP or MCP callers.
 
+For local dependency and configuration work that must not permit provider
+spend, set `providers` to `{"mode":"disabled"}` and omit provider catalogs,
+the spend ceiling, and the live-spend acknowledgement. Gongbu then starts with
+an empty production provider catalog; execution requests fail closed because no
+target is available. Live mode remains the default for existing configurations
+and retains every catalog, pricing, credential, ceiling, and acknowledgement
+gate. Disabled mode requires server configuration schema version 2; schema
+version 1 remains accepted only for its original live-provider shape.
+
 ## Start Hubu independently
 
 Start the already installed Hubu server using its own persistent database and
@@ -82,6 +91,13 @@ acceptance begins. Losing the poller, Temporal, or Hubu compatibility removes
 readiness, stops new admission, and gracefully closes the server.
 
 ## Start and inspect Gongbu
+
+Validate the complete production input without creating state directories,
+reading Keychain credentials, connecting to dependencies, or starting a process:
+
+```sh
+target/release/gongbu-server validate-config --config /absolute/path/gongbu.json
+```
 
 ```sh
 target/release/gongbu-server serve --config /absolute/path/gongbu.json

@@ -106,6 +106,14 @@ pub struct ValidatedProviderCatalog {
 }
 
 impl ValidatedProviderCatalog {
+    pub(crate) fn disabled() -> Self {
+        Self {
+            targets: ProviderTargetConfig::disabled(),
+            pricing: PricingCatalog::disabled(),
+            adapters: BTreeMap::new(),
+        }
+    }
+
     pub fn bind(
         targets: ProviderTargetConfig,
         pricing: PricingCatalog,
@@ -239,6 +247,16 @@ mod tests {
             .as_bytes(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn disabled_catalog_fails_closed_for_every_target() {
+        let catalog = ValidatedProviderCatalog::disabled();
+        let key = TargetKey::new("image_generation", "example", "fixture", "image-v1").unwrap();
+        assert_eq!(
+            catalog.resolve_active(&key).unwrap_err(),
+            RegistryError::TargetUnavailable
+        );
     }
 
     #[test]

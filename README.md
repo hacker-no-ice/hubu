@@ -284,6 +284,20 @@ This writes one `[mcp_servers.hubu]` entry that launches `hubu-unified-mcp`.
 To configure Gongbu in that same entry, add `--gongbu-endpoint URL` and
 `--gongbu-token-file FILE`.
 
+To scaffold and render the unified local backend configuration before handing
+the client-owned MCP process to Codex:
+
+```sh
+hubu stack init
+# Edit the reported stack.toml, credentials.toml, and providers.toml files.
+hubu stack render
+hubu init codex --stack-profile /absolute/profile/path/reported/by/stack-init
+```
+
+These commands do not start `hubu-server`, `gongbu-server`, Temporal, or the
+MCP process. Local stack doctor and lifecycle commands are delivered by the
+remaining milestone tasks.
+
 If the server from step 1 is already running with a different token file,
 restart it with the same auth, approval, and reconciliation token files before restarting Codex. Codex
 should then be able to discover Hubu MCP tools and call spend tools without

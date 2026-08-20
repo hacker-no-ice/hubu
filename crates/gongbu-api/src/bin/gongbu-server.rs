@@ -1,7 +1,7 @@
 use gongbu_api::server;
 use std::path::PathBuf;
 
-const HELP: &str = "gongbu-server\n\nUSAGE:\n    gongbu-server serve --config /absolute/path/gongbu.json\n    gongbu-server --version\n\nThe persistent local Gongbu service. Hubu must be started independently.";
+const HELP: &str = "gongbu-server\n\nUSAGE:\n    gongbu-server serve --config /absolute/path/gongbu.json\n    gongbu-server validate-config --config /absolute/path/gongbu.json\n    gongbu-server --version\n\nThe persistent local Gongbu service. Hubu must be started independently.";
 
 #[tokio::main]
 async fn main() {
@@ -47,6 +47,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         [command, config_flag, path] if command == "serve" && config_flag == "--config" => {
             server::serve(PathBuf::from(path)).await
+        }
+        [command, config_flag, path]
+            if command == "validate-config" && config_flag == "--config" =>
+        {
+            let config = server::validate_runtime_inputs(PathBuf::from(path))?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "valid",
+                    "schema_version": config.schema_version,
+                    "provider_mode": config.providers.mode,
+                })
+            );
+            Ok(())
         }
         _ => Err(std::io::Error::other(HELP).into()),
     }
