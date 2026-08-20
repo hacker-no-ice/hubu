@@ -24,6 +24,9 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
 - [unified-mcp-contract.md](unified-mcp-contract.md): accepted unified
   Hubu–Gongbu MCP names, schemas, backend routing, compatibility negotiation,
   partial availability, and removal history
+- [local-stack-contract.md](local-stack-contract.md): accepted V1 design for
+  annotated local stack configuration, doctor/render phases, component
+  lifecycle ownership, readiness, and safe shutdown
 - [canaries/HUB-96-unified-mcp-migration-canary.md](canaries/HUB-96-unified-mcp-migration-canary.md):
   packaged unified MCP migration evidence and the explicit standalone
   deprecation no-go decision
