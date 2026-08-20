@@ -138,10 +138,30 @@ impl SecretReferenceConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProvidersConfig {
-    pub target_catalog_path: PathBuf,
-    pub pricing_catalog_path: PathBuf,
-    pub maximum_spend_minor: i64,
-    pub live_spend_acknowledgement: String,
+    #[serde(default, skip_serializing_if = "ProviderMode::is_live")]
+    pub mode: ProviderMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_catalog_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_catalog_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_spend_minor: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_spend_acknowledgement: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderMode {
+    Disabled,
+    #[default]
+    Live,
+}
+
+impl ProviderMode {
+    fn is_live(&self) -> bool {
+        *self == Self::Live
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -229,23 +249,23 @@ impl ServerConfig {
     }
 
     pub fn validate(&self) -> Result<(), ServerError> {
-        if self.schema_version != gongbu_build_info::SERVER_CONFIG_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            1 | gongbu_build_info::SERVER_CONFIG_SCHEMA_VERSION
+        ) {
             return Err(invalid("unsupported server configuration schema_version"));
+        }
+        if self.schema_version == 1 && self.providers.mode != ProviderMode::Live {
+            return Err(invalid(
+                "disabled provider mode requires server configuration schema_version 2",
+            ));
         }
         if !self.http.listen.ip().is_loopback() {
             return Err(invalid("HTTP listen address must be loopback"));
         }
         validate_state_path(&self.state.database_path, "database_path")?;
         validate_state_path(&self.state.artifact_root, "artifact_root")?;
-        validate_file_path(&self.providers.target_catalog_path, "target_catalog_path")?;
-        validate_file_path(&self.providers.pricing_catalog_path, "pricing_catalog_path")?;
-        if self.providers.maximum_spend_minor <= 0
-            || self.providers.live_spend_acknowledgement != LIVE_SPEND_ACKNOWLEDGEMENT
-        {
-            return Err(invalid(
-                "provider spend ceiling and explicit live-spend acknowledgement are required",
-            ));
-        }
+        self.providers.validate()?;
         if self.hubu.expected_product_version.trim().is_empty()
             || self.hubu.expected_executor_contract != gongbu_build_info::HUBU_EXECUTOR_CONTRACT
             || self.hubu.account_id.trim().is_empty()
@@ -315,6 +335,49 @@ impl ServerConfig {
             "worker drain timeout",
         )?;
         Ok(())
+    }
+}
+
+impl ProvidersConfig {
+    fn validate(&self) -> Result<(), ServerError> {
+        match self.mode {
+            ProviderMode::Disabled => {
+                if self.target_catalog_path.is_some()
+                    || self.pricing_catalog_path.is_some()
+                    || self.maximum_spend_minor.is_some()
+                    || self.live_spend_acknowledgement.is_some()
+                {
+                    return Err(invalid(
+                        "disabled provider mode must not include catalogs or live-spend fields",
+                    ));
+                }
+            }
+            ProviderMode::Live => {
+                let targets = self
+                    .target_catalog_path
+                    .as_deref()
+                    .ok_or_else(|| invalid("live provider target_catalog_path is required"))?;
+                let pricing = self
+                    .pricing_catalog_path
+                    .as_deref()
+                    .ok_or_else(|| invalid("live provider pricing_catalog_path is required"))?;
+                validate_file_path(targets, "target_catalog_path")?;
+                validate_file_path(pricing, "pricing_catalog_path")?;
+                if self.maximum_spend_minor.is_none_or(|value| value <= 0)
+                    || self.live_spend_acknowledgement.as_deref()
+                        != Some(LIVE_SPEND_ACKNOWLEDGEMENT)
+                {
+                    return Err(invalid(
+                        "provider spend ceiling and explicit live-spend acknowledgement are required",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn maximum_spend_minor(&self) -> i64 {
+        self.maximum_spend_minor.unwrap_or(0)
     }
 }
 
@@ -434,6 +497,13 @@ pub async fn serve(config_path: impl AsRef<Path>) -> Result<(), BoxError> {
     serve_config(config).await
 }
 
+pub fn validate_runtime_inputs(config_path: impl AsRef<Path>) -> Result<ServerConfig, ServerError> {
+    let config = ServerConfig::from_path(config_path)?;
+    validated_provider_catalog(&config)?;
+    validate_managed_temporal_cli(&config.temporal)?;
+    Ok(config)
+}
+
 pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     let mut startup = StartupLifecycleGuard::armed();
     config.validate()?;
@@ -453,14 +523,13 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         .resolve(&config.hubu.credential_reference.validated()?)
         .map_err(|_| invalid("Hubu scoped credential is unavailable"))?;
 
-    let targets = ProviderTargetConfig::from_path(&config.providers.target_catalog_path)
-        .map_err(|error| invalid(format!("provider target catalog: {error}")))?;
-    reject_fixture_targets(&targets)?;
     let mut redaction_values = vec![
         caller_secret.expose().to_vec(),
         hubu_secret.expose().to_vec(),
     ];
-    for target in targets
+    let providers = validated_provider_catalog(&config)?;
+    for target in providers
+        .targets()
         .revisions()
         .filter(|target| target.is_execution_enabled())
     {
@@ -473,12 +542,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
             .map_err(|_| invalid("an enabled provider credential is unavailable"))?;
         redaction_values.push(secret.expose().to_vec());
     }
-    let pricing = PricingCatalog::load(&config.providers.pricing_catalog_path)
-        .map_err(|error| invalid(format!("pricing catalog: {error}")))?;
     let limits = config.artifacts.limits();
-    let providers =
-        ValidatedProviderCatalog::bind(targets, pricing, &ProviderRegistry::production(&limits))
-            .map_err(|error| invalid(format!("provider catalog binding: {error}")))?;
 
     let repository = Repository::open(
         &config.state.database_path,
@@ -564,7 +628,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         dependency_check_interval: Duration::from_millis(
             config.execution.dependency_check_interval_ms,
         ),
-        maximum_spend_minor: config.providers.maximum_spend_minor,
+        maximum_spend_minor: config.providers.maximum_spend_minor(),
         dependency_checker: Some(dependency_checker),
         worker_drain_timeout: Duration::from_millis(config.shutdown.worker_drain_timeout_ms),
         authenticator,
@@ -636,9 +700,12 @@ fn normalize_paths(config: &mut ServerConfig) -> Result<(), ServerError> {
         .join(name)
     };
     config.state.artifact_root = fs::canonicalize(&config.state.artifact_root)?;
-    config.providers.target_catalog_path = fs::canonicalize(&config.providers.target_catalog_path)?;
-    config.providers.pricing_catalog_path =
-        fs::canonicalize(&config.providers.pricing_catalog_path)?;
+    if let Some(path) = &mut config.providers.target_catalog_path {
+        *path = fs::canonicalize(&*path)?;
+    }
+    if let Some(path) = &mut config.providers.pricing_catalog_path {
+        *path = fs::canonicalize(&*path)?;
+    }
     if let TemporalConfig::ManagedLocal {
         binary_path,
         data_path,
@@ -662,6 +729,65 @@ fn reject_fixture_targets(targets: &ProviderTargetConfig) -> Result<(), ServerEr
     }) {
         return Err(invalid(
             "mock and fixture provider targets are not valid server boundaries",
+        ));
+    }
+    Ok(())
+}
+
+fn validated_provider_catalog(
+    config: &ServerConfig,
+) -> Result<ValidatedProviderCatalog, ServerError> {
+    if config.providers.mode == ProviderMode::Disabled {
+        return Ok(ValidatedProviderCatalog::disabled());
+    }
+    let targets_path = config
+        .providers
+        .target_catalog_path
+        .as_deref()
+        .ok_or_else(|| invalid("live provider target_catalog_path is required"))?;
+    let pricing_path = config
+        .providers
+        .pricing_catalog_path
+        .as_deref()
+        .ok_or_else(|| invalid("live provider pricing_catalog_path is required"))?;
+    let targets = ProviderTargetConfig::from_path(targets_path)
+        .map_err(|error| invalid(format!("provider target catalog: {error}")))?;
+    reject_fixture_targets(&targets)?;
+    let pricing = PricingCatalog::load(pricing_path)
+        .map_err(|error| invalid(format!("pricing catalog: {error}")))?;
+    ValidatedProviderCatalog::bind(
+        targets,
+        pricing,
+        &ProviderRegistry::production(&config.artifacts.limits()),
+    )
+    .map_err(|error| invalid(format!("provider catalog binding: {error}")))
+}
+
+fn validate_managed_temporal_cli(config: &TemporalConfig) -> Result<(), ServerError> {
+    let TemporalConfig::ManagedLocal {
+        binary_path,
+        expected_cli_version,
+        ..
+    } = config
+    else {
+        return Ok(());
+    };
+    let version = Command::new(binary_path)
+        .arg("--version")
+        .output()
+        .map_err(|_| invalid("managed Temporal CLI version probe failed"))?;
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&version.stdout),
+        String::from_utf8_lossy(&version.stderr)
+    );
+    if !version.status.success()
+        || !reported.split_whitespace().any(|part| {
+            part.trim_start_matches('v') == expected_cli_version.trim_start_matches('v')
+        })
+    {
+        return Err(invalid(
+            "managed Temporal CLI version does not match the configured pin",
         ));
     }
     Ok(())
@@ -712,7 +838,6 @@ fn start_managed_temporal(
 ) -> Result<Option<ManagedTemporalChild>, BoxError> {
     let TemporalConfig::ManagedLocal {
         binary_path,
-        expected_cli_version,
         data_path,
         rpc_port,
         ui_port,
@@ -721,22 +846,7 @@ fn start_managed_temporal(
     else {
         return Ok(None);
     };
-    let version = Command::new(binary_path).arg("--version").output()?;
-    let reported = format!(
-        "{}{}",
-        String::from_utf8_lossy(&version.stdout),
-        String::from_utf8_lossy(&version.stderr)
-    );
-    if !version.status.success()
-        || !reported.split_whitespace().any(|part| {
-            part.trim_start_matches('v') == expected_cli_version.trim_start_matches('v')
-        })
-    {
-        return Err(io::Error::other(
-            "managed Temporal CLI version does not match the configured pin",
-        )
-        .into());
-    }
+    validate_managed_temporal_cli(config)?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -867,7 +977,12 @@ mod tests {
         let binary = root.join("temporal-cli");
         fs::write(&targets, "{}").unwrap();
         fs::write(&prices, "{}").unwrap();
-        fs::write(&binary, "binary").unwrap();
+        fs::write(&binary, "#!/bin/sh\necho 'temporal version 1.0.0'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         ServerConfig {
             schema_version: 1,
             http: HttpConfig {
@@ -909,10 +1024,11 @@ mod tests {
                 },
             },
             providers: ProvidersConfig {
-                target_catalog_path: targets,
-                pricing_catalog_path: prices,
-                maximum_spend_minor: 100,
-                live_spend_acknowledgement: LIVE_SPEND_ACKNOWLEDGEMENT.into(),
+                mode: ProviderMode::Live,
+                target_catalog_path: Some(targets),
+                pricing_catalog_path: Some(prices),
+                maximum_spend_minor: Some(100),
+                live_spend_acknowledgement: Some(LIVE_SPEND_ACKNOWLEDGEMENT.into()),
             },
             artifacts: ArtifactConfig {
                 max_artifacts_per_execution: 4,
@@ -939,13 +1055,79 @@ mod tests {
     #[test]
     fn strict_config_accepts_only_safe_production_shape() {
         let root = tempdir().unwrap();
-        config(root.path()).validate().unwrap();
+        let legacy = config(root.path());
+        legacy.validate().unwrap();
+        assert!(serde_json::to_value(&legacy).unwrap()["providers"]
+            .get("mode")
+            .is_none());
         let mut legacy_contract = config(root.path());
         legacy_contract.hubu.expected_executor_contract = "hubu-spend-executor-v4.1".into();
         assert!(legacy_contract.validate().is_err());
         let mut value = serde_json::to_value(config(root.path())).unwrap();
         value["mock_hubu"] = serde_json::json!(true);
         assert!(serde_json::from_value::<ServerConfig>(value).is_err());
+    }
+
+    #[test]
+    fn disabled_provider_mode_requires_no_fake_catalog_or_spend_gate() {
+        let root = tempdir().unwrap();
+        let mut value = config(root.path());
+        value.schema_version = gongbu_build_info::SERVER_CONFIG_SCHEMA_VERSION;
+        value.providers = ProvidersConfig {
+            mode: ProviderMode::Disabled,
+            target_catalog_path: None,
+            pricing_catalog_path: None,
+            maximum_spend_minor: None,
+            live_spend_acknowledgement: None,
+        };
+        value.schema_version = 1;
+        assert!(value.validate().is_err());
+        value.schema_version = gongbu_build_info::SERVER_CONFIG_SCHEMA_VERSION;
+        value.validate().unwrap();
+        assert!(validated_provider_catalog(&value).is_ok());
+        let path = root.path().join("gongbu.json");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        validate_runtime_inputs(&path).unwrap();
+        assert!(!root.path().join("state").exists());
+        assert!(!root.path().join("artifacts").exists());
+
+        value.providers.maximum_spend_minor = Some(1);
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn runtime_validator_rejects_unbound_live_catalog_without_side_effects() {
+        let root = tempdir().unwrap();
+        let value = config(root.path());
+        let path = root.path().join("gongbu.json");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(validate_runtime_inputs(&path).is_err());
+        assert!(!root.path().join("state").exists());
+        assert!(!root.path().join("artifacts").exists());
+    }
+
+    #[test]
+    fn runtime_validator_rejects_managed_temporal_version_mismatch() {
+        let root = tempdir().unwrap();
+        let mut value = config(root.path());
+        value.schema_version = gongbu_build_info::SERVER_CONFIG_SCHEMA_VERSION;
+        value.providers = ProvidersConfig {
+            mode: ProviderMode::Disabled,
+            target_catalog_path: None,
+            pricing_catalog_path: None,
+            maximum_spend_minor: None,
+            live_spend_acknowledgement: None,
+        };
+        if let TemporalConfig::ManagedLocal {
+            expected_cli_version,
+            ..
+        } = &mut value.temporal
+        {
+            *expected_cli_version = "9.9.9".into();
+        }
+        let path = root.path().join("gongbu.json");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(validate_runtime_inputs(&path).is_err());
     }
 
     #[test]

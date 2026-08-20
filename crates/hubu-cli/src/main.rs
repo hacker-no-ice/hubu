@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 mod codex_mcp;
+mod stack;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
@@ -50,7 +51,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
-    let base_url = take_global_value(&mut args, "--url")
+    let explicit_base_url = take_global_value(&mut args, "--url");
+    let base_url = explicit_base_url
+        .clone()
         .or_else(|| env::var("HUBU_URL").ok())
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
@@ -61,7 +64,8 @@ fn run() -> Result<()> {
     args.remove(0);
 
     match command.as_str() {
-        "init" => init(&base_url, args),
+        "init" => init(&base_url, explicit_base_url.is_some(), args),
+        "stack" => stack::command(args, &hubu_home()),
         "register" => register(&base_url, args),
         "protocol" => protocol(&base_url, args),
         "user" => user(&base_url, args),
@@ -80,10 +84,10 @@ fn run() -> Result<()> {
     }
 }
 
-fn init(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn init(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) -> Result<()> {
     if args.first().map(String::as_str) == Some("codex") {
         args.remove(0);
-        return init_codex(base_url, args);
+        return init_codex(base_url, explicit_base_url, args);
     }
 
     if take_help(&mut args) {
@@ -99,7 +103,7 @@ fn init(base_url: &str, mut args: Vec<String>) -> Result<()> {
     write_policy_template(&policy_path, force)
 }
 
-fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_init_codex_help();
         return Ok(());
@@ -108,22 +112,69 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let config_path = take_value(&mut args, "--config")
         .map(PathBuf::from)
         .unwrap_or_else(default_codex_config_path);
-    let mcp_server = take_value(&mut args, "--mcp-server")
-        .map(PathBuf::from)
+    let stack_profile = if args.iter().any(|value| value == "--stack-profile") {
+        Some(PathBuf::from(
+            take_value(&mut args, "--stack-profile")
+                .ok_or_else(|| anyhow!("missing value for --stack-profile"))?,
+        ))
+    } else {
+        None
+    };
+    let manual_mcp_server = take_value(&mut args, "--mcp-server").map(PathBuf::from);
+    let manual_gongbu_endpoint = take_value(&mut args, "--gongbu-endpoint");
+    let manual_gongbu_token_file = take_value(&mut args, "--gongbu-token-file").map(PathBuf::from);
+    let manual_token_file = take_value(&mut args, "--token-file").map(PathBuf::from);
+    let manual_approval_token_file =
+        take_value(&mut args, "--approval-token-file").map(PathBuf::from);
+    let manual_reconciliation_token_file =
+        take_value(&mut args, "--reconciliation-token-file").map(PathBuf::from);
+    if stack_profile.is_some()
+        && (manual_mcp_server.is_some()
+            || manual_gongbu_endpoint.is_some()
+            || manual_gongbu_token_file.is_some()
+            || manual_token_file.is_some()
+            || manual_approval_token_file.is_some()
+            || manual_reconciliation_token_file.is_some()
+            || explicit_base_url)
+    {
+        bail!(
+            "--stack-profile cannot be combined with manual MCP, endpoint, or token-file options"
+        );
+    }
+    let handoff = stack_profile
+        .as_deref()
+        .map(|profile| stack::codex_handoff(profile, &hubu_home()))
+        .transpose()?;
+    let mcp_server = handoff
+        .as_ref()
+        .map(|value| value.mcp_server.clone())
+        .or(manual_mcp_server)
         .unwrap_or_else(default_mcp_server_path);
-    let gongbu_endpoint = take_value(&mut args, "--gongbu-endpoint");
-    let gongbu_token_file = take_value(&mut args, "--gongbu-token-file").map(PathBuf::from);
+    let gongbu_endpoint = handoff
+        .as_ref()
+        .map(|value| value.gongbu_endpoint.clone())
+        .or(manual_gongbu_endpoint);
+    let gongbu_token_file = handoff
+        .as_ref()
+        .map(|value| value.gongbu_token_file.clone())
+        .or(manual_gongbu_token_file);
     if gongbu_endpoint.is_some() != gongbu_token_file.is_some() {
         bail!("--gongbu-endpoint and --gongbu-token-file must be provided together");
     }
-    let token_file = take_value(&mut args, "--token-file")
-        .map(PathBuf::from)
+    let token_file = handoff
+        .as_ref()
+        .map(|value| value.hubu_token_file.clone())
+        .or(manual_token_file)
         .unwrap_or_else(default_codex_token_file_path);
-    let approval_token_file = take_value(&mut args, "--approval-token-file")
-        .map(PathBuf::from)
+    let approval_token_file = handoff
+        .as_ref()
+        .map(|value| value.approval_token_file.clone())
+        .or(manual_approval_token_file)
         .unwrap_or_else(|| default_codex_approval_token_file_path(&token_file));
-    let reconciliation_token_file = take_value(&mut args, "--reconciliation-token-file")
-        .map(PathBuf::from)
+    let reconciliation_token_file = handoff
+        .as_ref()
+        .map(|value| value.reconciliation_token_file.clone())
+        .or(manual_reconciliation_token_file)
         .unwrap_or_else(|| default_codex_reconciliation_token_file_path(&token_file));
     let force = take_flag(&mut args, "--force");
     let dry_run = take_flag(&mut args, "--dry-run");
@@ -135,12 +186,16 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
 
     let token_file = if dry_run {
         absolute_path(&token_file)?
+    } else if handoff.is_some() {
+        absolute_existing_file_path(&token_file)?
     } else {
         ensure_auth_token_file(&token_file)
             .with_context(|| format!("prepare Hubu auth token file `{}`", token_file.display()))?
     };
     let reconciliation_token_file = if dry_run {
         absolute_path(&reconciliation_token_file)?
+    } else if handoff.is_some() {
+        absolute_existing_file_path(&reconciliation_token_file)?
     } else {
         ensure_reconciliation_token_file(&reconciliation_token_file).with_context(|| {
             format!(
@@ -151,6 +206,8 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     };
     let approval_token_file = if dry_run {
         absolute_path(&approval_token_file)?
+    } else if handoff.is_some() {
+        absolute_existing_file_path(&approval_token_file)?
     } else {
         ensure_approval_token_file(&approval_token_file).with_context(|| {
             format!(
@@ -170,9 +227,13 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
         })
         .transpose()
         .context("resolve Gongbu token file")?;
+    let hubu_endpoint = handoff
+        .as_ref()
+        .map(|value| value.hubu_endpoint.as_str())
+        .unwrap_or(base_url);
     let block = codex_mcp::unified_block(codex_mcp::UnifiedConfig {
         mcp_server: &mcp_server,
-        hubu_endpoint: base_url,
+        hubu_endpoint,
         hubu_token_file: &token_file,
         reconciliation_token_file: &reconciliation_token_file,
         gongbu: gongbu_endpoint.as_deref().zip(gongbu_token_file.as_deref()),
@@ -190,20 +251,26 @@ fn init_codex(base_url: &str, mut args: Vec<String>) -> Result<()> {
     println!("Codex MCP configured for Hubu (unified)");
     println!("  config: {}", config_path.display());
     println!("  mcp_server: {}", mcp_server.display());
-    println!("  hubu_url: {base_url}");
+    println!("  hubu_url: {hubu_endpoint}");
     println!("  token_file: {}", token_file.display());
     println!("  approval_token_file: {}", approval_token_file.display());
     println!(
         "  reconciliation_token_file: {}",
         reconciliation_token_file.display()
     );
+    if let Some(profile) = &stack_profile {
+        println!("  stack_profile: {}", profile.display());
+        println!("  backends: keep the rendered profile's Hubu and Gongbu services running");
+    }
     println!("  next: restart Codex, then use /mcp or ask Codex to list Hubu tools");
-    println!(
-        "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {APPROVAL_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
-        token_file.display(),
-        approval_token_file.display(),
-        reconciliation_token_file.display()
-    );
+    if stack_profile.is_none() {
+        println!(
+            "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {APPROVAL_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
+            token_file.display(),
+            approval_token_file.display(),
+            reconciliation_token_file.display()
+        );
+    }
     println!(
         "  spend_tools: Codex pre-approves Hubu spend tool calls; Hubu still returns needs_approval without payment when policy requires review"
     );
@@ -2427,6 +2494,7 @@ Usage:
   hubu [--url URL] <command>
 
 Commands:
+  stack      Scaffold and render a unified local stack profile
   register   Register human users and agents
   protocol   Read Hubu protocol payloads
   user       List human users and manage advisory spending targets
@@ -2443,6 +2511,7 @@ Global options:
   --url URL   Hubu server URL (default: http://127.0.0.1:8787)
 
 Examples:
+  hubu stack init
   hubu init codex --token-file ~/.hubu/hubu.auth-token
   hubu register human --username alice-example --display-name \"Alice Example\"
   hubu register agent --name local-agent --version local-dev
@@ -2653,7 +2722,7 @@ fn print_init_help() {
 
 Usage:
   hubu init [--policy FILE] [--force]
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
@@ -2674,10 +2743,11 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
+  --stack-profile DIR       Read MCP binary, backend endpoints, and token files from an active rendered stack profile
   --mcp-server FILE         Selected MCP executable (default: hubu-unified-mcp sibling, then PATH)
   --token-file FILE         Hubu auth token file (default: $HUBU_AUTH_TOKEN_FILE, ./hubu.auth-token, or ~/.hubu/hubu.auth-token)
   --approval-token-file FILE

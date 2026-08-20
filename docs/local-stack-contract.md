@@ -1,9 +1,10 @@
 # Local stack configuration and lifecycle contract
 
-Status: accepted V1 design for HUB-100. The commands and starter workspace in
-this document are not implemented yet. Until the dependent milestone tasks
-land, the existing [Hubu MCP](mcp-transport.md) and
-[persistent Gongbu server](gongbu/server.md) runbooks remain authoritative.
+Status: accepted V1 design for HUB-100. HUB-101 implements the non-interactive
+`stack init` and atomic `stack render` phases plus the Codex client handoff.
+Doctor and lifecycle commands remain follow-up milestone work, so the existing
+[Hubu MCP](mcp-transport.md) and [persistent Gongbu server](gongbu/server.md)
+runbooks remain authoritative for starting and inspecting processes.
 
 ## Decision
 
@@ -132,6 +133,15 @@ Initialization succeeds when the scaffold is usable even if every operator
 decision is still missing. Its output distinguishes discovered facts from
 required operator choices.
 
+The implemented default profile is `hubu/stacks/default` below the host
+platform's user configuration directory. `$HUBU_HOME/stacks/default` overrides
+that location when `HUBU_HOME` is set. Select another profile with an explicit
+absolute path:
+
+```sh
+hubu stack init --profile /absolute/path/to/profile
+```
+
 ## Source validation and doctor
 
 `hubu stack doctor` is read-only. It never writes a source or generated file,
@@ -198,6 +208,18 @@ client launch environment containing separate Hubu and Gongbu endpoints and
 credential-file references. V1 may add service-native validation entry points,
 but it must not create a single runtime configuration parser shared across
 Hubu and Gongbu.
+
+HUB-101 adds those service-owned, side-effect-free validation entry points:
+
+```sh
+hubu-server validate-config --config /absolute/path/hubu-launch.json
+gongbu-server validate-config --config /absolute/path/gongbu-server.json
+```
+
+`hubu stack render --profile /absolute/path/to/profile` invokes the exact
+selected binaries. Successful generations are immutable below
+`generated/generations/`; only `generated/active-manifest.json` is atomically
+replaced. A validator failure leaves the prior active manifest unchanged.
 
 Rendering never modifies the starter TOML. If source digests no longer match
 the active manifest, status reports generated output as stale and start renders

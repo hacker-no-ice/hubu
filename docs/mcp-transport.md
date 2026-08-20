@@ -22,6 +22,12 @@ that bearer credential. Protected reconciliation additionally uses
 `hubu init codex` creates the local capability files and maps the required ones
 into the generated unified entry.
 
+When a local stack profile has been rendered, use
+`hubu init codex --stack-profile /absolute/path/to/profile`. The command reads
+the active client handoff and configures Codex to launch `hubu-unified-mcp`
+with that profile's separate Hubu and Gongbu endpoints and credential files.
+The stack itself does not start or own the stdio MCP process.
+
 ## Cheatsheet
 
 First install or rebuild the local binaries:

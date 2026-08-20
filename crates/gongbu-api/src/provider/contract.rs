@@ -189,6 +189,15 @@ struct FrozenCatalog {
 }
 
 impl PricingCatalog {
+    pub(crate) fn disabled() -> Self {
+        Self(Arc::new(FrozenCatalog {
+            version: "disabled".into(),
+            digest: "disabled".into(),
+            schema_version: 0,
+            rules: Vec::new(),
+        }))
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = fs::read(path).map_err(|e| ContractError::Io(e.to_string()))?;
         Self::from_json(&bytes)

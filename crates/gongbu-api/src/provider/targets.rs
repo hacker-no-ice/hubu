@@ -255,6 +255,13 @@ pub struct ProviderTargetConfig {
 }
 
 impl ProviderTargetConfig {
+    pub(crate) fn disabled() -> Self {
+        Self {
+            revisions: BTreeMap::new(),
+            active: BTreeMap::new(),
+        }
+    }
+
     pub fn from_env() -> Result<Self> {
         let path = env::var(PROVIDER_CONFIG_ENV).map_err(|_| Error::MissingConfigPath)?;
         Self::from_path(Path::new(&path))
