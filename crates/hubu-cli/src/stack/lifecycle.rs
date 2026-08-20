@@ -131,13 +131,13 @@ pub(super) fn logs(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         print_logs_help();
         return Ok(());
     }
-    let component = take_value(&mut args, "--component")
+    let component = take_value(&mut args, "--component")?
         .as_deref()
         .map(parse_component)
         .transpose()?
         .unwrap_or(ComponentSelection::All);
-    let execution_id = take_value(&mut args, "--execution-id");
-    let lines = take_value(&mut args, "--lines")
+    let execution_id = take_value(&mut args, "--execution-id")?;
+    let lines = take_value(&mut args, "--lines")?
         .map(|value| value.parse::<usize>().context("--lines must be an integer"))
         .transpose()?
         .unwrap_or(DEFAULT_LOG_LINES);
@@ -154,7 +154,7 @@ pub(super) fn restart(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         print_restart_help();
         return Ok(());
     }
-    let component = take_value(&mut args, "--component")
+    let component = take_value(&mut args, "--component")?
         .as_deref()
         .map(parse_component)
         .transpose()?
@@ -1181,10 +1181,15 @@ fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
     }
 }
 
-fn take_value(args: &mut Vec<String>, name: &str) -> Option<String> {
-    let index = args.iter().position(|arg| arg == name)?;
+fn take_value(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
+    let Some(index) = args.iter().position(|arg| arg == name) else {
+        return Ok(None);
+    };
     args.remove(index);
-    (index < args.len()).then(|| args.remove(index))
+    if index >= args.len() || args[index].starts_with('-') {
+        bail!("missing value for {name}");
+    }
+    Ok(Some(args.remove(index)))
 }
 
 fn parse_component(value: &str) -> Result<ComponentSelection> {
@@ -1434,6 +1439,17 @@ ownership = "managed"
             tail_lines(&log, Some("execution-a"), 2).unwrap(),
             vec!["new execution-a", "last execution-a"]
         );
+    }
+
+    #[test]
+    fn lifecycle_value_options_reject_a_missing_value() {
+        for name in ["--component", "--execution-id", "--lines"] {
+            let mut args = vec![name.to_owned(), "--profile".to_owned()];
+            assert!(take_value(&mut args, name)
+                .unwrap_err()
+                .to_string()
+                .contains("missing value"));
+        }
     }
 
     #[cfg(unix)]
