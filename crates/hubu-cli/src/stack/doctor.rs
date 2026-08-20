@@ -449,6 +449,15 @@ fn inspect_profile_with(
     let mut opaque_available = true;
     for key in opaque_keys {
         let Some(reference) = credentials.opaque.get(&key) else {
+            opaque_available = false;
+            report.checks.push(check(
+                CheckLayer::Renderability,
+                CheckStatus::Fail,
+                "opaque_credential_reference_missing",
+                "credentials",
+                Some(format!("credentials.toml:opaque.{key}")),
+                "add the opaque credential reference selected by the live provider target",
+            ));
             continue;
         };
         match opaque_probe(reference) {
@@ -1683,6 +1692,50 @@ account = "gongbu-caller"
             provider_readiness(&providers),
             ProviderReadiness::FixtureOnly
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_live_target_credential_is_incomplete_before_render() {
+        let root = tempdir().unwrap();
+        let (profile, renderer) = write_complete_managed_profile(root.path());
+        fs::write(
+            profile.join("providers.toml"),
+            format!(
+                r#"schema_version = 1
+mode = "live"
+catalog_version = "catalog-v1"
+maximum_spend_minor = 10
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+[[targets]]
+provider_config_version = "provider.v1"
+workload_type = "image.generate"
+provider = "example"
+adapter = "http_json"
+model = "model"
+credential = "missing_provider"
+active = true
+execution_enabled = true
+settings = {{ base_url = "https://example.invalid" }}
+[[pricing_rules]]
+schema_version = 1
+"#
+            ),
+        )
+        .unwrap();
+
+        let report = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+        assert_eq!(report.classification, ProfileClassification::Incomplete);
+        assert_eq!(report.provider_readiness, ProviderReadiness::Unknown);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "required_decision_missing"
+                && check.field.as_deref() == Some("credentials.toml:opaque.missing_provider")
+        }));
+        let error = render_profile_with_renderer(&profile, &renderer)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("credentials.toml:opaque.missing_provider"));
+        assert!(!profile.join("generated/active-manifest.json").exists());
     }
 
     #[cfg(unix)]

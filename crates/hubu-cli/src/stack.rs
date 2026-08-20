@@ -1348,6 +1348,12 @@ fn missing_fields(
                 if target.settings.is_none() {
                     missing.push(format!("providers.toml:targets[{index}].settings"));
                 }
+                if let Some(key) = target.credential.as_deref().filter(|key| !key.is_empty()) {
+                    let field = format!("credentials.toml:opaque.{key}");
+                    if !credentials.opaque.contains_key(key) && !missing.contains(&field) {
+                        missing.push(field);
+                    }
+                }
             }
             if providers.pricing_rules.is_empty() {
                 missing.push("providers.toml:pricing_rules".into());
