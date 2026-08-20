@@ -800,19 +800,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gongbu-mcp"
-version = "0.1.0"
-dependencies = [
- "base64",
- "gongbu-build-info",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "h2"
 version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -984,23 +971,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "hubu-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hubu-common",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "hubu-unified-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
  "chrono",
- "hubu-mcp",
  "reqwest",
  "serde",
  "serde_json",

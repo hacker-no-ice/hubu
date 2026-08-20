@@ -14,18 +14,7 @@ pub(crate) struct UnifiedConfig<'a> {
     pub trust_client_approval: bool,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum UpdateMode {
-    Unified,
-    MigrateStandalone { gongbu_configured: bool },
-}
-
-pub(crate) fn write_config(
-    config_path: &Path,
-    block: &str,
-    force: bool,
-    mode: UpdateMode,
-) -> Result<()> {
+pub(crate) fn write_config(config_path: &Path, block: &str, force: bool) -> Result<()> {
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create Codex config directory `{}`", parent.display()))?;
@@ -37,7 +26,7 @@ pub(crate) fn write_config(
             return Err(error).with_context(|| format!("read `{}`", config_path.display()))
         }
     };
-    let updated = upsert(&existing, block, force, mode)?;
+    let updated = upsert(&existing, block, force)?;
     fs::write(config_path, updated)
         .with_context(|| format!("write Codex config `{}`", config_path.display()))
 }
@@ -83,28 +72,14 @@ fn finish_block(block: &mut String, trust_client_approval: bool) {
     let _ = writeln!(block, "{MANAGED_END}");
 }
 
-fn upsert(existing: &str, block: &str, force: bool, mode: UpdateMode) -> Result<String> {
-    if let UpdateMode::MigrateStandalone { gongbu_configured } = mode {
-        if contains_table(existing, is_gongbu_table) && !gongbu_configured {
-            bail!(
-                "Codex config contains a standalone [mcp_servers.gongbu] table; pass --gongbu-endpoint and --gongbu-token-file with --migrate-standalone"
-            );
-        }
-        let without_managed = remove_managed_block(existing)?;
-        let without_standalone = remove_tables(&without_managed, is_standalone_table);
-        return Ok(append_block(&without_standalone, block));
-    }
+fn upsert(existing: &str, block: &str, force: bool) -> Result<String> {
     if let Some((start, end)) = managed_block_range(existing)? {
         let lines = existing.lines().collect::<Vec<_>>();
         let mut updated = Vec::new();
         updated.extend(lines[..start].iter().copied());
         updated.extend(block.trim_end_matches('\n').lines());
         updated.extend(lines[end + 1..].iter().copied());
-        let updated = join_lines(&updated);
-        if matches!(mode, UpdateMode::Unified) {
-            reject_standalone_gongbu(&updated)?;
-        }
-        return Ok(updated);
+        return Ok(join_lines(&updated));
     }
 
     let existing = if contains_table(existing, is_hubu_table) {
@@ -117,19 +92,7 @@ fn upsert(existing: &str, block: &str, force: bool, mode: UpdateMode) -> Result<
     } else {
         existing.to_string()
     };
-    if matches!(mode, UpdateMode::Unified) {
-        reject_standalone_gongbu(&existing)?;
-    }
     Ok(append_block(&existing, block))
-}
-
-fn reject_standalone_gongbu(config: &str) -> Result<()> {
-    if contains_table(config, is_gongbu_table) {
-        bail!(
-            "Codex config contains a standalone [mcp_servers.gongbu] table; pass --migrate-standalone to replace both standalone entries"
-        );
-    }
-    Ok(())
 }
 
 fn append_block(existing: &str, block: &str) -> String {
@@ -140,17 +103,6 @@ fn append_block(existing: &str, block: &str) -> String {
     updated.push_str(block.trim_end_matches('\n'));
     updated.push('\n');
     updated
-}
-
-fn remove_managed_block(existing: &str) -> Result<String> {
-    let Some((start, end)) = managed_block_range(existing)? else {
-        return Ok(existing.to_string());
-    };
-    let lines = existing.lines().collect::<Vec<_>>();
-    let mut kept = Vec::new();
-    kept.extend(lines[..start].iter().copied());
-    kept.extend(lines[end + 1..].iter().copied());
-    Ok(join_lines(&kept))
 }
 
 fn managed_block_range(existing: &str) -> Result<Option<(usize, usize)>> {
@@ -207,14 +159,6 @@ fn is_hubu_table(table: &str) -> bool {
     table == "mcp_servers.hubu" || table.starts_with("mcp_servers.hubu.")
 }
 
-fn is_gongbu_table(table: &str) -> bool {
-    table == "mcp_servers.gongbu" || table.starts_with("mcp_servers.gongbu.")
-}
-
-fn is_standalone_table(table: &str) -> bool {
-    is_hubu_table(table) || is_gongbu_table(table)
-}
-
 fn toml_string(value: &str) -> String {
     let mut escaped = String::new();
     for character in value.chars() {
@@ -249,59 +193,5 @@ mod tests {
         assert!(block.contains("command = \"/tmp/hubu \\\"dev\\\"/hubu-unified-mcp\""));
         assert!(block.contains("HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = \"/tmp/hubu\\\\token\""));
         assert!(block.contains("HUBU_UNIFIED_GONGBU_ENDPOINT"));
-    }
-
-    #[test]
-    fn explicit_migration_replaces_both_standalone_namespaces() {
-        let existing = "model = \"gpt-5.5\"\n\n[mcp_servers.hubu]\ncommand = \"hubu-mcp-server\"\n[mcp_servers.hubu.env]\nHUBU_URL = \"old\"\n\n[mcp_servers.gongbu]\ncommand = \"gongbu-mcp\"\n[mcp_servers.gongbu.env]\nGONGBU_MCP_ENDPOINT = \"old\"\n\n[mcp_servers.other]\ncommand = \"keep\"\n";
-        let block = format!(
-            "{MANAGED_BEGIN}\n[mcp_servers.hubu]\ncommand = \"hubu-unified-mcp\"\n{MANAGED_END}\n"
-        );
-        let updated = upsert(
-            existing,
-            &block,
-            false,
-            UpdateMode::MigrateStandalone {
-                gongbu_configured: true,
-            },
-        )
-        .unwrap();
-        assert!(updated.contains("command = \"hubu-unified-mcp\""));
-        assert!(updated.contains("[mcp_servers.other]"));
-        assert!(!updated.contains("hubu-mcp-server"));
-        assert!(!updated.contains("gongbu-mcp"));
-        assert!(!updated.contains("GONGBU_MCP_ENDPOINT"));
-    }
-
-    #[test]
-    fn migration_preserves_standalone_gongbu_when_replacement_is_missing() {
-        let existing = "[mcp_servers.hubu]\ncommand = \"hubu-mcp-server\"\n\n[mcp_servers.gongbu]\ncommand = \"gongbu-mcp\"\n";
-        let block = format!(
-            "{MANAGED_BEGIN}\n[mcp_servers.hubu]\ncommand = \"hubu-unified-mcp\"\n{MANAGED_END}\n"
-        );
-        let error = upsert(
-            existing,
-            &block,
-            false,
-            UpdateMode::MigrateStandalone {
-                gongbu_configured: false,
-            },
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("--gongbu-endpoint"));
-        assert!(error.to_string().contains("--gongbu-token-file"));
-        assert!(existing.contains("command = \"gongbu-mcp\""));
-    }
-
-    #[test]
-    fn default_update_rejects_a_remaining_gongbu_entry() {
-        let existing = "[mcp_servers.gongbu]\ncommand = \"gongbu-mcp\"\n";
-        let block = format!(
-            "{MANAGED_BEGIN}\n[mcp_servers.hubu]\ncommand = \"hubu-unified-mcp\"\n{MANAGED_END}\n"
-        );
-        assert!(upsert(existing, &block, false, UpdateMode::Unified)
-            .unwrap_err()
-            .to_string()
-            .contains("--migrate-standalone"));
     }
 }

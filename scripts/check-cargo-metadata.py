@@ -14,13 +14,11 @@ PLACEHOLDER_MARKERS = ("your-org", "example.com/hubu", "private/hubu")
 EXPECTED_PACKAGES = {
     "gongbu-api",
     "gongbu-build-info",
-    "gongbu-mcp",
     "hubu-api",
     "hubu-bench",
     "hubu-cli",
     "hubu-common",
     "hubu-core",
-    "hubu-mcp",
     "hubu-unified-mcp",
     "hubu-wallet",
 }

@@ -4,9 +4,9 @@ Status: implemented as `hubu-gongbu-mcp-v1`; this document remains the routing
 contract rather than an implementation guide.
 
 This document fixes the public names, schemas, ownership, discovery handshake,
-compatibility rules, and standalone-server migration gates for one supported MCP
-surface. The surface is an adapter and router only. It does not merge Hubu and
-Gongbu processes or allow either backend to import the other.
+and compatibility rules for the unified MCP surface. The surface is an adapter
+and router only. It does not merge Hubu and Gongbu processes or allow either
+backend to import the other.
 
 ## Decision
 
@@ -23,10 +23,10 @@ governance or execution data. A tool call is validated against the public schema
 and forwarded to exactly one owning backend. The router must not compose a
 governance mutation and an execution mutation into one tool call.
 
-HUB-111 passed the parity and GO gates below. Effective with HUB-97,
-`hubu-mcp-server` and `gongbu-mcp` are deprecated and unsupported;
-`hubu-unified-mcp` is the only supported agent-facing surface. Their source
-remains temporarily for HUB-98 removal staging, not compatibility.
+HUB-111 passed the parity and GO gates below, HUB-97 made
+`hubu-unified-mcp` the only supported agent-facing surface, and HUB-98 removed
+the retired adapter source. The dated gate record remains below as historical
+evidence for that decision.
 
 ## Boundaries and non-goals
 
@@ -61,12 +61,12 @@ callable catalog.
 All input schemas below are JSON Schema objects with
 `additionalProperties: false`. `required(...)` lists the schema-required fields;
 other listed fields are optional. The router must publish the full constraints
-from the owning standalone adapter, not merely the compact notation in the
+captured by its durable golden fixtures, not merely the compact notation in the
 tables. It must preserve Hubu tool annotations, including approval metadata.
 Gongbu tools are open-world operations but accept no endpoint, credential,
 account, amount, operation-key, retry, or artifact-path overrides.
 
-Successful backend calls preserve the standalone MCP result shape byte-for-byte
+Successful backend calls preserve the accepted MCP result shape byte-for-byte
 at the JSON value level:
 
 - Hubu results contain a text block with pretty-printed JSON and identical JSON
@@ -135,7 +135,7 @@ the existing Hubu MCP result with HTTP response `T` as `structuredContent` and
 as the text block. Source response structures remain authoritative in
 [`crates/hubu-api/src/lib.rs`](../crates/hubu-api/src/lib.rs).
 
-| Unified and standalone name | Exact input schema (compact) | Response schema | Hubu route |
+| MCP name | Exact input schema (compact) | Response schema | Hubu route |
 | --- | --- | --- | --- |
 | `hubu_health` | `{}` | `HubuJson({status:string})` | `GET /health` |
 | `hubu_registration_guidance` | `{}` | `HubuJson(RegistrationGuidance)` | `GET /registration/guidance` |
@@ -220,10 +220,11 @@ human-approval gate and reconciliation keeps its distinct capability.
 Each route is made with only the Gongbu backend credential and authenticated
 account claim. `GongbuText(T,vN)` means the existing Gongbu text result carrying
 the named HTTP response schema and schema version. Source structures remain
-authoritative in [`crates/gongbu-mcp/src/lib.rs`](../crates/gongbu-mcp/src/lib.rs)
+authoritative in the unified router's checked-in
+[golden fixture](../crates/hubu-unified-mcp/tests/fixtures/gongbu-tool-definitions-v2.json)
 and [`crates/gongbu-api/src/http/mod.rs`](../crates/gongbu-api/src/http/mod.rs).
 
-| Unified and standalone name | Exact input schema (compact) | Response schema | Gongbu route |
+| MCP name | Exact input schema (compact) | Response schema | Gongbu route |
 | --- | --- | --- | --- |
 | `gongbu_create_execution` | `{schema_version:2, spend_auth_token_id:string(1..255), input:object, input_schema_version:integer>=1, workload_type:string, provider:string, adapter:string, model:string}`; all required, strings non-empty | `GongbuText(ExecutionResponse,v2)` | `POST /v2/executions` |
 | `gongbu_get_execution` | `{execution_id:SafeId}`; required | `GongbuText(ExecutionResponse,v1)` | `GET /v1/executions/{execution_id}` |
@@ -345,15 +346,13 @@ or sent to the other backend by the router. Once forwarded, the owning adapter's
 existing error contract is preserved. A transport failure after an ambiguous
 mutation remains ambiguous; the router must not automatically retry it.
 
-## Migration, collisions, and omissions
+## Names, collisions, and omissions
 
-All 32 standalone tool mappings are identity mappings: the unified name, input
-schema, annotations, result schema, and owner are the same as today. Clients
-replace their `hubu-mcp-server` and `gongbu-mcp` entries with one
-`hubu-unified-mcp` entry, then require `hubu-gongbu-mcp-v1` during
-initialization. Saved allowlists can retain every existing `hubu_*` and
-`gongbu_*` entry. Clients should additionally allow the read-only
-`hubu_unified_capabilities` tool.
+The 32 backend-owned tool mappings preserve their accepted names, input
+schemas, annotations, result schemas, and owners. Clients require
+`hubu-gongbu-mcp-v1` during initialization and should allow the read-only
+`hubu_unified_capabilities` tool in addition to the `hubu_*` and `gongbu_*`
+catalogs they use.
 
 There are no name collisions. The superficially overlapping operations are
 intentional and not aliases:
@@ -372,7 +371,7 @@ Intentional omissions are HTTP-only operator/debug routes, Gongbu reconciliation
 routes, backend version/readiness endpoints as model tools, storage keys,
 filesystem paths, credentials, account claims, provider retry controls, and MCP
 protocol methods such as `ping` (which is a method, not a tool). They are not
-supported standalone tools and exposing them would broaden authority or confuse
+agent tools, and exposing them would broaden authority or confuse
 transport health with product operations.
 
 ## Parity, deprecation, and removal gates
@@ -462,8 +461,8 @@ be waived by schedule.
 - The unified server may depend on a small router-owned contract module and
   backend HTTP client modules. It must not import Hubu/Gongbu persistence,
   application, provider, or credential implementation crates.
-- Tool definitions should be generated or parity-tested from standalone public
-  definitions to prevent drift, while build-time sharing must not introduce a
+- Tool definitions are owned by small purpose-specific unified-router modules
+  and checked against durable golden fixtures to prevent drift, without a
   direct Hubu–Gongbu crate dependency.
 - Backend probes are bounded, independent, sanitized, and do not share circuit
   breakers. A slow backend cannot prevent the other backend or the local
@@ -474,5 +473,5 @@ be waived by schedule.
 - Any future composed workflow is a new public tool and design decision. It
   cannot be smuggled into one of the 32 identity mappings.
 
-These boundaries let implementation, health reporting, per-backend routing, and
-end-to-end migration tasks proceed without reopening public naming or ownership.
+These boundaries let implementation, health reporting, and per-backend routing
+evolve without reopening public naming or ownership.

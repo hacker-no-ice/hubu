@@ -2,13 +2,11 @@
 members = [
     "crates/gongbu-api",
     "crates/gongbu-build-info",
-    "crates/gongbu-mcp",
     "crates/hubu-api",
     "crates/hubu-bench",
     "crates/hubu-cli",
     "crates/hubu-common",
     "crates/hubu-core",
-    "crates/hubu-mcp",
     "crates/hubu-unified-mcp",
     "crates/hubu-wallet",
 ]

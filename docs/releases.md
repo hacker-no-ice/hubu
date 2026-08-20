@@ -73,9 +73,8 @@ archive:
 | `hubu-unified-mcp` | Only supported agent-facing MCP router over independently configured Hubu and Gongbu backends |
 | `gongbu-server` | Gongbu execution-plane HTTP process, database, Temporal worker, provider credentials/calls, artifacts, and recovery |
 
-`hubu-mcp-server` and `gongbu-mcp` are deprecated standalone adapters excluded
-from primary archives. `hubu-bench` and `gongbu-sandbox` are development tools
-and are also excluded. A shared archive does not merge backend processes,
+`hubu-bench` and `gongbu-sandbox` are development tools and are excluded. A
+shared archive does not merge backend processes,
 databases, credentials, provider execution, artifacts, or failure domains. The
 unified MCP binary communicates with each backend only through its versioned
 HTTP contract.
@@ -93,8 +92,7 @@ Linux release targets must be restored and verified before the first supported
 Linux user or public availability.
 
 Every archive includes `MANIFEST.json` and `PROVENANCE.json`. Both enumerate the
-four binaries, the one supported agent surface, the deprecated surfaces that
-were excluded, product version,
+four binaries, the one supported agent surface, product version,
 full source commit, executor contract, and Rust target; provenance also records
 the repository, workflow run, and locked
 dependency declaration. The archive carries its own `SHA256SUMS` for every
@@ -139,11 +137,8 @@ install \
 ```
 
 Configure the single supported agent entry after installation with
-`hubu init codex`. Migrate an existing two-entry configuration deterministically
-with `hubu init codex --migrate-standalone --gongbu-endpoint URL
---gongbu-token-file FILE`; migration refuses to change the config when a
-standalone Gongbu entry lacks replacement settings. Release archives do not
-contain standalone MCP adapters, and the CLI does not generate their config.
+`hubu init codex`. Add `--gongbu-endpoint URL --gongbu-token-file FILE` when the
+agent also needs Gongbu execution and artifact tools.
 
 Every binary's reported `product_version` and `source_commit` must match the
 archive provenance. Its `executor_contract` (or Gongbu's equivalent
@@ -187,7 +182,7 @@ substitute for those deployment gates.
 ## Rollback, deprecation, and retention
 
 Rollback means changing the consumer pin to an older validated unified MCP tag
-and checksum. It does not restore deprecated standalone MCP configuration.
+and checksum.
 Never move a tag, replace an asset, or edit an old checksum to perform a rollback.
 
 If a release is unsafe, mark it deprecated in its GitHub Release notes and
@@ -216,10 +211,9 @@ subsequent pre-launch canaries and does not invalidate this verified superset.
 The HUB-111 GO pull request was reviewed and merged as squash
 `7b34e22c6ceb055818e829a0573f23ad21a2de3c`, authorizing HUB-97.
 
-HUB-97 makes the unsupported cutover immediately on merge; HUB-98 then removes
-the retained standalone source. They proceed sequentially without the former
-90-day/two-stable-release wait. At least one immutable rollback release with
-checksums and provenance must remain available until HUB-98 verifies removal,
-workspace integrity, and stale operational references. Retaining that artifact
-does not permit mixed Hubu/Gongbu versions or merged backend state; rollback
-continues to change consumer pins and MCP configuration only.
+HUB-97 made the unsupported cutover immediately on merge, and HUB-98 then
+removed the retained standalone source without the former 90-day/two-stable-
+release wait. The immutable rollback release, checksums, and provenance remain
+historical evidence for that removal. They do not permit mixed Hubu/Gongbu
+versions or merged backend state; supported rollback changes only the consumer
+pin to another unified release.

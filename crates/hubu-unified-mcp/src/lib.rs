@@ -16,7 +16,6 @@ use std::{
     time::Duration,
 };
 
-use hubu_mcp::HUBU_ROUTING_CONTRACT_VERSION;
 use reqwest::{
     blocking::Client,
     header::{self, HeaderMap, HeaderValue},
@@ -41,6 +40,7 @@ use notification::TransitionState;
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.2";
+pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
 pub const ROUTING_REVISION: u32 = 1;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";

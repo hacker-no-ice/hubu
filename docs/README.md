@@ -21,19 +21,16 @@ planning, improvement, and handoff notes live under [`notes/`](notes/).
   v5 design research for multiple provider calls under one authorized maximum
 - [mcp-transport.md](mcp-transport.md): MCP adapter setup, approval boundaries,
   and tool mapping
-- [unified-mcp-migration.md](unified-mcp-migration.md): supported migration from
-  deprecated standalone MCP entries to the only supported unified surface and
-  health validation
 - [unified-mcp-contract.md](unified-mcp-contract.md): accepted unified
   Hubu–Gongbu MCP names, schemas, backend routing, compatibility negotiation,
-  partial availability, and standalone migration gates
+  partial availability, and removal history
 - [canaries/HUB-96-unified-mcp-migration-canary.md](canaries/HUB-96-unified-mcp-migration-canary.md):
   packaged unified MCP migration evidence and the explicit standalone
   deprecation no-go decision
 - [canaries/HUB-111-final-unified-mcp-cutover-go.md](canaries/HUB-111-final-unified-mcp-cutover-go.md):
   final immutable-release evidence and conditional zero-user cutover GO
 - [HUB-97-unified-mcp-cutover.md](HUB-97-unified-mcp-cutover.md): immediate
-  supported-surface and release-package cutover notes plus HUB-98 follow-up
+  supported-surface and release-package cutover history
 - [benchmarking.md](benchmarking.md): local benchmark usage and current MVP
   performance notes
 - [demo.md](demo.md): scripted local walkthrough and CLI reference

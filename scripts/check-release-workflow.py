@@ -20,8 +20,6 @@ PRODUCTION_BINARIES = (
 EXCLUDED_BINARIES = (
     "hubu-bench",
     "gongbu-sandbox",
-    "hubu-mcp-server",
-    "gongbu-mcp",
 )
 RELEASE_TARGETS = (
     "x86_64-apple-darwin",

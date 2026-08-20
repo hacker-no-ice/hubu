@@ -50,8 +50,7 @@ for expected_file in "${expected_files[@]}"; do
     exit 1
   fi
 done
-if [[ -e "${package_dir}/hubu-bench" || -e "${package_dir}/gongbu-sandbox" || \
-      -e "${package_dir}/hubu-mcp-server" || -e "${package_dir}/gongbu-mcp" ]]; then
+if [[ -e "${package_dir}/hubu-bench" || -e "${package_dir}/gongbu-sandbox" ]]; then
   echo "release archive contains an excluded binary" >&2
   exit 1
 fi
@@ -67,7 +66,7 @@ jq -e \
   --arg product_version "${product_version}" \
   --arg source_commit "${source_commit}" \
   --arg target "${target}" \
-  '.schema_version == 1 and
+  '.schema_version == 2 and
    .product == "hubu" and
    .product_version == $product_version and
    .source_commit == $source_commit and
@@ -75,7 +74,6 @@ jq -e \
    .target == $target and
    .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
    .supported_agent_surfaces == ["hubu-unified-mcp"] and
-   .deprecated_agent_surfaces_excluded == ["hubu-mcp-server", "gongbu-mcp"] and
    .manifest == "MANIFEST.json" and
    .dependencies == "Cargo.lock" and
    .third_party_licenses == "THIRD-PARTY-LICENSES.txt"' \
@@ -84,7 +82,7 @@ jq -e \
   --arg product_version "${product_version}" \
   --arg source_commit "${source_commit}" \
   --arg target "${target}" \
-  '.schema_version == 1 and
+  '.schema_version == 2 and
    .product == "hubu" and
    .product_version == $product_version and
    .source_commit == $source_commit and
@@ -92,7 +90,6 @@ jq -e \
    .target == $target and
    .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
    .supported_agent_surfaces == ["hubu-unified-mcp"] and
-   .deprecated_agent_surfaces_excluded == ["hubu-mcp-server", "gongbu-mcp"] and
    .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
   "${package_dir}/MANIFEST.json" >/dev/null
 
@@ -180,49 +177,4 @@ if grep -F '[mcp_servers.gongbu]' <<<"${generated_config}" >/dev/null; then
   exit 1
 fi
 
-migration_config="${smoke_dir}/codex-config.toml"
-printf '%s\n' \
-  '[mcp_servers.hubu]' \
-  'command = "hubu-mcp-server"' \
-  '[mcp_servers.hubu.env]' \
-  'HUBU_URL = "http://127.0.0.1:8787"' \
-  '[mcp_servers.gongbu]' \
-  'command = "gongbu-mcp"' \
-  '[mcp_servers.gongbu.env]' \
-  'GONGBU_MCP_ENDPOINT = "http://127.0.0.1:8788"' \
-  '[mcp_servers.other]' \
-  'command = "keep"' >"${migration_config}"
-if "${package_dir}/hubu" init codex \
-  --config "${migration_config}" \
-  --mcp-server "${package_dir}/hubu-unified-mcp" \
-  --token-file "${smoke_dir}/hubu.auth-token" \
-  --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
-  --approval-token-file "${smoke_dir}/hubu.approval-token" \
-  --migrate-standalone >/dev/null 2>&1; then
-  echo "migration without replacement Gongbu settings unexpectedly succeeded" >&2
-  exit 1
-fi
-grep -F 'command = "gongbu-mcp"' "${migration_config}" >/dev/null
-"${package_dir}/hubu" init codex \
-  --config "${migration_config}" \
-  --mcp-server "${package_dir}/hubu-unified-mcp" \
-  --token-file "${smoke_dir}/hubu.auth-token" \
-  --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
-  --approval-token-file "${smoke_dir}/hubu.approval-token" \
-  --gongbu-endpoint "http://127.0.0.1:8788" \
-  --gongbu-token-file "${smoke_dir}/gongbu.mcp-token" \
-  --migrate-standalone >/dev/null
-grep -E 'command = ".*/hubu-unified-mcp"' "${migration_config}" >/dev/null
-grep -F '[mcp_servers.other]' "${migration_config}" >/dev/null
-if grep -F 'hubu-mcp-server' "${migration_config}" >/dev/null || \
-   grep -F 'gongbu-mcp' "${migration_config}" >/dev/null; then
-  echo "standalone MCP entries remained after explicit migration" >&2
-  exit 1
-fi
-
-if "${package_dir}/hubu" init codex --compatibility-standalone >/dev/null 2>&1; then
-  echo "hubu still accepts the removed standalone compatibility configuration flag" >&2
-  exit 1
-fi
-
-echo "Verified unified archive ${package_name}: four binaries, unified-only discovery, distinct credentials, and atomic standalone-config migration; no provider call or spend was attempted"
+echo "Verified unified archive ${package_name}: four binaries, unified-only discovery, and distinct credentials; no provider call or spend was attempted"

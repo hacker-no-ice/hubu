@@ -408,88 +408,12 @@ fn call(process: &mut McpProcess, id: u64, case: &GoldenCase) -> Value {
     }
 }
 
-fn call_error(process: &mut McpProcess, id: u64, case: &GoldenCase) -> Value {
-    if case.name == "hubu_client_approval_profile" {
-        return process.call(id, case.name, json!({"unexpected":true}));
-    }
-    call(process, id, case)
-}
-
-fn contract_normalized_approval_profile(mut standalone: Value) -> Value {
-    let profile = &mut standalone["result"]["structuredContent"];
-    profile["client_policy"]["auto_approve_tools"] = json!([
-        "hubu_health",
-        "hubu_registration_guidance",
-        "hubu_client_approval_profile",
-        "hubu_list_users",
-        "hubu_show_policy",
-        "hubu_export_policy",
-        "hubu_policy_history",
-        "hubu_policy_diff",
-        "hubu_show_spending_targets",
-        "hubu_submit_spend",
-        "hubu_authorize_spend",
-        "hubu_list_agents",
-        "hubu_list_budgets",
-        "hubu_list_ledger",
-        "hubu_get_executor_claim",
-        "hubu_list_claims_requiring_reconciliation"
-    ]);
-    profile["client_policy"]["hubu_policy_conditional_tools"] =
-        json!(["hubu_submit_spend", "hubu_authorize_spend"]);
-    profile["client_policy"]["prompt_before_call_tools"] = json!([
-        "hubu_register_human",
-        "hubu_register_agent",
-        "hubu_add_policy",
-        "hubu_apply_policy",
-        "hubu_create_budget",
-        "hubu_create_recurring_budget",
-        "hubu_revoke_budget",
-        "hubu_replace_budget",
-        "hubu_set_spending_target",
-        "hubu_revoke_spending_target",
-        "hubu_reconcile_vendor_billed_claim",
-        "hubu_reconcile_vendor_did_not_bill_claim"
-    ]);
-    profile["tools"][0]["names"] = json!([
-        "hubu_health",
-        "hubu_registration_guidance",
-        "hubu_client_approval_profile",
-        "hubu_list_users",
-        "hubu_show_policy",
-        "hubu_export_policy",
-        "hubu_policy_history",
-        "hubu_policy_diff",
-        "hubu_show_spending_targets",
-        "hubu_list_agents",
-        "hubu_list_budgets",
-        "hubu_list_ledger",
-        "hubu_get_executor_claim",
-        "hubu_list_claims_requiring_reconciliation"
-    ]);
-    profile["tools"][1]["names"] = json!(["hubu_submit_spend", "hubu_authorize_spend"]);
-    profile["tools"][2]["names"] = profile["client_policy"]["prompt_before_call_tools"].clone();
-    profile["response_contract"]["agent_action"] = json!(
-        "Stop the spend workflow and surface approval_reason plus the structured response to the human."
-    );
-    standalone["result"]["content"][0]["text"] =
-        json!(serde_json::to_string_pretty(profile).unwrap());
-    standalone
-}
-
-fn configure_success(case: &GoldenCase, unified: &BackendStub, standalone: &BackendStub) {
+fn configure_success(case: &GoldenCase, backend: &BackendStub) {
     if case.name == "hubu_client_approval_profile" {
         return;
     }
     if case.name == "gongbu_get_artifact" {
-        unified.respond_bytes(
-            case.method,
-            case.path,
-            200,
-            "image/png",
-            b"\x89PNG\r\n\x1a\n",
-        );
-        standalone.respond_bytes(
+        backend.respond_bytes(
             case.method,
             case.path,
             200,
@@ -498,184 +422,140 @@ fn configure_success(case: &GoldenCase, unified: &BackendStub, standalone: &Back
         );
         return;
     }
-    let body = success_body(case);
-    if case.name == "hubu_health" {
-        unified.respond_sequence_json(
-            "GET",
-            "/health",
-            [(200, json!({"status":"ok"})), (200, body.clone())],
-        );
-    } else {
-        unified.respond_json(case.method, case.path, 200, body.clone());
-    }
-    standalone.respond_json(case.method, case.path, 200, body);
-}
-
-fn configure_error(case: &GoldenCase, unified: &BackendStub, standalone: &BackendStub) {
-    if case.name == "hubu_client_approval_profile" {
-        return;
-    }
-    let body = match case.owner {
-        Owner::Hubu => json!({"error":format!("HUB-107 application error for {}", case.name)}),
-        Owner::Gongbu => json!({"error":{"code":"invalid_request"}}),
-    };
-    if case.name == "hubu_health" {
-        unified.respond_sequence_json(
-            "GET",
-            "/health",
-            [(200, json!({"status":"ok"})), (400, body.clone())],
-        );
-    } else {
-        unified.respond_json(case.method, case.path, 400, body.clone());
-    }
-    standalone.respond_json(case.method, case.path, 400, body);
+    backend.respond_json(case.method, case.path, 200, success_body(case));
 }
 
 #[test]
-#[ignore = "runs through scripts/integration-unified-mcp.sh with standalone debug adapters"]
-fn all_mapped_tools_have_golden_success_and_error_parity() {
+#[ignore = "runs through scripts/integration-unified-mcp.sh with stamped unified metadata"]
+fn all_mapped_tools_have_unified_owned_golden_routing_coverage() {
     let cases = cases();
     assert_complete_unique_matrix(&cases);
 
-    let unified_hubu = BackendStub::start(BackendKind::Hubu);
-    let unified_gongbu = BackendStub::start(BackendKind::Gongbu);
-    let standalone_hubu = BackendStub::start(BackendKind::Hubu);
-    let standalone_gongbu = BackendStub::start(BackendKind::Gongbu);
-    let mut unified = McpProcess::start(
-        Some((&unified_hubu, HUBU_TOKEN)),
-        Some((&unified_gongbu, GONGBU_TOKEN)),
-    );
-    let mut hubu = McpProcess::start_standalone_hubu(&standalone_hubu);
-    let mut gongbu = McpProcess::start_standalone_gongbu(&standalone_gongbu);
-    unified.initialize();
-    hubu.initialize();
-    gongbu.initialize();
-
-    let mut id = 10;
-    let mut raw_success_comparisons = 0;
-    let mut raw_error_comparisons = 0;
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
     for case in &cases {
-        let (unified_backend, standalone_backend, standalone) = match case.owner {
-            Owner::Hubu => (&unified_hubu, &standalone_hubu, &mut hubu),
-            Owner::Gongbu => (&unified_gongbu, &standalone_gongbu, &mut gongbu),
-        };
-        configure_success(case, unified_backend, standalone_backend);
-        let expected = call(standalone, id, case);
-        let actual = call(&mut unified, id, case);
-        if case.name == "hubu_client_approval_profile" {
-            let normalized = contract_normalized_approval_profile(expected.clone());
-            assert_ne!(
-                normalized, expected,
-                "profile must remain an explicit exception"
-            );
-            assert_eq!(actual, normalized, "approval profile contract projection");
-        } else {
-            assert_eq!(
-                actual,
-                expected,
-                "{} success parity; unified requests: {:?}; standalone requests: {:?}",
-                case.name,
-                unified_backend.requests(),
-                standalone_backend.requests()
-            );
-            raw_success_comparisons += 1;
-        }
-        id += 1;
-
-        configure_error(case, unified_backend, standalone_backend);
-        let expected = call_error(standalone, id, case);
-        let actual = call_error(&mut unified, id, case);
-        assert_eq!(actual, expected, "{} error parity", case.name);
-        raw_error_comparisons += 1;
-        match case.owner {
-            Owner::Hubu => assert!(
-                expected.get("error").is_some(),
-                "{} must exercise an error",
-                case.name
-            ),
-            Owner::Gongbu => assert_eq!(
-                expected["result"]["isError"], true,
-                "{} must exercise an error",
-                case.name
-            ),
-        }
-        id += 1;
+        configure_success(
+            case,
+            match case.owner {
+                Owner::Hubu => &hubu,
+                Owner::Gongbu => &gongbu,
+            },
+        );
     }
-    assert_eq!(raw_success_comparisons, 31);
-    assert_eq!(raw_error_comparisons, 32);
+
+    let mut unified = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    unified.initialize();
+
+    for (offset, case) in cases.iter().enumerate() {
+        let response = call(&mut unified, 10 + offset as u64, case);
+        assert!(
+            response.get("error").is_none(),
+            "{} unexpectedly failed: {response}",
+            case.name
+        );
+        if case.name == "hubu_client_approval_profile" {
+            assert_eq!(
+                response["result"]["structuredContent"]["protocol_version"],
+                "hubu-mcp-client-approval-v1"
+            );
+            continue;
+        }
+        if case.name == "gongbu_get_artifact" {
+            assert_eq!(response["result"]["content"][1]["type"], "image");
+            assert_eq!(response["result"]["content"][1]["mimeType"], "image/png");
+            assert_eq!(response["result"]["content"][1]["data"], "iVBORw0KGgo=");
+        }
+        let backend = match case.owner {
+            Owner::Hubu => &hubu,
+            Owner::Gongbu => &gongbu,
+        };
+        let request = backend
+            .requests()
+            .into_iter()
+            .rev()
+            .find(|request| request.method == case.method && request.path == case.path)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} did not route to {} {}",
+                    case.name, case.method, case.path
+                )
+            });
+        assert!(
+            !request.raw.contains("hubu.dev/platform-invocation"),
+            "{} forwarded trusted MCP metadata",
+            case.name
+        );
+    }
 
     unified.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
-    hubu.finish(&["hub107-hubu-standalone-credential"]);
-    gongbu.finish(&["hub107-gongbu-standalone-credential"]);
 }
 
 #[test]
-#[ignore = "runs through scripts/integration-unified-mcp.sh with standalone debug adapters"]
-fn approval_metadata_is_injected_identically_without_forwarding_meta() {
-    let unified_hubu = BackendStub::start(BackendKind::Hubu);
-    let unified_gongbu = BackendStub::start(BackendKind::Gongbu);
-    let standalone_hubu = BackendStub::start(BackendKind::Hubu);
-    let mut unified = McpProcess::start(
-        Some((&unified_hubu, HUBU_TOKEN)),
-        Some((&unified_gongbu, GONGBU_TOKEN)),
-    );
-    let mut standalone = McpProcess::start_standalone_hubu(&standalone_hubu);
-    unified.initialize();
-    standalone.initialize();
+#[ignore = "runs through scripts/integration-unified-mcp.sh with stamped unified metadata"]
+fn operation_identity_is_injected_without_forwarding_trusted_metadata() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
     let case = cases()
         .into_iter()
         .find(|case| case.name == "hubu_authorize_spend")
         .unwrap();
-    configure_success(&case, &unified_hubu, &standalone_hubu);
+    configure_success(&case, &hubu);
+    let mut unified = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    unified.initialize();
 
-    let expected = call(&mut standalone, 10, &case);
-    let actual = call(&mut unified, 10, &case);
-    assert_eq!(actual, expected);
-    for request in [
-        unified_hubu
-            .requests()
-            .into_iter()
-            .find(|request| request.path == case.path)
-            .unwrap(),
-        standalone_hubu
-            .requests()
-            .into_iter()
-            .find(|request| request.path == case.path)
-            .unwrap(),
-    ] {
-        assert!(request.raw.contains("\"operation_key\":\"authorize-107\""));
-        assert!(request.raw.contains("\"task_id\":\"linear:HUB-107\""));
-        assert!(!request.raw.contains("hubu.dev/platform-invocation"));
-    }
+    let response = call(&mut unified, 10, &case);
+    assert!(response.get("error").is_none(), "{response}");
+    let request = hubu
+        .requests()
+        .into_iter()
+        .find(|request| request.path == case.path)
+        .unwrap();
+    assert!(request.raw.contains("\"operation_key\":\"authorize-107\""));
+    assert!(request.raw.contains("\"task_id\":\"linear:HUB-107\""));
+    assert!(!request.raw.contains("hubu.dev/platform-invocation"));
+
     unified.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
-    standalone.finish(&["hub107-hubu-standalone-credential"]);
 }
 
 #[test]
-#[ignore = "runs through scripts/integration-unified-mcp.sh with standalone debug adapters"]
-fn artifact_image_content_matches_at_the_json_value_level() {
-    let unified_hubu = BackendStub::start(BackendKind::Hubu);
-    let unified_gongbu = BackendStub::start(BackendKind::Gongbu);
-    let standalone_gongbu = BackendStub::start(BackendKind::Gongbu);
-    let mut unified = McpProcess::start(
-        Some((&unified_hubu, HUBU_TOKEN)),
-        Some((&unified_gongbu, GONGBU_TOKEN)),
+#[ignore = "runs through scripts/integration-unified-mcp.sh with stamped unified metadata"]
+fn backend_application_failures_are_owned_redacted_and_isolated() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    hubu.respond_json(
+        "GET",
+        "/users",
+        400,
+        json!({"error":format!("rejected {HUBU_TOKEN}")}),
     );
-    let mut standalone = McpProcess::start_standalone_gongbu(&standalone_gongbu);
+    gongbu.respond_json(
+        "GET",
+        "/v1/executions/exec-107",
+        400,
+        json!({"error":{"code":"invalid_request","secret":GONGBU_TOKEN}}),
+    );
+    gongbu.respond_json("GET", "/v1/executions/exec-ok", 200, execution_response());
+    let mut unified = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
     unified.initialize();
-    standalone.initialize();
-    let case = cases()
-        .into_iter()
-        .find(|case| case.name == "gongbu_get_artifact")
-        .unwrap();
-    configure_success(&case, &unified_gongbu, &standalone_gongbu);
 
-    let expected = call(&mut standalone, 10, &case);
-    let actual = call(&mut unified, 10, &case);
-    assert_eq!(actual, expected);
-    assert_eq!(actual["result"]["content"][1]["type"], "image");
-    assert_eq!(actual["result"]["content"][1]["mimeType"], "image/png");
-    assert_eq!(actual["result"]["content"][1]["data"], "iVBORw0KGgo=");
+    let hubu_error = unified.call(10, "hubu_list_users", json!({}));
+    assert_eq!(hubu_error["error"]["code"], -32000);
+    assert!(!hubu_error.to_string().contains(HUBU_TOKEN));
+
+    let gongbu_error = unified.call(
+        11,
+        "gongbu_get_execution",
+        json!({"execution_id":"exec-107"}),
+    );
+    assert_eq!(gongbu_error["result"]["isError"], true);
+    assert!(!gongbu_error.to_string().contains(GONGBU_TOKEN));
+
+    let healthy = unified.call(
+        12,
+        "gongbu_get_execution",
+        json!({"execution_id":"exec-ok"}),
+    );
+    assert_eq!(healthy["result"]["isError"], false);
+
     unified.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
-    standalone.finish(&["hub107-gongbu-standalone-credential"]);
 }

@@ -11,8 +11,6 @@ use std::{
     time::Duration,
 };
 
-use hubu_unified_mcp::source_commit;
-
 use super::fixtures::default_responses;
 
 #[derive(Clone, Copy)]
@@ -75,17 +73,6 @@ pub struct BackendStub {
 
 impl BackendStub {
     pub fn start(kind: BackendKind) -> Self {
-        assert_ne!(
-            source_commit(),
-            "unknown",
-            "run this matrix through scripts/integration-unified-mcp.sh"
-        );
-        assert_eq!(
-            source_commit().len(),
-            40,
-            "test source stamp must be a full commit-shaped value"
-        );
-
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let state = Arc::new(Mutex::new(StubState {

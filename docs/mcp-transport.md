@@ -34,7 +34,7 @@ cargo install --path crates/hubu-unified-mcp
 
 Unstamped local builds are for development and intentionally fail the unified
 source-commit compatibility check. Use all binaries from one verified release
-archive for an operator migration.
+archive for an operator deployment.
 
 Configure Codex once so agents in any project can discover Hubu MCP tools:
 
@@ -130,14 +130,8 @@ hubu init codex --config ~/.codex/config.toml --mcp-server /path/to/hubu-unified
 ```
 
 Add `--gongbu-endpoint URL --gongbu-token-file FILE` to configure the separate
-Gongbu backend in the same MCP entry. Use `--migrate-standalone` to replace an
-existing `hubu-mcp-server` plus `gongbu-mcp` pair deterministically, together
-with those Gongbu options; migration refuses to change the config if replacement
-Gongbu settings are absent. The CLI does not generate standalone configuration:
-both old adapters are deprecated and unsupported.
-
-Follow the [unified MCP migration guide](unified-mcp-migration.md) for the
-supported preflight, exact health interpretation, validation, and cutover behavior.
+Gongbu backend in the same MCP entry. Use binaries from one verified release
+archive so the router and both backends report matching compatibility metadata.
 
 Leave `--trust-client-approval` off when approval decisions will be resolved
 directly with the Hubu CLI. Enable it when the Codex client is trusted to prompt
@@ -182,6 +176,37 @@ approval gate is useful only when the selected MCP client reliably enforces it;
 it is not proof of a distinct human identity. The Hubu decision is durable, but
 the MVP attributes it to the existing owner-authenticated client. Do not expose
 this arrangement to a network or connect it to a real payment rail.
+
+## Backend Compatibility and Readiness
+
+Use all four runtime binaries from one verified release archive. The router
+requires each configured backend to report the same product version and exact
+source commit as itself, plus `hubu-spend-executor-v4.2`. Gongbu must also
+report the accepted API, MCP schema, and MCP protocol versions. An unstamped
+local build intentionally fails the source-commit compatibility check.
+
+Call `hubu_unified_capabilities` for the sanitized cross-backend view. Interpret
+each backend independently:
+
+| State | Meaning and operator action |
+| --- | --- |
+| `available` | Health and all compatibility fields match; eligible tools are callable. |
+| `degraded` | Gongbu is compatible but not ready. Reads and artifact retrieval remain available; repair Gongbu before creating executions. |
+| `unavailable` | A health or version probe failed. Inspect only the named backend process. |
+| `incompatible` | Product, source, executor, protocol, or schema metadata differs. Reinstall every binary from one archive. |
+| `unconfigured` | An endpoint/credential pair is absent or incomplete. Configure both values and restart the MCP client. |
+
+Partial availability is intentional. An unhealthy backend does not hide the
+router capability tool or compatible tools owned by the other backend.
+`gongbu_create_execution` additionally requires Hubu availability because it
+consumes Hubu authorization. The router never falls back across backends,
+queues a call, or retries an ambiguous mutation.
+
+After the initialize handshake, each effective callable-catalog transition
+emits one payload-free `notifications/tools/list_changed`; unchanged probes
+emit nothing. Clients refresh `tools/list` after the notification and use
+`hubu_unified_capabilities` for diagnostics rather than inferring backend state
+from the notification.
 
 ## Approval Boundaries
 

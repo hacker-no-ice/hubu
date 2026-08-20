@@ -55,12 +55,9 @@ verify_package() {
   done
   test ! -e "${package_dir}/hubu-bench"
   test ! -e "${package_dir}/gongbu-sandbox"
-  test ! -e "${package_dir}/hubu-mcp-server"
-  test ! -e "${package_dir}/gongbu-mcp"
-
   jq -e \
     --arg target "${target}" \
-    '.schema_version == 1 and
+    '.schema_version == 2 and
      .product == "hubu" and
      .product_version == "0.0.0-test" and
      .source_commit == "0000000000000000000000000000000000000000" and
@@ -68,12 +65,11 @@ verify_package() {
      .target == $target and
      .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
      .supported_agent_surfaces == ["hubu-unified-mcp"] and
-     .deprecated_agent_surfaces_excluded == ["hubu-mcp-server", "gongbu-mcp"] and
      .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
     "${package_dir}/MANIFEST.json" >/dev/null
   jq -e \
     --arg target "${target}" \
-    '.schema_version == 1 and
+    '.schema_version == 2 and
      .product == "hubu" and
      .product_version == "0.0.0-test" and
      .source_commit == "0000000000000000000000000000000000000000" and
@@ -82,7 +78,6 @@ verify_package() {
      .repository == "hacker-no-ice/hubu" and
      .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
      .supported_agent_surfaces == ["hubu-unified-mcp"] and
-     .deprecated_agent_surfaces_excluded == ["hubu-mcp-server", "gongbu-mcp"] and
      .manifest == "MANIFEST.json" and
      .dependencies == "Cargo.lock"' \
     "${package_dir}/PROVENANCE.json" >/dev/null
