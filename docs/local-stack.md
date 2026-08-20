@@ -8,12 +8,12 @@ failure domains.
 The supported profile workflow is:
 
 ```text
-stack init -> operator edit -> stack doctor -> stack render -> stack doctor -> init codex
+stack init -> operator edit -> stack start -> stack status -> init codex
 ```
 
-Service lifecycle remains explicit: operators start Hubu and Gongbu using their
-respective runbooks. The stack profile does not start or supervise the
-client-owned `hubu-unified-mcp` stdio process.
+`stack start` runs doctor and render as needed, then starts only missing managed
+components after their dependencies pass. The stack profile never starts or
+supervises the client-owned `hubu-unified-mcp` stdio process.
 
 ## Component ownership
 
@@ -183,10 +183,71 @@ endpoint and credential-file references. It does not copy raw credentials into
 Codex configuration or start the stdio process. Restart Codex so a new session
 loads the updated entry.
 
+## Lifecycle commands
+
+For a complete profile, one command validates, renders, and reconciles the
+launcher-owned processes:
+
+```sh
+hubu stack start --profile /absolute/path/to/profile
+hubu stack status --profile /absolute/path/to/profile
+hubu stack status --profile /absolute/path/to/profile --json
+```
+
+Hubu must be ready, version-compatible, and accessible through its protected
+probe before managed Gongbu starts. Gongbu then owns its Temporal worker and,
+in `managed_local` mode, its Temporal child. Stack readiness means both HTTP
+backends and the worker are ready; the unified MCP remains client-owned and is
+reported as a compatible handoff rather than a running stack process.
+
+Repeated start is a no-op for healthy, current processes. When rendered inputs,
+selected binaries, or launcher log routing change, start prints the affected
+managed components and requires an explicit confirmation before signalling
+anything:
+
+```sh
+hubu stack start --confirm-restart --profile /absolute/path/to/profile
+hubu stack restart --component gongbu --profile /absolute/path/to/profile
+```
+
+Restarting Hubu also restarts launcher-owned Gongbu because Gongbu depends on
+Hubu. Restarting Gongbu leaves Hubu running. External or compatible unowned
+processes are never signalled.
+
+Status distinguishes launcher-owned, compatible unowned, external, exited, and
+stale-identity processes. It also reports active generation and restart impact,
+Temporal ownership and worker readiness, the client-owned MCP handoff, and
+exact follow-up commands for doctor, logs, Codex initialization, Temporal
+workflow inspection, and artifact retrieval.
+
+Launcher-owned logs are available without mixing external service logs into the
+profile:
+
+```sh
+hubu stack logs --component all --lines 200 --profile /absolute/path/to/profile
+hubu stack logs --component gongbu --execution-id EXECUTION_ID --profile /absolute/path/to/profile
+```
+
+Stop proceeds in reverse dependency order: Gongbu drains first and shuts down
+its managed worker and Temporal child, then Hubu stops. Startup rollback also
+touches only children created by that invocation.
+
+```sh
+hubu stack stop --profile /absolute/path/to/profile
+```
+
+The launcher records a process start identity before it gains signal authority.
+If a PID was reused or the recorded identity does not match, lifecycle commands
+refuse to signal it. After independently confirming that ownership is gone, the
+operator can remove only the stale metadata with `stack stop --forget-stale`.
+Databases, artifacts, managed Temporal data, generated configurations, and logs
+are never deleted by start, restart, rollback, or stop.
+
 ## Runtime and recovery boundaries
 
-The profile is configuration, not a shared state store. Each component retains
-its own startup, readiness, shutdown, backup, and recovery procedure:
+The profile coordinates lifecycle without becoming a shared domain state
+store. Each component retains its own readiness, shutdown, backup, and recovery
+procedure:
 
 - Hubu recovery covers its database and capabilities.
 - Gongbu recovery covers its database, artifact root, and managed Temporal data
