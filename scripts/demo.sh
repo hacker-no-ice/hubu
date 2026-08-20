@@ -9,6 +9,14 @@ DEMO_READ_DELAY="${HUBU_DEMO_READ_DELAY:-2.4}"
 SERVER_LOG="$(mktemp -t hubu-demo-server.XXXXXX.log)"
 POLICY_FILE="$(mktemp -t hubu-demo-policy.XXXXXX.yaml)"
 SERVER_PID=""
+DEMO_DB_IS_TEMP=0
+
+if [[ -n "${HUBU_DB_PATH:-}" ]]; then
+  DEMO_DB="${HUBU_DB_PATH}"
+else
+  DEMO_DB="$(mktemp -t hubu-demo-db.XXXXXX.sqlite3)"
+  DEMO_DB_IS_TEMP=1
+fi
 
 if [[ ! -t 1 || "${NO_COLOR:-}" != "" ]]; then
   BOLD=""
@@ -38,6 +46,9 @@ cleanup() {
     wait "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
   rm -f "${SERVER_LOG}" "${POLICY_FILE}"
+  if [[ "${DEMO_DB_IS_TEMP}" == "1" ]]; then
+    rm -f "${DEMO_DB}" "${DEMO_DB}-shm" "${DEMO_DB}-wal"
+  fi
 }
 trap cleanup EXIT
 
@@ -139,12 +150,12 @@ cd "${ROOT_DIR}"
 banner
 
 step "Build the demo binaries"
-run cargo build --bin hubu-server --bin hubu
+run cargo build -p hubu-api -p hubu-cli --bin hubu-server --bin hubu
 pause_for_reading
 
 step "Start Hubu locally"
 note "server: ${DEMO_URL}"
-HUBU_LOG_FILE="${SERVER_LOG}" HUBU_LOG_STDERR=0 "${ROOT_DIR}/target/debug/hubu-server" "${DEMO_ADDR}" >"${SERVER_LOG}" 2>&1 &
+HUBU_DB_PATH="${DEMO_DB}" HUBU_LOG_FILE="${SERVER_LOG}" HUBU_LOG_STDERR=0 "${ROOT_DIR}/target/debug/hubu-server" "${DEMO_ADDR}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID="$!"
 wait_for_server
 say "${GREEN}Hubu server is ready.${RESET}"

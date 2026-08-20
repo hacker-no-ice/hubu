@@ -27,7 +27,7 @@ HUBU_BENCH_WORKERS=8 \
 For direct use:
 
 ```sh
-cargo run --bin hubu-bench -- \
+cargo run -p hubu-bench --bin hubu-bench -- \
   --url http://127.0.0.1:8787 \
   --agents 4 \
   --rps 8 \

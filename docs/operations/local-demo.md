@@ -12,9 +12,10 @@ From the workspace root:
 ./scripts/demo.sh
 ```
 
-The script builds the required binaries, starts an isolated `hubu-server`, runs
-the workflow, and prints the records needed to inspect each transition. Useful
-speed controls are:
+The script builds the required binaries, starts an isolated `hubu-server` with
+a temporary SQLite database, runs the workflow, and removes that database on
+exit. It prints the records needed to inspect each transition. Useful speed
+controls are:
 
 ```sh
 HUBU_DEMO_STEP_DELAY=0.1 \
@@ -22,9 +23,9 @@ HUBU_DEMO_READ_DELAY=0.1 \
 ./scripts/demo.sh
 ```
 
-Use `HUBU_DEMO_ADDR` and `HUBU_DB_PATH` when an isolated address or persistent
-demo database is required. Do not reuse a production database or credential
-file for the demo.
+Use `HUBU_DEMO_ADDR` to select another loopback address. Set `HUBU_DB_PATH` to
+an explicit absolute path only when the demo database should survive the run.
+Do not reuse a production database or credential file for the demo.
 
 ## Workflow
 
@@ -47,11 +48,12 @@ copying command output from this guide.
 
 ## Manual development setup
 
-To inspect individual steps, build the workspace and start the server:
+To inspect individual steps, build the required workspace packages and start
+the server:
 
 ```sh
-cargo build
-cargo run --bin hubu-server
+cargo build -p hubu-cli -p hubu-api
+cargo run -p hubu-api --bin hubu-server
 ```
 
 The server listens on `http://127.0.0.1:8787` by default. It reads

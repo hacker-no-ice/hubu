@@ -8,7 +8,7 @@ provisioned service.
 ## Build and configure
 
 ```sh
-cargo build --release --locked --bin gongbu-server
+cargo build --release --locked -p gongbu-api --bin gongbu-server
 ```
 
 Copy [`examples/gongbu/gongbu.server.json`](../../examples/gongbu/gongbu.server.json)
