@@ -365,6 +365,13 @@ fn render(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
 }
 
 fn render_profile(profile: &Path) -> Result<()> {
+    let renderer = env::current_exe()
+        .and_then(fs::canonicalize)
+        .context("resolve the running hubu executable")?;
+    render_profile_with_renderer(profile, &renderer)
+}
+
+fn render_profile_with_renderer(profile: &Path, renderer: &Path) -> Result<()> {
     let stack_path = profile.join("stack.toml");
     let credentials_path = profile.join("credentials.toml");
     let providers_path = profile.join("providers.toml");
@@ -387,6 +394,7 @@ fn render_profile(profile: &Path) -> Result<()> {
 
     let binaries = stack.binaries.as_ref().expect("checked");
     let hubu_bin = existing_absolute(binaries.hubu.as_deref().expect("checked"), "binaries.hubu")?;
+    validate_renderer_identity(renderer, &hubu_bin)?;
     let hubu_server = existing_absolute(
         binaries.hubu_server.as_deref().expect("checked"),
         "binaries.hubu_server",
@@ -904,7 +912,64 @@ fn validate_topology(stack: &StackSource) -> Result<()> {
             "gongbu",
         )?;
     }
+    if hubu.ownership == Some(Ownership::Managed) && gongbu.ownership == Some(Ownership::Managed) {
+        if hubu.listen.expect("checked") == gongbu.listen.expect("checked") {
+            bail!("stack.toml:hubu.listen and gongbu.listen must be distinct managed sockets");
+        }
+        let hubu_database = hubu.database_path.as_ref().expect("checked");
+        let gongbu_database = gongbu.database_path.as_ref().expect("checked");
+        if paths_resolve_to_same_resource(hubu_database, gongbu_database)? {
+            bail!("stack.toml:hubu.database_path and gongbu.database_path must be distinct managed state files");
+        }
+    }
     Ok(())
+}
+
+fn validate_renderer_identity(renderer: &Path, configured_hubu: &Path) -> Result<()> {
+    let renderer = fs::canonicalize(renderer).with_context(|| {
+        format!(
+            "canonicalize running hubu executable `{}`",
+            renderer.display()
+        )
+    })?;
+    let configured_hubu = fs::canonicalize(configured_hubu).with_context(|| {
+        format!(
+            "canonicalize configured hubu executable `{}`",
+            configured_hubu.display()
+        )
+    })?;
+    if renderer != configured_hubu {
+        bail!(
+            "stack.toml:binaries.hubu must identify the running hubu executable `{}`",
+            renderer.display()
+        );
+    }
+    Ok(())
+}
+
+fn paths_resolve_to_same_resource(left: &Path, right: &Path) -> Result<bool> {
+    Ok(resolve_existing_prefix(left)? == resolve_existing_prefix(right)?)
+}
+
+fn resolve_existing_prefix(path: &Path) -> Result<PathBuf> {
+    validate_safe_absolute(path, "managed resource path")?;
+    let mut existing = path;
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .ok_or_else(|| anyhow!("managed resource path has no existing ancestor"))?;
+        suffix.push(name.to_os_string());
+        existing = existing
+            .parent()
+            .ok_or_else(|| anyhow!("managed resource path has no existing ancestor"))?;
+    }
+    let mut resolved = fs::canonicalize(existing)
+        .with_context(|| format!("canonicalize `{}`", existing.display()))?;
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
 }
 
 fn validate_loopback_endpoint(endpoint: &str, field: &str) -> Result<reqwest::Url> {
@@ -1777,6 +1842,57 @@ mod tests {
     }
 
     #[test]
+    fn managed_services_reject_shared_sockets_and_state_files() {
+        let root = tempdir().unwrap();
+        let shared = quote(root.path().join("shared.sqlite3").display().to_string());
+        let stack = |gongbu_listen: &str, gongbu_database: &str| {
+            toml::from_str::<StackSource>(&format!(
+                r#"schema_version = 1
+[hubu]
+ownership = "managed"
+endpoint = "http://127.0.0.1:8787"
+listen = "127.0.0.1:8787"
+database_path = {shared}
+[gongbu]
+ownership = "managed"
+endpoint = "http://{gongbu_listen}"
+listen = "{gongbu_listen}"
+database_path = {gongbu_database}
+"#
+            ))
+            .unwrap()
+        };
+
+        let distinct = quote(root.path().join("gongbu.sqlite3").display().to_string());
+        let shared_socket = stack("127.0.0.1:8787", &distinct);
+        assert!(validate_topology(&shared_socket)
+            .unwrap_err()
+            .to_string()
+            .contains("distinct managed sockets"));
+
+        let shared_state = stack("127.0.0.1:8788", &shared);
+        assert!(validate_topology(&shared_state)
+            .unwrap_err()
+            .to_string()
+            .contains("distinct managed state files"));
+    }
+
+    #[test]
+    fn renderer_must_be_the_configured_hubu_binary() {
+        let root = tempdir().unwrap();
+        let renderer = root.path().join("hubu-running");
+        let configured = root.path().join("hubu-configured");
+        fs::write(&renderer, b"running").unwrap();
+        fs::write(&configured, b"configured").unwrap();
+
+        assert!(validate_renderer_identity(&renderer, &renderer).is_ok());
+        assert!(validate_renderer_identity(&renderer, &configured)
+            .unwrap_err()
+            .to_string()
+            .contains("must identify the running hubu executable"));
+    }
+
+    #[test]
     fn provider_render_preserves_v1_live_shape_and_versions_disabled_mode() {
         let live: ProvidersSource = toml::from_str(&format!(
             "schema_version = 1\nmode = \"live\"\nmaximum_spend_minor = 10\nlive_spend_acknowledgement = \"{LIVE_SPEND_ACKNOWLEDGEMENT}\"\n"
@@ -1882,15 +1998,15 @@ account = "gongbu-caller"
         .unwrap();
 
         assert!(files_needing_input(&profile).is_empty());
-        render_profile(&profile).unwrap();
+        render_profile_with_renderer(&profile, &binaries.join("hubu")).unwrap();
         let active_path = profile.join("generated/active-manifest.json");
         let active = fs::read(&active_path).unwrap();
         let handoff = codex_handoff(&profile, root.path()).unwrap();
         assert_eq!(handoff.hubu_endpoint, "http://127.0.0.1:8787");
-        render_profile(&profile).unwrap();
+        render_profile_with_renderer(&profile, &binaries.join("hubu")).unwrap();
         assert_eq!(fs::read(&active_path).unwrap(), active);
         write_fake_binary(&binaries.join("gongbu-server"), true);
-        assert!(render_profile(&profile).is_err());
+        assert!(render_profile_with_renderer(&profile, &binaries.join("hubu")).is_err());
         write_fake_binary(&binaries.join("gongbu-server"), false);
 
         fs::write(
@@ -1898,7 +2014,7 @@ account = "gongbu-caller"
             "schema_version = 1\nmode = \"disabled\"\n# changed\n",
         )
         .unwrap();
-        render_profile(&profile).unwrap();
+        render_profile_with_renderer(&profile, &binaries.join("hubu")).unwrap();
         let comment_only_active = fs::read(&active_path).unwrap();
         let comment_manifest: Value = read_json(&active_path).unwrap();
         assert_eq!(comment_manifest["restart_impact"], json!([]));
@@ -1909,7 +2025,7 @@ account = "gongbu-caller"
         )
         .unwrap();
         write_fake_binary(&binaries.join("gongbu-server"), true);
-        assert!(render_profile(&profile).is_err());
+        assert!(render_profile_with_renderer(&profile, &binaries.join("hubu")).is_err());
         assert_eq!(fs::read(&active_path).unwrap(), comment_only_active);
 
         write_fake_binary(&binaries.join("gongbu-server"), false);
@@ -1928,7 +2044,7 @@ account = "gongbu-caller"
             serde_json::to_vec_pretty(&incomplete_manifest).unwrap(),
         )
         .unwrap();
-        assert!(render_profile(&profile).is_err());
+        assert!(render_profile_with_renderer(&profile, &binaries.join("hubu")).is_err());
         fs::write(&active_path, &comment_only_active).unwrap();
 
         let manifest: ActiveManifest = read_json(&active_path).unwrap();
