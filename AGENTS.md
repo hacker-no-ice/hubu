@@ -69,7 +69,7 @@ friction and the agent flow structured:
 - The server should recompute fingerprints from the submitted payloads and
   reject mismatches before creating or reusing registration records.
 
-See `docs/agent-registration-protocol.md` for the full protocol draft.
+See `docs/agent-registration.md` for the registration protocol and persistence flow.
 
 ## GitHub operations
 

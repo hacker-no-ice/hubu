@@ -1,5 +1,5 @@
 # cargo-deny policy. Every exception must identify an owner, a reason, and a
-# removal condition in docs/repository-security.md. Do not downgrade a lint to
+# removal condition in docs/operations/repository-security.md. Do not downgrade a lint to
 # make CI green.
 
 [advisories]

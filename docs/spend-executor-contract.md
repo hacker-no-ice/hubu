@@ -1,8 +1,7 @@
 # Spend Executor Contract
 
-> The proposed task-scoped mandate extension is deferred. This v4 contract is
-> normative: one authorization funds one potentially billable executor call.
-> Multi-call tasks use multiple independent v4 operations.
+> This v4 contract maps one authorization to one potentially billable executor
+> call. Multi-call tasks use multiple independent v4 operations.
 
 This contract lets an external work service use Hubu for spend control without
 turning Hubu into the service that performs the work:
@@ -66,9 +65,8 @@ artifacts, and presentation. Hubu does not treat that correlation identifier as
 a pooled allocation: v4 enforces each operation maximum and the authoritative
 agent budget, not a separate task-level aggregate ceiling.
 
-The deferred [multi-spend mandate design](multi-spend-mandate-protocol.md) may
-be revisited if dogfooding demonstrates a need for one authorization covering
-several charges under a hard shared maximum.
+One authorization covering several charges under a shared maximum is outside
+v4 and requires a new protocol version.
 
 ## Boundary
 
@@ -179,7 +177,7 @@ guidance.
      "operation_key": "codex:tool-call:01JABC123",
      "account_id": "aga_example",
      "amount_cents": 500,
-     "task_id": "linear:HUB-73",
+     "task_id": "release:artwork",
      "execution_scope": {
        "schema_version": 1,
        "provider": "provider:google:gemini-developer",
@@ -334,7 +332,8 @@ guidance.
    including its terminal state if it has already been settled or released.
 
    The version-1 typed scope and legacy migration behavior are specified in
-   [Trusted execution scope](execution-scope.md). New callers omit `merchant`.
+   [trusted execution scope](spend-lifecycle.md#trusted-execution-scope). New
+   callers omit `merchant`.
 
    Claiming moves the hold to `claimed` and extends its expiry to
    `claim_expires_at`. The claim may remain active after the original

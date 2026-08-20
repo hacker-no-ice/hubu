@@ -105,7 +105,7 @@ collapses runtime responsibilities:
   boundary, or failure domain.
 - `hubu-unified-mcp` is the only supported and packaged agent-facing surface.
   The unified server implements the accepted
-  [unified MCP contract](docs/unified-mcp-contract.md) transport, isolated
+  [unified MCP contract](docs/unified-mcp.md) transport, isolated
   client boundaries, machine-readable health and compatibility reporting, and
   only the contract-approved Hubu governance and Gongbu execution/artifact
   catalogs and forwarding.
@@ -168,9 +168,9 @@ hubu-server
 ```
 
 This starts only the Hubu control plane. Gongbu is configured and started as a
-separate process; follow the [persistent Gongbu server runbook](docs/gongbu/server.md)
+separate process; follow the [persistent Gongbu server runbook](docs/operations/gongbu-server.md)
 when exercising provider execution. The deterministic
-[Gongbu sandbox](docs/gongbu/sandbox.md) remains a development tool and is not
+[Gongbu sandbox](docs/operations/gongbu-sandbox.md) remains a development tool and is not
 part of the production binary set.
 
 ### 2. Human Admin Setup
@@ -258,7 +258,7 @@ For new executor-backed work, prefer the typed `--provider`, `--executor`,
 `--capability`, and `--billing-merchant` flags. Hubu resolves them against its
 trusted catalog and prints both friendly names and stable IDs. The legacy
 `--merchant` form remains available during migration; see
-[Trusted execution scope](docs/execution-scope.md).
+[Trusted execution scope](docs/spend-lifecycle.md#trusted-execution-scope).
 After a terminal denial with no token, approval, hold, dispatch, or settlement
 side effect, Hubu may explicitly advise reusing the same key with corrected
 scope; otherwise reuse a key only for exact replay.
@@ -290,20 +290,21 @@ the client-owned MCP process to Codex:
 ```sh
 hubu stack init
 # Edit the reported stack.toml, credentials.toml, and providers.toml files.
+hubu stack doctor
 hubu stack render
+hubu stack doctor
 hubu init codex --stack-profile /absolute/profile/path/reported/by/stack-init
 ```
 
 These commands do not start `hubu-server`, `gongbu-server`, Temporal, or the
-MCP process. Local stack doctor and lifecycle commands are delivered by the
-remaining milestone tasks.
+MCP process. Doctor is read-only; service lifecycle commands remain separate.
 
 If the server from step 1 is already running with a different token file,
 restart it with the same auth, approval, and reconciliation token files before restarting Codex. Codex
 should then be able to discover Hubu MCP tools and call spend tools without
 holding wallet credentials. For other MCP clients, use Hubu's tool annotations
 or `hubu_client_approval_profile`; see
-[docs/mcp-transport.md](docs/mcp-transport.md) for setup, validation, and
+[docs/unified-mcp.md](docs/unified-mcp.md) for setup, validation, and
 backend-state guidance.
 
 ## Releases
@@ -313,7 +314,7 @@ immutable canary prerelease tied to the full source commit only when that commit
 does not already have a canary. Stable SemVer releases are promoted
 intentionally from a validated `main` revision. Consumers should pin an exact
 release and checksum, not a rolling newest build. See
-[docs/releases.md](docs/releases.md) for the supported targets, verification
+[docs/operations/releases.md](docs/operations/releases.md) for the supported targets, verification
 and installation steps, promotion workflow, and rollback/retention policy.
 Here, "stable" describes the version channel and immutable artifact identity;
 it does not approve Hubu for real-money production use.
@@ -373,8 +374,8 @@ Run the conservative local benchmark:
 The benchmark starts an isolated local server, simulates multiple agents owned
 by one user submitting paced spend requests, samples server CPU/RSS, and writes
 a report under `target/hubu-bench/`. See
-[docs/benchmarking.md](docs/benchmarking.md) for options and the current MVP
-results.
+[docs/operations/benchmarking.md](docs/operations/benchmarking.md) for options
+and interpretation guidance.
 
 ## Local HTTP Server
 
@@ -457,7 +458,7 @@ can run them directly with the CLI, or ask an agent to invoke protected MCP
 tools after the client shows a human approval prompt. If policy returns
 `needs_approval`, the MCP response reports that no payment was executed.
 
-See [docs/mcp-transport.md](docs/mcp-transport.md) for install details,
+See [docs/unified-mcp.md](docs/unified-mcp.md) for install details,
 approval profiles, manual MCP setup, backend validation, and the current tool
 map.
 
@@ -495,33 +496,27 @@ concurrent allocation of overlapping agent budgets and returns a warning when
 the allocations exceed the target. The warning does not block budget creation
 or spend, and the target never creates a hold.
 
-See [docs/budget-controls.md](docs/budget-controls.md) for spending-target
-advisories, agent ownership, period overlap rules, recurring budgets,
-the hold lifecycle, and CLI examples.
+See [docs/spend-lifecycle.md](docs/spend-lifecycle.md) for spending-target
+advisories, agent ownership, budget holds, authorization, execution, payment,
+and ledger behavior.
 
 ## Documentation
 
-- [docs/README.md](docs/README.md): docs index separating durable technical
-  docs from working notes
 - [architecture/index.html](architecture/index.html): interactive sketch-style
   architecture map with drill-down component diagrams and GitHub code links
-- [docs/agent-registration-protocol.md](docs/agent-registration-protocol.md):
-  v1 registration envelope, fingerprint fields, server validation, and
-  low-friction human review flow
-- [docs/demo.md](docs/demo.md): scripted local walkthrough and CLI reference
-- [docs/benchmarking.md](docs/benchmarking.md): local spend benchmark usage and
-  the latest MVP performance, scalability, and reliability report
-- [docs/registration-flow.md](docs/registration-flow.md): agent registration
-  model and flow
+- [docs/agent-registration.md](docs/agent-registration.md): registration
+  guidance, envelope, fingerprints, validation, persistence, and conflict flow
 - [docs/policy-engine.md](docs/policy-engine.md): policy rule format and
   evaluation behavior
-- [docs/budget-controls.md](docs/budget-controls.md): advisory spending targets,
-  agent-owned budgets, recurring periods, hold lifecycle, and spend enforcement
-- [docs/payment-ledger-flow.md](docs/payment-ledger-flow.md): payment
-  orchestration and ledger recording flow
-- [docs/mcp-transport.md](docs/mcp-transport.md): MCP stdio transport adapter
-  and approval boundaries
-- [docs/gongbu/README.md](docs/gongbu/README.md): Gongbu execution-plane design,
-  operator configuration, persistent runtime, and sandbox
-- [docs/notes/](docs/notes/): non-normative planning, improvement, and handoff
-  notes
+- [docs/spend-lifecycle.md](docs/spend-lifecycle.md): policy, budgets,
+  authorization, external execution, payments, and ledger state
+- [docs/spend-executor-contract.md](docs/spend-executor-contract.md): normative
+  claim, settlement, release, and reconciliation protocol
+- [docs/unified-mcp.md](docs/unified-mcp.md): MCP routing, compatibility,
+  availability, setup, and approval boundaries
+- [docs/local-stack.md](docs/local-stack.md): operator-owned stack profile,
+  rendering, compatibility, and client handoff
+- [docs/gongbu-execution.md](docs/gongbu-execution.md): execution-plane
+  ownership, admission, Temporal workflows, retries, and artifacts
+- [docs/operations/](docs/operations/): focused demo, benchmark, release,
+  security, persistent server, sandbox, and live-provider runbooks
