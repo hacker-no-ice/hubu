@@ -30,9 +30,6 @@ export function DocsShell({ document }: { document: Doc }) {
       <aside className="sidebar"><Navigation current={document.slug} /></aside>
       <main className="doc-main" id="main-content">
         <div className="doc-status"><span>EXPERIMENTAL · LOCAL-FIRST</span><p>Evaluate carefully. Live-provider paths are experimental and are not money-grade production infrastructure.</p></div>
-        {document.slug === "local-stack" && (
-          <aside className="availability-note"><strong>One-shot lifecycle in development</strong><p><code>hubu stack start</code> is being built as the one-shot managed start path, paired with <code>hubu stack status</code>. They are not on main yet; current releases use <code>stack init → edit → stack doctor → stack render → stack doctor → init codex</code> and the service runbooks.</p></aside>
-        )}
         <article className="markdown-body" dangerouslySetInnerHTML={{ __html: document.html }} />
         <div className="source-row"><a href={document.sourceUrl}>Edit this page on GitHub ↗</a><span>Canonical source: {document.sourcePath}</span></div>
         <nav className="doc-pagination" aria-label="Previous and next pages">

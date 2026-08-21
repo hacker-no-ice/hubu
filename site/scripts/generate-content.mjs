@@ -17,10 +17,10 @@ async function markdownPaths(directory) {
   return nested.flat().sort();
 }
 
-const sourceFiles = [path.join(repoRoot, "README.md"), ...(await markdownPaths(docsRoot))];
+const sourceFiles = await markdownPaths(docsRoot);
 const sourceToSlug = new Map(sourceFiles.map((file) => {
   const sourcePath = path.relative(repoRoot, file).split(path.sep).join("/");
-  const slug = sourcePath === "README.md" ? "overview" : sourcePath.replace(/^docs\//, "").replace(/\.md$/, "");
+  const slug = sourcePath.replace(/^docs\//, "").replace(/\.md$/, "");
   return [sourcePath, slug];
 }));
 
@@ -89,7 +89,7 @@ for (const file of sourceFiles) {
 
 await writeFile(
   path.join(siteRoot, "app/generated-docs.ts"),
-  `// Generated from ../README.md and ../docs/**/*.md. Do not edit.\nexport const documents = ${JSON.stringify(documents)} as const;\n`,
+  `// Generated from ../docs/**/*.md. Do not edit.\nexport const documents = ${JSON.stringify(documents)} as const;\n`,
 );
 
 const architectureTarget = path.join(siteRoot, "public/architecture");

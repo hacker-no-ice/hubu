@@ -5,11 +5,12 @@ vinext application deployed with OpenAI Sites.
 
 ## Canonical content
 
-The repository's top-level `README.md` and `docs/**/*.md` files remain the
-canonical documentation. `npm run content` generates a temporary TypeScript
-content index and copies the interactive `architecture/` visualizer into the
-site's public build input. Both generated locations are ignored by Git and must
-not be edited directly.
+The repository's `docs/**/*.md` files are the canonical website documentation;
+`docs/overview.md` supplies the website overview independently of the
+repository's concise top-level `README.md`. `npm run content` generates a
+temporary TypeScript content index and copies the interactive `architecture/`
+visualizer into the site's public build input. Both generated locations are
+ignored by Git and must not be edited directly.
 
 To add a page, add its Markdown file under `docs/`, then place it in the curated
 navigation in `app/lib/docs.ts`. The page is searchable automatically after the

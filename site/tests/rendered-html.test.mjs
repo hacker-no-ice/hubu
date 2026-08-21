@@ -18,7 +18,8 @@ test("server-renders the Hubu documentation home", async () => {
   assert.match(html, /Governed spend/);
   assert.match(html, /Experimental and local-first/);
   assert.match(html, /hubu stack start/);
-  assert.match(html, /In active development/);
+  assert.match(html, /MANAGED LIFECYCLE/);
+  assert.doesNotMatch(html, /not on main yet/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 
@@ -28,8 +29,19 @@ test("renders canonical Markdown on a documentation route", async () => {
   const html = await response.text();
   assert.match(html, /Local stack configuration/);
   assert.match(html, /stack doctor/);
-  assert.match(html, /not on main yet/i);
+  assert.match(html, /stack start/);
+  assert.doesNotMatch(html, /not on main yet/i);
   assert.match(html, /On this page/);
+});
+
+test("renders the concise canonical overview", async () => {
+  const response = await render("/docs/overview");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Why Hubu and Gongbu/);
+  assert.match(html, /Hubu governs resources\. Gongbu performs the work\./);
+  assert.match(html, /Experimental and local-first/);
+  assert.doesNotMatch(html, /What Hubu Does Today|Crates|Local Developer Tools/);
 });
 
 test("uses document navigation for deployed subpage reliability", async () => {

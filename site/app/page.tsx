@@ -4,8 +4,8 @@ import { searchDocuments } from "./lib/docs";
 const stackSteps = [
   ["01", "Initialize", "hubu stack init", "Create an operator-owned profile without starting services."],
   ["02", "Configure", "stack.toml · credentials.toml · providers.toml", "Choose ownership, binaries, identities, credential references, providers, and spend gates."],
-  ["03", "Start in one shot", "hubu stack start", "In development: validate, render, and start the managed stack while preserving service boundaries."],
-  ["04", "Check readiness", "hubu stack status", "In development: inspect the whole stack through one stable, redacted readiness view."],
+  ["03", "Start in one shot", "hubu stack start", "Validate, render, and start missing managed components in dependency order."],
+  ["04", "Check readiness", "hubu stack status", "Inspect the whole stack through one stable, redacted readiness view."],
   ["05", "Connect Codex", "hubu init codex --stack-profile …", "Install the unified MCP handoff, restart Codex, and inspect capabilities."],
   ["06", "Run governed work", "authorize → execute → submit → reconcile", "Keep policy and money state in Hubu; provider execution and artifacts in Gongbu."],
 ] as const;
@@ -56,14 +56,14 @@ export default function Home() {
         <section className="warning-band" aria-label="Project status warning">
           <span className="warning-mark">!</span>
           <div><strong>Experimental and local-first.</strong><p>Suitable for development, evaluation, and controlled live-provider experiments—not yet for money-grade production workloads.</p></div>
-          <a href="/docs/overview#before-real-money-deployment">Read the production warning →</a>
+          <a href="/docs/overview">Read the production warning →</a>
         </section>
 
         <section className="quickstart section-wrap">
           <div className="section-intro">
-            <p className="eyebrow"><span /> Target stack experience</p>
+            <p className="eyebrow"><span /> Managed stack experience</p>
             <h2>One command from profile to running</h2>
-            <p>The stack lifecycle now being built centers on one-shot startup and one readiness view, while preserving separate Hubu and Gongbu ownership.</p>
+            <p>The managed lifecycle centers on one-shot startup and one readiness view, while preserving separate Hubu and Gongbu ownership.</p>
           </div>
           <div className="steps">
             {stackSteps.map(([number, title, command, copy]) => (
@@ -73,8 +73,8 @@ export default function Home() {
             ))}
           </div>
           <aside className="roadmap-note">
-            <div><span>INTENDED MANAGED LIFECYCLE</span><code>stack init → configure → stack start → stack status → init codex</code></div>
-            <p><strong>In active development; not on main yet.</strong> <code>stack start</code> is the intended one-shot start path and <code>stack status</code> its unified readiness view. Current releases still use doctor, render, and the service runbooks.</p>
+            <div><span>MANAGED LIFECYCLE</span><code>stack init → configure → stack start → stack status → init codex</code></div>
+            <p><code>stack start</code> validates and renders the active profile before starting missing managed components. <code>stack status</code> reports their readiness without taking lifecycle action.</p>
           </aside>
         </section>
 
