@@ -37,19 +37,39 @@ install -m 0755 "${asset%.tar.gz}"/{hubu,hubu-server,hubu-unified-mcp,gongbu-ser
 ```
 
 Ensure `~/.local/bin` is on your `PATH`, then create an operator-owned stack
-profile:
+profile and start Hubu temporarily to bootstrap its human, agent, and account
+identities:
 
 ```sh
-hubu stack init --profile /absolute/path/to/profile
+profile=/absolute/path/to/profile
+hubu stack init --profile "$profile"
+
+mkdir -p "$profile/state/hubu"
+export HUBU_DB_PATH="$profile/state/hubu/hubu.sqlite3"
+export HUBU_AUTH_TOKEN_FILE="$profile/state/hubu/hubu.auth-token"
+export HUBU_APPROVAL_TOKEN_FILE="$profile/state/hubu/hubu.approval-token"
+export HUBU_RECONCILIATION_TOKEN_FILE="$profile/state/hubu/hubu.reconciliation-token"
+hubu-server &
+bootstrap_pid=$!
+
+until hubu health >/dev/null 2>&1; do sleep 1; done
+hubu protocol agent-registration
+hubu register human --username alice-example --display-name "Alice Example"
+hubu register agent --name local-agent --version local-dev
+
+kill "$bootstrap_pid"
+wait "$bootstrap_pid" || true
 ```
 
-Edit the generated `stack.toml`, `credentials.toml`, and `providers.toml` to
-choose the local topology, identities, provider targets, pricing, credentials,
-and spend ceiling. Start the configured services and check readiness:
+Copy the printed `agt_...` agent ID and `aga_...` account ID into `stack.toml`.
+Finish the generated `stack.toml`, `credentials.toml`, and `providers.toml`,
+using the credential-file paths above and choosing the topology, provider
+targets, pricing, credentials, and spend ceiling. Start the configured services
+and check readiness:
 
 ```sh
-hubu stack start --profile /absolute/path/to/profile
-hubu stack status --profile /absolute/path/to/profile
+hubu stack start --profile "$profile"
+hubu stack status --profile "$profile"
 ```
 
 `stack start` validates and renders the profile, then starts the managed Hubu
@@ -57,7 +77,7 @@ control plane and Gongbu execution plane and, when configured, Gongbu's managed
 Temporal runtime. Connect the running stack to Codex:
 
 ```sh
-hubu init codex --stack-profile /absolute/path/to/profile
+hubu init codex --stack-profile "$profile"
 ```
 
 After restarting Codex, agents can request governed provider-backed work
