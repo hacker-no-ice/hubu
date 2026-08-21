@@ -510,7 +510,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     prepare_state_paths(&config)?;
     normalize_paths(&mut config)?;
 
-    let secrets: Arc<dyn SecretProvider> = Arc::new(MacOsKeychain);
+    let secrets = startup_secret_provider()?;
     let caller_secret = secrets
         .resolve(
             &config
@@ -719,6 +719,16 @@ fn normalize_paths(config: &mut ServerConfig) -> Result<(), ServerError> {
 }
 
 fn reject_fixture_targets(targets: &ProviderTargetConfig) -> Result<(), ServerError> {
+    #[cfg(feature = "local-fixture-canary")]
+    if std::env::var("GONGBU_LOCAL_FIXTURE_CANARY").as_deref() == Ok("1")
+        && targets.revisions().all(|target| {
+            target.provider == "example"
+                && target.adapter == "fixture"
+                && target.model == "image-v1"
+        })
+    {
+        return Ok(());
+    }
     if targets.revisions().any(|target| {
         [&target.provider, &target.adapter, &target.model]
             .iter()
@@ -732,6 +742,16 @@ fn reject_fixture_targets(targets: &ProviderTargetConfig) -> Result<(), ServerEr
         ));
     }
     Ok(())
+}
+
+fn startup_secret_provider() -> Result<Arc<dyn SecretProvider>, ServerError> {
+    #[cfg(feature = "local-fixture-canary")]
+    if std::env::var("GONGBU_LOCAL_FIXTURE_CANARY").as_deref() == Ok("1") {
+        return crate::secrets::LocalFixtureSecrets::from_environment()
+            .map(|provider| Arc::new(provider) as Arc<dyn SecretProvider>)
+            .map_err(|_| invalid("local fixture credential directory is unavailable"));
+    }
+    Ok(Arc::new(MacOsKeychain))
 }
 
 fn validated_provider_catalog(

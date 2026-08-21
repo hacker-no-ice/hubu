@@ -12,6 +12,9 @@ keywords = ["ai-agents", "execution", "image-generation", "orchestration"]
 categories = ["web-programming::http-server"]
 publish = false
 
+[features]
+local-fixture-canary = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

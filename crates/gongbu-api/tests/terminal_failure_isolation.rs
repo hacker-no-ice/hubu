@@ -198,6 +198,33 @@ async fn run() {
         .unwrap();
     assert!(temporal.is_running());
 
+    drop(artifacts_service);
+    drop(repository);
+    drop(temporal_client);
+    drop(temporal_runtime);
+
+    let repository = Repository::open(root.path().join("gongbu.sqlite3"), Redactor::default())
+        .expect("reopen Gongbu state after process restart");
+    let artifacts_service = ArtifactService::new(
+        repository.clone(),
+        LocalFsStorage::new(root.path().join("artifacts")),
+        ArtifactLimits::default(),
+    );
+    artifacts_service
+        .preflight()
+        .expect("reopen artifact root after process restart");
+    let connection = Connection::connect(
+        ConnectionOptions::new(
+            Url::try_from(format!("http://127.0.0.1:{temporal_port}").as_str()).unwrap(),
+        )
+        .build(),
+    )
+    .await
+    .expect("reconnect to persisted Temporal service");
+    let temporal_client =
+        Client::new(connection, ClientOptions::new("default".to_owned()).build()).unwrap();
+    let temporal_runtime = Arc::new(Runtime::new_assume_tokio(Default::default()).unwrap());
+
     let health = dependencies_healthy.clone();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", http_port))
         .await
@@ -247,6 +274,16 @@ async fn run() {
         .await
         .unwrap();
     assert_eq!(persisted.status, ExecutionStatus::Succeeded);
+    let persisted_artifact = client
+        .get(format!("{base_url}/v1/artifacts/{}", artifact.artifact_id))
+        .bearer_auth(CALLER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(persisted_artifact, artifact_bytes);
 
     dependencies_healthy.store(false, Ordering::SeqCst);
     tokio::time::timeout(Duration::from_secs(15), server)

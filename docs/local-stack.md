@@ -343,20 +343,15 @@ From a source checkout with the Temporal CLI on `PATH`, run:
 ./scripts/integration-local-stack-acceptance.sh
 ```
 
-The canary deliberately composes three boundaries instead of adding a fixture
-provider to the production Gongbu binary:
-
-1. The real `hubu stack` test suite covers annotated non-starting init,
-   incremental doctor diagnostics, strict render validation, render-on-start,
-   readiness, staged activation, restart persistence, partial-stack recovery
-   guidance, and graceful whole-stack shutdown.
-2. The Hubu-to-Gongbu executor test covers real governed authorization, claim,
-   settlement/release, durable receipts, and local artifact persistence.
-3. The persistent Gongbu test uses a real Temporal service, HTTP API, worker,
-   workflow history, and artifact API with deterministic injected provider
-   activities. It discovers the stable Temporal workflow ID, retrieves the
-   generated artifact, restarts Gongbu against the same state, and verifies the
-   completed execution remains available.
+The canary builds source-only, feature-gated fixture support and then exercises
+the real process boundary end to end. It starts from a clean profile, runs
+annotated non-starting init, verifies incremental doctor diagnostics, renders
+and activates strict service-owned configuration, and starts the actual
+`hubu-server`, `gongbu-server`, Gongbu worker, and managed Temporal child. It
+then obtains a governed Hubu authorization, submits a deterministic Gongbu HTTP
+execution, discovers its Temporal workflow, downloads and verifies its
+artifact, gracefully stops the whole stack, starts it again against the same
+state, and verifies the completed execution and artifact remain available.
 
 This is a local fixture canary, not an unattended-production credential model.
 For V1 it temporarily lets the deterministic execution test use the existing
@@ -365,9 +360,13 @@ placed in model input, output, logs, or generated configuration. Gongbu is
 never given Hubu's human reconciliation capability. Keychain-backed,
 least-privilege execution credentials remain follow-up work in HUB-32.
 
-The canary never enables a live provider, supplies a provider credential,
-acknowledges live spend, or makes a billable request. Production
-`gongbu-server` continues to reject fixture providers.
+The canary uses an explicit one-cent fixture catalog, acknowledgement, and
+process-owned dummy provider reference to prove the fail-closed live-provider
+configuration path without making a billable request. Fixture support is
+compiled only when the non-default `local-fixture-canary` feature is selected
+and additionally requires an explicit canary environment switch. Normal and
+release `gongbu-server` builds omit that feature and continue to reject fixture
+providers.
 
 ## Runtime and recovery boundaries
 

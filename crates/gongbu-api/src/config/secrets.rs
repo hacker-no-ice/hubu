@@ -2,6 +2,9 @@
 use std::process::Command;
 use thiserror::Error;
 
+#[cfg(feature = "local-fixture-canary")]
+use std::{fs, path::PathBuf};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretReference {
     service: String,
@@ -99,6 +102,44 @@ impl SecretProvider for MacOsKeychain {
             output.stdout.pop();
         }
         ProviderSecret::new(output.stdout)
+    }
+}
+
+/// File-backed secrets for the explicit, feature-gated local acceptance
+/// canary. Release builds do not contain this provider.
+#[cfg(feature = "local-fixture-canary")]
+pub struct LocalFixtureSecrets {
+    root: PathBuf,
+}
+
+#[cfg(feature = "local-fixture-canary")]
+impl LocalFixtureSecrets {
+    pub fn from_environment() -> Result<Self> {
+        let root = std::env::var_os("GONGBU_LOCAL_FIXTURE_SECRET_DIR")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && path.is_dir())
+            .ok_or(SecretError::Unavailable)?;
+        Ok(Self { root })
+    }
+}
+
+#[cfg(feature = "local-fixture-canary")]
+impl SecretProvider for LocalFixtureSecrets {
+    fn resolve(&self, reference: &SecretReference) -> Result<ProviderSecret> {
+        let name = match (reference.service(), reference.account()) {
+            ("hubu.local-fixture", "caller") => "gongbu-caller",
+            ("hubu.local-fixture", "executor") => "hubu-auth",
+            ("hubu.local-fixture", "provider") => "provider",
+            _ => return Err(SecretError::Unavailable),
+        };
+        let mut bytes = fs::read(self.root.join(name)).map_err(|_| SecretError::Unavailable)?;
+        while bytes
+            .last()
+            .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            bytes.pop();
+        }
+        ProviderSecret::new(bytes)
     }
 }
 

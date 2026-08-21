@@ -262,7 +262,9 @@ fn inspect_profile_with(
             .as_deref()
             .is_some_and(|adapter| adapter == "fixture")
     });
-    if fixture_only {
+    let local_fixture_canary = cfg!(feature = "local-fixture-canary")
+        && std::env::var("HUBU_LOCAL_FIXTURE_CANARY").as_deref() == Ok("1");
+    if fixture_only && !local_fixture_canary {
         source_constraints_valid = false;
         report.provider_readiness = ProviderReadiness::FixtureOnly;
         report.checks.push(check(
@@ -272,6 +274,16 @@ fn inspect_profile_with(
             "providers",
             Some("providers.toml:targets".into()),
             "fixture adapters are suitable only for deterministic fixture execution",
+        ));
+    } else if fixture_only {
+        report.provider_readiness = ProviderReadiness::FixtureOnly;
+        report.checks.push(check(
+            CheckLayer::Renderability,
+            CheckStatus::Pass,
+            "local_fixture_canary_explicit",
+            "providers",
+            Some("providers.toml:targets".into()),
+            "the feature-gated local acceptance canary explicitly selected a fixture adapter",
         ));
     }
     if source_constraints_valid
@@ -1279,6 +1291,10 @@ fn required_opaque_keys(stack: &StackSource, providers: &ProvidersSource) -> BTr
 
 #[cfg(target_os = "macos")]
 fn opaque_reference_exists(reference: &OpaqueReference) -> Option<bool> {
+    #[cfg(feature = "local-fixture-canary")]
+    if let Some(available) = local_fixture_reference_exists(reference) {
+        return Some(available);
+    }
     let service = reference.service.as_deref()?;
     let account = reference.account.as_deref()?;
     let mut command = Command::new("/usr/bin/security");
@@ -1290,8 +1306,32 @@ fn opaque_reference_exists(reference: &OpaqueReference) -> Option<bool> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn opaque_reference_exists(_reference: &OpaqueReference) -> Option<bool> {
+fn opaque_reference_exists(reference: &OpaqueReference) -> Option<bool> {
+    #[cfg(feature = "local-fixture-canary")]
+    if let Some(available) = local_fixture_reference_exists(reference) {
+        return Some(available);
+    }
+    let _ = reference;
     None
+}
+
+#[cfg(feature = "local-fixture-canary")]
+fn local_fixture_reference_exists(reference: &OpaqueReference) -> Option<bool> {
+    if std::env::var("HUBU_LOCAL_FIXTURE_CANARY").as_deref() != Ok("1") {
+        return None;
+    }
+    let name = match (reference.service.as_deref()?, reference.account.as_deref()?) {
+        ("hubu.local-fixture", "caller") => "gongbu-caller",
+        ("hubu.local-fixture", "executor") => "hubu-auth",
+        ("hubu.local-fixture", "provider") => "provider",
+        _ => return Some(false),
+    };
+    Some(
+        std::env::var_os("GONGBU_LOCAL_FIXTURE_SECRET_DIR")
+            .map(PathBuf::from)
+            .filter(|root| root.is_absolute())
+            .is_some_and(|root| root.join(name).is_file()),
+    )
 }
 
 #[cfg(target_os = "macos")]
