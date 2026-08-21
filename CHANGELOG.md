@@ -1,8 +1,8 @@
 # Changelog
 
 This changelog records the key user-facing and operational changes in each
-stable Hubu release. It is intentionally curated rather than being a complete
-list of commits or pull requests.
+stable Hubu release and versioned release candidate. It is intentionally
+curated rather than being a complete list of commits or pull requests.
 
 <!--
 Future release template
@@ -21,6 +21,39 @@ Future release template
 
 - Describe only fixes that materially affect users or operators.
 -->
+
+## v0.2.0-rc.1 — 2026-08-20
+
+### Highlights
+
+- Unified Hubu and Gongbu in one Rust workspace and one verified four-binary
+  release archive while preserving separate processes, storage, credentials,
+  provider execution, artifacts, and failure domains.
+- Made `hubu-unified-mcp` the only supported agent-facing MCP surface, routing
+  governance and execution tools across the separate Hubu and Gongbu backends.
+- Added durable Gongbu execution, provider adapters, normalized artifacts, and
+  explicit pricing, authorization, reconciliation, and failure evidence.
+- Added a dependency-aware local stack workflow for initialization, startup,
+  readiness diagnosis, safe updates, recovery, and Codex handoff.
+- Added immutable manifests, provenance, internal and release checksums, locked
+  dependency inventories, license bundles, and published-archive smoke tests.
+
+### Breaking or operational changes
+
+- The original standalone Hubu and Gongbu MCP implementations are retired;
+  clients must configure `hubu-unified-mcp`.
+- The supported executor contract is `hubu-spend-executor-v4.2`.
+- The temporary pre-launch release matrix contains macOS Intel and Apple
+  silicon only; Linux is not advertised for this candidate.
+- The release remains experimental, local-first, and backed by a mock payment
+  rail. It is not approved for production or real-money use.
+
+### Important fixes
+
+- Preserved authorization, task, operation-key, and trusted execution-scope
+  boundaries through provider execution and retry flows.
+- Hardened credential redaction, immutable target revisions, claim recovery,
+  terminal failure isolation, and release completeness checks.
 
 ## v0.1.0 — 2026-08-12
 

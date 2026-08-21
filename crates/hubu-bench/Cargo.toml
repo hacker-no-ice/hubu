@@ -1,6 +1,6 @@
 [package]
 name = "hubu-bench"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local throughput and correctness benchmark for Hubu spend approvals"
 edition.workspace = true
 homepage.workspace = true
