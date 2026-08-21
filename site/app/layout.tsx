@@ -19,7 +19,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = /^[a-z0-9.-]+(?::\d+)?$/i.test(forwardedHost) ? forwardedHost : "localhost";
   const protocol = requestHeaders.get("x-forwarded-proto") === "http" || host.startsWith("localhost") ? "http" : "https";
   const metadataBase = new URL(`${protocol}://${host}`);
-  const image = new URL("/og-architecture.png", metadataBase).toString();
+  const image = new URL("/og-governs-executes.png", metadataBase).toString();
 
   return {
     metadataBase,
@@ -27,14 +27,14 @@ export async function generateMetadata(): Promise<Metadata> {
     description: "Documentation for Hubu's local-first agent spend control plane and the Gongbu execution plane.",
     openGraph: {
       title: "Hubu / 户部",
-      description: "Architecture in service of trust · One request · Two owners",
+      description: "Architecture in service of trust · Hubu governs · Gongbu executes",
       images: [{ url: image, width: 1200, height: 630 }],
       type: "website",
     },
     twitter: {
       card: "summary_large_image",
       title: "Hubu / 户部",
-      description: "Architecture in service of trust · One request · Two owners",
+      description: "Architecture in service of trust · Hubu governs · Gongbu executes",
       images: [image],
     },
   };
