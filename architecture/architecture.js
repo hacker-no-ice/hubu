@@ -444,11 +444,12 @@ const components = {
     title: "Hubu CLI",
     kind: "Interface",
     copy:
-      "The CLI is the human developer surface and local-stack launcher. It validates and renders profiles, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
+      "The CLI is the human developer surface and local-stack launcher. It validates immutable generations, stages updates for explicit activation, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
     responsibilities: [
-      "Supports profile init, doctor, render, dependency-aware start, component status and logs, and graceful reverse-order whole-stack stop alongside the existing administration commands.",
+      "Supports profile init, doctor, render, generation listing, explicit activation and source-matched rollback, dependency-aware start, component status and logs, and graceful reverse-order whole-stack stop alongside the existing administration commands.",
+      "Keeps operator TOML authoritative, stages validated updates without replacing the active manifest, reports redacted affected-component plans, and requires whole-stack stop/activate/start rather than selective restart or repair.",
       "Persists redacted process ownership metadata, validates the recorded start identity before every signal, and never signals external, compatible unowned, or client-owned MCP processes.",
-      "Starts Hubu before Gongbu, rolls back only children created by a failed invocation, and preserves databases, artifacts, Temporal data, generated files, and logs across restarts.",
+      "Starts Hubu before Gongbu, rolls back only children created by a failed invocation, and preserves databases, artifacts, Temporal data, retained generations, and logs across lifecycle transitions.",
       "Writes a managed Codex config block that lets agents in other projects discover Hubu MCP tools without reading the Hubu repo.",
       "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
       "Loads the local Hubu bearer and owner capability tokens from env or files, sending approval and reconciliation capabilities only on their human mutations.",
@@ -456,14 +457,14 @@ const components = {
     links: [sharedLinks.cli, sharedLinks.stackLifecycle, sharedLinks.localStack, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
       { id: "commands", label: "Commands", sub: "init/admin/stack", x: 70, y: 132, w: 210, h: 92, tone: "human" },
-      { id: "profile", label: "Stack profile", sub: "doctor + render", x: 380, y: 72, w: 220, h: 92, tone: "data", path: "crates/hubu-cli/src/stack.rs" },
+      { id: "profile", label: "Stack profile", sub: "stage + activate", x: 380, y: 72, w: 220, h: 92, tone: "data", path: "crates/hubu-cli/src/stack.rs" },
       { id: "launcher", label: "Lifecycle launcher", sub: "identity + ordering", x: 380, y: 292, w: 220, h: 92, tone: "core", path: "crates/hubu-cli/src/stack/lifecycle.rs" },
       { id: "managed", label: "Managed backends", sub: "Hubu then Gongbu", x: 780, y: 112, w: 220, h: 92, tone: "executor" },
       { id: "handoff", label: "Codex handoff", sub: "client-owned MCP", x: 780, y: 356, w: 220, h: 92, tone: "agent" },
     ],
     edges: [
       ["commands", "profile", "configure"],
-      ["profile", "launcher", "validated generation"],
+      ["profile", "launcher", "active generation"],
       ["launcher", "managed", "start/stop owned"],
       ["profile", "handoff", "render MCP config", { fromSide: "right", toSide: "left", waypoints: [{ x: 650, y: 118 }, { x: 650, y: 402 }], labelSegment: 1 }],
     ],
@@ -647,6 +648,7 @@ const sidebarHighlights = {
   ],
   cli: [
     "Humans use the CLI for setup, administration, and local stack lifecycle.",
+    "Validated updates stage first and activate only while the owned stack is stopped.",
     "The launcher signals only processes whose recorded start identity still matches.",
     "It configures agent-facing MCP access.",
     "It exposes policy, budget, spend, ledger, and health workflows.",

@@ -513,7 +513,17 @@ fn prepare_startable_profile(profile: &Path) -> Result<()> {
         bail!("stack source is incomplete or invalid; no process was started");
     }
     if !initial.is_startable() {
-        render_profile_with_renderer(profile, &renderer)?;
+        let outcome = render_profile_with_renderer_outcome(profile, &renderer)?;
+        if !outcome.activated {
+            bail!(
+                "validated generation {} is staged; run `hubu stack stop --profile {}`, `hubu stack activate --generation {} --profile {}`, and then `hubu stack start --profile {}`",
+                outcome.generation_id,
+                profile.display(),
+                outcome.generation_id,
+                profile.display(),
+                profile.display()
+            );
+        }
     }
     let preflight = doctor::inspect_profile(profile);
     if !preflight.is_renderable() || !preflight.check_passed("active_render_valid") {
@@ -1139,11 +1149,11 @@ fn runtime_dir(profile: &Path) -> PathBuf {
 }
 
 #[derive(Debug)]
-struct LifecycleLock {
+pub(super) struct LifecycleLock {
     _file: File,
 }
 
-fn acquire_lifecycle_lock(profile: &Path) -> Result<LifecycleLock> {
+pub(super) fn acquire_lifecycle_lock(profile: &Path) -> Result<LifecycleLock> {
     if !profile.is_dir() {
         bail!(
             "stack profile `{}` does not exist; run stack init first",
@@ -1184,6 +1194,16 @@ fn acquire_lifecycle_lock(profile: &Path) -> Result<LifecycleLock> {
         let _ = options;
         bail!("stack lifecycle locking is not supported on this platform")
     }
+}
+
+pub(super) fn ensure_profile_stopped(profile: &Path) -> Result<()> {
+    if runtime_state_path(profile).exists() {
+        bail!(
+            "launcher-owned managed components must be stopped before activation; run `hubu stack stop --profile {}`",
+            profile.display()
+        );
+    }
+    Ok(())
 }
 
 fn runtime_state_path(profile: &Path) -> PathBuf {
@@ -1407,6 +1427,7 @@ mod tests {
             schema_version: MANIFEST_SCHEMA_VERSION,
             generation_id: "a".repeat(64),
             generation: format!("generations/{}", "a".repeat(64)),
+            source_schema_versions: BTreeMap::new(),
             source_digests: BTreeMap::new(),
             generated_file_digests: BTreeMap::from([
                 ("hubu-launch.json".into(), "sha256:new-hubu".into()),
