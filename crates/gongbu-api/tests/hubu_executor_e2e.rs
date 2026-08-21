@@ -1,13 +1,23 @@
 use gongbu_api::{
     application::ArtifactServiceActivities,
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
-    execution::{CreateExecutionParams, Execution, HubuTokenReference, Repository},
-    hubu::{HubuClient, ProductionHubuActivities, SpendAuthorizationResolver},
-    provider_contract::NormalizedUsage,
+    execution::{Execution, Repository},
+    http::{Api, AuthenticatedAccount, ExecutionResponse},
+    hubu::{HubuClient, ProductionHubuActivities},
+    provider::{
+        contract::{
+            AdapterCapabilities, AdapterOutcome, NormalizedRequest, NormalizedUsage,
+            PricingCatalog, ProviderAdapter, ProviderFailure,
+        },
+        registry::{ProviderRegistry, ValidatedProviderCatalog},
+        targets::ProviderTargetConfig,
+    },
     redaction::Redactor,
+    secrets::ProviderSecret,
+    temporal::ExecutionScheduler,
     workflow::{
-        ActivityError, ExecutionWorkflow, HubuActivities, ProviderActivities, ProviderArtifact,
-        ProviderSuccess,
+        ActivityError, ExecutionWorkflow, HubuActivities, OperatorReconciliationRequest,
+        ProviderActivities, ProviderArtifact, ProviderSuccess,
     },
 };
 use reqwest::blocking::Client;
@@ -20,6 +30,7 @@ use std::{
     net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -51,20 +62,37 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     let provisioned = workspace.admin.provision();
     let repository = Repository::open(workspace.root().join("gongbu.sqlite3"), Redactor::default())
         .expect("open isolated Gongbu state");
-    let artifact_activities = ArtifactServiceActivities::new(
-        ArtifactService::new(
-            repository.clone(),
-            LocalFsStorage::new(workspace.root().join("artifacts")),
-            ArtifactLimits::default(),
+    let artifact_service = ArtifactService::new(
+        repository.clone(),
+        LocalFsStorage::new(workspace.root().join("artifacts")),
+        ArtifactLimits::default(),
+    );
+    let artifact_activities =
+        ArtifactServiceActivities::new(artifact_service.clone(), || NOW.to_string());
+    let admission_api = Api::new_with_authorization_resolver(
+        repository.clone(),
+        artifact_service,
+        admission_catalog(),
+        Arc::new(AdmissionScheduler),
+        i64::MAX,
+        Arc::new(
+            ProductionHubuActivities::new(workspace.hubu_client(), provisioned.agent_id.clone())
+                .unwrap(),
         ),
         || NOW.to_string(),
     );
+    let owner = AuthenticatedAccount::from_verified_claim(provisioned.account_id.clone()).unwrap();
+    let admission = AdmissionContext {
+        api: &admission_api,
+        owner: &owner,
+        repository: &repository,
+    };
 
     let success = run_success(
         &workspace,
         &provisioned,
-        &repository,
         &artifact_activities,
+        &admission,
         "hub-83:success-replay",
         Fault::None,
     );
@@ -76,8 +104,8 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     let failed = run_provider_failure(
         &workspace,
         &provisioned,
-        &repository,
         &artifact_activities,
+        &admission,
         "hub-83:proven-provider-failure",
     );
     assert_eq!(failed.provider_calls, 1);
@@ -88,8 +116,8 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     let ambiguous_claim = run_ambiguous_claim_recovery(
         &workspace,
         &provisioned,
-        &repository,
         &artifact_activities,
+        &admission,
         "hub-83:ambiguous-claim",
     );
     assert_eq!(ambiguous_claim.provider_calls, 0);
@@ -105,8 +133,8 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     let ambiguous_settlement = run_success(
         &workspace,
         &provisioned,
-        &repository,
         &artifact_activities,
+        &admission,
         "hub-83:ambiguous-settlement",
         Fault::DropSettlementResponse,
     );
@@ -124,6 +152,35 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     assert_eq!(budget["consumed_amount_cents"], ACTUAL_MINOR * 2);
     assert_eq!(budget["frozen_amount_cents"], 0);
     assert_eq!(budget["remaining_amount_cents"], 1_000 - ACTUAL_MINOR * 2);
+
+    let concurrent_a = workspace
+        .admin
+        .authorize(&provisioned, "hub-122:concurrent-a");
+    let concurrent_b = workspace
+        .admin
+        .authorize(&provisioned, "hub-122:concurrent-b");
+    let admitted_a = admit_execution(
+        admission.api,
+        admission.owner,
+        admission.repository,
+        "hub-122:concurrent-a",
+        &concurrent_a,
+    );
+    let admitted_b = admit_execution(
+        admission.api,
+        admission.owner,
+        admission.repository,
+        "hub-122:concurrent-b",
+        &concurrent_b,
+    );
+    assert_ne!(admitted_a.execution_id, admitted_b.execution_id);
+    let budget = workspace.admin.get("/budgets")["budgets"][0].clone();
+    assert_eq!(budget["consumed_amount_cents"], ACTUAL_MINOR * 2);
+    assert_eq!(budget["frozen_amount_cents"], AUTHORIZED_MINOR * 2);
+    assert_eq!(
+        budget["remaining_amount_cents"],
+        1_000 - ACTUAL_MINOR * 2 - AUTHORIZED_MINOR * 2
+    );
 
     let log = fs::read_to_string(&workspace.log_path).expect("read Hubu server log");
     for route in [
@@ -158,22 +215,35 @@ struct ScenarioResult {
     hubu_release_calls: usize,
 }
 
+struct AdmissionContext<'a> {
+    api: &'a Api,
+    owner: &'a AuthenticatedAccount,
+    repository: &'a Repository,
+}
+
 fn run_success(
     workspace: &TestWorkspace,
     provisioned: &Provisioned,
-    repository: &Repository,
     artifacts: &ArtifactServiceActivities,
+    admission: &AdmissionContext<'_>,
     operation_key: &str,
     fault: Fault,
 ) -> ScenarioResult {
     let authorization = workspace.admin.authorize(provisioned, operation_key);
-    let params = execution_params(workspace, provisioned, operation_key, &authorization);
-    let execution = repository
-        .create_execution(&params)
-        .expect("create Gongbu execution");
-    let replay = repository
-        .create_execution(&params)
-        .expect("replay Gongbu execution create");
+    let execution = admit_execution(
+        admission.api,
+        admission.owner,
+        admission.repository,
+        operation_key,
+        &authorization,
+    );
+    let replay = admit_execution(
+        admission.api,
+        admission.owner,
+        admission.repository,
+        operation_key,
+        &authorization,
+    );
     assert_eq!(execution.execution_id, replay.execution_id);
 
     let provider = DeterministicProvider::success();
@@ -184,7 +254,7 @@ fn run_success(
         false,
     );
     let workflow = ExecutionWorkflow {
-        repository,
+        repository: admission.repository,
         hubu: &hubu,
         provider: &provider,
         artifacts,
@@ -217,19 +287,22 @@ fn run_success(
         "provider must execute exactly once"
     );
     assert_eq!(
-        repository
+        admission
+            .repository
             .count_artifacts_for_execution(&execution.execution_id)
             .unwrap(),
         1
     );
     assert_eq!(
-        repository
+        admission
+            .repository
             .get_provider_attempt_for_execution(&execution.execution_id)
             .unwrap()
             .outcome,
         "succeeded"
     );
-    let receipt = repository
+    let receipt = admission
+        .repository
         .get_receipt_for_execution(&execution.execution_id)
         .expect("durable Gongbu receipt");
     assert_eq!(receipt.settlement_minor, ACTUAL_MINOR);
@@ -257,24 +330,23 @@ fn run_success(
 fn run_provider_failure(
     workspace: &TestWorkspace,
     provisioned: &Provisioned,
-    repository: &Repository,
     artifacts: &ArtifactServiceActivities,
+    admission: &AdmissionContext<'_>,
     operation_key: &str,
 ) -> ScenarioResult {
     let authorization = workspace.admin.authorize(provisioned, operation_key);
-    let execution = repository
-        .create_execution(&execution_params(
-            workspace,
-            provisioned,
-            operation_key,
-            &authorization,
-        ))
-        .expect("create failure execution");
+    let execution = admit_execution(
+        admission.api,
+        admission.owner,
+        admission.repository,
+        operation_key,
+        &authorization,
+    );
     let provider = DeterministicProvider::proven_failure();
     let hubu =
         FaultingProductionHubu::new(workspace.base_url(), &provisioned.agent_id, false, false);
     let workflow = ExecutionWorkflow {
-        repository,
+        repository: admission.repository,
         hubu: &hubu,
         provider: &provider,
         artifacts,
@@ -284,19 +356,22 @@ fn run_provider_failure(
     workflow.run(&execution.execution_id, NOW).unwrap();
     assert_eq!(provider.calls.get(), 1);
     assert_eq!(
-        repository
+        admission
+            .repository
             .get_provider_attempt_for_execution(&execution.execution_id)
             .unwrap()
             .outcome,
         "failed"
     );
     assert_eq!(
-        repository
+        admission
+            .repository
             .count_artifacts_for_execution(&execution.execution_id)
             .unwrap(),
         0
     );
-    assert!(repository
+    assert!(admission
+        .repository
         .get_receipt_for_execution(&execution.execution_id)
         .is_err());
 
@@ -312,24 +387,23 @@ fn run_provider_failure(
 fn run_ambiguous_claim_recovery(
     workspace: &TestWorkspace,
     provisioned: &Provisioned,
-    repository: &Repository,
     artifacts: &ArtifactServiceActivities,
+    admission: &AdmissionContext<'_>,
     operation_key: &str,
 ) -> ScenarioResult {
     let authorization = workspace.admin.authorize(provisioned, operation_key);
-    let execution = repository
-        .create_execution(&execution_params(
-            workspace,
-            provisioned,
-            operation_key,
-            &authorization,
-        ))
-        .expect("create ambiguous-claim execution");
+    let execution = admit_execution(
+        admission.api,
+        admission.owner,
+        admission.repository,
+        operation_key,
+        &authorization,
+    );
     let provider = DeterministicProvider::success();
     let hubu =
         FaultingProductionHubu::new(workspace.base_url(), &provisioned.agent_id, false, true);
     let workflow = ExecutionWorkflow {
-        repository,
+        repository: admission.repository,
         hubu: &hubu,
         provider: &provider,
         artifacts,
@@ -368,57 +442,92 @@ fn run_ambiguous_claim_recovery(
     }
 }
 
-fn execution_params(
-    workspace: &TestWorkspace,
-    provisioned: &Provisioned,
+fn admit_execution(
+    api: &Api,
+    owner: &AuthenticatedAccount,
+    repository: &Repository,
     operation_key: &str,
     authorization: &Value,
-) -> CreateExecutionParams {
-    let resolved = workspace
-        .hubu_client()
-        .resolve_authorization(&string_at(authorization, "auth_token_id"))
-        .expect("resolve authorization without claiming");
-    assert_eq!(resolved.operation_key, operation_key);
-    assert_eq!(resolved.account_id, provisioned.account_id);
-    assert_eq!(resolved.agent_id, provisioned.agent_id);
-    assert_eq!(resolved.amount_cents, AUTHORIZED_MINOR);
-    assert_eq!(resolved.workload_profile, "image_generation");
-    assert_eq!(resolved.status, "available");
-    CreateExecutionParams {
-        account_id: resolved.account_id,
-        operation_key: resolved.operation_key,
-        hubu_authorization_id: resolved.spend_auth_token_id.clone(),
-        hubu_claim_id: None,
-        hubu_token_reference: HubuTokenReference::new(string_at(authorization, "auth_token_id"))
-            .unwrap(),
-        authorized_minor: resolved.amount_cents,
-        authorization_currency: resolved.currency.to_ascii_uppercase(),
-        normalized_input: json!({"prompt":"deterministic blue pixel","image_count":1}),
-        input_hash: format!("sha256:{}", "1".repeat(64)),
-        input_schema_version: 1,
-        target: "image_generation/mock/deterministic/pixel-v1".into(),
-        config_version: "mock-pcv-1".into(),
-        workload_type: "image_generation".into(),
-        provider: "mock".into(),
-        adapter: "deterministic".into(),
-        model: "pixel-v1".into(),
-        provider_config_version: "mock-pcv-1".into(),
-        provider_config_digest: format!("sha256:{}", "a".repeat(64)),
-        pricing_snapshot: json!({
-            "provider":"mock",
-            "model":"pixel-v1",
-            "catalog_version":"hub-83-e2e-v1",
-            "catalog_digest":format!("sha256:{}", "b".repeat(64)),
-            "pricing_rule_id":"one-image",
-            "unit":"image",
-            "unit_amount_minor":ACTUAL_MINOR,
-            "quantity":1,
-            "estimated_amount_minor":ACTUAL_MINOR,
-            "currency":"USD"
-        }),
-        pricing_schema_version: 1,
-        execution_scope: resolved.execution_scope,
-        created_at: NOW.into(),
+) -> Execution {
+    let body = serde_json::to_vec(&json!({
+        "schema_version": 2,
+        "spend_auth_token_id": string_at(authorization, "auth_token_id"),
+        "input": {"prompt":"deterministic blue pixel","image_count":1},
+        "input_schema_version": 1,
+        "workload_type": "image_generation",
+        "provider": "mock",
+        "adapter": "deterministic",
+        "model": "pixel-v1"
+    }))
+    .unwrap();
+    let response = api.handle("POST", "/v2/executions", Some(owner), &body);
+    assert_eq!(
+        response.status,
+        200,
+        "Gongbu rejected {operation_key}: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let admitted: ExecutionResponse = serde_json::from_slice(&response.body).unwrap();
+    repository
+        .get_execution(&admitted.execution_id)
+        .expect("load admitted Gongbu execution")
+}
+
+fn admission_catalog() -> ValidatedProviderCatalog {
+    let targets: ProviderTargetConfig = serde_json::from_value(json!({
+        "provider_configs": [{
+            "provider_config_version": "mock-pcv-1",
+            "workload_type": "image_generation",
+            "provider": "mock",
+            "adapter": "deterministic",
+            "model": "pixel-v1",
+            "secret_service": "gongbu.mock",
+            "secret_account": "local"
+        }]
+    }))
+    .unwrap();
+    let pricing = PricingCatalog::from_json(
+        br#"{"schema_version":1,"catalog_version":"hub-83-e2e-v1","rules":[{"rule_id":"one-image","provider":"mock","model":"pixel-v1","currency":"USD","unit":"image","unit_amount_minor":40}]}"#,
+    )
+    .unwrap();
+    let mut registry = ProviderRegistry::new();
+    registry.register("mock", "deterministic", |_| Ok(Arc::new(AdmissionAdapter)));
+    ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap()
+}
+
+struct AdmissionAdapter;
+
+impl ProviderAdapter for AdmissionAdapter {
+    fn adapter_id(&self) -> &str {
+        "deterministic"
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities {
+            vendor_enforced_idempotency: false,
+        }
+    }
+
+    fn invoke(
+        &self,
+        _: &NormalizedRequest,
+        _: &Value,
+        _: &ProviderSecret,
+        _: Option<&str>,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        unreachable!("HTTP admission does not invoke providers")
+    }
+}
+
+struct AdmissionScheduler;
+
+impl ExecutionScheduler for AdmissionScheduler {
+    fn schedule(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn reconcile(&self, _: &str, _: OperatorReconciliationRequest) -> Result<(), String> {
+        Ok(())
     }
 }
 
