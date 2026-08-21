@@ -49,7 +49,11 @@ struct TestServer {
 
 impl TestServer {
     fn gongbu(version: Value) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        Self::gongbu_at("127.0.0.1:0".parse().unwrap(), version)
+    }
+
+    fn gongbu_at(address: SocketAddr, version: Value) -> Self {
+        let listener = TcpListener::bind(address).unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -159,7 +163,7 @@ fn managed_hubu_lifecycle_is_idempotent_and_never_owns_external_gongbu() {
     assert_success(&version_output);
     let version_json = String::from_utf8(version_output.stdout).unwrap();
     let version: Value = serde_json::from_str(&version_json).unwrap();
-    let gongbu = TestServer::gongbu(version);
+    let gongbu = TestServer::gongbu(version.clone());
     let hubu_address = reserve_addr();
 
     let python = root.path().join("hubu_server.py");
@@ -305,9 +309,11 @@ gongbu_caller = {}
         ),
     );
     fs::write(&stack_path, changed_stack).unwrap();
-    let unconfirmed = run(&["stack", "start", "--profile", profile_arg]);
-    assert!(!unconfirmed.status.success());
-    assert!(String::from_utf8_lossy(&unconfirmed.stderr).contains("--confirm-restart"));
+    let changed = run(&["stack", "start", "--profile", profile_arg]);
+    assert!(!changed.status.success());
+    let changed_error = String::from_utf8_lossy(&changed.stderr);
+    assert!(changed_error.contains("stack stop"));
+    assert!(changed_error.contains("stack start"));
     let unchanged_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     assert_eq!(
         unchanged_state["processes"]["hubu-server"]["pid"].as_u64(),
@@ -322,14 +328,11 @@ gongbu_caller = {}
         serde_json::json!(["hubu-server"])
     );
 
-    let confirmed = run(&[
-        "stack",
-        "start",
-        "--confirm-restart",
-        "--profile",
-        profile_arg,
-    ]);
-    assert_success(&confirmed);
+    let stopped_for_change = run(&["stack", "stop", "--profile", profile_arg]);
+    assert_success(&stopped_for_change);
+    wait_until_closed(hubu_address);
+    let restarted = run(&["stack", "start", "--profile", profile_arg]);
+    assert_success(&restarted);
     let restarted_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     let restarted_pid = restarted_state["processes"]["hubu-server"]["pid"]
         .as_u64()
@@ -338,14 +341,29 @@ gongbu_caller = {}
     assert_eq!(fs::read(&database).unwrap(), b"durable-state-canary");
 
     fs::write(&unhealthy_marker, "force one unhealthy generation").unwrap();
-    let recovered = run(&[
-        "stack",
-        "restart",
-        "--component",
-        "hubu",
-        "--profile",
-        profile_arg,
-    ]);
+    let refused_repair = run(&["stack", "start", "--profile", profile_arg]);
+    assert!(!refused_repair.status.success());
+    assert!(String::from_utf8_lossy(&refused_repair.stderr).contains("partial or unhealthy"));
+    let still_unhealthy: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(
+        still_unhealthy["processes"]["hubu-server"]["pid"].as_u64(),
+        Some(restarted_pid)
+    );
+    let unhealthy_status = run(&["stack", "status", "--json", "--profile", profile_arg]);
+    assert_success(&unhealthy_status);
+    let unhealthy_status: Value = serde_json::from_slice(&unhealthy_status.stdout).unwrap();
+    assert_eq!(
+        unhealthy_status["components"][0]["lifecycle"],
+        "owned_unhealthy"
+    );
+    assert!(unhealthy_status["components"][0]["guidance"]
+        .as_str()
+        .unwrap()
+        .contains("stack stop, then stack start"));
+    let stopped_for_recovery = run(&["stack", "stop", "--profile", profile_arg]);
+    assert_success(&stopped_for_recovery);
+    wait_until_closed(hubu_address);
+    let recovered = run(&["stack", "start", "--profile", profile_arg]);
     assert_success(&recovered);
     let recovered_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     assert_ne!(
@@ -379,36 +397,37 @@ gongbu_caller = {}
     assert!(String::from_utf8_lossy(&logs.stdout).contains("hubu"));
 
     assert!(TcpStream::connect_timeout(&gongbu.address, Duration::from_secs(1)).is_ok());
-    let before_external_failure: Value =
-        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    let before_external_failure_pid = before_external_failure["processes"]["hubu-server"]["pid"]
-        .as_u64()
-        .unwrap();
     let gongbu_address = gongbu.address;
     drop(gongbu);
-    let blocked_restart = run(&[
-        "stack",
-        "restart",
-        "--component",
-        "hubu",
-        "--profile",
-        profile_arg,
-    ]);
-    assert!(!blocked_restart.status.success());
-    assert!(String::from_utf8_lossy(&blocked_restart.stderr).contains("external gongbu"));
-    let after_external_failure: Value =
+    let stopped_with_external_down = run(&["stack", "stop", "--profile", profile_arg]);
+    assert_success(&stopped_with_external_down);
+    wait_until_closed(hubu_address);
+    let awaiting_external = run(&["stack", "start", "--profile", profile_arg]);
+    assert!(!awaiting_external.status.success());
+    assert!(String::from_utf8_lossy(&awaiting_external.stderr)
+        .contains("external component is unavailable"));
+    let prerequisite_state: Value =
         serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    assert_eq!(
-        after_external_failure["processes"]["hubu-server"]["pid"].as_u64(),
-        Some(before_external_failure_pid)
-    );
+    let prerequisite_pid = prerequisite_state["processes"]["hubu-server"]["pid"]
+        .as_u64()
+        .unwrap();
     assert!(TcpStream::connect_timeout(&hubu_address, Duration::from_secs(1)).is_ok());
     assert!(TcpStream::connect_timeout(&gongbu_address, Duration::from_millis(100)).is_err());
+
+    let restored_gongbu = TestServer::gongbu_at(gongbu_address, version.clone());
+    let completed = run(&["stack", "start", "--profile", profile_arg]);
+    assert_success(&completed);
+    let completed_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(
+        completed_state["processes"]["hubu-server"]["pid"].as_u64(),
+        Some(prerequisite_pid)
+    );
 
     let stopped = run(&["stack", "stop", "--profile", profile_arg]);
     assert_success(&stopped);
     wait_until_closed(hubu_address);
     assert!(!state_path.exists());
+    drop(restored_gongbu);
 }
 
 #[test]
@@ -428,4 +447,22 @@ fn status_reports_an_incomplete_profile_without_mutating_it() {
     assert_eq!(report["source_or_render_drift"], true);
     assert_eq!(report["components"][0]["ownership"], "unconfigured");
     assert!(!profile.exists());
+}
+
+#[test]
+fn restart_and_implicit_restart_confirmation_are_not_commands() {
+    let restart = run(&["stack", "restart"]);
+    assert!(!restart.status.success());
+    assert!(String::from_utf8_lossy(&restart.stderr).contains("unknown stack command `restart`"));
+
+    let root = tempfile::tempdir().unwrap();
+    let start = run(&[
+        "stack",
+        "start",
+        "--confirm-restart",
+        "--profile",
+        root.path().to_str().unwrap(),
+    ]);
+    assert!(!start.status.success());
+    assert!(String::from_utf8_lossy(&start.stderr).contains("unexpected arguments"));
 }

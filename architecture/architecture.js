@@ -446,7 +446,7 @@ const components = {
     copy:
       "The CLI is the human developer surface and local-stack launcher. It validates and renders profiles, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
     responsibilities: [
-      "Supports profile init, doctor, render, dependency-aware start, component status and logs, explicit restart, and reverse-order stop alongside the existing administration commands.",
+      "Supports profile init, doctor, render, dependency-aware start, component status and logs, and graceful reverse-order whole-stack stop alongside the existing administration commands.",
       "Persists redacted process ownership metadata, validates the recorded start identity before every signal, and never signals external, compatible unowned, or client-owned MCP processes.",
       "Starts Hubu before Gongbu, rolls back only children created by a failed invocation, and preserves databases, artifacts, Temporal data, generated files, and logs across restarts.",
       "Writes a managed Codex config block that lets agents in other projects discover Hubu MCP tools without reading the Hubu repo.",

@@ -200,19 +200,22 @@ in `managed_local` mode, its Temporal child. Stack readiness means both HTTP
 backends and the worker are ready; the unified MCP remains client-owned and is
 reported as a compatible handoff rather than a running stack process.
 
-Repeated start is a no-op for healthy, current processes. When rendered inputs,
-selected binaries, or launcher log routing change, start prints the affected
-managed components and requires an explicit confirmation before signalling
-anything:
+Repeated start is a no-op for a healthy, current stack. Start never repairs or
+signals a partially running, unhealthy, or changed managed stack. It reports
+the affected components and asks the operator to use the explicit graceful
+stop-then-start flow:
 
 ```sh
-hubu stack start --confirm-restart --profile /absolute/path/to/profile
-hubu stack restart --component gongbu --profile /absolute/path/to/profile
+hubu stack stop --profile /absolute/path/to/profile
+hubu stack start --profile /absolute/path/to/profile
 ```
 
-Restarting Hubu also restarts launcher-owned Gongbu because Gongbu depends on
-Hubu. Restarting Gongbu leaves Hubu running. External or compatible unowned
-processes are never signalled.
+Stop drains and stops the complete launcher-owned managed stack in reverse
+dependency order; the following start launches it in forward dependency order.
+External or compatible unowned processes are never signalled. When a managed
+prerequisite starts but a downstream external component is unavailable, the
+launcher leaves the prerequisite running and tells the external operator what
+must be restored before start is retried.
 
 Status distinguishes launcher-owned, compatible unowned, external, exited, and
 stale-identity processes. It also reports active generation and restart impact,
@@ -241,7 +244,7 @@ If a PID was reused or the recorded identity does not match, lifecycle commands
 refuse to signal it. After independently confirming that ownership is gone, the
 operator can remove only the stale metadata with `stack stop --forget-stale`.
 Databases, artifacts, managed Temporal data, generated configurations, and logs
-are never deleted by start, restart, rollback, or stop.
+are never deleted by start, rollback, or stop.
 
 ## Runtime and recovery boundaries
 

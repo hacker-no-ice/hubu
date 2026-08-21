@@ -250,7 +250,6 @@ pub(crate) fn command(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         "start" => lifecycle::start(args, hubu_home),
         "status" => lifecycle::status(args, hubu_home),
         "logs" => lifecycle::logs(args, hubu_home),
-        "restart" => lifecycle::restart(args, hubu_home),
         "stop" => lifecycle::stop(args, hubu_home),
         "help" | "--help" | "-h" => {
             print_help();
@@ -1930,7 +1929,7 @@ Durable contract: `docs/local-stack.md` in the Hubu repository.
 
 fn print_help() {
     println!(
-        "Manage the local Hubu stack profile\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR] [--confirm-restart]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack restart [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]"
+        "Manage the local Hubu stack profile\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]"
     );
 }
 

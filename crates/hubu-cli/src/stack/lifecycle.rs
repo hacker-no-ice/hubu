@@ -103,11 +103,10 @@ pub(super) fn start(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         print_start_help();
         return Ok(());
     }
-    let confirm_restart = take_flag(&mut args, "--confirm-restart");
     let profile = take_profile(&mut args, hubu_home)?;
     ensure_no_args(args)?;
     let _lock = acquire_lifecycle_lock(&profile)?;
-    start_profile(&profile, confirm_restart)
+    start_profile(&profile)
 }
 
 pub(super) fn status(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
@@ -148,22 +147,6 @@ pub(super) fn logs(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     let profile = take_profile(&mut args, hubu_home)?;
     ensure_no_args(args)?;
     print_logs(&profile, component, execution_id.as_deref(), lines)
-}
-
-pub(super) fn restart(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
-    if take_help(&mut args) {
-        print_restart_help();
-        return Ok(());
-    }
-    let component = take_value(&mut args, "--component")?
-        .as_deref()
-        .map(parse_component)
-        .transpose()?
-        .unwrap_or(ComponentSelection::All);
-    let profile = take_profile(&mut args, hubu_home)?;
-    ensure_no_args(args)?;
-    let _lock = acquire_lifecycle_lock(&profile)?;
-    restart_profile(&profile, component)
 }
 
 pub(super) fn stop(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
@@ -219,6 +202,10 @@ fn inspect_status(profile: &Path) -> Result<StackStatusReport> {
         (
             "start".into(),
             format!("hubu stack start --profile {profile_arg}"),
+        ),
+        (
+            "stop".into(),
+            format!("hubu stack stop --profile {profile_arg}"),
         ),
         (
             "logs".into(),
@@ -319,18 +306,28 @@ fn component_status(
     }
     let process = runtime.and_then(|value| value.processes.get(state_key));
     let (lifecycle, pid, log_file, guidance) = match process {
-        Some(process) => match recorded_process_state(process) {
-            RecordedProcessState::Running => (
+        Some(process)
+            if recorded_process_state(process) == RecordedProcessState::Running && ready =>
+        {
+            (
                 "owned_running",
                 Some(process.pid),
                 Some(process.log_file.clone()),
-                "this profile may restart or stop the recorded process".into(),
+                "this profile may stop the recorded process".into(),
+            )
+        }
+        Some(process) => match recorded_process_state(process) {
+            RecordedProcessState::Running => (
+                "owned_unhealthy",
+                Some(process.pid),
+                Some(process.log_file.clone()),
+                "run stack stop, then stack start, to recover the managed stack".into(),
             ),
             RecordedProcessState::Exited => (
                 "owned_exited",
                 Some(process.pid),
                 Some(process.log_file.clone()),
-                "run stack start to recover the missing managed component".into(),
+                "run stack stop, then stack start, to recover the managed stack".into(),
             ),
             RecordedProcessState::IdentityMismatch => (
                 "stale_identity",
@@ -478,7 +475,7 @@ fn print_logs(
     Ok(())
 }
 
-fn start_profile(profile: &Path, confirm_restart: bool) -> Result<()> {
+fn start_profile(profile: &Path) -> Result<()> {
     prepare_startable_profile(profile)?;
     let stack = read_toml::<StackSource>(&profile.join("stack.toml"))?;
     let manifest = read_active_manifest(profile)?;
@@ -489,23 +486,18 @@ fn start_profile(profile: &Path, confirm_restart: bool) -> Result<()> {
         launch_id: Uuid::new_v4().to_string(),
         processes: BTreeMap::new(),
     });
-    reconcile_exited_metadata(profile, &mut state)?;
     refuse_identity_mismatches(&state)?;
+
+    refuse_partial_or_unhealthy_stack(profile, &stack, &state)?;
 
     let restart_plan = required_restart_plan(profile, &stack, &manifest, &state)?;
     if !restart_plan.is_empty() {
-        println!("managed restart required: {}", restart_plan.join(", "));
-        if !confirm_restart {
-            bail!("rendered inputs changed; review the plan, then rerun with --confirm-restart");
-        }
-        stop_components(profile, selection_for_keys(&restart_plan), false)?;
-        state = read_runtime_state(profile)?.unwrap_or_else(|| RuntimeState {
-            schema_version: RUNTIME_STATE_SCHEMA_VERSION,
-            profile: profile.to_path_buf(),
-            generation_id: manifest.generation_id.clone(),
-            launch_id: Uuid::new_v4().to_string(),
-            processes: BTreeMap::new(),
-        });
+        bail!(
+            "managed stack inputs changed for {}; run `hubu stack stop --profile {}` and then `hubu stack start --profile {}`",
+            restart_plan.join(", "),
+            profile.display(),
+            profile.display()
+        );
     }
     state.generation_id = manifest.generation_id.clone();
     write_or_remove_runtime_state(profile, &state)?;
@@ -524,9 +516,52 @@ fn prepare_startable_profile(profile: &Path) -> Result<()> {
         render_profile_with_renderer(profile, &renderer)?;
     }
     let preflight = doctor::inspect_profile(profile);
-    if !preflight.is_startable() {
+    if !preflight.is_renderable() || !preflight.check_passed("active_render_valid") {
         doctor::print_human(profile, &preflight);
-        bail!("stack dependencies or credential references are not ready; no process was started");
+        bail!("stack inputs or credential references are not ready; no process was started");
+    }
+    Ok(())
+}
+
+fn refuse_partial_or_unhealthy_stack(
+    profile: &Path,
+    stack: &StackSource,
+    state: &RuntimeState,
+) -> Result<()> {
+    if state.processes.is_empty() {
+        return Ok(());
+    }
+    let report = doctor::inspect_profile(profile);
+    let managed = [
+        (
+            "hubu-server",
+            "hubu",
+            stack.hubu.as_ref().and_then(|value| value.ownership),
+        ),
+        (
+            "gongbu-server",
+            "gongbu",
+            stack.gongbu.as_ref().and_then(|value| value.ownership),
+        ),
+    ];
+    let needs_recovery = managed.iter().any(|(key, component, ownership)| {
+        if *ownership != Some(Ownership::Managed) {
+            return false;
+        }
+        match state.processes.get(*key) {
+            Some(process) => {
+                recorded_process_state(process) != RecordedProcessState::Running
+                    || !report.component_ready(component)
+            }
+            None => !report.component_ready(component),
+        }
+    });
+    if needs_recovery {
+        bail!(
+            "managed stack is partial or unhealthy; run `hubu stack stop --profile {}` and then `hubu stack start --profile {}`",
+            profile.display(),
+            profile.display()
+        );
     }
     Ok(())
 }
@@ -537,7 +572,9 @@ fn start_missing_components(
     manifest: &ActiveManifest,
     mut state: RuntimeState,
 ) -> Result<()> {
+    validate_start_prerequisites(profile, stack)?;
     let mut started = Vec::<StartedProcess>::new();
+    let mut preserve_started_on_error = false;
     let result = (|| {
         if stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed)
             && !doctor::inspect_profile(profile).component_ready("hubu")
@@ -587,13 +624,22 @@ fn start_missing_components(
         let final_report = doctor::inspect_profile(profile);
         if !final_report.is_running_ready() {
             doctor::print_human(profile, &final_report);
+            if has_managed_components(stack) && managed_components_ready(stack, &final_report) {
+                preserve_started_on_error = true;
+                bail!(
+                    "managed stack prerequisites are running, but an external component is unavailable; restore the external component, then rerun `hubu stack start --profile {}`",
+                    profile.display()
+                );
+            }
             bail!("stack did not reach running_ready");
         }
         Ok(())
     })();
 
     if let Err(error) = result {
-        rollback_started_processes(profile, &mut state, &mut started);
+        if !preserve_started_on_error {
+            rollback_started_processes(profile, &mut state, &mut started);
+        }
         return Err(error);
     }
     drop(started);
@@ -605,62 +651,28 @@ fn start_missing_components(
     Ok(())
 }
 
-fn restart_profile(profile: &Path, selection: ComponentSelection) -> Result<()> {
-    prepare_rendered_profile(profile)?;
-    let stack = read_toml::<StackSource>(&profile.join("stack.toml"))?;
-    let expanded = if selection == ComponentSelection::Hubu {
-        ComponentSelection::All
-    } else {
-        selection
-    };
-    validate_restart_dependencies(profile, &stack, expanded)?;
-    if let Some(state) = read_runtime_state(profile)? {
-        refuse_identity_mismatches(&state)?;
-        let manifest = read_active_manifest(profile)?;
-        let drift = required_restart_plan(profile, &stack, &manifest, &state)?;
-        let allowed = selected_components(expanded);
-        let outside_selection = drift
-            .iter()
-            .filter(|component| !allowed.contains(component.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !outside_selection.is_empty() {
-            bail!(
-                "restart scope would leave changed managed components running: {}; use stack start --confirm-restart or restart --component all",
-                outside_selection.join(", ")
-            );
-        }
+fn validate_start_prerequisites(profile: &Path, stack: &StackSource) -> Result<()> {
+    let report = doctor::inspect_profile(profile);
+    let gongbu_managed =
+        stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed);
+    if !gongbu_managed {
+        return Ok(());
     }
-    stop_components(profile, expanded, false)?;
-    start_profile(profile, true)
-}
-
-fn prepare_rendered_profile(profile: &Path) -> Result<()> {
-    let renderer = env::current_exe().context("locate the running hubu executable")?;
-    let initial = doctor::inspect_profile(profile);
-    if !initial.is_source_complete() {
-        doctor::print_human(profile, &initial);
-        bail!("stack source is incomplete or invalid; no process was stopped");
+    if stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::External)
+        && !report.component_ready("hubu")
+    {
+        bail!("external Hubu dependency is not ready; no managed process was started");
     }
-    if !initial.check_passed("active_render_valid") {
-        render_profile_with_renderer(profile, &renderer)?;
-    }
-    let rendered = doctor::inspect_profile(profile);
-    if !rendered.is_renderable() || !rendered.check_passed("active_render_valid") {
-        doctor::print_human(profile, &rendered);
-        bail!("stack inputs are not renderable; no process was stopped");
+    if stack.temporal.as_ref().and_then(|value| value.mode) == Some(TemporalMode::External)
+        && !report.check_passed("temporal_reachable")
+    {
+        bail!("external Temporal dependency is not reachable; no managed process was started");
     }
     Ok(())
 }
 
-fn validate_restart_dependencies(
-    profile: &Path,
-    stack: &StackSource,
-    selection: ComponentSelection,
-) -> Result<()> {
-    let selected = selected_components(selection);
-    let report = doctor::inspect_profile(profile);
-    for (component, ownership) in [
+fn managed_components_ready(stack: &StackSource, report: &doctor::DoctorReport) -> bool {
+    [
         (
             "hubu",
             stack.hubu.as_ref().and_then(|value| value.ownership),
@@ -669,34 +681,22 @@ fn validate_restart_dependencies(
             "gongbu",
             stack.gongbu.as_ref().and_then(|value| value.ownership),
         ),
-    ] {
-        if ownership == Some(Ownership::External) && !report.component_ready(component) {
-            bail!("external {component} is not ready; no launcher-owned process was stopped");
-        }
-    }
-    let gongbu_managed =
-        stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed);
-    if !gongbu_managed || !selected.contains("gongbu-server") {
-        return Ok(());
-    }
-    let hubu_selected = stack.hubu.as_ref().and_then(|value| value.ownership)
-        == Some(Ownership::Managed)
-        && selected.contains("hubu-server");
-    if !hubu_selected && !report.component_ready("hubu") {
-        bail!("Hubu dependency is not ready; no managed process was stopped");
-    }
-    if stack.temporal.as_ref().and_then(|value| value.mode) == Some(TemporalMode::External)
-        && !report.check_passed("temporal_reachable")
-    {
-        bail!("external Temporal dependency is not reachable; no managed process was stopped");
-    }
-    Ok(())
+    ]
+    .into_iter()
+    .all(|(component, ownership)| {
+        ownership != Some(Ownership::Managed) || report.component_ready(component)
+    })
+}
+
+fn has_managed_components(stack: &StackSource) -> bool {
+    stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed)
+        || stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed)
 }
 
 fn refuse_duplicate_owned_spawn(state: &RuntimeState, component: &str) -> Result<()> {
     if let Some(process) = state.processes.get(component) {
         bail!(
-            "refusing to start a duplicate {component}: launcher-owned PID {} is alive but not ready; use stack restart after inspecting status and logs",
+            "refusing to start a duplicate {component}: launcher-owned PID {} is alive but not ready; run stack stop, then stack start, after inspecting status and logs",
             process.pid
         );
     }
@@ -1004,13 +1004,6 @@ fn open_append_secure(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn reconcile_exited_metadata(profile: &Path, state: &mut RuntimeState) -> Result<()> {
-    state
-        .processes
-        .retain(|_, process| recorded_process_state(process) != RecordedProcessState::Exited);
-    write_or_remove_runtime_state(profile, state)
-}
-
 fn refuse_identity_mismatches(state: &RuntimeState) -> Result<()> {
     let stale = state
         .processes
@@ -1112,16 +1105,6 @@ fn source_digests(profile: &Path) -> Result<BTreeMap<String, String>> {
         values.insert(name.to_owned(), digest(&fs::read(profile.join(name))?));
     }
     Ok(values)
-}
-
-fn selection_for_keys(keys: &[String]) -> ComponentSelection {
-    let hubu = keys.iter().any(|key| key == "hubu-server");
-    let gongbu = keys.iter().any(|key| key == "gongbu-server");
-    match (hubu, gongbu) {
-        (true, _) => ComponentSelection::All,
-        (false, true) => ComponentSelection::Gongbu,
-        (false, false) => ComponentSelection::All,
-    }
 }
 
 fn write_or_remove_runtime_state(profile: &Path, state: &RuntimeState) -> Result<()> {
@@ -1378,7 +1361,7 @@ fn shell_word(value: &str) -> String {
 
 fn print_start_help() {
     println!(
-        "Start or reconcile managed local stack components\n\nUsage:\n  hubu stack start [--profile ABSOLUTE_DIR] [--confirm-restart]\n\n--confirm-restart permits the displayed affected-component restart plan after rendered configuration changes"
+        "Start a fully stopped local stack or report an already healthy stack\n\nUsage:\n  hubu stack start [--profile ABSOLUTE_DIR]\n\nA partial, unhealthy, or changed managed stack must be stopped gracefully before it can be started again"
     );
 }
 
@@ -1391,12 +1374,6 @@ fn print_status_help() {
 fn print_logs_help() {
     println!(
         "Read launcher-owned managed component logs\n\nUsage:\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]"
-    );
-}
-
-fn print_restart_help() {
-    println!(
-        "Explicitly restart launcher-owned components in dependency order\n\nUsage:\n  hubu stack restart [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all]"
     );
 }
 
