@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom},
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -513,7 +514,17 @@ fn prepare_startable_profile(profile: &Path) -> Result<()> {
         bail!("stack source is incomplete or invalid; no process was started");
     }
     if !initial.is_startable() {
-        render_profile_with_renderer(profile, &renderer)?;
+        let outcome = render_profile_with_renderer_outcome(profile, &renderer)?;
+        if !outcome.activated {
+            bail!(
+                "validated generation {} is staged; run `hubu stack stop --profile {}`, `hubu stack activate --generation {} --profile {}`, and then `hubu stack start --profile {}`",
+                outcome.generation_id,
+                profile.display(),
+                outcome.generation_id,
+                profile.display(),
+                profile.display()
+            );
+        }
     }
     let preflight = doctor::inspect_profile(profile);
     if !preflight.is_renderable() || !preflight.check_passed("active_render_valid") {
@@ -1139,11 +1150,11 @@ fn runtime_dir(profile: &Path) -> PathBuf {
 }
 
 #[derive(Debug)]
-struct LifecycleLock {
+pub(super) struct LifecycleLock {
     _file: File,
 }
 
-fn acquire_lifecycle_lock(profile: &Path) -> Result<LifecycleLock> {
+pub(super) fn acquire_lifecycle_lock(profile: &Path) -> Result<LifecycleLock> {
     if !profile.is_dir() {
         bail!(
             "stack profile `{}` does not exist; run stack init first",
@@ -1184,6 +1195,104 @@ fn acquire_lifecycle_lock(profile: &Path) -> Result<LifecycleLock> {
         let _ = options;
         bail!("stack lifecycle locking is not supported on this platform")
     }
+}
+
+pub(super) fn ensure_profile_stopped(profile: &Path) -> Result<()> {
+    if runtime_state_path(profile).exists() {
+        bail!(
+            "launcher-owned managed components must be stopped before activation; run `hubu stack stop --profile {}`",
+            profile.display()
+        );
+    }
+    let stack = read_toml::<StackSource>(&profile.join("stack.toml"))?;
+    let mut endpoints = Vec::new();
+    for (component, ownership, endpoint) in [
+        (
+            "hubu-server",
+            stack.hubu.as_ref().and_then(|value| value.ownership),
+            stack
+                .hubu
+                .as_ref()
+                .and_then(|value| value.endpoint.as_deref()),
+        ),
+        (
+            "gongbu-server",
+            stack.gongbu.as_ref().and_then(|value| value.ownership),
+            stack
+                .gongbu
+                .as_ref()
+                .and_then(|value| value.endpoint.as_deref()),
+        ),
+    ] {
+        if ownership == Some(Ownership::Managed) {
+            if let Some(endpoint) = endpoint {
+                endpoints.push((component, "current source", endpoint.to_string()));
+            }
+        }
+    }
+    let generated = profile.join("generated");
+    let active_path = generated.join("active-manifest.json");
+    if active_path.exists() {
+        let active: ActiveManifest =
+            read_json(&active_path).context("read active generation before activation")?;
+        validate_manifest_integrity(&generated, &active)
+            .context("validate active generation before activation")?;
+        let generation = active_generation_path(&generated, &active)?;
+        let handoff: CodexHandoff = read_json(&generation.join("client-handoff.json"))?;
+        if handoff.schema_version != 1 {
+            bail!("active client handoff has an unsupported schema_version");
+        }
+        if active
+            .generated_file_digests
+            .contains_key("hubu-launch.json")
+        {
+            endpoints.push(("hubu-server", "active generation", handoff.hubu_endpoint));
+        }
+        if active
+            .generated_file_digests
+            .contains_key("gongbu-server.json")
+        {
+            endpoints.push((
+                "gongbu-server",
+                "active generation",
+                handoff.gongbu_endpoint,
+            ));
+        }
+    }
+    let mut checked = BTreeSet::new();
+    let mut reachable = Vec::new();
+    for (component, source, endpoint) in endpoints {
+        if checked.insert((component, endpoint.clone()))
+            && managed_endpoint_accepts_connections(&endpoint)
+        {
+            reachable.push(format!("{component} ({source}: {endpoint})"));
+        }
+    }
+    if !reachable.is_empty() {
+        bail!(
+            "managed endpoints still accept connections for {}; this profile has no ownership metadata and will not signal them, so stop those processes through their owner before activating",
+            reachable.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn managed_endpoint_accepts_connections(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let Some(port) = url.port_or_known_default() else {
+        return false;
+    };
+    (host, port)
+        .to_socket_addrs()
+        .ok()
+        .into_iter()
+        .flatten()
+        .any(|address| TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok())
 }
 
 fn runtime_state_path(profile: &Path) -> PathBuf {
@@ -1386,6 +1495,7 @@ fn print_stop_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
     use tempfile::tempdir;
 
     fn process(component: &str, pid: u32, identity: String) -> OwnedProcess {
@@ -1407,6 +1517,7 @@ mod tests {
             schema_version: MANIFEST_SCHEMA_VERSION,
             generation_id: "a".repeat(64),
             generation: format!("generations/{}", "a".repeat(64)),
+            source_schema_versions: BTreeMap::new(),
             source_digests: BTreeMap::new(),
             generated_file_digests: BTreeMap::from([
                 ("hubu-launch.json".into(), "sha256:new-hubu".into()),
@@ -1545,6 +1656,80 @@ ownership = "managed"
                 .to_string()
                 .contains("missing value"));
         }
+    }
+
+    #[test]
+    fn activation_refuses_a_reachable_unowned_managed_endpoint() {
+        let temp = tempdir().unwrap();
+        let profile = temp.path();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let endpoint = toml::Value::String(endpoint).to_string();
+        fs::write(
+            profile.join("stack.toml"),
+            format!("schema_version = 1\n[hubu]\nownership = \"managed\"\nendpoint = {endpoint}\n"),
+        )
+        .unwrap();
+        let error = ensure_profile_stopped(profile).unwrap_err().to_string();
+        assert!(error.contains("no ownership metadata"));
+        assert!(error.contains("hubu-server"));
+        drop(listener);
+        ensure_profile_stopped(profile).unwrap();
+    }
+
+    #[test]
+    fn activation_refuses_the_reachable_active_endpoint_after_a_source_endpoint_change() {
+        let temp = tempdir().unwrap();
+        let profile = temp.path();
+        fs::write(
+            profile.join("stack.toml"),
+            "schema_version = 1\n[hubu]\nownership = \"managed\"\nendpoint = \"http://127.0.0.1:1\"\n",
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let active_endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let generation_id = "a".repeat(64);
+        let generated = profile.join("generated");
+        let generation = generated.join("generations").join(&generation_id);
+        fs::create_dir_all(&generation).unwrap();
+        let handoff = CodexHandoff {
+            schema_version: 1,
+            mcp_server: PathBuf::from("/tmp/hubu-unified-mcp"),
+            hubu_endpoint: active_endpoint.clone(),
+            hubu_token_file: PathBuf::from("/tmp/hubu-auth"),
+            approval_token_file: PathBuf::from("/tmp/hubu-approval"),
+            reconciliation_token_file: PathBuf::from("/tmp/hubu-reconciliation"),
+            gongbu_endpoint: "http://127.0.0.1:2".into(),
+            gongbu_token_file: PathBuf::from("/tmp/gongbu-caller"),
+        };
+        let handoff_bytes = serde_json::to_vec_pretty(&handoff).unwrap();
+        let launch_bytes = b"{}\n";
+        fs::write(generation.join("client-handoff.json"), &handoff_bytes).unwrap();
+        fs::write(generation.join("hubu-launch.json"), launch_bytes).unwrap();
+        let active = ActiveManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            generation_id: generation_id.clone(),
+            generation: format!("generations/{generation_id}"),
+            source_schema_versions: BTreeMap::new(),
+            source_digests: BTreeMap::new(),
+            generated_file_digests: BTreeMap::from([
+                ("client-handoff.json".into(), digest(&handoff_bytes)),
+                ("hubu-launch.json".into(), digest(launch_bytes)),
+            ]),
+            binary_provenance: Vec::new(),
+            process_log_files: BTreeMap::new(),
+            restart_impact: Vec::new(),
+        };
+        fs::write(
+            generated.join("active-manifest.json"),
+            serde_json::to_vec_pretty(&active).unwrap(),
+        )
+        .unwrap();
+
+        let error = ensure_profile_stopped(profile).unwrap_err().to_string();
+        assert!(error.contains("active generation"));
+        assert!(error.contains(&active_endpoint));
     }
 
     #[test]

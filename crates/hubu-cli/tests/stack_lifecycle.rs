@@ -285,6 +285,7 @@ gongbu_caller = {}
 
     let state_path = profile.join("runtime/launcher-state.json");
     let first_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let first_generation = first_state["generation_id"].as_str().unwrap().to_owned();
     let first_pid = first_state["processes"]["hubu-server"]["pid"]
         .as_u64()
         .unwrap();
@@ -314,6 +315,16 @@ gongbu_caller = {}
     let changed_error = String::from_utf8_lossy(&changed.stderr);
     assert!(changed_error.contains("stack stop"));
     assert!(changed_error.contains("stack start"));
+    let staged_generation = String::from_utf8_lossy(&changed.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("validated staged generation: "))
+        .expect("start reports the staged generation")
+        .to_owned();
+    let listed = run(&["stack", "generations", "--profile", profile_arg]);
+    assert_success(&listed);
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.contains(&format!("{first_generation} active")));
+    assert!(listed.contains(&staged_generation));
     let unchanged_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     assert_eq!(
         unchanged_state["processes"]["hubu-server"]["pid"].as_u64(),
@@ -323,14 +334,31 @@ gongbu_caller = {}
     let pending = run(&["stack", "status", "--json", "--profile", profile_arg]);
     assert_success(&pending);
     let pending: Value = serde_json::from_slice(&pending.stdout).unwrap();
-    assert_eq!(
-        pending["restart_impact"],
-        serde_json::json!(["hubu-server"])
-    );
+    assert_eq!(pending["restart_impact"], serde_json::json!([]));
+    assert_eq!(pending["source_or_render_drift"], serde_json::json!(true));
 
     let stopped_for_change = run(&["stack", "stop", "--profile", profile_arg]);
     assert_success(&stopped_for_change);
     wait_until_closed(hubu_address);
+    let refused_unactivated = run(&["stack", "start", "--profile", profile_arg]);
+    assert!(!refused_unactivated.status.success());
+    assert!(String::from_utf8_lossy(&refused_unactivated.stderr).contains("stack activate"));
+    let staged = run(&["stack", "render", "--profile", profile_arg]);
+    assert_success(&staged);
+    let staged_output = String::from_utf8_lossy(&staged.stdout);
+    let generation = staged_output
+        .lines()
+        .find_map(|line| line.strip_prefix("validated staged generation: "))
+        .expect("render reports the staged generation");
+    let activated = run(&[
+        "stack",
+        "activate",
+        "--generation",
+        generation,
+        "--profile",
+        profile_arg,
+    ]);
+    assert_success(&activated);
     let restarted = run(&["stack", "start", "--profile", profile_arg]);
     assert_success(&restarted);
     let restarted_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();

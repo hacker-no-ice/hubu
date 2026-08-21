@@ -5,7 +5,7 @@ Gongbu, Temporal, and the unified MCP client handoff. It coordinates compatible
 inputs without merging component ownership, runtime state, credentials, or
 failure domains.
 
-The supported profile workflow is:
+The initial profile workflow is:
 
 ```text
 stack init -> operator edit -> stack start -> stack status -> init codex
@@ -14,6 +14,16 @@ stack init -> operator edit -> stack start -> stack status -> init codex
 `stack start` runs doctor and render as needed, then starts only missing managed
 components after their dependencies pass. The stack profile never starts or
 supervises the client-owned `hubu-unified-mcp` stdio process.
+
+Later source or credential-reference changes use a reviewable two-phase flow:
+
+```text
+operator edit -> stack render -> review plan -> stack stop -> stack activate -> stack start
+```
+
+There is intentionally no `hubu stack restart` command. A changed, partial, or
+unhealthy managed stack is recovered as one dependency-ordered unit with an
+explicit graceful stop and start.
 
 ## Component ownership
 
@@ -50,8 +60,10 @@ PROFILE_ROOT/
   credential-file paths, never bearer or provider-secret values.
 - `providers.toml` contains operator-selected targets, pricing, spend ceilings,
   and the explicit live-execution gate.
-- `generated/` contains validated runtime artifacts and a redacted active
-  manifest. It is never an editing surface.
+- `generated/generations/` contains immutable validated runtime generations,
+  each with a redacted manifest.
+- `generated/active-manifest.json` is the atomic pointer to the selected
+  generation. Generated content is never an editing surface.
 
 The default profile is `hubu/stacks/default` under the host platform's user
 configuration directory. `HUBU_HOME` overrides Hubu's configuration root. An
@@ -134,17 +146,62 @@ binary provenance, component compatibility, provider catalogs, pricing, spend
 gates, identities, and credential references. It then uses service-owned
 production validators to stage a complete generation.
 
-A successful render:
+A first successful render:
 
 - writes immutable output below `generated/generations/`;
-- atomically replaces only `generated/active-manifest.json`;
+- validates it with the selected service-owned production binaries;
+- atomically creates `generated/active-manifest.json` only when no generation
+  is active and no launcher-owned process state exists;
 - records source and output digests, schema versions, binary provenance, and
-  restart impact in a redacted manifest; and
+  affected-component impact in a redacted per-generation manifest; and
 - leaves the source TOML unchanged.
+
+When a generation is already active, render validates and stages the new
+generation without changing the active manifest. Its redacted change plan
+contains changed source filenames, affected component names, the generation
+ID, and the exact activation command. Comment-only changes may have no affected
+component even though their source digest creates a distinct recoverable
+generation.
 
 An incomplete profile or validation failure leaves the previous active
 generation untouched. Generated files never contain raw bearer tokens,
 provider keys, human-approval capabilities, or reconciliation capabilities.
+
+## Updates and credential-reference rotation
+
+The three TOML files remain the source of truth. To update configuration or
+rotate one of the temporary file-based credential references:
+
+1. Create the replacement credential file with operator-controlled permissions.
+2. Edit only its absolute path in `credentials.toml`; do not put the credential
+   value in TOML.
+3. Run `stack doctor`, then `stack render` and review the reported source files,
+   affected components, and generation ID.
+4. If launcher-owned services are running, stop the whole managed stack.
+5. Activate the reviewed generation and start the whole managed stack.
+
+```sh
+hubu stack doctor --profile /absolute/path/to/profile
+hubu stack render --profile /absolute/path/to/profile
+hubu stack stop --profile /absolute/path/to/profile
+hubu stack activate --generation GENERATION_ID --profile /absolute/path/to/profile
+hubu stack start --profile /absolute/path/to/profile
+```
+
+Rendering and activation never read, copy, compare, or rewrite credential
+values. They validate reference shape and the owning service's configuration
+contract. Overwriting a credential value at the same path is therefore not a
+detectable or supported rotation: create a new file and change the reference so
+Hubu and the client-owned MCP handoff move together. Keep the previous
+credential available until the new generation is running and verified. If the
+client handoff is affected, rerun
+`hubu init codex --stack-profile ...` and restart Codex after backend startup.
+Native macOS Keychain loading and migration are tracked separately; this V1
+workflow intentionally preserves file-based Hubu and unified-MCP references.
+Gongbu's credential references remain Gongbu-owned opaque Keychain coordinates.
+The renderer does not read those secrets or prove that a Gongbu-to-Hubu caller
+value matches the Hubu bearer, so an operator rotating that shared capability
+must update both owning references before the whole-stack stop/start cycle.
 
 ## Compatibility
 
@@ -200,13 +257,15 @@ in `managed_local` mode, its Temporal child. Stack readiness means both HTTP
 backends and the worker are ready; the unified MCP remains client-owned and is
 reported as a compatible handoff rather than a running stack process.
 
-Repeated start is a no-op for a healthy, current stack. Start never repairs or
-signals a partially running, unhealthy, or changed managed stack. It reports
-the affected components and asks the operator to use the explicit graceful
-stop-then-start flow:
+Repeated start is a no-op for a healthy, current stack. Start never repairs,
+signals, or selectively restarts a partially running, unhealthy, changed, or
+drifted managed stack. For an unchanged unhealthy stack it asks for graceful
+whole-stack stop then start. For a validated staged update it additionally
+requires explicit generation activation while stopped:
 
 ```sh
 hubu stack stop --profile /absolute/path/to/profile
+hubu stack activate --generation GENERATION_ID --profile /absolute/path/to/profile
 hubu stack start --profile /absolute/path/to/profile
 ```
 
@@ -244,7 +303,37 @@ If a PID was reused or the recorded identity does not match, lifecycle commands
 refuse to signal it. After independently confirming that ownership is gone, the
 operator can remove only the stale metadata with `stack stop --forget-stale`.
 Databases, artifacts, managed Temporal data, generated configurations, and logs
-are never deleted by start, rollback, or stop.
+are never deleted by start, activation, rollback, or stop.
+
+## Generation rollback and interrupted updates
+
+List the validated generations retained by the profile:
+
+```sh
+hubu stack generations --profile /absolute/path/to/profile
+```
+
+Rollback never silently rewrites operator-owned input. Restore the exact
+`stack.toml`, `credentials.toml`, and `providers.toml` bytes for the target
+generation from operator version control or backup, select the same compatible
+binaries, and render them. Then stop the managed stack and reactivate that
+generation explicitly:
+
+```sh
+hubu stack render --profile /absolute/path/to/profile
+hubu stack stop --profile /absolute/path/to/profile
+hubu stack rollback --generation PRIOR_GENERATION_ID --profile /absolute/path/to/profile
+hubu stack start --profile /absolute/path/to/profile
+```
+
+The rollback command fails closed when the requested generation does not match
+the current source and selected-binary provenance, when its manifest or output
+digests are invalid, or while launcher-owned process metadata remains. A failed
+render or interrupted pre-activation update leaves the active manifest
+unchanged. A failed atomic activation leaves the prior active manifest in
+place; rerun doctor/render and retry activation after confirming the stack is
+stopped. Corrupt active or retained manifests are reported rather than skipped
+or replaced.
 
 ## Runtime and recovery boundaries
 
