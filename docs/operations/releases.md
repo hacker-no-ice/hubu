@@ -20,8 +20,9 @@ The distribution exposes two independent versions:
 
 A scheduled workflow publishes at most one prerelease for each exact `main`
 commit, tagged `main-<full-source-commit>`. There is no mutable latest-main
-artifact. Stable promotion is an explicit workflow dispatch, and neither
-channel replaces an existing tag or asset.
+artifact. Versioned release candidates use immutable `vX.Y.Z-rc.N` tags for
+human validation before stable promotion. Stable promotion is an explicit
+workflow dispatch, and no channel replaces an existing tag or asset.
 
 ## Release contents
 
@@ -99,10 +100,28 @@ gh workflow run release.yml \
 The workflow refuses draft, partial, or mismatched existing releases. Repeating
 the request never moves the tag or replaces an asset.
 
+## Publish a release candidate
+
+After validating a commit-addressed canary, publish a versioned candidate for
+human testing:
+
+```sh
+gh workflow run release.yml \
+  --repo hacker-no-ice/hubu \
+  --ref main \
+  -f channel=candidate \
+  -f version=v0.2.0-rc.1 \
+  -f source_commit=FULL_40_CHARACTER_COMMIT_SHA
+```
+
+Release-candidate tags and assets are immutable. If testing finds a problem,
+publish the fix from a new `main` commit as the next candidate number. Never
+replace an existing candidate.
+
 ## Promote a stable release
 
-Validate the commit-addressed prerelease and all published-archive smoke jobs,
-then dispatch:
+Validate the candidate and all published-archive smoke jobs, then dispatch the
+stable promotion from the same source commit:
 
 ```sh
 gh workflow run release.yml \

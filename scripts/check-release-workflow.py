@@ -74,10 +74,14 @@ for target in RELEASE_TARGETS:
 for required in (
     "channel:",
     "default: canary",
+    "- candidate",
     'INPUT_CHANNEL: ${{ inputs.channel }}',
     '"${INPUT_CHANNEL}" == "canary"',
+    '"${INPUT_CHANNEL}" == "candidate"',
+    "Candidate version must match vMAJOR.MINOR.PATCH-rc.NUMBER",
+    'RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}',
     'git checkout --detach "${source_commit}"',
-    "canary_release_is_complete",
+    "prerelease_is_complete",
     'gh release view "${tag}"',
     '.isDraft == false',
     '.isPrerelease == true',
@@ -112,6 +116,7 @@ if unpinned:
 
 print(
     "validated immutable release workflow: four production binaries, exactly two "
-    "temporary pre-launch macOS targets, scheduled and explicit canaries, shared "
-    "build identity, bounded permissions, and pinned actions"
+    "temporary pre-launch macOS targets, scheduled and explicit canaries, "
+    "versioned candidates, shared build identity, bounded permissions, and pinned "
+    "actions"
 )
