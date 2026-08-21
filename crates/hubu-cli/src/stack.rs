@@ -518,8 +518,8 @@ fn activate_selected_generation_with_renderer(
     rollback: bool,
     renderer: &Path,
 ) -> Result<()> {
-    lifecycle::ensure_profile_stopped(profile)?;
     let outcome = render_profile_with_renderer_outcome(profile, renderer)?;
+    lifecycle::ensure_profile_stopped(profile)?;
     if outcome.generation_id != requested {
         bail!(
             "generation `{requested}` does not match the current operator-owned source files and selected binary provenance; restore stack.toml, credentials.toml, providers.toml, and the compatible binaries recorded for that generation before retrying"

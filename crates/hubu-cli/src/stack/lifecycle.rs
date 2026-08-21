@@ -1205,7 +1205,7 @@ pub(super) fn ensure_profile_stopped(profile: &Path) -> Result<()> {
         );
     }
     let stack = read_toml::<StackSource>(&profile.join("stack.toml"))?;
-    let mut reachable = Vec::new();
+    let mut endpoints = Vec::new();
     for (component, ownership, endpoint) in [
         (
             "hubu-server",
@@ -1224,10 +1224,48 @@ pub(super) fn ensure_profile_stopped(profile: &Path) -> Result<()> {
                 .and_then(|value| value.endpoint.as_deref()),
         ),
     ] {
-        if ownership == Some(Ownership::Managed)
-            && endpoint.is_some_and(managed_endpoint_accepts_connections)
+        if ownership == Some(Ownership::Managed) {
+            if let Some(endpoint) = endpoint {
+                endpoints.push((component, "current source", endpoint.to_string()));
+            }
+        }
+    }
+    let generated = profile.join("generated");
+    let active_path = generated.join("active-manifest.json");
+    if active_path.exists() {
+        let active: ActiveManifest =
+            read_json(&active_path).context("read active generation before activation")?;
+        validate_manifest_integrity(&generated, &active)
+            .context("validate active generation before activation")?;
+        let generation = active_generation_path(&generated, &active)?;
+        let handoff: CodexHandoff = read_json(&generation.join("client-handoff.json"))?;
+        if handoff.schema_version != 1 {
+            bail!("active client handoff has an unsupported schema_version");
+        }
+        if active
+            .generated_file_digests
+            .contains_key("hubu-launch.json")
         {
-            reachable.push(component);
+            endpoints.push(("hubu-server", "active generation", handoff.hubu_endpoint));
+        }
+        if active
+            .generated_file_digests
+            .contains_key("gongbu-server.json")
+        {
+            endpoints.push((
+                "gongbu-server",
+                "active generation",
+                handoff.gongbu_endpoint,
+            ));
+        }
+    }
+    let mut checked = BTreeSet::new();
+    let mut reachable = Vec::new();
+    for (component, source, endpoint) in endpoints {
+        if checked.insert((component, endpoint.clone()))
+            && managed_endpoint_accepts_connections(&endpoint)
+        {
+            reachable.push(format!("{component} ({source}: {endpoint})"));
         }
     }
     if !reachable.is_empty() {
@@ -1637,6 +1675,61 @@ ownership = "managed"
         assert!(error.contains("hubu-server"));
         drop(listener);
         ensure_profile_stopped(profile).unwrap();
+    }
+
+    #[test]
+    fn activation_refuses_the_reachable_active_endpoint_after_a_source_endpoint_change() {
+        let temp = tempdir().unwrap();
+        let profile = temp.path();
+        fs::write(
+            profile.join("stack.toml"),
+            "schema_version = 1\n[hubu]\nownership = \"managed\"\nendpoint = \"http://127.0.0.1:1\"\n",
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let active_endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let generation_id = "a".repeat(64);
+        let generated = profile.join("generated");
+        let generation = generated.join("generations").join(&generation_id);
+        fs::create_dir_all(&generation).unwrap();
+        let handoff = CodexHandoff {
+            schema_version: 1,
+            mcp_server: PathBuf::from("/tmp/hubu-unified-mcp"),
+            hubu_endpoint: active_endpoint.clone(),
+            hubu_token_file: PathBuf::from("/tmp/hubu-auth"),
+            approval_token_file: PathBuf::from("/tmp/hubu-approval"),
+            reconciliation_token_file: PathBuf::from("/tmp/hubu-reconciliation"),
+            gongbu_endpoint: "http://127.0.0.1:2".into(),
+            gongbu_token_file: PathBuf::from("/tmp/gongbu-caller"),
+        };
+        let handoff_bytes = serde_json::to_vec_pretty(&handoff).unwrap();
+        let launch_bytes = b"{}\n";
+        fs::write(generation.join("client-handoff.json"), &handoff_bytes).unwrap();
+        fs::write(generation.join("hubu-launch.json"), launch_bytes).unwrap();
+        let active = ActiveManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            generation_id: generation_id.clone(),
+            generation: format!("generations/{generation_id}"),
+            source_schema_versions: BTreeMap::new(),
+            source_digests: BTreeMap::new(),
+            generated_file_digests: BTreeMap::from([
+                ("client-handoff.json".into(), digest(&handoff_bytes)),
+                ("hubu-launch.json".into(), digest(launch_bytes)),
+            ]),
+            binary_provenance: Vec::new(),
+            process_log_files: BTreeMap::new(),
+            restart_impact: Vec::new(),
+        };
+        fs::write(
+            generated.join("active-manifest.json"),
+            serde_json::to_vec_pretty(&active).unwrap(),
+        )
+        .unwrap();
+
+        let error = ensure_profile_stopped(profile).unwrap_err().to_string();
+        assert!(error.contains("active generation"));
+        assert!(error.contains(&active_endpoint));
     }
 
     #[test]
