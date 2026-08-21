@@ -32,7 +32,8 @@ def main() -> int:
     failures: list[str] = []
 
     for source in sorted(ROOT.rglob("*.md")):
-        if ".git" in source.parts or "target" in source.parts:
+        ignored_directories = {".git", "target", "node_modules", "dist", ".vinext"}
+        if any(part in ignored_directories for part in source.parts):
             continue
         text = source.read_text(encoding="utf-8")
         for match in (*MARKDOWN_LINK.finditer(text), *REFERENCE_LINK.finditer(text)):
