@@ -16,6 +16,10 @@ navigation in `app/lib/docs.ts`. The page is searchable automatically after the
 next build. Relative Markdown links are translated to site routes; links to
 repository source files remain GitHub links.
 
+Internal page changes intentionally use native document navigation. The current
+vinext client router fails on deployed dynamic documentation routes; the smoke
+tests guard this fallback until the upstream Link runtime is safe to restore.
+
 ## Local development
 
 From this directory:

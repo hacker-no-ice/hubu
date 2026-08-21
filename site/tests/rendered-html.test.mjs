@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function render(pathname = "/") {
@@ -16,7 +17,8 @@ test("server-renders the Hubu documentation home", async () => {
   const html = await response.text();
   assert.match(html, /Governed spend/);
   assert.match(html, /Experimental and local-first/);
-  assert.match(html, /stack start/);
+  assert.match(html, /hubu stack start/);
+  assert.match(html, /In active development/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 
@@ -26,6 +28,15 @@ test("renders canonical Markdown on a documentation route", async () => {
   const html = await response.text();
   assert.match(html, /Local stack configuration/);
   assert.match(html, /stack doctor/);
-  assert.match(html, /not available on main yet/i);
+  assert.match(html, /not on main yet/i);
   assert.match(html, /On this page/);
+});
+
+test("uses document navigation for deployed subpage reliability", async () => {
+  const sources = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/DocsShell.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/Search.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(sources.join("\n"), /next\/link|<Link\b/);
 });

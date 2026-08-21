@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { Search } from "./Search";
 import { adjacentDocuments, navGroups, searchDocuments, type Doc } from "../lib/docs";
 
@@ -9,7 +8,7 @@ function Navigation({ current }: { current: string }) {
         <section key={group.label}>
           <h2>{group.label}</h2>
           {group.items.map(([label, slug]) => (
-            <Link aria-current={slug === current ? "page" : undefined} href={`/docs/${slug}`} key={slug}>{label}</Link>
+            <a aria-current={slug === current ? "page" : undefined} href={`/docs/${slug}`} key={slug}>{label}</a>
           ))}
         </section>
       ))}
@@ -23,7 +22,7 @@ export function DocsShell({ document }: { document: Doc }) {
   return (
     <div className="docs-shell">
       <header className="docs-header">
-        <Link className="brand" href="/" aria-label="Hubu documentation home"><span className="brand-seal" aria-hidden="true">户</span><span>Hubu <i>/ docs</i></span></Link>
+        <a className="brand" href="/" aria-label="Hubu documentation home"><span className="brand-seal" aria-hidden="true">户</span><span>Hubu <i>/ docs</i></span></a>
         <Search documents={searchDocuments} />
         <a className="github-compact" href="https://github.com/hacker-no-ice/hubu">GitHub ↗</a>
       </header>
@@ -32,13 +31,13 @@ export function DocsShell({ document }: { document: Doc }) {
       <main className="doc-main" id="main-content">
         <div className="doc-status"><span>EXPERIMENTAL · LOCAL-FIRST</span><p>Evaluate carefully. Live-provider paths are experimental and are not money-grade production infrastructure.</p></div>
         {document.slug === "local-stack" && (
-          <aside className="availability-note"><strong>Current lifecycle on main</strong><p>Use <code>stack init → edit → stack doctor → stack render → stack doctor → init codex</code>, then follow the service runbooks. Planned <code>stack start</code> and <code>stack status</code> commands are not available on main yet.</p></aside>
+          <aside className="availability-note"><strong>One-shot lifecycle in development</strong><p><code>hubu stack start</code> is being built as the one-shot managed start path, paired with <code>hubu stack status</code>. They are not on main yet; current releases use <code>stack init → edit → stack doctor → stack render → stack doctor → init codex</code> and the service runbooks.</p></aside>
         )}
         <article className="markdown-body" dangerouslySetInnerHTML={{ __html: document.html }} />
         <div className="source-row"><a href={document.sourceUrl}>Edit this page on GitHub ↗</a><span>Canonical source: {document.sourcePath}</span></div>
         <nav className="doc-pagination" aria-label="Previous and next pages">
-          {previous ? <Link href={`/docs/${previous.slug}`}><small>← Previous</small><strong>{previous.title}</strong></Link> : <span />}
-          {next ? <Link href={`/docs/${next.slug}`}><small>Next →</small><strong>{next.title}</strong></Link> : <span />}
+          {previous ? <a href={`/docs/${previous.slug}`}><small>← Previous</small><strong>{previous.title}</strong></a> : <span />}
+          {next ? <a href={`/docs/${next.slug}`}><small>Next →</small><strong>{next.title}</strong></a> : <span />}
         </nav>
       </main>
       <aside className="toc" aria-label="On this page">

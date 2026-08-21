@@ -1,1093 +1,209 @@
-const sharedLinks = {
-  readme: ["README", "README.md"],
-  api: ["Local HTTP API", "crates/hubu-api/src/lib.rs"],
-  appSpend: ["Spend approval service", "crates/hubu-core/src/app/spend_approval.rs"],
-  appClaims: ["Executor claim service", "crates/hubu-core/src/app/executor_claim.rs"],
-  cli: ["CLI", "crates/hubu-cli/src/main.rs"],
-  stackLifecycle: ["Local stack lifecycle", "crates/hubu-cli/src/stack/lifecycle.rs"],
-  localStack: ["Local stack runbook", "docs/local-stack.md"],
-  localStackAcceptance: ["Local stack acceptance canary", "scripts/integration-local-stack-acceptance.sh"],
-  operationKeySkill: ["Operation-key skill", "skills/generate-hubu-operation-key/SKILL.md"],
-  operationKeyHelper: ["Operation-key helper", "skills/generate-hubu-operation-key/scripts/operation_keys.py"],
-  common: ["Shared models", "crates/hubu-common/src/lib.rs"],
-  user: ["User manager", "crates/hubu-core/src/user.rs"],
-  registration: ["Registration manager", "crates/hubu-core/src/registration/manager.rs"],
-  registrationModel: ["Registration model", "crates/hubu-core/src/registration/model.rs"],
-  registrationProtocol: ["Agent registration deep dive", "docs/agent-registration.md"],
-  policyEngine: ["Policy engine", "crates/hubu-core/src/policy/engine.rs"],
-  policyModel: ["Policy model", "crates/hubu-core/src/policy/model.rs"],
-  policyCondition: ["Policy conditions", "crates/hubu-core/src/policy/condition.rs"],
-  spend: ["Spend manager", "crates/hubu-core/src/spend/manager.rs"],
-  spendModel: ["Spend model", "crates/hubu-core/src/spend/model.rs"],
-  spendExecutor: ["Spend executor contract", "docs/spend-executor-contract.md"],
-  executionScope: ["Spend lifecycle", "docs/spend-lifecycle.md"],
-  scopeModel: ["Execution scope model", "crates/hubu-common/src/execution_scope.rs"],
-  budget: ["Budget manager", "crates/hubu-core/src/budget/manager.rs"],
-  budgetModel: ["Budget model", "crates/hubu-core/src/budget/model.rs"],
-  spendingTarget: ["Spending target model", "crates/hubu-core/src/spending_target.rs"],
-  payment: ["Payment manager", "crates/hubu-wallet/src/payment.rs"],
-  paymentAttempt: ["Payment attempt store", "crates/hubu-wallet/src/persistence.rs"],
-  rail: ["Payment rail", "crates/hubu-wallet/src/rail.rs"],
-  ledger: ["Ledger", "crates/hubu-wallet/src/ledger.rs"],
-  storage: ["Core SQLite storage", "crates/hubu-core/src/storage.rs"],
-  persistence: ["Governance persistence", "crates/hubu-core/src/persistence.rs"],
-  telemetry: ["Telemetry", "crates/hubu-core/src/telemetry.rs"],
-  releases: ["Release runbook", "docs/operations/releases.md"],
-  releaseWorkflow: ["Release workflow", ".github/workflows/release.yml"],
-  gongbuOverview: ["Gongbu execution plane", "docs/gongbu-execution.md"],
-  gongbuServer: ["Gongbu server runbook", "docs/operations/gongbu-server.md"],
-  gongbuApplication: ["Gongbu composition", "crates/gongbu-api/src/application.rs"],
-  gongbuWorkflow: ["Gongbu workflow", "crates/gongbu-api/src/workflow.rs"],
-  gongbuExecution: ["Gongbu execution store", "crates/gongbu-api/src/execution/mod.rs"],
-  gongbuArtifact: ["Gongbu artifact service", "crates/gongbu-api/src/artifact/mod.rs"],
-  gongbuProvider: ["Gongbu provider boundary", "crates/gongbu-api/src/provider/mod.rs"],
-  gongbuHubu: ["Gongbu Hubu client", "crates/gongbu-api/src/hubu/mod.rs"],
-  unifiedMcp: ["Unified MCP router", "crates/hubu-unified-mcp/src/lib.rs"],
-  unifiedHubuCatalog: ["Unified Hubu tool catalog", "crates/hubu-unified-mcp/src/hubu/catalog.rs"],
-  unifiedHubuRouting: ["Unified Hubu request routing", "crates/hubu-unified-mcp/src/hubu/routing.rs"],
-  unifiedTrustedIdentity: ["Unified trusted identity parsing", "crates/hubu-unified-mcp/src/hubu/trusted_identity.rs"],
-  unifiedGongbuCatalog: ["Unified Gongbu tool catalog", "crates/hubu-unified-mcp/src/gongbu/catalog.rs"],
-  unifiedGongbuFixture: ["Gongbu tool golden fixture", "crates/hubu-unified-mcp/tests/fixtures/gongbu-tool-definitions-v2.json"],
-  unifiedMcpStdio: ["Unified MCP stdio lifecycle", "crates/hubu-unified-mcp/src/stdio.rs"],
-  unifiedMcpNotifications: ["Unified MCP catalog transitions", "crates/hubu-unified-mcp/src/notification.rs"],
-  unifiedMcpContract: ["Unified MCP contract", "docs/unified-mcp.md"],
-  gongbuConfig: ["Gongbu server example", "examples/gongbu/gongbu.server.json"],
+const repository = "https://github.com/hacker-no-ice/hubu/blob/main/";
+
+const stages = {
+  discover: {
+    eyebrow: "01 · DISCOVER",
+    title: "One surface, explicit owners",
+    summary: "The agent connects to hubu-unified-mcp, which reports backend compatibility and routes each named tool to exactly one owner.",
+    outcome: "eligible hubu_* + gongbu_* tools",
+    links: ["link-agent-mcp"],
+    components: ["agent", "mcp"],
+  },
+  authorize: {
+    eyebrow: "02 · AUTHORIZE",
+    title: "Govern before execution",
+    summary: "Hubu evaluates trusted identity, policy, targets, and budgets before it issues a scoped authorization.",
+    outcome: "allow · deny · needs approval",
+    links: ["link-agent-mcp", "link-mcp-hubu"],
+    components: ["agent", "mcp", "hubu"],
+  },
+  execute: {
+    eyebrow: "03 · EXECUTE",
+    title: "Cross one versioned boundary",
+    summary: "Gongbu claims the authorization, runs a durable provider workflow, applies pricing, and keeps credentials and artifacts in its own plane.",
+    outcome: "completed · failed · retrying",
+    links: ["link-hubu-gongbu", "link-gongbu-provider"],
+    components: ["hubu", "gongbu", "provider"],
+  },
+  settle: {
+    eyebrow: "04 · SETTLE",
+    title: "Tie receipts back to intent",
+    summary: "Gongbu returns compact receipt and artifact references. Hubu finalizes the claim, releases or consumes the hold, and records ledger state.",
+    outcome: "settled · released · reconciliation",
+    links: ["link-gongbu-provider", "link-hubu-gongbu"],
+    components: ["provider", "gongbu", "hubu"],
+  },
 };
 
 const components = {
-  top: {
-    title: "Major Components",
-    kind: "Overview",
-    viewBox: "0 0 1440 900",
-    copy:
-      "Agents use one default MCP surface. The router reaches independently operated Hubu and Gongbu HTTP processes with separate credentials; shared source and packaging do not merge their storage, provider work, artifacts, or failure domains.",
+  stack: {
+    kind: "SYSTEM BOUNDARY",
+    title: "Separate by design",
+    copy: "The repository and release are unified. The running systems are not. Hubu and Gongbu retain separate processes, state, credentials, provider execution, artifacts, and recovery paths.",
     responsibilities: [
-      "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, approve or deny pending spend, review protected actions, and reconcile uncertain expired claims.",
-      "Agents discover Hubu governance and Gongbu execution/artifact tools through one `hubu-unified-mcp` process; trusted client metadata supplies operation and optional task identity outside model-authored arguments.",
-      "For local dogfooding, a repository Codex skill allocates a model-managed operation key once, binds it to immutable spend scope, and persists recovery state outside the Hubu server.",
-      "The CLI validates and reconciles launcher-owned local backend processes while leaving external services and the client-owned unified MCP process untouched.",
-      "The clean-environment canary starts the real Hubu, Gongbu, worker, and managed Temporal processes with source-only feature-gated fixture support that release binaries omit.",
-      "Local HTTP callers reach the API with the Hubu bearer token before protected routes resolve user authority.",
-      "Hubu resolves typed provider, executor, capability, and billing identities against its trusted catalog before policy evaluation and binds the canonical scope to authorization.",
-      "Release archives contain four production binaries under one product version and source provenance identity.",
-      "Gongbu exclusively claims, then settles actual vendor cost with receipt metadata or releases active authorized spend without Hubu performing provider work; expired uncertainty returns to a human decision.",
-      "The API handles local HTTP concerns and delegates spend approval, payment, and executor claim lifecycle orchestration to core app services.",
-      "Gongbu owns its process, database, Temporal workflow state, vendor credentials, provider adapters, model calls, artifacts, retries, and failure domain; Hubu stores only governance state and compact provider/artifact references.",
-      "SQLite-backed records preserve users, agents, advisory spending targets, budgets, policies, executor claims and receipts, reconciliation evidence, payments, and ledger entries.",
-      "The unified MCP surface is the only agent-facing surface and routes approved Hubu governance and Gongbu execution/artifact tools through independently configured backend clients.",
+      "Ship compatible binaries from one locked source revision.",
+      "Communicate only through the versioned executor contract.",
+      "Keep backend credentials, databases, and failures isolated.",
+      "Expose one agent-facing MCP surface without collapsing ownership.",
+      "Verify the real local process lifecycle and deterministic execution with a non-billable acceptance canary.",
     ],
-    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.localStackAcceptance, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.unifiedMcp, sharedLinks.unifiedMcpContract, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.scopeModel],
-    zones: [
-      { label: "Hubu control-plane process + owned state", x: 650, y: 48, w: 730, h: 366, labelX: 682, labelY: 84 },
-      { label: "Gongbu execution-plane process + owned state", x: 650, y: 484, w: 730, h: 366, labelX: 682, labelY: 520 },
-    ],
-    nodes: [
-      { id: "human", label: "Human owner", sub: "setup + decisions", x: 42, y: 108, w: 212, h: 100, tone: "human" },
-      { id: "agent", label: "AI agent", sub: "one MCP connection", x: 42, y: 380, w: 212, h: 100, tone: "agent" },
-      { id: "cli", label: "Hubu CLI", sub: "setup + stack lifecycle", x: 340, y: 110, w: 230, h: 96, tone: "surface" },
-      { id: "mcp", label: "Unified MCP", sub: "only agent surface", x: 340, y: 382, w: 230, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
-      { id: "release", label: "Release artifacts", sub: "four pinned binaries", x: 340, y: 708, w: 230, h: 96, tone: "surface" },
-      { id: "api", label: "Hubu HTTP API", sub: "Hubu bearer", x: 706, y: 132, w: 226, h: 104, tone: "core" },
-      { id: "app", label: "Governance services", sub: "policy + budgets + claims", x: 1010, y: 132, w: 250, h: 104, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },
-      { id: "ledger", label: "Hubu SQLite", sub: "governance + ledger", x: 1010, y: 286, w: 250, h: 96, tone: "data", path: "crates/hubu-core/src/storage.rs" },
-      { id: "gongbu", label: "Gongbu HTTP API", sub: "distinct caller capability", x: 706, y: 570, w: 226, h: 104, tone: "executor", path: "crates/gongbu-api/src/http/mod.rs" },
-      { id: "workflow", label: "Provider execution", sub: "workflow + adapters", x: 1010, y: 548, w: 250, h: 104, tone: "executor", path: "crates/gongbu-api/src/workflow.rs" },
-      { id: "gongbuData", label: "Gongbu state", sub: "SQLite + artifacts + credentials", x: 1010, y: 716, w: 250, h: 96, tone: "data", path: "crates/gongbu-api/src/application.rs" },
-    ],
-    edges: [
-      ["human", "cli", "operate"],
-      ["agent", "mcp", "initialize + tools"],
-      ["cli", "api", "Hubu credential"],
-      ["mcp", "api", "hubu_* + Hubu credential", { fromSide: "right", toSide: "left", waypoints: [{ x: 610, y: 430 }, { x: 610, y: 184 }], labelSegment: 1, labelDx: 34 }],
-      ["mcp", "gongbu", "gongbu_* + Gongbu credential", { fromSide: "right", toSide: "left", waypoints: [{ x: 610, y: 430 }, { x: 610, y: 622 }], labelSegment: 1, labelDx: 42 }],
-      ["api", "app", "govern"],
-      ["app", "ledger", "persist"],
-      ["gongbu", "workflow", "execute"],
-      ["workflow", "gongbuData", "own state + artifacts"],
-      ["gongbu", "api", "versioned executor contract", { fromSide: "top", toSide: "bottom", waypoints: [{ x: 819, y: 458 }, { x: 819, y: 430 }], labelSegment: 1, labelDx: 150 }],
-    ],
-  },
-  release: {
-    title: "Immutable Releases",
-    kind: "Component",
-    copy:
-      "The release workflow turns one exact main commit into target-specific archives containing four production binaries from the unified workspace.",
-    responsibilities: [
-      "Creates a commit-addressed prerelease for each eligible main build and accepts explicit stable SemVer promotion for an exact main revision.",
-      "Runs formatting, Clippy, workspace tests, the core integration flow, and locked release builds before publication.",
-      "Builds native release archives with hubu, hubu-server, hubu-unified-mcp, gongbu-server, licenses, notices, the lockfile, manifest, and per-target provenance.",
-      "Preserves separate Hubu and Gongbu runtime boundaries while sharing one product version and source provenance identity.",
-      "Publishes SHA-256 checksums without overwriting existing tags or assets, then smoke-tests downloads, legal files, manifests, startup, unified MCP initialization, and all four version surfaces.",
-      "Keeps the Hubu product version separate from the hubu-spend-executor-v4.2 contract identifier so consumers can negotiate compatibility explicitly.",
-    ],
-    links: [sharedLinks.releaseWorkflow, sharedLinks.releases, sharedLinks.common, sharedLinks.api, sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.gongbuApplication],
-    nodes: [
-      { id: "source", label: "Exact main commit", sub: "40-character SHA", x: 62, y: 224, w: 210, h: 92, tone: "data" },
-      { id: "checks", label: "Release gates", sub: "fmt + lint + tests", x: 352, y: 224, w: 210, h: 92, tone: "core" },
-      { id: "matrix", label: "Native builds", sub: "macOS + Linux", x: 642, y: 224, w: 210, h: 92, tone: "core" },
-      { id: "published", label: "GitHub Release", sub: "archives + SHA-256", x: 928, y: 112, w: 210, h: 92, tone: "data" },
-      { id: "smoke", label: "Clean smoke", sub: "download + start", x: 928, y: 356, w: 210, h: 92, tone: "agent" },
-      { id: "consumer", label: "Pinned consumer", sub: "tag + checksum", x: 642, y: 510, w: 210, h: 92, tone: "executor" },
-    ],
-    edges: [
-      ["source", "checks", "checkout", { labelDy: -44 }],
-      ["checks", "matrix", "gate"],
-      ["matrix", "published", "publish once", { fromSide: "top", toSide: "left", waypoints: [{ x: 747, y: 170 }, { x: 900, y: 170 }, { x: 900, y: 158 }], labelSegment: 1 }],
-      ["published", "smoke", "download"],
-      ["smoke", "consumer", "validated pin"],
-    ],
-  },
-  api: {
-    title: "Local HTTP API",
-    kind: "Component",
-    copy:
-      "The local server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, resolves public IDs, and leaves spend approval, payment, and claim state transitions to core app services.",
-    responsibilities: [
-      "Frames each request at CRLF-CRLF, validates Content-Length, reads exactly the declared body, and bounds header size, body size, and socket read time.",
-      "Keeps health and guidance public while requiring a local bearer token for protected routes plus distinct human capabilities for approval and reconciliation mutations.",
-      "Uses the local token and current user context for protected workflow authority, while refusing to treat executor possession of that token as human approval or reconciliation authority.",
-      "Exposes owner-scoped approval lookup and resolve routes; approve and deny are idempotent, while conflicting resolutions are rejected.",
-      "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
-      "Delegates authorize/payment to `SpendApprovalService` and claim, lookup, queue selection, settle/release, and reconciliation to `ExecutorClaimService` so both workflows are testable without HTTP.",
-      "Bridges wallet payment authorization and durable external executor claims through shared spend and budget state.",
-      "Uses one stable platform operation key as the agent-scoped workflow identity, with immutable authorization revisions for safe scope correction after terminal denial.",
-      "Returns immutable attempt audit and structured retry guidance, while SQLite atomically admits corrected revisions and rejects unsafe changed scope with conflict status.",
-      "Uses SQLite as the finalization authority so receipt, claim, token, hold, and balance commit atomically, settle serializes against release, and identical executor or human reconciliation retries return stored state.",
-    ],
-    links: [sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, sharedLinks.telemetry],
-    nodes: [
-      { id: "routes", label: "HTTP framing + routes", sub: "bounded GET/POST JSON", x: 72, y: 92, w: 220, h: 90, tone: "agent" },
-      { id: "auth", label: "Local auth", sub: "bearer + owner caps", x: 410, y: 76, w: 220, h: 92, tone: "core" },
-      { id: "state", label: "ServerState", sub: "shared managers", x: 410, y: 250, w: 220, h: 96, tone: "core" },
-      { id: "app", label: "App services", sub: "approval + claims", x: 410, y: 432, w: 220, h: 92, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },
-      { id: "registration", label: "Registration", sub: "agent records", x: 805, y: 48, w: 190, h: 84, tone: "core" },
-      { id: "governance", label: "Governance DB", sub: "attempts/outcomes/holds", x: 804, y: 180, w: 196, h: 84, tone: "data" },
-      { id: "wallet", label: "Wallet", sub: "payment + ledger", x: 808, y: 310, w: 188, h: 84, tone: "wallet" },
-      { id: "telemetry", label: "Telemetry", sub: "JSON events", x: 804, y: 464, w: 196, h: 86, tone: "data" },
-    ],
-    edges: [
-      ["routes", "auth", "protect"],
-      ["auth", "state", "dispatch"],
-      ["state", "registration", "mutate"],
-      ["state", "app", "authorize/claims"],
-      ["app", "governance", "persist"],
-      ["app", "wallet", "execute"],
-      ["app", "telemetry", "log"],
-    ],
-  },
-  app: {
-    title: "App Services",
-    kind: "Component",
-    copy:
-      "The core app layer coordinates managers and repositories for use cases that need more than one domain object. Spend approval and executor claim lifecycle services can be tested directly without exercising HTTP routes.",
-    responsibilities: [
-      "Atomically admits an immutable spend-attempt revision before evaluation; only all-denied, side-effect-free history permits corrected scope.",
-      "Evaluates a spend request against the selected policy and records allow or deny as final while preserving needs_approval as a durable pending decision.",
-      "Resolves pending spend exactly once: approval issues the scoped token and budget hold, while denial creates neither.",
-      "Reserves exactly one active agent budget for an allowed spend decision.",
-      "Persists the spend auth token and frozen budget hold after the budget accepts the request.",
-      "Submits wallet payments, persists payment attempts, marks successful tokens used, and settles, releases, or keeps the hold frozen according to the failed-payment retry policy.",
-      "Creates and looks up executor claims, derives the expired reconciliation queue, and coordinates receipt-backed executor or human finalization through one atomic repository boundary.",
-      "Returns domain-shaped approval, rejection, payment, and claim state while the API owns authentication, public IDs, and JSON response shape.",
-    ],
-    links: [sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spend, sharedLinks.budget, sharedLinks.persistence, sharedLinks.payment, sharedLinks.paymentAttempt],
-    nodes: [
-      { id: "input", label: "Use-case input", sub: "internal IDs + policy", x: 78, y: 112, w: 230, h: 92, tone: "core" },
-      { id: "approval", label: "Spend approval", sub: "wait + resolve + pay", x: 410, y: 72, w: 224, h: 92, tone: "core", path: "crates/hubu-core/src/app/spend_approval.rs" },
-      { id: "claims", label: "Executor claims", sub: "claim + reconcile", x: 410, y: 282, w: 224, h: 92, tone: "core", path: "crates/hubu-core/src/app/executor_claim.rs" },
-      { id: "managers", label: "Domain managers", sub: "spend + budget", x: 410, y: 492, w: 224, h: 92, tone: "core", path: "crates/hubu-core/src/spend/manager.rs" },
-      { id: "persist", label: "Governance store", sub: "claims + receipts", x: 798, y: 188, w: 238, h: 98, tone: "data", path: "crates/hubu-core/src/persistence.rs" },
-      { id: "payment", label: "Payment submit", sub: "wallet boundary", x: 798, y: 444, w: 238, h: 98, tone: "wallet", path: "crates/hubu-wallet/src/payment.rs" },
-    ],
-    edges: [
-      ["input", "approval", "authorize"],
-      ["input", "claims", "claim/finalize"],
-      ["approval", "managers", "evaluate/reserve", { fromSide: "left", toSide: "left", waypoints: [{ x: 360, y: 118 }, { x: 360, y: 538 }], labelSegment: 1, labelDx: -80 }],
-      ["claims", "managers", "read/apply"],
-      ["approval", "persist", "save"],
-      ["claims", "persist", "atomic transition", { labelDx: 8, labelDy: 50 }],
-      ["approval", "payment", "execute", { labelDx: 50, labelDy: 80 }],
-    ],
-  },
-  registration: {
-    title: "Registration",
-    kind: "Component",
-    viewBox: "0 0 1200 700",
-    copy:
-      "Registration has two paths: humans create the owner user context that Hubu selects as active, while agents prepare structured identity and version payloads against that owner. The server validates fingerprints before creating or reusing agent records.",
-    responsibilities: [
-      "Creates human owner users from a small username, display name, and optional email request, then selects that user as the active owner.",
-      "Publishes compact agent registration guidance so agents can build envelopes for the current Hubu user context.",
-      "Accepts simple agent requests or full envelopes, resolves the owner public id, and rejects mismatched fingerprints.",
-      "Creates or reuses agent identity, version, and account records, plus a fresh session per agent registration.",
-    ],
-    links: [sharedLinks.user, sharedLinks.registration, sharedLinks.registrationModel, sharedLinks.registrationProtocol, sharedLinks.common],
-    zones: [
-      { label: "Human registration path", x: 44, y: 46, w: 1090, h: 178 },
-      { label: "Agent registration path", x: 44, y: 286, w: 1090, h: 350 },
-    ],
-    nodes: [
-      { id: "humanFields", label: "Human fields", sub: "username + display", x: 84, y: 112, w: 218, h: 88, tone: "human", path: "crates/hubu-cli/src/main.rs" },
-      { id: "userManager", label: "User manager", sub: "create + select", x: 436, y: 112, w: 220, h: 88, tone: "core", path: "crates/hubu-core/src/user.rs" },
-      { id: "ownerContext", label: "Owner context", sub: "usr_ public id", x: 806, y: 112, w: 230, h: 88, tone: "data", path: "crates/hubu-core/src/user.rs" },
-      { id: "guidance", label: "Guidance", sub: ".well-known JSON", x: 84, y: 352, w: 218, h: 88, tone: "agent", path: "docs/agent-registration.md" },
-      { id: "review", label: "Human review", sub: "name + version", x: 84, y: 512, w: 218, h: 88, tone: "human", path: "docs/agent-registration.md" },
-      { id: "envelope", label: "Envelope", sub: "identity + version", x: 436, y: 430, w: 230, h: 98, tone: "core", path: "docs/agent-registration.md" },
-      { id: "fingerprints", label: "Fingerprint check", sub: "canonical SHA-256", x: 806, y: 352, w: 240, h: 92, tone: "core", path: "crates/hubu-api/src/lib.rs" },
-      { id: "records", label: "Agent records", sub: "identity/version/account", x: 806, y: 512, w: 250, h: 96, tone: "data", path: "crates/hubu-core/src/registration/manager.rs" },
-    ],
-    edges: [
-      ["humanFields", "userManager", "POST /init"],
-      ["userManager", "ownerContext", "create + select"],
-      ["guidance", "envelope", "client fills"],
-      ["review", "envelope", "approves"],
-      ["ownerContext", "envelope", "owner pub_id", { labelDx: -78, labelDy: 4, labelT: 0.58 }],
-      ["envelope", "fingerprints", "canonicalize"],
-      ["fingerprints", "records", "create/reuse"],
-    ],
-  },
-  policy: {
-    title: "Policy Resources & Engine",
-    kind: "Component",
-    copy:
-      "Hubu reconciles owner-scoped policy resources into immutable canonical revisions, assigns them by user default or agent override, and evaluates the selected current revision with deterministic deny-first precedence.",
-    responsibilities: [
-      "Gives each policy a stable opaque pol_ public id, immutable declarative key, mutable display name, and atomic current-revision pointer.",
-      "Canonicalizes and hashes immutable revisions; identical apply is a no-op and optional revision/hash compare-and-set rejects stale writes.",
-      "Stores assignments as separate references and migrates embedded legacy assignments without changing their effective content.",
-      "Records actor, source, timestamp, old/new hashes, and affected assignments for every mutation.",
-      "Validates policy shape before condition evaluation.",
-      "Resolves provider, executor, capability, and billing-merchant selectors against a versioned trusted catalog; unknown or ambiguous combinations fail closed.",
-      "Evaluates typed condition trees over amount, currency, agent, provider, executor, capability, billing merchant, legacy merchant, and category fields.",
-      "Merges matched effects as deny > needs_approval > allow > default.",
-    ],
-    links: [sharedLinks.persistence, sharedLinks.api, sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.executionScope, sharedLinks.scopeModel, sharedLinks.policyEngine, sharedLinks.policyModel, sharedLinks.policyCondition, ["Policy doc", "docs/policy-engine.md"]],
-    nodes: [
-      { id: "apply", label: "Declarative apply", sub: "validate + CAS", x: 54, y: 80, w: 210, h: 90, tone: "human", path: "crates/hubu-api/src/lib.rs" },
-      { id: "resource", label: "Policy resource", sub: "pol_ id + key + name", x: 390, y: 80, w: 218, h: 90, tone: "core", path: "crates/hubu-core/src/persistence.rs" },
-      { id: "revisions", label: "Immutable revisions", sub: "number + SHA-256", x: 742, y: 80, w: 228, h: 90, tone: "data", path: "crates/hubu-core/src/persistence.rs" },
-      { id: "assignments", label: "Assignments", sub: "default / agent override", x: 742, y: 238, w: 228, h: 90, tone: "data", path: "crates/hubu-core/src/persistence.rs" },
-      { id: "request", label: "Scope selector", sub: "provider/executor/capability/billing", x: 54, y: 412, w: 240, h: 90, tone: "agent", path: "crates/hubu-common/src/execution_scope.rs" },
-      { id: "validate", label: "Resolve + evaluate", sub: "canonical scope + typed rules", x: 390, y: 412, w: 218, h: 90, tone: "core" },
-      { id: "decision", label: "Decision trace", sub: "allow/approval/deny", x: 742, y: 412, w: 228, h: 90, tone: "wallet" },
-    ],
-    edges: [
-      ["apply", "resource", "reconcile"],
-      ["resource", "revisions", "append / point"],
-      ["resource", "assignments", "reference"],
-      ["assignments", "validate", "select current"],
-      ["request", "validate", "input"],
-      ["validate", "decision", "trace + precedence", { labelDy: -50 }],
-    ],
-  },
-  budget: {
-    title: "Budgets & Spending Targets",
-    kind: "Component",
-    copy:
-      "Agent budgets are hard execution-scoped allocations; user spending targets are separate advisory records. Spend reserves exactly one agent-budget hold for payment or executor completion, and expired executor uncertainty remains frozen until a human reconciles vendor billing.",
-    responsibilities: [
-      "Creates single or finite recurring budget periods owned by exactly one agent.",
-      "Revokes active budgets and replaces them by preserving history and creating a new forward-looking allowance.",
-      "Persists user spending targets separately and compares them with the maximum concurrent allocation of overlapping agent budgets.",
-      "Returns structured advisory warnings without blocking budget creation or spend.",
-      "Keys authorization, claim, and finalization by agent and platform operation key while returning stored state for identical retries.",
-      "Stores monotonic immutable authorization attempts and append-only outcomes so exact historical replay and corrected-denial audit survive restart.",
-      "Binds the complete canonical provider, executor, capability, and billing-merchant scope through the immutable decision referenced by the authorization token.",
-      "Reserves one hold per decision, moves executor work from frozen to exclusively claimed, and extends it to the workload claim lease.",
-      "Enforces unique agent-scoped operation ownership and finalizes receipt, claim, token, hold, and budget balance in one immediate SQLite transaction while leaving expired claims frozen for reconciliation.",
-      "Lists expired claims for the owning user and requires a server-verified human capability before recording the provider receipt, reference, evidence, outcome, actor, and timestamp.",
-      "Executor settlement consumes actual vendor cost and returns the unused authorization remainder; release returns the full hold.",
-      "A future shared allocation would be an explicit budget pool with agent membership, not a task-scoped branch in the MVP budget model.",
-    ],
-    links: [sharedLinks.budget, sharedLinks.budgetModel, sharedLinks.spendingTarget, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
-    nodes: [
-      { id: "create", label: "Create budget/target", sub: "hard + advisory", x: 76, y: 76, w: 206, h: 92, tone: "human" },
-      { id: "periods", label: "Periods", sub: "half-open windows", x: 420, y: 76, w: 210, h: 92, tone: "core" },
-      { id: "advisory", label: "Target advisory", sub: "max concurrent allocation", x: 780, y: 76, w: 230, h: 92, tone: "human", path: "crates/hubu-core/src/spending_target.rs" },
-      { id: "agentSpend", label: "App service", sub: "authorize operation", x: 76, y: 248, w: 206, h: 92, tone: "core", path: "crates/hubu-core/src/app/spend_approval.rs" },
-      { id: "reserve", label: "Reserve hold", sub: "frozen → claimed", x: 420, y: 248, w: 210, h: 92, tone: "core" },
-      { id: "payment", label: "Hubu payment", sub: "success/failure", x: 76, y: 414, w: 206, h: 92, tone: "wallet" },
-      { id: "executor", label: "Claim service", sub: "same operation + lease", x: 76, y: 548, w: 238, h: 92, tone: "executor", path: "crates/hubu-core/src/app/executor_claim.rs" },
-      { id: "settle", label: "Settle/release", sub: "actual cost + remainder", x: 420, y: 480, w: 238, h: 92, tone: "core" },
-      { id: "store", label: "Governance store", sub: "claims + receipts", x: 780, y: 282, w: 230, h: 96, tone: "data" },
-      { id: "reconcile", label: "Human reconciliation", sub: "evidence + receipt", x: 780, y: 500, w: 230, h: 96, tone: "human", path: "crates/hubu-core/src/app/executor_claim.rs" },
-    ],
-    edges: [
-      ["create", "periods", "expand"],
-      ["periods", "advisory", "compare"],
-      ["advisory", "store", "warn"],
-      ["periods", "store", "persist"],
-      ["agentSpend", "reserve", "authorize"],
-      ["reserve", "store", "freeze one"],
-      ["payment", "settle", "payment", { labelDx: 18, labelDy: -18, labelT: 0.56 }],
-      ["reserve", "executor", "claim lease", { labelDx: -36, labelDy: -46 }],
-      ["executor", "settle", "receipt", { labelDx: 8, labelDy: 24, labelT: 0.56 }],
-      ["executor", "reconcile", "lease expires", { labelDx: 10, labelDy: 50 }],
-      ["reconcile", "settle", "billed / not billed", { labelDy: -75 }],
-      ["reconcile", "store", "audit receipt"],
-      ["settle", "store", "one transaction"],
-      ["periods", "reserve", "active limits"],
-    ],
-  },
-  payment: {
-    title: "Payment Manager",
-    kind: "Component",
-    copy:
-      "The wallet boundary receives an app-service-built payment request after allowed spend. It checks request shape and idempotency, validates the spend token through a trait boundary, executes the selected rail, records only successful money movement, and marks tokens used only after ledger success.",
-    responsibilities: [
-      "Rejects malformed amounts, empty idempotency keys, and conflicting idempotency-key replays.",
-      "Returns the original response for an identical idempotency replay without revalidating, rerunning the rail, or writing another ledger transaction.",
-      "Validates token, owner, amount, agent, account, complete canonical execution scope, legacy merchant, and currency before rail execution, then resolves task ID and reason from the stored authorization snapshot.",
-      "Persists canonical scope JSON with payment attempts so replay remains exact after restart while legacy rows migrate as nullable scope.",
-      "Records successful payments in the immutable double-entry ledger, then marks the spend token used.",
-      "Returns failed rail responses without ledger writes or token use; the app service persists attempts and decides whether to release holds or keep them frozen for retry.",
-    ],
-    links: [sharedLinks.payment, sharedLinks.paymentAttempt, sharedLinks.rail, sharedLinks.ledger, ["Spend lifecycle", "docs/spend-lifecycle.md"]],
-    nodes: [
-      { id: "request", label: "App payment request", sub: "idempotency + token", x: 70, y: 96, w: 238, h: 92, tone: "core", path: "crates/hubu-core/src/app/spend_approval.rs" },
-      { id: "idempotency", label: "Idempotency state", sub: "cache + hydrated", x: 70, y: 278, w: 238, h: 92, tone: "data", path: "crates/hubu-wallet/src/persistence.rs" },
-      { id: "auth", label: "Spend auth", sub: "scope validation", x: 420, y: 168, w: 220, h: 92, tone: "core" },
-      { id: "rail", label: "PaymentRail", sub: "mock fiat/stablecoin", x: 780, y: 168, w: 230, h: 92, tone: "wallet" },
-      { id: "ledger", label: "Ledger write", sub: "success only", x: 780, y: 368, w: 230, h: 92, tone: "data" },
-      { id: "token", label: "Mark token used", sub: "after ledger", x: 420, y: 368, w: 220, h: 92, tone: "core" },
-      { id: "response", label: "PaymentResponse", sub: "succeeded/failed", x: 420, y: 548, w: 220, h: 92, tone: "wallet" },
-      { id: "attempts", label: "Attempt store", sub: "retry/restart state", x: 780, y: 548, w: 230, h: 92, tone: "data", path: "crates/hubu-wallet/src/persistence.rs" },
-    ],
-    edges: [
-      ["request", "idempotency", "shape/key"],
-      ["idempotency", "auth", "fresh"],
-      ["idempotency", "response", "replay", { labelDx: -72, labelDy: 18, labelT: 0.62 }],
-      ["auth", "rail", "execute"],
-      ["rail", "ledger", "success"],
-      ["ledger", "token", "ledger id"],
-      ["token", "response", "used", { labelDx: 120, labelDy: -6 }],
-      ["rail", "response", "failed", { fromSide: "right", toSide: "right", waypoints: [{ x: 1060, y: 214 }, { x: 1060, y: 500 }, { x: 700, y: 500 }, { x: 700, y: 594 }], labelSegment: 2 }],
-      ["response", "attempts", "persist"],
-    ],
-  },
-  gongbu: {
-    title: "Gongbu Execution Plane",
-    kind: "Runtime component",
-    viewBox: "0 0 1280 760",
-    copy:
-      "Gongbu is in the Hubu source repository, unified product model, and shared release archive. It remains outside the Hubu control-plane process, database, credential boundary, provider execution boundary, and failure domain.",
-    responsibilities: [
-      "Accepts one opaque Hubu spend-auth token ID plus execution intent through canonical HTTP v2, including calls routed by the unified MCP surface; callers cannot override account, operation identity, money, scope, task metadata, endpoint, or credentials.",
-      "Translates deprecated HTTP v1 only at admission: its two historical token aliases must be equal, never mean decision ID, and cannot broaden any resolved authority.",
-      "Resolves Hubu's authorization snapshot read-only, exact-matches Gongbu-derived target scope and catalog price, and persists the immutable snapshot before scheduling.",
-      "Persists an immutable execution and provider attempt before crossing billable boundaries, then runs recovery through Gongbu-owned Temporal workflow state.",
-      "Claims the Hubu authorization before provider work and validates the claim again immediately before the call.",
-      "Derives the version-1 canonical execution scope from the operator-selected provider/adapter target and exact-matches it across the Hubu trust boundary.",
-      "Resolves Gongbu-held credentials and invokes exactly the operator-selected provider adapter without routing or fallback.",
-      "Stores normalized artifacts under the Gongbu artifact root and persists metadata in the Gongbu database, never in Hubu storage.",
-      "Settles actual cost or safely releases through the v4 HTTP contract; ambiguous outcomes stay in reconciliation instead of causing blind provider retries.",
-      "Keeps the Hubu and Gongbu processes, databases, credentials, provider work, artifacts, backend interfaces, and failure domains separate despite shared source and release identity.",
-    ],
-    links: [sharedLinks.gongbuOverview, sharedLinks.gongbuServer, sharedLinks.gongbuApplication, sharedLinks.gongbuWorkflow, sharedLinks.gongbuExecution, sharedLinks.gongbuArtifact, sharedLinks.gongbuProvider, sharedLinks.gongbuHubu, sharedLinks.unifiedMcp, sharedLinks.gongbuConfig, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.api],
-    zones: [
-      { label: "Gongbu process + owned state", x: 300, y: 44, w: 650, h: 670 },
-      { label: "Provider boundary", x: 986, y: 44, w: 246, h: 250 },
-      { label: "Hubu control plane", x: 986, y: 474, w: 246, h: 240 },
-    ],
-    nodes: [
-      { id: "agent", label: "Agent client", sub: "unified MCP / HTTP", x: 58, y: 130, w: 196, h: 92, tone: "agent", path: "crates/hubu-unified-mcp/src/gongbu/mod.rs" },
-      { id: "gongbuApi", label: "Execution API", sub: "v2 + v1 translation", x: 340, y: 112, w: 210, h: 92, tone: "executor", path: "crates/gongbu-api/src/http/mod.rs" },
-      { id: "workflow", label: "Durable workflow", sub: "claim → execute → settle", x: 674, y: 112, w: 230, h: 92, tone: "executor", path: "crates/gongbu-api/src/workflow.rs" },
-      { id: "executionDb", label: "Gongbu SQLite", sub: "executions + attempts", x: 340, y: 352, w: 210, h: 96, tone: "data", path: "crates/gongbu-api/src/execution/mod.rs" },
-      { id: "temporal", label: "Temporal state", sub: "timers + recovery", x: 674, y: 276, w: 230, h: 92, tone: "data", path: "crates/gongbu-api/src/temporal.rs" },
-      { id: "artifacts", label: "Artifact store", sub: "normalized bytes", x: 340, y: 548, w: 210, h: 96, tone: "data", path: "crates/gongbu-api/src/artifact/mod.rs" },
-      { id: "provider", label: "Provider adapter", sub: "selected target only", x: 674, y: 474, w: 230, h: 92, tone: "executor", path: "crates/gongbu-api/src/provider/mod.rs" },
-      { id: "credentials", label: "Keychain secrets", sub: "Gongbu-held", x: 674, y: 606, w: 230, h: 80, tone: "data", path: "crates/gongbu-api/src/config/secrets.rs" },
-      { id: "vendor", label: "Provider", sub: "external model/API", x: 1012, y: 120, w: 194, h: 124, tone: "vendor" },
-      { id: "hubu", label: "Hubu trust boundary", sub: "resolve → claim → finalize", x: 1010, y: 556, w: 198, h: 100, tone: "core", path: "crates/hubu-api/src/lib.rs" },
-    ],
-    edges: [
-      ["agent", "gongbuApi", "v2 request + token ID", { labelDy: -65 }],
-      ["gongbuApi", "hubu", "read-only resolve + exact match", { fromSide: "right", toSide: "top", waypoints: [{ x: 580, y: 158 }, { x: 580, y: 450 }, { x: 1109, y: 450 }], labelSegment: 2, labelDy: -12 }],
-      ["gongbuApi", "executionDb", "persist first"],
-      ["gongbuApi", "workflow", "schedule"],
-      ["workflow", "temporal", "durable state"],
-      ["workflow", "executionDb", "attempt/receipt", { labelDx: -36, labelDy: 26 }],
-      ["workflow", "hubu", "durable claim/finalize", { fromSide: "right", toSide: "left", waypoints: [{ x: 936, y: 158 }, { x: 936, y: 606 }], labelSegment: 1, labelDx: 120 }],
-      ["workflow", "provider", "execute once", { fromSide: "left", toSide: "left", waypoints: [{ x: 630, y: 158 }, { x: 630, y: 520 }], labelSegment: 1, labelDx: -80 }],
-      ["credentials", "provider", "resolve secret", { labelDx: -175 }],
-      ["provider", "vendor", "model call", { fromSide: "right", toSide: "left", waypoints: [{ x: 962, y: 520 }, { x: 962, y: 182 }], labelSegment: 1 }],
-      ["vendor", "provider", "result/usage", { fromSide: "bottom", toSide: "right", waypoints: [{ x: 1109, y: 320 }, { x: 982, y: 320 }, { x: 982, y: 520 }], labelSegment: 1 }],
-      ["provider", "artifacts", "normalized bytes", { fromSide: "left", toSide: "bottom", waypoints: [{ x: 620, y: 520 }, { x: 620, y: 680 }, { x: 445, y: 680 }], labelSegment: 2 }],
-      ["artifacts", "executionDb", "metadata"],
-    ],
-  },
-  ledger: {
-    title: "SQLite Ledger",
-    kind: "Component",
-    copy:
-      "The ledger is the audit record for successful money movement. It stores balanced double-entry transactions and uses SQLite triggers to block mutation.",
-    responsibilities: [
-      "Creates user wallet cash and agent spend expense accounts.",
-      "Requires at least two entries, positive amounts, matching owner scope, and balanced debits/credits.",
-      "Prevents updates and deletes for ledger transactions and entries.",
-    ],
-    links: [sharedLinks.ledger, sharedLinks.payment, ["Wallet persistence", "crates/hubu-wallet/src/persistence.rs"]],
-    nodes: [
-      { id: "accounts", label: "Accounts", sub: "wallet + expense", x: 90, y: 126, w: 220, h: 92, tone: "wallet" },
-      { id: "draft", label: "Entry drafts", sub: "debit + credit", x: 448, y: 126, w: 210, h: 92, tone: "core" },
-      { id: "validate", label: "Validate", sub: "owner + balance", x: 804, y: 126, w: 210, h: 92, tone: "core" },
-      { id: "tx", label: "Transaction", sub: "external ref", x: 448, y: 366, w: 210, h: 92, tone: "data" },
-      { id: "triggers", label: "Immutability", sub: "no update/delete", x: 804, y: 366, w: 210, h: 92, tone: "data" },
-    ],
-    edges: [
-      ["accounts", "draft", "select"],
-      ["draft", "validate", "check"],
-      ["validate", "tx", "insert"],
-      ["tx", "triggers", "protect"],
-    ],
-  },
-  cli: {
-    title: "Hubu CLI",
-    kind: "Interface",
-    copy:
-      "The CLI is the human developer surface and local-stack launcher. It validates immutable generations, stages updates for explicit activation, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
-    responsibilities: [
-      "Supports profile init, doctor, render, generation listing, explicit activation and source-matched rollback, dependency-aware start, component status and logs, and graceful reverse-order whole-stack stop alongside the existing administration commands.",
-      "Keeps operator TOML authoritative, stages validated updates without replacing the active manifest, reports redacted affected-component plans, and requires whole-stack stop/activate/start rather than selective restart or repair.",
-      "Persists redacted process ownership metadata, validates the recorded start identity before every signal, and never signals external, compatible unowned, or client-owned MCP processes.",
-      "Starts Hubu before Gongbu, rolls back only children created by a failed invocation, and preserves databases, artifacts, Temporal data, retained generations, and logs across lifecycle transitions.",
-      "Ships a one-command acceptance canary that starts the real local stack and verifies governed deterministic execution, Temporal workflow discovery, artifact retrieval, restart persistence, and graceful shutdown without billable provider spend.",
-      "Writes a managed Codex config block that lets agents in other projects discover Hubu MCP tools without reading the Hubu repo.",
-      "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
-      "Loads the local Hubu bearer and owner capability tokens from env or files, sending approval and reconciliation capabilities only on their human mutations.",
-    ],
-    links: [sharedLinks.cli, sharedLinks.stackLifecycle, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.api, sharedLinks.registrationProtocol],
-    nodes: [
-      { id: "commands", label: "Commands", sub: "init/admin/stack", x: 70, y: 132, w: 210, h: 92, tone: "human" },
-      { id: "profile", label: "Stack profile", sub: "stage + activate", x: 380, y: 72, w: 220, h: 92, tone: "data", path: "crates/hubu-cli/src/stack.rs" },
-      { id: "launcher", label: "Lifecycle launcher", sub: "identity + ordering", x: 380, y: 292, w: 220, h: 92, tone: "core", path: "crates/hubu-cli/src/stack/lifecycle.rs" },
-      { id: "managed", label: "Managed backends", sub: "Hubu then Gongbu", x: 780, y: 112, w: 220, h: 92, tone: "executor" },
-      { id: "handoff", label: "Codex handoff", sub: "client-owned MCP", x: 780, y: 356, w: 220, h: 92, tone: "agent" },
-    ],
-    edges: [
-      ["commands", "profile", "configure"],
-      ["profile", "launcher", "active generation"],
-      ["launcher", "managed", "start/stop owned"],
-      ["profile", "handoff", "render MCP config", { fromSide: "right", toSide: "left", waypoints: [{ x: 650, y: 118 }, { x: 650, y: 402 }], labelSegment: 1 }],
-    ],
-  },
-  mcp: {
-    title: "Unified MCP Surface",
-    kind: "Interface",
-    viewBox: "0 0 1280 760",
-    copy:
-      "The agent harness launches one default stdio server. That router probes and calls two isolated HTTP backends through separate clients and credentials; it owns discovery and routing, not governance, provider execution, storage, or artifacts.",
-    responsibilities: [
-      "The unified server implements initialize, ping, tools/list, tools/call, startup validation, machine-readable capability snapshots, redacted backend-state errors, serialized list-changed notifications, and bounded monitor shutdown over JSON-RPC stdio.",
-      "Starts independent background probes only after the initialize/initialized handshake, baselines without an initial notification, and emits exactly one payload-free tools/list_changed event per effective callable-catalog transition.",
-      "Configures separate Hubu and Gongbu endpoints, bearer credentials, bounded HTTP clients, and independently probed versioned adapter boundaries without cross-domain Cargo dependencies.",
-      "Coalesces concurrent monitor and request refreshes with independent per-backend single-flight gates whose bookkeeping locks are released before network I/O.",
-      "Publishes and routes the four accepted gongbu_* execution and artifact tools with stable schema, result, error, redaction, operation-key, and no-retry behavior.",
-      "Forwards only fixed relative Gongbu API routes and rejects caller attempts to override accounts, endpoints, credentials, retry controls, or artifact storage paths before network access.",
-      "Fails closed on unknown or mismatched product, source-commit, executor-contract, MCP, and Gongbu schema versions while preserving healthy unrelated backend capabilities.",
-      "Keeps compatible Gongbu read and artifact capabilities available during degraded readiness, but blocks governed execution admission unless both required backend boundaries are safe.",
-      "Lists and routes exactly the 28 contract-approved Hubu tools with stable schemas, annotations, validation, trusted metadata, response shapes, and application errors.",
-      "Uses only fixed Hubu routes and the Hubu credential, keeps the trusted client approval gate, and sends the separate reconciliation capability only on the two reconciliation mutations.",
-      "Rejects unknown and out-of-map tool calls before domain network access, never falls back across backends, never retries ambiguous mutations, and sanitizes backend outages.",
-      "Preserves independent failure domains without fallback, queuing, or cross-boundary retries; backend transport and application failures retain their public MCP contracts.",
-      "Is the only agent-facing surface written by `hubu init codex` and the only MCP server included in release packaging.",
-      "Publishes a generic client approval profile so any harness can auto-approve reads and spend submission but prompt before resolving a needs_approval decision.",
-      "Uses Codex per-tool approval overrides as one rendering of that profile while leaving Hubu policy responsible for creating needs_approval outcomes.",
-      "Annotates tools with read-only, destructive, idempotent, open-world, and Hubu approval hints.",
-      "Keeps operation_key and task_id out of model-visible spend schemas, validates trusted platform metadata, and injects those identities into the HTTP request.",
-      "Leaves durable operation-key allocation and recovery to the client platform.",
-      "Loads the local Hubu bearer and owner capability tokens, returns durable approval status, and protects approve-or-deny with both the trusted client gate and server-verified approval capability.",
-    ],
-    links: [sharedLinks.unifiedMcp, sharedLinks.unifiedMcpStdio, sharedLinks.unifiedMcpNotifications, sharedLinks.unifiedHubuCatalog, sharedLinks.unifiedHubuRouting, sharedLinks.unifiedTrustedIdentity, sharedLinks.unifiedGongbuCatalog, sharedLinks.unifiedGongbuFixture, sharedLinks.unifiedMcpContract, sharedLinks.api, sharedLinks.gongbuApplication],
-    zones: [
-      { label: "hubu-unified-mcp process", x: 286, y: 44, w: 596, h: 670 },
-      { label: "Hubu process + failure domain", x: 940, y: 44, w: 292, h: 280 },
-      { label: "Gongbu process + failure domain", x: 940, y: 434, w: 292, h: 280 },
-    ],
-    nodes: [
-      { id: "agent", label: "Agent harness", sub: "one stdio connection", x: 30, y: 318, w: 210, h: 96, tone: "agent" },
-      { id: "tools", label: "Static router", sub: "28 Hubu + 4 Gongbu", x: 330, y: 118, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
-      { id: "notifications", label: "Catalog monitor", sub: "deduped list_changed", x: 330, y: 318, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/notification.rs" },
-      { id: "capability", label: "Capability snapshot", sub: "isolated health + compatibility", x: 330, y: 520, w: 200, h: 96, tone: "core", path: "crates/hubu-unified-mcp/src/capability.rs" },
-      { id: "hubuClient", label: "Hubu client", sub: "Hubu endpoint + credential", x: 650, y: 170, w: 200, h: 96, tone: "core", path: "crates/hubu-unified-mcp/src/hubu/transport.rs" },
-      { id: "gongbuClient", label: "Gongbu client", sub: "Gongbu endpoint + credential", x: 650, y: 486, w: 200, h: 96, tone: "executor", path: "crates/hubu-unified-mcp/src/gongbu/transport.rs" },
-      { id: "approval", label: "Hubu HTTP API", sub: "governance + Hubu SQLite", x: 974, y: 138, w: 224, h: 104, tone: "human", path: "crates/hubu-api/src/lib.rs" },
-      { id: "api", label: "Gongbu HTTP API", sub: "execution + Gongbu state", x: 974, y: 528, w: 224, h: 104, tone: "executor", path: "crates/gongbu-api/src/http/mod.rs" },
-    ],
-    edges: [
-      ["agent", "tools", "stdio", { labelDy: -54 }],
-      ["notifications", "agent", "list_changed", { fromSide: "left", toSide: "right", labelDy: -18 }],
-      ["agent", "capability", "status", { labelDy: 48 }],
-      ["tools", "hubuClient", "hubu_*"],
-      ["tools", "gongbuClient", "gongbu_*", { fromSide: "bottom", toSide: "top", waypoints: [{ x: 430, y: 350 }, { x: 750, y: 350 }], labelSegment: 1 }],
-      ["capability", "hubuClient", "probe", { fromSide: "top", toSide: "bottom", waypoints: [{ x: 430, y: 410 }, { x: 750, y: 410 }], labelSegment: 1 }],
-      ["capability", "gongbuClient", "probe"],
-      ["capability", "notifications", "catalog diff"],
-      ["hubuClient", "approval", "bounded HTTP"],
-      ["gongbuClient", "api", "bounded HTTP"],
+    links: [
+      ["Repository overview", "README.md"],
+      ["Local stack contract", "docs/local-stack.md"],
+      ["Local stack acceptance canary", "scripts/integration-local-stack-acceptance.sh"],
+      ["Spend lifecycle", "docs/spend-lifecycle.md"],
+      ["Release operations", "docs/operations/releases.md"],
     ],
   },
   agent: {
-    title: "Agent Spend Path",
-    kind: "Flow",
-    copy:
-      "Agents never hold private keys. They register as distinct accounts, operate under the current user's policy and their own hard budget, and submit spend intent for Hubu to authorize. User spending targets remain advisory to humans.",
+    kind: "CALLER",
+    title: "Structured intent, not authority",
+    copy: "The agent supplies workload intent through the unified MCP surface. Trusted session metadata and server-issued capabilities establish authority outside model-authored arguments.",
     responsibilities: [
-      "Consumes registration guidance instead of guessing protocol fields from prose.",
-      "Uses the repository skill to allocate each local-dogfood operation key once and persist its immutable scope in `.hubu/operation-keys.sqlite3` for retry and process recovery.",
-      "Submits structured spend intent with amount, descriptive reason, merchant, and agent account identity; optional business task correlation remains separate.",
-      "Reuses one platform-owned operation key throughout the spend workflow and allocates a different key for intentionally distinct work.",
-      "On needs_approval, shows the compact review, waits, reads or submits the human decision, and resumes from the durable approved or denied state.",
-      "Receives allow, needs_approval, or deny decisions with traceable reasons.",
+      "Discover the currently eligible tool catalog.",
+      "Reuse stable operation identity across retries.",
+      "Submit structured, canonical spend and execution inputs.",
     ],
-    links: [sharedLinks.unifiedMcp, sharedLinks.cli, sharedLinks.spend, sharedLinks.registrationProtocol, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper],
-    nodes: [
-      { id: "register", label: "Register", sub: "identity/session", x: 90, y: 110, w: 220, h: 92, tone: "agent" },
-      { id: "policy", label: "User policy", sub: "human-authored", x: 436, y: 110, w: 220, h: 92, tone: "human" },
-      { id: "operation", label: "Operation registry", sub: "scope + stable key", x: 90, y: 336, w: 220, h: 92, tone: "data", path: "skills/generate-hubu-operation-key/scripts/operation_keys.py" },
-      { id: "spend", label: "Spend request", sub: "structured intent", x: 436, y: 336, w: 220, h: 92, tone: "agent" },
-      { id: "decision", label: "Decision", sub: "wait/allow/deny", x: 806, y: 336, w: 220, h: 92, tone: "core" },
+    links: [["Registration protocol", "docs/agent-registration.md"], ["Unified MCP setup", "docs/unified-mcp.md"]],
+  },
+  mcp: {
+    kind: "AGENT SURFACE",
+    title: "Route without merging",
+    copy: "hubu-unified-mcp is a thin stdio adapter over separate Hubu and Gongbu HTTP clients. Its static ownership table routes each tool to one backend and fails closed on unknown names or incompatible versions.",
+    responsibilities: [
+      "Probe Hubu and Gongbu independently for compatibility.",
+      "Publish one sanitized, availability-aware tool catalog.",
+      "Never forward one backend credential to the other.",
+      "Preserve backend result and error semantics.",
     ],
-    edges: [
-      ["register", "policy", "inherits"],
-      ["register", "operation", "agent scope"],
-      ["policy", "spend", "governs"],
-      ["operation", "spend", "operation key"],
-      ["spend", "decision", "evaluate"],
+    links: [
+      ["Unified MCP guide", "docs/unified-mcp.md"],
+      ["Router implementation", "crates/hubu-unified-mcp/src/lib.rs"],
+      ["Hubu routing", "crates/hubu-unified-mcp/src/hubu/routing.rs"],
+      ["Gongbu catalog", "crates/hubu-unified-mcp/src/gongbu/catalog.rs"],
     ],
   },
-  human: {
-    title: "Human Owner Flow",
-    kind: "Flow",
-    copy:
-      "Humans set the financial boundaries. The CLI and MCP adapter aim to keep review small while making identity, policy, advisory target, and hard budget state explicit.",
+  hubu: {
+    kind: "CONTROL PLANE",
+    title: "Govern and account",
+    copy: "Hubu owns the durable decision boundary: humans, agents, policy, budgets, spending targets, authorizations, claims, reconciliation, payments, and ledger state.",
     responsibilities: [
-      "Registers humans with separate username and display name fields.",
-      "Reviews current owner context, agent name/version, and protected setup actions.",
-      "Funds governance by creating a user-level policy and agent budget before agent spending, with an optional advisory spending target for aggregate allocations.",
-      "Reviews pending spend context and resolves it explicitly as approve or deny; repeated matching decisions are safe and conflicts are rejected.",
+      "Canonicalize identity and spend scope before evaluation.",
+      "Apply deterministic policy and reserve budget capacity.",
+      "Issue scoped authorizations and exclusive executor claims.",
+      "Finalize receipts, reconciliation evidence, and ledger entries atomically.",
     ],
-    links: [sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.registrationProtocol, sharedLinks.budget],
-    nodes: [
-      { id: "user", label: "User", sub: "username + public id", x: 90, y: 126, w: 210, h: 92, tone: "human" },
-      { id: "review", label: "Review", sub: "compact fields", x: 430, y: 126, w: 220, h: 92, tone: "human" },
-      { id: "policy", label: "Policy", sub: "rules", x: 800, y: 100, w: 210, h: 92, tone: "core" },
-      { id: "budget", label: "Budget + target", sub: "hard + advisory", x: 800, y: 334, w: 210, h: 92, tone: "core" },
-      { id: "audit", label: "Audit", sub: "ledger/list views", x: 430, y: 454, w: 220, h: 92, tone: "data" },
+    links: [
+      ["Policy engine", "docs/policy-engine.md"],
+      ["Spend lifecycle", "docs/spend-lifecycle.md"],
+      ["Approval service", "crates/hubu-core/src/app/spend_approval.rs"],
+      ["Executor claims", "crates/hubu-core/src/app/executor_claim.rs"],
+      ["Ledger", "crates/hubu-wallet/src/ledger.rs"],
     ],
-    edges: [
-      ["user", "review", "approve"],
-      ["review", "policy", "attach"],
-      ["review", "budget", "create", { fromSide: "right", toSide: "left", waypoints: [{ x: 700, y: 172 }, { x: 700, y: 380 }], labelSegment: 1 }],
-      ["policy", "audit", "observe", { fromSide: "right", toSide: "right", waypoints: [{ x: 1050, y: 146 }, { x: 1050, y: 500 }], labelSegment: 1 }],
-      ["budget", "audit", "observe", { fromSide: "bottom", toSide: "top", waypoints: [{ x: 905, y: 470 }, { x: 540, y: 470 }], labelSegment: 1 }],
+  },
+  gongbu: {
+    kind: "EXECUTION PLANE",
+    title: "Execute and recover",
+    copy: "Gongbu owns provider work end to end: credentials, pricing, Temporal workflows, retries, execution records, receipts, and artifacts. Hubu never opens Gongbu state.",
+    responsibilities: [
+      "Validate and exclusively claim Hubu authorization.",
+      "Run provider calls through durable Temporal activities.",
+      "Price actual work and persist safe receipt metadata.",
+      "Own artifact storage, retry policy, and recovery as one failure domain.",
     ],
+    links: [
+      ["Execution plane guide", "docs/gongbu-execution.md"],
+      ["Server runbook", "docs/operations/gongbu-server.md"],
+      ["Workflow implementation", "crates/gongbu-api/src/workflow.rs"],
+      ["Provider boundary", "crates/gongbu-api/src/provider/mod.rs"],
+      ["Artifact service", "crates/gongbu-api/src/artifact/mod.rs"],
+    ],
+  },
+  provider: {
+    kind: "EXTERNAL EDGE",
+    title: "Treat provider work as evidence",
+    copy: "External providers receive only the credentials and requests owned by Gongbu. Their responses become priced execution evidence and artifact references—not a second source of governance truth.",
+    responsibilities: [
+      "Remain outside both Hubu and Gongbu trust boundaries.",
+      "Use provider-specific idempotency and bounded retries.",
+      "Return sanitized receipt metadata and artifacts to Gongbu.",
+    ],
+    links: [["Live provider testing", "docs/operations/live-provider-testing.md"], ["Provider adapters", "crates/gongbu-api/src/provider/mod.rs"]],
   },
 };
 
-const fillByTone = {
-  human: "var(--human)",
-  agent: "var(--agent)",
-  surface: "var(--surface)",
-  core: "var(--core)",
-  wallet: "var(--wallet)",
-  data: "var(--data)",
-  external: "var(--external)",
-  executor: "var(--executor)",
-  vendor: "var(--vendor)",
-};
+const stageOrder = ["discover", "authorize", "execute", "settle"];
+let currentStage = "authorize";
+let playTimer = null;
 
-const sidebarHighlights = {
-  top: [
-    "Owners set budgets, policies, and approvals.",
-    "Hubu authorizes spend; Gongbu executes provider work.",
-    "Runtime, data, credential, and failure boundaries stay separate.",
-  ],
-  release: [
-    "One exact commit builds all four packaged production binaries.",
-    "Formatting, lint, tests, and integration gates run before publication.",
-    "Archives carry checksums, manifests, and source provenance.",
-  ],
-  api: [
-    "Bearer authentication protects local HTTP routes.",
-    "Routes translate requests and delegate work to app services.",
-    "Transport concerns stay outside domain orchestration.",
-  ],
-  app: [
-    "Approval services persist pending decisions and resolve them once.",
-    "Claim services coordinate executor settlement and release.",
-    "State transitions are persisted atomically.",
-  ],
-  registration: [
-    "Humans establish the active owner context.",
-    "Agents submit structured identity and version envelopes.",
-    "The server recomputes fingerprints before registration.",
-  ],
-  policy: [
-    "Policies use immutable, hash-addressed revisions.",
-    "Assignments select the current user or agent policy.",
-    "Evaluation is deterministic and deny-first.",
-  ],
-  budget: [
-    "Agent budgets are hard limits; owner targets are advisory.",
-    "Authorization freezes one execution-scoped hold.",
-    "Claims settle, release, or wait for human reconciliation.",
-  ],
-  payment: [
-    "Requests validate idempotency, spend token, and scope.",
-    "Successful rail execution writes the immutable ledger.",
-    "Identical retries return the stored result without paying twice.",
-  ],
-  gongbu: [
-    "Gongbu runs as a separate execution-plane process.",
-    "It claims Hubu authorization before provider work.",
-    "It owns workflows, credentials, provider calls, and artifacts.",
-  ],
-  ledger: [
-    "Successful money movement is recorded double-entry.",
-    "Every transaction must balance within one owner scope.",
-    "Triggers prevent updates and deletes.",
-  ],
-  cli: [
-    "Humans use the CLI for setup, administration, and local stack lifecycle.",
-    "Validated updates stage first and activate only while the owned stack is stopped.",
-    "The launcher signals only processes whose recorded start identity still matches.",
-    "The acceptance canary proves the real process lifecycle plus deterministic workflow and artifact recovery without billable provider spend.",
-    "It configures agent-facing MCP access.",
-    "It exposes policy, budget, spend, ledger, and health workflows.",
-  ],
-  mcp: [
-    "The agent harness starts one default unified MCP process.",
-    "A static routing map sends each call to exactly one owning backend.",
-    "Separate clients, credentials, probes, and failures preserve backend boundaries.",
-    "Its static catalog and routing preserve the versioned public MCP contract.",
-  ],
-  agent: [
-    "The agent reuses a scope-bound operation key.",
-    "The agent waits when Hubu requires a human decision.",
-    "Execution finishes by settling or releasing the hold.",
-  ],
-  human: [
-    "The owner initializes and funds the control plane.",
-    "Policies and budgets define agent authority.",
-    "Pending spend returns for an explicit approve-or-deny review.",
-  ],
-};
-
-let currentView = "top";
-
-const svg = document.getElementById("architecture-canvas");
-const title = document.getElementById("diagram-title");
-const crumb = document.getElementById("diagram-crumb");
-const detailsTitle = document.getElementById("details-title");
-const detailsKind = document.getElementById("details-kind");
-const detailsCopy = document.getElementById("details-copy");
-const highlights = document.getElementById("highlights");
-const responsibilities = document.getElementById("responsibilities");
-const sourceLinks = document.getElementById("source-links");
-const topButtons = [
-  document.getElementById("top-view-button"),
-  document.getElementById("details-back-button"),
-];
-
-topButtons.forEach((button) => button.addEventListener("click", () => showView("top")));
-
-function showView(viewId) {
-  currentView = viewId;
-  const view = components[viewId];
-  title.textContent = view.title;
-  crumb.textContent = view.kind;
-  detailsTitle.textContent = view.title;
-  detailsKind.textContent = view.kind;
-  detailsCopy.textContent = view.copy;
-  renderList(highlights, sidebarHighlights[viewId]);
-  renderList(responsibilities, view.responsibilities);
-  renderSourceLinks(view.links);
-  renderDiagram(view);
-}
-
-function renderList(list, items) {
-  list.innerHTML = "";
-  items.forEach((item) => {
-    const li = document.createElement("li");
-    li.textContent = item;
-    list.appendChild(li);
+function selectStage(stageName) {
+  const stage = stages[stageName];
+  if (!stage) return;
+  currentStage = stageName;
+  document.body.dataset.stage = stageName;
+  document.querySelectorAll("[data-stage-button]").forEach((button) => {
+    button.setAttribute("aria-pressed", button.dataset.stageButton === stageName ? "true" : "false");
   });
+  document.querySelectorAll(".flow-link").forEach((link) => link.classList.remove("is-active"));
+  stage.links.forEach((className) => document.querySelector(`.${className}`)?.classList.add("is-active"));
+  document.querySelectorAll(".flow-node").forEach((node) => node.classList.toggle("is-active", stage.components.includes(node.dataset.component)));
+  document.querySelector("#stage-eyebrow").textContent = stage.eyebrow;
+  document.querySelector("#stage-title").textContent = stage.title;
+  document.querySelector("#stage-summary").textContent = stage.summary;
+  document.querySelector("#stage-outcome").textContent = stage.outcome;
 }
 
-function renderSourceLinks(links) {
-  sourceLinks.innerHTML = "";
-  links.forEach(([label, path]) => {
-    const li = document.createElement("li");
-    const anchor = document.createElement("a");
-    anchor.href = `https://github.com/hacker-no-ice/hubu/blob/main/${path}`;
-    anchor.target = "_blank";
-    anchor.rel = "noreferrer";
-    anchor.textContent = `${label} — ${path}`;
-    li.appendChild(anchor);
-    sourceLinks.appendChild(li);
+function selectComponent(componentName) {
+  const component = components[componentName];
+  if (!component) return;
+  document.querySelectorAll("[role='tab'][data-component]").forEach((tab) => {
+    tab.setAttribute("aria-selected", tab.dataset.component === componentName ? "true" : "false");
   });
+  document.querySelector("#detail-kind").textContent = component.kind;
+  document.querySelector("#detail-title").textContent = component.title;
+  document.querySelector("#detail-copy").textContent = component.copy;
+  document.querySelector("#detail-responsibilities").replaceChildren(
+    ...component.responsibilities.map((text) => Object.assign(document.createElement("li"), { textContent: text })),
+  );
+  document.querySelector("#detail-links").replaceChildren(
+    ...component.links.map(([label, path]) => {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = repository + path;
+      link.textContent = `${label} ↗`;
+      item.append(link);
+      return item;
+    }),
+  );
 }
 
-function renderDiagram(view) {
-  svg.innerHTML = "";
-  svg.setAttribute("viewBox", view.viewBox || "0 0 1200 700");
-  addMarker();
-  (view.zones || []).forEach(drawZone);
-  const nodesById = Object.fromEntries(view.nodes.map((node) => [node.id, node]));
-  view.edges.forEach(([from, to, label, options = {}], index) => {
-    drawEdge(nodesById[from], nodesById[to], label, index, options);
+document.querySelectorAll("[data-stage-button]").forEach((button) => {
+  button.addEventListener("click", () => {
+    window.clearInterval(playTimer);
+    playTimer = null;
+    selectStage(button.dataset.stageButton);
   });
-  view.nodes.forEach(drawNode);
-}
+});
 
-function drawZone(zone) {
-  const group = makeSvg("g", { class: "zone" });
-  group.appendChild(makeSvg("rect", {
-    class: "zone-fill",
-    x: zone.x,
-    y: zone.y,
-    width: zone.w,
-    height: zone.h,
-    rx: "8",
-  }));
-  const text = makeSvg("text", {
-    class: "zone-label",
-    x: zone.labelX || zone.x + 18,
-    y: zone.labelY || zone.y + 30,
-  });
-  text.textContent = zone.label;
-  group.appendChild(text);
-  svg.appendChild(group);
-}
+document.querySelectorAll("[data-component]").forEach((button) => {
+  button.addEventListener("click", () => selectComponent(button.dataset.component));
+});
 
-function addMarker() {
-  const defs = makeSvg("defs");
-  const marker = makeSvg("marker", {
-    id: "arrow-tip",
-    viewBox: "0 0 10 10",
-    refX: "8",
-    refY: "5",
-    markerWidth: "7",
-    markerHeight: "7",
-    orient: "auto-start-reverse",
-  });
-  marker.appendChild(makeSvg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "var(--line)" }));
-  defs.appendChild(marker);
-  svg.appendChild(defs);
-}
-
-function drawEdge(from, to, label, index, options = {}) {
-  if (options.waypoints) {
-    drawRoutedEdge(from, to, label, options);
+document.querySelector("#play-flow").addEventListener("click", (event) => {
+  if (playTimer) {
+    window.clearInterval(playTimer);
+    playTimer = null;
+    event.currentTarget.innerHTML = '<span aria-hidden="true">▶</span> Play the flow';
     return;
   }
-  const start = center(from);
-  const end = center(to);
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const horizontal = Math.abs(dx) >= Math.abs(dy);
-  const fromPoint = edgePoint(from, horizontal ? Math.sign(dx) : 0, horizontal ? 0 : Math.sign(dy));
-  const toPoint = edgePoint(to, horizontal ? -Math.sign(dx) : 0, horizontal ? 0 : -Math.sign(dy));
-  const offset = (index % 2 === 0 ? 1 : -1) * 10;
-  const points = horizontal
-    ? [
-        fromPoint,
-        { x: (fromPoint.x + toPoint.x) / 2 + offset, y: fromPoint.y },
-        { x: (fromPoint.x + toPoint.x) / 2 + offset, y: toPoint.y },
-        toPoint,
-      ]
-    : [
-        fromPoint,
-        { x: fromPoint.x, y: (fromPoint.y + toPoint.y) / 2 + offset },
-        { x: toPoint.x, y: (fromPoint.y + toPoint.y) / 2 + offset },
-        toPoint,
-      ];
-  drawPolylineEdge(points, label, {
-    ...options,
-    labelPoint: {
-      x: (fromPoint.x + toPoint.x) / 2,
-      y: (fromPoint.y + toPoint.y) / 2,
-    },
-  });
-}
+  let index = stageOrder.indexOf(currentStage);
+  selectStage(stageOrder[index]);
+  event.currentTarget.innerHTML = '<span aria-hidden="true">Ⅱ</span> Pause the flow';
+  playTimer = window.setInterval(() => {
+    index = (index + 1) % stageOrder.length;
+    selectStage(stageOrder[index]);
+  }, 2100);
+});
 
-function drawRoutedEdge(from, to, label, options) {
-  const points = [
-    edgePointForSide(from, options.fromSide),
-    ...options.waypoints,
-    edgePointForSide(to, options.toSide),
-  ];
-  drawPolylineEdge(points, label, options);
-}
-
-function drawPolylineEdge(points, label, options = {}) {
-  const path = makeSvg("path", {
-    class: "arrow-line",
-    d: points.map((point, pointIndex) => `${pointIndex === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" "),
-    "marker-end": "url(#arrow-tip)",
-  });
-  svg.appendChild(path);
-
-  const segmentIndex = options.labelSegment == null
-    ? longestSegmentIndex(points)
-    : Math.min(options.labelSegment, points.length - 2);
-  const segmentStart = points[segmentIndex];
-  const segmentEnd = points[segmentIndex + 1];
-  const labelPoint = options.labelPoint || {
-    x: (segmentStart.x + segmentEnd.x) / 2,
-    y: (segmentStart.y + segmentEnd.y) / 2,
-  };
-  drawEdgeLabel(label, {
-    x: labelPoint.x + (options.labelDx || 0),
-    y: labelPoint.y - 8 + (options.labelDy || 0),
-  });
-}
-
-function longestSegmentIndex(points) {
-  let longestIndex = 0;
-  let longestLength = -1;
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const length = Math.abs(points[index + 1].x - points[index].x)
-      + Math.abs(points[index + 1].y - points[index].y);
-    if (length > longestLength) {
-      longestLength = length;
-      longestIndex = index;
-    }
-  }
-  return longestIndex;
-}
-
-function drawEdgeLabel(label, point) {
-  const labelWidth = Math.max(58, label.length * 8 + 18);
-  svg.appendChild(makeSvg("rect", {
-    class: "arrow-label-back",
-    x: point.x - labelWidth / 2,
-    y: point.y - 17,
-    width: labelWidth,
-    height: 23,
-    rx: "4",
-  }));
-  const text = makeSvg("text", {
-    class: "arrow-label",
-    x: point.x,
-    y: point.y,
-    "text-anchor": "middle",
-  });
-  text.textContent = label;
-  svg.appendChild(text);
-}
-
-function drawNode(node) {
-  const drillable = Boolean(components[node.id]);
-  const attributes = { class: nodeClass(node, drillable) };
-  if (drillable) {
-    attributes.tabindex = "0";
-    attributes.role = "button";
-    attributes["aria-label"] = `${node.label}. Select for subsystem details.`;
-  }
-  const group = makeSvg("g", attributes);
-  group.dataset.nodeId = node.id;
-
-  const angle = ((node.x + node.y) % 7) - 3;
-  group.setAttribute("transform", `rotate(${angle} ${node.x + node.w / 2} ${node.y + node.h / 2})`);
-
-  drawNodeShape(group, node);
-
-  const label = makeSvg("text", {
-    x: node.x + node.w / 2,
-    y: node.y + node.h / 2 - 5,
-    "text-anchor": "middle",
-    "font-size": labelSize(node.label),
-  });
-  label.textContent = node.label;
-  group.appendChild(label);
-
-  const sub = makeSvg("text", {
-    class: "subtext",
-    x: node.x + node.w / 2,
-    y: node.y + node.h / 2 + 24,
-    "text-anchor": "middle",
-    "font-size": subLabelSize(node.sub),
-  });
-  sub.textContent = node.sub;
-  group.appendChild(sub);
-
-  if (drillable) {
-    group.addEventListener("click", () => drill(node.id));
-    group.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        drill(node.id);
-      }
-    });
-  }
-  svg.appendChild(group);
-}
-
-function nodeClass(node, drillable) {
-  return [
-    "node",
-    drillable ? "is-drillable" : "",
-    isActorNode(node) ? "actor-node" : "",
-    node.tone === "data" ? "storage-node" : "",
-    node.tone === "vendor" ? "vendor-node" : "",
-    ["external", "executor", "vendor"].includes(node.tone) ? "external-node" : "",
-  ].filter(Boolean).join(" ");
-}
-
-function drawNodeShape(group, node) {
-  if (isActorNode(node)) {
-    drawActorShape(group, node);
-    return;
-  }
-
-  if (node.tone === "vendor") {
-    drawVendorShape(group, node);
-    return;
-  }
-
-  if (node.tone === "data") {
-    drawStorageShape(group, node);
-    return;
-  }
-
-  group.appendChild(makeSvg("rect", {
-    class: "node-fill",
-    x: node.x,
-    y: node.y,
-    width: node.w,
-    height: node.h,
-    rx: "5",
-    fill: fillByTone[node.tone],
-  }));
-  drawUnderline(group, node);
-}
-
-function drawActorShape(group, node) {
-  const notch = Math.min(28, node.w * 0.15);
-  const points = [
-    [node.x + notch, node.y],
-    [node.x + node.w - notch, node.y],
-    [node.x + node.w, node.y + node.h / 2],
-    [node.x + node.w - notch, node.y + node.h],
-    [node.x + notch, node.y + node.h],
-    [node.x, node.y + node.h / 2],
-  ].map(([x, y]) => `${x},${y}`).join(" ");
-  group.appendChild(makeSvg("polygon", {
-    class: "node-fill",
-    points,
-    fill: fillByTone[node.tone],
-  }));
-  drawUnderline(group, node);
-}
-
-function drawStorageShape(group, node) {
-  const capHeight = Math.min(24, node.h * 0.28);
-  const bodyTop = node.y + capHeight / 2;
-  group.appendChild(makeSvg("path", {
-    class: "node-fill",
-    d: [
-      `M ${node.x} ${bodyTop}`,
-      `Q ${node.x + node.w / 2} ${node.y - capHeight / 2} ${node.x + node.w} ${bodyTop}`,
-      `L ${node.x + node.w} ${node.y + node.h - capHeight / 2}`,
-      `Q ${node.x + node.w / 2} ${node.y + node.h + capHeight / 2} ${node.x} ${node.y + node.h - capHeight / 2}`,
-      "Z",
-    ].join(" "),
-    fill: fillByTone[node.tone],
-  }));
-  group.appendChild(makeSvg("path", {
-    class: "storage-cap",
-    d: `M ${node.x} ${bodyTop} Q ${node.x + node.w / 2} ${node.y + capHeight * 1.35} ${node.x + node.w} ${bodyTop}`,
-    fill: "none",
-  }));
-}
-
-function drawVendorShape(group, node) {
-  const x = node.x;
-  const y = node.y;
-  const w = node.w;
-  const h = node.h;
-  const cloudPath = [
-    `M ${x + w * 0.21} ${y + h * 0.72}`,
-    `C ${x + w * 0.07} ${y + h * 0.72}, ${x + w * 0.03} ${y + h * 0.52}, ${x + w * 0.17} ${y + h * 0.44}`,
-    `C ${x + w * 0.18} ${y + h * 0.23}, ${x + w * 0.39} ${y + h * 0.17}, ${x + w * 0.49} ${y + h * 0.34}`,
-    `C ${x + w * 0.61} ${y + h * 0.12}, ${x + w * 0.87} ${y + h * 0.23}, ${x + w * 0.82} ${y + h * 0.48}`,
-    `C ${x + w * 0.98} ${y + h * 0.52}, ${x + w * 0.94} ${y + h * 0.75}, ${x + w * 0.78} ${y + h * 0.74}`,
-    `L ${x + w * 0.21} ${y + h * 0.72}`,
-    "Z",
-  ].join(" ");
-  group.appendChild(makeSvg("path", {
-    class: "node-fill",
-    d: cloudPath,
-    fill: fillByTone[node.tone],
-  }));
-}
-
-function drawUnderline(group, node) {
-  group.appendChild(makeSvg("path", {
-    d: roughUnderline(node.x + 18, node.y + node.h - 18, node.w - 36),
-    fill: "none",
-    stroke: "rgba(31, 41, 51, 0.35)",
-    "stroke-width": "3",
-    "stroke-linecap": "round",
-  }));
-}
-
-function isActorNode(node) {
-  return node.tone === "human" || node.tone === "agent";
-}
-
-function drill(nodeId) {
-  if (components[nodeId]) {
-    showView(nodeId);
-  }
-}
-
-function center(node) {
-  return { x: node.x + node.w / 2, y: node.y + node.h / 2 };
-}
-
-function edgePoint(node, sideX, sideY) {
-  return {
-    x: node.x + node.w / 2 + (node.w / 2) * sideX,
-    y: node.y + node.h / 2 + (node.h / 2) * sideY,
-  };
-}
-
-function edgePointForSide(node, side) {
-  const sides = {
-    top: [0, -1],
-    right: [1, 0],
-    bottom: [0, 1],
-    left: [-1, 0],
-  };
-  const [sideX, sideY] = sides[side];
-  return edgePoint(node, sideX, sideY);
-}
-
-function roughUnderline(x, y, width) {
-  const middle = x + width / 2;
-  return `M ${x} ${y} Q ${middle} ${y + 7}, ${x + width} ${y - 1}`;
-}
-
-function labelSize(label) {
-  if (label.length > 20) return 19;
-  if (label.length > 14) return 21;
-  return 24;
-}
-
-function subLabelSize(label) {
-  if (label.length > 30) return 11;
-  if (label.length > 24) return 12;
-  return 14;
-}
-
-function makeSvg(name, attrs = {}) {
-  const element = document.createElementNS("http://www.w3.org/2000/svg", name);
-  Object.entries(attrs).forEach(([key, value]) => element.setAttribute(key, value));
-  return element;
-}
-
-showView("top");
+selectStage("authorize");
+selectComponent("stack");

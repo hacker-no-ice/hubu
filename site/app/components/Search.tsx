@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import Link from "next/link";
 
 export type SearchDocument = { slug: string; title: string; excerpt: string };
 
@@ -32,9 +31,9 @@ export function Search({ documents, large = false }: { documents: SearchDocument
       {results.length > 0 && (
         <div className="search-results" id="search-results">
           {results.map((result) => (
-            <Link href={`/docs/${result.slug}`} key={result.slug}>
+            <a href={`/docs/${result.slug}`} key={result.slug}>
               <strong>{result.title}</strong><span>{result.excerpt}</span>
-            </Link>
+            </a>
           ))}
         </div>
       )}
