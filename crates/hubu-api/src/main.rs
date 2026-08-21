@@ -52,6 +52,7 @@ fn run() -> anyhow::Result<()> {
             );
             if let Some(path) = &config.log_file {
                 std::env::set_var("HUBU_LOG_FILE", path);
+                std::env::set_var("HUBU_LOG_STDERR", "0");
             }
             if let Some(path) = &config.spend_timing_config {
                 std::env::set_var("HUBU_SPEND_TIMING_CONFIG", path);

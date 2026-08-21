@@ -50,6 +50,10 @@ fn server_with_backends(
         snapshot: Arc::new(Mutex::new(snapshot)),
         transition_state: Arc::new(transition_state),
         capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
+        last_probe_at: Arc::new(Mutex::new(ProbeTimes {
+            hubu: Instant::now(),
+            gongbu: Instant::now(),
+        })),
         hubu_routing,
     }
 }

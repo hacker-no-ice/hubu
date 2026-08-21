@@ -375,6 +375,8 @@ fn hubu_only_initialize_discovery_and_call() {
     let initialize = mcp.initialize();
     assert_backend_state(&initialize, "hubu", "available");
     assert_backend_state(&initialize, "gongbu", "unconfigured");
+    let baseline_health = hubu.request_count("GET", "/health");
+    let baseline_version = hubu.request_count("GET", "/version");
     let tools = mcp.list_tools();
     let names = tool_names(&tools);
     assert!(names.contains(&"hubu_list_budgets"));
@@ -385,6 +387,8 @@ fn hubu_only_initialize_discovery_and_call() {
         response["result"]["structuredContent"]["budgets"][0]["budget_id"],
         "hubu-state-marker"
     );
+    assert_eq!(hubu.request_count("GET", "/health"), baseline_health);
+    assert_eq!(hubu.request_count("GET", "/version"), baseline_version);
     assert_bearer_isolated(&hubu, HUBU_TOKEN, GONGBU_TOKEN);
     mcp.finish(&[HUBU_TOKEN]);
 }
@@ -398,6 +402,9 @@ fn gongbu_only_initialize_discovery_and_read_call() {
     let initialize = mcp.initialize();
     assert_backend_state(&initialize, "hubu", "unconfigured");
     assert_backend_state(&initialize, "gongbu", "available");
+    let baseline_livez = gongbu.request_count("GET", "/livez");
+    let baseline_readyz = gongbu.request_count("GET", "/readyz");
+    let baseline_version = gongbu.request_count("GET", "/version");
     let tools = mcp.list_tools();
     let names = tool_names(&tools);
     assert!(names.contains(&"gongbu_get_execution"));
@@ -410,6 +417,9 @@ fn gongbu_only_initialize_discovery_and_read_call() {
     let body: Value =
         serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(body["outcome"], "gongbu-state-marker");
+    assert_eq!(gongbu.request_count("GET", "/livez"), baseline_livez);
+    assert_eq!(gongbu.request_count("GET", "/readyz"), baseline_readyz);
+    assert_eq!(gongbu.request_count("GET", "/version"), baseline_version);
     assert_bearer_isolated(&gongbu, GONGBU_TOKEN, HUBU_TOKEN);
     mcp.finish(&[GONGBU_TOKEN]);
 }

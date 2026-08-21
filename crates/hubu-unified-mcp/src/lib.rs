@@ -13,7 +13,7 @@ use std::{
     env, fmt,
     io::{self, BufRead, Write},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use reqwest::{
@@ -55,7 +55,7 @@ const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
-const DEFAULT_CAPABILITY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const DEFAULT_CAPABILITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const MIN_CAPABILITY_POLL_INTERVAL_MS: u64 = 10;
 const MAX_CAPABILITY_POLL_INTERVAL_MS: u64 = 60_000;
 
@@ -413,7 +413,14 @@ pub struct Server {
     snapshot: Arc<Mutex<CapabilitySnapshot>>,
     transition_state: Arc<TransitionState>,
     capability_poll_interval: Duration,
+    last_probe_at: Arc<Mutex<ProbeTimes>>,
     hubu_routing: HubuRoutingConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProbeTimes {
+    hubu: Instant,
+    gongbu: Instant,
 }
 
 impl Server {
@@ -422,12 +429,17 @@ impl Server {
         let capability_poll_interval = config.capability_poll_interval;
         let backends = BackendClients::new(config)?;
         let snapshot = backends.probe();
+        let probed_at = Instant::now();
         let transition_state = TransitionState::new(&snapshot);
         Ok(Self {
             backends,
             snapshot: Arc::new(Mutex::new(snapshot)),
             transition_state: Arc::new(transition_state),
             capability_poll_interval,
+            last_probe_at: Arc::new(Mutex::new(ProbeTimes {
+                hubu: probed_at,
+                gongbu: probed_at,
+            })),
             hubu_routing,
         })
     }
@@ -456,7 +468,6 @@ impl Server {
     }
 
     fn initialize_result(&self) -> Value {
-        self.refresh_capabilities();
         let mut capability = self.capabilities();
         capability
             .as_object_mut()
@@ -515,9 +526,11 @@ impl Server {
         };
         if owner == BackendOwner::Gongbu {
             if call.name == "gongbu_create_execution" {
+                // Governed execution admission must synchronously validate both
+                // backend boundaries immediately before forwarding.
                 self.refresh_capabilities();
             } else {
-                self.refresh_gongbu_capability();
+                self.refresh_gongbu_capability_if_stale();
             }
             let snapshot = self.snapshot();
             if let Err(rejection) = tool_availability(&call.name, owner, &snapshot) {
@@ -530,7 +543,7 @@ impl Server {
                 .expect("available Gongbu route has a configured client");
             return success_response(id, gongbu::call_tool(client, &call.name, call.arguments));
         }
-        self.refresh_hubu_capability();
+        self.refresh_hubu_capability_if_stale();
         hubu::call_tool(self, id, call)
     }
 
@@ -583,7 +596,7 @@ impl Server {
     }
 
     fn list_tools(&self) -> Vec<Value> {
-        self.refresh_capabilities();
+        self.refresh_capabilities_if_stale();
         self.list_tools_for_snapshot()
     }
 
@@ -618,6 +631,14 @@ impl Server {
         let refreshed = self.backends.probe();
         self.transition_state
             .apply_full(&self.snapshot, probe_id, refreshed);
+        let now = Instant::now();
+        *self
+            .last_probe_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ProbeTimes {
+            hubu: now,
+            gongbu: now,
+        };
     }
 
     fn refresh_hubu_capability(&self) {
@@ -625,6 +646,10 @@ impl Server {
         let refreshed = self.backends.probe_hubu();
         self.transition_state
             .apply_hubu(&self.snapshot, probe_id, refreshed);
+        self.last_probe_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hubu = Instant::now();
     }
 
     fn refresh_gongbu_capability(&self) {
@@ -632,6 +657,54 @@ impl Server {
         let refreshed = self.backends.probe_gongbu();
         self.transition_state
             .apply_gongbu(&self.snapshot, probe_id, refreshed);
+        self.last_probe_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .gongbu = Instant::now();
+    }
+
+    fn refresh_capabilities_if_stale(&self) {
+        let now = Instant::now();
+        let times = *self
+            .last_probe_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hubu_stale = now.duration_since(times.hubu) >= self.capability_poll_interval;
+        let gongbu_stale = now.duration_since(times.gongbu) >= self.capability_poll_interval;
+        match (hubu_stale, gongbu_stale) {
+            (true, true) => self.refresh_capabilities(),
+            (true, false) => self.refresh_hubu_capability(),
+            (false, true) => self.refresh_gongbu_capability(),
+            (false, false) => {}
+        }
+    }
+
+    fn refresh_hubu_capability_if_stale(&self) {
+        let last = self
+            .last_probe_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hubu;
+        if last.elapsed() >= self.capability_poll_interval {
+            self.refresh_hubu_capability();
+        }
+    }
+
+    fn refresh_gongbu_capability_if_stale(&self) {
+        let last = self
+            .last_probe_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .gongbu;
+        if last.elapsed() >= self.capability_poll_interval {
+            self.refresh_gongbu_capability();
+        }
+    }
+
+    pub(crate) fn capability_probe_failed(&self) -> bool {
+        let snapshot = self.snapshot();
+        matches!(snapshot.hubu.state, capability::BackendState::Unavailable)
+            || matches!(snapshot.gongbu.state, capability::BackendState::Unavailable)
     }
 
     fn mark_hubu_unavailable(&self) {
@@ -762,7 +835,7 @@ mod tests {
 
     #[test]
     fn validates_injectable_capability_poll_interval() {
-        assert_eq!(poll_interval(None).unwrap(), Duration::from_millis(250));
+        assert_eq!(poll_interval(None).unwrap(), Duration::from_secs(30));
         assert_eq!(
             poll_interval(Some("10".into())).unwrap(),
             Duration::from_millis(10)

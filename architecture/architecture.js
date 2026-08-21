@@ -153,6 +153,7 @@ const components = {
       "Uses one stable platform operation key as the agent-scoped workflow identity, with immutable authorization revisions for safe scope correction after terminal denial.",
       "Returns immutable attempt audit and structured retry guidance, while SQLite atomically admits corrected revisions and rejects unsafe changed scope with conflict status.",
       "Uses SQLite as the finalization authority so receipt, claim, token, hold, and balance commit atomically, settle serializes against release, and identical executor or human reconciliation retries return stored state.",
+      "Writes managed structured events through one bounded JSONL sink, rotates four 10 MiB generations, suppresses successful health/version request noise, and retains failed probe diagnostics.",
     ],
     links: [sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, sharedLinks.telemetry],
     nodes: [
@@ -480,7 +481,7 @@ const components = {
       "The agent harness launches one default stdio server. That router probes and calls two isolated HTTP backends through separate clients and credentials; it owns discovery and routing, not governance, provider execution, storage, or artifacts.",
     responsibilities: [
       "The unified server implements initialize, ping, tools/list, tools/call, startup validation, machine-readable capability snapshots, redacted backend-state errors, serialized list-changed notifications, and bounded monitor shutdown over JSON-RPC stdio.",
-      "Starts independent background probes only after the initialize/initialized handshake, baselines without an initial notification, and emits exactly one payload-free tools/list_changed event per effective callable-catalog transition.",
+      "Starts jittered 30-second background probes only after the initialize/initialized handshake, backs off repeated outages, reuses fresh snapshots for routine calls, and emits exactly one payload-free tools/list_changed event per effective callable-catalog transition.",
       "Configures separate Hubu and Gongbu endpoints, bearer credentials, bounded HTTP clients, and independently probed versioned adapter boundaries without cross-domain Cargo dependencies.",
       "Coalesces concurrent monitor and request refreshes with independent per-backend single-flight gates whose bookkeeping locks are released before network I/O.",
       "Publishes and routes the four accepted gongbu_* execution and artifact tools with stable schema, result, error, redaction, operation-key, and no-retry behavior.",
