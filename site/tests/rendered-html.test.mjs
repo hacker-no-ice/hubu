@@ -44,6 +44,14 @@ test("renders the concise canonical overview", async () => {
   assert.doesNotMatch(html, /What Hubu Does Today|Crates|Local Developer Tools/);
 });
 
+test("uses GitHub tree URLs for repository directory links", async () => {
+  const response = await render("/docs/spend-lifecycle");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /github\.com\/hacker-no-ice\/hubu\/tree\/main\/crates\/hubu-core/);
+  assert.doesNotMatch(html, /github\.com\/hacker-no-ice\/hubu\/blob\/main\/crates\/hubu-core["#]/);
+});
+
 test("uses document navigation for deployed subpage reliability", async () => {
   const sources = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
@@ -51,4 +59,19 @@ test("uses document navigation for deployed subpage reliability", async () => {
     readFile(new URL("../app/components/Search.tsx", import.meta.url), "utf8"),
   ]);
   assert.doesNotMatch(sources.join("\n"), /next\/link|<Link\b/);
+});
+
+test("keeps component drill-down diagrams and resettable architecture playback", async () => {
+  const [html, script] = await Promise.all([
+    readFile(new URL("../../architecture/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../../architecture/architecture.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(html, /id="detail-diagram"/);
+  assert.match(html, /data-component="registration"/);
+  assert.match(html, /data-component="policy"/);
+  assert.match(html, /data-component="budgets"/);
+  assert.match(html, /data-component="persistence"/);
+  assert.match(script, /Identity \+ registration/);
+  assert.match(script, /function stopPlayback\(\)/);
+  assert.match(script, /setAttribute\("aria-pressed", "false"\)/);
 });

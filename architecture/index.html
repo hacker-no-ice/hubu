@@ -46,7 +46,7 @@
             <button type="button" data-stage-button="execute"><span>03</span><strong>Execute</strong><small>provider isolation</small></button>
             <button type="button" data-stage-button="settle"><span>04</span><strong>Settle</strong><small>provable finality</small></button>
           </div>
-          <button class="play-button" type="button" id="play-flow"><span aria-hidden="true">▶</span> Play the flow</button>
+          <button class="play-button" type="button" id="play-flow" aria-pressed="false"><span aria-hidden="true">▶</span> Play the flow</button>
         </aside>
 
         <div class="system-widget">
@@ -110,13 +110,22 @@
             <button type="button" role="tab" data-component="stack" aria-selected="true"><span>00</span>System boundary</button>
             <button type="button" role="tab" data-component="mcp"><span>01</span>Unified MCP</button>
             <button type="button" role="tab" data-component="hubu"><span>02</span>Hubu control plane</button>
-            <button type="button" role="tab" data-component="gongbu"><span>03</span>Gongbu execution plane</button>
-            <button type="button" role="tab" data-component="provider"><span>04</span>Provider edge</button>
+            <button type="button" role="tab" data-component="api"><span>03</span>Hubu HTTP API</button>
+            <button type="button" role="tab" data-component="registration"><span>04</span>Agent registration</button>
+            <button type="button" role="tab" data-component="policy"><span>05</span>Policy engine</button>
+            <button type="button" role="tab" data-component="budgets"><span>06</span>Budgets + payments</button>
+            <button type="button" role="tab" data-component="persistence"><span>07</span>Hubu persistence</button>
+            <button type="button" role="tab" data-component="gongbu"><span>08</span>Gongbu execution plane</button>
+            <button type="button" role="tab" data-component="provider"><span>09</span>Provider edge</button>
           </div>
           <article class="component-detail" aria-live="polite">
             <p id="detail-kind">SYSTEM BOUNDARY</p>
             <h3 id="detail-title">Separate by design</h3>
             <p id="detail-copy">The repository and release are unified. The running systems are not. Hubu and Gongbu retain separate processes, state, credentials, and recovery paths.</p>
+            <div class="detail-map">
+              <p>INTERNAL FLOW</p>
+              <ol id="detail-diagram" class="detail-diagram" aria-label="Selected component internal flow"></ol>
+            </div>
             <div class="detail-columns">
               <div><h4>Responsibilities</h4><ul id="detail-responsibilities"></ul></div>
               <div><h4>Source & runbooks</h4><ul id="detail-links" class="source-links"></ul></div>

@@ -1,4 +1,5 @@
 import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Marked, Renderer } from "marked";
@@ -63,7 +64,16 @@ function renderMarkdown(markdown, sourcePath) {
       const sourceTarget = path.posix.normalize(path.posix.join(path.posix.dirname(sourcePath), linkPath));
       if (sourceToSlug.has(sourceTarget)) resolved = `/docs/${sourceToSlug.get(sourceTarget)}${hash ? `#${hash}` : ""}`;
       else if (sourceTarget === "architecture" || sourceTarget === "architecture/index.html") resolved = `/architecture/${hash ? `#${hash}` : ""}`;
-      else resolved = `${githubRoot}${sourceTarget}${hash ? `#${hash}` : ""}`;
+      else {
+        let targetIsDirectory = false;
+        try {
+          targetIsDirectory = statSync(path.join(repoRoot, sourceTarget)).isDirectory();
+        } catch {
+          // Missing repository targets remain blob links so stale links are visible.
+        }
+        const githubTargetRoot = targetIsDirectory ? githubRoot.replace("/blob/", "/tree/") : githubRoot;
+        resolved = `${githubTargetRoot}${sourceTarget}${hash ? `#${hash}` : ""}`;
+      }
     }
     return `<a href="${escapeAttribute(resolved)}"${title ? ` title="${escapeAttribute(title)}"` : ""}>${text}</a>`;
   };

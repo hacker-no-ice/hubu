@@ -110,6 +110,14 @@ button { color: inherit; }
 .component-detail > p:first-child { color: var(--indigo); font: 9px ui-monospace, monospace; letter-spacing: .1em; }
 .component-detail h3 { margin: 16px 0 14px; font-size: clamp(34px, 4vw, 54px); line-height: 1; letter-spacing: -.055em; font-weight: 540; }
 .component-detail > p:nth-child(3) { max-width: 760px; color: #a2a4aa; line-height: 1.65; }
+.detail-map { margin-top: 34px; padding: 24px; border: 1px solid #252832; border-radius: 10px; background: #08090b; overflow: hidden; }
+.detail-map > p { margin: 0 0 18px; color: #656872; font: 9px ui-monospace, monospace; letter-spacing: .12em; }
+.detail-diagram { margin: 0; padding: 0; display: flex; align-items: stretch; gap: 26px; list-style: none; overflow-x: auto; scrollbar-width: thin; }
+.detail-diagram li { position: relative; min-width: 128px; flex: 1 0 128px; padding: 14px 13px; border: 1px solid #30333d; border-radius: 8px; background: #101116; }
+.detail-diagram li:not(:last-child)::after { content: "→"; position: absolute; top: 50%; right: -20px; transform: translateY(-50%); color: var(--cyan); font: 13px ui-monospace, monospace; }
+.detail-diagram strong, .detail-diagram span { display: block; }
+.detail-diagram strong { color: #e5e6e9; font-size: 11px; font-weight: 560; line-height: 1.35; }
+.detail-diagram span { margin-top: 7px; color: #6f727c; font: 9px/1.4 ui-monospace, monospace; }
 .detail-columns { margin-top: 44px; padding-top: 30px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1.1fr .9fr; gap: 45px; }
 .detail-columns h4 { margin: 0 0 15px; color: #ddd; font-size: 11px; font-weight: 560; }
 .detail-columns ul { margin: 0; padding: 0; list-style: none; }
