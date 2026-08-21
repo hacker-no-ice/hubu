@@ -167,7 +167,7 @@ Codex after changing the generated configuration.
 The lifecycle is:
 
 ```text
-operator starts: hubu-server and gongbu-server
+operator starts: hubu stack start (managed hubu-server and gongbu-server)
 client starts:   hubu-unified-mcp
 router calls:    separate Hubu and Gongbu HTTP endpoints
 agent sees:      eligible hubu_* and gongbu_* tools

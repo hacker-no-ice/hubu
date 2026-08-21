@@ -2494,7 +2494,7 @@ Usage:
   hubu [--url URL] <command>
 
 Commands:
-  stack      Scaffold, diagnose, and render a unified local stack profile
+  stack      Configure and operate a unified local stack profile
   register   Register human users and agents
   protocol   Read Hubu protocol payloads
   user       List human users and manage advisory spending targets

@@ -14,6 +14,7 @@ use std::{
 use uuid::Uuid;
 
 mod doctor;
+mod lifecycle;
 
 const SOURCE_SCHEMA_VERSION: u32 = 1;
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -223,7 +224,7 @@ struct BinaryProvenance {
     server_config_schema_version: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ActiveManifest {
     schema_version: u32,
     generation_id: String,
@@ -232,6 +233,8 @@ struct ActiveManifest {
     generated_file_digests: BTreeMap<String, String>,
     binary_provenance: Vec<BinaryProvenance>,
     process_log_files: BTreeMap<String, Option<PathBuf>>,
+    #[serde(default)]
+    restart_impact: Vec<String>,
 }
 
 pub(crate) fn command(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
@@ -244,6 +247,10 @@ pub(crate) fn command(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         "init" => init(args, hubu_home),
         "doctor" => doctor::command(args, hubu_home),
         "render" => render(args, hubu_home),
+        "start" => lifecycle::start(args, hubu_home),
+        "status" => lifecycle::status(args, hubu_home),
+        "logs" => lifecycle::logs(args, hubu_home),
+        "stop" => lifecycle::stop(args, hubu_home),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -1910,8 +1917,10 @@ Start with every uncommented example that matches your topology, fill the
 commented fields you choose, and leave unrelated examples commented. Then run
 `hubu stack doctor --profile /absolute/path/to/this/profile`. When the profile
 is `ready_to_render`, run
-`hubu stack render --profile /absolute/path/to/this/profile`, followed by doctor
-again to validate the active generation and runtime readiness.
+`hubu stack start --profile /absolute/path/to/this/profile`. Start runs doctor
+and render as needed, launches only configured managed services, and leaves
+external services and the client-owned unified MCP process untouched. Use
+`hubu stack status` and `hubu stack logs` for the combined operator view.
 
 Durable contract: `docs/local-stack.md` in the Hubu repository.
 "#
@@ -1920,7 +1929,7 @@ Durable contract: `docs/local-stack.md` in the Hubu repository.
 
 fn print_help() {
     println!(
-        "Manage the local Hubu stack profile\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]"
+        "Manage the local Hubu stack profile\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]"
     );
 }
 

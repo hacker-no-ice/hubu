@@ -82,6 +82,50 @@ pub(super) struct DoctorReport {
     checks: Vec<DoctorCheck>,
 }
 
+impl DoctorReport {
+    pub(super) fn is_source_complete(&self) -> bool {
+        !matches!(
+            self.classification,
+            ProfileClassification::Invalid | ProfileClassification::Incomplete
+        )
+    }
+
+    pub(super) fn is_startable(&self) -> bool {
+        matches!(
+            self.classification,
+            ProfileClassification::ReadyToStart | ProfileClassification::RunningReady
+        )
+    }
+
+    pub(super) fn is_running_ready(&self) -> bool {
+        self.classification == ProfileClassification::RunningReady
+    }
+
+    pub(super) fn is_renderable(&self) -> bool {
+        !self.checks.iter().any(|check| {
+            check.status == CheckStatus::Fail
+                && matches!(
+                    check.layer,
+                    CheckLayer::SourceSyntax | CheckLayer::Completeness | CheckLayer::Renderability
+                )
+        })
+    }
+
+    pub(super) fn component_ready(&self, component: &str) -> bool {
+        self.checks.iter().any(|check| {
+            check.status == CheckStatus::Pass
+                && check.component == component
+                && matches!(check.code, "hubu_running_ready" | "gongbu_running_ready")
+        })
+    }
+
+    pub(super) fn check_passed(&self, code: &str) -> bool {
+        self.checks
+            .iter()
+            .any(|check| check.status == CheckStatus::Pass && check.code == code)
+    }
+}
+
 pub(super) fn command(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     if take_help(&mut args) {
         print_help();
@@ -1397,7 +1441,7 @@ fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
     }
 }
 
-fn print_human(profile: &Path, report: &DoctorReport) {
+pub(super) fn print_human(profile: &Path, report: &DoctorReport) {
     println!("profile: {}", profile.display());
     println!("classification: {}", enum_name(report.classification));
     println!(
