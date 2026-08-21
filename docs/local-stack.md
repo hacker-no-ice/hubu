@@ -335,6 +335,39 @@ place; rerun doctor/render and retry activation after confirming the stack is
 stopped. Corrupt active or retained manifests are reported rather than skipped
 or replaced.
 
+## Clean-environment acceptance canary
+
+From a source checkout with the Temporal CLI on `PATH`, run:
+
+```sh
+./scripts/integration-local-stack-acceptance.sh
+```
+
+The canary builds source-only, feature-gated fixture support and then exercises
+the real process boundary end to end. It starts from a clean profile, runs
+annotated non-starting init, verifies incremental doctor diagnostics, renders
+and activates strict service-owned configuration, and starts the actual
+`hubu-server`, `gongbu-server`, Gongbu worker, and managed Temporal child. It
+then obtains a governed Hubu authorization, submits a deterministic Gongbu HTTP
+execution, discovers its Temporal workflow, downloads and verifies its
+artifact, gracefully stops the whole stack, starts it again against the same
+state, and verifies the completed execution and artifact remain available.
+
+This is a local fixture canary, not an unattended-production credential model.
+For V1 it temporarily lets the deterministic execution test use the existing
+broad local Hubu bearer, which remains process-owned test data and is never
+placed in model input, output, logs, or generated configuration. Gongbu is
+never given Hubu's human reconciliation capability. Keychain-backed,
+least-privilege execution credentials remain follow-up work in HUB-32.
+
+The canary uses an explicit one-cent fixture catalog, acknowledgement, and
+process-owned dummy provider reference to prove the fail-closed live-provider
+configuration path without making a billable request. Fixture support is
+compiled only when the non-default `local-fixture-canary` feature is selected
+and additionally requires an explicit canary environment switch. Normal and
+release `gongbu-server` builds omit that feature and continue to reject fixture
+providers.
+
 ## Runtime and recovery boundaries
 
 The profile coordinates lifecycle without becoming a shared domain state

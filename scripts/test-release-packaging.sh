@@ -36,6 +36,7 @@ verify_package() {
     Cargo.lock
     LICENSE-APACHE
     LICENSE-MIT
+    LOCAL-STACK.md
     MANIFEST.json
     PROVENANCE.json
     SHA256SUMS
@@ -45,8 +46,10 @@ verify_package() {
     hubu
     hubu-server
     hubu-unified-mcp
+    operations/gongbu-server.md
+    unified-mcp.md
   )
-  actual_files="$(find "${package_dir}" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)"
+  actual_files="$(cd "${package_dir}" && find . -type f -print | sed 's#^\./##' | LC_ALL=C sort)"
   expected_listing="$(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort)"
   [[ "${actual_files}" == "${expected_listing}" ]]
 
@@ -65,6 +68,7 @@ verify_package() {
      .target == $target and
      .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
      .supported_agent_surfaces == ["hubu-unified-mcp"] and
+     (.files | contains(["LOCAL-STACK.md", "operations/gongbu-server.md", "unified-mcp.md"])) and
      .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
     "${package_dir}/MANIFEST.json" >/dev/null
   jq -e \

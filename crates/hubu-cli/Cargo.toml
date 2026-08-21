@@ -12,6 +12,9 @@ keywords = ["ai-agents", "budgets", "payments", "policy", "cli"]
 categories = ["command-line-utilities", "finance"]
 publish = false
 
+[features]
+local-fixture-canary = []
+
 [[bin]]
 name = "hubu"
 path = "src/main.rs"

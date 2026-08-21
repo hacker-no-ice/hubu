@@ -20,6 +20,13 @@ use crate::artifact::ArtifactLimits;
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
 
+#[cfg(feature = "local-fixture-canary")]
+use super::contract::{
+    AdapterCapabilities, AdapterOutcome, NormalizedArtifact, NormalizedRequest, ProviderFailure,
+};
+#[cfg(feature = "local-fixture-canary")]
+use crate::secrets::ProviderSecret;
+
 pub type BoundAdapter = Arc<dyn ProviderAdapter + Send + Sync>;
 type Factory = dyn Fn(&ProviderConfigVersion) -> Result<BoundAdapter, ContractError> + Send + Sync;
 
@@ -78,6 +85,10 @@ impl ProviderRegistry {
                 max_artifact_bytes,
             )?))
         });
+        #[cfg(feature = "local-fixture-canary")]
+        if local_fixture_canary_enabled() {
+            registry.register("example", "fixture", |_| Ok(Arc::new(LocalFixtureAdapter)));
+        }
         registry
     }
 
@@ -95,6 +106,55 @@ impl ProviderRegistry {
     fn factory(&self, target: &ProviderConfigVersion) -> Option<&Arc<Factory>> {
         self.factories
             .get(&(target.provider.clone(), target.adapter.clone()))
+    }
+}
+
+#[cfg(feature = "local-fixture-canary")]
+fn local_fixture_canary_enabled() -> bool {
+    std::env::var("GONGBU_LOCAL_FIXTURE_CANARY").as_deref() == Ok("1")
+}
+
+#[cfg(feature = "local-fixture-canary")]
+struct LocalFixtureAdapter;
+
+#[cfg(feature = "local-fixture-canary")]
+impl ProviderAdapter for LocalFixtureAdapter {
+    fn adapter_id(&self) -> &str {
+        "fixture"
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities {
+            vendor_enforced_idempotency: false,
+        }
+    }
+
+    fn invoke(
+        &self,
+        _: &NormalizedRequest,
+        _: &serde_json::Value,
+        _: &ProviderSecret,
+        _: Option<&str>,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        Ok(AdapterOutcome {
+            usage: Some(crate::provider_contract::NormalizedUsage {
+                images: Some(1),
+                ..Default::default()
+            }),
+            provider_amount_minor: Some(1),
+            provider_currency: Some("USD".into()),
+            provider_request_id: Some("local-fixture-request".into()),
+            provider_operation_id: None,
+            artifacts: vec![NormalizedArtifact {
+                media_type: "image/png".into(),
+                bytes: vec![
+                    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0,
+                    0, 1, 8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99,
+                    100, 248, 15, 0, 1, 5, 1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174,
+                    66, 96, 130,
+                ],
+            }],
+        })
     }
 }
 
