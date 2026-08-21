@@ -127,7 +127,10 @@ grep -F 'external component is unavailable' <<<"${first_start}" >/dev/null
 stack_started=1
 
 hubu() {
-  HUBU_URL="${hubu_endpoint}" HUBU_AUTH_TOKEN_FILE="${hubu_auth}" "${hubu_bin}" "$@"
+  env -u HUBU_AUTH_TOKEN -u HUBU_APPROVAL_TOKEN -u HUBU_RECONCILIATION_TOKEN \
+    HUBU_URL="${hubu_endpoint}" \
+    HUBU_AUTH_TOKEN_FILE="${hubu_auth}" \
+    "${hubu_bin}" "$@"
 }
 
 human_output="$(hubu register human --username hub-105-owner --display-name 'HUB-105 Owner')"
@@ -336,6 +339,10 @@ fi
 stack_started=0
 "${hubu_bin}" stack start --profile "${profile}" >/dev/null
 stack_started=1
+temporal workflow describe \
+  --address "127.0.0.1:${temporal_port}" \
+  --namespace default \
+  --workflow-id "${workflow_id}" >/dev/null
 persisted="$(curl --fail --silent \
   -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
   "${gongbu_endpoint}/v1/executions/${execution_id}")"
