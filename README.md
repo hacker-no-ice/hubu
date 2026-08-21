@@ -37,7 +37,12 @@ install -m 0755 "${asset%.tar.gz}"/{hubu,hubu-server,hubu-unified-mcp,gongbu-ser
 ```
 
 Ensure `~/.local/bin` is on your `PATH`, then create an operator-owned stack
-profile and start Hubu temporarily to bootstrap its human, agent, and account
+profile. This quick start uses the generated managed-Hubu endpoint and database;
+for an external Hubu or a custom database, follow the
+[local stack guide](docs/local-stack.md) and bootstrap directly against that
+final backend instead.
+
+Start managed Hubu temporarily to bootstrap its human, agent, and account
 identities:
 
 ```sh
@@ -56,16 +61,27 @@ until hubu health >/dev/null 2>&1; do sleep 1; done
 hubu protocol agent-registration
 hubu register human --username alice-example --display-name "Alice Example"
 hubu register agent --name local-agent --version local-dev
+```
+
+Keep the temporary server running. Copy the printed `agt_...` agent ID and
+`aga_...` account ID, replace `agt_...` below, then apply a starter policy and
+create the agent's active USD budget:
+
+```sh
+hubu policy new-template --path "$profile/starter-policy.yaml"
+hubu policy validate --path "$profile/starter-policy.yaml"
+hubu policy apply --path "$profile/starter-policy.yaml"
+hubu budget create --agent-id agt_... --amount 25
 
 kill "$bootstrap_pid"
 wait "$bootstrap_pid" || true
 ```
 
-Copy the printed `agt_...` agent ID and `aga_...` account ID into `stack.toml`.
-Finish the generated `stack.toml`, `credentials.toml`, and `providers.toml`,
-using the credential-file paths above and choosing the topology, provider
-targets, pricing, credentials, and spend ceiling. Start the configured services
-and check readiness:
+Set `hubu.ownership` to `managed` in `stack.toml`, keep its generated endpoint,
+listen address, and database path unchanged, and add the printed agent and
+account IDs. Finish `credentials.toml` with the credential-file paths above,
+then configure the managed Gongbu/Temporal topology, provider targets, pricing,
+provider credentials, and spend ceiling. Start the services and check readiness:
 
 ```sh
 hubu stack start --profile "$profile"
