@@ -702,11 +702,30 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
     if let Some(active) = &previous_active {
         validate_manifest_integrity(&generated, active)?;
     }
+    let relative_generation = PathBuf::from("generations").join(&generation_id);
+    let generation = generated.join(&relative_generation);
     if let Some(active) = &previous_active {
         if active.generation_id == generation_id {
-            if active.source_digests != source_digests || active.binary_provenance != provenances {
-                bail!("active manifest does not match the current generation inputs");
-            }
+            let expected = rederive_generation(
+                &generated,
+                &generation,
+                &stack,
+                &credentials,
+                &providers,
+                &provenances,
+                hubu_server.as_deref(),
+                gongbu_server.as_deref(),
+                &unified_mcp,
+                &hubu_auth,
+                &hubu_approval,
+                &hubu_reconciliation,
+                &gongbu_caller_file,
+                &source_digests,
+                &generation_id,
+                &relative_generation,
+                previous_active.as_ref(),
+            )?;
+            validate_rederived_generation(active, &expected, true)?;
             validate_generation(
                 &generated,
                 active,
@@ -726,33 +745,74 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
             });
         }
     }
-    let relative_generation = PathBuf::from("generations").join(&generation_id);
-    let generation = generated.join(&relative_generation);
     if generation.exists() {
-        let staged: ActiveManifest = read_json(&generation.join("manifest.json"))
-            .context("read the staged generation manifest")?;
-        if staged.generation_id != generation_id
-            || staged.source_digests != source_digests
-            || staged.binary_provenance != provenances
-        {
-            bail!("inactive generation `{generation_id}` is inconsistent with current inputs");
+        if !fs::symlink_metadata(&generation)?.file_type().is_dir() {
+            bail!(
+                "inactive generation path `{}` is not a real directory",
+                generation.display()
+            );
         }
-        validate_generation(
-            &generated,
-            &staged,
-            &stack,
-            &providers,
-            hubu_server.as_deref(),
-            gongbu_server.as_deref(),
-        )?;
-        let outcome = render_outcome(previous_active.as_ref(), &staged, false);
-        print_staged_plan(profile, &outcome);
-        return Ok(outcome);
+        let manifest_path = generation.join("manifest.json");
+        let staged = if manifest_path.exists() {
+            let bytes = fs::read(&manifest_path)?;
+            match serde_json::from_slice::<Value>(&bytes) {
+                Err(_) => None,
+                Ok(value) => {
+                    if value
+                        .get("schema_version")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|version| version != u64::from(MANIFEST_SCHEMA_VERSION))
+                    {
+                        bail!("staged generation uses an unsupported manifest schema");
+                    }
+                    serde_json::from_slice::<ActiveManifest>(&bytes).ok()
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(staged) = staged {
+            let expected = rederive_generation(
+                &generated,
+                &generation,
+                &stack,
+                &credentials,
+                &providers,
+                &provenances,
+                hubu_server.as_deref(),
+                gongbu_server.as_deref(),
+                &unified_mcp,
+                &hubu_auth,
+                &hubu_approval,
+                &hubu_reconciliation,
+                &gongbu_caller_file,
+                &source_digests,
+                &generation_id,
+                &relative_generation,
+                previous_active.as_ref(),
+            )?;
+            validate_rederived_generation(&staged, &expected, false)?;
+            validate_generation(
+                &generated,
+                &staged,
+                &stack,
+                &providers,
+                hubu_server.as_deref(),
+                gongbu_server.as_deref(),
+            )?;
+            let outcome = render_outcome(previous_active.as_ref(), &staged, false);
+            print_staged_plan(profile, &outcome);
+            return Ok(outcome);
+        }
+        fs::remove_dir_all(&generation)
+            .with_context(|| format!("discard incomplete generation `{generation_id}`"))?;
+        eprintln!("discarded incomplete staged generation: {generation_id}");
     }
     create_secure_dir(&generated.join("generations"))?;
     create_secure_dir(&generation)?;
 
     let result = render_generation(
+        &generation,
         &generation,
         &stack,
         &credentials,
@@ -802,6 +862,7 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
 #[allow(clippy::too_many_arguments)]
 fn render_generation(
     generation: &Path,
+    runtime_generation: &Path,
     stack: &StackSource,
     credentials: &CredentialsSource,
     providers: &ProvidersSource,
@@ -877,7 +938,8 @@ fn render_generation(
             .find(|item| item.component == "gongbu-server")
             .expect("probed");
         let gongbu_schema_version = gongbu_version.server_config_schema_version.unwrap_or(1);
-        let provider_json = render_provider_config(providers, gongbu_schema_version, generation)?;
+        let provider_json =
+            render_provider_config(providers, gongbu_schema_version, runtime_generation)?;
         let config = json!({
             "schema_version": gongbu_schema_version,
             "http": {"listen": gongbu.listen.expect("checked")},
@@ -1000,6 +1062,77 @@ fn render_generation(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn rederive_generation(
+    generated: &Path,
+    generation: &Path,
+    stack: &StackSource,
+    credentials: &CredentialsSource,
+    providers: &ProvidersSource,
+    provenances: &[BinaryProvenance],
+    hubu_server: Option<&Path>,
+    gongbu_server: Option<&Path>,
+    unified_mcp: &Path,
+    hubu_auth: &Path,
+    hubu_approval: &Path,
+    hubu_reconciliation: &Path,
+    gongbu_caller_file: &Path,
+    source_digests: &BTreeMap<String, String>,
+    generation_id: &str,
+    relative_generation: &Path,
+    previous_active: Option<&ActiveManifest>,
+) -> Result<ActiveManifest> {
+    let candidate = generated.join(format!("verification-{}", Uuid::new_v4()));
+    create_secure_dir(&candidate)?;
+    let result = render_generation(
+        &candidate,
+        generation,
+        stack,
+        credentials,
+        providers,
+        provenances,
+        hubu_server,
+        gongbu_server,
+        unified_mcp,
+        hubu_auth,
+        hubu_approval,
+        hubu_reconciliation,
+        gongbu_caller_file,
+        source_digests,
+        generation_id,
+        relative_generation,
+        previous_active,
+    );
+    let cleanup = fs::remove_dir_all(&candidate)
+        .with_context(|| format!("remove verification candidate `{}`", candidate.display()));
+    match (result, cleanup) {
+        (Ok(manifest), Ok(())) => Ok(manifest),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn validate_rederived_generation(
+    stored: &ActiveManifest,
+    expected: &ActiveManifest,
+    allow_legacy_source_schema_metadata: bool,
+) -> Result<()> {
+    let source_schemas_match = stored.source_schema_versions == expected.source_schema_versions
+        || (allow_legacy_source_schema_metadata && stored.source_schema_versions.is_empty());
+    if stored.schema_version != expected.schema_version
+        || stored.generation_id != expected.generation_id
+        || stored.generation != expected.generation
+        || !source_schemas_match
+        || stored.source_digests != expected.source_digests
+        || stored.binary_provenance != expected.binary_provenance
+        || stored.generated_file_digests != expected.generated_file_digests
+        || stored.process_log_files != expected.process_log_files
+    {
+        bail!("stored generation does not match artifacts re-derived from current inputs");
+    }
+    Ok(())
+}
+
 fn validate_generation(
     generated: &Path,
     manifest: &ActiveManifest,
@@ -1084,16 +1217,8 @@ fn persist_generation_manifest(generated: &Path, manifest: &ActiveManifest) -> R
     let path = generation.join("manifest.json");
     if path.exists() {
         let stored: ActiveManifest = read_json(&path)?;
-        if stored.generation_id != manifest.generation_id
-            || stored.generation != manifest.generation
-            || stored.source_schema_versions != manifest.source_schema_versions
-            || stored.source_digests != manifest.source_digests
-            || stored.binary_provenance != manifest.binary_provenance
-            || stored.generated_file_digests != manifest.generated_file_digests
-            || stored.process_log_files != manifest.process_log_files
-        {
-            bail!("stored generation manifest does not match the authenticated generation");
-        }
+        validate_rederived_generation(&stored, manifest, true)
+            .context("stored generation manifest does not match the authenticated generation")?;
         return Ok(());
     }
     write_json_secure(&path, &serde_json::to_value(manifest)?)
@@ -2836,6 +2961,10 @@ gongbu_caller = {}
         let root = tempdir().unwrap();
         let profile = root.path().join("profile");
         let binaries = root.path().join("bin");
+        let hubu_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let gongbu_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hubu_addr = hubu_listener.local_addr().unwrap();
+        let gongbu_addr = gongbu_listener.local_addr().unwrap();
         fs::create_dir(&binaries).unwrap();
         for name in ["hubu", "hubu-server", "gongbu-server", "hubu-unified-mcp"] {
             write_fake_binary(&binaries.join(name), false);
@@ -2861,14 +2990,14 @@ account_id = "account-1"
 agent_id = "agent-1"
 [hubu]
 ownership = "managed"
-endpoint = "http://127.0.0.1:8787"
-listen = "127.0.0.1:8787"
+endpoint = "http://{hubu_addr}"
+listen = "{hubu_addr}"
 database_path = {}
 log_file = {}
 [gongbu]
 ownership = "managed"
-endpoint = "http://127.0.0.1:8788"
-listen = "127.0.0.1:8788"
+endpoint = "http://{gongbu_addr}"
+listen = "{gongbu_addr}"
 database_path = {}
 artifact_root = {}
 log_file = {}
@@ -2920,6 +3049,8 @@ account = "gongbu-caller"
         .unwrap();
 
         assert!(files_needing_input(&profile).is_empty());
+        drop(hubu_listener);
+        drop(gongbu_listener);
         let initial =
             render_profile_with_renderer_outcome(&profile, &binaries.join("hubu")).unwrap();
         assert!(initial.activated);
@@ -2932,7 +3063,7 @@ account = "gongbu-caller"
             .join("manifest.json")
             .is_file());
         let handoff = codex_handoff(&profile, root.path()).unwrap();
-        assert_eq!(handoff.hubu_endpoint, "http://127.0.0.1:8787");
+        assert_eq!(handoff.hubu_endpoint, format!("http://{hubu_addr}"));
         render_profile_with_renderer(&profile, &binaries.join("hubu")).unwrap();
         assert_eq!(fs::read(&active_path).unwrap(), active);
         write_fake_binary(&binaries.join("gongbu-server"), true);
@@ -2953,6 +3084,14 @@ account = "gongbu-caller"
         let staged_again =
             render_profile_with_renderer_outcome(&profile, &binaries.join("hubu")).unwrap();
         assert_eq!(staged_again, staged);
+        assert_eq!(fs::read(&active_path).unwrap(), active);
+        let staged_dir = profile
+            .join("generated/generations")
+            .join(&staged.generation_id);
+        fs::write(staged_dir.join("manifest.json"), b"{}\n").unwrap();
+        let recovered =
+            render_profile_with_renderer_outcome(&profile, &binaries.join("hubu")).unwrap();
+        assert_eq!(recovered, staged);
         assert_eq!(fs::read(&active_path).unwrap(), active);
         activate_selected_generation_with_renderer(
             &profile,
@@ -3010,6 +3149,28 @@ account = "gongbu-caller"
                     .contains("rotated-secret-canary"));
             }
         }
+        let rotation_dir = profile
+            .join("generated/generations")
+            .join(&rotation.generation_id);
+        let handoff_path = rotation_dir.join("client-handoff.json");
+        let mut tampered_handoff: Value = read_json(&handoff_path).unwrap();
+        tampered_handoff["hubu_endpoint"] = json!("http://127.0.0.1:9999");
+        let tampered_bytes = serde_json::to_vec_pretty(&tampered_handoff).unwrap();
+        fs::write(&handoff_path, &tampered_bytes).unwrap();
+        let manifest_path = rotation_dir.join("manifest.json");
+        let mut tampered_manifest: Value = read_json(&manifest_path).unwrap();
+        tampered_manifest["generated_file_digests"]["client-handoff.json"] =
+            json!(digest(&tampered_bytes));
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&tampered_manifest).unwrap(),
+        )
+        .unwrap();
+        let tamper_error = render_profile_with_renderer_outcome(&profile, &binaries.join("hubu"))
+            .unwrap_err()
+            .to_string();
+        assert!(tamper_error.contains("re-derived from current inputs"));
+        fs::remove_dir_all(rotation_dir).unwrap();
         fs::write(&credentials_path, original_credentials).unwrap();
 
         fs::write(

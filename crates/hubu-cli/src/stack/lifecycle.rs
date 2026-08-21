@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom},
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -1203,7 +1204,57 @@ pub(super) fn ensure_profile_stopped(profile: &Path) -> Result<()> {
             profile.display()
         );
     }
+    let stack = read_toml::<StackSource>(&profile.join("stack.toml"))?;
+    let mut reachable = Vec::new();
+    for (component, ownership, endpoint) in [
+        (
+            "hubu-server",
+            stack.hubu.as_ref().and_then(|value| value.ownership),
+            stack
+                .hubu
+                .as_ref()
+                .and_then(|value| value.endpoint.as_deref()),
+        ),
+        (
+            "gongbu-server",
+            stack.gongbu.as_ref().and_then(|value| value.ownership),
+            stack
+                .gongbu
+                .as_ref()
+                .and_then(|value| value.endpoint.as_deref()),
+        ),
+    ] {
+        if ownership == Some(Ownership::Managed)
+            && endpoint.is_some_and(managed_endpoint_accepts_connections)
+        {
+            reachable.push(component);
+        }
+    }
+    if !reachable.is_empty() {
+        bail!(
+            "managed endpoints still accept connections for {}; this profile has no ownership metadata and will not signal them, so stop those processes through their owner before activating",
+            reachable.join(", ")
+        );
+    }
     Ok(())
+}
+
+fn managed_endpoint_accepts_connections(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let Some(port) = url.port_or_known_default() else {
+        return false;
+    };
+    (host, port)
+        .to_socket_addrs()
+        .ok()
+        .into_iter()
+        .flatten()
+        .any(|address| TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok())
 }
 
 fn runtime_state_path(profile: &Path) -> PathBuf {
@@ -1406,6 +1457,7 @@ fn print_stop_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
     use tempfile::tempdir;
 
     fn process(component: &str, pid: u32, identity: String) -> OwnedProcess {
@@ -1566,6 +1618,25 @@ ownership = "managed"
                 .to_string()
                 .contains("missing value"));
         }
+    }
+
+    #[test]
+    fn activation_refuses_a_reachable_unowned_managed_endpoint() {
+        let temp = tempdir().unwrap();
+        let profile = temp.path();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let endpoint = toml::Value::String(endpoint).to_string();
+        fs::write(
+            profile.join("stack.toml"),
+            format!("schema_version = 1\n[hubu]\nownership = \"managed\"\nendpoint = {endpoint}\n"),
+        )
+        .unwrap();
+        let error = ensure_profile_stopped(profile).unwrap_err().to_string();
+        assert!(error.contains("no ownership metadata"));
+        assert!(error.contains("hubu-server"));
+        drop(listener);
+        ensure_profile_stopped(profile).unwrap();
     }
 
     #[test]

@@ -1988,19 +1988,29 @@ deliberately_unvalidated_external_shape = true
         let gongbu_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let temporal_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let ui_guard = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let ports = [
-            hubu_listener.local_addr().unwrap().port(),
-            gongbu_listener.local_addr().unwrap().port(),
-            temporal_listener.local_addr().unwrap().port(),
-            ui_guard.local_addr().unwrap().port(),
+        let addresses = [
+            hubu_listener.local_addr().unwrap(),
+            gongbu_listener.local_addr().unwrap(),
+            temporal_listener.local_addr().unwrap(),
+            ui_guard.local_addr().unwrap(),
         ];
+        let ports = addresses.map(|address| address.port());
         let stack_path = profile.join("stack.toml");
         let mut stack = fs::read_to_string(&stack_path).unwrap();
         for (old, new) in [41001_u16, 41002, 41003, 41004].into_iter().zip(ports) {
             stack = stack.replace(&old.to_string(), &new.to_string());
         }
         fs::write(&stack_path, stack).unwrap();
+        drop(hubu_listener);
+        drop(gongbu_listener);
+        drop(temporal_listener);
+        drop(ui_guard);
         render_profile_with_renderer(&profile, &renderer).unwrap();
+
+        let hubu_listener = std::net::TcpListener::bind(addresses[0]).unwrap();
+        let gongbu_listener = std::net::TcpListener::bind(addresses[1]).unwrap();
+        let _temporal_listener = std::net::TcpListener::bind(addresses[2]).unwrap();
+        let _ui_guard = std::net::TcpListener::bind(addresses[3]).unwrap();
 
         let version = r#"{"product_version":"0.1.0","source_commit":"unknown","executor_contract":"hubu-executor.v1"}"#;
         let hubu_server = spawn_http_server(
