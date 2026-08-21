@@ -3,7 +3,7 @@ use gongbu_api::{
     application::{ApplicationDependencies, ArtifactServiceActivities, Authenticator},
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
     execution::{Execution, Repository},
-    http::{AuthenticatedAccount, ExecutionResponse, ExecutionStatus},
+    http::{ArtifactListResponse, AuthenticatedAccount, ExecutionResponse, ExecutionStatus},
     hubu::{BudgetHold, ExecutorSpendResponse, HttpClientError, SpendAuthorizationResolver},
     provider::{
         contract::{
@@ -31,7 +31,10 @@ use std::{
     },
     time::Duration,
 };
-use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions, Url};
+use temporalio_client::{
+    Client, ClientOptions, Connection, ConnectionOptions, UntypedWorkflow, Url,
+    WorkflowDescribeOptions,
+};
 use temporalio_sdk::Runtime;
 
 const CALLER_TOKEN: &str = "hub-71-caller";
@@ -71,7 +74,7 @@ async fn run() {
 
     let repository = Repository::open(root.path().join("gongbu.sqlite3"), Redactor::default())
         .expect("open Gongbu state");
-    let artifacts = ArtifactService::new(
+    let artifacts_service = ArtifactService::new(
         repository.clone(),
         LocalFsStorage::new(root.path().join("artifacts")),
         ArtifactLimits::default(),
@@ -85,18 +88,19 @@ async fn run() {
     let server = tokio::spawn(gongbu_api::application::serve(
         listener,
         ApplicationDependencies {
-            repository,
-            artifacts: artifacts.clone(),
+            repository: repository.clone(),
+            artifacts: artifacts_service.clone(),
             providers: catalog(),
             hubu: Arc::new(ScenarioHubu),
             hubu_authorizations: Arc::new(ScenarioHubu),
             secrets: Arc::new(UnavailableSecrets),
             provider_activities: Some(Arc::new(ScenarioProvider)),
-            artifact_activities: Some(Arc::new(ArtifactServiceActivities::new(artifacts, || {
-                "2026-08-17T00:00:00Z".into()
-            }))),
-            temporal_runtime,
-            temporal_client,
+            artifact_activities: Some(Arc::new(ArtifactServiceActivities::new(
+                artifacts_service.clone(),
+                || "2026-08-17T00:00:00Z".into(),
+            ))),
+            temporal_runtime: temporal_runtime.clone(),
+            temporal_client: temporal_client.clone(),
             temporal_worker: TemporalWorkerConfig {
                 task_queue: TASK_QUEUE.into(),
                 recovery_delays_seconds: vec![1],
@@ -140,9 +144,109 @@ async fn run() {
     let valid = submit(&client, &base_url, "valid-after-failures").await;
     let completed = wait_for_terminal(&client, &base_url, &valid.execution_id).await;
     assert_eq!(completed.status, ExecutionStatus::Succeeded);
+    let workflow_id = format!("gongbu-execution-{}", valid.execution_id);
+    let workflow = temporal_client
+        .get_workflow_handle::<UntypedWorkflow>(&workflow_id)
+        .describe(WorkflowDescribeOptions::builder().build())
+        .await
+        .expect("discover the execution workflow through Temporal");
+    assert_eq!(workflow.id(), workflow_id);
+    assert!(workflow.history_length() > 0);
+
+    let artifacts = client
+        .get(format!(
+            "{base_url}/v1/executions/{}/artifacts",
+            valid.execution_id
+        ))
+        .bearer_auth(CALLER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json::<ArtifactListResponse>()
+        .await
+        .unwrap();
+    assert_eq!(artifacts.artifacts.len(), 1);
+    let artifact = &artifacts.artifacts[0];
+    assert_eq!(artifact.execution_id, valid.execution_id);
+    assert_eq!(artifact.media_type, "image/png");
+    let artifact_bytes = client
+        .get(format!("{base_url}/v1/artifacts/{}", artifact.artifact_id))
+        .bearer_auth(CALLER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(
+        artifact_bytes.as_ref(),
+        STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap()
+    );
     assert_eq!(ready_status(&client, &base_url).await, StatusCode::OK);
     assert!(temporal.is_running());
     assert!(!server.is_finished());
+
+    shutdown_tx
+        .send(())
+        .expect("request graceful Gongbu shutdown before restart");
+    tokio::time::timeout(Duration::from_secs(15), server)
+        .await
+        .expect("Gongbu must stop gracefully before restart")
+        .unwrap()
+        .unwrap();
+    assert!(temporal.is_running());
+
+    let health = dependencies_healthy.clone();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", http_port))
+        .await
+        .unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(gongbu_api::application::serve(
+        listener,
+        ApplicationDependencies {
+            repository,
+            artifacts: artifacts_service.clone(),
+            providers: catalog(),
+            hubu: Arc::new(ScenarioHubu),
+            hubu_authorizations: Arc::new(ScenarioHubu),
+            secrets: Arc::new(UnavailableSecrets),
+            provider_activities: Some(Arc::new(ScenarioProvider)),
+            artifact_activities: Some(Arc::new(ArtifactServiceActivities::new(
+                artifacts_service,
+                || "2026-08-17T00:00:00Z".into(),
+            ))),
+            temporal_runtime,
+            temporal_client,
+            temporal_worker: TemporalWorkerConfig {
+                task_queue: TASK_QUEUE.into(),
+                recovery_delays_seconds: vec![1],
+            },
+            temporal_namespace: "default".into(),
+            temporal_startup_timeout: Duration::from_secs(15),
+            dependency_check_interval: Duration::from_millis(100),
+            maximum_spend_minor: 100,
+            dependency_checker: Some(Arc::new(move || health.load(Ordering::SeqCst))),
+            worker_drain_timeout: Duration::from_secs(15),
+            authenticator: Arc::new(TestAuthenticator),
+            now: Arc::new(|| "2026-08-17T00:00:00Z".into()),
+        },
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+    wait_until_ready(&client, &base_url).await;
+    let persisted = client
+        .get(format!("{base_url}/v1/executions/{}", valid.execution_id))
+        .bearer_auth(CALLER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json::<ExecutionResponse>()
+        .await
+        .unwrap();
+    assert_eq!(persisted.status, ExecutionStatus::Succeeded);
 
     dependencies_healthy.store(false, Ordering::SeqCst);
     tokio::time::timeout(Duration::from_secs(15), server)

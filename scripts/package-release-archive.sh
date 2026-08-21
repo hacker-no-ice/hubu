@@ -47,6 +47,7 @@ done
 cp "${root_dir}/LICENSE-MIT" "${package_dir}/LICENSE-MIT"
 cp "${root_dir}/LICENSE-APACHE" "${package_dir}/LICENSE-APACHE"
 cp "${root_dir}/THIRD-PARTY-NOTICES.md" "${package_dir}/THIRD-PARTY-NOTICES.md"
+cp "${root_dir}/docs/local-stack.md" "${package_dir}/LOCAL-STACK.md"
 cp "${root_dir}/Cargo.lock" "${package_dir}/Cargo.lock"
 "${root_dir}/scripts/generate-third-party-licenses.sh" \
   "${target}" \
@@ -56,7 +57,7 @@ jq -n \
   --arg source_commit "${source_commit}" \
   --arg executor_contract "hubu-spend-executor-v4.2" \
   --arg target "${target}" \
-  '{schema_version: 2, product: "hubu", product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, binaries: ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"], supported_agent_surfaces: ["hubu-unified-mcp"], development_tools_excluded: ["hubu-bench", "gongbu-sandbox"], files: ["Cargo.lock", "LICENSE-APACHE", "LICENSE-MIT", "PROVENANCE.json", "SHA256SUMS", "THIRD-PARTY-LICENSES.txt", "THIRD-PARTY-NOTICES.md", "gongbu-server", "hubu", "hubu-server", "hubu-unified-mcp"]}' \
+  '{schema_version: 2, product: "hubu", product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, binaries: ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"], supported_agent_surfaces: ["hubu-unified-mcp"], development_tools_excluded: ["hubu-bench", "gongbu-sandbox"], files: ["Cargo.lock", "LICENSE-APACHE", "LICENSE-MIT", "LOCAL-STACK.md", "PROVENANCE.json", "SHA256SUMS", "THIRD-PARTY-LICENSES.txt", "THIRD-PARTY-NOTICES.md", "gongbu-server", "hubu", "hubu-server", "hubu-unified-mcp"]}' \
   > "${package_dir}/MANIFEST.json"
 jq -n \
   --arg product_version "${release_version}" \
@@ -72,6 +73,7 @@ checksum_files=(
   Cargo.lock
   LICENSE-APACHE
   LICENSE-MIT
+  LOCAL-STACK.md
   MANIFEST.json
   PROVENANCE.json
   THIRD-PARTY-LICENSES.txt

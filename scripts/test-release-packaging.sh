@@ -36,6 +36,7 @@ verify_package() {
     Cargo.lock
     LICENSE-APACHE
     LICENSE-MIT
+    LOCAL-STACK.md
     MANIFEST.json
     PROVENANCE.json
     SHA256SUMS
@@ -65,6 +66,7 @@ verify_package() {
      .target == $target and
      .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
      .supported_agent_surfaces == ["hubu-unified-mcp"] and
+     (.files | contains(["LOCAL-STACK.md"])) and
      .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
     "${package_dir}/MANIFEST.json" >/dev/null
   jq -e \

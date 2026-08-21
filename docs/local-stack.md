@@ -335,6 +335,40 @@ place; rerun doctor/render and retry activation after confirming the stack is
 stopped. Corrupt active or retained manifests are reported rather than skipped
 or replaced.
 
+## Clean-environment acceptance canary
+
+From a source checkout with the Temporal CLI on `PATH`, run:
+
+```sh
+./scripts/integration-local-stack-acceptance.sh
+```
+
+The canary deliberately composes three boundaries instead of adding a fixture
+provider to the production Gongbu binary:
+
+1. The real `hubu stack` test suite covers annotated non-starting init,
+   incremental doctor diagnostics, strict render validation, render-on-start,
+   readiness, staged activation, restart persistence, partial-stack recovery
+   guidance, and graceful whole-stack shutdown.
+2. The Hubu-to-Gongbu executor test covers real governed authorization, claim,
+   settlement/release, durable receipts, and local artifact persistence.
+3. The persistent Gongbu test uses a real Temporal service, HTTP API, worker,
+   workflow history, and artifact API with deterministic injected provider
+   activities. It discovers the stable Temporal workflow ID, retrieves the
+   generated artifact, restarts Gongbu against the same state, and verifies the
+   completed execution remains available.
+
+This is a local fixture canary, not an unattended-production credential model.
+For V1 it temporarily lets the deterministic execution test use the existing
+broad local Hubu bearer, which remains process-owned test data and is never
+placed in model input, output, logs, or generated configuration. Gongbu is
+never given Hubu's human reconciliation capability. Keychain-backed,
+least-privilege execution credentials remain follow-up work in HUB-32.
+
+The canary never enables a live provider, supplies a provider credential,
+acknowledges live spend, or makes a billable request. Production
+`gongbu-server` continues to reject fixture providers.
+
 ## Runtime and recovery boundaries
 
 The profile coordinates lifecycle without becoming a shared domain state

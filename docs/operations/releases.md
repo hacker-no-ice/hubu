@@ -78,6 +78,8 @@ done
 
 Every binary must report the product version and source commit recorded in the
 archive. Hubu and Gongbu must both report `hubu-spend-executor-v4.2`.
+`LOCAL-STACK.md` is the packaged bootstrap, lifecycle, recovery, and Codex
+handoff runbook for installing the four binaries outside a source checkout.
 
 ## Publish a canary
 
