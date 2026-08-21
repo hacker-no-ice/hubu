@@ -7,10 +7,14 @@ vinext application deployed with OpenAI Sites.
 
 The repository's `docs/**/*.md` files are the canonical website documentation;
 `docs/overview.md` supplies the website overview independently of the
-repository's concise top-level `README.md`. `npm run content` generates a
-temporary TypeScript content index and copies the interactive `architecture/`
-visualizer into the site's public build input. Both generated locations are
-ignored by Git and must not be edited directly.
+repository's concise top-level `README.md`. The reader-focused dark architecture
+guide lives in `site/architecture/`; the repository's detailed engineering
+explorer remains canonical under top-level `architecture/`.
+
+`npm run content` generates a temporary TypeScript content index, publishes the
+reader guide at `/architecture/`, and copies the engineering explorer to
+`/architecture/internal/`. Generated public copies are ignored by Git and must
+not be edited directly.
 
 To add a page, add its Markdown file under `docs/`, then place it in the curated
 navigation in `app/lib/docs.ts`. The page is searchable automatically after the

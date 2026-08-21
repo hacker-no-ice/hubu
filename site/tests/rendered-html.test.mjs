@@ -63,8 +63,8 @@ test("uses document navigation for deployed subpage reliability", async () => {
 
 test("keeps component drill-down diagrams and resettable architecture playback", async () => {
   const [html, script] = await Promise.all([
-    readFile(new URL("../../architecture/index.html", import.meta.url), "utf8"),
-    readFile(new URL("../../architecture/architecture.js", import.meta.url), "utf8"),
+    readFile(new URL("../architecture/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../architecture/architecture.js", import.meta.url), "utf8"),
   ]);
   assert.match(html, /id="detail-diagram"/);
   assert.match(html, /data-component="registration"/);
@@ -74,4 +74,14 @@ test("keeps component drill-down diagrams and resettable architecture playback",
   assert.match(script, /Identity \+ registration/);
   assert.match(script, /function stopPlayback\(\)/);
   assert.match(script, /setAttribute\("aria-pressed", "false"\)/);
+});
+
+test("publishes the original engineering architecture explorer separately", async () => {
+  const [source, published] = await Promise.all([
+    readFile(new URL("../../architecture/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/architecture/internal/index.html", import.meta.url), "utf8"),
+  ]);
+  assert.match(source, /Agent Spend Control Plane/);
+  assert.match(source, /Major Components/);
+  assert.equal(published, source);
 });

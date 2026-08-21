@@ -3,145 +3,93 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Interactive architecture guide for the Hubu governance and Gongbu execution planes." />
-    <title>Architecture · Hubu Docs</title>
+    <title>Agent Spend Control Plane</title>
     <link rel="stylesheet" href="./architecture.css" />
   </head>
-  <body data-stage="authorize">
-    <a class="skip-link" href="#architecture">Skip to architecture</a>
-    <header class="site-header">
-      <a class="brand" href="/" aria-label="Hubu documentation home">
-        <span class="brand-mark" aria-hidden="true">户</span>
-        <span>Hubu <i>/ architecture</i></span>
-      </a>
-      <nav aria-label="Primary navigation">
-        <a href="/docs/overview">Documentation</a>
-        <a href="https://github.com/hacker-no-ice/hubu">GitHub ↗</a>
+  <body>
+    <header class="app-header">
+      <div class="brand-lockup">
+        <div class="logo-mark" aria-label="Hubu">
+          <span class="logo-glyph" aria-hidden="true">户</span>
+          <span class="logo-word" aria-hidden="true">Hubu</span>
+        </div>
+        <div>
+          <p class="kicker">Hubu + Gongbu architecture</p>
+          <h1>Agent Spend Control Plane</h1>
+          <p class="snapshot-record">
+            Architecture snapshot
+            <time datetime="2026-08-20">2026-08-20</time>
+            <span aria-hidden="true">·</span>
+            <span>source</span>
+            <code>9d84407a1c680cd16bf098ebf3e40c4bb52c72ef</code>
+          </p>
+        </div>
+      </div>
+      <nav aria-label="Architecture views">
+        <button class="icon-button" id="top-view-button" type="button" title="Return to top level">
+          <span aria-hidden="true">↖</span>
+          <span class="sr-only">Return to top level</span>
+        </button>
+        <a
+          class="github-link"
+          href="https://github.com/hacker-no-ice/hubu"
+          target="_blank"
+          rel="noreferrer"
+        >
+          GitHub
+        </a>
       </nav>
     </header>
 
-    <main id="architecture">
-      <section class="hero">
-        <p class="kicker"><span></span> System architecture</p>
-        <h1>Architecture in<br />service of trust.</h1>
-        <p class="hero-copy">
-          Hubu decides whether agent spend is allowed. Gongbu performs provider work.
-          One versioned contract connects them without merging credentials, state, or failure domains.
+    <main class="workspace">
+      <section class="diagram-region" aria-label="Hubu architecture diagram">
+        <div class="diagram-toolbar">
+          <div>
+            <p class="crumb" id="diagram-crumb">Overview</p>
+            <h2 id="diagram-title">Major Components</h2>
+          </div>
+          <div class="legend" aria-label="Diagram legend">
+            <span><i class="swatch human"></i>Human</span>
+            <span><i class="swatch agent"></i>Agent</span>
+            <span><i class="swatch surface"></i>Hubu surface</span>
+            <span><i class="swatch core"></i>Core</span>
+            <span><i class="swatch wallet"></i>Wallet</span>
+            <span><i class="swatch data"></i>Data</span>
+            <span><i class="swatch executor"></i>Executor</span>
+            <span><i class="swatch vendor"></i>Vendor</span>
+          </div>
+        </div>
+        <svg
+          id="architecture-canvas"
+          class="architecture-canvas"
+          viewBox="0 0 1200 700"
+          role="img"
+          aria-labelledby="diagram-title diagram-summary"
+        ></svg>
+        <p id="diagram-summary" class="diagram-summary">
+          Select a component to zoom into its subsystem and see how the internals interact.
         </p>
-        <div class="hero-meta">
-          <span>Interactive system map</span>
-          <span>Executor contract <code>v4.2</code></span>
-          <span>Unified MCP <code>v1</code></span>
-        </div>
       </section>
 
-      <section class="architecture-story" aria-labelledby="story-title">
-        <aside class="story-nav">
-          <p class="section-label">TRACE A GOVERNED REQUEST</p>
-          <h2 id="story-title">Hubu governs.<br />Gongbu executes.</h2>
-          <p>Select a moment in the lifecycle to see which components participate and where authority lives.</p>
-          <div class="stage-list" role="group" aria-label="Request lifecycle stage">
-            <button type="button" data-stage-button="discover"><span>01</span><strong>Discover</strong><small>one agent surface</small></button>
-            <button type="button" data-stage-button="authorize" aria-pressed="true"><span>02</span><strong>Authorize</strong><small>policy before work</small></button>
-            <button type="button" data-stage-button="execute"><span>03</span><strong>Execute</strong><small>provider isolation</small></button>
-            <button type="button" data-stage-button="settle"><span>04</span><strong>Settle</strong><small>provable finality</small></button>
-          </div>
-          <button class="play-button" type="button" id="play-flow" aria-pressed="false"><span aria-hidden="true">▶</span> Play the flow</button>
-        </aside>
-
-        <div class="system-widget">
-          <div class="widget-header">
-            <div><span class="live-dot"></span><span id="stage-eyebrow">02 · AUTHORIZE</span></div>
-            <span>hubu-system-map</span>
-          </div>
-          <div class="stage-copy" aria-live="polite">
-            <h2 id="stage-title">Govern before execution</h2>
-            <p id="stage-summary">Hubu evaluates trusted identity, policy, targets, and budgets before it issues a scoped authorization.</p>
-          </div>
-
-          <div class="flow-map" aria-label="Hubu request flow">
-            <button class="flow-node agent" type="button" data-component="agent">
-              <span class="node-icon">A</span><small>CALLER</small><strong>AI agent</strong><em>structured intent</em>
-            </button>
-            <span class="flow-link link-agent-mcp" aria-hidden="true"><i></i></span>
-            <button class="flow-node mcp" type="button" data-component="mcp">
-              <span class="node-icon">M</span><small>AGENT SURFACE</small><strong>Unified MCP</strong><em>static routing</em>
-            </button>
-            <span class="flow-link link-mcp-hubu" aria-hidden="true"><i></i></span>
-            <button class="flow-node hubu" type="button" data-component="hubu">
-              <span class="node-icon">H</span><small>CONTROL PLANE</small><strong>Hubu</strong><em>governance state</em>
-            </button>
-            <span class="flow-link link-hubu-gongbu" aria-hidden="true"><i></i><b>v4.2 contract</b></span>
-            <button class="flow-node gongbu" type="button" data-component="gongbu">
-              <span class="node-icon">G</span><small>EXECUTION PLANE</small><strong>Gongbu</strong><em>workflow state</em>
-            </button>
-            <span class="flow-link link-gongbu-provider" aria-hidden="true"><i></i></span>
-            <button class="flow-node provider" type="button" data-component="provider">
-              <span class="node-icon">P</span><small>EXTERNAL</small><strong>Provider</strong><em>model + receipt</em>
-            </button>
-          </div>
-
-          <div class="ownership-grid">
-            <button class="ownership-card hubu-card" type="button" data-component="hubu">
-              <span>HUBU OWNS</span>
-              <div><b>Identity</b><b>Policy</b><b>Budgets</b><b>Claims</b><b>Ledger</b></div>
-              <small>Hubu database + capabilities</small>
-            </button>
-            <div class="boundary-marker"><span>HTTP</span><b>executor contract</b><span>v4.2</span></div>
-            <button class="ownership-card gongbu-card" type="button" data-component="gongbu">
-              <span>GONGBU OWNS</span>
-              <div><b>Credentials</b><b>Temporal</b><b>Providers</b><b>Retries</b><b>Artifacts</b></div>
-              <small>Gongbu database + artifact root</small>
-            </button>
-          </div>
-
-          <div class="outcome-strip"><span>DEFINITIVE OUTCOME</span><p id="stage-outcome">allow · deny · needs approval</p></div>
+      <aside class="details-panel" aria-live="polite">
+        <button class="back-button" id="details-back-button" type="button">
+          <span aria-hidden="true">←</span>
+          Top level
+        </button>
+        <p class="crumb" id="details-kind">Overview</p>
+        <h2 id="details-title">Major Components</h2>
+        <p id="details-copy"></p>
+        <div class="detail-list">
+          <h3>At a glance</h3>
+          <ul id="highlights"></ul>
+          <h3>Responsibilities and boundaries</h3>
+          <ul id="responsibilities"></ul>
+          <h3>Source and runbooks</h3>
+          <ul id="source-links" class="source-links"></ul>
         </div>
-      </section>
-
-      <section class="component-section" aria-labelledby="component-title">
-        <div class="component-intro">
-          <p class="section-label">DRILL INTO A BOUNDARY</p>
-          <h2 id="component-title">Every owner has one job.</h2>
-          <p>Choose a component in the map or below. The guide keeps runtime ownership, operational responsibilities, and source together.</p>
-        </div>
-        <div class="component-layout">
-          <div class="component-tabs" role="tablist" aria-label="Architecture components">
-            <button type="button" role="tab" data-component="stack" aria-selected="true"><span>00</span>System boundary</button>
-            <button type="button" role="tab" data-component="mcp"><span>01</span>Unified MCP</button>
-            <button type="button" role="tab" data-component="hubu"><span>02</span>Hubu control plane</button>
-            <button type="button" role="tab" data-component="api"><span>03</span>Hubu HTTP API</button>
-            <button type="button" role="tab" data-component="registration"><span>04</span>Agent registration</button>
-            <button type="button" role="tab" data-component="policy"><span>05</span>Policy engine</button>
-            <button type="button" role="tab" data-component="budgets"><span>06</span>Budgets + payments</button>
-            <button type="button" role="tab" data-component="persistence"><span>07</span>Hubu persistence</button>
-            <button type="button" role="tab" data-component="gongbu"><span>08</span>Gongbu execution plane</button>
-            <button type="button" role="tab" data-component="provider"><span>09</span>Provider edge</button>
-          </div>
-          <article class="component-detail" aria-live="polite">
-            <p id="detail-kind">SYSTEM BOUNDARY</p>
-            <h3 id="detail-title">Separate by design</h3>
-            <p id="detail-copy">The repository and release are unified. The running systems are not. Hubu and Gongbu retain separate processes, state, credentials, and recovery paths.</p>
-            <div class="detail-map">
-              <p>INTERNAL FLOW</p>
-              <ol id="detail-diagram" class="detail-diagram" aria-label="Selected component internal flow"></ol>
-            </div>
-            <div class="detail-columns">
-              <div><h4>Responsibilities</h4><ul id="detail-responsibilities"></ul></div>
-              <div><h4>Source & runbooks</h4><ul id="detail-links" class="source-links"></ul></div>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <section class="principles">
-        <article><span>01</span><h2>Govern synchronously.</h2><p>Policy and budget decisions happen before external work starts, with canonical scope and retry-safe identity.</p></article>
-        <article><span>02</span><h2>Execute separately.</h2><p>Provider credentials, workflows, artifacts, and retries stay inside Gongbu’s execution failure domain.</p></article>
-        <article><span>03</span><h2>Reconcile explicitly.</h2><p>Receipts and settlement evidence tie execution back to authorizations without copying provider state into Hubu.</p></article>
-      </section>
+      </aside>
     </main>
 
-    <footer><span>Hubu / 户部</span><p>Governance before execution.</p><a href="/docs/overview">Back to documentation →</a></footer>
     <script src="./architecture.js"></script>
   </body>
 </html>

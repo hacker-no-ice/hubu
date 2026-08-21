@@ -105,6 +105,10 @@ await writeFile(
 const architectureTarget = path.join(siteRoot, "public/architecture");
 await rm(architectureTarget, { recursive: true, force: true });
 await mkdir(architectureTarget, { recursive: true });
-await cp(path.join(repoRoot, "architecture"), architectureTarget, { recursive: true });
+await cp(path.join(siteRoot, "architecture"), architectureTarget, { recursive: true });
 
-console.log(`Generated ${documents.length} documentation pages and synced the architecture visualizer.`);
+const internalArchitectureTarget = path.join(architectureTarget, "internal");
+await mkdir(internalArchitectureTarget, { recursive: true });
+await cp(path.join(repoRoot, "architecture"), internalArchitectureTarget, { recursive: true });
+
+console.log(`Generated ${documents.length} documentation pages and synced both architecture visualizers.`);
