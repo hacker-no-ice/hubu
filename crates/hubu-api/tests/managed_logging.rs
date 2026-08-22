@@ -40,16 +40,17 @@ fn managed_server_writes_each_structured_event_once() {
         .unwrap(),
     )
     .unwrap();
-    let launcher_log = OpenOptions::new()
+    let stderr_path = logs.join("hubu-server.stderr.log");
+    let launcher_stderr = OpenOptions::new()
         .create(true)
-        .append(true)
-        .open(&log_path)
+        .write(true)
+        .truncate(true)
+        .open(&stderr_path)
         .unwrap();
-    let launcher_stderr = launcher_log.try_clone().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_hubu-server"))
         .args(["serve", "--config"])
         .arg(&config_path)
-        .stdout(Stdio::from(launcher_log))
+        .stdout(Stdio::null())
         .stderr(Stdio::from(launcher_stderr))
         .spawn()
         .unwrap();
@@ -99,4 +100,5 @@ fn managed_server_writes_each_structured_event_once() {
         event.as_str(),
         "http_request_started" | "http_request_finished"
     )));
+    assert!(fs::read_to_string(stderr_path).unwrap().is_empty());
 }

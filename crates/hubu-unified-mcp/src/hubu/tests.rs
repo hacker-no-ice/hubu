@@ -45,14 +45,15 @@ fn server_with_backends(
         gongbu: test_backend_report(gongbu_state, true),
     };
     let transition_state = TransitionState::new(&snapshot);
+    let now = Instant::now();
     Server {
         backends: BackendClients::new(config).unwrap(),
         snapshot: Arc::new(Mutex::new(snapshot)),
         transition_state: Arc::new(transition_state),
         capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
-        last_probe_at: Arc::new(Mutex::new(ProbeTimes {
-            hubu: Instant::now(),
-            gongbu: Instant::now(),
+        probe_timings: Arc::new(Mutex::new(ProbeTimings {
+            hubu: BackendProbeTiming::new(now, DEFAULT_CAPABILITY_POLL_INTERVAL, false, 7),
+            gongbu: BackendProbeTiming::new(now, DEFAULT_CAPABILITY_POLL_INTERVAL, false, 11),
         })),
         hubu_routing,
     }

@@ -145,14 +145,17 @@ payload-free `notifications/tools/list_changed` when the effective catalog
 changes. Clients then refresh `tools/list` and use
 `hubu_unified_capabilities` for diagnostics.
 
-The initialized monitor probes on a jittered 30-second default cadence so
-multiple client-owned stdio processes do not synchronize. Repeated unavailable
-results back off exponentially to at most five minutes, and a healthy result
-resets the cadence. Routine `tools/list` and tool calls reuse a capability
-snapshot until it is stale; the explicit capability diagnostic still forces a
-refresh. Operators may set `HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS` between
-10 and 60000 milliseconds to replace the base interval. Backoff and jitter
-still apply to an overridden interval.
+The initialized monitor probes each backend independently on a jittered
+30-second default cadence so multiple client-owned stdio processes do not
+synchronize. Repeated unavailable results back off that backend exponentially
+to at most five minutes without delaying transitions for the other backend, and
+a healthy result resets its cadence. The same per-backend deadline gates
+background and request-triggered refreshes, so routine `tools/list` and tool
+calls cannot bypass outage backoff. The explicit capability diagnostic and
+governed execution admission still force a refresh. Operators may set
+`HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS` between 10 and 60000 milliseconds to
+replace the base interval. Backoff and jitter still apply to an overridden
+interval.
 
 ## Setup
 

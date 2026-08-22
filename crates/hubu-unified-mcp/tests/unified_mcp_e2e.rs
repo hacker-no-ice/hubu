@@ -292,6 +292,59 @@ fn concurrent_monitor_and_request_refresh_are_single_flight_per_backend() {
 
 #[test]
 #[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn outage_backoff_is_shared_with_requests_and_independent_per_backend() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    mcp.initialize_with_monitor();
+
+    hubu.disconnect(true);
+    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+
+    let mut observed_health = hubu.request_count("GET", "/health");
+    for _ in 0..2 {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while hubu.request_count("GET", "/health") == observed_health {
+            assert!(
+                Instant::now() < deadline,
+                "Hubu outage probe did not repeat"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        observed_health = hubu.request_count("GET", "/health");
+    }
+
+    // Hubu remains deeply backed off, but Gongbu must still observe its own
+    // readiness transition on the normal independent cadence.
+    let baseline_readyz = gongbu.request_count("GET", "/readyz");
+    gongbu.respond_json("GET", "/readyz", 503, json!({"status":"not_ready"}));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while gongbu.request_count("GET", "/readyz") == baseline_readyz {
+        assert!(
+            Instant::now() < deadline,
+            "Gongbu probe was delayed by Hubu outage backoff"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // The third Hubu failure has a minimum 3.2 second jittered backoff. Wait
+    // past the one-second base interval, then prove routine traffic shares that
+    // longer deadline instead of starting another Hubu probe.
+    thread::sleep(Duration::from_millis(1_250));
+    let backed_off_health = hubu.request_count("GET", "/health");
+    let _ = mcp.list_tools();
+    let rejected = mcp.call(94, "hubu_list_budgets", json!({}));
+    assert_eq!(rejected["error"]["data"]["code"], "backend_unavailable");
+    assert_eq!(
+        hubu.request_count("GET", "/health"),
+        backed_off_health,
+        "request-triggered refresh bypassed Hubu outage backoff"
+    );
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn catalog_transitions_emit_exactly_once_and_preserve_the_healthy_backend() {
     let hubu = BackendStub::start(BackendKind::Hubu);
     let gongbu = BackendStub::start(BackendKind::Gongbu);

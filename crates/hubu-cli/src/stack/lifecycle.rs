@@ -17,6 +17,7 @@ const STATE_FILE: &str = "launcher-state.json";
 const DEFAULT_LOG_LINES: usize = 200;
 const MAX_LOG_LINES: usize = 10_000;
 const MAX_LOG_READ_BYTES: u64 = 4 * 1024 * 1024;
+const HUBU_STDERR_LOG: &str = "hubu-server.stderr.log";
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STOP_GRACE_FLOOR: Duration = Duration::from_secs(5);
 
@@ -814,15 +815,28 @@ fn spawn_component(
     if let Some(parent) = log_file.parent() {
         create_secure_dir(parent)?;
     }
-    let log = open_append_secure(&log_file)?;
-    let stderr = log.try_clone()?;
     let mut command = Command::new(&binary);
     command
         .args(["serve", "--config"])
         .arg(&config)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(stderr));
+        .stdin(Stdio::null());
+    if component == "hubu-server" {
+        let stderr_log_file = hubu_stderr_log_file(profile);
+        if let Some(parent) = stderr_log_file.parent() {
+            create_secure_dir(parent)?;
+        }
+        // Ensure `stack logs` has a securely validated structured-log target
+        // even before Hubu emits its first event. Drop the descriptor before
+        // spawn so Hubu remains the only process holding and rotating the file.
+        drop(open_append_secure(&log_file)?);
+        command
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(open_truncate_secure(&stderr_log_file)?));
+    } else {
+        let log = open_append_secure(&log_file)?;
+        let stderr = log.try_clone()?;
+        command.stdout(Stdio::from(log)).stderr(Stdio::from(stderr));
+    }
     for name in [
         "HUBU_AUTH_TOKEN",
         "HUBU_APPROVAL_TOKEN",
@@ -1013,6 +1027,35 @@ fn open_append_secure(path: &Path) -> Result<File> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
     Ok(file)
+}
+
+fn open_truncate_secure(path: &Path) -> Result<File> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        bail!(
+            "refusing to use symlinked launcher stderr log `{}`",
+            path.display()
+        );
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open launcher stderr log `{}`", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
+fn hubu_stderr_log_file(profile: &Path) -> PathBuf {
+    runtime_dir(profile).join("logs").join(HUBU_STDERR_LOG)
 }
 
 fn refuse_identity_mismatches(state: &RuntimeState) -> Result<()> {
@@ -1778,6 +1821,20 @@ ownership = "managed"
             .to_string()
             .contains("symlinked launcher log"));
         assert_eq!(fs::read_to_string(target).unwrap(), "do-not-append");
+    }
+
+    #[test]
+    fn hubu_stderr_uses_a_distinct_truncated_capture_file() {
+        let temp = tempdir().unwrap();
+        let structured = temp.path().join("logs/hubu.jsonl");
+        let stderr = hubu_stderr_log_file(temp.path());
+        assert_ne!(stderr, structured);
+        fs::create_dir_all(stderr.parent().unwrap()).unwrap();
+        fs::write(&stderr, "old diagnostics").unwrap();
+
+        drop(open_truncate_secure(&stderr).unwrap());
+
+        assert_eq!(fs::metadata(stderr).unwrap().len(), 0);
     }
 
     #[test]
