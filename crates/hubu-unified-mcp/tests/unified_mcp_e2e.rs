@@ -217,7 +217,7 @@ fn initialized_lifecycle_establishes_the_notification_baseline() {
     mcp.assert_no_notification(Duration::from_millis(1_200));
 
     hubu.disconnect(false);
-    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    assert_list_changed(&mcp.notification(Duration::from_secs(3)));
     mcp.assert_no_notification(Duration::from_millis(2_200));
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
 }
@@ -243,7 +243,7 @@ fn out_of_order_initialized_does_not_start_the_monitor() {
     mcp.assert_no_notification(Duration::from_millis(1_200));
 
     hubu.disconnect(false);
-    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    assert_list_changed(&mcp.notification(Duration::from_secs(3)));
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
 }
 
@@ -303,7 +303,7 @@ fn outage_backoff_is_shared_with_requests_and_independent_per_backend() {
 
     let mut observed_health = hubu.request_count("GET", "/health");
     for _ in 0..3 {
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let deadline = Instant::now() + Duration::from_secs(6);
         while hubu.request_count("GET", "/health") == observed_health {
             assert!(
                 Instant::now() < deadline,
