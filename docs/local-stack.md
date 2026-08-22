@@ -290,6 +290,21 @@ hubu stack logs --component all --lines 200 --profile /absolute/path/to/profile
 hubu stack logs --component gongbu --execution-id EXECUTION_ID --profile /absolute/path/to/profile
 ```
 
+Managed Hubu writes structured events directly to its configured JSONL file;
+the launcher does not duplicate those events through stderr. Successful
+`/health` and `/version` probes are omitted from normal request logging, while
+failed probes remain visible. The structured log rotates at 10 MiB and retains
+four prior generations (`hubu.jsonl.1` through `hubu.jsonl.4`), bounding the
+visible structured history to approximately 50 MiB. Stack lifecycle commands
+preserve both the current file and its retained generations. A pre-existing
+file larger than the per-file limit is discarded at the next rotation instead
+of being retained as an oversized generation. Fatal process diagnostics and
+structured-log write errors use the separate
+`runtime/logs/hubu-server.stderr.log` capture, which is truncated on each
+managed Hubu start so JSONL rotation never orphans its file descriptor. Hubu
+creates every active structured-log generation with private `0600` permissions
+on Unix, including the new active file opened after rotation.
+
 Stop proceeds in reverse dependency order: Gongbu drains first and shuts down
 its managed worker and Temporal child, then Hubu stops. Startup rollback also
 touches only children created by that invocation.

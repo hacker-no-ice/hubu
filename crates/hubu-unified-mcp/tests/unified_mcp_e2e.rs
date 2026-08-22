@@ -217,7 +217,7 @@ fn initialized_lifecycle_establishes_the_notification_baseline() {
     mcp.assert_no_notification(Duration::from_millis(1_200));
 
     hubu.disconnect(false);
-    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    assert_list_changed(&mcp.notification(Duration::from_secs(3)));
     mcp.assert_no_notification(Duration::from_millis(2_200));
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
 }
@@ -243,7 +243,7 @@ fn out_of_order_initialized_does_not_start_the_monitor() {
     mcp.assert_no_notification(Duration::from_millis(1_200));
 
     hubu.disconnect(false);
-    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+    assert_list_changed(&mcp.notification(Duration::from_secs(3)));
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
 }
 
@@ -287,6 +287,79 @@ fn concurrent_monitor_and_request_refresh_are_single_flight_per_backend() {
 
     assert_list_changed(&mcp.notification(Duration::from_secs(3)));
     mcp.assert_no_notification(Duration::from_millis(2_200));
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn outage_backoff_is_shared_with_requests_and_independent_per_backend() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    mcp.initialize_with_monitor();
+
+    hubu.disconnect(true);
+    assert_list_changed(&mcp.notification(Duration::from_secs(2)));
+
+    let mut observed_health = hubu.request_count("GET", "/health");
+    for _ in 0..3 {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while hubu.request_count("GET", "/health") == observed_health {
+            assert!(
+                Instant::now() < deadline,
+                "Hubu outage probe did not repeat"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        observed_health = hubu.request_count("GET", "/health");
+    }
+
+    // Hubu remains deeply backed off, but Gongbu must still observe its own
+    // readiness transition on the normal independent cadence.
+    let baseline_readyz = gongbu.request_count("GET", "/readyz");
+    gongbu.respond_json("GET", "/readyz", 503, json!({"status":"not_ready"}));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while gongbu.request_count("GET", "/readyz") == baseline_readyz {
+        assert!(
+            Instant::now() < deadline,
+            "Gongbu probe was delayed by Hubu outage backoff"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // The fourth Hubu failure has a minimum 6.4 second jittered backoff. Wait
+    // past the one-second base interval, then prove routine traffic shares that
+    // longer deadline instead of starting another Hubu probe.
+    thread::sleep(Duration::from_millis(1_250));
+    let backed_off_health = hubu.request_count("GET", "/health");
+    let _ = mcp.list_tools();
+    let rejected = mcp.call(94, "hubu_list_budgets", json!({}));
+    assert_eq!(rejected["error"]["data"]["code"], "backend_unavailable");
+    assert_eq!(
+        hubu.request_count("GET", "/health"),
+        backed_off_health,
+        "request-triggered refresh bypassed Hubu outage backoff"
+    );
+
+    // A forced diagnostic observes recovery and shortens Hubu's next deadline
+    // back to the healthy cadence. The sleeping monitor must be woken so the
+    // next background probe is not delayed by the obsolete outage deadline.
+    hubu.disconnect(false);
+    let recovered = mcp.call(95, "hubu_unified_capabilities", json!({}));
+    assert_eq!(
+        recovered["result"]["structuredContent"]["backends"]["hubu"]["state"],
+        "available"
+    );
+    assert_list_changed(&mcp.notification(Duration::from_secs(1)));
+    let recovered_health = hubu.request_count("GET", "/health");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while hubu.request_count("GET", "/health") == recovered_health {
+        assert!(
+            Instant::now() < deadline,
+            "monitor did not wake after forced recovery shortened the probe deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
 }
 
@@ -375,6 +448,8 @@ fn hubu_only_initialize_discovery_and_call() {
     let initialize = mcp.initialize();
     assert_backend_state(&initialize, "hubu", "available");
     assert_backend_state(&initialize, "gongbu", "unconfigured");
+    let baseline_health = hubu.request_count("GET", "/health");
+    let baseline_version = hubu.request_count("GET", "/version");
     let tools = mcp.list_tools();
     let names = tool_names(&tools);
     assert!(names.contains(&"hubu_list_budgets"));
@@ -385,6 +460,8 @@ fn hubu_only_initialize_discovery_and_call() {
         response["result"]["structuredContent"]["budgets"][0]["budget_id"],
         "hubu-state-marker"
     );
+    assert_eq!(hubu.request_count("GET", "/health"), baseline_health);
+    assert_eq!(hubu.request_count("GET", "/version"), baseline_version);
     assert_bearer_isolated(&hubu, HUBU_TOKEN, GONGBU_TOKEN);
     mcp.finish(&[HUBU_TOKEN]);
 }
@@ -398,6 +475,9 @@ fn gongbu_only_initialize_discovery_and_read_call() {
     let initialize = mcp.initialize();
     assert_backend_state(&initialize, "hubu", "unconfigured");
     assert_backend_state(&initialize, "gongbu", "available");
+    let baseline_livez = gongbu.request_count("GET", "/livez");
+    let baseline_readyz = gongbu.request_count("GET", "/readyz");
+    let baseline_version = gongbu.request_count("GET", "/version");
     let tools = mcp.list_tools();
     let names = tool_names(&tools);
     assert!(names.contains(&"gongbu_get_execution"));
@@ -410,6 +490,9 @@ fn gongbu_only_initialize_discovery_and_read_call() {
     let body: Value =
         serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(body["outcome"], "gongbu-state-marker");
+    assert_eq!(gongbu.request_count("GET", "/livez"), baseline_livez);
+    assert_eq!(gongbu.request_count("GET", "/readyz"), baseline_readyz);
+    assert_eq!(gongbu.request_count("GET", "/version"), baseline_version);
     assert_bearer_isolated(&gongbu, GONGBU_TOKEN, HUBU_TOKEN);
     mcp.finish(&[GONGBU_TOKEN]);
 }

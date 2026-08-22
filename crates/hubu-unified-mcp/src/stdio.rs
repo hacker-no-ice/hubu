@@ -2,7 +2,10 @@
 
 use std::{
     io::{self, BufRead, Write},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     thread,
 };
 
@@ -18,13 +21,15 @@ enum RunEvent {
 }
 
 struct CapabilityMonitor {
-    stop: mpsc::Sender<()>,
+    stop: Arc<AtomicBool>,
+    wake: mpsc::Sender<()>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for CapabilityMonitor {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        self.stop.store(true, Ordering::Release);
+        let _ = self.wake.send(());
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -80,6 +85,8 @@ pub(super) fn run(
                         }
                     }
                     if lifecycle_ready && initialize_response_seen && !initialized {
+                        // Establish the post-handshake baseline without emitting
+                        // a transition for changes that happened during setup.
                         server.refresh_capabilities();
                         server.reset_catalog_tracking();
                         initialized = true;
@@ -112,13 +119,20 @@ fn spawn_capability_monitor(
     event_tx: mpsc::Sender<RunEvent>,
 ) -> CapabilityMonitor {
     let server = server.clone();
-    let poll_interval = server.capability_poll_interval();
-    let (stop_tx, stop_rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let (wake_tx, wake_rx) = mpsc::channel();
+    server.install_probe_schedule_waker(wake_tx.clone());
     let handle = thread::spawn(move || loop {
-        match stop_rx.recv_timeout(poll_interval) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        if thread_stop.load(Ordering::Acquire) {
+            return;
+        }
+        let delay = server.next_capability_probe_delay();
+        match wake_rx.recv_timeout(delay) {
+            Ok(()) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                server.refresh_capabilities();
+                server.refresh_due_capabilities();
                 if event_tx.send(RunEvent::RefreshComplete).is_err() {
                     return;
                 }
@@ -126,7 +140,8 @@ fn spawn_capability_monitor(
         }
     });
     CapabilityMonitor {
-        stop: stop_tx,
+        stop,
+        wake: wake_tx,
         handle: Some(handle),
     }
 }

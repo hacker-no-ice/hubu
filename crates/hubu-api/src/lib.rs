@@ -1339,34 +1339,57 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     }
 
     let request = parse_request(&raw)?;
-    log_event(
-        "info",
-        "http_request_started",
-        json!({
-            "request_id": request_id,
-            "method": request.method,
-            "path": request.path,
-            "body_bytes": request.body.len(),
-        }),
-    );
+    let operational_probe = is_operational_probe(&request.path);
+    if !operational_probe {
+        log_event(
+            "info",
+            "http_request_started",
+            json!({
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.path,
+                "body_bytes": request.body.len(),
+            }),
+        );
+    }
     let method = request.method.clone();
     let path = request.path.clone();
     let response = route(request, state);
     let status = response.status;
     write_response(&mut stream, response)
         .with_context(|| format!("write response for request {request_id}"))?;
-    log_event(
-        "info",
-        "http_request_finished",
-        json!({
-            "request_id": request_id,
-            "method": method,
-            "path": path,
-            "status": status,
-            "elapsed_ms": started_at.elapsed().as_millis(),
-        }),
-    );
+    if operational_probe {
+        if !(200..300).contains(&status) {
+            log_event(
+                "warn",
+                "http_probe_failed",
+                json!({
+                    "request_id": request_id,
+                    "method": method,
+                    "path": path,
+                    "status": status,
+                    "elapsed_ms": started_at.elapsed().as_millis(),
+                }),
+            );
+        }
+    } else {
+        log_event(
+            "info",
+            "http_request_finished",
+            json!({
+                "request_id": request_id,
+                "method": method,
+                "path": path,
+                "status": status,
+                "elapsed_ms": started_at.elapsed().as_millis(),
+            }),
+        );
+    }
     Ok(())
+}
+
+fn is_operational_probe(path: &str) -> bool {
+    matches!(path.split('?').next(), Some("/health" | "/version"))
 }
 
 fn read_http_request(stream: &mut TcpStream, deadline: Instant) -> Result<String> {
@@ -9247,5 +9270,13 @@ rules: []
             authorize_spend(request.to_string(), &state).expect("spend should authorize");
 
         (path, state, agent, authorization)
+    }
+
+    #[test]
+    fn recognizes_only_health_and_version_probe_paths() {
+        assert!(is_operational_probe("/health"));
+        assert!(is_operational_probe("/version?verbose=true"));
+        assert!(!is_operational_probe("/health/details"));
+        assert!(!is_operational_probe("/spend/health"));
     }
 }

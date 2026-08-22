@@ -12,8 +12,8 @@ mod hubu;
 use std::{
     env, fmt,
     io::{self, BufRead, Write},
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{mpsc, Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use reqwest::{
@@ -55,9 +55,10 @@ const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
-const DEFAULT_CAPABILITY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const DEFAULT_CAPABILITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const MIN_CAPABILITY_POLL_INTERVAL_MS: u64 = 10;
 const MAX_CAPABILITY_POLL_INTERVAL_MS: u64 = 60_000;
+const MAX_CAPABILITY_FAILURE_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("gongbu_create_execution", BackendOwner::Gongbu),
@@ -413,7 +414,78 @@ pub struct Server {
     snapshot: Arc<Mutex<CapabilitySnapshot>>,
     transition_state: Arc<TransitionState>,
     capability_poll_interval: Duration,
+    probe_timings: Arc<Mutex<ProbeTimings>>,
+    probe_schedule_waker: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     hubu_routing: HubuRoutingConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProbeTimings {
+    hubu: BackendProbeTiming,
+    gongbu: BackendProbeTiming,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BackendProbeTiming {
+    next_probe_at: Instant,
+    failure_streak: u32,
+    jitter_state: u64,
+}
+
+impl BackendProbeTiming {
+    fn new(now: Instant, base: Duration, failed: bool, jitter_seed: u64) -> Self {
+        let mut timing = Self {
+            next_probe_at: now,
+            failure_streak: 0,
+            jitter_state: jitter_seed.max(1),
+        };
+        timing.record_result(now, base, failed);
+        timing
+    }
+
+    fn record_result(&mut self, now: Instant, base: Duration, failed: bool) {
+        let multiplier = if failed {
+            let multiplier = 1_u32 << self.failure_streak.min(31);
+            self.failure_streak = self.failure_streak.saturating_add(1);
+            multiplier
+        } else {
+            self.failure_streak = 0;
+            1
+        };
+        let backed_off = base
+            .saturating_mul(multiplier)
+            .min(MAX_CAPABILITY_FAILURE_BACKOFF);
+        let jitter_percent = 80 + self.next_jitter_value() % 41;
+        let millis = backed_off
+            .as_millis()
+            .saturating_mul(u128::from(jitter_percent))
+            / 100;
+        let delay = Duration::from_millis(
+            u64::try_from(millis.max(1))
+                .unwrap_or(u64::MAX)
+                .min(MAX_CAPABILITY_FAILURE_BACKOFF.as_millis() as u64),
+        );
+        self.next_probe_at = now + delay;
+    }
+
+    fn claim_if_due(&mut self, now: Instant, base: Duration) -> bool {
+        if now < self.next_probe_at {
+            return false;
+        }
+        self.next_probe_at = now + base;
+        true
+    }
+
+    fn delay_from(self, now: Instant) -> Duration {
+        self.next_probe_at.saturating_duration_since(now)
+    }
+
+    fn next_jitter_value(&mut self) -> u64 {
+        self.jitter_state ^= self.jitter_state << 13;
+        self.jitter_state ^= self.jitter_state >> 7;
+        self.jitter_state ^= self.jitter_state << 17;
+        self.jitter_state
+    }
 }
 
 impl Server {
@@ -422,12 +494,34 @@ impl Server {
         let capability_poll_interval = config.capability_poll_interval;
         let backends = BackendClients::new(config)?;
         let snapshot = backends.probe();
+        let probed_at = Instant::now();
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+            ^ u64::from(std::process::id());
+        let probe_timings = ProbeTimings {
+            hubu: BackendProbeTiming::new(
+                probed_at,
+                capability_poll_interval,
+                report_unavailable(&snapshot.hubu),
+                seed ^ 0x4855_4255,
+            ),
+            gongbu: BackendProbeTiming::new(
+                probed_at,
+                capability_poll_interval,
+                report_unavailable(&snapshot.gongbu),
+                seed ^ 0x474f_4e47_4255,
+            ),
+        };
         let transition_state = TransitionState::new(&snapshot);
         Ok(Self {
             backends,
             snapshot: Arc::new(Mutex::new(snapshot)),
             transition_state: Arc::new(transition_state),
             capability_poll_interval,
+            probe_timings: Arc::new(Mutex::new(probe_timings)),
+            probe_schedule_waker: Arc::new(Mutex::new(None)),
             hubu_routing,
         })
     }
@@ -456,7 +550,6 @@ impl Server {
     }
 
     fn initialize_result(&self) -> Value {
-        self.refresh_capabilities();
         let mut capability = self.capabilities();
         capability
             .as_object_mut()
@@ -515,9 +608,11 @@ impl Server {
         };
         if owner == BackendOwner::Gongbu {
             if call.name == "gongbu_create_execution" {
+                // Governed execution admission must synchronously validate both
+                // backend boundaries immediately before forwarding.
                 self.refresh_capabilities();
             } else {
-                self.refresh_gongbu_capability();
+                self.refresh_gongbu_capability_if_stale();
             }
             let snapshot = self.snapshot();
             if let Err(rejection) = tool_availability(&call.name, owner, &snapshot) {
@@ -530,7 +625,7 @@ impl Server {
                 .expect("available Gongbu route has a configured client");
             return success_response(id, gongbu::call_tool(client, &call.name, call.arguments));
         }
-        self.refresh_hubu_capability();
+        self.refresh_hubu_capability_if_stale();
         hubu::call_tool(self, id, call)
     }
 
@@ -583,7 +678,7 @@ impl Server {
     }
 
     fn list_tools(&self) -> Vec<Value> {
-        self.refresh_capabilities();
+        self.refresh_capabilities_if_stale();
         self.list_tools_for_snapshot()
     }
 
@@ -616,32 +711,142 @@ impl Server {
     pub(crate) fn refresh_capabilities(&self) {
         let probe_id = self.transition_state.next_probe_id();
         let refreshed = self.backends.probe();
+        let hubu_failed = report_unavailable(&refreshed.hubu);
+        let gongbu_failed = report_unavailable(&refreshed.gongbu);
         self.transition_state
             .apply_full(&self.snapshot, probe_id, refreshed);
+        let now = Instant::now();
+        let mut timings = self
+            .probe_timings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        timings
+            .hubu
+            .record_result(now, self.capability_poll_interval, hubu_failed);
+        timings
+            .gongbu
+            .record_result(now, self.capability_poll_interval, gongbu_failed);
+        drop(timings);
+        self.wake_probe_monitor();
     }
 
     fn refresh_hubu_capability(&self) {
         let probe_id = self.transition_state.next_probe_id();
         let refreshed = self.backends.probe_hubu();
+        let failed = report_unavailable(&refreshed);
         self.transition_state
             .apply_hubu(&self.snapshot, probe_id, refreshed);
+        self.probe_timings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hubu
+            .record_result(Instant::now(), self.capability_poll_interval, failed);
+        self.wake_probe_monitor();
     }
 
     fn refresh_gongbu_capability(&self) {
         let probe_id = self.transition_state.next_probe_id();
         let refreshed = self.backends.probe_gongbu();
+        let failed = report_unavailable(&refreshed);
         self.transition_state
             .apply_gongbu(&self.snapshot, probe_id, refreshed);
+        self.probe_timings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .gongbu
+            .record_result(Instant::now(), self.capability_poll_interval, failed);
+        self.wake_probe_monitor();
+    }
+
+    fn refresh_capabilities_if_stale(&self) {
+        let now = Instant::now();
+        let mut timings = self
+            .probe_timings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hubu_due = timings
+            .hubu
+            .claim_if_due(now, self.capability_poll_interval);
+        let gongbu_due = timings
+            .gongbu
+            .claim_if_due(now, self.capability_poll_interval);
+        drop(timings);
+        match (hubu_due, gongbu_due) {
+            (true, true) => self.refresh_capabilities(),
+            (true, false) => self.refresh_hubu_capability(),
+            (false, true) => self.refresh_gongbu_capability(),
+            (false, false) => {}
+        }
+    }
+
+    fn refresh_hubu_capability_if_stale(&self) {
+        let due = self
+            .probe_timings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hubu
+            .claim_if_due(Instant::now(), self.capability_poll_interval);
+        if due {
+            self.refresh_hubu_capability();
+        }
+    }
+
+    fn refresh_gongbu_capability_if_stale(&self) {
+        let due = self
+            .probe_timings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .gongbu
+            .claim_if_due(Instant::now(), self.capability_poll_interval);
+        if due {
+            self.refresh_gongbu_capability();
+        }
+    }
+
+    pub(crate) fn next_capability_probe_delay(&self) -> Duration {
+        let now = Instant::now();
+        let timings = *self
+            .probe_timings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        timings
+            .hubu
+            .delay_from(now)
+            .min(timings.gongbu.delay_from(now))
+    }
+
+    pub(crate) fn refresh_due_capabilities(&self) {
+        self.refresh_capabilities_if_stale();
+    }
+
+    pub(crate) fn install_probe_schedule_waker(&self, waker: mpsc::Sender<()>) {
+        *self
+            .probe_schedule_waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(waker);
+    }
+
+    fn wake_probe_monitor(&self) {
+        let waker = self
+            .probe_schedule_waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(waker) = waker {
+            let _ = waker.send(());
+        }
     }
 
     fn mark_hubu_unavailable(&self) {
         let probe_id = self.transition_state.next_probe_id();
         self.transition_state
             .mark_hubu_unavailable(&self.snapshot, probe_id);
-    }
-
-    pub(crate) fn capability_poll_interval(&self) -> Duration {
-        self.capability_poll_interval
+        self.probe_timings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hubu
+            .record_result(Instant::now(), self.capability_poll_interval, true);
+        self.wake_probe_monitor();
     }
 
     pub(crate) fn take_pending_catalog_transitions(&self) -> usize {
@@ -652,6 +857,10 @@ impl Server {
         let snapshot = self.snapshot();
         self.transition_state.reset(&snapshot);
     }
+}
+
+fn report_unavailable(report: &capability::BackendReport) -> bool {
+    matches!(report.state, capability::BackendState::Unavailable)
 }
 
 fn capability_tool() -> Value {
@@ -762,7 +971,7 @@ mod tests {
 
     #[test]
     fn validates_injectable_capability_poll_interval() {
-        assert_eq!(poll_interval(None).unwrap(), Duration::from_millis(250));
+        assert_eq!(poll_interval(None).unwrap(), Duration::from_secs(30));
         assert_eq!(
             poll_interval(Some("10".into())).unwrap(),
             Duration::from_millis(10)
@@ -779,6 +988,64 @@ mod tests {
             poll_interval(Some("secret/path".into())).unwrap_err(),
             ConfigError::InvalidPollInterval
         );
+    }
+
+    #[test]
+    fn probe_timing_jitters_backs_off_and_resets_after_recovery() {
+        let now = Instant::now();
+        let base = Duration::from_secs(30);
+        let mut timing = BackendProbeTiming::new(now, base, true, 11);
+        let first = timing.next_probe_at.duration_since(now);
+        timing.record_result(now, base, true);
+        let second = timing.next_probe_at.duration_since(now);
+        timing.record_result(now, base, true);
+        let third = timing.next_probe_at.duration_since(now);
+
+        assert!((Duration::from_secs(24)..=Duration::from_secs(36)).contains(&first));
+        assert!(second > first);
+        assert!(third > second);
+
+        timing.record_result(now, base, false);
+        let recovered = timing.next_probe_at.duration_since(now);
+        assert!((Duration::from_secs(24)..=Duration::from_secs(36)).contains(&recovered));
+    }
+
+    #[test]
+    fn short_poll_interval_backoff_reaches_the_configured_cap() {
+        let now = Instant::now();
+        let base = Duration::from_secs(1);
+        let mut timing = BackendProbeTiming::new(now, base, true, 19);
+        for _ in 0..9 {
+            timing.record_result(now, base, true);
+        }
+
+        let capped = timing.next_probe_at.duration_since(now);
+        assert!((Duration::from_secs(240)..=Duration::from_secs(300)).contains(&capped));
+    }
+
+    #[test]
+    fn forced_refresh_wakes_the_probe_monitor() {
+        let server = Server::new(Config::default()).unwrap();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        server.install_probe_schedule_waker(wake_tx);
+
+        server.refresh_capabilities();
+
+        wake_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("forced refresh must wake the probe monitor");
+    }
+
+    #[test]
+    fn backend_probe_backoff_is_independent() {
+        let now = Instant::now();
+        let base = Duration::from_secs(30);
+        let mut hubu = BackendProbeTiming::new(now, base, true, 13);
+        let mut gongbu = BackendProbeTiming::new(now, base, false, 17);
+        hubu.record_result(now, base, true);
+        gongbu.record_result(now, base, false);
+
+        assert!(hubu.next_probe_at.duration_since(now) > gongbu.next_probe_at.duration_since(now));
     }
 
     #[test]
