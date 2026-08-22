@@ -55,6 +55,7 @@ fn server_with_backends(
             hubu: BackendProbeTiming::new(now, DEFAULT_CAPABILITY_POLL_INTERVAL, false, 7),
             gongbu: BackendProbeTiming::new(now, DEFAULT_CAPABILITY_POLL_INTERVAL, false, 11),
         })),
+        probe_schedule_waker: Arc::new(Mutex::new(None)),
         hubu_routing,
     }
 }

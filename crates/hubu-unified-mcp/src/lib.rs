@@ -12,7 +12,7 @@ mod hubu;
 use std::{
     env, fmt,
     io::{self, BufRead, Write},
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -415,6 +415,7 @@ pub struct Server {
     transition_state: Arc<TransitionState>,
     capability_poll_interval: Duration,
     probe_timings: Arc<Mutex<ProbeTimings>>,
+    probe_schedule_waker: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     hubu_routing: HubuRoutingConfig,
 }
 
@@ -444,7 +445,7 @@ impl BackendProbeTiming {
 
     fn record_result(&mut self, now: Instant, base: Duration, failed: bool) {
         let multiplier = if failed {
-            let multiplier = 1_u32 << self.failure_streak.min(4);
+            let multiplier = 1_u32 << self.failure_streak.min(31);
             self.failure_streak = self.failure_streak.saturating_add(1);
             multiplier
         } else {
@@ -520,6 +521,7 @@ impl Server {
             transition_state: Arc::new(transition_state),
             capability_poll_interval,
             probe_timings: Arc::new(Mutex::new(probe_timings)),
+            probe_schedule_waker: Arc::new(Mutex::new(None)),
             hubu_routing,
         })
     }
@@ -724,6 +726,8 @@ impl Server {
         timings
             .gongbu
             .record_result(now, self.capability_poll_interval, gongbu_failed);
+        drop(timings);
+        self.wake_probe_monitor();
     }
 
     fn refresh_hubu_capability(&self) {
@@ -737,6 +741,7 @@ impl Server {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .hubu
             .record_result(Instant::now(), self.capability_poll_interval, failed);
+        self.wake_probe_monitor();
     }
 
     fn refresh_gongbu_capability(&self) {
@@ -750,6 +755,7 @@ impl Server {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .gongbu
             .record_result(Instant::now(), self.capability_poll_interval, failed);
+        self.wake_probe_monitor();
     }
 
     fn refresh_capabilities_if_stale(&self) {
@@ -813,6 +819,24 @@ impl Server {
         self.refresh_capabilities_if_stale();
     }
 
+    pub(crate) fn install_probe_schedule_waker(&self, waker: mpsc::Sender<()>) {
+        *self
+            .probe_schedule_waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(waker);
+    }
+
+    fn wake_probe_monitor(&self) {
+        let waker = self
+            .probe_schedule_waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(waker) = waker {
+            let _ = waker.send(());
+        }
+    }
+
     fn mark_hubu_unavailable(&self) {
         let probe_id = self.transition_state.next_probe_id();
         self.transition_state
@@ -822,6 +846,7 @@ impl Server {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .hubu
             .record_result(Instant::now(), self.capability_poll_interval, true);
+        self.wake_probe_monitor();
     }
 
     pub(crate) fn take_pending_catalog_transitions(&self) -> usize {
@@ -983,6 +1008,32 @@ mod tests {
         timing.record_result(now, base, false);
         let recovered = timing.next_probe_at.duration_since(now);
         assert!((Duration::from_secs(24)..=Duration::from_secs(36)).contains(&recovered));
+    }
+
+    #[test]
+    fn short_poll_interval_backoff_reaches_the_configured_cap() {
+        let now = Instant::now();
+        let base = Duration::from_secs(1);
+        let mut timing = BackendProbeTiming::new(now, base, true, 19);
+        for _ in 0..9 {
+            timing.record_result(now, base, true);
+        }
+
+        let capped = timing.next_probe_at.duration_since(now);
+        assert!((Duration::from_secs(240)..=Duration::from_secs(300)).contains(&capped));
+    }
+
+    #[test]
+    fn forced_refresh_wakes_the_probe_monitor() {
+        let server = Server::new(Config::default()).unwrap();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        server.install_probe_schedule_waker(wake_tx);
+
+        server.refresh_capabilities();
+
+        wake_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("forced refresh must wake the probe monitor");
     }
 
     #[test]

@@ -302,7 +302,7 @@ fn outage_backoff_is_shared_with_requests_and_independent_per_backend() {
     assert_list_changed(&mcp.notification(Duration::from_secs(2)));
 
     let mut observed_health = hubu.request_count("GET", "/health");
-    for _ in 0..2 {
+    for _ in 0..3 {
         let deadline = Instant::now() + Duration::from_secs(4);
         while hubu.request_count("GET", "/health") == observed_health {
             assert!(
@@ -327,7 +327,7 @@ fn outage_backoff_is_shared_with_requests_and_independent_per_backend() {
         thread::sleep(Duration::from_millis(10));
     }
 
-    // The third Hubu failure has a minimum 3.2 second jittered backoff. Wait
+    // The fourth Hubu failure has a minimum 6.4 second jittered backoff. Wait
     // past the one-second base interval, then prove routine traffic shares that
     // longer deadline instead of starting another Hubu probe.
     thread::sleep(Duration::from_millis(1_250));
@@ -340,6 +340,26 @@ fn outage_backoff_is_shared_with_requests_and_independent_per_backend() {
         backed_off_health,
         "request-triggered refresh bypassed Hubu outage backoff"
     );
+
+    // A forced diagnostic observes recovery and shortens Hubu's next deadline
+    // back to the healthy cadence. The sleeping monitor must be woken so the
+    // next background probe is not delayed by the obsolete outage deadline.
+    hubu.disconnect(false);
+    let recovered = mcp.call(95, "hubu_unified_capabilities", json!({}));
+    assert_eq!(
+        recovered["result"]["structuredContent"]["backends"]["hubu"]["state"],
+        "available"
+    );
+    assert_list_changed(&mcp.notification(Duration::from_secs(1)));
+    let recovered_health = hubu.request_count("GET", "/health");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while hubu.request_count("GET", "/health") == recovered_health {
+        assert!(
+            Instant::now() < deadline,
+            "monitor did not wake after forced recovery shortened the probe deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
 }
 

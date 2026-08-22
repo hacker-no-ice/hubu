@@ -33,7 +33,7 @@ impl RotatingFile {
         retained_generations: usize,
     ) -> std::io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = open_secure_append(&path)?;
         let size = file.metadata()?.len();
         Ok(Self {
             path,
@@ -70,10 +70,7 @@ impl RotatingFile {
         if self.file.is_some() {
             return Ok(());
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let file = open_secure_append(&self.path)?;
         self.size = file.metadata()?.len();
         self.file = Some(file);
         Ok(())
@@ -111,6 +108,17 @@ impl RotatingFile {
         }
         Ok(())
     }
+}
+
+fn open_secure_append(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 fn rotated_path(path: &Path, generation: usize) -> PathBuf {
@@ -186,6 +194,33 @@ mod tests {
             "one\ntwo\n"
         );
         assert!(!rotated_path(&path, 3).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reopened_active_log_preserves_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("hubu.jsonl");
+        let mut log = RotatingFile::open_with_policy(&path, 4, 1).unwrap();
+
+        log.write_line("one").unwrap();
+        log.write_line("two").unwrap();
+        drop(log);
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(rotated_path(&path, 1))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]

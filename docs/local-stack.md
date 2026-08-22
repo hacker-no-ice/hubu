@@ -301,7 +301,9 @@ file larger than the per-file limit is discarded at the next rotation instead
 of being retained as an oversized generation. Fatal process diagnostics and
 structured-log write errors use the separate
 `runtime/logs/hubu-server.stderr.log` capture, which is truncated on each
-managed Hubu start so JSONL rotation never orphans its file descriptor.
+managed Hubu start so JSONL rotation never orphans its file descriptor. Hubu
+creates every active structured-log generation with private `0600` permissions
+on Unix, including the new active file opened after rotation.
 
 Stop proceeds in reverse dependency order: Gongbu drains first and shuts down
 its managed worker and Temporal child, then Hubu stops. Startup rollback also
