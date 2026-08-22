@@ -449,13 +449,14 @@ impl Api {
             .map_err(|_| ApiError::validation())?;
         let admission_time =
             DateTime::parse_from_rfc3339(&created_at).map_err(|_| ApiError::internal())?;
+        // Hubu's consumed, frozen, and remaining hold fields are the aggregate
+        // balance of the containing budget. Only the individual hold status
+        // and amount are valid execution-admission invariants.
         if authorization.spend_auth_token_id != spend_auth_token_id
             || authorization.status != "available"
             || authorization_expires_at <= admission_time
             || authorization.budget_hold.status != "frozen"
             || authorization.budget_hold.amount_cents != authorization.amount_cents
-            || authorization.budget_hold.frozen_amount_cents != authorization.amount_cents
-            || authorization.budget_hold.consumed_amount_cents != 0
             || authorization.account_id != account.account_id
             || authorization.operation_key.trim().is_empty()
             || authorization.decision_id.trim().is_empty()
@@ -1109,6 +1110,16 @@ mod tests {
                 response.spend_auth_token_id = "different-token".into();
             } else if spend_auth_token_id.starts_with("expired") {
                 response.expires_at = "2026-08-05T19:00:00Z".into();
+            } else if spend_auth_token_id.starts_with("aggregate-consumed") {
+                response.budget_hold.consumed_amount_cents = 100;
+                response.budget_hold.remaining_amount_cents = 800;
+            } else if spend_auth_token_id.starts_with("aggregate-frozen") {
+                response.budget_hold.frozen_amount_cents = 200;
+                response.budget_hold.remaining_amount_cents = 800;
+            } else if spend_auth_token_id.starts_with("hold-status-mismatch") {
+                response.budget_hold.status = "settled".into();
+            } else if spend_auth_token_id.starts_with("hold-amount-mismatch") {
+                response.budget_hold.amount_cents += 1;
             }
             Ok(response)
         }
@@ -1411,6 +1422,40 @@ mod tests {
                 .get_execution_by_hubu_token("account-a", token)
                 .is_err());
         }
+    }
+
+    #[test]
+    fn aggregate_budget_balances_do_not_control_execution_admission() {
+        let fixture = fixture();
+        for token in ["aggregate-consumed-1", "aggregate-frozen-1"] {
+            assert_eq!(
+                call_create(&fixture, &request(token)).status,
+                200,
+                "{token}"
+            );
+            assert!(fixture
+                .repository
+                .get_execution_by_hubu_token("account-a", token)
+                .is_ok());
+        }
+        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn individual_budget_hold_invariants_remain_fail_closed() {
+        let fixture = fixture();
+        for token in ["hold-status-mismatch-1", "hold-amount-mismatch-1"] {
+            assert_eq!(
+                call_create(&fixture, &request(token)).status,
+                400,
+                "{token}"
+            );
+            assert!(fixture
+                .repository
+                .get_execution_by_hubu_token("account-a", token)
+                .is_err());
+        }
+        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 0);
     }
 
     #[test]
