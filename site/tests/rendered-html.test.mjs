@@ -34,6 +34,71 @@ test("renders canonical Markdown on a documentation route", async () => {
   assert.match(html, /On this page/);
 });
 
+test("publishes the versioned local-stack configuration reference at stable public routes", async () => {
+  const landing = await render("/configuration/local-stack/v1");
+  assert.equal(landing.status, 200);
+  const landingHtml = await landing.text();
+  assert.match(landingHtml, /Local stack configuration reference/);
+  assert.match(landingHtml, /Value-source labels/);
+  assert.match(landingHtml, /provider-disabled example/i);
+  assert.match(landingHtml, /href="\/configuration\/local-stack\/v1\/stack-toml"/);
+
+  const providers = await render("/configuration/local-stack/v1/providers-toml");
+  assert.equal(providers.status, 200);
+  const providersHtml = await providers.text();
+  assert.match(providersHtml, /I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND/);
+  assert.match(providersHtml, /rate_numerator_minor/);
+  assert.match(providersHtml, /provider_config_version/);
+});
+
+test("documents every schema-v1 local-stack source field", async () => {
+  const references = [
+    ["../../docs/configuration/local-stack/v1/stack-toml.md", [
+      "schema_version", "allow_development_builds", "binaries.hubu", "binaries.hubu_server",
+      "binaries.gongbu_server", "binaries.hubu_unified_mcp", "identity.account_id",
+      "identity.agent_id", "hubu.ownership", "hubu.endpoint", "hubu.listen",
+      "hubu.database_path", "hubu.log_file", "gongbu.ownership", "gongbu.endpoint",
+      "gongbu.listen", "gongbu.database_path", "gongbu.artifact_root", "gongbu.log_file",
+      "temporal.mode", "temporal.binary_path", "temporal.expected_cli_version",
+      "temporal.data_path", "temporal.rpc_port", "temporal.ui_port", "temporal.address",
+      "temporal.namespace", "temporal.task_queue", "temporal.ui_url",
+      "runtime.hubu_startup_policy", "runtime.hubu_startup_timeout_ms",
+      "runtime.recovery_delays_seconds", "runtime.temporal_startup_timeout_ms",
+      "runtime.dependency_check_interval_ms", "runtime.worker_drain_timeout_ms",
+      "runtime.max_artifacts_per_execution", "runtime.max_encoded_bytes",
+      "runtime.max_decoded_bytes", "runtime.max_width", "runtime.max_height",
+      "runtime.log_level", "runtime.log_format",
+    ]],
+    ["../../docs/configuration/local-stack/v1/credentials-toml.md", [
+      "schema_version", "files.hubu_auth", "files.hubu_approval",
+      "files.hubu_reconciliation", "files.gongbu_caller", "opaque.<key>.service",
+      "opaque.<key>.account", "opaque.gongbu_hubu", "opaque.gongbu_caller",
+    ]],
+    ["../../docs/configuration/local-stack/v1/providers-toml.md", [
+      "schema_version", "mode", "catalog_version", "maximum_spend_minor",
+      "live_spend_acknowledgement", "targets.provider_config_version",
+      "targets.workload_type", "targets.provider", "targets.adapter", "targets.model",
+      "targets.credential", "targets.active", "targets.execution_enabled", "targets.settings",
+      "targets.settings.type", "targets.settings.config.endpoint",
+      "targets.settings.config.api_version", "targets.settings.config.timeout_ms",
+      "targets.settings.config.max_retries", "targets.settings.config.headers",
+      "targets.settings.config.project", "targets.settings.config.location",
+      "targets.settings.config.approved_artifact_hosts",
+      "targets.settings.config.poll_interval_ms", "targets.settings.config.idempotency_header",
+      "pricing_rules.rule_id", "pricing_rules.provider", "pricing_rules.model",
+      "pricing_rules.currency", "pricing_rules.selector", "pricing_rules.selector.image_size",
+      "pricing_rules.components", "pricing_rules.components.unit",
+      "pricing_rules.components.rate_numerator_minor",
+      "pricing_rules.components.rate_denominator",
+    ]],
+  ];
+
+  for (const [path, fields] of references) {
+    const source = await readFile(new URL(path, import.meta.url), "utf8");
+    for (const field of fields) assert.match(source, new RegExp("### `" + field.replaceAll(".", "\\.") + "`"), `${path} is missing ${field}`);
+  }
+});
+
 test("renders the concise canonical overview", async () => {
   const response = await render("/docs/overview");
   assert.equal(response.status, 200);
