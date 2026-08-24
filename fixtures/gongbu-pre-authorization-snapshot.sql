@@ -69,8 +69,8 @@ INSERT INTO executions(
  'sha256:legacy',1,'image_generation/example/fixture/image-v1','provider-v1',
  'image_generation','example','fixture','image-v1','provider-v1',
  'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
- '{"provider":"example","model":"image-v1","catalog_version":"prices-v1","catalog_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pricing_rule_id":"example-image","unit":"image","unit_amount_minor":100,"quantity":1,"estimated_amount_minor":100,"currency":"USD"}',
- 1,NULL,'reconciliation_required','2026-08-05T20:00:00Z',
+ '{"schema_version":2,"provider":"example","model":"image-v1","catalog_version":"prices-v2","catalog_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pricing_rule_id":"example-image","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"100","exact_estimate_denominator":"1","estimated_amount_minor":100,"currency":"USD"}',
+ 2,NULL,'reconciliation_required','2026-08-05T20:00:00Z',
  '2026-08-05T20:01:00Z',3
 );
 INSERT INTO reconciliation_records(

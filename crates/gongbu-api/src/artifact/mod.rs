@@ -355,18 +355,24 @@ mod tests {
                 provider_config_version: "v1".into(),
                 provider_config_digest: format!("sha256:{}", "a".repeat(64)),
                 pricing_snapshot: json!({
+                    "schema_version": 2,
                     "provider": "provider",
                     "model": "model",
-                    "catalog_version": "prices-v1",
+                    "catalog_version": "prices-v2",
                     "catalog_digest": format!("sha256:{}", "a".repeat(64)),
                     "pricing_rule_id": "provider-model",
-                    "unit": "image",
-                    "unit_amount_minor": 100,
-                    "quantity": 1,
+                    "components": [{
+                        "unit": "image",
+                        "rate_numerator_minor": 100,
+                        "rate_denominator": 1,
+                        "quantity": 1
+                    }],
+                    "exact_estimate_numerator": "100",
+                    "exact_estimate_denominator": "1",
                     "estimated_amount_minor": 100,
                     "currency": "USD"
                 }),
-                pricing_schema_version: 1,
+                pricing_schema_version: 2,
                 execution_scope: None,
                 created_at: "2026-08-05T20:00:00Z".into(),
             })

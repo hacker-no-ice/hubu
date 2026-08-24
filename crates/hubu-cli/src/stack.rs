@@ -908,11 +908,7 @@ fn render_generation(
     let provider_mode = providers.mode.expect("checked");
     if provider_mode == ProviderMode::Live {
         let targets = render_targets(providers, credentials)?;
-        let pricing = json!({
-            "schema_version": 1,
-            "catalog_version": providers.catalog_version.as_ref().expect("checked"),
-            "rules": providers.pricing_rules.iter().map(toml_to_json).collect::<Result<Vec<_>>>()?,
-        });
+        let pricing = render_pricing_catalog(providers)?;
         write_generated_json(
             generation,
             "provider-targets.json",
@@ -1367,6 +1363,14 @@ fn render_provider_config(
             "live_spend_acknowledgement": providers.live_spend_acknowledgement.as_ref().expect("checked"),
         })),
     }
+}
+
+fn render_pricing_catalog(providers: &ProvidersSource) -> Result<Value> {
+    Ok(json!({
+        "schema_version": 2,
+        "catalog_version": providers.catalog_version.as_ref().expect("checked"),
+        "rules": providers.pricing_rules.iter().map(toml_to_json).collect::<Result<Vec<_>>>()?,
+    }))
 }
 
 fn generated_digest_changed(
@@ -2482,8 +2486,12 @@ schema_version = 1
 # provider = "<same provider id>"
 # model = "<same model id>"
 # currency = "USD"
-# unit = "image"
-# Set unit_amount_minor to the operator-approved price in currency minor units.
+# selector = { image_size = "1k" }
+# components = [
+#   { unit = "image", rate_numerator_minor = 1, rate_denominator = 1 },
+# ]
+# Add separate selector-qualified rules for every enabled image size. Rates use
+# exact rational currency-minor-unit values; verify all values with the provider.
 "#
     .into()
 }
@@ -2611,7 +2619,8 @@ mod tests {
         assert!(!providers.contains(LIVE_SPEND_ACKNOWLEDGEMENT));
         assert!(!providers.contains("REQUIRED"));
         assert!(!providers.contains("maximum_spend_minor ="));
-        assert!(!providers.contains("unit_amount_minor ="));
+        assert!(providers.contains("selector = { image_size = \"1k\" }"));
+        assert!(providers.contains("rate_numerator_minor = 1"));
         assert!(profile.join("generated").is_dir());
         #[cfg(unix)]
         {
@@ -2852,7 +2861,7 @@ artifact_root = {shared}
     }
 
     #[test]
-    fn provider_render_preserves_v1_live_shape_and_versions_disabled_mode() {
+    fn provider_config_preserves_legacy_server_shape_and_versions_disabled_mode() {
         let live: ProvidersSource = toml::from_str(&format!(
             "schema_version = 1\nmode = \"live\"\nmaximum_spend_minor = 10\nlive_spend_acknowledgement = \"{LIVE_SPEND_ACKNOWLEDGEMENT}\"\n"
         ))
@@ -2865,6 +2874,36 @@ artifact_root = {shared}
         let disabled: ProvidersSource =
             toml::from_str("schema_version = 1\nmode = \"disabled\"\n").unwrap();
         assert!(render_provider_config(&disabled, 1, Path::new("/tmp/generation")).is_err());
+    }
+
+    #[test]
+    fn pricing_catalog_render_is_v2_and_preserves_selector_components() {
+        let providers: ProvidersSource = toml::from_str(
+            r#"schema_version = 1
+mode = "live"
+catalog_version = "prices-v2"
+[[pricing_rules]]
+rule_id = "image-2k"
+provider = "google"
+model = "gemini-image"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [{ unit = "image", rate_numerator_minor = 67, rate_denominator = 10 }]
+"#,
+        )
+        .unwrap();
+
+        let catalog = render_pricing_catalog(&providers).unwrap();
+        assert_eq!(catalog["schema_version"], 2);
+        assert_eq!(catalog["rules"][0]["selector"]["image_size"], "2k");
+        assert_eq!(
+            catalog["rules"][0]["components"][0],
+            json!({
+                "unit": "image",
+                "rate_numerator_minor": 67,
+                "rate_denominator": 10,
+            })
+        );
     }
 
     #[cfg(unix)]

@@ -439,7 +439,7 @@ fn catalog() -> ValidatedProviderCatalog {
         }]
     }))
     .unwrap();
-    let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"prices-v1","rules":[{"rule_id":"example-image","provider":"example","model":"image-v1","currency":"USD","unit":"image","unit_amount_minor":100}]}"#).unwrap();
+    let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"prices-v2","rules":[{"rule_id":"example-image","provider":"example","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1}]}]}"#).unwrap();
     let mut registry = ProviderRegistry::new();
     registry.register("example", "fixture", |_| Ok(Arc::new(AdmissionAdapter)));
     ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap()

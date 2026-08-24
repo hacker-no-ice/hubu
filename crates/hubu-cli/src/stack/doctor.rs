@@ -1788,7 +1788,7 @@ account = "gongbu-caller"
             format!(
                 r#"schema_version = 1
 mode = "live"
-catalog_version = "catalog-v1"
+catalog_version = "catalog-v2"
 maximum_spend_minor = 10
 live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
 [[targets]]

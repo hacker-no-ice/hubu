@@ -487,7 +487,7 @@ fn admission_catalog() -> ValidatedProviderCatalog {
     }))
     .unwrap();
     let pricing = PricingCatalog::from_json(
-        br#"{"schema_version":1,"catalog_version":"hub-83-e2e-v1","rules":[{"rule_id":"one-image","provider":"mock","model":"pixel-v1","currency":"USD","unit":"image","unit_amount_minor":40}]}"#,
+        br#"{"schema_version":2,"catalog_version":"hub-83-e2e-v2","rules":[{"rule_id":"one-image","provider":"mock","model":"pixel-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":40,"rate_denominator":1}]}]}"#,
     )
     .unwrap();
     let mut registry = ProviderRegistry::new();

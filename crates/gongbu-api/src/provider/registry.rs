@@ -298,9 +298,11 @@ mod tests {
     fn fixture_pricing(provider: &str) -> PricingCatalog {
         PricingCatalog::from_json(
             serde_json::to_string(&json!({
-                "schema_version":1,"catalog_version":"v1","rules":[{
+                "schema_version":2,"catalog_version":"v2","rules":[{
                     "rule_id":"image","provider":provider,"model":"image-v1",
-                    "currency":"USD","unit":"image","unit_amount_minor":1
+                    "currency":"USD","components":[{
+                        "unit":"image","rate_numerator_minor":1,"rate_denominator":1
+                    }]
                 }]
             }))
             .unwrap()
@@ -356,7 +358,7 @@ mod tests {
                 {"provider_config_version":"f-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://flux.example","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["flux.example"]}}}
             ]
         })).unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"v1","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","unit":"image","unit_amount_minor":1},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","unit":"image","unit_amount_minor":1},{"rule_id":"f","provider":"flux","model":"flux-2-pro","currency":"USD","unit":"image","unit_amount_minor":1}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f","provider":"flux","model":"flux-2-pro","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]}]}"#).unwrap();
         let catalog = ValidatedProviderCatalog::bind(
             targets,
             pricing,

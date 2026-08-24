@@ -1,14 +1,19 @@
 {
-  "schema_version": 1,
-  "catalog_version": "builtin-v1",
+  "schema_version": 2,
+  "catalog_version": "builtin-v2",
   "rules": [
     {
       "rule_id": "local-mock-image-v1",
       "provider": "local-mock",
       "model": "mock-image-v1",
       "currency": "USD",
-      "unit": "image",
-      "unit_amount_minor": 500
+      "components": [
+        {
+          "unit": "image",
+          "rate_numerator_minor": 500,
+          "rate_denominator": 1
+        }
+      ]
     }
   ]
 }
