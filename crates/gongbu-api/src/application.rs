@@ -10,7 +10,7 @@ use crate::{
     execution::{Execution, Repository},
     http::{Api, AuthenticatedAccount, HttpResponse},
     hubu::SpendAuthorizationResolver,
-    lifecycle::LifecycleReason,
+    lifecycle::{DependencyName, DependencyProbeOutcome, LifecycleReason},
     provider::{
         contract::{
             enforce_cost, vendor_idempotency_key, AdapterOutcome, NormalizedRequest,
@@ -49,8 +49,10 @@ use std::{
 use temporalio_client::Client;
 use temporalio_sdk::Runtime;
 use thiserror::Error;
+use tokio::time::Instant;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+pub const DEPENDENCY_FAILURE_GRACE: Duration = Duration::from_secs(30);
 
 /// Generic bridge from a frozen execution to its startup-bound adapter.
 /// Selection is exact: this dispatcher never routes, falls back, or invokes a
@@ -360,6 +362,7 @@ pub struct ApplicationDependencies {
     pub temporal_namespace: String,
     pub temporal_startup_timeout: Duration,
     pub dependency_check_interval: Duration,
+    pub dependency_failure_grace: Duration,
     pub maximum_spend_minor: i64,
     pub dependency_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     pub worker_drain_timeout: Duration,
@@ -463,6 +466,7 @@ where
                 dependencies.temporal_namespace,
                 task_queue,
                 dependencies.dependency_check_interval,
+                dependencies.dependency_failure_grace,
                 dependencies.dependency_checker,
             ),
             supervised_ready,
@@ -507,13 +511,15 @@ async fn monitor_temporal(
     namespace: String,
     task_queue: String,
     interval: Duration,
+    failure_grace: Duration,
     dependency_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> LifecycleReason {
+    let mut temporal_health = DependencyHealthTracker::default();
+    let mut hubu_health = DependencyHealthTracker::default();
     loop {
         tokio::time::sleep(interval).await;
-        let temporal_ready = worker_is_polling(&client, &namespace, &task_queue)
-            .await
-            .unwrap_or(false);
+        let (temporal_sample, grpc_code) =
+            temporal_probe_sample(worker_is_polling(&client, &namespace, &task_queue).await);
         let dependencies_ready = match dependency_checker.as_ref() {
             Some(checker) => {
                 let checker = checker.clone();
@@ -523,9 +529,153 @@ async fn monitor_temporal(
             }
             None => true,
         };
-        if !temporal_ready || !dependencies_ready {
+        let now = Instant::now();
+        let temporal_shutdown = record_dependency_sample(
+            &mut temporal_health,
+            DependencyName::Temporal,
+            temporal_sample,
+            grpc_code.as_deref(),
+            now,
+            failure_grace,
+        );
+        let hubu_shutdown = record_dependency_sample(
+            &mut hubu_health,
+            DependencyName::Hubu,
+            if dependencies_ready {
+                DependencySample::Healthy
+            } else {
+                DependencySample::Unhealthy
+            },
+            None,
+            now,
+            failure_grace,
+        );
+        if temporal_shutdown || hubu_shutdown {
             return LifecycleReason::DependencyHealthShutdown;
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DependencySample {
+    Healthy,
+    Unhealthy,
+    Indeterminate,
+}
+
+fn temporal_probe_sample(
+    result: Result<bool, temporalio_client::tonic::Status>,
+) -> (DependencySample, Option<String>) {
+    match result {
+        Ok(true) => (DependencySample::Healthy, None),
+        Ok(false) => (DependencySample::Unhealthy, None),
+        Err(error) => (
+            DependencySample::Indeterminate,
+            Some(format!("{:?}", error.code()).to_ascii_lowercase()),
+        ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DependencyHealthObservation {
+    Healthy,
+    Degraded { first_failure: bool, failures: u32 },
+    Recovered { failures: u32 },
+    Shutdown { failures: u32 },
+}
+
+#[derive(Default)]
+struct DependencyHealthTracker {
+    failure_started_at: Option<Instant>,
+    consecutive_failures: u32,
+}
+
+impl DependencyHealthTracker {
+    fn observe(
+        &mut self,
+        sample: DependencySample,
+        now: Instant,
+        failure_grace: Duration,
+    ) -> DependencyHealthObservation {
+        if sample == DependencySample::Healthy {
+            let failures = self.consecutive_failures;
+            self.failure_started_at = None;
+            self.consecutive_failures = 0;
+            return if failures == 0 {
+                DependencyHealthObservation::Healthy
+            } else {
+                DependencyHealthObservation::Recovered { failures }
+            };
+        }
+
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let failure_started_at = *self.failure_started_at.get_or_insert(now);
+        if now.duration_since(failure_started_at) >= failure_grace {
+            DependencyHealthObservation::Shutdown {
+                failures: self.consecutive_failures,
+            }
+        } else {
+            DependencyHealthObservation::Degraded {
+                first_failure: self.consecutive_failures == 1,
+                failures: self.consecutive_failures,
+            }
+        }
+    }
+}
+
+fn record_dependency_sample(
+    tracker: &mut DependencyHealthTracker,
+    dependency: DependencyName,
+    sample: DependencySample,
+    grpc_code: Option<&str>,
+    now: Instant,
+    failure_grace: Duration,
+) -> bool {
+    let observation = tracker.observe(sample, now, failure_grace);
+    match observation {
+        DependencyHealthObservation::Healthy
+        | DependencyHealthObservation::Degraded {
+            first_failure: false,
+            ..
+        } => false,
+        DependencyHealthObservation::Degraded {
+            first_failure: true,
+            failures,
+        } => {
+            crate::lifecycle::log_dependency_probe(
+                dependency,
+                probe_outcome(sample),
+                failures,
+                grpc_code,
+            );
+            false
+        }
+        DependencyHealthObservation::Recovered { failures } => {
+            crate::lifecycle::log_dependency_probe(
+                dependency,
+                DependencyProbeOutcome::Recovered,
+                failures,
+                None,
+            );
+            false
+        }
+        DependencyHealthObservation::Shutdown { failures } => {
+            crate::lifecycle::log_dependency_probe(
+                dependency,
+                probe_outcome(sample),
+                failures,
+                grpc_code,
+            );
+            true
+        }
+    }
+}
+
+fn probe_outcome(sample: DependencySample) -> DependencyProbeOutcome {
+    match sample {
+        DependencySample::Healthy => DependencyProbeOutcome::Recovered,
+        DependencySample::Unhealthy => DependencyProbeOutcome::Unhealthy,
+        DependencySample::Indeterminate => DependencyProbeOutcome::Indeterminate,
     }
 }
 
@@ -714,6 +864,79 @@ mod tests {
         ));
         assert_eq!(reason, LifecycleReason::DependencyHealthShutdown);
         assert!(!ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn transient_dependency_failure_recovers_without_shutdown() {
+        let mut tracker = DependencyHealthTracker::default();
+        let started = Instant::now();
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Indeterminate,
+                started,
+                Duration::from_secs(30),
+            ),
+            DependencyHealthObservation::Degraded {
+                first_failure: true,
+                failures: 1,
+            }
+        );
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Healthy,
+                started + Duration::from_secs(1),
+                Duration::from_secs(30),
+            ),
+            DependencyHealthObservation::Recovered { failures: 1 }
+        );
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Healthy,
+                started + Duration::from_secs(31),
+                Duration::from_secs(30),
+            ),
+            DependencyHealthObservation::Healthy
+        );
+    }
+
+    #[test]
+    fn temporal_transport_error_is_indeterminate_and_preserves_safe_code() {
+        assert_eq!(
+            temporal_probe_sample(Err(temporalio_client::tonic::Status::unavailable(
+                "connection rotation",
+            ))),
+            (DependencySample::Indeterminate, Some("unavailable".into()))
+        );
+    }
+
+    #[test]
+    fn sustained_dependency_failure_shuts_down_after_grace() {
+        let mut tracker = DependencyHealthTracker::default();
+        let started = Instant::now();
+        assert!(matches!(
+            tracker.observe(
+                DependencySample::Unhealthy,
+                started,
+                Duration::from_secs(30),
+            ),
+            DependencyHealthObservation::Degraded { failures: 1, .. }
+        ));
+        assert!(matches!(
+            tracker.observe(
+                DependencySample::Unhealthy,
+                started + Duration::from_secs(29),
+                Duration::from_secs(30),
+            ),
+            DependencyHealthObservation::Degraded { failures: 2, .. }
+        ));
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Unhealthy,
+                started + Duration::from_secs(30),
+                Duration::from_secs(30),
+            ),
+            DependencyHealthObservation::Shutdown { failures: 3 }
+        );
     }
 
     #[test]

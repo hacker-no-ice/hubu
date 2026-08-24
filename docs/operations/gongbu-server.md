@@ -47,6 +47,14 @@ For an external service:
 Gongbu never starts or stops external Temporal. In both modes, readiness
 requires an active worker polling the configured task queue.
 
+After startup, a single failed Temporal or Hubu dependency probe does not stop
+Gongbu. The supervisor allows a fixed 30-second recovery grace so routine gRPC
+connection rotation and other transient transport failures can reconnect. A
+healthy sample resets the grace window; continuously unhealthy probes still
+remove readiness and shut down the process. The `gongbu_dependency_probe` log
+event records only the dependency, outcome, consecutive-failure count, and a
+redacted gRPC status code when available.
+
 ## Validate and start
 
 Validation creates no state, reads no Keychain secret, and connects to no

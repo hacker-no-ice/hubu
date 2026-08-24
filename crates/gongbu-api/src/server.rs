@@ -628,6 +628,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         dependency_check_interval: Duration::from_millis(
             config.execution.dependency_check_interval_ms,
         ),
+        dependency_failure_grace: application::DEPENDENCY_FAILURE_GRACE,
         maximum_spend_minor: config.providers.maximum_spend_minor(),
         dependency_checker: Some(dependency_checker),
         worker_drain_timeout: Duration::from_millis(config.shutdown.worker_drain_timeout_ms),
