@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS hubu_authorization_snapshots(
  decision_id TEXT NOT NULL, spend_auth_token_id TEXT NOT NULL,
  amount_minor INTEGER NOT NULL CHECK(amount_minor>=0), currency TEXT NOT NULL CHECK(length(currency)=3),
  execution_scope_json TEXT NOT NULL CHECK(json_valid(execution_scope_json)),
- workload_profile TEXT NOT NULL, expires_at TEXT NOT NULL, authorization_status TEXT NOT NULL,
+ lease_profile TEXT NOT NULL, expires_at TEXT NOT NULL, authorization_status TEXT NOT NULL,
  task_id TEXT, reason TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS hubu_authorization_token
  ON hubu_authorization_snapshots(spend_auth_token_id);

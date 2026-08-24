@@ -536,7 +536,7 @@ impl SpendAuthorizationResolver for ScenarioHubu {
             merchant: None,
             execution_scope: gongbu_api::execution_scope::for_target("example", "fixture"),
             task_id: None,
-            workload_profile: "image_generation".into(),
+            lease_profile: "default".into(),
             status: "available".into(),
             expires_at: "2099-01-01T00:00:00Z".into(),
             budget_hold: BudgetHold {

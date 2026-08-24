@@ -22,7 +22,7 @@ request
 Every spend operation has a stable, agent-scoped `operation_key` supplied by a
 trusted client platform or orchestrator. Hubu stores the workflow under that
 key. An identical retry recovers the existing operation; a retry that changes
-the account, amount, reason, workload profile, task correlation, or execution
+the account, amount, reason, lease profile, task correlation, or execution
 scope is rejected.
 
 `task_id` is optional trusted business correlation. `reason` is descriptive,

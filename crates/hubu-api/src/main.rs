@@ -39,7 +39,7 @@ fn run() -> anyhow::Result<()> {
                 "HUBU_RECONCILIATION_TOKEN",
                 "HUBU_LOG_FILE",
                 "HUBU_LOG_STDERR",
-                "HUBU_SPEND_TIMING_CONFIG",
+                "HUBU_LEASE_CONFIG",
             ] {
                 std::env::remove_var(name);
             }
@@ -54,8 +54,8 @@ fn run() -> anyhow::Result<()> {
                 std::env::set_var("HUBU_LOG_FILE", path);
                 std::env::set_var("HUBU_LOG_STDERR", "0");
             }
-            if let Some(path) = &config.spend_timing_config {
-                std::env::set_var("HUBU_SPEND_TIMING_CONFIG", path);
+            if let Some(path) = &config.lease_config {
+                std::env::set_var("HUBU_LEASE_CONFIG", path);
             }
             hubu_api::run_server(&config.listen.to_string())
         }

@@ -182,7 +182,7 @@ fn all_tool_definitions() -> Vec<Value> {
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "execution_scope": execution_scope_input_schema(),
-                "workload_profile": { "type": "string" }
+                "lease_profile": { "type": "string" }
             }), &["account_id", "amount_cents", "reason"]),
         ),
         write_tool(
@@ -194,7 +194,7 @@ fn all_tool_definitions() -> Vec<Value> {
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "execution_scope": execution_scope_input_schema(),
-                "workload_profile": { "type": "string" }
+                "lease_profile": { "type": "string" }
             }), &["account_id", "amount_cents", "reason"]),
         ),
         read_tool(

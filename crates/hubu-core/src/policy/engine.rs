@@ -118,7 +118,7 @@ mod tests {
             category: category.map(str::to_string),
             task_id: None,
             reason: "test spend".to_string(),
-            workload_profile: "default".to_string(),
+            lease_profile: "default".to_string(),
         }
     }
 

@@ -11,10 +11,10 @@ use crate::policy::engine;
 use crate::policy::model::{Effect, Policy};
 use crate::spend::error::SpendError;
 use crate::spend::model::{
-    IssuedSpendAuthToken, SpendAuthTokenRecord, SpendDecisionRecord, SpendEvaluationResponse,
-    SpendExecutorClaimRecord, SpendExecutorClaimRequest, SpendExecutorClaimStatus,
-    SpendExecutorClaimValidationRequest, SpendPaymentValidationRequest, SpendRequest,
-    SpendTimingConfig, ValidatedSpendAuthorization,
+    IssuedSpendAuthToken, LeaseConfig, SpendAuthTokenRecord, SpendDecisionRecord,
+    SpendEvaluationResponse, SpendExecutorClaimRecord, SpendExecutorClaimRequest,
+    SpendExecutorClaimStatus, SpendExecutorClaimValidationRequest, SpendPaymentValidationRequest,
+    SpendRequest, ValidatedSpendAuthorization,
 };
 use crate::telemetry::log_event;
 
@@ -27,7 +27,7 @@ pub struct SpendManager {
     executor_claims: HashMap<SpendExecutorClaimId, SpendExecutorClaimRecord>,
     claim_id_by_token: HashMap<SpendAuthTokenId, SpendExecutorClaimId>,
     claim_id_by_operation: HashMap<(AgentId, String), SpendExecutorClaimId>,
-    timing: SpendTimingConfig,
+    lease_config: LeaseConfig,
 }
 
 impl SpendManager {
@@ -40,7 +40,7 @@ impl SpendManager {
             executor_claims: HashMap::new(),
             claim_id_by_token: HashMap::new(),
             claim_id_by_operation: HashMap::new(),
-            timing: SpendTimingConfig::default(),
+            lease_config: LeaseConfig::default(),
         }
     }
 
@@ -48,14 +48,14 @@ impl SpendManager {
         decisions: Vec<SpendDecisionRecord>,
         tokens: Vec<SpendAuthTokenRecord>,
     ) -> Self {
-        Self::from_records_with_claims(decisions, tokens, Vec::new(), SpendTimingConfig::default())
+        Self::from_records_with_claims(decisions, tokens, Vec::new(), LeaseConfig::default())
     }
 
     pub fn from_records_with_claims(
         decisions: Vec<SpendDecisionRecord>,
         tokens: Vec<SpendAuthTokenRecord>,
         executor_claims: Vec<SpendExecutorClaimRecord>,
-        timing: SpendTimingConfig,
+        lease_config: LeaseConfig,
     ) -> Self {
         let mut decision_ids_by_operation: HashMap<_, Vec<_>> = HashMap::new();
         for decision in &decisions {
@@ -101,7 +101,7 @@ impl SpendManager {
                 .collect(),
             claim_id_by_token,
             claim_id_by_operation,
-            timing,
+            lease_config,
         }
     }
 
@@ -126,7 +126,7 @@ impl SpendManager {
             })
     }
 
-    pub fn workload_profile_for_operation(
+    pub fn lease_profile_for_operation(
         &self,
         agent_id: &AgentId,
         operation_key: &str,
@@ -135,7 +135,7 @@ impl SpendManager {
             .get(&(agent_id.clone(), operation_key.to_string()))
             .and_then(|decision_ids| decision_ids.last())
             .and_then(|decision_id| self.decisions.get(decision_id))
-            .map(|decision| decision.request.workload_profile.clone())
+            .map(|decision| decision.request.lease_profile.clone())
     }
 
     pub fn auth_token_record(&self, token_id: &SpendAuthTokenId) -> Option<SpendAuthTokenRecord> {
@@ -164,20 +164,21 @@ impl SpendManager {
         if decision.evaluation.decision != Effect::NeedsApproval {
             return Err(SpendError::SpendDecisionNotAllowed);
         }
-        let timing = self
-            .timing
-            .profile(&decision.request.workload_profile)
+        let lease_profile = self
+            .lease_config
+            .lease_profile(&decision.request.lease_profile)
             .ok_or_else(|| {
-                SpendError::UnknownWorkloadProfile(decision.request.workload_profile.clone())
+                SpendError::UnknownLeaseProfile(decision.request.lease_profile.clone())
             })?;
         let token_id = SpendAuthTokenId::new();
-        let expires_at = Utc::now() + Duration::seconds(timing.authorization_ttl_seconds);
+        let expires_at =
+            Utc::now() + Duration::seconds(self.lease_config.authorization_ttl_seconds);
         let token_record = SpendAuthTokenRecord {
             id: token_id.clone(),
             owner_user_id: decision.owner_user_id.clone(),
             spend_decision_id: decision_id.clone(),
             expires_at,
-            claim_ttl_seconds: timing.claim_ttl_seconds,
+            claim_ttl_seconds: lease_profile.claim_ttl_seconds,
             used_at: None,
             used_by_payment_id: None,
             revoked_at: None,
@@ -340,12 +341,12 @@ impl SpendManager {
             });
         }
 
-        let timing = self
-            .timing
-            .profile(&request.workload_profile)
-            .ok_or_else(|| SpendError::UnknownWorkloadProfile(request.workload_profile.clone()))?;
-        let authorization_ttl = Duration::seconds(timing.authorization_ttl_seconds);
-        let claim_ttl_seconds = timing.claim_ttl_seconds;
+        let lease_profile = self
+            .lease_config
+            .lease_profile(&request.lease_profile)
+            .ok_or_else(|| SpendError::UnknownLeaseProfile(request.lease_profile.clone()))?;
+        let authorization_ttl = Duration::seconds(self.lease_config.authorization_ttl_seconds);
+        let claim_ttl_seconds = lease_profile.claim_ttl_seconds;
         let evaluation = engine::evaluate_policy(&request, policy)?;
         let decision_id = SpendDecisionId::new();
         let decision_record = SpendDecisionRecord {
@@ -541,7 +542,7 @@ impl SpendManager {
             .decisions
             .get(&validation.spend_decision_id)
             .ok_or(SpendError::MissingSpendDecision)?;
-        let workload_profile = decision.request.workload_profile.clone();
+        let lease_profile = decision.request.lease_profile.clone();
         let claim_ttl_seconds = self
             .tokens
             .get(&request.authorization.spend_auth_token_id)
@@ -554,7 +555,7 @@ impl SpendManager {
             owner_user_id: request.authorization.owner_user_id.clone(),
             agent_id: request.authorization.agent_id.clone(),
             operation_key: request.operation_key.clone(),
-            workload_profile,
+            lease_profile,
             status: SpendExecutorClaimStatus::Claimed,
             claimed_at,
             expires_at: claimed_at + Duration::seconds(claim_ttl_seconds),
@@ -829,7 +830,7 @@ mod tests {
             category: Some("meals".to_string()),
             task_id: Some("task_123".to_string()),
             reason: "Team lunch".to_string(),
-            workload_profile: "default".to_string(),
+            lease_profile: "default".to_string(),
         }
     }
 
@@ -1168,20 +1169,24 @@ mod tests {
 
     #[test]
     fn executor_claim_uses_profile_lease_and_survives_authorization_expiry() {
-        let timing = SpendTimingConfig {
-            default_profile: "image".to_string(),
-            profiles: HashMap::from([(
+        let lease_config = LeaseConfig {
+            authorization_ttl_seconds: 60,
+            default_lease_profile: "image".to_string(),
+            lease_profiles: HashMap::from([(
                 "image".to_string(),
-                crate::spend::SpendTimingProfile {
-                    authorization_ttl_seconds: 60,
+                crate::spend::LeaseProfile {
                     claim_ttl_seconds: 600,
                 },
             )]),
         };
-        let mut manager =
-            SpendManager::from_records_with_claims(Vec::new(), Vec::new(), Vec::new(), timing);
+        let mut manager = SpendManager::from_records_with_claims(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            lease_config,
+        );
         let mut spend = spend_request(2_500);
-        spend.workload_profile = "image".to_string();
+        spend.lease_profile = "image".to_string();
         let evaluation = manager
             .evaluate_spend(
                 &user_context(),
@@ -1210,7 +1215,7 @@ mod tests {
             })
             .expect("executor should claim token");
 
-        assert_eq!(claim.workload_profile, "image");
+        assert_eq!(claim.lease_profile, "image");
         assert!(claim.expires_at > token.expires_at);
         manager
             .tokens

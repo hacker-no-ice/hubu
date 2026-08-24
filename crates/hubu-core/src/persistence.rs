@@ -375,7 +375,7 @@ impl SqliteGovernanceRepository {
         sqlite_tx.execute(
             "INSERT INTO spend_executor_claims
              (id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
-              workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
+              lease_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
               provider_reference, reconciliation_evidence, reconciled_at, reconciled_by_user_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO NOTHING",
@@ -385,7 +385,7 @@ impl SqliteGovernanceRepository {
                 claim.owner_user_id.to_string(),
                 claim.agent_id.to_string(),
                 claim.operation_key,
-                claim.workload_profile,
+                claim.lease_profile,
                 executor_claim_status(&claim.status),
                 claim.claimed_at.to_rfc3339(),
                 claim.expires_at.to_rfc3339(),
@@ -1092,7 +1092,7 @@ impl SqliteGovernanceRepository {
                 owner_user_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 operation_key TEXT NOT NULL,
-                workload_profile TEXT NOT NULL,
+                lease_profile TEXT NOT NULL,
                 status TEXT NOT NULL,
                 claimed_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
@@ -2770,7 +2770,7 @@ impl SpendRepository for SqliteGovernanceRepository {
         self.conn.execute(
             "INSERT INTO spend_executor_claims
              (id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
-              workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
+              lease_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
               provider_reference, reconciliation_evidence, reconciled_at, reconciled_by_user_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO NOTHING",
@@ -2780,7 +2780,7 @@ impl SpendRepository for SqliteGovernanceRepository {
                 record.owner_user_id.to_string(),
                 record.agent_id.to_string(),
                 record.operation_key,
-                record.workload_profile,
+                record.lease_profile,
                 executor_claim_status(&record.status),
                 record.claimed_at.to_rfc3339(),
                 record.expires_at.to_rfc3339(),
@@ -2801,7 +2801,7 @@ impl SpendRepository for SqliteGovernanceRepository {
     fn load_executor_claims(&self) -> Result<Vec<SpendExecutorClaimRecord>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
-                    workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
+                    lease_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
                     provider_reference, reconciliation_evidence, reconciled_at,
                     reconciled_by_user_id
              FROM spend_executor_claims
@@ -3078,7 +3078,7 @@ fn load_executor_claim_by_id(
 ) -> Result<Option<SpendExecutorClaimRecord>, StorageError> {
     conn.query_row(
         "SELECT id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
-                workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
+                lease_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
                 provider_reference, reconciliation_evidence, reconciled_at,
                 reconciled_by_user_id
          FROM spend_executor_claims
@@ -3097,7 +3097,7 @@ fn load_executor_claim_by_operation(
 ) -> Result<Option<SpendExecutorClaimRecord>, StorageError> {
     conn.query_row(
         "SELECT id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
-                workload_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
+                lease_profile, status, claimed_at, expires_at, finalized_at, settlement_id,
                 provider_reference, reconciliation_evidence, reconciled_at,
                 reconciled_by_user_id
          FROM spend_executor_claims
@@ -3273,7 +3273,7 @@ fn executor_claim_from_row(
         owner_user_id: parse_id(&owner_user_id)?,
         agent_id: parse_id(&agent_id)?,
         operation_key: row.get(4)?,
-        workload_profile: row.get(5)?,
+        lease_profile: row.get(5)?,
         status: parse_executor_claim_status(&status)?,
         claimed_at: parse_timestamp(&claimed_at)?,
         expires_at: parse_timestamp(&expires_at)?,
@@ -3643,7 +3643,7 @@ mod tests {
             category: None,
             task_id: Some("task".to_string()),
             reason: "test spend".to_string(),
-            workload_profile: "default".to_string(),
+            lease_profile: "default".to_string(),
         }
     }
 
@@ -3850,7 +3850,7 @@ mod tests {
             owner_user_id: user_id(),
             agent_id: decision.request.agent_id.clone(),
             operation_key: decision.operation_key.clone(),
-            workload_profile: "default".to_string(),
+            lease_profile: "default".to_string(),
             status: SpendExecutorClaimStatus::Claimed,
             claimed_at: Utc::now(),
             expires_at: claim_expires_at,
@@ -3909,7 +3909,7 @@ mod tests {
                 spend_auth_token_id TEXT NOT NULL UNIQUE,
                 owner_user_id TEXT NOT NULL,
                 executor_execution_id TEXT NOT NULL,
-                workload_profile TEXT NOT NULL,
+                lease_profile TEXT NOT NULL,
                 status TEXT NOT NULL,
                 claimed_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
@@ -4607,7 +4607,7 @@ mod tests {
             owner_user_id: user_id(),
             agent_id: decision.request.agent_id.clone(),
             operation_key: decision.operation_key.clone(),
-            workload_profile: "default".to_string(),
+            lease_profile: "default".to_string(),
             status: SpendExecutorClaimStatus::Claimed,
             claimed_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(15),
@@ -4956,7 +4956,7 @@ mod tests {
                 spend_auth_token_id TEXT NOT NULL UNIQUE,
                 owner_user_id TEXT NOT NULL,
                 executor_execution_id TEXT NOT NULL,
-                workload_profile TEXT NOT NULL,
+                lease_profile TEXT NOT NULL,
                 status TEXT NOT NULL,
                 claimed_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
@@ -4998,7 +4998,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO spend_executor_claims
                  (id, spend_auth_token_id, owner_user_id, executor_execution_id,
-                  workload_profile, status, claimed_at, expires_at)
+                  lease_profile, status, claimed_at, expires_at)
                  VALUES (?1, ?2, ?3, 'reused-legacy-execution', 'default',
                          'claimed', ?4, ?5)",
                 params![

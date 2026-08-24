@@ -465,7 +465,6 @@ impl Api {
                 .currency
                 .eq_ignore_ascii_case(&pricing_snapshot.currency)
             || authorization.execution_scope.as_ref() != Some(&execution_scope)
-            || authorization.workload_profile != request.workload_type
             || !legacy_authorization_matches(
                 &request,
                 &authorization,
@@ -499,7 +498,7 @@ impl Api {
             amount_minor: authorization.amount_cents,
             currency: authorization.currency.to_ascii_uppercase(),
             execution_scope: execution_scope.clone(),
-            workload_profile: authorization.workload_profile.clone(),
+            lease_profile: authorization.lease_profile.clone(),
             expires_at: authorization.expires_at.clone(),
             authorization_status: authorization.status.clone(),
             task_id: authorization.task_id.clone(),
@@ -838,7 +837,7 @@ fn immutable_hash(
         },
         "task_id": authorization.task_id,
         "reason": authorization.reason,
-        "workload_profile": authorization.workload_profile,
+        "lease_profile": authorization.lease_profile,
         "expires_at": authorization.expires_at,
         "input": normalized_input,
         "input_schema_version": request.input_schema_version,
@@ -1087,7 +1086,7 @@ mod tests {
                 merchant: None,
                 execution_scope: for_target("example", "fixture"),
                 task_id: Some("linear:HUB-72".into()),
-                workload_profile: "image_generation".into(),
+                lease_profile: "default".into(),
                 status: "available".into(),
                 expires_at: "2026-08-05T21:00:00Z".into(),
                 budget_hold: crate::hubu::BudgetHold {
@@ -1476,7 +1475,7 @@ mod tests {
         assert_eq!(snapshot.operation_key, "restart-token");
         assert_eq!(snapshot.task_id.as_deref(), Some("linear:HUB-72"));
         assert_eq!(snapshot.reason, "test execution");
-        assert_eq!(snapshot.workload_profile, "image_generation");
+        assert_eq!(snapshot.lease_profile, "default");
         assert_eq!(snapshot.authorization_status, "available");
         assert_eq!(
             restarted

@@ -20,7 +20,7 @@ pub struct HubuLaunchConfig {
     pub approval_token_file: PathBuf,
     pub reconciliation_token_file: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spend_timing_config: Option<PathBuf>,
+    pub lease_config: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -62,8 +62,8 @@ impl HubuLaunchConfig {
         ] {
             validate_safe_absolute(path, name, true)?;
         }
-        if let Some(path) = &self.spend_timing_config {
-            validate_safe_absolute(path, "spend_timing_config", true)?;
+        if let Some(path) = &self.lease_config {
+            validate_safe_absolute(path, "lease_config", true)?;
         }
         let auth = fs::canonicalize(&self.auth_token_file)?;
         let approval = fs::canonicalize(&self.approval_token_file)?;
@@ -115,7 +115,7 @@ mod tests {
             auth_token_file: root.join("auth"),
             approval_token_file: root.join("approval"),
             reconciliation_token_file: root.join("reconciliation"),
-            spend_timing_config: None,
+            lease_config: None,
         }
     }
 

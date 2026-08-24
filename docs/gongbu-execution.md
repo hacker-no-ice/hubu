@@ -28,7 +28,7 @@ Gongbu owns:
 - execution recovery.
 
 The components communicate over
-[`hubu-spend-executor-v4.2`](spend-executor-contract.md).
+[`hubu-spend-executor-v4.3`](spend-executor-contract.md).
 
 ## Admission and execution flow
 
@@ -41,7 +41,7 @@ Gongbu then:
 2. Derives the provider, adapter, model, execution scope, and price from its
    operator-controlled catalog.
 3. Requires exact agreement on the account, agent, operation key, amount,
-   currency, workload profile, expiry, and typed execution scope.
+   currency, lease profile, expiry, and typed execution scope.
 4. Persists the `Execution` aggregate before scheduling work.
 5. Starts the stable Temporal workflow
    `gongbu-execution-{execution_id}` on the `gongbu-executions` task queue.

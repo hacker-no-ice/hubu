@@ -191,7 +191,7 @@ fn authorize_managed_hubu(
         scope.capability.id,
         "--billing-merchant".to_string(),
         scope.billing_merchant.id,
-        "--workload-profile".to_string(),
+        "--lease-profile".to_string(),
         "image_generation".to_string(),
     ];
     let output = std::process::Command::new(&context.cli_binary)

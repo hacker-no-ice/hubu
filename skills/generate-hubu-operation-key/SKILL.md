@@ -11,7 +11,7 @@ Treat this workflow as protection against accidental duplicate operations. Do no
 
 ## Start one logical operation
 
-1. Build a JSON object containing the immutable spend scope. Include every applicable identity and spend field: `agent_id`, `account_id`, `amount`, `currency`, `merchant`, `reason`, `workload_profile`, provider, model, and target.
+1. Build a JSON object containing the immutable spend scope. Include every applicable identity and spend field: `agent_id`, `account_id`, `amount`, `currency`, `merchant`, `reason`, `lease_profile`, provider, model, and target.
 2. Exclude credentials, authorization tokens, raw provider payloads, and other secrets.
 3. Run `begin` exactly once before the first authorization or billable call:
 

@@ -26,8 +26,8 @@ pub struct SpendRequest {
     pub task_id: Option<String>,
     #[serde(default)]
     pub reason: String,
-    #[serde(default = "default_workload_profile")]
-    pub workload_profile: String,
+    #[serde(default = "default_lease_profile")]
+    pub lease_profile: String,
 }
 
 impl SpendRequest {
@@ -86,32 +86,32 @@ fn is_legacy_scope_for_merchant(scope: &ExecutionScope, merchant: &str) -> bool 
         && scope.billing_merchant.display_name == merchant
 }
 
-pub fn default_workload_profile() -> String {
+pub fn default_lease_profile() -> String {
     "default".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SpendTimingProfile {
-    pub authorization_ttl_seconds: i64,
+pub struct LeaseProfile {
     pub claim_ttl_seconds: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SpendTimingConfig {
-    pub default_profile: String,
-    pub profiles: HashMap<String, SpendTimingProfile>,
+pub struct LeaseConfig {
+    pub authorization_ttl_seconds: i64,
+    pub default_lease_profile: String,
+    pub lease_profiles: HashMap<String, LeaseProfile>,
 }
 
-impl Default for SpendTimingConfig {
+impl Default for LeaseConfig {
     fn default() -> Self {
         Self {
-            default_profile: default_workload_profile(),
-            profiles: HashMap::from([(
-                default_workload_profile(),
-                SpendTimingProfile {
-                    authorization_ttl_seconds: 5 * 60,
+            authorization_ttl_seconds: 5 * 60,
+            default_lease_profile: default_lease_profile(),
+            lease_profiles: HashMap::from([(
+                default_lease_profile(),
+                LeaseProfile {
                     claim_ttl_seconds: 15 * 60,
                 },
             )]),
@@ -119,34 +119,35 @@ impl Default for SpendTimingConfig {
     }
 }
 
-impl SpendTimingConfig {
+impl LeaseConfig {
     pub fn validate(&self) -> Result<(), String> {
-        if !self.profiles.contains_key(&self.default_profile) {
+        if self.authorization_ttl_seconds <= 0 {
+            return Err("authorization_ttl_seconds must be positive".to_string());
+        }
+        if !self
+            .lease_profiles
+            .contains_key(&self.default_lease_profile)
+        {
             return Err(format!(
-                "default workload profile `{}` is not configured",
-                self.default_profile
+                "default lease profile `{}` is not configured",
+                self.default_lease_profile
             ));
         }
-        for (name, profile) in &self.profiles {
+        for (name, profile) in &self.lease_profiles {
             if name.trim().is_empty() {
-                return Err("workload profile names cannot be empty".to_string());
-            }
-            if profile.authorization_ttl_seconds <= 0 {
-                return Err(format!(
-                    "workload profile `{name}` authorization_ttl_seconds must be positive"
-                ));
+                return Err("lease profile names cannot be empty".to_string());
             }
             if profile.claim_ttl_seconds <= 0 {
                 return Err(format!(
-                    "workload profile `{name}` claim_ttl_seconds must be positive"
+                    "lease profile `{name}` claim_ttl_seconds must be positive"
                 ));
             }
         }
         Ok(())
     }
 
-    pub fn profile(&self, name: &str) -> Option<&SpendTimingProfile> {
-        self.profiles.get(name)
+    pub fn lease_profile(&self, name: &str) -> Option<&LeaseProfile> {
+        self.lease_profiles.get(name)
     }
 }
 
@@ -264,7 +265,7 @@ pub struct SpendExecutorClaimRecord {
     pub owner_user_id: UserId,
     pub agent_id: AgentId,
     pub operation_key: String,
-    pub workload_profile: String,
+    pub lease_profile: String,
     pub status: SpendExecutorClaimStatus,
     pub claimed_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -292,7 +293,7 @@ mod identity_tests {
             category: None,
             task_id: task_id.map(str::to_string),
             reason: reason.to_string(),
-            workload_profile: "default".to_string(),
+            lease_profile: "default".to_string(),
         }
     }
 

@@ -60,10 +60,10 @@ use hubu_core::{
     },
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
     spend::{
-        SpendAttemptAuditRecord, SpendAuthorizationDecision, SpendDecisionRecord,
+        LeaseConfig, SpendAttemptAuditRecord, SpendAuthorizationDecision, SpendDecisionRecord,
         SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendExecutorPriceModelSnapshot,
         SpendExecutorSettlementReceipt, SpendManager, SpendPaymentValidationRequest,
-        SpendRetryGuidance, SpendTimingConfig,
+        SpendRetryGuidance,
     },
     spending_target::{
         periods_overlap, CreateSpendingTargetRequest, SpendingTarget, SpendingTargetManager,
@@ -95,7 +95,7 @@ const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
 const RECONCILIATION_CAPABILITY_HEADER: &str = "x-hubu-reconciliation-capability";
-const SPEND_TIMING_CONFIG_ENV: &str = "HUBU_SPEND_TIMING_CONFIG";
+const LEASE_CONFIG_ENV: &str = "HUBU_LEASE_CONFIG";
 const HTTP_READ_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
@@ -190,7 +190,7 @@ struct ServerState {
     governance: Mutex<SqliteGovernanceRepository>,
     payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
     payments: Mutex<LocalPaymentManager>,
-    spend_timing: SpendTimingConfig,
+    lease_config: LeaseConfig,
 }
 
 impl ServerState {
@@ -201,12 +201,12 @@ impl ServerState {
     }
 
     fn new_with_db_path(path: impl AsRef<Path>) -> Result<Self> {
-        Self::new_with_db_path_and_spend_timing(path, load_spend_timing_config()?)
+        Self::new_with_db_path_and_lease_config(path, load_lease_config()?)
     }
 
-    fn new_with_db_path_and_spend_timing(
+    fn new_with_db_path_and_lease_config(
         path: impl AsRef<Path>,
-        spend_timing: SpendTimingConfig,
+        lease_config: LeaseConfig,
     ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let db_path = path.display().to_string();
@@ -258,7 +258,7 @@ impl ServerState {
             governance
                 .load_executor_claims()
                 .context("load executor spend claims")?,
-            spend_timing.clone(),
+            lease_config.clone(),
         )));
         let budgets = BudgetManager::from_records(
             governance.load_budgets().context("load budgets")?,
@@ -308,7 +308,7 @@ impl ServerState {
             governance: Mutex::new(governance),
             payment_attempts: Mutex::new(payment_attempts),
             payments: Mutex::new(payments),
-            spend_timing,
+            lease_config,
         };
         log_event(
             "info",
@@ -323,24 +323,24 @@ impl ServerState {
     }
 }
 
-fn load_spend_timing_config() -> Result<SpendTimingConfig> {
-    let config = match env::var(SPEND_TIMING_CONFIG_ENV) {
+fn load_lease_config() -> Result<LeaseConfig> {
+    let config = match env::var(LEASE_CONFIG_ENV) {
         Ok(path) => {
-            let contents = fs::read_to_string(&path)
-                .with_context(|| format!("read spend timing config `{path}`"))?;
-            parse_spend_timing_config(&contents, &path)?
+            let contents =
+                fs::read_to_string(&path).with_context(|| format!("read lease config `{path}`"))?;
+            parse_lease_config(&contents, &path)?
         }
-        Err(env::VarError::NotPresent) => SpendTimingConfig::default(),
-        Err(error) => return Err(error).context("read spend timing config environment variable"),
+        Err(env::VarError::NotPresent) => LeaseConfig::default(),
+        Err(error) => return Err(error).context("read lease config environment variable"),
     };
     config
         .validate()
-        .map_err(|error| anyhow!("invalid spend timing config: {error}"))?;
+        .map_err(|error| anyhow!("invalid lease config: {error}"))?;
     Ok(config)
 }
 
-fn parse_spend_timing_config(yaml: &str, path: &str) -> Result<SpendTimingConfig> {
-    serde_yaml_ng::from_str(yaml).with_context(|| format!("parse spend timing config `{path}`"))
+fn parse_lease_config(yaml: &str, path: &str) -> Result<LeaseConfig> {
+    serde_yaml_ng::from_str(yaml).with_context(|| format!("parse lease config `{path}`"))
 }
 
 /// Local API authority for the current Hubu process.
@@ -1032,7 +1032,7 @@ struct SpendHttpRequest {
     merchant: Option<String>,
     #[serde(default)]
     execution_scope: Option<ExecutionScopeSelector>,
-    workload_profile: Option<String>,
+    lease_profile: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1073,7 +1073,7 @@ struct SpendHttpResponse {
     approval: Option<SpendApprovalHttpResponse>,
     auth_token_id: Option<String>,
     execution_scope: Option<ExecutionScope>,
-    workload_profile: String,
+    lease_profile: String,
     authorization_expires_at: Option<String>,
     budget_hold: Option<BudgetHoldHttpResponse>,
     payment: Option<PaymentHttpResponse>,
@@ -1099,7 +1099,7 @@ struct SpendApprovalReviewHttpResponse {
     currency: String,
     merchant: Option<String>,
     execution_scope: Option<ExecutionScope>,
-    workload_profile: String,
+    lease_profile: String,
     reason: String,
     policy_summary: String,
     policy_reasons: Vec<String>,
@@ -1221,7 +1221,7 @@ struct ExecutorSpendHttpResponse {
     merchant: Option<String>,
     execution_scope: Option<ExecutionScope>,
     task_id: Option<String>,
-    workload_profile: String,
+    lease_profile: String,
     status: String,
     expires_at: String,
     budget_hold: BudgetHoldHttpResponse,
@@ -1231,7 +1231,7 @@ struct ExecutorSpendHttpResponse {
 struct ExecutorSpendClaimHttpResponse {
     operation_key: String,
     claim_id: String,
-    workload_profile: String,
+    lease_profile: String,
     status: String,
     claimed_at: String,
     claim_expires_at: String,
@@ -1735,7 +1735,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             ]
         },
         "executor_flow": [
-            "platform supplies one stable operation_key and requests POST /spend/authorize with merchant, task scope, and workload_profile",
+            "platform supplies one stable operation_key and requests POST /spend/authorize with merchant, task scope, and lease_profile",
             "Hubu durably records the workflow under the agent-scoped operation_key",
             "when policy returns needs_approval, the client shows approval.review to the human and resolves the approval_request_id as approve or deny before continuing",
             "agent sends the spend_auth_token_id and execution intent to an executor",
@@ -1806,7 +1806,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "task_id",
                 "execution_scope",
                 "merchant (legacy only)",
-                "workload_profile"
+                "lease_profile"
             ],
             "task_id_compatibility": "missing maps reason into task_id for legacy clients; explicit null omits task correlation; an explicit string is preserved independently"
         },
@@ -1872,7 +1872,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "mcp": "MCP reconciliation tools require both a trusted client approval prompt and the distinct reconciliation capability."
             }
         },
-        "timing": &state.spend_timing,
+        "lease": &state.lease_config,
         "scope_rules": [
             "operation_key is platform-assigned, immutable, and scoped to the authorized agent; authorization retries must use the same spend scope",
             "task_id is an optional trusted external correlation and reason is independent human-readable authorization context; neither must equal operation_key",
@@ -1880,7 +1880,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "account_id, amount_cents, complete canonical execution_scope, and legacy merchant must match the original authorized spend",
             "typed execution_scope identifiers resolve against Hubu's trusted catalog; unknown or ambiguous identifiers are rejected",
             "provider, executor, capability, and billing_merchant are independently policy-addressable stable identities",
-            "workload_profile is selected during authorization and cannot be changed by the executor",
+            "lease_profile is selected during authorization and cannot be changed by the executor",
             "the spend auth token must be unexpired, unused, unrevoked, and unclaimed when a new claim starts",
             "authorization and claim retries with the same operation_key return stored workflow state, including terminal state",
             "claiming moves the associated budget hold from frozen to claimed and extends it to claim_expires_at",
@@ -3357,7 +3357,7 @@ fn resolve_spend_approval(body: String, state: &ServerState) -> Result<SpendHttp
 
 fn authorized_spend_response(authorization: AuthorizedSpend) -> SpendHttpResponse {
     let auth_token_id = authorization.approval.auth_token_id();
-    let workload_profile = authorization.approval.workload_profile.clone();
+    let lease_profile = authorization.approval.lease_profile.clone();
     let authorization_expires_at = authorization.approval.token.expires_at.to_rfc3339();
     let policy_decision = policy_decision_response(&authorization.approval.evaluation.evaluation);
     let approval = approval_for_approved_spend(
@@ -3384,7 +3384,7 @@ fn authorized_spend_response(authorization: AuthorizedSpend) -> SpendHttpRespons
         approval,
         auth_token_id: Some(auth_token_id),
         execution_scope: authorization.approval.execution_scope.clone(),
-        workload_profile,
+        lease_profile,
         authorization_expires_at: Some(authorization_expires_at),
         budget_hold: Some(budget_hold_state_response(
             authorization.approval.budget_reservation.hold,
@@ -3475,7 +3475,7 @@ fn approval_for_approved_spend(
                 category: None,
                 task_id: approval.task_id.clone(),
                 reason: approval.reason.clone(),
-                workload_profile: approval.workload_profile.clone(),
+                lease_profile: approval.lease_profile.clone(),
             },
             policy_decision_response(&approval.evaluation.evaluation).summary,
             approval.evaluation.evaluation.reasons.clone(),
@@ -3511,7 +3511,7 @@ fn approval_for_rejected_spend(
                 category: None,
                 task_id: rejection.task_id.clone(),
                 reason: rejection.reason.clone(),
-                workload_profile: rejection.workload_profile.clone(),
+                lease_profile: rejection.lease_profile.clone(),
             },
             policy_decision_response(&rejection.evaluation.evaluation).summary,
             rejection.evaluation.evaluation.reasons.clone(),
@@ -3541,7 +3541,7 @@ fn approval_review_response(
             currency: request.currency.to_string(),
             merchant: request.merchant.clone(),
             execution_scope: request.execution_scope.clone(),
-            workload_profile: request.workload_profile.clone(),
+            lease_profile: request.lease_profile.clone(),
             reason: request.reason.clone(),
             policy_summary,
             policy_reasons,
@@ -3703,7 +3703,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         failure_reason: settlement.payment.failure_reason,
     });
     let auth_token_id = authorization.approval.auth_token_id();
-    let workload_profile = authorization.approval.workload_profile.clone();
+    let lease_profile = authorization.approval.lease_profile.clone();
     let authorization_expires_at = authorization.approval.token.expires_at.to_rfc3339();
     let policy_decision = policy_decision_response(&authorization.approval.evaluation.evaluation);
     let approval = approval_for_approved_spend(
@@ -3726,7 +3726,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         approval,
         auth_token_id: Some(auth_token_id),
         execution_scope: authorization.approval.execution_scope.clone(),
-        workload_profile,
+        lease_profile,
         authorization_expires_at: Some(authorization_expires_at),
         budget_hold,
         payment,
@@ -3825,7 +3825,7 @@ fn resolve_executor_spend(body: String, state: &ServerState) -> Result<ExecutorS
     let validated = ValidatedExecutorSpend {
         operation_key: decision.operation_key.clone(),
         reason: decision.request.reason.clone(),
-        workload_profile: decision.request.workload_profile.clone(),
+        lease_profile: decision.request.lease_profile.clone(),
         status: "available".to_string(),
         request: ExecutorSpendHttpRequest {
             spend_auth_token_id: token.id.to_string(),
@@ -4153,7 +4153,7 @@ fn release_executor_spend_request(
 struct ValidatedExecutorSpend {
     operation_key: String,
     reason: String,
-    workload_profile: String,
+    lease_profile: String,
     status: String,
     request: ExecutorSpendHttpRequest,
     account_pub_id: String,
@@ -4193,7 +4193,7 @@ impl ResolvedExecutorSpend {
         self,
         operation_key: String,
         reason: String,
-        workload_profile: String,
+        lease_profile: String,
         validation: hubu_core::spend::ValidatedSpendAuthorization,
         budget_hold: BudgetHold,
         budget_balance: hubu_core::budget::BudgetBalance,
@@ -4201,7 +4201,7 @@ impl ResolvedExecutorSpend {
         ValidatedExecutorSpend {
             operation_key,
             reason,
-            workload_profile,
+            lease_profile,
             status: "available".to_string(),
             request: self.request,
             account_pub_id: self.account_pub_id,
@@ -4233,7 +4233,7 @@ fn apply_authoritative_executor_identity(
     Ok((
         decision.operation_key.clone(),
         decision.request.reason.clone(),
-        decision.request.workload_profile.clone(),
+        decision.request.lease_profile.clone(),
     ))
 }
 
@@ -4278,7 +4278,7 @@ fn resolve_executor_spend_request(
         task_id: FieldPresence::Missing,
         merchant: request.merchant.clone(),
         execution_scope: request.execution_scope.as_ref().map(scope_as_selector),
-        workload_profile: None,
+        lease_profile: None,
     };
     let account = resolve_agent_account_for_spend(&spend_request, &user, state)?;
     let account_pub_id = account.pub_id.clone();
@@ -4305,16 +4305,16 @@ fn validate_executor_spend_request(
     state: &ServerState,
 ) -> Result<ValidatedExecutorSpend> {
     let mut resolved = resolve_executor_spend_request(request, state)?;
-    let (validation, operation_key, reason, workload_profile) = {
+    let (validation, operation_key, reason, lease_profile) = {
         let spend = state
             .spend
             .lock()
             .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-        let (operation_key, reason, workload_profile) =
+        let (operation_key, reason, lease_profile) =
             apply_authoritative_executor_identity(&mut resolved, &spend)?;
         let validation =
             spend.validate_auth_token_for_payment(&resolved.payment_validation_request())?;
-        (validation, operation_key, reason, workload_profile)
+        (validation, operation_key, reason, lease_profile)
     };
 
     let (budget_hold, budget_balance) = {
@@ -4360,7 +4360,7 @@ fn validate_executor_spend_request(
     Ok(resolved.into_validated(
         operation_key,
         reason,
-        workload_profile,
+        lease_profile,
         validation,
         budget_hold,
         budget_balance,
@@ -4413,7 +4413,7 @@ fn executor_spend_from_claim_state(
     Ok(ValidatedExecutorSpend {
         operation_key: claim_state.decision.operation_key.clone(),
         reason: claim_state.decision.request.reason.clone(),
-        workload_profile: claim_state.decision.request.workload_profile.clone(),
+        lease_profile: claim_state.decision.request.lease_profile.clone(),
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
         request: ExecutorSpendHttpRequest {
             spend_auth_token_id: claim_state.token.id.to_string(),
@@ -4457,7 +4457,7 @@ fn executor_claim_response(
     Ok(ExecutorSpendClaimHttpResponse {
         operation_key: claim.operation_key.clone(),
         claim_id: claim.id.to_string(),
-        workload_profile: claim.workload_profile.clone(),
+        lease_profile: claim.lease_profile.clone(),
         status: executor_claim_status_name(&claim.status).to_string(),
         claimed_at: claim.claimed_at.to_rfc3339(),
         claim_expires_at: claim.expires_at.to_rfc3339(),
@@ -4507,7 +4507,7 @@ fn executor_spend_response_with_hold(
         merchant: validated.request.merchant.clone(),
         execution_scope: validated.request.execution_scope.clone(),
         task_id: validated.request.task_id.clone(),
-        workload_profile: validated.workload_profile.clone(),
+        lease_profile: validated.lease_profile.clone(),
         status: validated.status.clone(),
         expires_at: validated.validation.expires_at.to_rfc3339(),
         budget_hold: budget_hold_state_response(hold, balance),
@@ -4604,10 +4604,10 @@ fn evaluate_and_reserve_spend(
             .governance
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        let workload_profile = request.workload_profile.clone().unwrap_or_else(|| {
+        let lease_profile = request.lease_profile.clone().unwrap_or_else(|| {
             spend_manager
-                .workload_profile_for_operation(&agent_id, &operation_key)
-                .unwrap_or_else(|| state.spend_timing.default_profile.clone())
+                .lease_profile_for_operation(&agent_id, &operation_key)
+                .unwrap_or_else(|| state.lease_config.default_lease_profile.clone())
         });
         SpendApprovalService.authorize(
             AuthorizeSpendRequest {
@@ -4621,7 +4621,7 @@ fn evaluate_and_reserve_spend(
                 execution_scope,
                 task_id,
                 reason,
-                workload_profile,
+                lease_profile,
             },
             &policy,
             &mut spend_manager,
@@ -4708,7 +4708,7 @@ fn spend_rejection_response(
         approval,
         auth_token_id: None,
         execution_scope: rejection.execution_scope,
-        workload_profile: rejection.workload_profile,
+        lease_profile: rejection.lease_profile,
         authorization_expires_at: None,
         budget_hold: None,
         payment: None,
@@ -5538,56 +5538,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_spend_timing_yaml_config() {
-        let config = parse_spend_timing_config(
+    fn parses_lease_config_yaml() {
+        let config = parse_lease_config(
             r#"
-default_profile: batch
-profiles:
+authorization_ttl_seconds: 600
+default_lease_profile: batch
+lease_profiles:
   batch:
-    authorization_ttl_seconds: 600
     claim_ttl_seconds: 1800
 "#,
-            "test-spend-timing.yaml",
+            "test-lease.yaml",
         )
-        .expect("spend timing YAML should parse");
+        .expect("lease YAML should parse");
 
-        assert_eq!(config.default_profile, "batch");
-        let batch = config.profiles.get("batch").expect("batch profile");
-        assert_eq!(batch.authorization_ttl_seconds, 600);
+        assert_eq!(config.authorization_ttl_seconds, 600);
+        assert_eq!(config.default_lease_profile, "batch");
+        let batch = config.lease_profiles.get("batch").expect("batch profile");
         assert_eq!(batch.claim_ttl_seconds, 1800);
     }
 
     #[test]
-    fn spend_timing_yaml_rejects_unknown_fields() {
-        let error = parse_spend_timing_config(
+    fn lease_config_yaml_rejects_unknown_fields() {
+        let error = parse_lease_config(
             r#"
-default_profile: batch
-profiles:
+authorization_ttl_seconds: 600
+default_lease_profile: batch
+lease_profiles:
   batch:
-    authorization_ttl_seconds: 600
     claim_ttl_seconds: 1800
     retry_seconds: 10
 "#,
-            "test-spend-timing.yaml",
+            "test-lease.yaml",
         )
-        .expect_err("unknown timing fields should fail");
+        .expect_err("unknown lease fields should fail");
 
         assert!(error
             .to_string()
-            .contains("parse spend timing config `test-spend-timing.yaml`"));
+            .contains("parse lease config `test-lease.yaml`"));
     }
 
     #[test]
-    fn spend_timing_yaml_rejects_missing_fields_and_malformed_yaml() {
+    fn lease_config_yaml_rejects_missing_fields_and_malformed_yaml() {
         for yaml in [
-            "default_profile: batch\nprofiles:\n  batch:\n    authorization_ttl_seconds: 600\n",
-            "default_profile: [batch\nprofiles: {}\n",
+            "authorization_ttl_seconds: 600\ndefault_lease_profile: batch\nlease_profiles:\n  batch: {}\n",
+            "authorization_ttl_seconds: 600\ndefault_lease_profile: [batch\nlease_profiles: {}\n",
         ] {
-            let error = parse_spend_timing_config(yaml, "test-spend-timing.yaml")
-                .expect_err("invalid timing YAML should fail");
+            let error = parse_lease_config(yaml, "test-lease.yaml")
+                .expect_err("invalid lease YAML should fail");
             assert!(error
                 .to_string()
-                .contains("parse spend timing config `test-spend-timing.yaml`"));
+                .contains("parse lease config `test-lease.yaml`"));
         }
     }
 
@@ -5874,7 +5874,7 @@ profiles:
         );
         assert_eq!(
             response.body["executor_contract"],
-            "hubu-spend-executor-v4.2"
+            "hubu-spend-executor-v4.3"
         );
         assert!(response.body["source_commit"]
             .as_str()
@@ -7041,7 +7041,7 @@ profiles:
             assert_eq!(response.status, 200);
             assert_eq!(
                 response.body["protocol_version"],
-                "hubu-spend-executor-v4.2"
+                "hubu-spend-executor-v4.3"
             );
             assert!(response.body["role_boundary"]["hubu"]
                 .as_array()
@@ -7082,7 +7082,7 @@ profiles:
                 json!(["agent_id", "operation_key"])
             );
             assert_eq!(
-                response.body["timing"]["profiles"]["default"]["claim_ttl_seconds"],
+                response.body["lease"]["lease_profiles"]["default"]["claim_ttl_seconds"],
                 900
             );
             assert!(response.body["scope_rules"]
@@ -7140,7 +7140,7 @@ profiles:
         assert_eq!(first.currency, "usd");
         assert_eq!(first.task_id.as_deref(), Some("linear:HUB-72"));
         assert_eq!(first.reason, "Generate the approved image");
-        assert_eq!(first.workload_profile, "default");
+        assert_eq!(first.lease_profile, "default");
         assert_eq!(first.status, "available");
         assert_eq!(first.budget_hold.status, "frozen");
         assert_eq!(second.decision_id, first.decision_id);
@@ -7548,14 +7548,14 @@ profiles:
 
     #[test]
     fn expired_claim_lookup_queue_and_human_reconciliation_restore_budget_usability() {
-        let mut timing = SpendTimingConfig::default();
-        timing
-            .profiles
+        let mut lease_config = LeaseConfig::default();
+        lease_config
+            .lease_profiles
             .get_mut("default")
-            .expect("default timing profile should exist")
+            .expect("default lease profile should exist")
             .claim_ttl_seconds = 1;
         let (path, state, agent, authorization) =
-            setup_executor_authorization_with_timing("executor-reconciliation", timing);
+            setup_executor_authorization_with_lease_config("executor-reconciliation", lease_config);
         let claim = claim_executor_spend(
             json!({
                 "spend_auth_token_id": authorization
@@ -7849,14 +7849,14 @@ profiles:
     }
 
     #[test]
-    fn authorization_replay_preserves_omitted_workload_profile_after_default_changes() {
+    fn authorization_replay_preserves_omitted_lease_profile_after_default_changes() {
         let (path, state, agent, authorization) =
-            setup_executor_authorization("authorization-profile-restart");
+            setup_executor_authorization("authorization-lease-restart");
         drop(state);
 
         let mut restarted =
             ServerState::new_with_db_path(&path).expect("server should reload authorized spend");
-        restarted.spend_timing.default_profile = "new-default".to_string();
+        restarted.lease_config.default_lease_profile = "new-default".to_string();
 
         let replay = authorize_spend(
             json!({
@@ -7869,10 +7869,10 @@ profiles:
             .to_string(),
             &restarted,
         )
-        .expect("omitted profile should replay with the stored profile");
+        .expect("omitted lease profile should replay with the stored profile");
         assert_eq!(replay.decision_id, authorization.decision_id);
         assert_eq!(replay.auth_token_id, authorization.auth_token_id);
-        assert_eq!(replay.workload_profile, authorization.workload_profile);
+        assert_eq!(replay.lease_profile, authorization.lease_profile);
 
         let conflict = authorize_spend(
             json!({
@@ -7881,12 +7881,12 @@ profiles:
                 "amount_cents": 500,
                 "reason": "hubu-logo-demo",
                 "merchant": "gongbu.image",
-                "workload_profile": "new-default",
+                "lease_profile": "new-default",
             })
             .to_string(),
             &restarted,
         )
-        .expect_err("an explicitly changed profile should still conflict");
+        .expect_err("an explicitly changed lease profile should still conflict");
         assert!(conflict
             .to_string()
             .contains("changed scope retry is unsafe"));
@@ -8568,7 +8568,7 @@ rules: []
             task_id: FieldPresence::Missing,
             merchant: Some("Acme Cafe".to_string()),
             execution_scope: None,
-            workload_profile: None,
+            lease_profile: None,
         };
         let account = resolve_agent_account_for_spend(&request, &user, &state).unwrap();
         let spend_request = hubu_core::spend::SpendRequest {
@@ -8582,7 +8582,7 @@ rules: []
             category: None,
             task_id: Some(request.reason.clone()),
             reason: request.reason.clone(),
-            workload_profile: "default".to_string(),
+            lease_profile: "default".to_string(),
         };
         state
             .governance
@@ -9171,21 +9171,21 @@ rules: []
         RegisterAgentHttpResponse,
         SpendHttpResponse,
     ) {
-        setup_executor_authorization_with_timing(test_name, SpendTimingConfig::default())
+        setup_executor_authorization_with_lease_config(test_name, LeaseConfig::default())
     }
 
-    fn setup_executor_authorization_with_timing(
+    fn setup_executor_authorization_with_lease_config(
         test_name: &str,
-        timing: SpendTimingConfig,
+        lease_config: LeaseConfig,
     ) -> (
         std::path::PathBuf,
         ServerState,
         RegisterAgentHttpResponse,
         SpendHttpResponse,
     ) {
-        setup_executor_authorization_with_identity_and_timing(
+        setup_executor_authorization_with_identity_and_lease_config(
             test_name,
-            timing,
+            lease_config,
             None,
             "hubu-logo-demo",
         )
@@ -9201,17 +9201,17 @@ rules: []
         RegisterAgentHttpResponse,
         SpendHttpResponse,
     ) {
-        setup_executor_authorization_with_identity_and_timing(
+        setup_executor_authorization_with_identity_and_lease_config(
             test_name,
-            SpendTimingConfig::default(),
+            LeaseConfig::default(),
             task_id,
             reason,
         )
     }
 
-    fn setup_executor_authorization_with_identity_and_timing(
+    fn setup_executor_authorization_with_identity_and_lease_config(
         test_name: &str,
-        timing: SpendTimingConfig,
+        lease_config: LeaseConfig,
         task_id: Option<Value>,
         reason: &str,
     ) -> (
@@ -9222,7 +9222,7 @@ rules: []
     ) {
         let path =
             std::env::temp_dir().join(format!("hubu-api-{test_name}-{}.sqlite", UserId::new()));
-        let state = ServerState::new_with_db_path_and_spend_timing(&path, timing)
+        let state = ServerState::new_with_db_path_and_lease_config(&path, lease_config)
             .expect("server state should initialize");
         let _user = init(
             json!({

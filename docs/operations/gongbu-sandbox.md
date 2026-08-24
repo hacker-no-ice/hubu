@@ -41,7 +41,7 @@ absolute destination that does not already exist.
 
 Real Hubu mode requires an exact immutable release and verifies published
 checksums, provenance, product/source identity, and
-`hubu-spend-executor-v4.2`. Mutable release aliases are rejected.
+`hubu-spend-executor-v4.3`. Mutable release aliases are rejected.
 
 Real provider mode is potentially billable. It requires an operator-owned
 credential reference, frozen pricing, a positive minor-unit ceiling, and the

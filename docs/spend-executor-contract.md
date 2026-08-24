@@ -17,7 +17,7 @@ references needed for settlement auditability.
 
 ## Protocol Version
 
-The current version is `hubu-spend-executor-v4.2`. Agents and executors can
+The current version is `hubu-spend-executor-v4.3`. Agents and executors can
 discover its machine-readable guidance from either public route:
 
 ```http
@@ -25,9 +25,14 @@ GET /spend/executor/guidance
 GET /.well-known/hubu-spend-executor.json
 ```
 
-V4.2 requires the read-only `POST /spend/executor/resolve` capability used for
-token-only executor admission. A v4.1 Hubu does not provide that route and is
-therefore intentionally startup-incompatible with a v4.2 Gongbu.
+V4.3 renames Hubu's `workload_profile` field to `lease_profile`, makes the
+authorization TTL global, and limits each lease profile to its claim TTL.
+Gongbu workload types remain independent execution-plane identities and no
+longer have to equal a Hubu lease profile. The breaking payload and guidance
+shape makes v4.3 intentionally startup-incompatible with v4.2.
+
+V4.2 introduced the read-only `POST /spend/executor/resolve` capability used
+for token-only executor admission.
 
 V4 retains V3's immutable, platform-provided `operation_key` from authorization
 through claim and finalization. Hubu stores workflow state under
@@ -55,7 +60,7 @@ agent task
 ```
 
 Each operation has a unique, durable `operation_key` and an immutable invocation
-scope consisting of its merchant, maximum amount, workload profile, and
+scope consisting of its merchant, maximum amount, lease profile, and
 operation purpose. An HTTP retry of the same provider invocation reuses that
 operation. A retry or alternate model call that may create another charge uses
 a new operation key and requires a new authorization.
@@ -105,27 +110,26 @@ Executors are responsible for:
   snapshot, and artifact reference
 - settling after billable work or releasing before billable work
 
-## Timing Profiles
+## Lease Profiles
 
-The authorization request selects a `workload_profile`. Hubu snapshots that
+The authorization request selects a `lease_profile`. Hubu snapshots that
 profile into the spend decision, so the executor cannot exchange a short job for
-a longer claim lease. The default profile gives authorization five minutes to
-start and gives a successful claim a fifteen-minute execution lease.
+a longer claim lease. The global authorization TTL controls how quickly any
+authorized operation must start; the selected profile controls how long the
+claimed execution may run.
 
-Operators can load different profiles with `HUBU_SPEND_TIMING_CONFIG` pointing
-to a YAML file:
+Operators configure one authorization start window and a bounded set of lease
+profiles with `HUBU_LEASE_CONFIG` pointing to a YAML file:
 
 ```yaml
-default_profile: interactive
-profiles:
+authorization_ttl_seconds: 300
+default_lease_profile: interactive
+lease_profiles:
   interactive:
-    authorization_ttl_seconds: 300
     claim_ttl_seconds: 900
-  image_generation:
-    authorization_ttl_seconds: 300
+  long_running:
     claim_ttl_seconds: 3600
   batch:
-    authorization_ttl_seconds: 900
     claim_ttl_seconds: 14400
 ```
 
@@ -162,7 +166,7 @@ CLI clients still supply an explicit key; this contract defines the server-side
 invariant every adapter must satisfy.
 
 Hubu rejects unknown profiles and non-positive durations during startup or
-authorization. The effective timing configuration is published in executor
+authorization. The effective lease configuration is published in executor
 guidance.
 
 ## Flow
@@ -187,7 +191,7 @@ guidance.
        "billing_merchant": "merchant:google"
      },
      "reason": "hubu-logo-demo",
-     "workload_profile": "image_generation"
+     "lease_profile": "long_running"
    }
    ```
 
@@ -218,7 +222,7 @@ guidance.
          "agent_id": "agt_example",
          "amount_cents": 500,
          "currency": "usd",
-         "workload_profile": "image_generation",
+         "lease_profile": "long_running",
          "reason": "hubu-logo-demo",
          "policy_summary": "policy defaulted to needs_approval because no automatic-allow rule matched"
        }
@@ -273,7 +277,7 @@ guidance.
 2. The agent sends only `spend_auth_token_id` plus execution intent and target
    selection to canonical `POST /v2/executions` with `schema_version: 2`. It
    does not repeat account, operation key, money, typed scope, task ID, reason,
-   workload profile, or expiry.
+   lease profile, or expiry.
 
    Original v1 clients send `hubu_authorization_id` and
    `hubu_token_reference` as equal historical aliases of the same spend-auth
@@ -399,7 +403,7 @@ guidance.
 {
   "operation_key": "codex:tool-call:01JABC123",
   "claim_id": "uuid",
-  "workload_profile": "image_generation",
+  "lease_profile": "long_running",
   "status": "claimed",
   "claimed_at": "2026-07-20T12:04:00Z",
   "claim_expires_at": "2026-07-20T13:04:00Z",
@@ -429,7 +433,7 @@ guidance.
     },
     "task_id": "hubu-logo-demo",
     "reason": "Generate the Project Hubu logo",
-    "workload_profile": "image_generation",
+    "lease_profile": "long_running",
     "status": "claimed",
     "expires_at": "2026-07-20T12:05:00Z",
     "budget_hold": {

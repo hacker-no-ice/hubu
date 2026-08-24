@@ -6,7 +6,7 @@ pub const API_SCHEMA_VERSION: u32 = 2;
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const MCP_SCHEMA_VERSION: u32 = 2;
 pub const SERVER_CONFIG_SCHEMA_VERSION: u32 = 2;
-pub const HUBU_EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4.2";
+pub const HUBU_EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4.3";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct BuildInfo {
@@ -50,6 +50,6 @@ mod tests {
         assert_eq!(info.api_schema_version, 2);
         assert_eq!(info.mcp_schema_version, 2);
         assert_eq!(info.server_config_schema_version, 2);
-        assert_eq!(info.hubu_executor_contract, "hubu-spend-executor-v4.2");
+        assert_eq!(info.hubu_executor_contract, "hubu-spend-executor-v4.3");
     }
 }

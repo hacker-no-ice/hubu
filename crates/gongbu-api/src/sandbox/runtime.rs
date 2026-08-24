@@ -29,13 +29,10 @@ use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions, Ur
 use temporalio_sdk::Runtime;
 use tokio::{net::TcpStream, task::JoinHandle, time::Instant};
 
-const MANAGED_HUBU_SPEND_TIMING_YAML: &str = r#"default_profile: default
-profiles:
+const MANAGED_HUBU_LEASE_CONFIG_YAML: &str = r#"authorization_ttl_seconds: 300
+default_lease_profile: default
+lease_profiles:
   default:
-    authorization_ttl_seconds: 300
-    claim_ttl_seconds: 900
-  image_generation:
-    authorization_ttl_seconds: 300
     claim_ttl_seconds: 900
 "#;
 use uuid::Uuid;
@@ -260,8 +257,8 @@ async fn start_managed_hubu(
     let database = hubu_root.join("hubu.sqlite3");
     let auth_token = hubu_root.join("hubu.auth-token");
     let reconciliation_token = hubu_root.join("hubu.reconciliation-token");
-    let spend_timing = hubu_root.join("spend-timing.yaml");
-    fs::write(&spend_timing, MANAGED_HUBU_SPEND_TIMING_YAML)?;
+    let lease_config = hubu_root.join("lease-config.yaml");
+    fs::write(&lease_config, MANAGED_HUBU_LEASE_CONFIG_YAML)?;
     let log_path = run.root().join("logs/hubu.jsonl");
     let stdout = File::create(run.root().join("logs/hubu-process.log"))?;
     let stderr = stdout.try_clone()?;
@@ -272,7 +269,7 @@ async fn start_managed_hubu(
         .env("HUBU_DB_PATH", &database)
         .env("HUBU_AUTH_TOKEN_FILE", &auth_token)
         .env("HUBU_RECONCILIATION_TOKEN_FILE", &reconciliation_token)
-        .env("HUBU_SPEND_TIMING_CONFIG", &spend_timing)
+        .env("HUBU_LEASE_CONFIG", &lease_config)
         .env("HUBU_LOG_FILE", &log_path)
         .env("HUBU_LOG_STDERR", "0")
         .stdout(Stdio::from(stdout))

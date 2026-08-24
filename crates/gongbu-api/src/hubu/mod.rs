@@ -399,7 +399,7 @@ pub struct ExecutorSpendResponse {
     pub merchant: Option<String>,
     pub execution_scope: Option<ExecutionScope>,
     pub task_id: Option<String>,
-    pub workload_profile: String,
+    pub lease_profile: String,
     pub status: String,
     pub expires_at: String,
     pub budget_hold: BudgetHold,
@@ -409,7 +409,7 @@ pub struct ExecutorSpendResponse {
 pub struct ExecutorSpendClaimResponse {
     pub operation_key: String,
     pub claim_id: String,
-    pub workload_profile: String,
+    pub lease_profile: String,
     pub status: String,
     pub claimed_at: String,
     pub claim_expires_at: String,
@@ -510,7 +510,7 @@ mod tests {
             "merchant":null,
             "execution_scope":null,
             "task_id":null,
-            "workload_profile":"image_generation",
+            "lease_profile":"default",
             "status":"available",
             "expires_at":"2099-01-01T00:00:00Z",
             "budget_hold":{
