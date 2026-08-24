@@ -41,7 +41,7 @@ use notification::TransitionState;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
-pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.2";
+pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.3";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
 pub const ROUTING_REVISION: u32 = 1;
 

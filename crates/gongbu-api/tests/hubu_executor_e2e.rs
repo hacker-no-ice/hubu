@@ -721,7 +721,7 @@ impl HubuAdmin {
                 "amount_cents":AUTHORIZED_MINOR,
                 "task_id":task_id,
                 "reason":"Deterministic Gongbu executor test",
-                "workload_profile":"image_generation",
+                "lease_profile":"default",
                 "execution_scope": {
                     "schema_version":1,
                     "provider":"provider:local:fixture",
@@ -783,12 +783,12 @@ impl TestWorkspace {
         let address = reserve_address();
         let base_url = format!("http://{address}");
         let log_path = directory.path().join("hubu-server.jsonl");
-        let spend_timing = directory.path().join("spend-timing.yaml");
+        let lease_config = directory.path().join("lease-config.yaml");
         fs::write(
-            &spend_timing,
-            "default_profile: default\nprofiles:\n  default:\n    authorization_ttl_seconds: 300\n    claim_ttl_seconds: 900\n  image_generation:\n    authorization_ttl_seconds: 300\n    claim_ttl_seconds: 900\n",
+            &lease_config,
+            "authorization_ttl_seconds: 300\ndefault_lease_profile: default\nlease_profiles:\n  default:\n    claim_ttl_seconds: 900\n",
         )
-        .expect("write spend timing config");
+        .expect("write lease config");
         let log = File::create(&log_path).expect("create Hubu log");
         let server_bin = env::var_os("HUBU_SERVER_BIN")
             .map(PathBuf::from)
@@ -798,7 +798,7 @@ impl TestWorkspace {
             .env("HUBU_DB_PATH", directory.path().join("hubu.sqlite3"))
             .env("HUBU_AUTH_TOKEN", AUTH_TOKEN)
             .env("HUBU_RECONCILIATION_TOKEN", RECONCILIATION_TOKEN)
-            .env("HUBU_SPEND_TIMING_CONFIG", &spend_timing)
+            .env("HUBU_LEASE_CONFIG", &lease_config)
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log))
             .spawn()

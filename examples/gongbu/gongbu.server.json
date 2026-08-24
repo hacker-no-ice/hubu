@@ -22,7 +22,7 @@
     "endpoint": "http://127.0.0.1:8787",
     "allowlisted_hosts": [],
     "expected_product_version": "v0.1.0",
-    "expected_executor_contract": "hubu-spend-executor-v4.2",
+    "expected_executor_contract": "hubu-spend-executor-v4.3",
     "account_id": "replace-with-hubu-account-id",
     "agent_id": "replace-with-hubu-agent-id",
     "credential_reference": {

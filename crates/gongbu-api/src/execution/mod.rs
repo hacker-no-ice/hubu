@@ -90,7 +90,7 @@ pub struct HubuAuthorizationSnapshot {
     pub amount_minor: i64,
     pub currency: String,
     pub execution_scope: ExecutionScope,
-    pub workload_profile: String,
+    pub lease_profile: String,
     pub expires_at: String,
     pub authorization_status: String,
     pub task_id: Option<String>,
@@ -362,7 +362,6 @@ impl Repository {
                     .currency
                     .eq_ignore_ascii_case(&n.authorization_currency)
                 || n.execution_scope.as_ref() != Some(&authorization.execution_scope)
-                || authorization.workload_profile != n.workload_type
                 || authorization.authorization_status != "available"
                 || authorization.agent_id.trim().is_empty()
                 || authorization.expires_at.trim().is_empty()
@@ -412,8 +411,8 @@ impl Repository {
         if let Some(authorization) = authorization {
             if e.execution_id == id {
                 tx.execute(
-                    "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,workload_profile,expires_at,authorization_status,task_id,reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                    params![e.execution_id,authorization.account_id,authorization.agent_id,authorization.operation_key,authorization.decision_id,authorization.spend_auth_token_id,authorization.amount_minor,authorization.currency,serde_json::to_string(&authorization.execution_scope).expect("execution scope serializes"),authorization.workload_profile,authorization.expires_at,authorization.authorization_status,authorization.task_id,authorization.reason],
+                    "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,lease_profile,expires_at,authorization_status,task_id,reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                    params![e.execution_id,authorization.account_id,authorization.agent_id,authorization.operation_key,authorization.decision_id,authorization.spend_auth_token_id,authorization.amount_minor,authorization.currency,serde_json::to_string(&authorization.execution_scope).expect("execution scope serializes"),authorization.lease_profile,authorization.expires_at,authorization.authorization_status,authorization.task_id,authorization.reason],
                 )?;
             }
         }
@@ -465,7 +464,7 @@ impl Repository {
             .lock()
             .unwrap()
             .query_row(
-                "SELECT account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,workload_profile,expires_at,authorization_status,task_id,reason FROM hubu_authorization_snapshots WHERE execution_id=?1",
+                "SELECT account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,lease_profile,expires_at,authorization_status,task_id,reason FROM hubu_authorization_snapshots WHERE execution_id=?1",
                 [execution_id],
                 |row| {
                     let scope: String = row.get(7)?;
@@ -484,7 +483,7 @@ impl Repository {
                                 Box::new(error),
                             )
                         })?,
-                        workload_profile: row.get(8)?,
+                        lease_profile: row.get(8)?,
                         expires_at: row.get(9)?,
                         authorization_status: row.get(10)?,
                         task_id: row.get(11)?,
@@ -1733,7 +1732,7 @@ mod tests {
             [&digest],
         ).unwrap();
         connection.execute(
-            "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,workload_profile,expires_at,authorization_status,reason) VALUES('hub-72-row','account-a','agent-a','operation','decision-1','token-1',100,'USD','{\"schema_version\":1,\"provider\":{\"id\":\"provider:local:fixture\",\"display_name\":\"Local fixture provider\"},\"executor\":{\"id\":\"executor:gongbu:image\",\"display_name\":\"Gongbu image executor\"},\"capability\":{\"id\":\"capability:image:generate\",\"display_name\":\"Generate image\"},\"billing_merchant\":{\"id\":\"merchant:local\",\"display_name\":\"Local merchant\"}}','image_generation','2026-08-05T21:00:00Z','available','migration fixture')",
+            "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,lease_profile,expires_at,authorization_status,reason) VALUES('hub-72-row','account-a','agent-a','operation','decision-1','token-1',100,'USD','{\"schema_version\":1,\"provider\":{\"id\":\"provider:local:fixture\",\"display_name\":\"Local fixture provider\"},\"executor\":{\"id\":\"executor:gongbu:image\",\"display_name\":\"Gongbu image executor\"},\"capability\":{\"id\":\"capability:image:generate\",\"display_name\":\"Generate image\"},\"billing_merchant\":{\"id\":\"merchant:local\",\"display_name\":\"Local merchant\"}}','default','2026-08-05T21:00:00Z','available','migration fixture')",
             [],
         ).unwrap();
         drop(connection);

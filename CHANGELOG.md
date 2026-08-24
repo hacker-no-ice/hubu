@@ -22,6 +22,16 @@ Future release template
 - Describe only fixes that materially affect users or operators.
 -->
 
+## Unreleased
+
+### Breaking or operational changes
+
+- Advanced the executor contract to `hubu-spend-executor-v4.3`: Hubu's
+  `workload_profile` is now `lease_profile`, authorization TTL is global, lease
+  profiles configure claim TTL only, and Gongbu workload types no longer have
+  to equal Hubu lease profiles. Existing local profiles and databases must be
+  recreated.
+
 ## v0.2.0-rc.1 — 2026-08-20
 
 ### Highlights

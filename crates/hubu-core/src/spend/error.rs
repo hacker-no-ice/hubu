@@ -23,8 +23,8 @@ pub enum SpendError {
     PaymentRequestMismatch,
     #[error("request is outside the resolved user context")]
     UserScopeMismatch,
-    #[error("unknown workload profile `{0}`")]
-    UnknownWorkloadProfile(String),
+    #[error("unknown lease profile `{0}`")]
+    UnknownLeaseProfile(String),
     #[error("operation key cannot be empty")]
     EmptyOperationKey,
     #[error("operation key was already authorized with different spend scope")]

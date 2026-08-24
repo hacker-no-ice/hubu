@@ -16,7 +16,7 @@ The distribution exposes two independent versions:
 - `product_version` identifies all four production binaries. Stable releases
   use SemVer tags; `main` builds include the source commit.
 - `executor_contract` identifies the Hubu-to-executor protocol and changes only
-  with that protocol. The current value is `hubu-spend-executor-v4.2`.
+  with that protocol. The current value is `hubu-spend-executor-v4.3`.
 
 A scheduled workflow publishes at most one prerelease for each exact `main`
 commit, tagged `main-<full-source-commit>`. There is no mutable latest-main
@@ -78,7 +78,7 @@ done
 ```
 
 Every binary must report the product version and source commit recorded in the
-archive. Hubu and Gongbu must both report `hubu-spend-executor-v4.2`.
+archive. Hubu and Gongbu must both report `hubu-spend-executor-v4.3`.
 `LOCAL-STACK.md` is the packaged bootstrap, lifecycle, recovery, and Codex
 handoff runbook for installing the four binaries outside a source checkout.
 Its linked `operations/gongbu-server.md` and `unified-mcp.md` guides are

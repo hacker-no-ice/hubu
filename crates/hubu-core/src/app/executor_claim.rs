@@ -232,7 +232,7 @@ impl ExecutorClaimService {
                 "operation_key": state.claim.operation_key,
                 "spend_auth_token_id": state.claim.spend_auth_token_id.to_string(),
                 "claim_expires_at": state.claim.expires_at.to_rfc3339(),
-                "workload_profile": state.claim.workload_profile,
+                "lease_profile": state.claim.lease_profile,
                 "idempotent_replay": state.idempotent_replay,
             }),
         );
@@ -625,7 +625,7 @@ mod tests {
                         execution_scope: None,
                         task_id: Some("task-123".to_string()),
                         reason: "Test executor authorization".to_string(),
-                        workload_profile: "default".to_string(),
+                        lease_profile: "default".to_string(),
                     },
                     &policy,
                     &mut spend_manager,

@@ -170,7 +170,7 @@ authorization="$(hubu spend authorize \
   --executor executor:gongbu:image \
   --capability capability:image:generate \
   --billing-merchant merchant:local \
-  --workload-profile default)"
+  --lease-profile default)"
 spend_auth_token_id="$(field "${authorization}" auth_token_id)"
 [[ -n "${spend_auth_token_id}" ]] || fail "Hubu did not issue fixture authorization"
 

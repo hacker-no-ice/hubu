@@ -1321,7 +1321,7 @@ impl SpendAuthorizationResolver for MockHubu {
             merchant: None,
             execution_scope: crate::execution_scope::for_target("sandbox", "fixture"),
             task_id: None,
-            workload_profile: "image_generation".into(),
+            lease_profile: "default".into(),
             status: "available".into(),
             expires_at: self
                 .config

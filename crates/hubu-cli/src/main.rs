@@ -1546,7 +1546,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let reason = take_required(&mut args, "--reason")?;
     let task_id = take_value(&mut args, "--task-id");
     let (merchant, execution_scope) = take_execution_scope(&mut args)?;
-    let workload_profile = take_value(&mut args, "--workload-profile");
+    let lease_profile = take_value(&mut args, "--lease-profile");
     ensure_no_args(args)?;
 
     let amount_cents = amount_to_cents(&amount)?;
@@ -1565,7 +1565,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "reason": reason,
         "merchant": merchant,
         "execution_scope": execution_scope,
-        "workload_profile": workload_profile,
+        "lease_profile": lease_profile,
     });
     body["account_id"] = json!(account_id);
     if let Some(task_id) = task_id {
@@ -1592,7 +1592,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let reason = take_required(&mut args, "--reason")?;
     let task_id = take_value(&mut args, "--task-id");
     let (merchant, execution_scope) = take_execution_scope(&mut args)?;
-    let workload_profile = take_value(&mut args, "--workload-profile");
+    let lease_profile = take_value(&mut args, "--lease-profile");
     ensure_no_args(args)?;
 
     let amount_cents = amount_to_cents(&amount)?;
@@ -1611,7 +1611,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
         "reason": reason,
         "merchant": merchant,
         "execution_scope": execution_scope,
-        "workload_profile": workload_profile,
+        "lease_profile": lease_profile,
     });
     body["account_id"] = json!(account_id);
     if let Some(task_id) = task_id {
@@ -1956,10 +1956,7 @@ fn print_spend_response(response: &Value) -> Result<()> {
         println!("  auth_token_id: {token_id}");
     }
     print_execution_scope(response);
-    println!(
-        "  workload_profile: {}",
-        string_at(response, "workload_profile")?
-    );
+    println!("  lease_profile: {}", string_at(response, "lease_profile")?);
     if let Some(expires_at) = response
         .get("authorization_expires_at")
         .and_then(Value::as_str)
@@ -2060,10 +2057,7 @@ fn print_spend_approval_response(approval: &Value) -> Result<()> {
     println!("  account_id: {}", string_at(review, "account_id")?);
     println!("  agent_id: {}", string_at(review, "agent_id")?);
     println!("  amount: {}", money_at(review, "amount_cents")?);
-    println!(
-        "  workload_profile: {}",
-        string_at(review, "workload_profile")?
-    );
+    println!("  lease_profile: {}", string_at(review, "lease_profile")?);
     println!("  reason: {}", string_at(review, "reason")?);
     println!("  policy_summary: {}", string_at(review, "policy_summary")?);
     if let Some(merchant) = review.get("merchant").and_then(Value::as_str) {
@@ -2904,8 +2898,8 @@ fn print_spend_help() {
         "Test an agent spend request
 
 Usage:
-  hubu spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
-  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--lease-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--lease-profile NAME]
   hubu spend approval get --approval-request-id ID
   hubu spend approval approve --approval-request-id ID
   hubu spend approval deny --approval-request-id ID
@@ -2946,7 +2940,7 @@ fn print_spend_authorize_help() {
         "Authorize spend and reserve budget without executing payment
 
 Usage:
-  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--workload-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--lease-profile NAME]
 
 Note:
   Supply one immutable agent-scoped operation key before the first request; do not generate a new key on retry.
