@@ -16,6 +16,7 @@ const MAX_HARNESS_ID_BYTES: usize = 512;
 const MAX_TASK_ID_BYTES: usize = 512;
 const MAX_TOOL_NAME_BYTES: usize = 128;
 const SCHEMA_VERSION: i64 = 1;
+const APPLICATION_ID: i64 = 0x4855_424f;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NormalizedHarnessIdentity {
@@ -225,34 +226,46 @@ impl OperationRegistry {
     fn from_connection(mut connection: Connection) -> Result<Self> {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let application_id =
+            connection.query_row("PRAGMA application_id", [], |row| row.get::<_, i64>(0))?;
         let version =
             connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
-        if version != 0 && version != SCHEMA_VERSION {
-            bail!("unified MCP operation registry schema version {version} is unsupported; expected {SCHEMA_VERSION}");
-        }
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS installation_identity (
-                 singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
-                 installation_id TEXT NOT NULL UNIQUE CHECK(length(installation_id) BETWEEN 1 AND 128),
-                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-             );
-             CREATE TABLE IF NOT EXISTS harness_operations (
-                 platform TEXT NOT NULL CHECK(length(platform) BETWEEN 1 AND 64),
-                 installation_id TEXT NOT NULL CHECK(length(installation_id) BETWEEN 1 AND 128),
-                 harness_call_id TEXT NOT NULL CHECK(length(harness_call_id) BETWEEN 1 AND 512),
-                 request_hash TEXT NOT NULL CHECK(length(request_hash) = 71),
-                 operation_key TEXT NOT NULL UNIQUE CHECK(length(operation_key) BETWEEN 1 AND 160),
-                 codex_call_id TEXT CHECK(codex_call_id IS NULL OR length(codex_call_id) BETWEEN 1 AND 512),
-                 claude_tool_use_id TEXT CHECK(claude_tool_use_id IS NULL OR length(claude_tool_use_id) BETWEEN 1 AND 512),
-                 hubu_invocation_id TEXT CHECK(hubu_invocation_id IS NULL OR length(hubu_invocation_id) BETWEEN 1 AND 512),
-                 controlled_installation_id TEXT CHECK(controlled_installation_id IS NULL OR length(controlled_installation_id) BETWEEN 1 AND 512),
-                 task_id TEXT CHECK(task_id IS NULL OR length(task_id) BETWEEN 1 AND 512),
-                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                 PRIMARY KEY(platform, installation_id, harness_call_id),
-                 FOREIGN KEY(installation_id) REFERENCES installation_identity(installation_id)
-             );
-             PRAGMA user_version = 1;",
+        let user_table_count = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get::<_, i64>(0),
         )?;
+        if application_id == 0 && version == 0 && user_table_count == 0 {
+            connection.execute_batch(&format!(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE installation_identity (
+                     singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
+                     installation_id TEXT NOT NULL UNIQUE CHECK(length(installation_id) BETWEEN 1 AND 128),
+                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                 );
+                 CREATE TABLE harness_operations (
+                     platform TEXT NOT NULL CHECK(length(platform) BETWEEN 1 AND 64),
+                     installation_id TEXT NOT NULL CHECK(length(installation_id) BETWEEN 1 AND 128),
+                     harness_call_id TEXT NOT NULL CHECK(length(harness_call_id) BETWEEN 1 AND 512),
+                     request_hash TEXT NOT NULL CHECK(length(request_hash) = 71),
+                     operation_key TEXT NOT NULL UNIQUE CHECK(length(operation_key) BETWEEN 1 AND 160),
+                     codex_call_id TEXT CHECK(codex_call_id IS NULL OR length(codex_call_id) BETWEEN 1 AND 512),
+                     claude_tool_use_id TEXT CHECK(claude_tool_use_id IS NULL OR length(claude_tool_use_id) BETWEEN 1 AND 512),
+                     hubu_invocation_id TEXT CHECK(hubu_invocation_id IS NULL OR length(hubu_invocation_id) BETWEEN 1 AND 512),
+                     controlled_installation_id TEXT CHECK(controlled_installation_id IS NULL OR length(controlled_installation_id) BETWEEN 1 AND 512),
+                     task_id TEXT CHECK(task_id IS NULL OR length(task_id) BETWEEN 1 AND 512),
+                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                     PRIMARY KEY(platform, installation_id, harness_call_id),
+                     FOREIGN KEY(installation_id) REFERENCES installation_identity(installation_id)
+                 );
+                 PRAGMA application_id = {APPLICATION_ID};
+                 PRAGMA user_version = {SCHEMA_VERSION};
+                 COMMIT;"
+            ))?;
+        } else if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
+            bail!("unified MCP operation registry identity or schema version is unsupported; refusing to modify the configured database");
+        }
+        validate_schema(&connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let installation_id = transaction
             .query_row(
@@ -279,7 +292,6 @@ impl OperationRegistry {
         })
     }
 
-    #[cfg(test)]
     #[cfg(test)]
     pub(crate) fn open_in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
@@ -369,6 +381,21 @@ impl OperationRegistry {
             task_id: identity.task_id.clone(),
         })
     }
+}
+
+fn validate_schema(connection: &Connection) -> Result<()> {
+    connection
+        .prepare("SELECT singleton, installation_id, created_at FROM installation_identity LIMIT 0")
+        .context("validate unified MCP operation registry installation schema")?;
+    connection
+        .prepare(
+            "SELECT platform, installation_id, harness_call_id, request_hash, operation_key,
+                    codex_call_id, claude_tool_use_id, hubu_invocation_id,
+                    controlled_installation_id, task_id, created_at
+             FROM harness_operations LIMIT 0",
+        )
+        .context("validate unified MCP operation registry operation schema")?;
+    Ok(())
 }
 
 fn canonical_request_hash(tool_name: &str, arguments: &Value) -> Result<String> {
@@ -565,6 +592,48 @@ mod tests {
         assert_eq!(
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn unrelated_sqlite_database_is_rejected_without_schema_mutation() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("unrelated.sqlite3");
+        let unrelated = Connection::open(&path).unwrap();
+        unrelated
+            .execute_batch("CREATE TABLE unrelated(value TEXT); PRAGMA user_version = 1;")
+            .unwrap();
+        drop(unrelated);
+
+        let error = OperationRegistry::open(&path).unwrap_err().to_string();
+        assert!(error.contains("refusing to modify"));
+
+        let unrelated = Connection::open(&path).unwrap();
+        assert_eq!(
+            unrelated
+                .query_row("PRAGMA application_id", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            unrelated
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'unrelated'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            unrelated
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'installation_identity'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
         );
     }
 

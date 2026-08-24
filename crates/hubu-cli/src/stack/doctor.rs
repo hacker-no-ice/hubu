@@ -1,5 +1,6 @@
 use super::*;
 use reqwest::{blocking::Client, redirect::Policy, StatusCode};
+use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use std::{
     collections::BTreeSet,
@@ -12,6 +13,8 @@ use std::{
 
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
+const OPERATION_REGISTRY_APPLICATION_ID: i64 = 0x4855_424f;
+const OPERATION_REGISTRY_SCHEMA_VERSION: i64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1027,6 +1030,17 @@ fn report_operation_registry_path(path: &Path, checks: &mut Vec<DoctorCheck>) {
                     return;
                 }
             }
+            if validate_operation_registry(path).is_err() {
+                checks.push(check(
+                    CheckLayer::RuntimeReadiness,
+                    CheckStatus::Warning,
+                    "operation_registry_invalid",
+                    "hubu-unified-mcp",
+                    Some("client-handoff.json:operation_state_path".into()),
+                    "the stack and unrelated tools remain available, but billable Hubu tools are disabled because the configured registry is not a valid unified MCP operation database",
+                ));
+                return;
+            }
             checks.push(check(
                 CheckLayer::RuntimeReadiness,
                 CheckStatus::Pass,
@@ -1061,6 +1075,42 @@ fn report_operation_registry_path(path: &Path, checks: &mut Vec<DoctorCheck>) {
             "the stack and unrelated tools remain available, but billable Hubu tools are disabled until the registry path is accessible",
         )),
     }
+}
+
+fn validate_operation_registry(path: &Path) -> rusqlite::Result<()> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let application_id =
+        connection.query_row("PRAGMA application_id", [], |row| row.get::<_, i64>(0))?;
+    let version = connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+    let quick_check =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))?;
+    if application_id != OPERATION_REGISTRY_APPLICATION_ID
+        || version != OPERATION_REGISTRY_SCHEMA_VERSION
+        || quick_check != "ok"
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    connection.prepare(
+        "SELECT singleton, installation_id, created_at FROM installation_identity LIMIT 0",
+    )?;
+    connection.prepare(
+        "SELECT platform, installation_id, harness_call_id, request_hash, operation_key,
+                codex_call_id, claude_tool_use_id, hubu_invocation_id,
+                controlled_installation_id, task_id, created_at
+         FROM harness_operations LIMIT 0",
+    )?;
+    let installation_count = connection.query_row(
+        "SELECT COUNT(*) FROM installation_identity WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if installation_count != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
 }
 
 fn probe_hubu(
@@ -1624,6 +1674,46 @@ mod tests {
         assert!(checks[0]
             .message
             .contains("billable Hubu tools are disabled"));
+
+        let corrupt_path = root.path().join("corrupt.sqlite3");
+        fs::write(&corrupt_path, b"not sqlite").unwrap();
+        checks.clear();
+        report_operation_registry_path(&corrupt_path, &mut checks);
+        assert_eq!(checks[0].status, CheckStatus::Warning);
+        assert_eq!(checks[0].code, "operation_registry_invalid");
+
+        let valid_path = root.path().join("valid.sqlite3");
+        let valid = Connection::open(&valid_path).unwrap();
+        valid
+            .execute_batch(
+                "CREATE TABLE installation_identity (
+                     singleton INTEGER PRIMARY KEY,
+                     installation_id TEXT NOT NULL,
+                     created_at TEXT NOT NULL
+                 );
+                 CREATE TABLE harness_operations (
+                     platform TEXT NOT NULL,
+                     installation_id TEXT NOT NULL,
+                     harness_call_id TEXT NOT NULL,
+                     request_hash TEXT NOT NULL,
+                     operation_key TEXT NOT NULL,
+                     codex_call_id TEXT,
+                     claude_tool_use_id TEXT,
+                     hubu_invocation_id TEXT,
+                     controlled_installation_id TEXT,
+                     task_id TEXT,
+                     created_at TEXT NOT NULL
+                 );
+                 INSERT INTO installation_identity VALUES (1, 'hubu-installation:v1:test', CURRENT_TIMESTAMP);
+                 PRAGMA application_id = 1213547087;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        drop(valid);
+        checks.clear();
+        report_operation_registry_path(&valid_path, &mut checks);
+        assert_eq!(checks[0].status, CheckStatus::Pass);
+        assert_eq!(checks[0].code, "operation_registry_path_ready");
     }
 
     #[cfg(unix)]

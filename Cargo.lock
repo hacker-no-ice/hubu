@@ -943,6 +943,7 @@ dependencies = [
  "hubu-core",
  "libc",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
