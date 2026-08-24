@@ -188,31 +188,32 @@ impl std::fmt::Debug for OperationRegistry {
 
 impl OperationRegistry {
     pub(crate) fn open(path: &Path) -> Result<Self> {
-        if path != Path::new(":memory:") {
-            if !path.is_absolute() {
-                bail!("unified MCP operation registry path must be absolute");
-            }
-            if let Ok(metadata) = fs::symlink_metadata(path) {
-                if metadata.file_type().is_symlink() || !metadata.is_file() {
-                    bail!("unified MCP operation registry path must name a regular file");
-                }
-            }
-            let parent = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .ok_or_else(|| anyhow!("unified MCP operation registry path has no parent"))?;
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "create unified MCP operation registry directory `{}`",
-                    parent.display()
-                )
-            })?;
+        if path == Path::new(":memory:") {
+            bail!("unified MCP operation registry requires a persistent on-disk path; in-memory state is test-only");
         }
+        if !path.is_absolute() {
+            bail!("unified MCP operation registry path must be absolute");
+        }
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("unified MCP operation registry path must name a regular file");
+            }
+        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or_else(|| anyhow!("unified MCP operation registry path has no parent"))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "create unified MCP operation registry directory `{}`",
+                parent.display()
+            )
+        })?;
 
         let connection = Connection::open(path)
             .with_context(|| format!("open unified MCP operation registry `{}`", path.display()))?;
         #[cfg(unix)]
-        if path != Path::new(":memory:") {
+        {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
                 format!("secure unified MCP operation registry `{}`", path.display())
@@ -278,6 +279,7 @@ impl OperationRegistry {
         })
     }
 
+    #[cfg(test)]
     #[cfg(test)]
     pub(crate) fn open_in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)

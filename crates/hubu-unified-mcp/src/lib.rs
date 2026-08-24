@@ -12,7 +12,7 @@ mod hubu;
 use std::{
     env, fmt,
     io::{self, BufRead, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -192,7 +192,7 @@ impl Default for Config {
             gongbu: None,
             hubu_routing: HubuRoutingConfig::default(),
             capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
-            operation_state_path: Some(PathBuf::from(":memory:")),
+            operation_state_path: None,
         }
     }
 }
@@ -507,6 +507,11 @@ impl BackendProbeTiming {
 impl Server {
     pub fn new(config: Config) -> Result<Self, ConfigError> {
         let operation_registry = match config.operation_state_path.as_deref() {
+            Some(path) if path == Path::new(":memory:") => {
+                OperationRegistryCapability::Unavailable {
+                    reason_code: "configuration_invalid",
+                }
+            }
             Some(path) => match operation_registry::OperationRegistry::open(path) {
                 Ok(registry) => OperationRegistryCapability::Available(Mutex::new(registry)),
                 Err(_) => OperationRegistryCapability::Unavailable {
@@ -1101,6 +1106,21 @@ mod tests {
         assert_eq!(
             capability["operation_registry"]["reason_code"],
             "state_unavailable"
+        );
+    }
+
+    #[test]
+    fn in_memory_operation_registry_is_rejected_for_runtime_configuration() {
+        let server = Server::new(Config {
+            operation_state_path: Some(PathBuf::from(":memory:")),
+            ..Config::default()
+        })
+        .unwrap();
+        let capability = server.capabilities();
+        assert_eq!(capability["operation_registry"]["state"], "unavailable");
+        assert_eq!(
+            capability["operation_registry"]["reason_code"],
+            "configuration_invalid"
         );
     }
 
