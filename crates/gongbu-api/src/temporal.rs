@@ -68,7 +68,7 @@ pub async fn worker_is_polling(
     client: &Client,
     namespace: &str,
     task_queue: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<bool, temporalio_client::tonic::Status> {
     #[allow(deprecated)]
     let request = DescribeTaskQueueRequest {
         namespace: namespace.into(),

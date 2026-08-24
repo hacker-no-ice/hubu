@@ -165,6 +165,7 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
         temporal_namespace: config.temporal.namespace.clone(),
         temporal_startup_timeout: Duration::from_secs(30),
         dependency_check_interval: Duration::from_secs(5),
+        dependency_failure_grace: application::DEPENDENCY_FAILURE_GRACE,
         maximum_spend_minor: config
             .provider
             .maximum_spend_minor
