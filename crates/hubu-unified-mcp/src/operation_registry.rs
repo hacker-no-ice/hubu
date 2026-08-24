@@ -209,11 +209,10 @@ impl OperationRegistry {
             })?;
         }
 
-        let existed = path.exists();
         let connection = Connection::open(path)
             .with_context(|| format!("open unified MCP operation registry `{}`", path.display()))?;
         #[cfg(unix)]
-        if !existed && path != Path::new(":memory:") {
+        if path != Path::new(":memory:") {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
                 format!("secure unified MCP operation registry `{}`", path.display())
@@ -547,6 +546,24 @@ mod tests {
             .resolve_or_allocate(&codex("restart"), "hubu_authorize_spend", &json!({"a": 1}))
             .unwrap();
         assert_eq!(recovered, first);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_registry_file_is_hardened_on_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let path = root.path().join("operations.sqlite3");
+        fs::File::create(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        OperationRegistry::open(&path).unwrap();
+
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
