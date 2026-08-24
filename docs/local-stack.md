@@ -256,9 +256,16 @@ hubu init codex --stack-profile /absolute/path/to/profile
 
 The command reads the active manifest, verifies the selected unified MCP binary,
 and writes the managed `[mcp_servers.hubu]` entry with separate Hubu and Gongbu
-endpoint and credential-file references. It does not copy raw credentials into
-Codex configuration or start the stdio process. Restart Codex so a new session
-loads the updated entry.
+endpoint and credential-file references plus a separate unified-MCP operation
+registry path. If the active handoff is rejected, rerender or reinitialize the
+stack profile, rerun this command, and restart Codex. It does not copy raw
+credentials into Codex configuration or start the stdio process.
+
+Stack doctor reports an uninitialized or unusable operation registry as a
+degraded billable capability, not a backend startup failure. Hubu, Gongbu, and
+unrelated read, status, and artifact tools remain available; new billable Hubu
+calls remain disabled until the client-owned unified MCP process can initialize
+the registry.
 
 ## Lifecycle commands
 

@@ -12,6 +12,7 @@ mod hubu;
 use std::{
     env, fmt,
     io::{self, BufRead, Write},
+    path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -29,6 +30,7 @@ mod capability;
 mod credential;
 mod diagnostics;
 mod notification;
+mod operation_registry;
 mod probe;
 mod stdio;
 
@@ -50,6 +52,7 @@ const GONGBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_GONGBU_ENDPOINT";
 const GONGBU_TOKEN_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN";
 const GONGBU_TOKEN_FILE_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE";
 const CAPABILITY_POLL_INTERVAL_ENV: &str = "HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS";
+const OPERATION_STATE_PATH_ENV: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
@@ -179,6 +182,7 @@ pub struct Config {
     pub gongbu: Option<BackendConfig>,
     pub hubu_routing: HubuRoutingConfig,
     pub capability_poll_interval: Duration,
+    pub operation_state_path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -188,6 +192,7 @@ impl Default for Config {
             gongbu: None,
             hubu_routing: HubuRoutingConfig::default(),
             capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
+            operation_state_path: None,
         }
     }
 }
@@ -209,6 +214,9 @@ impl Config {
     }
 
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let operation_state_path = lookup(OPERATION_STATE_PATH_ENV)
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from);
         let mut hubu_routing = HubuRoutingConfig::new(
             lookup(TRUST_CLIENT_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
             lookup(RECONCILIATION_TOKEN_ENV),
@@ -228,6 +236,7 @@ impl Config {
             )?,
             hubu_routing,
             capability_poll_interval: poll_interval(lookup(CAPABILITY_POLL_INTERVAL_ENV))?,
+            operation_state_path,
         })
     }
 }
@@ -417,6 +426,13 @@ pub struct Server {
     probe_timings: Arc<Mutex<ProbeTimings>>,
     probe_schedule_waker: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     hubu_routing: HubuRoutingConfig,
+    operation_registry: Arc<OperationRegistryCapability>,
+}
+
+#[derive(Debug)]
+enum OperationRegistryCapability {
+    Available(Mutex<operation_registry::OperationRegistry>),
+    Unavailable { reason_code: &'static str },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -490,6 +506,22 @@ impl BackendProbeTiming {
 
 impl Server {
     pub fn new(config: Config) -> Result<Self, ConfigError> {
+        let operation_registry = match config.operation_state_path.as_deref() {
+            Some(path) if path == Path::new(":memory:") => {
+                OperationRegistryCapability::Unavailable {
+                    reason_code: "configuration_invalid",
+                }
+            }
+            Some(path) => match operation_registry::OperationRegistry::open(path) {
+                Ok(registry) => OperationRegistryCapability::Available(Mutex::new(registry)),
+                Err(_) => OperationRegistryCapability::Unavailable {
+                    reason_code: "state_unavailable",
+                },
+            },
+            None => OperationRegistryCapability::Unavailable {
+                reason_code: "configuration_missing",
+            },
+        };
         let hubu_routing = config.hubu_routing.clone();
         let capability_poll_interval = config.capability_poll_interval;
         let backends = BackendClients::new(config)?;
@@ -523,6 +555,7 @@ impl Server {
             probe_timings: Arc::new(Mutex::new(probe_timings)),
             probe_schedule_waker: Arc::new(Mutex::new(None)),
             hubu_routing,
+            operation_registry: Arc::new(operation_registry),
         })
     }
 
@@ -686,7 +719,13 @@ impl Server {
         let snapshot = self.snapshot();
         let mut tools = vec![capability_tool()];
         if tool_availability("hubu_health", BackendOwner::Hubu, &snapshot).is_ok() {
-            tools.extend(hubu::tool_definitions());
+            tools.extend(hubu::tool_definitions().into_iter().filter(|tool| {
+                self.operation_registry_available()
+                    || !matches!(
+                        tool["name"].as_str(),
+                        Some("hubu_authorize_spend" | "hubu_submit_spend")
+                    )
+            }));
         }
         tools.extend(gongbu::tool_definitions().into_iter().filter(|tool| {
             let name = tool["name"]
@@ -698,7 +737,56 @@ impl Server {
     }
 
     fn capabilities(&self) -> Value {
-        capabilities_value(&self.snapshot())
+        let mut capability = capabilities_value(&self.snapshot());
+        let (available, reason_code) = match self.operation_registry.as_ref() {
+            OperationRegistryCapability::Available(_) => (true, None),
+            OperationRegistryCapability::Unavailable { reason_code } => (false, Some(*reason_code)),
+        };
+        capability["operation_registry"] = json!({
+            "state": if available { "available" } else { "unavailable" },
+            "reason_code": reason_code,
+            "billable_operations_available": available
+        });
+        if !available {
+            for tool in capability["tools"]
+                .as_array_mut()
+                .expect("capability tools are an array")
+            {
+                if matches!(
+                    tool["name"].as_str(),
+                    Some("hubu_authorize_spend" | "hubu_submit_spend")
+                ) {
+                    tool["available"] = json!(false);
+                    tool["reason_code"] = json!("operation_registry_unavailable");
+                }
+            }
+        }
+        capability
+    }
+
+    fn operation_registry_available(&self) -> bool {
+        matches!(
+            self.operation_registry.as_ref(),
+            OperationRegistryCapability::Available(_)
+        )
+    }
+
+    fn resolve_harness_operation(
+        &self,
+        identity: &operation_registry::NormalizedHarnessIdentity,
+        tool_name: &str,
+        arguments: &Value,
+    ) -> anyhow::Result<operation_registry::OperationResolution> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!(
+                "Hubu billable tools require an available operation registry; configure {OPERATION_STATE_PATH_ENV} to an absolute writable SQLite file"
+            );
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .resolve_or_allocate(identity, tool_name, arguments)
     }
 
     fn snapshot(&self) -> CapabilitySnapshot {
@@ -951,6 +1039,7 @@ mod tests {
     #[test]
     fn validates_independent_backend_configuration() {
         let config = Config::from_lookup(lookup(&[
+            (OPERATION_STATE_PATH_ENV, "/tmp/hubu-unified-test.sqlite3"),
             (HUBU_ENDPOINT_ENV, "https://hubu.example.test/api"),
             (HUBU_TOKEN_ENV, "hubu-secret"),
             (GONGBU_ENDPOINT_ENV, "http://127.0.0.1:8788"),
@@ -987,6 +1076,51 @@ mod tests {
         assert_eq!(
             poll_interval(Some("secret/path".into())).unwrap_err(),
             ConfigError::InvalidPollInterval
+        );
+    }
+
+    #[test]
+    fn missing_operation_registry_preserves_non_billable_startup() {
+        let server = Server::new(Config::from_lookup(lookup(&[])).unwrap()).unwrap();
+        let capability = server.capabilities();
+        assert_eq!(capability["operation_registry"]["state"], "unavailable");
+        assert_eq!(
+            capability["operation_registry"]["reason_code"],
+            "configuration_missing"
+        );
+        assert_eq!(server.list_tools_for_snapshot().len(), 1);
+    }
+
+    #[test]
+    fn broken_operation_registry_degrades_billable_capability_without_startup_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("state-directory");
+        std::fs::create_dir(&path).unwrap();
+        let server = Server::new(Config {
+            operation_state_path: Some(path),
+            ..Config::default()
+        })
+        .unwrap();
+        let capability = server.capabilities();
+        assert_eq!(capability["operation_registry"]["state"], "unavailable");
+        assert_eq!(
+            capability["operation_registry"]["reason_code"],
+            "state_unavailable"
+        );
+    }
+
+    #[test]
+    fn in_memory_operation_registry_is_rejected_for_runtime_configuration() {
+        let server = Server::new(Config {
+            operation_state_path: Some(PathBuf::from(":memory:")),
+            ..Config::default()
+        })
+        .unwrap();
+        let capability = server.capabilities();
+        assert_eq!(capability["operation_registry"]["state"], "unavailable");
+        assert_eq!(
+            capability["operation_registry"]["reason_code"],
+            "configuration_invalid"
         );
     }
 
@@ -1051,6 +1185,7 @@ mod tests {
     #[test]
     fn incomplete_pair_is_unconfigured_without_blocking_the_other_backend() {
         let config = Config::from_lookup(lookup(&[
+            (OPERATION_STATE_PATH_ENV, "/tmp/hubu-unified-test.sqlite3"),
             (HUBU_ENDPOINT_ENV, "http://hubu.test"),
             (HUBU_TOKEN_ENV, "hubu-secret"),
             (GONGBU_ENDPOINT_ENV, "http://gongbu.test"),
@@ -1068,6 +1203,7 @@ mod tests {
     fn rejects_credential_bearing_endpoint_configuration() {
         assert_eq!(
             Config::from_lookup(lookup(&[
+                (OPERATION_STATE_PATH_ENV, "/tmp/hubu-unified-test.sqlite3"),
                 (GONGBU_ENDPOINT_ENV, "https://secret@gongbu.test"),
                 (GONGBU_TOKEN_ENV, "never-print-me"),
             ]))

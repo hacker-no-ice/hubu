@@ -2,7 +2,6 @@ mod catalog;
 mod response;
 mod routing;
 mod transport;
-mod trusted_identity;
 
 use serde_json::{json, Value};
 
@@ -39,6 +38,20 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
     {
         return success_response(id, tool_result_v1(catalog::approval_profile()));
     }
+    let operation = if matches!(name.as_str(), "hubu_submit_spend" | "hubu_authorize_spend") {
+        let identity = match crate::operation_registry::NormalizedHarnessIdentity::from_meta(
+            call.meta.as_ref(),
+        ) {
+            Ok(identity) => identity,
+            Err(error) => return error_response(id, -32000, &error.to_string()),
+        };
+        match server.resolve_harness_operation(&identity, &name, &call.arguments) {
+            Ok(operation) => Some(operation),
+            Err(error) => return error_response(id, -32000, &error.to_string()),
+        }
+    } else {
+        None
+    };
     let params = json!({
         "name": name,
         "arguments": call.arguments,
@@ -47,6 +60,7 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
     match route_tool_call_v1(
         params,
         server.hubu_routing.trusted_client_approval,
+        operation,
         |request| client.execute_hubu(request, &server.hubu_routing),
     ) {
         Ok(result) => success_response(id, result),

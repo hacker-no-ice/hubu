@@ -10,6 +10,7 @@ pub(crate) struct UnifiedConfig<'a> {
     pub hubu_endpoint: &'a str,
     pub hubu_token_file: &'a Path,
     pub reconciliation_token_file: &'a Path,
+    pub operation_state_path: &'a Path,
     pub gongbu: Option<(&'a str, &'a Path)>,
     pub trust_client_approval: bool,
 }
@@ -41,11 +42,13 @@ pub(crate) fn unified_block(config: UnifiedConfig<'_>) -> String {
          [mcp_servers.hubu.env]\n\
          HUBU_UNIFIED_HUBU_ENDPOINT = \"{}\"\n\
          HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = \"{}\"\n\
-         HUBU_RECONCILIATION_TOKEN_FILE = \"{}\"\n",
+         HUBU_RECONCILIATION_TOKEN_FILE = \"{}\"\n\
+         HUBU_UNIFIED_OPERATION_STATE_PATH = \"{}\"\n",
         toml_string(&config.mcp_server.display().to_string()),
         toml_string(config.hubu_endpoint),
         toml_string(&config.hubu_token_file.display().to_string()),
         toml_string(&config.reconciliation_token_file.display().to_string()),
+        toml_string(&config.operation_state_path.display().to_string()),
     );
     if let Some((endpoint, token_file)) = config.gongbu {
         let _ = writeln!(
@@ -185,6 +188,7 @@ mod tests {
             hubu_endpoint: "http://127.0.0.1:8787",
             hubu_token_file: Path::new("/tmp/hubu\\token"),
             reconciliation_token_file: Path::new("/tmp/hubu\\reconciliation-token"),
+            operation_state_path: Path::new("/tmp/hubu\\unified-operations.sqlite3"),
             gongbu: Some(("http://127.0.0.1:8788", Path::new("/tmp/gongbu-token"))),
             trust_client_approval: false,
         });
@@ -193,5 +197,8 @@ mod tests {
         assert!(block.contains("command = \"/tmp/hubu \\\"dev\\\"/hubu-unified-mcp\""));
         assert!(block.contains("HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = \"/tmp/hubu\\\\token\""));
         assert!(block.contains("HUBU_UNIFIED_GONGBU_ENDPOINT"));
+        assert!(block.contains(
+            "HUBU_UNIFIED_OPERATION_STATE_PATH = \"/tmp/hubu\\\\unified-operations.sqlite3\""
+        ));
     }
 }

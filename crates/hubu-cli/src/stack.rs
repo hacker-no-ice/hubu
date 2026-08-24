@@ -209,6 +209,7 @@ pub(crate) struct CodexHandoff {
     pub hubu_token_file: PathBuf,
     pub approval_token_file: PathBuf,
     pub reconciliation_token_file: PathBuf,
+    pub operation_state_path: PathBuf,
     pub gongbu_endpoint: String,
     pub gongbu_token_file: PathBuf,
 }
@@ -280,8 +281,8 @@ pub(crate) fn codex_handoff(profile: &Path, hubu_home: &Path) -> Result<CodexHan
     let generation = active_generation_path(&root.join("generated"), &manifest)?;
     verify_generated_file(&generation, &manifest, "client-handoff.json")?;
     let handoff: CodexHandoff = read_json(&generation.join("client-handoff.json"))?;
-    if handoff.schema_version != 1 {
-        bail!("active client handoff has an unsupported schema_version");
+    if handoff.schema_version != 2 {
+        bail!("active client handoff has an unsupported schema_version; run `hubu stack render`, activate the schema-v2 generation, and reinitialize the client");
     }
     Ok(handoff)
 }
@@ -984,13 +985,20 @@ fn render_generation(
         validate_with_binary(gongbu_server, &generation.join("gongbu-server.json"))?;
     }
 
+    let operation_state_path = runtime_generation
+        .ancestors()
+        .nth(3)
+        .ok_or_else(|| anyhow!("generated stack path has no profile root"))?
+        .join("state/hubu-unified-operations.sqlite3");
+    validate_operation_state_separation(stack, &operation_state_path)?;
     let handoff = CodexHandoff {
-        schema_version: 1,
+        schema_version: 2,
         mcp_server: unified_mcp.to_path_buf(),
         hubu_endpoint: hubu_endpoint.clone(),
         hubu_token_file: hubu_auth.to_path_buf(),
         approval_token_file: hubu_approval.to_path_buf(),
         reconciliation_token_file: hubu_reconciliation.to_path_buf(),
+        operation_state_path,
         gongbu_endpoint: gongbu_endpoint.clone(),
         gongbu_token_file: gongbu_caller_file.to_path_buf(),
     };
@@ -1657,6 +1665,47 @@ fn validate_managed_resources(stack: &StackSource) -> Result<()> {
                     other.0
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_operation_state_separation(stack: &StackSource, operation_state: &Path) -> Result<()> {
+    let operation = (
+        "generated client handoff operation_state_path",
+        operation_state,
+        ManagedResourceKind::File,
+    );
+    let mut backend_resources = Vec::new();
+    if let Some(hubu) = stack.hubu.as_ref() {
+        push_resource(
+            &mut backend_resources,
+            "stack.toml:hubu.database_path",
+            hubu.database_path.as_deref(),
+            ManagedResourceKind::File,
+        );
+    }
+    if let Some(gongbu) = stack.gongbu.as_ref() {
+        push_resource(
+            &mut backend_resources,
+            "stack.toml:gongbu.database_path",
+            gongbu.database_path.as_deref(),
+            ManagedResourceKind::File,
+        );
+        push_resource(
+            &mut backend_resources,
+            "stack.toml:gongbu.artifact_root",
+            gongbu.artifact_root.as_deref(),
+            ManagedResourceKind::Directory,
+        );
+    }
+    for backend in backend_resources {
+        if managed_resources_overlap(&operation, &backend)? {
+            bail!(
+                "{} and {} must not overlap; unified MCP, Hubu, and Gongbu state remain separate",
+                operation.0,
+                backend.0
+            );
         }
     }
     Ok(())

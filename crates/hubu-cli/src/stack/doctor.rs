@@ -1,5 +1,6 @@
 use super::*;
 use reqwest::{blocking::Client, redirect::Policy, StatusCode};
+use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use std::{
     collections::BTreeSet,
@@ -12,6 +13,8 @@ use std::{
 
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
+const OPERATION_REGISTRY_APPLICATION_ID: i64 = 0x4855_424f;
+const OPERATION_REGISTRY_SCHEMA_VERSION: i64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -580,10 +583,13 @@ fn inspect_profile_with(
             "client_handoff_invalid",
             "hubu-unified-mcp",
             None,
-            "the active client handoff is missing, stale, or incoherent; render again",
+            "the active client handoff is missing, stale, incoherent, or older than schema v2; run `hubu stack render`, activate the new generation, and reinitialize the client",
         ));
         return report;
     }
+    let handoff: CodexHandoff = read_json(&generation.join("client-handoff.json"))
+        .expect("validated client handoff remains readable");
+    report_operation_registry_path(&handoff.operation_state_path, &mut report.checks);
     report.checks.push(check(
         CheckLayer::Renderability,
         CheckStatus::Pass,
@@ -984,12 +990,16 @@ fn validate_handoff(
     let Ok(handoff) = read_json::<CodexHandoff>(&generation.join("client-handoff.json")) else {
         return false;
     };
-    handoff.schema_version == 1
+    handoff.schema_version == 2
         && Some(&handoff.mcp_server) == binaries.get("hubu-unified-mcp")
         && Some(&handoff.hubu_token_file) == credentials.get("hubu_auth")
         && Some(&handoff.approval_token_file) == credentials.get("hubu_approval")
         && Some(&handoff.reconciliation_token_file) == credentials.get("hubu_reconciliation")
         && Some(&handoff.gongbu_token_file) == credentials.get("gongbu_caller")
+        && handoff.operation_state_path.is_absolute()
+        && generation.ancestors().nth(3).is_some_and(|profile| {
+            handoff.operation_state_path == profile.join("state/hubu-unified-operations.sqlite3")
+        })
         && stack
             .hubu
             .as_ref()
@@ -1000,6 +1010,107 @@ fn validate_handoff(
             .as_ref()
             .and_then(|value| value.endpoint.as_ref())
             == Some(&handoff.gongbu_endpoint)
+}
+
+fn report_operation_registry_path(path: &Path, checks: &mut Vec<DoctorCheck>) {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o222 == 0 {
+                    checks.push(check(
+                        CheckLayer::RuntimeReadiness,
+                        CheckStatus::Warning,
+                        "operation_registry_not_writable",
+                        "hubu-unified-mcp",
+                        Some("client-handoff.json:operation_state_path".into()),
+                        "the stack remains available, but new billable Hubu operations are disabled until the unified MCP registry is writable",
+                    ));
+                    return;
+                }
+            }
+            if validate_operation_registry(path).is_err() {
+                checks.push(check(
+                    CheckLayer::RuntimeReadiness,
+                    CheckStatus::Warning,
+                    "operation_registry_invalid",
+                    "hubu-unified-mcp",
+                    Some("client-handoff.json:operation_state_path".into()),
+                    "the stack and unrelated tools remain available, but billable Hubu tools are disabled because the configured registry is not a valid unified MCP operation database",
+                ));
+                return;
+            }
+            checks.push(check(
+                CheckLayer::RuntimeReadiness,
+                CheckStatus::Pass,
+                "operation_registry_path_ready",
+                "hubu-unified-mcp",
+                Some("client-handoff.json:operation_state_path".into()),
+                "the separate unified MCP operation registry path is initialized for billable operations",
+            ));
+        }
+        Ok(_) => checks.push(check(
+            CheckLayer::RuntimeReadiness,
+            CheckStatus::Warning,
+            "operation_registry_path_invalid",
+            "hubu-unified-mcp",
+            Some("client-handoff.json:operation_state_path".into()),
+            "the stack and unrelated tools remain available, but billable Hubu tools are disabled because the registry path is not a regular file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => checks.push(check(
+            CheckLayer::RuntimeReadiness,
+            CheckStatus::Warning,
+            "operation_registry_uninitialized",
+            "hubu-unified-mcp",
+            Some("client-handoff.json:operation_state_path".into()),
+            "the stack remains available; the client-owned unified MCP process will initialize this registry before billable Hubu tools become available",
+        )),
+        Err(_) => checks.push(check(
+            CheckLayer::RuntimeReadiness,
+            CheckStatus::Warning,
+            "operation_registry_path_unreadable",
+            "hubu-unified-mcp",
+            Some("client-handoff.json:operation_state_path".into()),
+            "the stack and unrelated tools remain available, but billable Hubu tools are disabled until the registry path is accessible",
+        )),
+    }
+}
+
+fn validate_operation_registry(path: &Path) -> rusqlite::Result<()> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let application_id =
+        connection.query_row("PRAGMA application_id", [], |row| row.get::<_, i64>(0))?;
+    let version = connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+    let quick_check =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))?;
+    if application_id != OPERATION_REGISTRY_APPLICATION_ID
+        || version != OPERATION_REGISTRY_SCHEMA_VERSION
+        || quick_check != "ok"
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    connection.prepare(
+        "SELECT singleton, installation_id, created_at FROM installation_identity LIMIT 0",
+    )?;
+    connection.prepare(
+        "SELECT platform, installation_id, harness_call_id, request_hash, operation_key,
+                codex_call_id, claude_tool_use_id, hubu_invocation_id,
+                controlled_installation_id, task_id, created_at
+         FROM harness_operations LIMIT 0",
+    )?;
+    let installation_count = connection.query_row(
+        "SELECT COUNT(*) FROM installation_identity WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if installation_count != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
 }
 
 fn probe_hubu(
@@ -1544,6 +1655,66 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use tempfile::tempdir;
+
+    #[test]
+    fn operation_registry_path_reports_degraded_billable_capability_without_failing_stack() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("operations.sqlite3");
+        let mut checks = Vec::new();
+        report_operation_registry_path(&path, &mut checks);
+        assert_eq!(checks[0].status, CheckStatus::Warning);
+        assert_eq!(checks[0].code, "operation_registry_uninitialized");
+        assert!(checks[0].message.contains("stack remains available"));
+
+        fs::create_dir(&path).unwrap();
+        checks.clear();
+        report_operation_registry_path(&path, &mut checks);
+        assert_eq!(checks[0].status, CheckStatus::Warning);
+        assert_eq!(checks[0].code, "operation_registry_path_invalid");
+        assert!(checks[0]
+            .message
+            .contains("billable Hubu tools are disabled"));
+
+        let corrupt_path = root.path().join("corrupt.sqlite3");
+        fs::write(&corrupt_path, b"not sqlite").unwrap();
+        checks.clear();
+        report_operation_registry_path(&corrupt_path, &mut checks);
+        assert_eq!(checks[0].status, CheckStatus::Warning);
+        assert_eq!(checks[0].code, "operation_registry_invalid");
+
+        let valid_path = root.path().join("valid.sqlite3");
+        let valid = Connection::open(&valid_path).unwrap();
+        valid
+            .execute_batch(
+                "CREATE TABLE installation_identity (
+                     singleton INTEGER PRIMARY KEY,
+                     installation_id TEXT NOT NULL,
+                     created_at TEXT NOT NULL
+                 );
+                 CREATE TABLE harness_operations (
+                     platform TEXT NOT NULL,
+                     installation_id TEXT NOT NULL,
+                     harness_call_id TEXT NOT NULL,
+                     request_hash TEXT NOT NULL,
+                     operation_key TEXT NOT NULL,
+                     codex_call_id TEXT,
+                     claude_tool_use_id TEXT,
+                     hubu_invocation_id TEXT,
+                     controlled_installation_id TEXT,
+                     task_id TEXT,
+                     created_at TEXT NOT NULL
+                 );
+                 INSERT INTO installation_identity VALUES (1, 'hubu-installation:v1:test', CURRENT_TIMESTAMP);
+                 PRAGMA application_id = 1213547087;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        drop(valid);
+        checks.clear();
+        report_operation_registry_path(&valid_path, &mut checks);
+        assert_eq!(checks[0].status, CheckStatus::Pass);
+        assert_eq!(checks[0].code, "operation_registry_path_ready");
+    }
 
     #[cfg(unix)]
     fn write_fake_binary(path: &Path, reject_validation: bool) {

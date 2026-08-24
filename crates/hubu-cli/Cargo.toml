@@ -26,6 +26,7 @@ dirs.workspace = true
 hubu-common.workspace = true
 hubu-core.workspace = true
 reqwest.workspace = true
+rusqlite.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

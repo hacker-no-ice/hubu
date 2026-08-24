@@ -1282,8 +1282,8 @@ pub(super) fn ensure_profile_stopped(profile: &Path) -> Result<()> {
             .context("validate active generation before activation")?;
         let generation = active_generation_path(&generated, &active)?;
         let handoff: CodexHandoff = read_json(&generation.join("client-handoff.json"))?;
-        if handoff.schema_version != 1 {
-            bail!("active client handoff has an unsupported schema_version");
+        if handoff.schema_version != 2 {
+            bail!("active client handoff has an unsupported schema_version; run `hubu stack render`, activate the schema-v2 generation, and reinitialize the client");
         }
         if active
             .generated_file_digests
@@ -1737,12 +1737,13 @@ ownership = "managed"
         let generation = generated.join("generations").join(&generation_id);
         fs::create_dir_all(&generation).unwrap();
         let handoff = CodexHandoff {
-            schema_version: 1,
+            schema_version: 2,
             mcp_server: PathBuf::from("/tmp/hubu-unified-mcp"),
             hubu_endpoint: active_endpoint.clone(),
             hubu_token_file: PathBuf::from("/tmp/hubu-auth"),
             approval_token_file: PathBuf::from("/tmp/hubu-approval"),
             reconciliation_token_file: PathBuf::from("/tmp/hubu-reconciliation"),
+            operation_state_path: PathBuf::from("/tmp/hubu-unified-operations.sqlite3"),
             gongbu_endpoint: "http://127.0.0.1:2".into(),
             gongbu_token_file: PathBuf::from("/tmp/gongbu-caller"),
         };
