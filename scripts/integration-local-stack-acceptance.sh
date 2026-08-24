@@ -7,10 +7,12 @@ profile="${workspace}/profile"
 stack_started=0
 
 cleanup() {
+  local status=$?
   if [[ "${stack_started}" == "1" && -x "${root_dir}/target/debug/hubu" ]]; then
     "${root_dir}/target/debug/hubu" stack stop --profile "${profile}" >/dev/null 2>&1 || true
   fi
   rm -rf "${workspace}"
+  return "${status}"
 }
 trap cleanup EXIT
 trap 'echo "local-stack acceptance failed at line ${LINENO}" >&2' ERR
@@ -33,7 +35,7 @@ if ! command -v temporal >/dev/null 2>&1; then
   exit 2
 fi
 
-for tool in jq curl python3; do
+for tool in jq curl python3 sqlite3; do
   command -v "${tool}" >/dev/null 2>&1 || {
     echo "local-stack acceptance requires ${tool} on PATH" >&2
     exit 2
@@ -202,7 +204,7 @@ grep -F 'providers.toml:targets' <<<"${incomplete_live}" >/dev/null
 cat >"${profile}/providers.toml" <<'EOF'
 schema_version = 1
 mode = "live"
-catalog_version = "hub-105-fixture-v1"
+catalog_version = "hub-114-fixture-v2"
 maximum_spend_minor = 1
 live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
 
@@ -218,12 +220,28 @@ execution_enabled = true
 settings = { type = "fixture" }
 
 [[pricing_rules]]
-rule_id = "fixture-image"
+rule_id = "fixture-image-1k"
 provider = "example"
 model = "image-v1"
 currency = "USD"
-unit = "image"
-unit_amount_minor = 1
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 1, rate_denominator = 1 }]
+
+[[pricing_rules]]
+rule_id = "fixture-image-2k"
+provider = "example"
+model = "image-v1"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [{ unit = "image", rate_numerator_minor = 2, rate_denominator = 1 }]
+
+[[pricing_rules]]
+rule_id = "fixture-image-4k"
+provider = "example"
+model = "image-v1"
+currency = "USD"
+selector = { image_size = "4k" }
+components = [{ unit = "image", rate_numerator_minor = 3, rate_denominator = 1 }]
 EOF
 
 cat >"${profile}/stack.toml" <<EOF
@@ -290,7 +308,7 @@ jq -e '.classification == "running_ready"' < <("${hubu_bin}" stack status --json
 submission_response="$(curl --silent --show-error --write-out '\n%{http_code}' \
   -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
   -H 'Content-Type: application/json' \
-  -d "$(jq -n --arg token "${spend_auth_token_id}" '{schema_version:2,spend_auth_token_id:$token,input:{prompt:"acceptance canary",image_count:1},input_schema_version:1,workload_type:"default",provider:"example",adapter:"fixture",model:"image-v1"}')" \
+  -d "$(jq -n --arg token "${spend_auth_token_id}" '{schema_version:2,spend_auth_token_id:$token,input:{prompt:"acceptance canary",image_count:1,image_size:"1k"},input_schema_version:1,workload_type:"default",provider:"example",adapter:"fixture",model:"image-v1"}')" \
   "${gongbu_endpoint}/v2/executions")"
 submission_status="$(tail -n 1 <<<"${submission_response}")"
 submission="$(sed '$d' <<<"${submission_response}")"
@@ -312,6 +330,8 @@ for _ in {1..150}; do
   sleep 0.1
 done
 [[ "$(jq -r '.status' <<<"${terminal}")" == "succeeded" ]] || fail "fixture execution did not succeed"
+pricing_record="$(sqlite3 "${workspace}/gongbu.sqlite3" "SELECT pricing_schema_version || '|' || json_extract(pricing_snapshot_json, '$.schema_version') || '|' || json_extract(pricing_snapshot_json, '$.pricing_rule_id') || '|' || json_extract(pricing_snapshot_json, '$.selector.image_size') FROM executions WHERE execution_id = '${execution_id}';")"
+[[ "${pricing_record}" == "2|2|fixture-image-1k|1k" ]] || fail "fixture execution did not persist the selected schema-v2 1k price"
 
 workflow_id="gongbu-execution-${execution_id}"
 temporal workflow describe \

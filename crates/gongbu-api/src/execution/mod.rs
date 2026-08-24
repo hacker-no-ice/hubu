@@ -1442,7 +1442,7 @@ fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
         || n.hubu_authorization_id != n.hubu_token_reference.as_str()
         || n.authorized_minor < 0
         || n.input_schema_version < 1
-        || n.pricing_schema_version < 1
+        || n.pricing_schema_version != PRICING_SNAPSHOT_SCHEMA_VERSION
         || [
             &n.workload_type,
             &n.provider,
@@ -1464,12 +1464,6 @@ fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
     }
     safe_json(&n.normalized_input)?;
     safe_json(&n.pricing_snapshot)?;
-    if !matches!(
-        n.pricing_schema_version,
-        1 | PRICING_SNAPSHOT_SCHEMA_VERSION
-    ) {
-        return Err(Error::Invalid("pricing schema version"));
-    }
     if n.execution_scope
         .as_ref()
         .is_some_and(|scope| for_target(&n.provider, &n.adapter).as_ref() != Some(scope))
@@ -1599,13 +1593,16 @@ mod tests {
             provider_config_version: "pcv-1".into(),
             provider_config_digest: format!("sha256:{}", "a".repeat(64)),
             pricing_snapshot: json!({
+                "schema_version":2,
                 "provider":"example","model":"image-v1",
-                "catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),
-                "pricing_rule_id":"example-image","unit":"image",
-                "unit_amount_minor":100,"quantity":1,
+                "catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),
+                "pricing_rule_id":"example-image","components":[{
+                    "unit":"image","rate_numerator_minor":100,"rate_denominator":1,"quantity":1
+                }],
+                "exact_estimate_numerator":"100","exact_estimate_denominator":"1",
                 "estimated_amount_minor":100,"currency":"USD"
             }),
-            pricing_schema_version: 1,
+            pricing_schema_version: 2,
             execution_scope: None,
             created_at: "2026-08-05T20:00:00Z".into(),
         }
@@ -1675,7 +1672,8 @@ mod tests {
         assert_eq!(a.provider_config_version, "pcv-1");
         let mut changed = new("a", "same");
         changed.normalized_input = json!({"prompt":"changed"});
-        changed.pricing_snapshot["unit_amount_minor"] = json!(499);
+        changed.pricing_snapshot["components"][0]["rate_numerator_minor"] = json!(499);
+        changed.pricing_snapshot["exact_estimate_numerator"] = json!(499.to_string());
         changed.pricing_snapshot["estimated_amount_minor"] = json!(499);
         let b = r.create_execution(&changed).unwrap();
         let c = r.create_execution(&new("b", "same")).unwrap();
@@ -2049,7 +2047,7 @@ mod tests {
             provider_attempt_id: a,
             settlement_minor: 100,
             currency: "USD".into(),
-            pricing_catalog_version: "prices-v1".into(),
+            pricing_catalog_version: "prices-v2".into(),
             created_at: "2026-08-05T20:03:00Z".into(),
             settled_at: None,
             hubu_settlement_id: None,
@@ -2141,7 +2139,7 @@ mod tests {
                 provider_attempt_id: attempt.provider_attempt_id,
                 settlement_minor: 100,
                 currency: "USD".into(),
-                pricing_catalog_version: "prices-v1".into(),
+                pricing_catalog_version: "prices-v2".into(),
                 created_at: "2026-08-05T20:03:00Z".into(),
                 settled_at: None,
                 hubu_settlement_id: None,
@@ -2161,7 +2159,7 @@ mod tests {
             provider_attempt_id: attempt_id,
             settlement_minor: 100,
             currency: "USD".into(),
-            pricing_catalog_version: "prices-v1".into(),
+            pricing_catalog_version: "prices-v2".into(),
             created_at: "2026-08-05T20:03:00Z".into(),
             settled_at: None,
             hubu_settlement_id: None,
@@ -2209,7 +2207,7 @@ mod tests {
             provider_attempt_id: a,
             settlement_minor: 101,
             currency: "USD".into(),
-            pricing_catalog_version: "prices-v1".into(),
+            pricing_catalog_version: "prices-v2".into(),
             created_at: "2026-08-05T20:02:00Z".into(),
             settled_at: None,
             hubu_settlement_id: None,
@@ -2225,7 +2223,7 @@ mod tests {
             Err(Error::Invalid("pricing catalog version"))
         ));
         receipt.settlement_minor = 501;
-        receipt.pricing_catalog_version = "prices-v1".into();
+        receipt.pricing_catalog_version = "prices-v2".into();
         assert!(matches!(
             r.create_receipt(&receipt),
             Err(Error::OverAuthorization)

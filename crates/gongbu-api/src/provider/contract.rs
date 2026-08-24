@@ -147,11 +147,6 @@ pub struct PricingRule {
     pub currency: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<PricingSelector>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit: Option<PricingUnit>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit_amount_minor: Option<i64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub components: Vec<PriceComponent>,
 }
 
@@ -184,7 +179,6 @@ pub struct PricingCatalog(Arc<FrozenCatalog>);
 struct FrozenCatalog {
     version: String,
     digest: String,
-    schema_version: u32,
     rules: Vec<PricingRule>,
 }
 
@@ -193,7 +187,6 @@ impl PricingCatalog {
         Self(Arc::new(FrozenCatalog {
             version: "disabled".into(),
             digest: "disabled".into(),
-            schema_version: 0,
             rules: Vec::new(),
         }))
     }
@@ -206,9 +199,7 @@ impl PricingCatalog {
     pub fn from_json(bytes: &[u8]) -> Result<Self> {
         let mut doc: CatalogDocument =
             serde_json::from_slice(bytes).map_err(|e| ContractError::Malformed(e.to_string()))?;
-        if !matches!(doc.schema_version, 1 | 2)
-            || doc.catalog_version.trim().is_empty()
-            || doc.rules.is_empty()
+        if doc.schema_version != 2 || doc.catalog_version.trim().is_empty() || doc.rules.is_empty()
         {
             return Err(ContractError::Malformed(
                 "unsupported schema, empty version, or no rules".into(),
@@ -237,23 +228,13 @@ impl PricingCatalog {
             if !SUPPORTED_CURRENCIES.contains(&rule.currency.as_str()) {
                 return Err(ContractError::Malformed("unsupported currency".into()));
             }
-            let legacy = rule.unit.zip(rule.unit_amount_minor);
-            if doc.schema_version == 1 {
-                if rule.selector.is_some() || !rule.components.is_empty() || legacy.is_none() {
-                    return Err(ContractError::Malformed("invalid v1 rule shape".into()));
-                }
-            } else if legacy.is_some()
-                || rule.unit.is_some()
-                || rule.unit_amount_minor.is_some()
-                || rule.components.is_empty()
-            {
+            if rule.components.is_empty() {
                 return Err(ContractError::Malformed("invalid v2 rule shape".into()));
             }
-            if legacy.is_some_and(|(_, amount)| amount < 0)
-                || rule
-                    .components
-                    .iter()
-                    .any(|c| c.rate_numerator_minor < 0 || c.rate_denominator <= 0)
+            if rule
+                .components
+                .iter()
+                .any(|c| c.rate_numerator_minor < 0 || c.rate_denominator <= 0)
             {
                 return Err(ContractError::Malformed("invalid rate".into()));
             }
@@ -295,7 +276,6 @@ impl PricingCatalog {
         Ok(Self(Arc::new(FrozenCatalog {
             version: doc.catalog_version,
             digest,
-            schema_version: doc.schema_version,
             rules: doc.rules,
         })))
     }
@@ -328,18 +308,9 @@ impl PricingCatalog {
         {
             return Err(ContractError::IndeterminableCost);
         }
-        let components = if let Some((unit, amount)) = rule.unit.zip(rule.unit_amount_minor) {
-            vec![PriceComponent {
-                unit,
-                rate_numerator_minor: amount,
-                rate_denominator: 1,
-            }]
-        } else {
-            rule.components.clone()
-        };
         let mut exact = Rational::zero();
         let mut frozen = Vec::new();
-        for component in components {
+        for component in &rule.components {
             let quantity = request.quantity_for(component.unit)?;
             exact = exact.add(
                 Rational::new(component.rate_numerator_minor, component.rate_denominator)?
@@ -353,35 +324,19 @@ impl PricingCatalog {
             });
         }
         let estimated_amount_minor = exact.ceil_i64()?;
-        let legacy = self.0.schema_version == 1;
-        let legacy_component = frozen.first().cloned();
         Ok(PricingSnapshot {
-            schema_version: self.0.schema_version,
+            schema_version: 2,
             provider: request.provider.clone(),
             model: request.model.clone(),
             catalog_version: self.0.version.clone(),
             catalog_digest: self.0.digest.clone(),
             pricing_rule_id: rule.rule_id.clone(),
             selector: rule.selector.clone(),
-            components: if legacy { Vec::new() } else { frozen },
-            exact_estimate_numerator: if legacy {
-                String::new()
-            } else {
-                exact.n.to_string()
-            },
-            exact_estimate_denominator: if legacy {
-                String::new()
-            } else {
-                exact.d.to_string()
-            },
+            components: frozen,
+            exact_estimate_numerator: exact.n.to_string(),
+            exact_estimate_denominator: exact.d.to_string(),
             estimated_amount_minor,
             currency: rule.currency.clone(),
-            unit: legacy_component.as_ref().filter(|_| legacy).map(|c| c.unit),
-            unit_amount_minor: legacy_component
-                .as_ref()
-                .filter(|_| legacy)
-                .map(|c| c.rate_numerator_minor),
-            quantity: legacy_component.filter(|_| legacy).map(|c| c.quantity),
         })
     }
 
@@ -521,7 +476,6 @@ pub fn validate_image_input(request: &NormalizedRequest, input: &serde_json::Val
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PricingSnapshot {
-    #[serde(default = "legacy_snapshot_version")]
     pub schema_version: u32,
     pub provider: String,
     pub model: String,
@@ -530,24 +484,11 @@ pub struct PricingSnapshot {
     pub pricing_rule_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<PricingSelector>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub components: Vec<FrozenPriceComponent>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub exact_estimate_numerator: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub exact_estimate_denominator: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit: Option<PricingUnit>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit_amount_minor: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quantity: Option<i64>,
     pub estimated_amount_minor: i64,
     pub currency: String,
-}
-
-const fn legacy_snapshot_version() -> u32 {
-    1
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -637,32 +578,25 @@ fn gcd(mut a: i128, mut b: i128) -> i128 {
 
 impl PricingSnapshot {
     pub fn is_image_only(&self) -> bool {
-        match self.schema_version {
-            1 => self.unit == Some(PricingUnit::Image),
-            2 => self.components.len() == 1 && self.components[0].unit == PricingUnit::Image,
-            _ => false,
-        }
+        self.schema_version == 2
+            && self.components.len() == 1
+            && self.components[0].unit == PricingUnit::Image
     }
     pub fn has_unit(&self, unit: PricingUnit) -> bool {
-        self.unit == Some(unit)
-            || self
-                .components
-                .iter()
-                .any(|component| component.unit == unit)
+        self.components
+            .iter()
+            .any(|component| component.unit == unit)
     }
     pub fn estimated_quantity(&self, unit: PricingUnit) -> Option<i64> {
-        if self.unit == Some(unit) {
-            self.quantity
-        } else {
-            self.components
-                .iter()
-                .find(|component| component.unit == unit)
-                .map(|component| component.quantity)
-        }
+        self.components
+            .iter()
+            .find(|component| component.unit == unit)
+            .map(|component| component.quantity)
     }
     pub fn validate_integrity(&self) -> Result<()> {
         let digest = self.catalog_digest.strip_prefix("sha256:");
-        if self.provider.trim().is_empty()
+        if self.schema_version != 2
+            || self.provider.trim().is_empty()
             || self.model.trim().is_empty()
             || self.catalog_version.trim().is_empty()
             || self.pricing_rule_id.trim().is_empty()
@@ -731,60 +665,33 @@ impl PricingSnapshot {
     }
 
     fn effective_components(&self) -> Result<Vec<FrozenPriceComponent>> {
-        if self.schema_version == 1 {
-            let (unit, rate, quantity) = self
-                .unit
-                .zip(self.unit_amount_minor)
-                .zip(self.quantity)
-                .map(|((a, b), c)| (a, b, c))
-                .ok_or(ContractError::IndeterminableCost)?;
-            if rate < 0 || quantity <= 0 || !self.components.is_empty() {
-                return Err(ContractError::IndeterminableCost);
-            }
-            Ok(vec![FrozenPriceComponent {
-                unit,
-                rate_numerator_minor: rate,
-                rate_denominator: 1,
-                quantity,
-            }])
-        } else if self.schema_version == 2
-            && self.unit.is_none()
-            && self.unit_amount_minor.is_none()
-            && self.quantity.is_none()
-            && !self.components.is_empty()
-        {
+        if self.schema_version == 2 && !self.components.is_empty() {
             Ok(self.components.clone())
         } else {
             Err(ContractError::IndeterminableCost)
         }
     }
     fn exact_estimate(&self) -> Result<Rational> {
-        if self.schema_version == 1 {
-            let c = self.effective_components()?.remove(0);
-            Rational::new(c.rate_numerator_minor, c.rate_denominator)?.mul(c.quantity)
-        } else {
-            let n = self
-                .exact_estimate_numerator
-                .parse::<i128>()
-                .map_err(|_| ContractError::IndeterminableCost)?;
-            let d = self
-                .exact_estimate_denominator
-                .parse::<i128>()
-                .map_err(|_| ContractError::IndeterminableCost)?;
-            if n < 0 || d <= 0 {
-                return Err(ContractError::IndeterminableCost);
-            }
-            let mut recomputed = Rational::zero();
-            for c in self.effective_components()? {
-                recomputed = recomputed.add(
-                    Rational::new(c.rate_numerator_minor, c.rate_denominator)?.mul(c.quantity)?,
-                )?;
-            }
-            if recomputed != (Rational { n, d }) {
-                return Err(ContractError::IndeterminableCost);
-            }
-            Ok(recomputed)
+        let n = self
+            .exact_estimate_numerator
+            .parse::<i128>()
+            .map_err(|_| ContractError::IndeterminableCost)?;
+        let d = self
+            .exact_estimate_denominator
+            .parse::<i128>()
+            .map_err(|_| ContractError::IndeterminableCost)?;
+        if n < 0 || d <= 0 {
+            return Err(ContractError::IndeterminableCost);
         }
+        let mut recomputed = Rational::zero();
+        for c in self.effective_components()? {
+            recomputed = recomputed
+                .add(Rational::new(c.rate_numerator_minor, c.rate_denominator)?.mul(c.quantity)?)?;
+        }
+        if recomputed != (Rational { n, d }) {
+            return Err(ContractError::IndeterminableCost);
+        }
+        Ok(recomputed)
     }
 }
 
@@ -948,7 +855,7 @@ pub fn enforce_cost(
 #[cfg(test)]
 mod tests {
     use super::*;
-    const CATALOG: &str = r#"{"schema_version":1,"catalog_version":"2026-08-05","rules":[{"rule_id":"image-standard","provider":"vendor","model":"image-v1","currency":"usd","unit":"image","unit_amount_minor":125}]}"#;
+    const CATALOG: &str = r#"{"schema_version":2,"catalog_version":"2026-08-05","rules":[{"rule_id":"image-standard","provider":"vendor","model":"image-v1","currency":"usd","components":[{"unit":"image","rate_numerator_minor":125,"rate_denominator":1}]}]}"#;
     fn request() -> NormalizedRequest {
         NormalizedRequest {
             provider: "vendor".into(),
@@ -970,7 +877,7 @@ mod tests {
         );
         assert_eq!(s.estimated_amount_minor, 250);
 
-        let spaced = r#"{"schema_version":1,"catalog_version":"v1","rules":[{"rule_id":" z","provider":" p","model":" z","currency":" usd ","unit":"image","unit_amount_minor":1},{"rule_id":"a","provider":"p","model":"a","currency":"USD","unit":"image","unit_amount_minor":2}]}"#;
+        let spaced = r#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":" z","provider":" p","model":" z","currency":" usd ","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"a","provider":"p","model":"a","currency":"USD","components":[{"unit":"image","rate_numerator_minor":2,"rate_denominator":1}]}]}"#;
         let normalized = spaced
             .replace("\" z\"", "\"z\"")
             .replace("\" p\"", "\"p\"")
@@ -983,17 +890,14 @@ mod tests {
     fn rejects_duplicate_ambiguous_malformed_and_currency() {
         assert!(PricingCatalog::from_json(b"{}").is_err());
         assert!(PricingCatalog::from_json(CATALOG.replace("usd", "EUR").as_bytes()).is_err());
-        let duplicate=CATALOG.replace("]}", ",{\"rule_id\":\"other\",\"provider\":\"vendor\",\"model\":\"image-v1\",\"currency\":\"USD\",\"unit\":\"image\",\"unit_amount_minor\":1}]}");
+        let duplicate = br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"image-standard","provider":"vendor","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":125,"rate_denominator":1}]},{"rule_id":"other","provider":"vendor","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]}]}"#;
         assert_eq!(
-            PricingCatalog::from_json(duplicate.as_bytes()).unwrap_err(),
+            PricingCatalog::from_json(duplicate).unwrap_err(),
             ContractError::AmbiguousRule
         );
-        let duplicate_id = CATALOG.replace(
-            "]}",
-            ",{\"rule_id\":\"image-standard\",\"provider\":\"other\",\"model\":\"other\",\"currency\":\"USD\",\"unit\":\"image\",\"unit_amount_minor\":1}]}"
-        );
+        let duplicate_id = br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"image-standard","provider":"vendor","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":125,"rate_denominator":1}]},{"rule_id":"image-standard","provider":"other","model":"other","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]}]}"#;
         assert!(
-            matches!(PricingCatalog::from_json(duplicate_id.as_bytes()), Err(ContractError::Malformed(message)) if message.contains("duplicate rule_id"))
+            matches!(PricingCatalog::from_json(duplicate_id), Err(ContractError::Malformed(message)) if message.contains("duplicate rule_id"))
         );
     }
     #[test]
@@ -1050,6 +954,30 @@ mod tests {
             flat.snapshot(&request),
             Err(ContractError::UnsupportedTarget)
         );
+    }
+
+    #[test]
+    fn pricing_v1_catalogs_and_snapshots_are_rejected() {
+        let legacy_catalog = br#"{"schema_version":1,"catalog_version":"v1","rules":[{"rule_id":"image","provider":"vendor","model":"image-v1","currency":"USD","unit":"image","unit_amount_minor":125}]}"#;
+        assert!(matches!(
+            PricingCatalog::from_json(legacy_catalog),
+            Err(ContractError::Malformed(_))
+        ));
+
+        let legacy_snapshot = serde_json::json!({
+            "schema_version": 1,
+            "provider": "vendor",
+            "model": "image-v1",
+            "catalog_version": "v1",
+            "catalog_digest": format!("sha256:{}", "a".repeat(64)),
+            "pricing_rule_id": "image",
+            "unit": "image",
+            "unit_amount_minor": 125,
+            "quantity": 1,
+            "estimated_amount_minor": 125,
+            "currency": "USD"
+        });
+        assert!(serde_json::from_value::<PricingSnapshot>(legacy_snapshot).is_err());
     }
 
     #[test]

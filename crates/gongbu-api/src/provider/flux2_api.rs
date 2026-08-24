@@ -1272,7 +1272,7 @@ mod tests {
                 Some("opaque-key"),
             )
             .unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"fixture-v1","rules":[{"rule_id":"flux2-pro","provider":"flux","model":"flux-2-pro","currency":"USD","unit":"image","unit_amount_minor":45}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"fixture-v2","rules":[{"rule_id":"flux2-pro","provider":"flux","model":"flux-2-pro","currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]}]}"#).unwrap();
         let snapshot = pricing.snapshot(&request()).unwrap();
         assert_eq!(snapshot.estimated_amount_minor, 45);
         assert_eq!(
@@ -1305,7 +1305,7 @@ mod tests {
                 provider_config_version: "pcv".into(),
                 provider_config_digest: format!("sha256:{}", "a".repeat(64)),
                 pricing_snapshot: serde_json::to_value(snapshot).unwrap(),
-                pricing_schema_version: 1,
+                pricing_schema_version: 2,
                 execution_scope: None,
                 created_at: "now".into(),
             })

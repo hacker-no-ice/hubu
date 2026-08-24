@@ -1152,15 +1152,18 @@ mod tests {
         targets.validate().unwrap();
         let pricing = PricingCatalog::from_json(
             br#"{
-                "schema_version":1,
-                "catalog_version":"prices-v1",
+                "schema_version":2,
+                "catalog_version":"prices-v2",
                 "rules":[{
                     "rule_id":"example-image",
                     "provider":"example",
                     "model":"image-v1",
                     "currency":"USD",
-                    "unit":"image",
-                    "unit_amount_minor":100
+                    "components":[{
+                        "unit":"image",
+                        "rate_numerator_minor":100,
+                        "rate_denominator":1
+                    }]
                 }]
             }"#,
         )
@@ -1666,7 +1669,7 @@ mod tests {
         assert_eq!(call_create(&fixture, &fabricated_version).status, 400);
 
         let mut fabricated_snapshot = request("operation-3");
-        fabricated_snapshot["pricing_snapshot"] = json!({"unit_amount_minor": 0});
+        fabricated_snapshot["pricing_snapshot"] = json!({"components": []});
         assert_eq!(call_create(&fixture, &fabricated_snapshot).status, 400);
     }
 
@@ -1719,15 +1722,18 @@ mod tests {
         .unwrap();
         let changed_pricing = PricingCatalog::from_json(
             br#"{
-                "schema_version":1,
+                "schema_version":2,
                 "catalog_version":"prices-v2",
                 "rules":[{
                     "rule_id":"example-image-v2",
                     "provider":"example",
                     "model":"image-v1",
                     "currency":"USD",
-                    "unit":"image",
-                    "unit_amount_minor":200
+                    "components":[{
+                        "unit":"image",
+                        "rate_numerator_minor":200,
+                        "rate_denominator":1
+                    }]
                 }]
             }"#,
         )
@@ -1767,10 +1773,10 @@ mod tests {
         .unwrap();
         let changed_pricing = PricingCatalog::from_json(
             br#"{
-                "schema_version":1,"catalog_version":"prices-v2",
+                "schema_version":2,"catalog_version":"prices-v2",
                 "rules":[{"rule_id":"example-image-v2","provider":"example",
-                "model":"image-v1","currency":"USD","unit":"image",
-                "unit_amount_minor":200}]
+                "model":"image-v1","currency":"USD","components":[{
+                "unit":"image","rate_numerator_minor":200,"rate_denominator":1}]}]
             }"#,
         )
         .unwrap();
@@ -1823,10 +1829,10 @@ mod tests {
         .unwrap();
         let pricing = PricingCatalog::from_json(
             br#"{
-                "schema_version":1,"catalog_version":"prices-v1",
+                "schema_version":2,"catalog_version":"prices-v2",
                 "rules":[{"rule_id":"example-text","provider":"example",
-                "model":"text-v1","currency":"USD","unit":"input_token",
-                "unit_amount_minor":1}]
+                "model":"text-v1","currency":"USD","components":[{
+                "unit":"input_token","rate_numerator_minor":1,"rate_denominator":1}]}]
             }"#,
         )
         .unwrap();

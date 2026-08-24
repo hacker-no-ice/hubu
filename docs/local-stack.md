@@ -65,6 +65,26 @@ PROFILE_ROOT/
 - `generated/active-manifest.json` is the atomic pointer to the selected
   generation. Generated content is never an editing surface.
 
+Live profiles use pricing catalog schema v2 exclusively. Each pricing rule in
+`providers.toml` supplies exact rational components and may qualify an image
+price with a normalized `1k`, `2k`, or `4k` selector:
+
+```toml
+[[pricing_rules]]
+rule_id = "gemini-image-1k"
+provider = "google"
+model = "gemini-image"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [
+  { unit = "image", rate_numerator_minor = 1, rate_denominator = 1 },
+]
+```
+
+Define one selector-qualified rule for every enabled image size. Managed-stack
+production validation does not accept or translate the retired flat `unit` and
+`unit_amount_minor` pricing shape.
+
 The default profile is `hubu/stacks/default` under the host platform's user
 configuration directory. `HUBU_HOME` overrides Hubu's configuration root. An
 operator may instead provide an absolute profile path:

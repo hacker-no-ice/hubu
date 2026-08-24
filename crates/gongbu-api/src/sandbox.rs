@@ -1722,15 +1722,18 @@ fn mock_provider_catalog() -> Result<ValidatedProviderCatalog, SandboxError> {
     .map_err(|error| SandboxError::Invalid(format!("mock provider targets: {error}")))?;
     let pricing = PricingCatalog::from_json(
         br#"{
-          "schema_version":1,
-          "catalog_version":"sandbox-mock-v1",
+          "schema_version":2,
+          "catalog_version":"sandbox-mock-v2",
           "rules":[{
             "rule_id":"sandbox-image",
             "provider":"sandbox",
             "model":"deterministic-image-v1",
             "currency":"USD",
-            "unit":"image",
-            "unit_amount_minor":1
+            "components":[{
+              "unit":"image",
+              "rate_numerator_minor":1,
+              "rate_denominator":1
+            }]
           }]
         }"#,
     )
@@ -1819,8 +1822,8 @@ mod tests {
             provider: "example".into(), adapter: "fixture".into(), model: "image-v1".into(),
             provider_config_version: "fixture-v1".into(),
             provider_config_digest: format!("sha256:{}", "a".repeat(64)),
-            pricing_snapshot: json!({"provider":"example","model":"image-v1","catalog_version":"v1","catalog_digest":format!("sha256:{}", "b".repeat(64)),"pricing_rule_id":"image","unit":"image","unit_amount_minor":100,"quantity":1,"estimated_amount_minor":100,"currency":"USD"}),
-            pricing_schema_version: 1, execution_scope: None, created_at: "2026-08-10T00:00:00Z".into(),
+            pricing_snapshot: json!({"schema_version":2,"provider":"example","model":"image-v1","catalog_version":"v2","catalog_digest":format!("sha256:{}", "b".repeat(64)),"pricing_rule_id":"image","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"100","exact_estimate_denominator":"1","estimated_amount_minor":100,"currency":"USD"}),
+            pricing_schema_version: 2, execution_scope: None, created_at: "2026-08-10T00:00:00Z".into(),
         }).unwrap()
     }
 
@@ -1979,15 +1982,18 @@ mod tests {
         fs::write(
             &pricing,
             br#"{
-          "schema_version":1,
-          "catalog_version":"sandbox-prices-v1",
+          "schema_version":2,
+          "catalog_version":"sandbox-prices-v2",
           "rules":[{
             "rule_id":"gemini-test-image",
             "provider":"google",
             "model":"gemini-test",
             "currency":"USD",
-            "unit":"image",
-            "unit_amount_minor":10
+            "components":[{
+              "unit":"image",
+              "rate_numerator_minor":10,
+              "rate_denominator":1
+            }]
           }]
         }"#,
         )

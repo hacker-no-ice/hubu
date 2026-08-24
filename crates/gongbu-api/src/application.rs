@@ -881,8 +881,8 @@ mod tests {
                 .unwrap()
                 .digest()
                 .to_owned(),
-            pricing_snapshot: json!({"provider":"google","model":"gemini-image-v1","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-image","unit":"image","unit_amount_minor":25,"quantity":1,"estimated_amount_minor":25,"currency":"USD"}),
-            pricing_schema_version: 1,
+            pricing_snapshot: json!({"schema_version":2,"provider":"google","model":"gemini-image-v1","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-image","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"25","exact_estimate_denominator":"1","estimated_amount_minor":25,"currency":"USD"}),
+            pricing_schema_version: 2,
             execution_scope: None,
             created_at: "now".into(),
         };
@@ -923,7 +923,7 @@ mod tests {
                 fixture_calls.clone(),
             )?))
         });
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"prices-v1","rules":[{"rule_id":"gemini-image","provider":"google","model":"gemini-image-v1","currency":"USD","unit":"image","unit_amount_minor":25}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"prices-v2","rules":[{"rule_id":"gemini-image","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]}]}"#).unwrap();
         let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
         let runner = PersistedExecutionRunner::new(
             repository.clone(),
@@ -1081,7 +1081,7 @@ mod tests {
         targets.validate().unwrap();
         let repository = Repository::in_memory().unwrap();
         let execution = repository.create_execution(&CreateExecutionParams {
-            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"token-ref".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:30, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"image_generation/ideogram/ideogram_image/ideogram-v3".into(), config_version:"ideogram-pcv-1".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v1","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","unit":"image","unit_amount_minor":30,"quantity":1,"estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:1, execution_scope:None, created_at:"now".into()
+            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"token-ref".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:30, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"image_generation/ideogram/ideogram_image/ideogram-v3".into(), config_version:"ideogram-pcv-1".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"schema_version":2,"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"30","exact_estimate_denominator":"1","estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:2, execution_scope:None, created_at:"now".into()
         }).unwrap();
         let root = tempdir().unwrap();
         let artifacts = ArtifactService::new(
@@ -1099,7 +1099,7 @@ mod tests {
                 fixture_transport.clone(),
             )?))
         });
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"prices-v1","rules":[{"rule_id":"ideogram-image","provider":"ideogram","model":"ideogram-v3","currency":"USD","unit":"image","unit_amount_minor":30}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"prices-v2","rules":[{"rule_id":"ideogram-image","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]}]}"#).unwrap();
         let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
         let runner = PersistedExecutionRunner::new(
             repository.clone(),
@@ -1276,7 +1276,7 @@ mod tests {
                 {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://flux.example","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["flux.example"]}}}
             ]
         })).unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":1,"catalog_version":"mixed-v1","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","unit":"image","unit_amount_minor":25},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","unit":"image","unit_amount_minor":30},{"rule_id":"f","provider":"flux","model":"flux-2-pro","currency":"USD","unit":"image","unit_amount_minor":45}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f","provider":"flux","model":"flux-2-pro","currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]}]}"#).unwrap();
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
             .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
