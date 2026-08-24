@@ -457,6 +457,7 @@ where
     };
     let completion = worker.take_completion();
     let supervised_ready = ready.clone();
+    let dependency_ready = ready.clone();
     let supervised_shutdown = async move {
         let reason = wait_for_shutdown(
             shutdown,
@@ -468,6 +469,7 @@ where
                 dependencies.dependency_check_interval,
                 dependencies.dependency_failure_grace,
                 dependencies.dependency_checker,
+                dependency_ready,
             ),
             supervised_ready,
         )
@@ -513,13 +515,28 @@ async fn monitor_temporal(
     interval: Duration,
     failure_grace: Duration,
     dependency_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ready: Arc<AtomicBool>,
 ) -> LifecycleReason {
     let mut temporal_health = DependencyHealthTracker::default();
     let mut hubu_health = DependencyHealthTracker::default();
+    let probe_interval = dependency_probe_interval(interval, failure_grace);
     loop {
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(probe_interval).await;
         let (temporal_sample, grpc_code) =
             temporal_probe_sample(worker_is_polling(&client, &namespace, &task_queue).await);
+        let temporal_shutdown = record_dependency_sample(
+            &mut temporal_health,
+            DependencyName::Temporal,
+            temporal_sample,
+            grpc_code.as_deref(),
+            Instant::now(),
+            failure_grace,
+        );
+        update_dependency_readiness(&ready, &temporal_health, &hubu_health);
+        if temporal_shutdown {
+            return LifecycleReason::DependencyHealthShutdown;
+        }
+
         let dependencies_ready = match dependency_checker.as_ref() {
             Some(checker) => {
                 let checker = checker.clone();
@@ -529,15 +546,6 @@ async fn monitor_temporal(
             }
             None => true,
         };
-        let now = Instant::now();
-        let temporal_shutdown = record_dependency_sample(
-            &mut temporal_health,
-            DependencyName::Temporal,
-            temporal_sample,
-            grpc_code.as_deref(),
-            now,
-            failure_grace,
-        );
         let hubu_shutdown = record_dependency_sample(
             &mut hubu_health,
             DependencyName::Hubu,
@@ -547,13 +555,18 @@ async fn monitor_temporal(
                 DependencySample::Unhealthy
             },
             None,
-            now,
+            Instant::now(),
             failure_grace,
         );
-        if temporal_shutdown || hubu_shutdown {
+        update_dependency_readiness(&ready, &temporal_health, &hubu_health);
+        if hubu_shutdown {
             return LifecycleReason::DependencyHealthShutdown;
         }
     }
+}
+
+fn dependency_probe_interval(interval: Duration, failure_grace: Duration) -> Duration {
+    interval.min(failure_grace)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -591,6 +604,10 @@ struct DependencyHealthTracker {
 }
 
 impl DependencyHealthTracker {
+    fn is_healthy(&self) -> bool {
+        self.failure_started_at.is_none()
+    }
+
     fn observe(
         &mut self,
         sample: DependencySample,
@@ -621,6 +638,17 @@ impl DependencyHealthTracker {
             }
         }
     }
+}
+
+fn update_dependency_readiness(
+    ready: &AtomicBool,
+    temporal_health: &DependencyHealthTracker,
+    hubu_health: &DependencyHealthTracker,
+) {
+    ready.store(
+        temporal_health.is_healthy() && hubu_health.is_healthy(),
+        Ordering::SeqCst,
+    );
 }
 
 fn record_dependency_sample(
@@ -937,6 +965,40 @@ mod tests {
             ),
             DependencyHealthObservation::Shutdown { failures: 3 }
         );
+    }
+
+    #[test]
+    fn probe_interval_never_exceeds_failure_grace() {
+        assert_eq!(
+            dependency_probe_interval(Duration::from_secs(300), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            dependency_probe_interval(Duration::from_secs(5), Duration::from_secs(30)),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn dependency_readiness_withdraws_immediately_and_recovers_collectively() {
+        let ready = AtomicBool::new(true);
+        let started = Instant::now();
+        let grace = Duration::from_secs(30);
+        let mut temporal_health = DependencyHealthTracker::default();
+        let mut hubu_health = DependencyHealthTracker::default();
+
+        temporal_health.observe(DependencySample::Indeterminate, started, grace);
+        update_dependency_readiness(&ready, &temporal_health, &hubu_health);
+        assert!(!ready.load(Ordering::SeqCst));
+
+        hubu_health.observe(DependencySample::Unhealthy, started, grace);
+        temporal_health.observe(DependencySample::Healthy, started, grace);
+        update_dependency_readiness(&ready, &temporal_health, &hubu_health);
+        assert!(!ready.load(Ordering::SeqCst));
+
+        hubu_health.observe(DependencySample::Healthy, started, grace);
+        update_dependency_readiness(&ready, &temporal_health, &hubu_health);
+        assert!(ready.load(Ordering::SeqCst));
     }
 
     #[test]

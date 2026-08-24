@@ -288,6 +288,20 @@ async fn run() {
     assert_eq!(persisted_artifact, artifact_bytes);
 
     dependencies_healthy.store(false, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if ready_status(&client, &base_url).await != StatusCode::OK {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("dependency degradation must withdraw readiness before shutdown");
+    assert!(
+        !server.is_finished(),
+        "the recovery grace must keep the server alive after withdrawing readiness"
+    );
     tokio::time::timeout(Duration::from_secs(15), server)
         .await
         .expect("dependency loss must stop the persistent server")
