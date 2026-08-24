@@ -1,8 +1,9 @@
 # Unified MCP surface
 
 `hubu-unified-mcp` is Hubu's only supported agent-facing MCP server. It is a
-thin stdio adapter over the separate Hubu and Gongbu HTTP APIs; it does not own
-domain state or merge the two backends.
+stdio adapter over the separate Hubu and Gongbu HTTP APIs. It owns only local
+harness-operation identity state; it does not own either backend's domain state
+or merge the backends.
 
 The implemented public contract is `hubu-gongbu-mcp-v1`. The server reports
 `serverInfo.name = "hubu-unified-mcp"` and implements MCP protocol version
@@ -14,7 +15,8 @@ The implemented public contract is `hubu-gongbu-mcp-v1`. The server reports
   authorizations, claims, reconciliation, payments, and ledger state.
 - Gongbu owns provider configuration and credentials, executions, Temporal
   state, provider calls and retries, pricing, artifacts, and recovery.
-- The router owns discovery and static name-to-backend routing only.
+- The router owns discovery, static name-to-backend routing, and its local
+  normalized harness-operation registry.
 
 The processes retain separate endpoints, bearer credentials, databases,
 configuration, lifecycle, readiness, and failure domains. The router never
@@ -192,6 +194,9 @@ starts it from client configuration.
 
 Manual MCP clients configure these inputs for the router:
 
+- `HUBU_UNIFIED_OPERATION_STATE_PATH`, an absolute path to the router-owned
+  SQLite registry. Managed setup always renders it. A manual client may omit
+  it, but new billable Hubu operations are then unavailable.
 - `HUBU_UNIFIED_HUBU_ENDPOINT`
 - `HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
   `HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`
@@ -229,13 +234,45 @@ connect it to a real payment rail without a stronger authentication design.
 ## Trusted invocation metadata
 
 Spend tools expose business arguments such as account, amount, scope, workload,
-and reason. `operation_key` and optional `task_id` travel outside model-authored
-arguments under `_meta["hubu.dev/platform-invocation"]`.
+and reason. `operation_key` and optional `task_id` remain outside
+model-authored arguments. The router accepts exactly one supported trusted
+identity source per spend call:
 
-The router validates and injects those fields, rejects them when supplied in
-ordinary arguments, and forwards an explicit null task ID when none exists.
-The client platform must reuse the same invocation metadata for retries. The
-router does not allocate operation keys.
+- Codex `_meta.callId`
+- Claude Code `_meta["claudecode/toolUseId"]`
+- `_meta["hubu.dev/platform-invocation"]` containing only `platform`,
+  `invocation_id`, optional `task_id`, and optional diagnostic
+  `installation_id`
+
+The controlled envelope does not accept `operation_key`. Its optional
+`installation_id` is a bounded typed diagnostic alias only: it neither selects
+the registry installation nor participates in operation-key authority or the
+core deduplication tuple. On first successful registry startup the router
+persists its own stable local installation identity. For each call it validates bounded identifiers,
+canonically hashes the tool name and model-authored arguments, and atomically
+resolves or allocates a private `hubu:operation:v1:*` key by platform, local
+installation, and harness call ID. Exact redelivery reuses the key. Reusing the
+same identity with different arguments or trusted aliases fails before backend
+access, while a different call ID creates a distinct operation.
+
+Only common identity columns and the typed Codex, Claude Code, and controlled
+envelope aliases are stored; arbitrary `_meta` content is not persisted. The
+router injects the private key and an explicit null task ID when none exists.
+The registry is adapter state and remains separate from both the Hubu and
+Gongbu databases, credentials, provider execution, artifacts, and failure
+domains. HUB-125 owns broader spend workflow routing changes.
+
+The v1 normalizer fails closed when more than one primary identity source is
+present in the same call. It does not apply metadata precedence or correlate
+aliases across harnesses. A future contract revision may add explicit alias
+correlation without changing v1's fail-closed behavior.
+
+Registry availability is independent of both backend capabilities. Missing or
+broken registry state does not stop unified MCP startup and does not hide Hubu
+reads, Gongbu reads, status, or artifact tools. It hides new Hubu billable tools
+from discovery and rejects direct billable calls before backend access. The
+capability snapshot reports `operation_registry.state`, its stable reason code,
+and `billable_operations_available` for diagnosis.
 
 The router implementation and ownership map live in
 [`crates/hubu-unified-mcp`](../crates/hubu-unified-mcp).

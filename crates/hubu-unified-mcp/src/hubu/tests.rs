@@ -11,8 +11,16 @@ use serde_json::{json, Value};
 use super::routing::{route_tool_call_v1, HubuRequestCapabilityV1};
 use crate::{
     capability::{BackendReport, BackendState, CapabilitySnapshot, ContractVersions},
+    operation_registry::OperationResolution,
     *,
 };
+
+fn resolved_operation() -> OperationResolution {
+    OperationResolution {
+        operation_key: "hubu:operation:v1:test:fixed".into(),
+        task_id: Some("linear:HUB-124".into()),
+    }
+}
 
 fn server_with_backends(
     hubu_endpoint: &str,
@@ -57,6 +65,9 @@ fn server_with_backends(
         })),
         probe_schedule_waker: Arc::new(Mutex::new(None)),
         hubu_routing,
+        operation_registry: Arc::new(OperationRegistryCapability::Available(Mutex::new(
+            crate::operation_registry::OperationRegistry::open_in_memory().unwrap(),
+        ))),
     }
 }
 
@@ -473,18 +484,11 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
         let params = json!({
             "name": name,
             "arguments": arguments,
-            "_meta": {
-                "hubu.dev/platform-invocation": {
-                    "platform":"codex",
-                    "installation_id":"installation-1",
-                    "invocation_id":"invocation-1",
-                    "operation_key":"operation-1",
-                    "task_id":"linear:HUB-91"
-                }
-            }
         });
         let mut captured = None;
-        let result = route_tool_call_v1(params, true, |request| {
+        let operation =
+            matches!(name, "hubu_submit_spend" | "hubu_authorize_spend").then(resolved_operation);
+        let result = route_tool_call_v1(params, true, operation, |request| {
             captured = Some(request);
             Ok(json!({"status":"ok"}))
         })
@@ -500,9 +504,9 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
         if matches!(name, "hubu_submit_spend" | "hubu_authorize_spend") {
             assert_eq!(
                 request.body.as_ref().unwrap()["operation_key"],
-                "operation-1"
+                "hubu:operation:v1:test:fixed"
             );
-            assert_eq!(request.body.as_ref().unwrap()["task_id"], "linear:HUB-91");
+            assert_eq!(request.body.as_ref().unwrap()["task_id"], "linear:HUB-124");
         }
         if name == "hubu_apply_policy" {
             assert_eq!(request.body.as_ref().unwrap()["source"], "mcp");
@@ -514,6 +518,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
     let local = route_tool_call_v1(
         json!({"name":"hubu_client_approval_profile","arguments":{}}),
         true,
+        None,
         |_| {
             called = true;
             Ok(json!({}))
@@ -561,6 +566,7 @@ fn approved_query_variants_match_owned_routing_contract() {
         route_tool_call_v1(
             json!({"name":name,"arguments":arguments}),
             false,
+            None,
             |request| {
                 captured = Some(request);
                 Ok(json!({}))
@@ -576,6 +582,7 @@ fn approved_query_variants_match_owned_routing_contract() {
             "arguments":{"policy_id":"policy-1","agent_id":"agent-1"}
         }),
         false,
+        None,
         |_| unreachable!(),
     )
     .unwrap_err();
@@ -589,11 +596,9 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
     let server = server_with_backends(&endpoint, None, false, None);
     let arguments = json!({"account_id":"account-1","amount_cents":25,"reason":"review"});
     let meta = json!({"hubu.dev/platform-invocation":{
-        "platform":"codex",
-        "installation_id":"installation-1",
+        "platform":"codex-controlled",
         "invocation_id":"invocation-1",
-        "operation_key":"operation-1",
-        "task_id":"linear:HUB-91"
+        "task_id":"linear:HUB-124"
     }});
     let owned_routing_result = route_tool_call_v1(
         json!({
@@ -602,6 +607,7 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
             "_meta":meta.clone()
         }),
         false,
+        Some(resolved_operation()),
         |_| Ok(json!({"decision":"needs_approval","payment":null})),
     )
     .unwrap();
@@ -613,8 +619,11 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
     assert!(raw.contains("authorization: Bearer hubu-token-canary"));
     assert!(!raw.contains("gongbu-token-canary"));
     let body: Value = serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-    assert_eq!(body["operation_key"], "operation-1");
-    assert_eq!(body["task_id"], "linear:HUB-91");
+    assert!(body["operation_key"]
+        .as_str()
+        .unwrap()
+        .starts_with("hubu:operation:v1:codex-controlled:"));
+    assert_eq!(body["task_id"], "linear:HUB-124");
     assert!(body.get("_meta").is_none());
     assert!(body.get("platform").is_none());
     assert_eq!(response["result"], owned_routing_result);
@@ -626,6 +635,75 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
         response["result"]["content"][0]["text"],
         serde_json::to_string_pretty(&response["result"]["structuredContent"]).unwrap()
     );
+}
+
+#[test]
+fn spend_identity_collision_fails_before_a_second_backend_request() {
+    let (endpoint, request, handle) = one_shot_http_server(200, r#"{"decision":"allow"}"#);
+    let server = server_with_backends(&endpoint, None, false, None);
+    let meta = Some(json!({"callId": "codex-call-124"}));
+    let first = tool_call(
+        &server,
+        "hubu_submit_spend",
+        json!({"account_id":"account-1","amount_cents":25,"reason":"first"}),
+        meta.clone(),
+    );
+    assert!(first.get("error").is_none());
+    request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+
+    let collision = tool_call(
+        &server,
+        "hubu_submit_spend",
+        json!({"account_id":"account-1","amount_cents":30,"reason":"changed"}),
+        meta,
+    );
+    assert_eq!(collision["error"]["code"], -32000);
+    assert!(collision["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("refusing backend access"));
+}
+
+#[test]
+fn unavailable_registry_hides_and_rejects_only_billable_hubu_tools() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let mut server = server_with_backends(&endpoint, Some(&endpoint), false, None);
+    server.operation_registry = Arc::new(OperationRegistryCapability::Unavailable {
+        reason_code: "configuration_missing",
+    });
+
+    let names = server
+        .list_tools_for_snapshot()
+        .into_iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"hubu_health".to_owned()));
+    assert!(names.contains(&"gongbu_get_artifact".to_owned()));
+    assert!(!names.contains(&"hubu_authorize_spend".to_owned()));
+    assert!(!names.contains(&"hubu_submit_spend".to_owned()));
+    let capability = server.capabilities();
+    assert_eq!(
+        capability["operation_registry"]["billable_operations_available"],
+        false
+    );
+
+    let rejected = tool_call(
+        &server,
+        "hubu_submit_spend",
+        json!({"account_id":"account-1","amount_cents":25,"reason":"blocked"}),
+        Some(json!({"callId":"call-without-registry"})),
+    );
+    assert!(rejected["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("operation registry"));
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock
+    ));
 }
 
 #[test]

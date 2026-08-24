@@ -155,10 +155,11 @@ a retry loop, or ask the model to invent or remember it. A reusable skill can
 teach the protocol, but enforcement belongs in the platform adapter or SDK and
 Hubu's database constraints.
 
-The current Hubu MCP transport accepts this key as an explicit input but does
-not yet derive it from trusted platform invocation metadata. That adapter is a
-separate integration layer; this contract defines the server-side invariant it
-must satisfy.
+The unified Hubu MCP transport derives this key from supported trusted harness
+call metadata, persists the normalized identity in its own SQLite registry, and
+rejects identity collisions before backend access. Direct HTTP and diagnostic
+CLI clients still supply an explicit key; this contract defines the server-side
+invariant every adapter must satisfy.
 
 Hubu rejects unknown profiles and non-positive durations during startup or
 authorization. The effective timing configuration is published in executor

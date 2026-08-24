@@ -39,6 +39,8 @@ const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../policies/starter-po
 const CODEX_HOME_ENV: &str = "CODEX_HOME";
 const HUBU_HOME_ENV: &str = "HUBU_HOME";
 const HUBU_UNIFIED_MCP_SERVER_ENV: &str = "HUBU_UNIFIED_MCP_SERVER";
+const HUBU_UNIFIED_OPERATION_STATE_PATH_ENV: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
+const DEFAULT_UNIFIED_OPERATION_STATE_FILE: &str = "hubu-unified-operations.sqlite3";
 #[cfg(test)]
 const TEST_APPROVAL_TOKEN: &str = "test-human-approval-token";
 
@@ -128,6 +130,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         take_value(&mut args, "--approval-token-file").map(PathBuf::from);
     let manual_reconciliation_token_file =
         take_value(&mut args, "--reconciliation-token-file").map(PathBuf::from);
+    let manual_operation_state_path = take_value(&mut args, "--mcp-state-file").map(PathBuf::from);
     if stack_profile.is_some()
         && (manual_mcp_server.is_some()
             || manual_gongbu_endpoint.is_some()
@@ -135,6 +138,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
             || manual_token_file.is_some()
             || manual_approval_token_file.is_some()
             || manual_reconciliation_token_file.is_some()
+            || manual_operation_state_path.is_some()
             || explicit_base_url)
     {
         bail!(
@@ -176,6 +180,11 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         .map(|value| value.reconciliation_token_file.clone())
         .or(manual_reconciliation_token_file)
         .unwrap_or_else(|| default_codex_reconciliation_token_file_path(&token_file));
+    let operation_state_path = handoff
+        .as_ref()
+        .map(|value| value.operation_state_path.clone())
+        .or(manual_operation_state_path)
+        .unwrap_or_else(|| default_unified_operation_state_path(&token_file));
     let force = take_flag(&mut args, "--force");
     let dry_run = take_flag(&mut args, "--dry-run");
     let trust_client_approval = take_flag(&mut args, "--trust-client-approval");
@@ -216,6 +225,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
             )
         })?
     };
+    let operation_state_path = absolute_path(&operation_state_path)?;
     let gongbu_token_file = gongbu_token_file
         .as_deref()
         .map(|path| {
@@ -236,6 +246,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         hubu_endpoint,
         hubu_token_file: &token_file,
         reconciliation_token_file: &reconciliation_token_file,
+        operation_state_path: &operation_state_path,
         gongbu: gongbu_endpoint.as_deref().zip(gongbu_token_file.as_deref()),
         trust_client_approval,
     });
@@ -258,6 +269,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         "  reconciliation_token_file: {}",
         reconciliation_token_file.display()
     );
+    println!("  mcp_state_file: {}", operation_state_path.display());
     if let Some(profile) = &stack_profile {
         println!("  stack_profile: {}", profile.display());
         println!("  backends: keep the rendered profile's Hubu and Gongbu services running");
@@ -325,6 +337,17 @@ fn default_codex_approval_token_file_path(auth_token_file: &Path) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .join(DEFAULT_APPROVAL_TOKEN_FILE)
+}
+
+fn default_unified_operation_state_path(auth_token_file: &Path) -> PathBuf {
+    if let Some(path) = env::var_os(HUBU_UNIFIED_OPERATION_STATE_PATH_ENV) {
+        return PathBuf::from(path);
+    }
+    auth_token_file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(DEFAULT_UNIFIED_OPERATION_STATE_FILE)
 }
 
 fn hubu_home() -> PathBuf {
@@ -2744,7 +2767,7 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
@@ -2755,6 +2778,7 @@ Options:
                              Separate human approval capability file (default: beside --token-file)
   --reconciliation-token-file FILE
                              Separate human reconciliation capability file (default: beside --token-file)
+  --mcp-state-file FILE      Durable unified MCP operation registry (default: $HUBU_UNIFIED_OPERATION_STATE_PATH or beside --token-file)
   --gongbu-endpoint URL     Optional Gongbu backend URL for the unified entry
   --gongbu-token-file FILE  Gongbu bearer token file; required with --gongbu-endpoint
   --force                   Replace an existing unmanaged [mcp_servers.hubu] config block

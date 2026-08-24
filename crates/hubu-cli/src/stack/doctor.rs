@@ -580,10 +580,13 @@ fn inspect_profile_with(
             "client_handoff_invalid",
             "hubu-unified-mcp",
             None,
-            "the active client handoff is missing, stale, or incoherent; render again",
+            "the active client handoff is missing, stale, incoherent, or older than schema v2; run `hubu stack render`, activate the new generation, and reinitialize the client",
         ));
         return report;
     }
+    let handoff: CodexHandoff = read_json(&generation.join("client-handoff.json"))
+        .expect("validated client handoff remains readable");
+    report_operation_registry_path(&handoff.operation_state_path, &mut report.checks);
     report.checks.push(check(
         CheckLayer::Renderability,
         CheckStatus::Pass,
@@ -984,12 +987,16 @@ fn validate_handoff(
     let Ok(handoff) = read_json::<CodexHandoff>(&generation.join("client-handoff.json")) else {
         return false;
     };
-    handoff.schema_version == 1
+    handoff.schema_version == 2
         && Some(&handoff.mcp_server) == binaries.get("hubu-unified-mcp")
         && Some(&handoff.hubu_token_file) == credentials.get("hubu_auth")
         && Some(&handoff.approval_token_file) == credentials.get("hubu_approval")
         && Some(&handoff.reconciliation_token_file) == credentials.get("hubu_reconciliation")
         && Some(&handoff.gongbu_token_file) == credentials.get("gongbu_caller")
+        && handoff.operation_state_path.is_absolute()
+        && generation.ancestors().nth(3).is_some_and(|profile| {
+            handoff.operation_state_path == profile.join("state/hubu-unified-operations.sqlite3")
+        })
         && stack
             .hubu
             .as_ref()
@@ -1000,6 +1007,60 @@ fn validate_handoff(
             .as_ref()
             .and_then(|value| value.endpoint.as_ref())
             == Some(&handoff.gongbu_endpoint)
+}
+
+fn report_operation_registry_path(path: &Path, checks: &mut Vec<DoctorCheck>) {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o222 == 0 {
+                    checks.push(check(
+                        CheckLayer::RuntimeReadiness,
+                        CheckStatus::Warning,
+                        "operation_registry_not_writable",
+                        "hubu-unified-mcp",
+                        Some("client-handoff.json:operation_state_path".into()),
+                        "the stack remains available, but new billable Hubu operations are disabled until the unified MCP registry is writable",
+                    ));
+                    return;
+                }
+            }
+            checks.push(check(
+                CheckLayer::RuntimeReadiness,
+                CheckStatus::Pass,
+                "operation_registry_path_ready",
+                "hubu-unified-mcp",
+                Some("client-handoff.json:operation_state_path".into()),
+                "the separate unified MCP operation registry path is initialized for billable operations",
+            ));
+        }
+        Ok(_) => checks.push(check(
+            CheckLayer::RuntimeReadiness,
+            CheckStatus::Warning,
+            "operation_registry_path_invalid",
+            "hubu-unified-mcp",
+            Some("client-handoff.json:operation_state_path".into()),
+            "the stack and unrelated tools remain available, but billable Hubu tools are disabled because the registry path is not a regular file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => checks.push(check(
+            CheckLayer::RuntimeReadiness,
+            CheckStatus::Warning,
+            "operation_registry_uninitialized",
+            "hubu-unified-mcp",
+            Some("client-handoff.json:operation_state_path".into()),
+            "the stack remains available; the client-owned unified MCP process will initialize this registry before billable Hubu tools become available",
+        )),
+        Err(_) => checks.push(check(
+            CheckLayer::RuntimeReadiness,
+            CheckStatus::Warning,
+            "operation_registry_path_unreadable",
+            "hubu-unified-mcp",
+            Some("client-handoff.json:operation_state_path".into()),
+            "the stack and unrelated tools remain available, but billable Hubu tools are disabled until the registry path is accessible",
+        )),
+    }
 }
 
 fn probe_hubu(
@@ -1544,6 +1605,26 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use tempfile::tempdir;
+
+    #[test]
+    fn operation_registry_path_reports_degraded_billable_capability_without_failing_stack() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("operations.sqlite3");
+        let mut checks = Vec::new();
+        report_operation_registry_path(&path, &mut checks);
+        assert_eq!(checks[0].status, CheckStatus::Warning);
+        assert_eq!(checks[0].code, "operation_registry_uninitialized");
+        assert!(checks[0].message.contains("stack remains available"));
+
+        fs::create_dir(&path).unwrap();
+        checks.clear();
+        report_operation_registry_path(&path, &mut checks);
+        assert_eq!(checks[0].status, CheckStatus::Warning);
+        assert_eq!(checks[0].code, "operation_registry_path_invalid");
+        assert!(checks[0]
+            .message
+            .contains("billable Hubu tools are disabled"));
+    }
 
     #[cfg(unix)]
     fn write_fake_binary(path: &Path, reject_validation: bool) {

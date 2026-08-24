@@ -15,6 +15,7 @@ use super::BackendStub;
 const RECONCILIATION_TOKEN: &str = "hub107-reconciliation-capability";
 
 pub struct McpProcess {
+    _state: tempfile::TempDir,
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: mpsc::Receiver<Value>,
@@ -27,6 +28,7 @@ impl McpProcess {
     pub fn start(hubu: Option<(&BackendStub, &str)>, gongbu: Option<(&BackendStub, &str)>) -> Self {
         let executable = env::var_os("HUBU_UNIFIED_MCP_CANARY_BIN")
             .unwrap_or_else(|| OsString::from(env!("CARGO_BIN_EXE_hubu-unified-mcp")));
+        let state = tempfile::tempdir().unwrap();
         let mut command = Command::new(executable);
         command
             .env_remove("HUBU_UNIFIED_HUBU_ENDPOINT")
@@ -34,6 +36,10 @@ impl McpProcess {
             .env_remove("HUBU_UNIFIED_GONGBU_ENDPOINT")
             .env_remove("HUBU_UNIFIED_GONGBU_BEARER_TOKEN")
             .env("HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS", "1000")
+            .env(
+                "HUBU_UNIFIED_OPERATION_STATE_PATH",
+                state.path().join("operations.sqlite3"),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -50,10 +56,10 @@ impl McpProcess {
         command
             .env("HUBU_MCP_TRUST_CLIENT_APPROVAL", "1")
             .env("HUBU_RECONCILIATION_TOKEN", RECONCILIATION_TOKEN);
-        Self::spawn(command)
+        Self::spawn(command, state)
     }
 
-    fn spawn(mut command: Command) -> Self {
+    fn spawn(mut command: Command, state: tempfile::TempDir) -> Self {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -73,6 +79,7 @@ impl McpProcess {
             }
         });
         Self {
+            _state: state,
             child,
             stdin: Some(stdin),
             stdout,

@@ -102,9 +102,7 @@ fn exact_hub_88_catalog_and_representative_governed_artifact_flow() {
         json!({"account_id":"account-93","amount_cents":25,"reason":"HUB-96 no-spend canary"}),
         json!({"hubu.dev/platform-invocation":{
             "platform":"codex",
-            "installation_id":"installation-96",
             "invocation_id":"invocation-96",
-            "operation_key":"operation-96",
             "task_id":"linear:HUB-96"
         }}),
     );
@@ -536,9 +534,7 @@ fn governed_hubu_to_gongbu_execution_fails_closed_without_hubu() {
         json!({"account_id":"account-93","amount_cents":25,"reason":"HUB-93 governed fixture"}),
         json!({"hubu.dev/platform-invocation":{
             "platform":"codex",
-            "installation_id":"installation-93",
             "invocation_id":"invocation-93",
-            "operation_key":"operation-93",
             "task_id":"linear:HUB-93"
         }}),
     );
@@ -553,7 +549,7 @@ fn governed_hubu_to_gongbu_execution_fails_closed_without_hubu() {
         .unwrap();
     assert!(authorization_request
         .raw
-        .contains("\"operation_key\":\"operation-93\""));
+        .contains("\"operation_key\":\"hubu:operation:v1:codex:"));
 
     let executed = mcp.call(4, "gongbu_create_execution", execution_arguments());
     assert_eq!(

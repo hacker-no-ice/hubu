@@ -8,6 +8,7 @@ use std::{
 #[test]
 fn binary_initializes_lists_tools_and_exits_on_stdin_close() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_hubu-unified-mcp"))
+        .env_remove("HUBU_UNIFIED_OPERATION_STATE_PATH")
         .env_remove("HUBU_UNIFIED_HUBU_ENDPOINT")
         .env_remove("HUBU_UNIFIED_HUBU_BEARER_TOKEN")
         .env_remove("HUBU_UNIFIED_GONGBU_ENDPOINT")
@@ -41,12 +42,22 @@ fn binary_initializes_lists_tools_and_exits_on_stdin_close() {
         responses[0]["result"]["serverInfo"]["name"],
         "hubu-unified-mcp"
     );
+    assert_eq!(
+        responses[0]["result"]["capabilities"]["experimental"]["hubu.dev/unified-mcp"]
+            ["operation_registry"]["state"],
+        "unavailable"
+    );
     assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 1);
 }
 
 #[test]
 fn initialized_monitor_stops_cleanly_on_eof() {
+    let state = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_hubu-unified-mcp"))
+        .env(
+            "HUBU_UNIFIED_OPERATION_STATE_PATH",
+            state.path().join("operations.sqlite3"),
+        )
         .env_remove("HUBU_UNIFIED_HUBU_ENDPOINT")
         .env_remove("HUBU_UNIFIED_HUBU_BEARER_TOKEN")
         .env_remove("HUBU_UNIFIED_GONGBU_ENDPOINT")
@@ -74,8 +85,13 @@ fn initialized_monitor_stops_cleanly_on_eof() {
 
 #[test]
 fn binary_rejects_invalid_configuration_without_printing_credentials() {
+    let state = tempfile::tempdir().unwrap();
     let secret = "credential-that-must-not-appear";
     let output = Command::new(env!("CARGO_BIN_EXE_hubu-unified-mcp"))
+        .env(
+            "HUBU_UNIFIED_OPERATION_STATE_PATH",
+            state.path().join("operations.sqlite3"),
+        )
         .env("HUBU_UNIFIED_HUBU_ENDPOINT", "https://url-secret@hubu.test")
         .env("HUBU_UNIFIED_HUBU_BEARER_TOKEN", secret)
         .env_remove("HUBU_UNIFIED_GONGBU_ENDPOINT")

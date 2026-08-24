@@ -1,7 +1,8 @@
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
-use super::{catalog::approval_profile, trusted_identity::TrustedSpendIdentity};
+use super::catalog::approval_profile;
+use crate::operation_registry::OperationResolution;
 
 #[derive(Debug, Clone, Copy)]
 struct McpConfig {
@@ -74,6 +75,7 @@ fn post_request_with(
 pub(super) fn route_tool_call_v1(
     params: Value,
     protected_tools_enabled: bool,
+    operation: Option<OperationResolution>,
     execute: impl FnOnce(HubuHttpRequestV1) -> Result<Value>,
 ) -> Result<Value> {
     let name = params
@@ -171,7 +173,7 @@ pub(super) fn route_tool_call_v1(
             }
         }
         "hubu_submit_spend" => {
-            let arguments = trusted_spend_arguments(&params, arguments)?;
+            let arguments = trusted_spend_arguments(arguments, operation.as_ref())?;
             post_request_with(
                 "/spend",
                 arguments,
@@ -180,7 +182,7 @@ pub(super) fn route_tool_call_v1(
             )
         }
         "hubu_authorize_spend" => {
-            let arguments = trusted_spend_arguments(&params, arguments)?;
+            let arguments = trusted_spend_arguments(arguments, operation.as_ref())?;
             post_request_with(
                 "/spend/authorize",
                 arguments,
@@ -247,7 +249,10 @@ pub(super) fn route_tool_call_v1(
     Ok(tool_result_v1(response))
 }
 
-pub(crate) fn trusted_spend_arguments(params: &Value, mut arguments: Value) -> Result<Value> {
+pub(crate) fn trusted_spend_arguments(
+    mut arguments: Value,
+    operation: Option<&OperationResolution>,
+) -> Result<Value> {
     let arguments = arguments
         .as_object_mut()
         .ok_or_else(|| anyhow!("Hubu spend tool arguments must be an object"))?;
@@ -258,14 +263,16 @@ pub(crate) fn trusted_spend_arguments(params: &Value, mut arguments: Value) -> R
             );
         }
     }
-    let trusted = TrustedSpendIdentity::from_call_params(params)?;
+    let trusted = operation.ok_or_else(|| {
+        anyhow!("Hubu spend tools require a resolved trusted harness operation identity")
+    })?;
     arguments.insert(
         "operation_key".to_string(),
-        Value::String(trusted.operation_key),
+        Value::String(trusted.operation_key.clone()),
     );
     arguments.insert(
         "task_id".to_string(),
-        trusted.task_id.map_or(Value::Null, Value::String),
+        trusted.task_id.clone().map_or(Value::Null, Value::String),
     );
     Ok(Value::Object(arguments.clone()))
 }

@@ -27,9 +27,7 @@ struct GoldenCase {
 fn platform_meta(operation_key: &str) -> Value {
     json!({"hubu.dev/platform-invocation": {
         "platform": "codex",
-        "installation_id": "installation-hub-107",
         "invocation_id": format!("invocation-{operation_key}"),
-        "operation_key": operation_key,
         "task_id": "linear:HUB-107"
     }})
 }
@@ -510,7 +508,9 @@ fn operation_identity_is_injected_without_forwarding_trusted_metadata() {
         .into_iter()
         .find(|request| request.path == case.path)
         .unwrap();
-    assert!(request.raw.contains("\"operation_key\":\"authorize-107\""));
+    assert!(request
+        .raw
+        .contains("\"operation_key\":\"hubu:operation:v1:codex:"));
     assert!(request.raw.contains("\"task_id\":\"linear:HUB-107\""));
     assert!(!request.raw.contains("hubu.dev/platform-invocation"));
 
