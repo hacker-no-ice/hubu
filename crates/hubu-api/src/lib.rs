@@ -706,11 +706,12 @@ fn publish_new_private_file(path: &Path, value: &[u8]) -> std::io::Result<bool> 
 }
 
 fn validate_generated_file_token(token: &str, prefix: &str, path: &Path) -> Result<()> {
-    if token.starts_with(prefix)
+    let truncated_prefix = !token.is_empty() && prefix.starts_with(token);
+    let malformed_generated_token = token.starts_with(prefix)
         && token
             .strip_prefix(prefix)
-            .is_none_or(|suffix| suffix.parse::<AgentSessionId>().is_err())
-    {
+            .is_none_or(|suffix| suffix.parse::<AgentSessionId>().is_err());
+    if truncated_prefix || malformed_generated_token {
         return Err(anyhow!(
             "Hubu auth token file `{}` contains incomplete generated credential state",
             path.display()
@@ -5639,13 +5640,32 @@ mod tests {
                 .ends_with(".tmp")
         }));
 
-        let partial = root.path().join("partial");
-        fs::write(&partial, b"hubu_\n").unwrap();
-        fs::set_permissions(&partial, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(create_token_file(&partial, "hubu_")
-            .unwrap_err()
-            .to_string()
-            .contains("incomplete generated credential state"));
+        for (name, prefix, contents) in [
+            ("truncated-auth", "hubu_", "hubu"),
+            ("empty-auth-suffix", "hubu_", "hubu_"),
+            ("truncated-approval", "hubu_approve_", "hubu_approve"),
+            (
+                "truncated-reconciliation",
+                "hubu_reconcile_",
+                "hubu_reconcile",
+            ),
+        ] {
+            let partial = root.path().join(name);
+            fs::write(&partial, format!("{contents}\n")).unwrap();
+            fs::set_permissions(&partial, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(create_token_file(&partial, prefix)
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete generated credential state"));
+        }
+
+        let external = root.path().join("operator-supplied");
+        fs::write(&external, b"operator-supplied-capability\n").unwrap();
+        fs::set_permissions(&external, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            create_token_file(&external, "hubu_").unwrap(),
+            "operator-supplied-capability"
+        );
     }
 
     #[test]
