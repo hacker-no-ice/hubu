@@ -299,11 +299,17 @@ guidance.
    ```
 
    Hubu returns the authoritative authorization snapshot without claiming it.
-   The executor independently derives its operator-controlled target, typed
-   scope, and catalog price and requires exact identity, price, currency,
-   workload, and scope agreement before persistence. An existing execution may
-   replay locally by the same token and immutable intent after a claim or
-   restart.
+   For a new execution, its account and agent are the authoritative attribution;
+   the executor caller credential contributes no execution identity. The
+   executor independently derives its operator-controlled target, typed scope,
+   and catalog price and requires exact operation, price, currency, workload,
+   and scope agreement before persisting that attribution snapshot.
+
+   Before this resolution, the executor checks for a persisted execution by the
+   same token. An exact immutable request replays locally even after the token
+   was claimed or settled, without resolving Hubu again. A changed request
+   conflicts. The persisted execution agent is used for claim settlement or
+   release.
 
 4. After persistence and before irreversible work, the durable executor claims
    the authorization:

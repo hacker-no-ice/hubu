@@ -18,11 +18,6 @@ hubu_server = "/absolute/path/to/hubu-server"
 gongbu_server = "/absolute/path/to/gongbu-server"
 hubu_unified_mcp = "/absolute/path/to/hubu-unified-mcp"
 
-[identity]
-# Copy existing public IDs from Hubu bootstrap and registration output.
-account_id = "aga_REPLACE_WITH_EXISTING_ACCOUNT_ID"
-agent_id = "agt_REPLACE_WITH_EXISTING_AGENT_ID"
-
 [hubu]
 ownership = "managed"
 endpoint = "http://127.0.0.1:8787"
@@ -103,7 +98,7 @@ mode = "disabled"
 hubu stack doctor --profile /absolute/path/to/profile
 ```
 
-Doctor should move from `incomplete` to `ready_to_render` only after every path, identity, coordinate, port, version, and credential reference is valid. Provider readiness is reported separately as disabled.
+Doctor should move from `incomplete` to `ready_to_render` only after every path, coordinate, port, version, and credential reference is valid. Provider readiness is reported separately as disabled.
 
 ## Representative live-provider profile
 
@@ -113,7 +108,7 @@ Live execution can incur charges after a verified configuration is rendered, act
 
 ### `stack.toml`
 
-Use the same complete `stack.toml` from the provider-disabled example. Provider mode does not merge Hubu and Gongbu or change their topology. Confirm that the identity has an active policy and budget suitable for the intended provider work.
+Use the same complete `stack.toml` from the provider-disabled example. Provider mode does not merge Hubu and Gongbu or change their topology. Register and fund each agent in Hubu after startup; registration does not change the stack generation or Gongbu configuration.
 
 ### `credentials.toml`
 
@@ -194,7 +189,7 @@ If the selected model enables `2k` or `4k`, add a separate selector-qualified ru
 ### Live-profile review checklist
 
 - [ ] All four binaries share one verified Hubu release lineage.
-- [ ] Hubu account and agent IDs already exist and have the intended policy and budget.
+- [ ] Each agent that will request spend is registered in Hubu and has the intended policy and budget.
 - [ ] File paths refer to distinct existing capability files.
 - [ ] Opaque coordinates resolve under the Gongbu process identity without exposing values.
 - [ ] Provider, adapter, model, endpoint, API version, region/project fields, and artifact hosts are authoritative.

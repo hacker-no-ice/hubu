@@ -18,8 +18,9 @@ a graceful restart.
 
 All state, catalog, artifact, and managed Temporal paths must be absolute. Raw
 tokens and provider keys never belong in JSON. Configuration references
-operator-owned Keychain items, and the authenticated caller account must match
-the configured Hubu account exactly.
+operator-owned Keychain items. Schema version 3 selects no execution account or
+agent: the authenticated caller capability identifies the installation/service
+and contains no execution identity claim.
 
 Use `providers: {"mode":"disabled"}` for dependency or configuration work that
 must not permit provider traffic. Live mode requires an exact target, complete
@@ -80,6 +81,11 @@ These GET endpoints expose safe status and compatibility metadata only. All
 execution and artifact endpoints require the caller capability. A 503 from
 `/readyz` means new admission is closed.
 
+The same installation caller can access a known execution and its artifacts
+regardless of which of the owner's agents Hubu attributed it to. This is not an
+owner-wide browsing API—clients must already know the execution or artifact
+ID—and it is not strong multi-user or per-agent isolation.
+
 ## Submit and inspect
 
 The version-2 execution request supplies only the authorization token and
@@ -111,8 +117,12 @@ curl -fsS -H "Authorization: Bearer $CAPABILITY" \
   http://127.0.0.1:8788/v1/executions/EXECUTION_ID/artifacts
 ```
 
-Submitting an identical body replays the same execution. A changed immutable
-field conflicts. On restart, Gongbu resubmits nonterminal executions to their
+For a new token, Hubu's resolved spend authorization is authoritative for the
+persisted execution account and agent. Submitting an identical body first
+replays the persisted token locally and does not ask Hubu to resolve a token
+that may already be claimed or settled. A changed immutable field conflicts.
+Settlement and release use the persisted execution agent. On restart, Gongbu
+resubmits nonterminal executions to their
 stable workflow IDs and never creates a second provider or financial side
 effect merely to recover scheduling.
 

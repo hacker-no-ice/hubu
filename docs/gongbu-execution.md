@@ -35,14 +35,17 @@ The components communicate over
 The canonical caller submits a Hubu spend-authorization token plus execution
 intent and an operator-configured target to `POST /v2/executions`.
 
-Gongbu then:
+For a new execution, Gongbu then:
 
-1. Resolves Hubu's read-only authorization snapshot.
+1. Resolves Hubu's read-only authorization snapshot, which is authoritative for
+   account and agent attribution.
 2. Derives the provider, adapter, model, execution scope, and price from its
    operator-controlled catalog.
-3. Requires exact agreement on the account, agent, operation key, amount,
-   currency, lease profile, expiry, and typed execution scope.
-4. Persists the `Execution` aggregate before scheduling work.
+3. Requires exact agreement on the operation key, amount, currency, lease
+   profile, expiry, and typed execution scope, and accepts account and agent
+   only from Hubu.
+4. Persists the `Execution` aggregate and immutable Hubu authorization snapshot
+   before scheduling work.
 5. Starts the stable Temporal workflow
    `gongbu-execution-{execution_id}` on the `gongbu-executions` task queue.
 6. Claims the Hubu authorization from the durable workflow.
@@ -54,17 +57,26 @@ Resolving authorization never claims it. Preview APIs are optional UX and are
 never authority for admission or price. Gongbu recomputes from its active
 catalog immediately before persistence.
 
+An exact replay is different: Gongbu first looks up a persisted execution by
+the opaque spend-auth token ID, validates the immutable execution request, and
+returns or reschedules that local record without resolving Hubu again. This
+keeps replay available after the token has been claimed or settled. A changed
+immutable request conflicts, and an ambiguous legacy token reference fails
+closed.
+
 ## Retry and reconciliation
 
-Execution identity, operation key, provider-attempt identity, Hubu claim, and
+Execution identity, its persisted account and agent snapshot, operation key,
+provider-attempt identity, Hubu claim, and
 Temporal workflow ID remain stable across recovery. A restart resubmits
 nonterminal executions to the same workflow identity rather than creating a
 second provider call.
 
 An ambiguous provider or settlement outcome becomes
 `reconciliation_required`. Gongbu does not blindly retry the provider call or
-release Hubu's hold merely because a response was lost. Finalization uses a
-persisted provider receipt and remains idempotent under repeated delivery.
+release Hubu's hold merely because a response was lost. Finalization uses the
+persisted execution agent and provider receipt and remains idempotent under
+repeated delivery.
 
 ## Provider targets and pricing
 
@@ -126,7 +138,12 @@ The persistent server exposes:
 
 Agents normally reach this surface through
 [`hubu-unified-mcp`](unified-mcp.md). The router forwards Gongbu calls using
-only the Gongbu endpoint, bearer credential, and account claim.
+only the Gongbu endpoint and installation-scoped bearer credential. The
+capability carries no account or agent claim. One installation caller can
+retrieve known executions and their artifacts across the owner's agents, but
+there is no owner-wide browse/list promise: access remains by known execution
+or artifact ID. This local trust model does not provide strong multi-user or
+per-agent isolation.
 
 For local startup, shutdown, backup, and troubleshooting, use
 [Gongbu server operations](operations/gongbu-server.md). For deterministic and
