@@ -1,6 +1,6 @@
 # `stack.toml` reference
 
-`stack.toml` selects compatible binaries, assigns lifecycle ownership, identifies the workload, separates persistent state, configures Temporal, and defines bounded runtime policy. It never contains credential values or provider pricing.
+`stack.toml` selects compatible binaries, assigns lifecycle ownership, separates persistent state, configures Temporal, and defines bounded runtime policy. It never selects an execution account or agent and never contains credential values or provider pricing.
 
 > **Source of truth:** edit this file, then run `hubu stack doctor`. Do not edit rendered JSON generations.
 
@@ -63,31 +63,13 @@ Required when `gongbu.ownership = "managed"`; omit it for external Gongbu. Gongb
 
 Required for every profile. It identifies the only supported agent-facing MCP binary. The stack prepares its handoff configuration but never starts or supervises the client-owned stdio process.
 
-## `[identity]`
+## Execution attribution
 
-Identity is required when Gongbu is managed because Gongbu submits execution lifecycle calls against Hubu for one existing account and agent. These are public identifiers, not credentials.
-
-### `identity.account_id`
-
-| Attribute | Value |
-| --- | --- |
-| Required | When `gongbu.ownership = "managed"` |
-| Supplied by | Copied from Hubu command output |
-| Meaning | Existing Hubu account public ID used by Gongbu and its authenticated caller |
-| Sensitive | No |
-
-Use the account ID printed during bootstrap. Do not invent an ID or use a human username.
-
-### `identity.agent_id`
-
-| Attribute | Value |
-| --- | --- |
-| Required | When `gongbu.ownership = "managed"` |
-| Supplied by | Copied from Hubu command output |
-| Meaning | Existing registered Hubu agent public ID whose budget and policy govern work |
-| Sensitive | No |
-
-Use the `agt_...` identifier printed by agent registration. It must match the agent whose budget and policies should authorize provider work.
+Schema version 1 accepts a legacy `[identity]` block only for source-file
+compatibility, but current rendering ignores it. New profiles must omit the
+block. Stack startup selects no execution account or agent. For each new
+execution, Hubu spend authorization supplies authoritative account and agent
+attribution and Gongbu persists that immutable snapshot.
 
 ## `[hubu]`
 

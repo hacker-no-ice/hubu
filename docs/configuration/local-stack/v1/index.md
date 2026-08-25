@@ -10,7 +10,7 @@ Schema version 1 is the operator-owned configuration contract for the local Hubu
 
 | File | Controls | Typical value sources | Detailed reference |
 | --- | --- | --- | --- |
-| `stack.toml` | Binaries, topology, identities, Temporal, state paths, lifecycle, and runtime limits | Hubu discovery, Hubu command output, and explicit operator choices | [`stack.toml`](stack-toml.md) |
+| `stack.toml` | Binaries, topology, Temporal, state paths, lifecycle, and runtime limits | Hubu discovery and explicit operator choices | [`stack.toml`](stack-toml.md) |
 | `credentials.toml` | File paths and opaque Keychain coordinates that refer to credentials | Hubu bootstrap output and Gongbu/provider credential setup | [`credentials.toml`](credentials-toml.md) |
 | `providers.toml` | Disabled/live mode, provider targets, frozen pricing, spend ceiling, and the live-spend gate | Provider documentation and explicit operator approval | [`providers.toml`](providers-toml.md) |
 
@@ -68,7 +68,7 @@ Keep Hubu and Gongbu separate even though the profile coordinates them. They ret
 ### First local evaluation
 
 1. Read the [provider-disabled example](examples.md#provider-disabled-local-profile).
-2. Use the [`stack.toml` reference](stack-toml.md) for topology and identities.
+2. Use the [`stack.toml` reference](stack-toml.md) for topology and runtime boundaries.
 3. Use the [`credentials.toml` reference](credentials-toml.md) for capability-file paths.
 4. Set only `schema_version = 1` and `mode = "disabled"` in `providers.toml`.
 5. Run doctor and follow the reported field paths.
@@ -91,7 +91,7 @@ Read [managed versus external ownership](decisions.md#managed-versus-external-ow
 | --- | --- | --- |
 | Comment only | No runtime component | Doctor and render may produce a new source digest; review the plan. |
 | Binary or topology field | Launcher and the selected backend | Doctor → render → whole-stack stop → activate → start. |
-| Hubu identity | Gongbu execution and MCP handoff | Doctor → render → stop → activate → start; rerun `hubu init codex` when the handoff changes. |
+| New Hubu agent registration | Hubu governance state only | No render, activation, stop, restart, or Gongbu configuration change. |
 | Credential reference path or coordinate | Owning backend and possibly MCP handoff | Create the replacement reference first, then doctor → render → stop → activate → start. |
 | Provider target, settings, or pricing | Gongbu | Doctor → render → stop → activate → start. |
 | Runtime or logging policy | Managed process configuration | Doctor → render → stop → activate → start. |
@@ -101,10 +101,10 @@ Doctor and render report the exact affected components. Treat their redacted pla
 ## Cross-file relationships
 
 ```text
-stack.toml identity.account_id + identity.agent_id
-                         │
-                         ▼
-              Gongbu execution identity
+Hubu spend authorization
+   │ authoritative account + agent snapshot per new execution
+   ▼
+Gongbu execution record
 
 credentials.toml [opaque.provider_image]
                          │ referenced by key
@@ -122,7 +122,7 @@ The opaque table name is a local reference key. Its `service` and `account` valu
 
 ## Reference index
 
-- [`stack.toml`: binaries, topology, identity, Temporal, and runtime](stack-toml.md)
+- [`stack.toml`: binaries, topology, Temporal, and runtime](stack-toml.md)
 - [`credentials.toml`: credential-file paths and opaque references](credentials-toml.md)
 - [`providers.toml`: modes, targets, settings, pricing, and spend gate](providers-toml.md)
 - [Decision guides](decisions.md)

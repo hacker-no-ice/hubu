@@ -109,8 +109,8 @@ It never:
 - starts, stops, or signals a service;
 - connects to a provider or performs provider work;
 - creates, copies, reveals, or tests a raw credential;
-- selects a provider, model, price, spend ceiling, account, agent, or Temporal
-  ownership mode; or
+- selects a provider, model, price, spend ceiling, execution account, execution
+  agent, or Temporal ownership mode; or
 - enables live execution.
 
 Repeated initialization leaves existing inputs byte-for-byte unchanged.
@@ -132,7 +132,7 @@ Doctor evaluates four layers:
 1. Source syntax and schema compatibility.
 2. Completeness, reported by starter file and stable field path.
 3. Renderability, including paths, ports, binary provenance, component
-   compatibility, identities, credential references, and managed-Gongbu
+   compatibility, credential references, and managed-Gongbu
    provider and artifact contracts.
 4. Runtime readiness for already-running components and external dependencies.
 
@@ -167,7 +167,7 @@ hubu stack render --profile /absolute/path/to/profile
 
 Rendering validates source syntax, required decisions, path and port safety,
 binary provenance, component compatibility, provider catalogs, pricing, spend
-gates, identities, and credential references. It then uses service-owned
+gates, and credential references. It then uses service-owned
 production validators to stage a complete generation.
 
 A first successful render:
@@ -226,6 +226,13 @@ Gongbu's credential references remain Gongbu-owned opaque Keychain coordinates.
 The renderer does not read those secrets or prove that a Gongbu-to-Hubu caller
 value matches the Hubu bearer, so an operator rotating that shared capability
 must update both owning references before the whole-stack stop/start cycle.
+
+Stack startup selects no Hubu execution account or agent. The Gongbu caller
+bearer capability authenticates this installation/service and carries no
+execution identity claim. Registering another agent after startup changes only
+Hubu governance state: it requires no stack render, activation, stop, restart,
+or Gongbu configuration change. New executions receive their authoritative
+account and agent attribution from Hubu spend authorization.
 
 ## Compatibility
 
@@ -394,17 +401,20 @@ the real process boundary end to end. It starts from a clean profile, runs
 annotated non-starting init, verifies incremental doctor diagnostics, renders
 and activates strict service-owned configuration, and starts the actual
 `hubu-server`, `gongbu-server`, Gongbu worker, and managed Temporal child. It
-then obtains a governed Hubu authorization, submits a deterministic Gongbu HTTP
-execution, discovers its Temporal workflow, downloads and verifies its
-artifact, gracefully stops the whole stack, starts it again against the same
-state, and verifies the completed execution and artifact remain available.
+then obtains governed Hubu authorizations, registers a second agent after
+startup without rerendering or restarting, submits deterministic Gongbu HTTP
+executions for both agents through the same installation caller, discovers the
+Temporal workflows, downloads and verifies their artifacts, gracefully stops
+the whole stack, starts it again against the same state, and verifies the
+completed executions and artifacts remain available.
 
 This is a local fixture canary, not an unattended-production credential model.
 For V1 it temporarily lets the deterministic execution test use the existing
 broad local Hubu bearer, which remains process-owned test data and is never
 placed in model input, output, logs, or generated configuration. Gongbu is
-never given Hubu's human reconciliation capability. Keychain-backed,
-least-privilege execution credentials remain follow-up work in HUB-32.
+never given Hubu's human reconciliation capability. Credential
+pre-provisioning/bootstrap and complete removal of the temporary Hubu workflow
+remain follow-up work in HUB-69/HUB-134.
 
 The canary uses an explicit one-cent fixture catalog, acknowledgement, and
 process-owned dummy provider reference to prove the fail-closed live-provider

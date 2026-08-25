@@ -42,8 +42,9 @@ for an external Hubu or a custom database, follow the
 [local stack guide](docs/local-stack.md) and bootstrap directly against that
 final backend instead.
 
-Start managed Hubu temporarily to bootstrap its human, agent, and account
-identities:
+Initialize the profile. Current releases still use a temporary Hubu process to
+pre-provision its capability files; this bootstrap does not register or select
+an execution account or agent:
 
 ```sh
 profile=/absolute/path/to/profile
@@ -56,36 +57,34 @@ export HUBU_APPROVAL_TOKEN_FILE="$profile/state/hubu/hubu.approval-token"
 export HUBU_RECONCILIATION_TOKEN_FILE="$profile/state/hubu/hubu.reconciliation-token"
 hubu-server &
 bootstrap_pid=$!
-
 until hubu health >/dev/null 2>&1; do sleep 1; done
+kill "$bootstrap_pid"
+wait "$bootstrap_pid" || true
+```
+
+Complete `stack.toml`, `credentials.toml`, and the managed Gongbu/Temporal and
+provider decisions without an `[identity]` block, then start the
+principal-neutral stack. Register and fund agents against the running Hubu
+service:
+
+```sh
+hubu stack start --profile "$profile"
+hubu stack status --profile "$profile"
 hubu protocol agent-registration
 hubu register human --username alice-example --display-name "Alice Example"
 hubu register agent --name local-agent --version local-dev
 ```
 
-Keep the temporary server running. Copy the printed `agt_...` agent ID and
-`aga_...` account ID, replace `agt_...` below, then apply a starter policy and
-create the agent's active USD budget:
+Registration happens against the running Hubu service and does not require a
+new stack render, activation, stop, or restart. Replace `agt_...` below with the
+printed agent ID, then apply a starter policy and create the agent's active USD
+budget:
 
 ```sh
 hubu policy new-template --path "$profile/starter-policy.yaml"
 hubu policy validate --path "$profile/starter-policy.yaml"
 hubu policy apply --path "$profile/starter-policy.yaml"
 hubu budget create --agent-id agt_... --amount 25
-
-kill "$bootstrap_pid"
-wait "$bootstrap_pid" || true
-```
-
-Set `hubu.ownership` to `managed` in `stack.toml`, keep its generated endpoint,
-listen address, and database path unchanged, and add the printed agent and
-account IDs. Finish `credentials.toml` with the credential-file paths above,
-then configure the managed Gongbu/Temporal topology, provider targets, pricing,
-provider credentials, and spend ceiling. Start the services and check readiness:
-
-```sh
-hubu stack start --profile "$profile"
-hubu stack status --profile "$profile"
 ```
 
 `stack start` validates and renders the profile, then starts the managed Hubu
@@ -101,6 +100,10 @@ through Hubu's unified MCP tools: Hubu authorizes and reserves budget, Gongbu
 executes the work and stores its artifacts, and Hubu records the outcome. Live
 provider execution is experimental and can incur charges; use explicit targets
 and conservative spend ceilings.
+
+Credential pre-provisioning and removal of the temporary-Hubu bootstrap
+workaround are still tracked in HUB-69/HUB-134; this quick start does not claim
+that credential-bootstrap work is complete.
 
 ## Documentation
 

@@ -116,8 +116,10 @@ For example, an agent-facing spend result includes:
 ```
 
 The authorization token ID is a scoped continuation identifier, not a service
-credential. Gongbu still authenticates independently and Hubu validates the
-stored authorization, scope, expiry, and claim state.
+credential. Gongbu authenticates the installation caller independently. For a
+new execution Hubu validates and supplies authoritative account/agent
+attribution; exact replay of a persisted token is local to Gongbu before Hubu
+resolution.
 
 The router does not add a success envelope, rename fields, translate currency
 units, expose filesystem locations, or convert an application error into a
@@ -221,10 +223,14 @@ Manual MCP clients configure these inputs for the router:
 - `HUBU_UNIFIED_HUBU_ENDPOINT`
 - `HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
   `HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`
-- the corresponding Gongbu endpoint, token, and account configuration
+- the corresponding Gongbu endpoint and installation-scoped caller token
 - `HUBU_RECONCILIATION_TOKEN` or its file form when reconciliation is enabled
 
 Endpoint and credential values are never returned by capability discovery.
+The Gongbu caller token carries no execution identity claim. One configured
+installation caller may read known executions and artifacts across the owner's
+agents, but the API does not promise owner-wide browse/list and this local
+capability model is not strong multi-user or per-agent isolation.
 
 ## Approval boundary
 

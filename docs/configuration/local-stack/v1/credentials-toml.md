@@ -50,7 +50,7 @@ Absolute path to the reconciliation capability file configured for Hubu. Reconci
 
 ### `files.gongbu_caller`
 
-Absolute path to the Gongbu caller bearer capability used by the unified MCP handoff. This is the client-side reference for authenticated Gongbu calls; it is not the provider credential and not the Keychain coordinate used by Gongbu server configuration.
+Absolute path to the Gongbu caller bearer capability used by the unified MCP handoff. This is the client-side reference for authenticated Gongbu calls; it authenticates the installation/service and carries no execution account or agent claim. It is not the provider credential and not the Keychain coordinate used by Gongbu server configuration.
 
 ## `[opaque.<key>]`
 
@@ -101,7 +101,7 @@ account = "local-stack"
 
 ### `opaque.gongbu_caller`
 
-Keychain coordinate for the bearer capability Gongbu server expects from its authenticated caller. This server-owned reference and `files.gongbu_caller` are separate references on opposite sides of the authentication boundary.
+Keychain coordinate for the bearer capability Gongbu server expects from its authenticated installation caller. The capability carries no execution identity. This server-owned reference and `files.gongbu_caller` are separate references on opposite sides of the authentication boundary.
 
 The renderer does not prove that their underlying values match. When rotating the shared capability, update both owning references before the whole-stack stop/start cycle.
 

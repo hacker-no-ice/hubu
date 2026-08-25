@@ -33,6 +33,12 @@ IDs do not encode names, fingerprints, ownership, or model metadata.
 Registration is idempotent for identity, version, and account. Each successful
 registration creates a new session.
 
+Registration is governance state, not execution-plane startup configuration.
+After the stack is running, registering a new agent requires no stack render,
+activation, stop, restart, or Gongbu configuration change. Hubu later supplies
+that agent's authoritative attribution in each approved spend authorization;
+the installation-scoped Gongbu caller capability does not select the agent.
+
 ## Guidance-first client flow
 
 Clients must read the compact registration guidance before collecting fields:

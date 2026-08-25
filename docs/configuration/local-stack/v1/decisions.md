@@ -39,13 +39,16 @@ For `external`:
 
 `temporal.ui_url` is display-only. It does not replace the RPC address.
 
-## Account and agent identities
+## Account and agent attribution
 
-`identity.account_id` and `identity.agent_id` are existing Hubu public identifiers. They are neither usernames nor credentials.
+The stack does not configure an execution account or agent. Gongbu's caller
+capability authenticates the installation/service and carries no principal
+claim. For every new execution, Hubu spend authorization is authoritative for
+account and agent attribution and Gongbu persists that snapshot.
 
-The account identifies the spending account used by Gongbu's authenticated execution caller. The agent identifies whose Hubu policy and budget govern work. Obtain them from the bootstrap and registration commands; do not choose strings that merely resemble IDs.
-
-Changing identity changes the governed workload context. Render and activate a new generation, then rerun the client handoff when reported.
+Registering or funding another agent after startup changes Hubu governance
+state only. It requires no stack render, activation, stop, restart, or Gongbu
+configuration change.
 
 ## Credential files versus opaque references
 
