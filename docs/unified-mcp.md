@@ -307,9 +307,11 @@ retains the private key for internal continuation verification, claim
 idempotency, settlement, and recovery, but never returns it. A
 `needs_approval` result or ambiguous dispatch likewise retains it so an exact
 redelivery can recover Hubu's durable state. Expired authorization token IDs are
-removed opportunistically until an execution is bound. The public handle cannot
-retrieve or replay an operation: recovery requires the original normalized
-harness call identity or its authorized continuation flow.
+removed opportunistically only before Gongbu create dispatch begins. Once
+dispatch starts, the identifier is retained so an ambiguous response can
+recover Gongbu's locally persisted execution after restart. The public handle
+cannot retrieve or replay an operation: recovery requires the original
+normalized harness call identity or its authorized continuation flow.
 
 `gongbu_create_execution` accepts only the opaque `spend_auth_token_id` plus
 execution intent. Before forwarding, the router requires that identifier to

@@ -711,7 +711,7 @@ impl OperationRegistry {
                  FROM harness_operations
                  WHERE auth_token_id IS NOT NULL
                    AND authorization_expires_at IS NOT NULL
-                   AND gongbu_execution_id IS NULL",
+                   AND gongbu_create_started_at IS NULL",
             )?;
             let mapped = statement.query_map([], |row| {
                 Ok((
@@ -1391,6 +1391,63 @@ mod tests {
             .unwrap()
             .get("auth_token_id")
             .is_none());
+    }
+
+    #[test]
+    fn expired_authorization_identifier_survives_ambiguous_gongbu_dispatch_restart() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("operations.sqlite3");
+        let arguments = json!({
+            "schema_version": 2,
+            "spend_auth_token_id": "dispatched-authorization",
+            "input": {"prompt": "recover me"},
+            "input_schema_version": 1,
+            "workload_type": "image_generation",
+            "provider": "fixture",
+            "adapter": "fixture",
+            "model": "fixture-v1"
+        });
+        let mut registry = OperationRegistry::open(&path).unwrap();
+        let operation = registry
+            .resolve_or_allocate(
+                &codex("ambiguous-gongbu-dispatch"),
+                "hubu_authorize_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        registry
+            .record_authorization_result(
+                &operation.operation_handle,
+                &json!({
+                    "decision":"allow",
+                    "auth_token_id":"dispatched-authorization",
+                    "authorization_expires_at":"2099-01-01T00:00:00Z",
+                    "operation_handle":operation.operation_handle
+                }),
+            )
+            .unwrap();
+        let dispatched = registry
+            .resolve_gongbu_continuation("dispatched-authorization", &arguments)
+            .unwrap();
+        assert!(dispatched.execution_id.is_none());
+        registry
+            .connection
+            .execute(
+                "UPDATE harness_operations
+                 SET authorization_expires_at = '2020-01-01T00:00:00Z'
+                 WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+            )
+            .unwrap();
+        drop(registry);
+
+        let mut restarted = OperationRegistry::open(&path).unwrap();
+        let recovered = restarted
+            .resolve_gongbu_continuation("dispatched-authorization", &arguments)
+            .unwrap();
+        assert_eq!(recovered.operation_handle, operation.operation_handle);
+        assert_eq!(recovered.operation_key, operation.operation_key.unwrap());
+        assert!(recovered.execution_id.is_none());
     }
 
     #[test]
