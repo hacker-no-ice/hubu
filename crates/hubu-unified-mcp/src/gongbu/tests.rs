@@ -8,7 +8,10 @@ use std::{
 
 use serde_json::{json, Value};
 
-use crate::{BackendClient, BackendClients, BackendConfig, BackendOwner, Config};
+use crate::{
+    operation_registry::GongbuContinuation, BackendClient, BackendClients, BackendConfig,
+    BackendOwner, Config,
+};
 
 use super::{catalog::tool_definitions, transport::call_tool};
 
@@ -73,6 +76,14 @@ fn create_arguments() -> Value {
     json!({"schema_version":2,"spend_auth_token_id":"hubu-token-1","input":{"prompt":"circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"example","adapter":"fixture","model":"v1"})
 }
 
+fn continuation() -> GongbuContinuation {
+    GongbuContinuation {
+        operation_key: "op-1".into(),
+        operation_handle: "hubu:public-operation:v1:test".into(),
+        execution_id: None,
+    }
+}
+
 #[test]
 fn catalog_matches_owned_gongbu_v2_contract() {
     let expected: Vec<Value> = serde_json::from_str(include_str!(
@@ -83,15 +94,19 @@ fn catalog_matches_owned_gongbu_v2_contract() {
 }
 
 #[test]
-fn create_preserves_operation_key_authorization_and_no_retry_semantics() {
+fn create_keeps_private_operation_identity_internal() {
     let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", EXECUTION)]);
     let result = call_tool(
         &client(&endpoint, "gongbu-execution-secret"),
         "gongbu_create_execution",
         create_arguments(),
-    );
+        Some(&continuation()),
+    )
+    .result;
     assert_eq!(result["isError"], false);
-    assert_eq!(result["content"][0]["text"], EXECUTION);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(!text.contains("operation_key") && !text.contains("op-1"));
+    assert!(text.contains("hubu:public-operation:v1:test"));
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     let request = requests[0].to_ascii_lowercase();
@@ -130,7 +145,7 @@ fn unsafe_owner_overrides_and_missing_authorization_do_not_send() {
         cases.push(arguments);
     }
     for arguments in cases {
-        let result = call_tool(&client, "gongbu_create_execution", arguments);
+        let result = call_tool(&client, "gongbu_create_execution", arguments, None).result;
         assert_eq!(result["isError"], true);
         assert!(result["content"][0]["text"]
             .as_str()
@@ -152,11 +167,19 @@ fn artifacts_preserve_safe_metadata_and_image_content() {
         &client,
         "gongbu_list_artifacts",
         json!({"execution_id":"exec-1"}),
-    );
+        None,
+    )
+    .result;
     let text = listed["content"][0]["text"].as_str().unwrap();
     assert!(!text.contains("private/file") && !text.contains("canary"));
     assert!(text.contains("[REDACTED]") && text.contains("width"));
-    let artifact = call_tool(&client, "gongbu_get_artifact", json!({"artifact_id":"a-1"}));
+    let artifact = call_tool(
+        &client,
+        "gongbu_get_artifact",
+        json!({"artifact_id":"a-1"}),
+        None,
+    )
+    .result;
     assert_eq!(artifact["isError"], false);
     assert_eq!(artifact["content"][1]["type"], "image");
     assert_eq!(artifact["content"][1]["mimeType"], "image/png");
@@ -170,7 +193,9 @@ fn application_and_transport_failures_preserve_contract_without_retry() {
         &client(&endpoint, "secret"),
         "gongbu_create_execution",
         create_arguments(),
-    );
+        Some(&continuation()),
+    )
+    .result;
     assert_eq!(rejected["isError"], true);
     assert!(rejected["content"][0]["text"]
         .as_str()
@@ -191,7 +216,9 @@ fn application_and_transport_failures_preserve_contract_without_retry() {
         &client(&endpoint, "secret"),
         "gongbu_create_execution",
         create_arguments(),
-    );
+        Some(&continuation()),
+    )
+    .result;
     assert_eq!(unavailable["isError"], true);
     assert!(unavailable["content"][0]["text"]
         .as_str()

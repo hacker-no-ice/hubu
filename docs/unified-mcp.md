@@ -94,8 +94,9 @@ concise recovery guidance:
 
 - Hubu successes contain pretty-printed JSON text and identical
   `structuredContent`.
-- Gongbu JSON successes retain their compact text result and
-  `isError: false`.
+- Gongbu JSON successes retain their compact text result and `isError: false`.
+  Execution projections replace Gongbu's private operation identity with the
+  same stable public operation handle returned by Hubu authorization.
 - `gongbu_get_artifact` returns safe metadata followed by PNG or JPEG content.
 - Gongbu application errors remain `isError: true` with their sanitized error
   object.
@@ -116,10 +117,13 @@ For example, an agent-facing spend result includes:
 ```
 
 The authorization token ID is a scoped continuation identifier, not a service
-credential. Gongbu authenticates the installation caller independently. For a
-new execution Hubu validates and supplies authoritative account/agent
-attribution; exact replay of a persisted token is local to Gongbu before Hubu
-resolution.
+credential. For `gongbu_create_execution`, the router resolves that identifier
+to exactly one normalized operation in its registry before contacting Gongbu.
+Gongbu authenticates the installation caller independently. For a new execution,
+Hubu validates the same identifier over the versioned executor contract and
+supplies authoritative account/agent attribution; exact replay of a persisted
+token is local to Gongbu before Hubu resolution. Neither the public handle nor
+the continuation identifier grants backend access on its own.
 
 The router does not add a success envelope, rename fields, translate currency
 units, expose filesystem locations, or convert an application error into a
@@ -297,13 +301,37 @@ payload separately from the bounded continuation columns `decision_id`,
 
 Before forwarding a spend mutation, the registry durably marks dispatch. A
 terminal `allow` or `deny` result is stored before it is returned and exact
-redelivery reads that result without another backend mutation. The registry then
-erases its private backend key; terminal state is monotonic, so a delayed pending
-response cannot overwrite it. A `needs_approval` result or ambiguous dispatch
-retains the key so an exact redelivery can recover Hubu's durable state. Expired
-authorization token IDs are removed opportunistically. The public handle cannot
+redelivery reads that result without another backend mutation. Terminal state is
+monotonic, so a delayed pending response cannot overwrite it. The registry
+retains the private key for internal continuation verification, claim
+idempotency, settlement, and recovery, but never returns it. A
+`needs_approval` result or ambiguous dispatch likewise retains it so an exact
+redelivery can recover Hubu's durable state. Expired authorization token IDs are
+removed opportunistically until an execution is bound. The public handle cannot
 retrieve or replay an operation: recovery requires the original normalized
-harness call identity.
+harness call identity or its authorized continuation flow.
+
+`gongbu_create_execution` accepts only the opaque `spend_auth_token_id` plus
+execution intent. Before forwarding, the router requires that identifier to
+name one allowed normalized operation, canonically binds the first immutable
+execution intent to it, and rejects changed intent or nested attempts to supply
+operation identity, task correlation, endpoint, credential, retry, or lifecycle
+state. Gongbu independently resolves the identifier from Hubu and returns its
+internal operation identity. The router verifies that identity and any existing
+execution ID against the registry before projecting success. Exact replay may
+ask Gongbu for its idempotent stored execution, but cannot bind a second
+execution; conflicting intent fails before Gongbu access and conflicting
+returned identity fails closed.
+
+The registry persists the Gongbu execution ID and current public lifecycle
+state (`pending`, `preflighting`, `claimed`, `executing`, `settling`,
+`succeeded`, `released`, `failed`, or `reconciliation_required`) plus its
+optional outcome against the normalized operation. Create and status results
+recursively remove `operation_key` fields and private-key text from content,
+structured content, errors, failure messages, and artifact metadata. Read-only
+status correlation exposes only `operation_handle`; `task_id` remains trusted,
+non-authoritative correlation and is not accepted in model-authored protected
+inputs.
 
 One distinct harness spend call remains one distinct potentially billable
 operation. The router does not infer retries across call IDs. If acknowledgment
@@ -312,7 +340,9 @@ with the same harness identity and never submit a replacement spend call.
 
 The registry is adapter state and remains separate from both the Hubu and
 Gongbu databases, credentials, provider execution, artifacts, and failure
-domains. The existing agent-orchestrated Gongbu handoff remains unchanged.
+domains. Continuation binding composes agent calls, not backend storage or
+process ownership: the router still makes one bounded request to Gongbu, and
+Gongbu performs its own Hubu resolution, persistence, scheduling, and recovery.
 
 The v1 normalizer fails closed when more than one primary identity source is
 present in the same call. It does not apply metadata precedence or correlate
@@ -322,7 +352,8 @@ correlation without changing v1's fail-closed behavior.
 Registry availability is independent of both backend capabilities. Missing or
 broken registry state does not stop unified MCP startup and does not hide Hubu
 reads, Gongbu reads, status, or artifact tools. It hides new Hubu billable tools
-from discovery and rejects direct billable calls before backend access. The
+and `gongbu_create_execution` from discovery and rejects direct billable calls
+before backend access. The
 capability snapshot reports `operation_registry.state`, its stable reason code,
 and `billable_operations_available` for diagnosis.
 

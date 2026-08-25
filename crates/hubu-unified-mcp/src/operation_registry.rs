@@ -16,7 +16,7 @@ const MAX_PLATFORM_BYTES: usize = 64;
 const MAX_HARNESS_ID_BYTES: usize = 512;
 const MAX_TASK_ID_BYTES: usize = 512;
 const MAX_TOOL_NAME_BYTES: usize = 128;
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const APPLICATION_ID: i64 = 0x4855_424f;
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
 
@@ -167,6 +167,21 @@ pub(crate) struct OperationResolution {
     pub(crate) recorded_result: Option<Value>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GongbuContinuation {
+    pub(crate) operation_key: String,
+    pub(crate) operation_handle: String,
+    pub(crate) execution_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GongbuLifecycle {
+    pub(crate) execution_id: String,
+    pub(crate) operation_key: String,
+    pub(crate) status: String,
+    pub(crate) outcome: Option<String>,
+}
+
 #[derive(Debug)]
 struct PersistedOperation {
     request_hash: String,
@@ -245,7 +260,9 @@ impl OperationRegistry {
         if application_id == 0 && version == 0 && user_table_count == 0 {
             create_schema(&connection)?;
         } else if application_id == APPLICATION_ID && version == 1 {
-            migrate_v1_to_v2(&mut connection)?;
+            migrate_v1_to_v3(&mut connection)?;
+        } else if application_id == APPLICATION_ID && version == 2 {
+            migrate_v2_to_v3(&mut connection)?;
         } else if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
             bail!("unified MCP operation registry identity or schema version is unsupported; refusing to modify the configured database");
         }
@@ -508,7 +525,6 @@ impl OperationRegistry {
             })
             .transpose()?;
         let authorization_expires_at = optional_string(result, "authorization_expires_at")?;
-        let terminal = matches!(decision, "allow" | "deny");
         let changed = transaction.execute(
             "UPDATE harness_operations
              SET decision = ?2,
@@ -517,8 +533,7 @@ impl OperationRegistry {
                  approval_request_id = ?5,
                  authorization_expires_at = ?6,
                  result_json = ?7,
-                 result_recorded_at = CURRENT_TIMESTAMP,
-                 operation_key = CASE WHEN ?8 THEN NULL ELSE operation_key END
+                 result_recorded_at = CURRENT_TIMESTAMP
              WHERE operation_handle = ?1",
             params![
                 operation_handle,
@@ -528,7 +543,6 @@ impl OperationRegistry {
                 approval_request_id,
                 authorization_expires_at,
                 result_json,
-                terminal,
             ],
         )?;
         if changed != 1 {
@@ -538,13 +552,168 @@ impl OperationRegistry {
         Ok(result.clone())
     }
 
+    pub(crate) fn resolve_gongbu_continuation(
+        &mut self,
+        auth_token_id: &str,
+        arguments: &Value,
+    ) -> Result<GongbuContinuation> {
+        self.remove_expired_authorization_identifiers()?;
+        validate_identifier("auth_token_id", auth_token_id, 255)?;
+        if !arguments.is_object() {
+            bail!("Gongbu execution arguments must be an object");
+        }
+        let request_hash = canonical_request_hash("gongbu_create_execution", arguments)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let continuation = transaction
+            .query_row(
+                "SELECT operation_key, operation_handle, decision,
+                        gongbu_request_hash, gongbu_execution_id
+                 FROM harness_operations WHERE auth_token_id = ?1",
+                [auth_token_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("authorization continuation is unknown or expired"))?;
+        let operation_key = continuation.0.ok_or_else(|| {
+            anyhow!("authorization continuation is missing private operation identity")
+        })?;
+        if continuation.2.as_deref() != Some("allow") {
+            bail!("authorization continuation is not executable");
+        }
+        if continuation
+            .3
+            .as_deref()
+            .is_some_and(|existing| existing != request_hash)
+        {
+            bail!("authorization continuation was already bound to different execution intent; refusing backend access");
+        }
+        let changed = transaction.execute(
+            "UPDATE harness_operations
+             SET gongbu_request_hash = COALESCE(gongbu_request_hash, ?2),
+                 gongbu_create_started_at = COALESCE(gongbu_create_started_at, CURRENT_TIMESTAMP)
+             WHERE operation_handle = ?1
+               AND (gongbu_request_hash IS NULL OR gongbu_request_hash = ?2)",
+            params![continuation.1, request_hash],
+        )?;
+        if changed != 1 {
+            bail!("authorization continuation identity conflict; refusing backend access");
+        }
+        transaction.commit()?;
+        Ok(GongbuContinuation {
+            operation_key,
+            operation_handle: continuation.1,
+            execution_id: continuation.4,
+        })
+    }
+
+    pub(crate) fn continuation_for_execution(
+        &self,
+        execution_id: &str,
+    ) -> Result<Option<GongbuContinuation>> {
+        validate_identifier("execution_id", execution_id, 255)?;
+        let continuation = self
+            .connection
+            .query_row(
+                "SELECT operation_key, operation_handle, gongbu_execution_id
+                 FROM harness_operations WHERE gongbu_execution_id = ?1",
+                [execution_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        continuation
+            .map(|(operation_key, operation_handle, execution_id)| {
+                Ok(GongbuContinuation {
+                    operation_key: operation_key.ok_or_else(|| {
+                        anyhow!("Gongbu execution is missing private operation identity")
+                    })?,
+                    operation_handle,
+                    execution_id,
+                })
+            })
+            .transpose()
+    }
+
+    pub(crate) fn record_gongbu_lifecycle(
+        &mut self,
+        operation_handle: &str,
+        lifecycle: &GongbuLifecycle,
+    ) -> Result<()> {
+        validate_gongbu_status(&lifecycle.status)?;
+        validate_identifier("execution_id", &lifecycle.execution_id, 255)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = transaction
+            .query_row(
+                "SELECT operation_key, gongbu_execution_id
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [operation_handle],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("Gongbu execution has no matching normalized operation"))?;
+        if existing.0.as_deref() != Some(lifecycle.operation_key.as_str())
+            || existing
+                .1
+                .as_deref()
+                .is_some_and(|execution_id| execution_id != lifecycle.execution_id)
+        {
+            bail!("Gongbu execution identity conflicts with its normalized operation");
+        }
+        let changed = transaction.execute(
+            "UPDATE harness_operations
+             SET gongbu_execution_id = COALESCE(gongbu_execution_id, ?2),
+                 gongbu_status = ?3,
+                 gongbu_outcome = ?4,
+                 gongbu_result_recorded_at = CURRENT_TIMESTAMP
+             WHERE operation_handle = ?1
+               AND operation_key = ?5
+               AND (gongbu_execution_id IS NULL OR gongbu_execution_id = ?2)",
+            params![
+                operation_handle,
+                lifecycle.execution_id,
+                lifecycle.status,
+                lifecycle.outcome,
+                lifecycle.operation_key,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("Gongbu execution identity conflicts with its normalized operation");
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     fn remove_expired_authorization_identifiers(&mut self) -> Result<()> {
         let now = Utc::now();
         let rows = {
             let mut statement = self.connection.prepare(
                 "SELECT operation_handle, authorization_expires_at, result_json
                  FROM harness_operations
-                 WHERE auth_token_id IS NOT NULL AND authorization_expires_at IS NOT NULL",
+                 WHERE auth_token_id IS NOT NULL
+                   AND authorization_expires_at IS NOT NULL
+                   AND gongbu_execution_id IS NULL",
             )?;
             let mapped = statement.query_map([], |row| {
                 Ok((
@@ -621,10 +790,18 @@ fn create_schema(connection: &Connection) -> Result<()> {
              result_json TEXT,
              dispatch_started_at TEXT,
              result_recorded_at TEXT,
+             gongbu_request_hash TEXT CHECK(gongbu_request_hash IS NULL OR length(gongbu_request_hash) = 71),
+             gongbu_execution_id TEXT UNIQUE CHECK(gongbu_execution_id IS NULL OR length(gongbu_execution_id) BETWEEN 1 AND 255),
+             gongbu_status TEXT CHECK(gongbu_status IS NULL OR gongbu_status IN ('pending','preflighting','claimed','executing','settling','succeeded','released','failed','reconciliation_required')),
+             gongbu_outcome TEXT,
+             gongbu_create_started_at TEXT,
+             gongbu_result_recorded_at TEXT,
              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
              PRIMARY KEY(platform, installation_id, harness_call_id),
              FOREIGN KEY(installation_id) REFERENCES installation_identity(installation_id)
          );
+         CREATE UNIQUE INDEX harness_operation_auth_token
+             ON harness_operations(auth_token_id) WHERE auth_token_id IS NOT NULL;
          PRAGMA application_id = {APPLICATION_ID};
          PRAGMA user_version = {SCHEMA_VERSION};
          COMMIT;"
@@ -632,7 +809,7 @@ fn create_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_v1_to_v2(connection: &mut Connection) -> Result<()> {
+fn migrate_v1_to_v3(connection: &mut Connection) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let application_id =
         transaction.query_row("PRAGMA application_id", [], |row| row.get::<_, i64>(0))?;
@@ -691,6 +868,12 @@ fn migrate_v1_to_v2(connection: &mut Connection) -> Result<()> {
              result_json TEXT,
              dispatch_started_at TEXT,
              result_recorded_at TEXT,
+             gongbu_request_hash TEXT CHECK(gongbu_request_hash IS NULL OR length(gongbu_request_hash) = 71),
+             gongbu_execution_id TEXT UNIQUE CHECK(gongbu_execution_id IS NULL OR length(gongbu_execution_id) BETWEEN 1 AND 255),
+             gongbu_status TEXT CHECK(gongbu_status IS NULL OR gongbu_status IN ('pending','preflighting','claimed','executing','settling','succeeded','released','failed','reconciliation_required')),
+             gongbu_outcome TEXT,
+             gongbu_create_started_at TEXT,
+             gongbu_result_recorded_at TEXT,
              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
              PRIMARY KEY(platform, installation_id, harness_call_id),
              FOREIGN KEY(installation_id) REFERENCES installation_identity(installation_id)
@@ -721,10 +904,53 @@ fn migrate_v1_to_v2(connection: &mut Connection) -> Result<()> {
     }
     transaction.execute_batch(&format!(
         "DROP TABLE harness_operations_v1;
+         CREATE UNIQUE INDEX harness_operation_auth_token
+             ON harness_operations(auth_token_id) WHERE auth_token_id IS NOT NULL;
          PRAGMA user_version = {SCHEMA_VERSION};"
     ))?;
     transaction.commit()?;
     Ok(())
+}
+
+fn migrate_v2_to_v3(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(&format!(
+        "ALTER TABLE harness_operations ADD COLUMN gongbu_request_hash TEXT
+             CHECK(gongbu_request_hash IS NULL OR length(gongbu_request_hash) = 71);
+         ALTER TABLE harness_operations ADD COLUMN gongbu_execution_id TEXT
+             CHECK(gongbu_execution_id IS NULL OR length(gongbu_execution_id) BETWEEN 1 AND 255);
+         ALTER TABLE harness_operations ADD COLUMN gongbu_status TEXT
+             CHECK(gongbu_status IS NULL OR gongbu_status IN ('pending','preflighting','claimed','executing','settling','succeeded','released','failed','reconciliation_required'));
+         ALTER TABLE harness_operations ADD COLUMN gongbu_outcome TEXT;
+         ALTER TABLE harness_operations ADD COLUMN gongbu_create_started_at TEXT;
+         ALTER TABLE harness_operations ADD COLUMN gongbu_result_recorded_at TEXT;
+         CREATE UNIQUE INDEX harness_operation_auth_token
+             ON harness_operations(auth_token_id) WHERE auth_token_id IS NOT NULL;
+         CREATE UNIQUE INDEX harness_operation_gongbu_execution
+             ON harness_operations(gongbu_execution_id) WHERE gongbu_execution_id IS NOT NULL;
+         PRAGMA user_version = {SCHEMA_VERSION};"
+    ))?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn validate_gongbu_status(status: &str) -> Result<()> {
+    if matches!(
+        status,
+        "pending"
+            | "preflighting"
+            | "claimed"
+            | "executing"
+            | "settling"
+            | "succeeded"
+            | "released"
+            | "failed"
+            | "reconciliation_required"
+    ) {
+        Ok(())
+    } else {
+        bail!("Gongbu returned an unsupported execution status")
+    }
 }
 
 fn optional_string(value: &Value, field: &str) -> Result<Option<String>> {
@@ -751,7 +977,10 @@ fn validate_schema(connection: &Connection) -> Result<()> {
                     codex_call_id, claude_tool_use_id, hubu_invocation_id,
                     controlled_installation_id, task_id, decision, decision_id,
                     auth_token_id, approval_request_id, authorization_expires_at,
-                    result_json, dispatch_started_at, result_recorded_at, created_at
+                    result_json, dispatch_started_at, result_recorded_at,
+                    gongbu_request_hash, gongbu_execution_id, gongbu_status,
+                    gongbu_outcome, gongbu_create_started_at,
+                    gongbu_result_recorded_at, created_at
              FROM harness_operations LIMIT 0",
         )
         .context("validate unified MCP operation registry operation schema")?;
@@ -942,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_result_replays_without_private_key_and_pending_result_remains_dispatchable() {
+    fn terminal_result_replays_with_private_key_retained_only_in_registry() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
         let pending = registry
             .resolve_or_allocate(
@@ -991,7 +1220,7 @@ mod tests {
                 &json!({"amount": 1}),
             )
             .unwrap();
-        assert!(recovered_terminal.operation_key.is_none());
+        assert_eq!(recovered_terminal.operation_key, pending.operation_key);
         assert_eq!(recovered_terminal.recorded_result, Some(terminal));
         let stored: (
             Option<String>,
@@ -1010,7 +1239,7 @@ mod tests {
         assert_eq!(
             stored,
             (
-                None,
+                pending.operation_key,
                 Some("decision-1".into()),
                 Some("authorization-1".into()),
                 None
@@ -1058,7 +1287,7 @@ mod tests {
                 &json!({"amount": 1}),
             )
             .unwrap();
-        assert!(recovered.operation_key.is_none());
+        assert_eq!(recovered.operation_key, operation.operation_key);
         assert_eq!(recovered.recorded_result, Some(terminal));
     }
 

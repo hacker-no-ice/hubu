@@ -9,26 +9,60 @@ use crate::BackendClient;
 use super::{
     request::{self, PreparedCall},
     response::{
-        api_error, artifact_result, scrub_artifact_metadata, text_result, ArtifactListResponse,
-        ExecutionResponse, ToolError, ToolResult,
+        api_error, artifact_result, execution_result, scrub_artifact_metadata, text_result,
+        ArtifactListResponse, ExecutionResponse, ToolError, ToolResult,
     },
 };
 
 const JSON_LIMIT: usize = 1024 * 1024;
 const ARTIFACT_LIMIT: usize = 64 * 1024 * 1024;
 
-pub(super) fn call_tool(client: &BackendClient, name: &str, arguments: Value) -> Value {
-    let result = request::prepare(name, arguments).and_then(|call| execute(client, call));
-    serde_json::to_value(result.unwrap_or_else(ToolError::into_result))
-        .expect("Gongbu MCP result serializes")
+pub(crate) struct CallOutcome {
+    pub(crate) result: Value,
+    pub(crate) lifecycle: Option<crate::operation_registry::GongbuLifecycle>,
 }
 
-fn execute(client: &BackendClient, call: PreparedCall) -> Result<ToolResult, ToolError> {
+pub(super) fn call_tool(
+    client: &BackendClient,
+    name: &str,
+    arguments: Value,
+    expected: Option<&crate::operation_registry::GongbuContinuation>,
+) -> CallOutcome {
+    match request::prepare(name, arguments).and_then(|call| execute(client, call, expected)) {
+        Ok((result, lifecycle)) => CallOutcome {
+            result: serde_json::to_value(result).expect("Gongbu MCP result serializes"),
+            lifecycle,
+        },
+        Err(error) => CallOutcome {
+            result: serde_json::to_value(error.into_result()).expect("Gongbu MCP error serializes"),
+            lifecycle: None,
+        },
+    }
+}
+
+fn execute(
+    client: &BackendClient,
+    call: PreparedCall,
+    expected: Option<&crate::operation_registry::GongbuContinuation>,
+) -> Result<
+    (
+        ToolResult,
+        Option<crate::operation_registry::GongbuLifecycle>,
+    ),
+    ToolError,
+> {
     match call {
         PreparedCall::Create(request) => {
+            let expected = expected.ok_or_else(|| {
+                ToolError::new(
+                    "unknown_continuation",
+                    "Gongbu execution requires a bound authorization continuation",
+                )
+            })?;
             let response: ExecutionResponse =
                 json_request(client, Method::POST, "v2/executions", Some(&request))?;
-            Ok(text_result(&response))
+            let (result, lifecycle) = execution_result(response, Some(expected))?;
+            Ok((result, Some(lifecycle)))
         }
         PreparedCall::GetExecution(execution_id) => {
             let response: ExecutionResponse = json_request::<Value, _>(
@@ -37,7 +71,8 @@ fn execute(client: &BackendClient, call: PreparedCall) -> Result<ToolResult, Too
                 &format!("v1/executions/{execution_id}"),
                 None,
             )?;
-            Ok(text_result(&response))
+            let (result, lifecycle) = execution_result(response, expected)?;
+            Ok((result, expected.map(|_| lifecycle)))
         }
         PreparedCall::ListArtifacts(execution_id) => {
             let mut response: ArtifactListResponse = json_request::<Value, _>(
@@ -47,9 +82,11 @@ fn execute(client: &BackendClient, call: PreparedCall) -> Result<ToolResult, Too
                 None,
             )?;
             scrub_artifact_metadata(&mut response);
-            Ok(text_result(&response))
+            Ok((text_result(&response), None))
         }
-        PreparedCall::GetArtifact(artifact_id) => get_artifact(client, artifact_id),
+        PreparedCall::GetArtifact(artifact_id) => {
+            get_artifact(client, artifact_id).map(|result| (result, None))
+        }
     }
 }
 

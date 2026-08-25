@@ -50,14 +50,6 @@ fn cases() -> Vec<GoldenCase> {
     let gongbu = Owner::Gongbu;
     vec![
         GoldenCase {
-            name: "gongbu_create_execution",
-            owner: gongbu,
-            method: "POST",
-            path: "/v2/executions",
-            arguments: execution_arguments(),
-            meta: None,
-        },
-        GoldenCase {
             name: "gongbu_get_artifact",
             owner: gongbu,
             method: "GET",
@@ -104,6 +96,14 @@ fn cases() -> Vec<GoldenCase> {
             path: "/spend/authorize",
             arguments: json!({"account_id":"account-107","amount_cents":0,"reason":"no-spend parity fixture"}),
             meta: Some(platform_meta("authorize-107")),
+        },
+        GoldenCase {
+            name: "gongbu_create_execution",
+            owner: gongbu,
+            method: "POST",
+            path: "/v2/executions",
+            arguments: execution_arguments(),
+            meta: None,
         },
         GoldenCase {
             name: "hubu_client_approval_profile",
@@ -366,11 +366,11 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
 }
 
-fn execution_response() -> Value {
+fn execution_response_for(operation_key: &str) -> Value {
     json!({
         "schema_version":2,
         "execution_id":"exec-107",
-        "operation_key":"operation-107",
+        "operation_key":operation_key,
         "status":"succeeded",
         "outcome":"deterministic-no-spend",
         "failure":null,
@@ -380,6 +380,10 @@ fn execution_response() -> Value {
         "started_at":"2026-08-19T00:00:00Z",
         "completed_at":"2026-08-19T00:00:01Z"
     })
+}
+
+fn execution_response() -> Value {
+    execution_response_for("operation-107")
 }
 
 fn artifact_list_response() -> Value {
@@ -395,7 +399,15 @@ fn success_body(case: &GoldenCase) -> Value {
         "gongbu_create_execution" | "gongbu_get_execution" => execution_response(),
         "gongbu_list_artifacts" => artifact_list_response(),
         "gongbu_get_artifact" => unreachable!("artifact success uses image bytes"),
-        "hubu_authorize_spend" | "hubu_submit_spend" => json!({
+        "hubu_authorize_spend" => json!({
+            "fixture":"HUB-125",
+            "tool":case.name,
+            "status":"ok",
+            "decision":"allow",
+            "decision_id":format!("decision-{}", case.name),
+            "auth_token_id":"fixture-no-spend-token"
+        }),
+        "hubu_submit_spend" => json!({
             "fixture":"HUB-125",
             "tool":case.name,
             "status":"ok",
@@ -453,6 +465,29 @@ fn all_mapped_tools_have_unified_owned_golden_routing_coverage() {
     unified.initialize();
 
     for (offset, case) in cases.iter().enumerate() {
+        if case.name == "gongbu_create_execution" {
+            let authorization = hubu
+                .requests()
+                .into_iter()
+                .rev()
+                .find(|request| request.path == "/spend/authorize")
+                .expect("authorization must precede execution creation");
+            let body = authorization
+                .raw
+                .split_once("\r\n\r\n")
+                .expect("captured HTTP request has a body")
+                .1;
+            let value: Value = serde_json::from_str(body).expect("authorization body is JSON");
+            let operation_key = value["operation_key"]
+                .as_str()
+                .expect("unified MCP injects the private operation key");
+            gongbu.respond_json(
+                case.method,
+                case.path,
+                200,
+                execution_response_for(operation_key),
+            );
+        }
         let response = call(&mut unified, 10 + offset as u64, case);
         assert!(
             response.get("error").is_none(),

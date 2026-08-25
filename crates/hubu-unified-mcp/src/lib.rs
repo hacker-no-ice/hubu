@@ -656,7 +656,7 @@ impl Server {
                 .gongbu
                 .as_ref()
                 .expect("available Gongbu route has a configured client");
-            return success_response(id, gongbu::call_tool(client, &call.name, call.arguments));
+            return self.call_gongbu_tool(id, client, call);
         }
         self.refresh_hubu_capability_if_stale();
         hubu::call_tool(self, id, call)
@@ -705,7 +705,7 @@ impl Server {
                 .gongbu
                 .as_ref()
                 .expect("available Gongbu route has a configured client");
-            return success_response(id, gongbu::call_tool(client, &call.name, call.arguments));
+            return self.call_gongbu_tool(id, client, call);
         }
         hubu::call_tool(self, id, call)
     }
@@ -732,6 +732,7 @@ impl Server {
                 .as_str()
                 .expect("Gongbu tool definition has a name");
             tool_availability(name, BackendOwner::Gongbu, &snapshot).is_ok()
+                && (name != "gongbu_create_execution" || self.operation_registry_available())
         }));
         tools
     }
@@ -754,7 +755,7 @@ impl Server {
             {
                 if matches!(
                     tool["name"].as_str(),
-                    Some("hubu_authorize_spend" | "hubu_submit_spend")
+                    Some("hubu_authorize_spend" | "hubu_submit_spend" | "gongbu_create_execution")
                 ) {
                     tool["available"] = json!(false);
                     tool["reason_code"] = json!("operation_registry_unavailable");
@@ -816,6 +817,82 @@ impl Server {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .record_authorization_result(operation_handle, result)
+    }
+
+    fn resolve_gongbu_continuation(
+        &self,
+        auth_token_id: &str,
+        arguments: &Value,
+    ) -> anyhow::Result<operation_registry::GongbuContinuation> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("Gongbu execution requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .resolve_gongbu_continuation(auth_token_id, arguments)
+    }
+
+    fn gongbu_continuation_for_execution(
+        &self,
+        execution_id: &str,
+    ) -> anyhow::Result<Option<operation_registry::GongbuContinuation>> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            return Ok(None);
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .continuation_for_execution(execution_id)
+    }
+
+    fn record_gongbu_lifecycle(
+        &self,
+        operation_handle: &str,
+        lifecycle: &operation_registry::GongbuLifecycle,
+    ) -> anyhow::Result<()> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("Gongbu execution requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_gongbu_lifecycle(operation_handle, lifecycle)
+    }
+
+    fn call_gongbu_tool(&self, id: Value, client: &BackendClient, call: ToolCall) -> Value {
+        let expected = if call.name == "gongbu_create_execution" {
+            let auth_token_id = match gongbu::create_continuation_id(&call.arguments) {
+                Ok(auth_token_id) => auth_token_id,
+                Err(result) => return success_response(id, result),
+            };
+            match self.resolve_gongbu_continuation(&auth_token_id, &call.arguments) {
+                Ok(continuation) => Some(continuation),
+                Err(error) => return error_response(id, -32000, &error.to_string()),
+            }
+        } else if call.name == "gongbu_get_execution" {
+            let execution_id = match gongbu::status_execution_id(&call.arguments) {
+                Ok(execution_id) => execution_id,
+                Err(result) => return success_response(id, result),
+            };
+            match self.gongbu_continuation_for_execution(&execution_id) {
+                Ok(continuation) => continuation,
+                Err(error) => return error_response(id, -32000, &error.to_string()),
+            }
+        } else {
+            None
+        };
+        let outcome = gongbu::call_tool(client, &call.name, call.arguments, expected.as_ref());
+        if let (Some(expected), Some(lifecycle)) = (expected.as_ref(), outcome.lifecycle.as_ref()) {
+            if let Err(error) = self.record_gongbu_lifecycle(&expected.operation_handle, lifecycle)
+            {
+                return error_response(id, -32000, &error.to_string());
+            }
+        }
+        success_response(id, outcome.result)
     }
 
     fn snapshot(&self) -> CapabilitySnapshot {

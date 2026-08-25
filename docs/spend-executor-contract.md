@@ -34,6 +34,13 @@ shape makes v4.3 intentionally startup-incompatible with v4.2.
 V4.2 introduced the read-only `POST /spend/executor/resolve` capability used
 for token-only executor admission.
 
+The unified MCP continuation binding added for HUB-126 does not change the v4.3
+Hubu-to-executor wire shape. It makes the existing `auth_token_id` /
+`spend_auth_token_id` the agent-visible continuation identifier for one private
+normalized operation. The agent never supplies or receives `operation_key` on
+Gongbu tools. Gongbu learns it only from authenticated Hubu resolution and
+retains it internally for claim, idempotency, settlement, and recovery.
+
 V4 retains V3's immutable, platform-provided `operation_key` from authorization
 through claim and finalization. Hubu stores workflow state under
 `(agent_id, operation_key)`. Retrying with the same key and scope returns that
@@ -288,6 +295,14 @@ guidance.
    scheduling. V1 is supported through all `0.1.x` releases and removed in
    `0.2.0`.
 
+   On the unified MCP surface, the router first requires the continuation ID to
+   match exactly one allowed normalized operation and binds the first canonical
+   execution intent to it. It rejects changed intent or any model-authored
+   operation identity, endpoint, credential, retry control, trusted `task_id`,
+   or protected lifecycle state before the Gongbu request. The public operation
+   handle remains visible for correlation but is not authority and is not an
+   execution-creation input.
+
 3. Before persistence, the executor performs a read-only resolution:
 
    ```http
@@ -310,6 +325,15 @@ guidance.
    was claimed or settled, without resolving Hubu again. A changed request
    conflicts. The persisted execution agent is used for claim settlement or
    release.
+
+   Gongbu's HTTP response still contains `operation_key` on this private
+   backend contract. The unified MCP router verifies it against its bound
+   normalized operation, persists Gongbu's execution ID and lifecycle state,
+   and removes the key recursively from all agent-facing content, structured
+   content, errors, failure text, and status projections. A returned execution
+   ID conflict fails closed. Exact replay can only recover the same Gongbu
+   execution; payload-similarity inference and ambiguous provider retry remain
+   out of scope.
 
 4. After persistence and before irreversible work, the durable executor claims
    the authorization:
