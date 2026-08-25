@@ -141,6 +141,29 @@ effect merely to recover scheduling.
 
 Agents normally use these routes through [Unified MCP](../unified-mcp.md).
 
+### Diagnose rejected admission
+
+An HTTP 400 response may add one safe diagnostic to the existing
+`invalid_request` error: `target_not_selectable` names the four target fields,
+while `pricing_selector_not_matched` names `input.image_size`. Gongbu reports
+field paths only and never echoes their submitted values.
+
+The first occurrence of each allowlisted route-version/reason pair in a Gongbu
+process writes one structured line to stderr (and thus to a launcher-managed
+Gongbu process log when stderr is captured):
+
+```json
+{"event":"gongbu_admission_rejected","route":"create_execution","route_version":2,"status":400,"code":"invalid_request","reason_code":"pricing_selector_not_matched","fields":["input.image_size"]}
+```
+
+No event is written for generic, malformed, or unknown diagnostics. The event
+never contains request bodies, values, identifiers, target values, or raw
+errors, so use the returned field paths to compare the request with the active
+operator configuration rather than expecting the log to reproduce either.
+Managed Gongbu logs append across process starts, so an event may predate the
+current process. Admission rejections have no execution ID; inspect them with
+`hubu stack logs --component gongbu --lines 100`, without `--execution-id`.
+
 ## Shutdown and backup
 
 Send SIGINT or SIGTERM. Gongbu removes readiness, stops accepting requests,

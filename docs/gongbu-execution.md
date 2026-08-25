@@ -64,6 +64,20 @@ keeps replay available after the token has been claimed or settled. A changed
 immutable request conflicts, and an ambiguous legacy token reference fails
 closed.
 
+Diagnostic admission failures remain HTTP 400 `invalid_request` errors and may
+add one bounded `reason_code`/`fields` pair. `target_not_selectable` identifies
+`workload_type`, `provider`, `adapter`, and `model`; alternatively,
+`pricing_selector_not_matched` identifies `input.image_size`. The field names
+identify contract locations only: Gongbu never echoes their values. Other
+validation failures retain the generic error without diagnostic fields.
+
+For either allowlisted diagnostic, Gongbu emits one
+`gongbu_admission_rejected` JSON event on the first occurrence of that route
+version and reason in each process. The event contains the static
+`create_execution` route, route version, HTTP status, error code, reason code,
+and field names. It never copies a request body, value, identifier, target
+value, raw error, or unknown diagnostic into that event.
+
 ## Retry and reconciliation
 
 Execution identity, its persisted account and agent snapshot, operation key,

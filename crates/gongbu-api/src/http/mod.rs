@@ -167,6 +167,10 @@ pub struct ErrorResponse {
 pub struct ErrorBody {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,6 +185,8 @@ pub struct ApiError {
     status: u16,
     code: &'static str,
     message: &'static str,
+    reason_code: Option<&'static str>,
+    fields: Option<&'static [&'static str]>,
 }
 
 impl ApiError {
@@ -189,6 +195,8 @@ impl ApiError {
             status,
             code,
             message,
+            reason_code: None,
+            fields: None,
         }
     }
     fn unauthorized() -> Self {
@@ -196,6 +204,16 @@ impl ApiError {
     }
     fn validation() -> Self {
         Self::new(400, "invalid_request", "request validation failed")
+    }
+    fn validation_with_diagnostics(
+        reason_code: &'static str,
+        fields: &'static [&'static str],
+    ) -> Self {
+        Self {
+            reason_code: Some(reason_code),
+            fields: Some(fields),
+            ..Self::validation()
+        }
     }
     fn legacy_token_alias_mismatch() -> Self {
         Self::new(
@@ -225,6 +243,10 @@ impl ApiError {
                 error: ErrorBody {
                     code: self.code.into(),
                     message: self.message.into(),
+                    reason_code: self.reason_code.map(str::to_owned),
+                    fields: self
+                        .fields
+                        .map(|fields| fields.iter().map(|field| (*field).to_owned()).collect()),
                 },
             },
         )
@@ -386,10 +408,12 @@ impl Api {
             &request.model,
         )
         .map_err(map_target_error)?;
-        let resolved = self
-            .providers
-            .resolve_active(&target_key)
-            .map_err(|_| ApiError::validation())?;
+        let resolved = self.providers.resolve_active(&target_key).map_err(|_| {
+            ApiError::validation_with_diagnostics(
+                "target_not_selectable",
+                &["workload_type", "provider", "adapter", "model"],
+            )
+        })?;
         let image_count = input_quantity(&normalized_input, "image_count")?;
         if image_count.is_some_and(|count| {
             u64::try_from(count).map_or(true, |count| {
@@ -940,9 +964,13 @@ fn map_target_error(error: TargetError) -> ApiError {
 
 fn map_pricing_error(error: ContractError) -> ApiError {
     match error {
-        ContractError::UnsupportedTarget
-        | ContractError::IndeterminableCost
-        | ContractError::InsufficientAuthorization => ApiError::validation(),
+        ContractError::UnsupportedTarget => ApiError::validation_with_diagnostics(
+            "pricing_selector_not_matched",
+            &["input.image_size"],
+        ),
+        ContractError::IndeterminableCost | ContractError::InsufficientAuthorization => {
+            ApiError::validation()
+        }
         _ => ApiError::internal(),
     }
 }
@@ -1279,6 +1307,10 @@ mod tests {
     }
 
     fn execution(response: &HttpResponse) -> ExecutionResponse {
+        serde_json::from_slice(&response.body).unwrap()
+    }
+
+    fn error(response: &HttpResponse) -> ErrorResponse {
         serde_json::from_slice(&response.body).unwrap()
     }
 
@@ -1727,6 +1759,104 @@ mod tests {
         let mut fabricated_snapshot = request("operation-3");
         fabricated_snapshot["pricing_snapshot"] = json!({"components": []});
         assert_eq!(call_create(&fixture, &fabricated_snapshot).status, 400);
+    }
+
+    #[test]
+    fn unavailable_target_reports_bounded_diagnostics_without_side_effects() {
+        let fixture = fixture();
+        let token = "unavailable-target";
+        let mut unavailable = request(token);
+        unavailable["workload_type"] = json!("text_generation");
+
+        let response = call_create(&fixture, &unavailable);
+
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            error(&response),
+            ErrorResponse {
+                schema_version: SCHEMA_VERSION,
+                error: ErrorBody {
+                    code: "invalid_request".into(),
+                    message: "request validation failed".into(),
+                    reason_code: Some("target_not_selectable".into()),
+                    fields: Some(
+                        ["workload_type", "provider", "adapter", "model"]
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect(),
+                    ),
+                },
+            }
+        );
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture
+            .repository
+            .get_execution_by_spend_auth_token(token)
+            .is_err());
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unmatched_pricing_selector_reports_input_field_without_side_effects() {
+        let fixture = fixture();
+        let pricing = PricingCatalog::from_json(
+            br#"{
+                "schema_version":2,
+                "catalog_version":"selector-prices-v2",
+                "rules":[{
+                    "rule_id":"example-image-2k",
+                    "provider":"example",
+                    "model":"image-v1",
+                    "currency":"USD",
+                    "selector":{"image_size":"2k"},
+                    "components":[{
+                        "unit":"image",
+                        "rate_numerator_minor":100,
+                        "rate_denominator":1
+                    }]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            catalog(fixture.api.providers.targets().clone(), pricing),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let token = "unmatched-pricing-selector";
+        let mut unmatched = request(token);
+        unmatched["input"]["image_size"] = json!("4k");
+
+        let response = api.handle(
+            "POST",
+            "/v2/executions",
+            Some(&fixture.caller),
+            &serde_json::to_vec(&unmatched).unwrap(),
+        );
+
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            error(&response),
+            ErrorResponse {
+                schema_version: SCHEMA_VERSION,
+                error: ErrorBody {
+                    code: "invalid_request".into(),
+                    message: "request validation failed".into(),
+                    reason_code: Some("pricing_selector_not_matched".into()),
+                    fields: Some(vec!["input.image_size".into()]),
+                },
+            }
+        );
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture
+            .repository
+            .get_execution_by_spend_auth_token(token)
+            .is_err());
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
     }
 
     #[test]

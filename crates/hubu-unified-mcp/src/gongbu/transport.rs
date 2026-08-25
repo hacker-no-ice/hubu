@@ -10,7 +10,7 @@ use super::{
     request::{self, PreparedCall},
     response::{
         api_error, artifact_result, execution_result, scrub_artifact_metadata, text_result,
-        ArtifactListResponse, ExecutionResponse, ToolError, ToolResult,
+        ApiErrorContext, ArtifactListResponse, ExecutionResponse, ToolError, ToolResult,
     },
 };
 
@@ -102,6 +102,7 @@ fn get_artifact(client: &BackendClient, artifact_id: String) -> Result<ToolResul
         return Err(api_error(
             status,
             read_bounded(response, JSON_LIMIT).ok().as_deref(),
+            ApiErrorContext::General,
         ));
     }
     let media_type = response
@@ -129,6 +130,11 @@ fn json_request<B: Serialize + ?Sized, R: DeserializeOwned>(
     path: &str,
     body: Option<&B>,
 ) -> Result<R, ToolError> {
+    let error_context = if method == Method::POST && path == "v2/executions" {
+        ApiErrorContext::CreateExecutionV2
+    } else {
+        ApiErrorContext::General
+    };
     let body = body
         .map(serde_json::to_vec)
         .transpose()
@@ -139,7 +145,7 @@ fn json_request<B: Serialize + ?Sized, R: DeserializeOwned>(
         ToolError::upstream("invalid_response", "Gongbu returned an invalid response")
     })?;
     if !status.is_success() {
-        return Err(api_error(status, Some(&bytes)));
+        return Err(api_error(status, Some(&bytes), error_context));
     }
     serde_json::from_slice(&bytes)
         .map_err(|_| ToolError::upstream("invalid_response", "Gongbu returned an invalid response"))

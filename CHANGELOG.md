@@ -39,6 +39,12 @@ Future release template
   to equal Hubu lease profiles. Existing local profiles and databases must be
   recreated.
 
+### Important fixes
+
+- Gongbu admission errors now distinguish unselectable target tuples from
+  unmatched image-size pricing selectors through bounded API, unified-MCP, and
+  process-log diagnostics without echoing submitted values.
+
 ## v0.2.0-rc.1 — 2026-08-20
 
 ### Highlights
