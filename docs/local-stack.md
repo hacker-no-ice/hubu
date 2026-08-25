@@ -54,6 +54,10 @@ PROFILE_ROOT/
   generated/
 ```
 
+For field-by-field meaning, value sources, conditional requirements, and
+annotated examples, use the public
+[schema-version-1 configuration reference](configuration/local-stack/v1/index.md).
+
 - `stack.toml` describes topology, binary selection, loopback addresses,
   persistent state roots, Temporal mode, and lifecycle policy.
 - `credentials.toml` contains opaque credential references or absolute

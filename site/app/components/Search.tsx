@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 
-export type SearchDocument = { slug: string; title: string; excerpt: string };
+export type SearchDocument = { slug: string; href: string; title: string; excerpt: string };
 
 export function Search({ documents, large = false }: { documents: SearchDocument[]; large?: boolean }) {
   const [query, setQuery] = useState("");
@@ -31,7 +31,7 @@ export function Search({ documents, large = false }: { documents: SearchDocument
       {results.length > 0 && (
         <div className="search-results" id="search-results">
           {results.map((result) => (
-            <a href={`/docs/${result.slug}`} key={result.slug}>
+            <a href={result.href} key={result.slug}>
               <strong>{result.title}</strong><span>{result.excerpt}</span>
             </a>
           ))}

@@ -21,9 +21,16 @@ async function markdownPaths(directory) {
 const sourceFiles = await markdownPaths(docsRoot);
 const sourceToSlug = new Map(sourceFiles.map((file) => {
   const sourcePath = path.relative(repoRoot, file).split(path.sep).join("/");
-  const slug = sourcePath.replace(/^docs\//, "").replace(/\.md$/, "");
+  const slug = sourcePath
+    .replace(/^docs\//, "")
+    .replace(/\/index\.md$/, "")
+    .replace(/\.md$/, "");
   return [sourcePath, slug];
 }));
+
+function publicHref(slug) {
+  return slug.startsWith("configuration/local-stack/v1") ? `/${slug}` : `/docs/${slug}`;
+}
 
 function escapeAttribute(value) {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
@@ -62,7 +69,7 @@ function renderMarkdown(markdown, sourcePath) {
     else if (!/^[a-z]+:/i.test(href) && !href.startsWith("//")) {
       const [linkPath, hash = ""] = href.split("#", 2);
       const sourceTarget = path.posix.normalize(path.posix.join(path.posix.dirname(sourcePath), linkPath));
-      if (sourceToSlug.has(sourceTarget)) resolved = `/docs/${sourceToSlug.get(sourceTarget)}${hash ? `#${hash}` : ""}`;
+      if (sourceToSlug.has(sourceTarget)) resolved = `${publicHref(sourceToSlug.get(sourceTarget))}${hash ? `#${hash}` : ""}`;
       else if (sourceTarget === "architecture" || sourceTarget === "architecture/index.html") resolved = `/architecture/${hash ? `#${hash}` : ""}`;
       else {
         let targetIsDirectory = false;
@@ -88,6 +95,7 @@ for (const file of sourceFiles) {
   const body = markdown.replace(/^#\s+.+$/m, "");
   documents.push({
     slug: sourceToSlug.get(sourcePath),
+    href: publicHref(sourceToSlug.get(sourcePath)),
     title,
     excerpt: plainText(body).slice(0, 190),
     html: renderMarkdown(markdown, sourcePath),

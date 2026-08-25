@@ -2405,6 +2405,7 @@ fn stack_template(profile: &Path) -> Result<String> {
     let state = profile.join("state");
     Ok(format!(
         r#"# Hubu local stack source. Comments identify choices that still need input.
+# Reference: https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/stack-toml
 schema_version = 1
 # Set true only when every selected binary is an unstamped local development build.
 allow_development_builds = false
@@ -2478,6 +2479,7 @@ log_format = "text"
 
 fn credentials_template() -> String {
     r#"# Credential references only. Never paste bearer tokens or provider secrets here.
+# Reference: https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/credentials-toml
 schema_version = 1
 
 [files]
@@ -2503,6 +2505,7 @@ schema_version = 1
 
 fn providers_template() -> String {
     r#"# Provider and pricing choices are intentionally omitted by initialization.
+# Reference: https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/providers-toml
 schema_version = 1
 
 # Choose exactly one mode. Disabled is the no-spend local dependency profile.
@@ -2579,6 +2582,8 @@ operator-owned TOML for the target generation before `hubu stack rollback`.
 There is no stack restart command and no per-component repair path.
 
 Durable contract: `docs/local-stack.md` in the Hubu repository.
+Public field reference:
+https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/
 "#
     .into()
 }
@@ -2665,6 +2670,14 @@ mod tests {
         );
         assert!(!stack_before.is_empty());
         let providers = fs::read_to_string(profile.join("providers.toml")).unwrap();
+        let stack_reference =
+            "https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/stack-toml";
+        assert!(String::from_utf8(stack_before)
+            .unwrap()
+            .contains(stack_reference));
+        assert!(fs::read_to_string(profile.join("README.md"))
+            .unwrap()
+            .contains("https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/"));
         assert!(!providers.contains(LIVE_SPEND_ACKNOWLEDGEMENT));
         assert!(!providers.contains("REQUIRED"));
         assert!(!providers.contains("maximum_spend_minor ="));

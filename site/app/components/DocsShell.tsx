@@ -8,13 +8,17 @@ function Navigation({ current }: { current: string }) {
         <section key={group.label}>
           <h2>{group.label}</h2>
           {group.items.map(([label, slug]) => (
-            <a aria-current={slug === current ? "page" : undefined} href={`/docs/${slug}`} key={slug}>{label}</a>
+            <a aria-current={slug === current ? "page" : undefined} href={getDocumentHref(slug)} key={slug}>{label}</a>
           ))}
         </section>
       ))}
       <section><h2>Visual guide</h2><a href="/architecture/">Interactive architecture <span>↗</span></a></section>
     </nav>
   );
+}
+
+function getDocumentHref(slug: string) {
+  return searchDocuments.find((document) => document.slug === slug)?.href ?? `/docs/${slug}`;
 }
 
 export function DocsShell({ document }: { document: Doc }) {
@@ -33,8 +37,8 @@ export function DocsShell({ document }: { document: Doc }) {
         <article className="markdown-body" dangerouslySetInnerHTML={{ __html: document.html }} />
         <div className="source-row"><a href={document.sourceUrl}>Edit this page on GitHub ↗</a><span>Canonical source: {document.sourcePath}</span></div>
         <nav className="doc-pagination" aria-label="Previous and next pages">
-          {previous ? <a href={`/docs/${previous.slug}`}><small>← Previous</small><strong>{previous.title}</strong></a> : <span />}
-          {next ? <a href={`/docs/${next.slug}`}><small>Next →</small><strong>{next.title}</strong></a> : <span />}
+          {previous ? <a href={previous.href}><small>← Previous</small><strong>{previous.title}</strong></a> : <span />}
+          {next ? <a href={next.href}><small>Next →</small><strong>{next.title}</strong></a> : <span />}
         </nav>
       </main>
       <aside className="toc" aria-label="On this page">

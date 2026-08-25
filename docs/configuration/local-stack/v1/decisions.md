@@ -1,0 +1,188 @@
+# Local stack configuration decision guides
+
+The field reference describes valid shapes. These guides explain the operational decisions behind fields that are syntactically simple but carry non-obvious lifecycle, security, or billing consequences.
+
+## Managed versus external ownership
+
+Use `managed` when this profile owns the local process lifecycle. Use `external` when another operator, supervisor, or installation owns it.
+
+| Question | Managed | External |
+| --- | --- | --- |
+| Does `hubu stack start` launch it? | Yes, after dependencies pass | No |
+| Does `hubu stack stop` signal it? | Yes, gracefully | No |
+| Are local binary and state paths required? | Yes | No |
+| Does Hubu still check endpoint health and compatibility? | Yes | Yes |
+| Does external ownership permit remote endpoints in schema v1? | Not applicable | No; Hubu and Gongbu endpoints remain explicit loopback origins |
+
+The common local choice is managed Hubu and managed Gongbu. External ownership is advanced configuration, not a way to skip required compatibility or authentication.
+
+Hubu and Gongbu stay separate in either mode. Ownership never authorizes one component to open the other's database, read its credentials, or manage its artifacts.
+
+## Managed-local versus external Temporal
+
+Choose `managed_local` when managed Gongbu should start a local Temporal service using an installed Temporal CLI. Choose `external` when a Temporal deployment already exists and another operator owns it.
+
+For `managed_local`:
+
+- select an existing CLI with `temporal.binary_path`;
+- copy its exact version into `temporal.expected_cli_version`;
+- dedicate `temporal.data_path`;
+- select distinct RPC and UI ports;
+- keep `namespace` and `task_queue` aligned with Gongbu.
+
+For `external`:
+
+- provide `temporal.address` instead of managed-local binary, data, and port fields;
+- use a namespace that already exists;
+- ensure the external operator provides availability and lifecycle management;
+- remember that Gongbu still owns its worker.
+
+`temporal.ui_url` is display-only. It does not replace the RPC address.
+
+## Account and agent identities
+
+`identity.account_id` and `identity.agent_id` are existing Hubu public identifiers. They are neither usernames nor credentials.
+
+The account identifies the spending account used by Gongbu's authenticated execution caller. The agent identifies whose Hubu policy and budget govern work. Obtain them from the bootstrap and registration commands; do not choose strings that merely resemble IDs.
+
+Changing identity changes the governed workload context. Render and activate a new generation, then rerun the client handoff when reported.
+
+## Credential files versus opaque references
+
+The profile has two credential-reference mechanisms because two owners resolve credentials differently:
+
+| Mechanism | Example | Resolver | Contains secret? |
+| --- | --- | --- | --- |
+| Absolute file path | `files.hubu_auth` | Hubu CLI or unified MCP client | No; points to a file |
+| Opaque coordinate | `[opaque.provider_image]` | Gongbu | No; names Keychain service/account |
+
+Never convert one mechanism into the other by copying secret bytes into TOML. The renderer checks reference shape and ownership contracts but does not read secret values.
+
+## Disabled versus live provider mode
+
+Choose `disabled` for installation, topology validation, documentation exploration, or any environment that must not perform provider work.
+
+Disabled mode must omit all live-only fields. Commented examples are not active TOML, but keeping speculative future values out of the initial profile reduces confusion and accidental activation risk.
+
+Choose `live` only after:
+
+1. the local stack validates in the intended topology;
+2. provider credentials exist behind Gongbu-owned references;
+3. the exact provider, adapter, model, endpoint, and API version are verified;
+4. frozen pricing represents every billable component;
+5. a conservative profile spend ceiling is approved;
+6. the operator enters the exact live-spend acknowledgement;
+7. the rendered plan is reviewed before activation.
+
+## Immutable configuration versions
+
+`catalog_version` and `provider_config_version` are operator-owned labels for immutable content.
+
+Use a new label whenever the content changes. Examples of meaningful changes include:
+
+- provider or model selection;
+- credential coordinate;
+- endpoint, region, API version, timeout, or retry settings;
+- activation or execution gate;
+- price, unit, selector, or component composition.
+
+Do not use a mutable label such as `latest` and then replace its meaning. Gongbu persists configuration digests and pricing snapshots so execution history remains attributable to the exact reviewed inputs.
+
+## Provider targets and adapter settings
+
+A provider target key consists of:
+
+```text
+workload_type / provider / adapter / model
+```
+
+These fields answer different questions:
+
+- `workload_type`: what kind of governed work is requested;
+- `provider`: which provider namespace owns the target;
+- `adapter`: which Gongbu implementation constructs and interprets requests;
+- `model`: which exact provider model receives the work;
+- `settings.type`: which adapter-specific configuration schema is used.
+
+`adapter` and `settings.type` should agree, but they are not substitutes. The former is part of the target identity; the latter selects the tagged settings payload validated by Gongbu.
+
+Endpoint and API-version values come from the integration contract and provider documentation. Do not copy a console URL, documentation URL, or marketing model name unless it is the exact adapter input.
+
+## Active versus execution-enabled
+
+`active` selects one immutable revision for a target key. `execution_enabled` independently permits new work through that revision.
+
+| Active | Execution enabled | New work |
+| --- | --- | --- |
+| `false` | Either | Not selectable |
+| `true` | `false` | Selected revision remains blocked |
+| `true` | `true` | Eligible when pricing, credentials, authorization, and readiness also pass |
+
+Keeping both gates explicit supports retaining history and disabling execution without mutating an immutable revision.
+
+## Pricing, authorization, holds, and settlement
+
+These amounts are related but not interchangeable:
+
+1. **Catalog rate** — the operator-verified exact rational price for each billable unit.
+2. **Estimated amount** — Gongbu evaluates request quantities against the matching rule and rounds conservatively to currency minor units.
+3. **Requested Hubu authorization** — the governed amount requested before provider transmission.
+4. **Budget hold** — Hubu reserves the authorized amount so concurrent work cannot spend it twice.
+5. **Profile maximum spend** — `maximum_spend_minor` prevents this Gongbu configuration from exceeding its explicit ceiling.
+6. **Final settlement** — the successful provider outcome is settled without exceeding the authorization. Indeterminate or ambiguous outcomes reconcile according to the executor contract rather than guessing that no spend occurred.
+
+```text
+exact catalog × request quantity
+              │ conservative rounding
+              ▼
+       estimated minor units
+              │ bounded by profile and Hubu policy/budget
+              ▼
+       authorization + budget hold
+              │ provider execution
+              ▼
+        settlement or reconciliation
+```
+
+`maximum_spend_minor` does not create a Hubu budget, and a sufficient Hubu budget does not waive the profile ceiling. Both checks must pass.
+
+## Converting provider prices
+
+Convert the provider's published currency amount into integer minor units without losing the fraction.
+
+For USD $0.067 per image:
+
+```text
+$0.067 = 6.7 cents = 67 / 10 cents
+```
+
+```toml
+{ unit = "image", rate_numerator_minor = 67, rate_denominator = 10 }
+```
+
+For USD $2.50 per million input tokens:
+
+```text
+$2.50 = 250 cents for 1,000,000 tokens
+```
+
+```toml
+{ unit = "input_token", rate_numerator_minor = 250, rate_denominator = 1000000 }
+```
+
+If the provider bills images plus input and output tokens, include three components. Do not omit a component because it is usually small.
+
+## Changing an active profile
+
+Source edits never silently replace the active generation. The safe update sequence is:
+
+```sh
+hubu stack doctor --profile /absolute/path/to/profile
+hubu stack render --profile /absolute/path/to/profile
+# review generation ID, changed source files, and affected components
+hubu stack stop --profile /absolute/path/to/profile
+hubu stack activate --generation GENERATION_ID --profile /absolute/path/to/profile
+hubu stack start --profile /absolute/path/to/profile
+```
+
+Keep previous credentials and operator-owned source available until the new generation is verified. Rollback requires restoring the exact source and compatible binary provenance recorded for the target generation.
