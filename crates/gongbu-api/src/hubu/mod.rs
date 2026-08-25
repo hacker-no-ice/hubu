@@ -149,7 +149,7 @@ pub struct HubuVersion {
 /// Hubu endpoint; it contains no installation, provisioning, or lifecycle code.
 pub struct ProductionHubuActivities {
     client: HubuClient,
-    agent_id: String,
+    repository: crate::execution::Repository,
 }
 
 pub trait SpendAuthorizationResolver {
@@ -175,24 +175,13 @@ impl SpendAuthorizationResolver for ProductionHubuActivities {
         &self,
         spend_auth_token_id: &str,
     ) -> Result<ExecutorSpendResponse, HttpClientError> {
-        let response = self.client.resolve_authorization(spend_auth_token_id)?;
-        if response.agent_id != self.agent_id {
-            return Err(HttpClientError::Status {
-                status: 400,
-                body: "resolved authorization belongs to another configured agent".into(),
-            });
-        }
-        Ok(response)
+        self.client.resolve_authorization(spend_auth_token_id)
     }
 }
 
 impl ProductionHubuActivities {
-    pub fn new(client: HubuClient, agent_id: impl Into<String>) -> Result<Self, &'static str> {
-        let agent_id = agent_id.into();
-        if agent_id.trim().is_empty() || agent_id.len() > 255 {
-            return Err("invalid Hubu agent identity");
-        }
-        Ok(Self { client, agent_id })
+    pub fn new(client: HubuClient, repository: crate::execution::Repository) -> Self {
+        Self { client, repository }
     }
 
     pub(crate) fn spend(&self, execution: &Execution) -> ExecutorSpendRequest {
@@ -211,6 +200,53 @@ impl ProductionHubuActivities {
             // omits the untrusted duplicate and lets Hubu return the stored value.
             task_id: None,
         }
+    }
+
+    fn agent_id_for(&self, execution: &Execution) -> Result<String, ActivityError> {
+        match self
+            .repository
+            .get_hubu_authorization_snapshot(&execution.execution_id)
+        {
+            Ok(authorization)
+                if authorization.account_id == execution.account_id
+                    && authorization.operation_key == execution.operation_key
+                    && authorization.spend_auth_token_id
+                        == execution.hubu_token_reference.as_str() =>
+            {
+                return Ok(authorization.agent_id);
+            }
+            Ok(_) => {
+                return Err(ActivityError::Proven(
+                    "persisted_hubu_authorization_identity_mismatch".into(),
+                ));
+            }
+            Err(crate::execution::Error::NotFound) => {}
+            Err(_) => {
+                return Err(ActivityError::Proven(
+                    "persisted_hubu_authorization_unavailable".into(),
+                ));
+            }
+        }
+        let claim_id = execution.hubu_claim_id.as_deref().ok_or_else(|| {
+            ActivityError::Proven("legacy_finalization_principal_unavailable".into())
+        })?;
+        let claim = self
+            .client
+            .inspect_claim(claim_id)
+            .map_err(map_activity_error)?;
+        if claim.operation_key != execution.operation_key
+            || claim.spend.account_id != execution.account_id
+            || claim.spend.spend_auth_token_id != execution.hubu_token_reference.as_str()
+            || !matches!(
+                claim.status.as_str(),
+                "claimed" | "active" | "settled" | "released"
+            )
+        {
+            return Err(ActivityError::Proven(
+                "legacy_claim_identity_mismatch".into(),
+            ));
+        }
+        Ok(claim.spend.agent_id)
     }
 }
 
@@ -262,7 +298,7 @@ impl HubuActivities for ProductionHubuActivities {
                 .map_err(|_| ActivityError::Proven("pricing_snapshot_invalid".into()))?;
         self.client
             .settle(&ExecutorSpendFinalizationRequest {
-                agent_id: self.agent_id.clone(),
+                agent_id: self.agent_id_for(execution)?,
                 operation_key: execution.operation_key.clone(),
                 receipt: Some(ProviderReceipt {
                     actual_vendor_cost_cents: amount_minor,
@@ -284,7 +320,7 @@ impl HubuActivities for ProductionHubuActivities {
     fn release(&self, execution: &Execution) -> Result<(), ActivityError> {
         self.client
             .release(&ExecutorSpendFinalizationRequest {
-                agent_id: self.agent_id.clone(),
+                agent_id: self.agent_id_for(execution)?,
                 operation_key: execution.operation_key.clone(),
                 receipt: None,
             })
@@ -476,6 +512,69 @@ mod tests {
     };
 
     use super::*;
+    use tempfile::tempdir;
+
+    fn execution_params() -> crate::execution::CreateExecutionParams {
+        let scope = crate::execution_scope::for_target("google", "gemini_image").unwrap();
+        crate::execution::CreateExecutionParams {
+            account_id: "account-1".into(),
+            operation_key: "operation-1".into(),
+            hubu_authorization_id: "token-1".into(),
+            hubu_claim_id: None,
+            hubu_token_reference: crate::execution::HubuTokenReference::new("token-1").unwrap(),
+            authorized_minor: 100,
+            authorization_currency: "USD".into(),
+            normalized_input: json!({"prompt":"cat","image_count":1}),
+            input_hash: "sha256:input".into(),
+            input_schema_version: 1,
+            target: "image_generation/google/gemini_image/gemini-image-v1".into(),
+            config_version: "provider-v1".into(),
+            workload_type: "image_generation".into(),
+            provider: "google".into(),
+            adapter: "gemini_image".into(),
+            model: "gemini-image-v1".into(),
+            provider_config_version: "provider-v1".into(),
+            provider_config_digest: format!("sha256:{}", "a".repeat(64)),
+            pricing_snapshot: json!({
+                "schema_version":2,"provider":"google","model":"gemini-image-v1",
+                "catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "b".repeat(64)),
+                "pricing_rule_id":"image","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1,"quantity":1}],
+                "exact_estimate_numerator":"100","exact_estimate_denominator":"1",
+                "estimated_amount_minor":100,"currency":"USD"
+            }),
+            pricing_schema_version: 2,
+            execution_scope: Some(scope.clone()),
+            created_at: "2026-08-25T00:00:00Z".into(),
+        }
+    }
+
+    fn persisted_execution(
+        repository: &crate::execution::Repository,
+        agent_id: &str,
+    ) -> crate::execution::Execution {
+        let params = execution_params();
+        let scope = params.execution_scope.clone().unwrap();
+        repository
+            .create_execution_with_authorization(
+                &params,
+                &crate::execution::HubuAuthorizationSnapshot {
+                    account_id: "account-1".into(),
+                    agent_id: agent_id.into(),
+                    operation_key: "operation-1".into(),
+                    decision_id: "decision-1".into(),
+                    spend_auth_token_id: "token-1".into(),
+                    amount_minor: 100,
+                    currency: "USD".into(),
+                    execution_scope: scope,
+                    lease_profile: "default".into(),
+                    expires_at: "2099-01-01T00:00:00Z".into(),
+                    authorization_status: "available".into(),
+                    task_id: None,
+                    reason: "test".into(),
+                },
+            )
+            .unwrap()
+    }
 
     #[test]
     fn ambiguous_claim_is_returned_without_retry() {
@@ -497,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn resolver_rejects_authorization_for_another_configured_agent() {
+    fn resolver_returns_authorization_without_a_configured_agent_binding() {
         let (client, _) = fake_hubu(vec![Some(json!({
             "operation_key":"op-1",
             "reason":"test",
@@ -519,9 +618,74 @@ mod tests {
                 "frozen_amount_cents":100,"remaining_amount_cents":0
             }
         }))]);
-        let activities = ProductionHubuActivities::new(client, "configured-agent").unwrap();
-        let error = activities.resolve_authorization("token-1").unwrap_err();
-        assert!(matches!(error, HttpClientError::Status { status: 400, .. }));
+        let root = tempdir().unwrap();
+        let repository = crate::execution::Repository::open(
+            root.path().join("gongbu.sqlite3"),
+            crate::redaction::Redactor::default(),
+        )
+        .unwrap();
+        let activities = ProductionHubuActivities::new(client, repository);
+        let authorization = activities.resolve_authorization("token-1").unwrap();
+        assert_eq!(authorization.agent_id, "another-agent");
+    }
+
+    #[test]
+    fn finalization_agent_is_loaded_from_persisted_snapshot_after_restart() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("gongbu.sqlite3");
+        let repository =
+            crate::execution::Repository::open(&path, crate::redaction::Redactor::default())
+                .unwrap();
+        let execution = persisted_execution(&repository, "agent-from-authorization");
+        drop(repository);
+
+        let restarted =
+            crate::execution::Repository::open(&path, crate::redaction::Redactor::default())
+                .unwrap();
+        let activities =
+            ProductionHubuActivities::new(HubuClient::new("http://127.0.0.1:1"), restarted);
+        assert_eq!(
+            activities.agent_id_for(&execution).unwrap(),
+            "agent-from-authorization"
+        );
+    }
+
+    #[test]
+    fn legacy_finalization_agent_uses_immutable_claim_inspection_without_resolve() {
+        let claim = json!({
+            "operation_key":"operation-1","claim_id":"claim-1","lease_profile":"default",
+            "status":"claimed","claimed_at":"2026-08-25T00:00:01Z",
+            "claim_expires_at":"2099-01-01T00:00:00Z","finalized_at":null,
+            "settlement_id":null,"reconciliation_required":false,
+            "spend":{
+                "operation_key":"operation-1","reason":"test","spend_auth_token_id":"token-1",
+                "decision_id":"decision-1","account_id":"account-1","agent_id":"claim-agent",
+                "amount_cents":100,"currency":"USD","merchant":null,
+                "execution_scope":crate::execution_scope::for_target("google", "gemini_image"),
+                "task_id":null,"lease_profile":"default","status":"claimed",
+                "expires_at":"2099-01-01T00:00:00Z",
+                "budget_hold":{"hold_id":"hold-1","budget_id":"budget-1","status":"frozen",
+                    "amount_cents":100,"consumed_amount_cents":0,"frozen_amount_cents":100,
+                    "remaining_amount_cents":0}
+            }
+        });
+        let (client, paths) = fake_hubu(vec![Some(claim)]);
+        let root = tempdir().unwrap();
+        let repository = crate::execution::Repository::open(
+            root.path().join("gongbu.sqlite3"),
+            crate::redaction::Redactor::default(),
+        )
+        .unwrap();
+        let mut params = execution_params();
+        params.hubu_claim_id = Some("claim-1".into());
+        let execution = repository.create_execution(&params).unwrap();
+        let activities = ProductionHubuActivities::new(client, repository);
+
+        assert_eq!(activities.agent_id_for(&execution).unwrap(), "claim-agent");
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/spend/executor/claim?claim_id=claim-1"]
+        );
     }
 
     #[test]

@@ -1,8 +1,7 @@
 //! Versioned authenticated Execution and Artifact HTTP contract.
 //!
-//! Transport adapters authenticate a request, construct an [`AuthenticatedAccount`],
-//! and pass the method/path/body here. Account identity is deliberately absent from
-//! every request schema.
+//! Transport adapters authenticate an installation-scoped service caller and pass
+//! the method/path/body here. Execution identity comes only from Hubu authorization.
 use crate::{
     artifacts::{ArtifactService, Error as ArtifactError},
     execution_scope::{for_target, ExecutionScope},
@@ -28,22 +27,13 @@ use std::sync::Arc;
 pub use gongbu_build_info::API_SCHEMA_VERSION as SCHEMA_VERSION;
 pub const V1_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AuthenticatedAccount {
-    account_id: String,
-}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthenticatedCaller(());
 
-impl AuthenticatedAccount {
-    /// Construct only from a successfully validated authentication claim.
-    pub fn from_verified_claim(account_id: impl Into<String>) -> Result<Self, ApiError> {
-        let account_id = account_id.into();
-        let account_id = account_id.trim();
-        if account_id.is_empty() || account_id.len() > 255 {
-            return Err(ApiError::unauthorized());
-        }
-        Ok(Self {
-            account_id: account_id.to_owned(),
-        })
+impl AuthenticatedCaller {
+    /// Construct only after validating the installation's caller capability.
+    pub fn service_installation() -> Self {
+        Self(())
     }
 }
 
@@ -217,9 +207,6 @@ impl ApiError {
     fn not_found() -> Self {
         Self::new(404, "not_found", "resource not found")
     }
-    fn forbidden() -> Self {
-        Self::new(403, "forbidden", "resource belongs to another account")
-    }
     fn conflict() -> Self {
         Self::new(
             409,
@@ -309,27 +296,27 @@ impl Api {
         &self,
         method: &str,
         path: &str,
-        account: Option<&AuthenticatedAccount>,
+        caller: Option<&AuthenticatedCaller>,
         body: &[u8],
     ) -> HttpResponse {
-        let result = account
+        let result = caller
             .ok_or_else(ApiError::unauthorized)
-            .and_then(|account| {
+            .and_then(|caller| {
                 let segments: Vec<_> = path.trim_matches('/').split('/').collect();
                 match (method, segments.as_slice()) {
-                    ("POST", ["v1", "executions"]) => self.create_v1(account, body),
-                    ("POST", ["v2", "executions"]) => self.create_v2(account, body),
+                    ("POST", ["v1", "executions"]) => self.create_v1(caller, body),
+                    ("POST", ["v2", "executions"]) => self.create_v2(caller, body),
                     ("GET", ["v1", "executions", execution_id]) => {
-                        self.get_execution(account, execution_id)
+                        self.get_execution(caller, execution_id)
                     }
                     ("POST", ["v1", "executions", execution_id, "reconciliation"]) => {
-                        self.reconcile(account, execution_id, body)
+                        self.reconcile(caller, execution_id, body)
                     }
                     ("GET", ["v1", "executions", execution_id, "artifacts"]) => {
-                        self.list_artifacts(account, execution_id)
+                        self.list_artifacts(caller, execution_id)
                     }
                     ("GET", ["v1", "artifacts", artifact_id]) => {
-                        self.get_artifact(account, artifact_id)
+                        self.get_artifact(caller, artifact_id)
                     }
                     _ => Err(ApiError::not_found()),
                 }
@@ -344,29 +331,29 @@ impl Api {
 
     fn create_v1(
         &self,
-        account: &AuthenticatedAccount,
+        caller: &AuthenticatedCaller,
         body: &[u8],
     ) -> Result<HttpResponse, ApiError> {
         let request: CreateExecutionV1Request =
             serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
         let request = translate_v1(request)?;
-        self.create(account, request, V1_SCHEMA_VERSION)
+        self.create(caller, request, V1_SCHEMA_VERSION)
     }
 
     fn create_v2(
         &self,
-        account: &AuthenticatedAccount,
+        caller: &AuthenticatedCaller,
         body: &[u8],
     ) -> Result<HttpResponse, ApiError> {
         let request: CreateExecutionV2Request =
             serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
         let request = translate_v2(request)?;
-        self.create(account, request, SCHEMA_VERSION)
+        self.create(caller, request, SCHEMA_VERSION)
     }
 
     fn create(
         &self,
-        account: &AuthenticatedAccount,
+        _caller: &AuthenticatedCaller,
         request: CreateExecutionRequest,
         response_schema_version: u32,
     ) -> Result<HttpResponse, ApiError> {
@@ -375,7 +362,7 @@ impl Api {
         let normalized_input = canonicalize(&request.input);
         match self
             .repository
-            .get_execution_by_hubu_token(&account.account_id, &spend_auth_token_id)
+            .get_execution_by_spend_auth_token(&spend_auth_token_id)
         {
             Ok(existing) if immutable_request_matches(&existing, &request, &normalized_input) => {
                 if existing.status == "pending" {
@@ -457,7 +444,7 @@ impl Api {
             || authorization_expires_at <= admission_time
             || authorization.budget_hold.status != "frozen"
             || authorization.budget_hold.amount_cents != authorization.amount_cents
-            || authorization.account_id != account.account_id
+            || authorization.account_id.trim().is_empty()
             || authorization.operation_key.trim().is_empty()
             || authorization.decision_id.trim().is_empty()
             || authorization.amount_cents != pricing_snapshot.estimated_amount_minor
@@ -473,14 +460,6 @@ impl Api {
             )
         {
             return Err(ApiError::validation());
-        }
-        match self
-            .repository
-            .get_execution_by_operation(&account.account_id, authorization.operation_key.trim())
-        {
-            Ok(_) => return Err(ApiError::conflict()),
-            Err(PersistenceError::NotFound) => {}
-            Err(error) => return Err(map_persistence(error)),
         }
         let input_hash = immutable_hash(
             &request,
@@ -506,7 +485,7 @@ impl Api {
         };
         let pricing_schema_version = i64::from(pricing_snapshot.schema_version);
         let params = CreateExecutionParams {
-            account_id: account.account_id.clone(),
+            account_id: authorization.account_id.clone(),
             operation_key: authorization.operation_key.trim().to_owned(),
             // Both legacy execution columns retain their historical token-ID
             // meaning. The authoritative decision ID exists only in the
@@ -555,26 +534,23 @@ impl Api {
 
     fn authorized_execution(
         &self,
-        account: &AuthenticatedAccount,
+        _caller: &AuthenticatedCaller,
         execution_id: &str,
     ) -> Result<Execution, ApiError> {
         let execution = self
             .repository
             .get_execution(execution_id)
             .map_err(map_persistence)?;
-        if execution.account_id != account.account_id {
-            return Err(ApiError::forbidden());
-        }
         Ok(execution)
     }
 
     fn reconcile(
         &self,
-        account: &AuthenticatedAccount,
+        caller: &AuthenticatedCaller,
         execution_id: &str,
         body: &[u8],
     ) -> Result<HttpResponse, ApiError> {
-        let execution = self.authorized_execution(account, execution_id)?;
+        let execution = self.authorized_execution(caller, execution_id)?;
         if execution.status != "reconciliation_required" {
             return Err(ApiError::validation());
         }
@@ -604,13 +580,13 @@ impl Api {
 
     fn get_execution(
         &self,
-        account: &AuthenticatedAccount,
+        caller: &AuthenticatedCaller,
         execution_id: &str,
     ) -> Result<HttpResponse, ApiError> {
         Ok(json_response(
             200,
             &execution_response(
-                self.authorized_execution(account, execution_id)?,
+                self.authorized_execution(caller, execution_id)?,
                 V1_SCHEMA_VERSION,
             )?,
         ))
@@ -618,13 +594,13 @@ impl Api {
 
     fn list_artifacts(
         &self,
-        account: &AuthenticatedAccount,
+        caller: &AuthenticatedCaller,
         execution_id: &str,
     ) -> Result<HttpResponse, ApiError> {
-        self.authorized_execution(account, execution_id)?;
+        let execution = self.authorized_execution(caller, execution_id)?;
         let artifacts = self
             .artifacts
-            .list_for_account(execution_id, &account.account_id)
+            .list_for_account(execution_id, &execution.account_id)
             .map_err(map_artifact_error)?;
         Ok(json_response(
             200,
@@ -638,17 +614,17 @@ impl Api {
 
     fn get_artifact(
         &self,
-        account: &AuthenticatedAccount,
+        caller: &AuthenticatedCaller,
         artifact_id: &str,
     ) -> Result<HttpResponse, ApiError> {
         let artifact = self
             .repository
             .get_artifact(artifact_id)
             .map_err(map_persistence)?;
-        self.authorized_execution(account, &artifact.execution_id)?;
+        let execution = self.authorized_execution(caller, &artifact.execution_id)?;
         let retrieved = self
             .artifacts
-            .retrieve_for_account(artifact_id, &account.account_id)
+            .retrieve_for_account(artifact_id, &execution.account_id)
             .map_err(map_artifact_error)?;
         Ok(HttpResponse {
             status: 200,
@@ -1057,8 +1033,7 @@ mod tests {
         api: Api,
         repository: Repository,
         artifacts: ArtifactService,
-        owner: AuthenticatedAccount,
-        other: AuthenticatedAccount,
+        caller: AuthenticatedCaller,
         scheduler: Arc<Scheduler>,
         resolver: Arc<TestResolver>,
         _root: TempDir,
@@ -1073,7 +1048,13 @@ mod tests {
             &self,
             spend_auth_token_id: &str,
         ) -> Result<crate::hubu::ExecutorSpendResponse, HttpClientError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            let previous_calls = self.calls.fetch_add(1, Ordering::SeqCst);
+            if spend_auth_token_id.starts_with("consumed-legacy-replay") && previous_calls > 0 {
+                return Err(HttpClientError::Status {
+                    status: 409,
+                    body: "authorization already consumed".into(),
+                });
+            }
             let mut response = crate::hubu::ExecutorSpendResponse {
                 operation_key: spend_auth_token_id.into(),
                 reason: "test execution".into(),
@@ -1181,8 +1162,7 @@ mod tests {
             ),
             repository,
             artifacts,
-            owner: AuthenticatedAccount::from_verified_claim("account-a").unwrap(),
-            other: AuthenticatedAccount::from_verified_claim("account-b").unwrap(),
+            caller: AuthenticatedCaller::service_installation(),
             scheduler,
             resolver,
             _root: root,
@@ -1204,7 +1184,7 @@ mod tests {
         let response = api.handle(
             "POST",
             "/v2/executions",
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             &serde_json::to_vec(&request("over-ceiling")).unwrap(),
         );
         assert_eq!(response.status, 400);
@@ -1272,7 +1252,7 @@ mod tests {
         let response = fixture.api.handle(
             "POST",
             "/v1/executions",
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             raw.as_bytes(),
         );
         assert_eq!(response.status, 200);
@@ -1284,7 +1264,7 @@ mod tests {
         fixture.api.handle(
             "POST",
             "/v2/executions",
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             &serde_json::to_vec(request).unwrap(),
         )
     }
@@ -1293,7 +1273,7 @@ mod tests {
         fixture.api.handle(
             "POST",
             "/v1/executions",
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             &serde_json::to_vec(request).unwrap(),
         )
     }
@@ -1329,7 +1309,7 @@ mod tests {
         let fetched = fixture.api.handle(
             "GET",
             &format!("/v1/executions/{}", first.execution_id),
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             &[],
         );
         let fetched = execution(&fetched);
@@ -1413,7 +1393,6 @@ mod tests {
         let fixture = fixture();
         for token in [
             "price-mismatch-1",
-            "identity-mismatch-1",
             "scope-mismatch-1",
             "token-swap-1",
             "expired-1",
@@ -1424,6 +1403,39 @@ mod tests {
                 .get_execution_by_hubu_token("account-a", token)
                 .is_err());
         }
+    }
+
+    #[test]
+    fn admission_persists_two_authoritative_principals_from_hubu() {
+        let fixture = fixture();
+        let first = execution(&call_create(&fixture, &request("account-a-token")));
+        let second = execution(&call_create(&fixture, &request("identity-mismatch-token")));
+
+        assert_ne!(first.execution_id, second.execution_id);
+        assert_eq!(first.operation_key, "account-a-token");
+        assert_eq!(second.operation_key, "identity-mismatch-token");
+        let first_snapshot = fixture
+            .repository
+            .get_hubu_authorization_snapshot(&first.execution_id)
+            .unwrap();
+        let second_snapshot = fixture
+            .repository
+            .get_hubu_authorization_snapshot(&second.execution_id)
+            .unwrap();
+        assert_eq!(
+            (
+                first_snapshot.account_id.as_str(),
+                first_snapshot.agent_id.as_str()
+            ),
+            ("account-a", "agent-a")
+        );
+        assert_eq!(
+            (
+                second_snapshot.account_id.as_str(),
+                second_snapshot.agent_id.as_str()
+            ),
+            ("account-b", "agent-a")
+        );
     }
 
     #[test]
@@ -1491,6 +1503,38 @@ mod tests {
         let fixture = fixture();
         let submitted = legacy_request("legacy-restart-token");
         let created = execution(&call_create_v1(&fixture, &submitted));
+        let persisted = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        let preflighting = fixture
+            .repository
+            .update_execution(
+                &created.execution_id,
+                persisted.version,
+                &crate::execution::ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: None,
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-08-05T20:00:01Z",
+            )
+            .unwrap();
+        fixture
+            .repository
+            .set_claim(
+                &created.execution_id,
+                preflighting.version,
+                "persisted-claim",
+                "2026-08-05T20:00:02Z",
+            )
+            .unwrap();
         let calls_before = fixture.resolver.calls.load(Ordering::SeqCst);
         let restarted_repository = Repository::open(
             fixture._root.path().join("gongbu.sqlite3"),
@@ -1509,12 +1553,37 @@ mod tests {
         let replay = restarted.handle(
             "POST",
             "/v1/executions",
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             &serde_json::to_vec(&submitted).unwrap(),
         );
         assert_eq!(replay.status, 200);
         assert_eq!(execution(&replay).execution_id, created.execution_id);
         assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), calls_before);
+    }
+
+    #[test]
+    fn pre_snapshot_consumed_authorization_replays_without_resolution() {
+        let fixture = fixture();
+        let submitted = request("consumed-legacy-replay-token");
+        let created = execution(&call_create(&fixture, &submitted));
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture
+                .repository
+                .delete_hubu_authorization_snapshot(&created.execution_id)
+                .unwrap(),
+            1
+        );
+
+        let replay = call_create(&fixture, &submitted);
+        assert_eq!(replay.status, 200);
+        assert_eq!(execution(&replay).execution_id, created.execution_id);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+
+        let mut changed = submitted;
+        changed["input"] = json!({"prompt":"different","image_count":1});
+        assert_eq!(call_create(&fixture, &changed).status, 409);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1526,7 +1595,7 @@ mod tests {
                 .handle(
                     "POST",
                     "/v2/executions",
-                    Some(&fixture.owner),
+                    Some(&fixture.caller),
                     &serde_json::to_vec(&request("operator-signal")).unwrap(),
                 )
                 .body,
@@ -1581,19 +1650,7 @@ mod tests {
                 .handle(
                     "POST",
                     &format!("/v1/executions/{}/reconciliation", created.execution_id),
-                    Some(&fixture.other),
-                    &body
-                )
-                .status,
-            403
-        );
-        assert_eq!(
-            fixture
-                .api
-                .handle(
-                    "POST",
-                    &format!("/v1/executions/{}/reconciliation", created.execution_id),
-                    Some(&fixture.owner),
+                    Some(&fixture.caller),
                     &body
                 )
                 .status,
@@ -1621,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn authentication_validation_forbidden_and_not_found_are_distinct() {
+    fn authentication_validation_and_not_found_are_distinct() {
         let fixture = fixture();
         assert_eq!(
             fixture
@@ -1641,16 +1698,16 @@ mod tests {
                 .handle(
                     "GET",
                     &format!("/v1/executions/{}", created.execution_id),
-                    Some(&fixture.other),
+                    Some(&fixture.caller),
                     &[],
                 )
                 .status,
-            403
+            200
         );
         assert_eq!(
             fixture
                 .api
-                .handle("GET", "/v1/executions/missing", Some(&fixture.owner), &[],)
+                .handle("GET", "/v1/executions/missing", Some(&fixture.caller), &[],)
                 .status,
             404
         );
@@ -1747,7 +1804,7 @@ mod tests {
         let replay = restarted.handle(
             "POST",
             "/v2/executions",
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             &serde_json::to_vec(&request("operation-1")).unwrap(),
         );
         assert_eq!(replay.status, 200);
@@ -1791,7 +1848,7 @@ mod tests {
             .into_iter()
             .map(|api| {
                 let barrier = barrier.clone();
-                let owner = fixture.owner.clone();
+                let owner = fixture.caller;
                 thread::spawn(move || {
                     let body = serde_json::to_vec(&request("operation-race")).unwrap();
                     barrier.wait();
@@ -1803,12 +1860,68 @@ mod tests {
             .into_iter()
             .map(|handle| handle.join().unwrap())
             .collect();
-        assert!(responses.iter().all(|response| response.status == 200));
+        assert!(
+            responses.iter().all(|response| response.status == 200),
+            "statuses: {:?}",
+            responses
+                .iter()
+                .map(|response| response.status)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             execution(&responses[0]).execution_id,
             execution(&responses[1]).execution_id
         );
         assert_eq!(execution(&responses[0]).execution_id, created.execution_id);
+    }
+
+    #[test]
+    fn concurrent_new_admission_persists_one_token_and_snapshot() {
+        let fixture = fixture();
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = [fixture.api.clone(), fixture.api.clone()]
+            .into_iter()
+            .map(|api| {
+                let barrier = barrier.clone();
+                let caller = fixture.caller;
+                thread::spawn(move || {
+                    let body = serde_json::to_vec(&request("new-admission-race")).unwrap();
+                    barrier.wait();
+                    api.handle("POST", "/v2/executions", Some(&caller), &body)
+                })
+            })
+            .collect();
+        let responses: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(
+            responses.iter().all(|response| response.status == 200),
+            "statuses: {:?}",
+            responses
+                .iter()
+                .map(|response| response.status)
+                .collect::<Vec<_>>()
+        );
+        let first = execution(&responses[0]);
+        let second = execution(&responses[1]);
+        assert_eq!(first.execution_id, second.execution_id);
+        assert_eq!(
+            fixture
+                .repository
+                .get_execution_by_spend_auth_token("new-admission-race")
+                .unwrap()
+                .execution_id,
+            first.execution_id
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .get_hubu_authorization_snapshot(&first.execution_id)
+                .unwrap()
+                .spend_auth_token_id,
+            "new-admission-race"
+        );
     }
 
     #[test]
@@ -1850,7 +1963,7 @@ mod tests {
         let response = api.handle(
             "POST",
             "/v2/executions",
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             &serde_json::to_vec(&text_request).unwrap(),
         );
         assert_eq!(response.status, 400);
@@ -1896,7 +2009,7 @@ mod tests {
         let response = api.handle(
             "POST",
             "/v2/executions",
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             &serde_json::to_vec(&mixed).unwrap(),
         );
         assert_eq!(response.status, 400);
@@ -1932,7 +2045,7 @@ mod tests {
         let listed = fixture.api.handle(
             "GET",
             &format!("/v1/executions/{}/artifacts", created.execution_id),
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             &[],
         );
         let body: Value = serde_json::from_slice(&listed.body).unwrap();
@@ -1944,7 +2057,7 @@ mod tests {
         let downloaded = fixture.api.handle(
             "GET",
             &format!("/v1/artifacts/{}", artifact.artifact_id),
-            Some(&fixture.owner),
+            Some(&fixture.caller),
             &[],
         );
         assert_eq!(downloaded.status, 200);
@@ -1956,16 +2069,16 @@ mod tests {
                 .handle(
                     "GET",
                     &format!("/v1/artifacts/{}", artifact.artifact_id),
-                    Some(&fixture.other),
+                    Some(&fixture.caller),
                     &[],
                 )
                 .status,
-            403
+            200
         );
         assert_eq!(
             fixture
                 .api
-                .handle("GET", "/v1/artifacts/missing", Some(&fixture.owner), &[],)
+                .handle("GET", "/v1/artifacts/missing", Some(&fixture.caller), &[],)
                 .status,
             404
         );
