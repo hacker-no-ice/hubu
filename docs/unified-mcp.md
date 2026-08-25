@@ -292,7 +292,8 @@ payload separately from the bounded continuation columns `decision_id`,
 Before forwarding a spend mutation, the registry durably marks dispatch. A
 terminal `allow` or `deny` result is stored before it is returned and exact
 redelivery reads that result without another backend mutation. The registry then
-erases its private backend key. A `needs_approval` result or ambiguous dispatch
+erases its private backend key; terminal state is monotonic, so a delayed pending
+response cannot overwrite it. A `needs_approval` result or ambiguous dispatch
 retains the key so an exact redelivery can recover Hubu's durable state. Expired
 authorization token IDs are removed opportunistically. The public handle cannot
 retrieve or replay an operation: recovery requires the original normalized

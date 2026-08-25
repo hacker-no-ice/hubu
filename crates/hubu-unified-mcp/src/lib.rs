@@ -807,7 +807,7 @@ impl Server {
         &self,
         operation_handle: &str,
         result: &Value,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Value> {
         let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
         else {
             anyhow::bail!("Hubu billable tools require an available operation registry");

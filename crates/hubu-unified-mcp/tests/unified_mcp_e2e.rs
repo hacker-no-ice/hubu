@@ -195,7 +195,8 @@ fn normalized_spend_wire_lifecycle_survives_redelivery_collision_and_restart() {
         arguments.clone(),
         json!({"claudecode/toolUseId":"toolu_hub_125"}),
     );
-    assert_public_spend_result(&claude);
+    let claude_result = assert_public_spend_result(&claude);
+    let claude_handle = claude_result["operation_handle"].clone();
     assert_eq!(hubu.request_count("POST", "/spend"), 1);
     let claude_request_body = hubu
         .requests()
@@ -206,19 +207,72 @@ fn normalized_spend_wire_lifecycle_survives_redelivery_collision_and_restart() {
         .unwrap();
     assert_eq!(claude_request_body["task_id"], Value::Null);
     assert!(claude_request_body.get("_meta").is_none());
+
+    let claude_redelivery = first.call_with_meta(
+        18,
+        "hubu_submit_spend",
+        arguments.clone(),
+        json!({"claudecode/toolUseId":"toolu_hub_125"}),
+    );
+    assert_eq!(claude_redelivery["result"], claude["result"]);
+    assert_eq!(hubu.request_count("POST", "/spend"), 1);
+
+    let claude_collision = first.call_with_meta(
+        19,
+        "hubu_submit_spend",
+        json!({"account_id":"account-125","amount_cents":30,"reason":"changed"}),
+        json!({"claudecode/toolUseId":"toolu_hub_125"}),
+    );
+    assert!(claude_collision["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("refusing backend access"));
+    assert_eq!(hubu.request_count("POST", "/spend"), 1);
+
+    let mut claude_spoofed = arguments.clone();
+    claude_spoofed["operation_key"] = json!("model-owned");
+    let claude_spoof = first.call_with_meta(
+        20,
+        "hubu_submit_spend",
+        claude_spoofed,
+        json!({"claudecode/toolUseId":"toolu_hub_125_spoof"}),
+    );
+    assert!(claude_spoof["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("trusted platform state"));
+    assert_eq!(hubu.request_count("POST", "/spend"), 1);
+
+    let claude_distinct = first.call_with_meta(
+        21,
+        "hubu_submit_spend",
+        arguments.clone(),
+        json!({"claudecode/toolUseId":"toolu_hub_125_distinct"}),
+    );
+    let claude_distinct_result = assert_public_spend_result(&claude_distinct);
+    assert_ne!(claude_distinct_result["operation_handle"], claude_handle);
+    assert_eq!(hubu.request_count("POST", "/spend"), 2);
     first.finish(&[HUBU_TOKEN, PRIVATE_RESPONSE_CANARY]);
 
     let mut restarted =
         McpProcess::start_with_operation_state(Some((&hubu, HUBU_TOKEN)), None, &state_path);
     restarted.initialize();
     let recovered = restarted.call_with_meta(
-        20,
+        30,
         "hubu_authorize_spend",
-        arguments,
+        arguments.clone(),
         json!({"callId":"codex-call-125"}),
     );
     assert_eq!(recovered["result"], codex["result"]);
     assert_eq!(hubu.request_count("POST", "/spend/authorize"), 2);
+    let claude_recovered = restarted.call_with_meta(
+        31,
+        "hubu_submit_spend",
+        arguments,
+        json!({"claudecode/toolUseId":"toolu_hub_125"}),
+    );
+    assert_eq!(claude_recovered["result"], claude["result"]);
+    assert_eq!(hubu.request_count("POST", "/spend"), 2);
     restarted.finish(&[HUBU_TOKEN, PRIVATE_RESPONSE_CANARY]);
 }
 

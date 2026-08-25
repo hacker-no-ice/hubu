@@ -89,13 +89,18 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
                     &operation.operation_handle,
                     operation.operation_key.as_deref(),
                 );
-                if let Err(error) =
-                    server.record_harness_operation_result(&operation.operation_handle, &response)
+                return match server
+                    .record_harness_operation_result(&operation.operation_handle, &response)
                 {
-                    let message = operation_failure_message(&error.to_string(), operation, true);
-                    return error_response(id, -32000, &message);
-                }
-                return success_response(id, tool_result_v1(response));
+                    Ok(authoritative_response) => {
+                        success_response(id, tool_result_v1(authoritative_response))
+                    }
+                    Err(error) => {
+                        let message =
+                            operation_failure_message(&error.to_string(), operation, true);
+                        error_response(id, -32000, &message)
+                    }
+                };
             }
             success_response(id, result)
         }

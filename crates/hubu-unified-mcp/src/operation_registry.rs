@@ -289,6 +289,7 @@ impl OperationRegistry {
         tool_name: &str,
         arguments: &Value,
     ) -> Result<OperationResolution> {
+        self.remove_expired_authorization_identifiers()?;
         identity.validate()?;
         validate_identifier("tool_name", tool_name, MAX_TOOL_NAME_BYTES)?;
         if !arguments.is_object() {
@@ -407,7 +408,7 @@ impl OperationRegistry {
         &mut self,
         operation_handle: &str,
         result: &Value,
-    ) -> Result<()> {
+    ) -> Result<Value> {
         if contains_protected_identity(result) {
             bail!("normalized operation result contains protected backend identity");
         }
@@ -415,12 +416,21 @@ impl OperationRegistry {
         if result_json.len() > MAX_RESULT_BYTES {
             bail!("Hubu spend authorization result is too large to persist safely");
         }
-        let private_operation_key = self
+        let transaction = self
             .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (private_operation_key, existing_decision, existing_result) = transaction
             .query_row(
-                "SELECT operation_key FROM harness_operations WHERE operation_handle = ?1",
+                "SELECT operation_key, decision, result_json
+                 FROM harness_operations WHERE operation_handle = ?1",
                 [operation_handle],
-                |row| row.get::<_, Option<String>>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| anyhow!("normalized operation result has no matching operation"))?;
@@ -437,6 +447,17 @@ impl OperationRegistry {
         if !matches!(decision, "allow" | "deny" | "needs_approval") {
             bail!("Hubu spend authorization result has an unsupported decision");
         }
+        if matches!(existing_decision.as_deref(), Some("allow" | "deny")) {
+            let existing_result = existing_result
+                .as_deref()
+                .ok_or_else(|| anyhow!("terminal normalized operation is missing replay state"))
+                .and_then(|value| {
+                    serde_json::from_str(value)
+                        .context("decode recorded normalized operation result")
+                })?;
+            transaction.commit()?;
+            return Ok(existing_result);
+        }
         let decision_id = optional_string(result, "decision_id")?;
         let auth_token_id = optional_string(result, "auth_token_id")?
             .or(optional_string(result, "spend_auth_token_id")?);
@@ -452,7 +473,7 @@ impl OperationRegistry {
             .transpose()?;
         let authorization_expires_at = optional_string(result, "authorization_expires_at")?;
         let terminal = matches!(decision, "allow" | "deny");
-        let changed = self.connection.execute(
+        let changed = transaction.execute(
             "UPDATE harness_operations
              SET decision = ?2,
                  decision_id = ?3,
@@ -477,7 +498,8 @@ impl OperationRegistry {
         if changed != 1 {
             bail!("normalized operation result has no matching operation");
         }
-        Ok(())
+        transaction.commit()?;
+        Ok(result.clone())
     }
 
     fn remove_expired_authorization_identifiers(&mut self) -> Result<()> {
@@ -575,9 +597,20 @@ fn create_schema(connection: &Connection) -> Result<()> {
 }
 
 fn migrate_v1_to_v2(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let application_id =
+        transaction.query_row("PRAGMA application_id", [], |row| row.get::<_, i64>(0))?;
+    let version = transaction.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+    if application_id == APPLICATION_ID && version == SCHEMA_VERSION {
+        transaction.commit()?;
+        return Ok(());
+    }
+    if application_id != APPLICATION_ID || version != 1 {
+        bail!("unified MCP operation registry identity or schema version changed during migration");
+    }
     #[allow(clippy::type_complexity)]
     let existing = {
-        let mut statement = connection.prepare(
+        let mut statement = transaction.prepare(
             "SELECT platform, installation_id, harness_call_id, request_hash, operation_key,
                     codex_call_id, claude_tool_use_id, hubu_invocation_id,
                     controlled_installation_id, task_id, created_at
@@ -600,7 +633,6 @@ fn migrate_v1_to_v2(connection: &mut Connection) -> Result<()> {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute_batch(
         "ALTER TABLE harness_operations RENAME TO harness_operations_v1;
          CREATE TABLE harness_operations (
@@ -951,6 +983,50 @@ mod tests {
     }
 
     #[test]
+    fn terminal_result_is_monotonic_against_a_delayed_pending_response() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let operation = registry
+            .resolve_or_allocate(
+                &codex("monotonic"),
+                "hubu_authorize_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        let terminal = json!({
+            "decision":"allow",
+            "decision_id":"terminal-decision",
+            "operation_handle":operation.operation_handle
+        });
+        assert_eq!(
+            registry
+                .record_authorization_result(&operation.operation_handle, &terminal)
+                .unwrap(),
+            terminal
+        );
+
+        let delayed = json!({
+            "decision":"needs_approval",
+            "decision_id":"stale-decision",
+            "operation_handle":operation.operation_handle
+        });
+        assert_eq!(
+            registry
+                .record_authorization_result(&operation.operation_handle, &delayed)
+                .unwrap(),
+            terminal
+        );
+        let recovered = registry
+            .resolve_or_allocate(
+                &codex("monotonic"),
+                "hubu_authorize_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        assert!(recovered.operation_key.is_none());
+        assert_eq!(recovered.recorded_result, Some(terminal));
+    }
+
+    #[test]
     fn private_operation_key_is_rejected_from_recorded_result() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
         let operation = registry
@@ -1011,6 +1087,42 @@ mod tests {
             )
             .unwrap();
         assert!(stored.is_none());
+    }
+
+    #[test]
+    fn expired_authorization_identifier_is_removed_before_live_replay() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let operation = registry
+            .resolve_or_allocate(
+                &codex("expired-live"),
+                "hubu_authorize_spend",
+                &json!({"a": 1}),
+            )
+            .unwrap();
+        registry
+            .record_authorization_result(
+                &operation.operation_handle,
+                &json!({
+                    "decision":"allow",
+                    "auth_token_id":"expired-authorization",
+                    "authorization_expires_at":"2020-01-01T00:00:00Z",
+                    "operation_handle":operation.operation_handle
+                }),
+            )
+            .unwrap();
+
+        let recovered = registry
+            .resolve_or_allocate(
+                &codex("expired-live"),
+                "hubu_authorize_spend",
+                &json!({"a": 1}),
+            )
+            .unwrap();
+        assert!(recovered
+            .recorded_result
+            .unwrap()
+            .get("auth_token_id")
+            .is_none());
     }
 
     #[test]
