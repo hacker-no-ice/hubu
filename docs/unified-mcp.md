@@ -344,6 +344,12 @@ domains. Continuation binding composes agent calls, not backend storage or
 process ownership: the router still makes one bounded request to Gongbu, and
 Gongbu performs its own Hubu resolution, persistence, scheduling, and recovery.
 
+Registry schema v3 intentionally does not upgrade a v2 registry. V2 terminal
+authorization rows erased the private operation identity, so their continuation
+tokens cannot be bound or recovered safely. Such a profile fails the registry
+capability closed and must start with fresh adapter state; backend reads remain
+available while billable tools are hidden.
+
 The v1 normalizer fails closed when more than one primary identity source is
 present in the same call. It does not apply metadata precedence or correlate
 aliases across harnesses. A future contract revision may add explicit alias

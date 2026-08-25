@@ -261,8 +261,6 @@ impl OperationRegistry {
             create_schema(&connection)?;
         } else if application_id == APPLICATION_ID && version == 1 {
             migrate_v1_to_v3(&mut connection)?;
-        } else if application_id == APPLICATION_ID && version == 2 {
-            migrate_v2_to_v3(&mut connection)?;
         } else if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
             bail!("unified MCP operation registry identity or schema version is unsupported; refusing to modify the configured database");
         }
@@ -912,28 +910,6 @@ fn migrate_v1_to_v3(connection: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_v2_to_v3(connection: &mut Connection) -> Result<()> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(&format!(
-        "ALTER TABLE harness_operations ADD COLUMN gongbu_request_hash TEXT
-             CHECK(gongbu_request_hash IS NULL OR length(gongbu_request_hash) = 71);
-         ALTER TABLE harness_operations ADD COLUMN gongbu_execution_id TEXT
-             CHECK(gongbu_execution_id IS NULL OR length(gongbu_execution_id) BETWEEN 1 AND 255);
-         ALTER TABLE harness_operations ADD COLUMN gongbu_status TEXT
-             CHECK(gongbu_status IS NULL OR gongbu_status IN ('pending','preflighting','claimed','executing','settling','succeeded','released','failed','reconciliation_required'));
-         ALTER TABLE harness_operations ADD COLUMN gongbu_outcome TEXT;
-         ALTER TABLE harness_operations ADD COLUMN gongbu_create_started_at TEXT;
-         ALTER TABLE harness_operations ADD COLUMN gongbu_result_recorded_at TEXT;
-         CREATE UNIQUE INDEX harness_operation_auth_token
-             ON harness_operations(auth_token_id) WHERE auth_token_id IS NOT NULL;
-         CREATE UNIQUE INDEX harness_operation_gongbu_execution
-             ON harness_operations(gongbu_execution_id) WHERE gongbu_execution_id IS NOT NULL;
-         PRAGMA user_version = {SCHEMA_VERSION};"
-    ))?;
-    transaction.commit()?;
-    Ok(())
-}
-
 fn validate_gongbu_status(status: &str) -> Result<()> {
     if matches!(
         status,
@@ -1542,6 +1518,52 @@ mod tests {
                 )
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn v2_registry_is_rejected_without_advertising_unrecoverable_continuations() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("operations-v2.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE harness_operations (
+                     operation_handle TEXT PRIMARY KEY,
+                     operation_key TEXT,
+                     auth_token_id TEXT,
+                     result_json TEXT
+                 );
+                 INSERT INTO harness_operations(
+                     operation_handle, operation_key, auth_token_id, result_json
+                 ) VALUES(
+                     'hubu:public-operation:v1:legacy', NULL,
+                     'unrecoverable-token',
+                     '{{\"decision\":\"allow\",\"auth_token_id\":\"unrecoverable-token\"}}'
+                 );
+                 PRAGMA application_id = {APPLICATION_ID};
+                 PRAGMA user_version = 2;"
+            ))
+            .unwrap();
+        drop(connection);
+
+        let error = OperationRegistry::open(&path).unwrap_err().to_string();
+        assert!(error.contains("schema version is unsupported"));
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT auth_token_id FROM harness_operations", [], |row| {
+                    row.get::<_, String>(0)
+                },)
+                .unwrap(),
+            "unrecoverable-token"
         );
     }
 
