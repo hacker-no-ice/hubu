@@ -55,10 +55,10 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
                 if let Some(result) = operation.recorded_result.clone() {
                     return success_response(id, tool_result_v1(result));
                 }
-                if let Err(error) =
-                    server.mark_harness_operation_dispatch_started(&operation.operation_handle)
-                {
-                    return error_response(id, -32000, &error.to_string());
+                match server.mark_harness_operation_dispatch_started(&operation.operation_handle) {
+                    Ok(Some(result)) => return success_response(id, tool_result_v1(result)),
+                    Ok(None) => {}
+                    Err(error) => return error_response(id, -32000, &error.to_string()),
                 }
                 Some(operation)
             }

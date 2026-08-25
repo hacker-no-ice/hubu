@@ -792,7 +792,7 @@ impl Server {
     fn mark_harness_operation_dispatch_started(
         &self,
         operation_handle: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<Value>> {
         let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
         else {
             anyhow::bail!("Hubu billable tools require an available operation registry");

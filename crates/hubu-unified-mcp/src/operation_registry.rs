@@ -391,8 +391,43 @@ impl OperationRegistry {
         })
     }
 
-    pub(crate) fn mark_dispatch_started(&mut self, operation_handle: &str) -> Result<()> {
-        let changed = self.connection.execute(
+    pub(crate) fn mark_dispatch_started(
+        &mut self,
+        operation_handle: &str,
+    ) -> Result<Option<Value>> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (operation_key, decision, result_json) = transaction
+            .query_row(
+                "SELECT operation_key, decision, result_json
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [operation_handle],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("normalized operation cannot be dispatched"))?;
+        if matches!(decision.as_deref(), Some("allow" | "deny")) {
+            let result = result_json
+                .as_deref()
+                .ok_or_else(|| anyhow!("terminal normalized operation is missing replay state"))
+                .and_then(|value| {
+                    serde_json::from_str(value)
+                        .context("decode recorded normalized operation result")
+                })?;
+            transaction.commit()?;
+            return Ok(Some(result));
+        }
+        if operation_key.is_none() {
+            bail!("normalized operation cannot be dispatched");
+        }
+        let changed = transaction.execute(
             "UPDATE harness_operations
              SET dispatch_started_at = COALESCE(dispatch_started_at, CURRENT_TIMESTAMP)
              WHERE operation_handle = ?1 AND operation_key IS NOT NULL",
@@ -401,7 +436,8 @@ impl OperationRegistry {
         if changed != 1 {
             bail!("normalized operation cannot be dispatched");
         }
-        Ok(())
+        transaction.commit()?;
+        Ok(None)
     }
 
     pub(crate) fn record_authorization_result(
@@ -1024,6 +1060,33 @@ mod tests {
             .unwrap();
         assert!(recovered.operation_key.is_none());
         assert_eq!(recovered.recorded_result, Some(terminal));
+    }
+
+    #[test]
+    fn dispatch_boundary_returns_terminal_result_that_won_the_race() {
+        let mut first = OperationRegistry::open_in_memory().unwrap();
+        let stale_resolution = first
+            .resolve_or_allocate(
+                &codex("dispatch-race"),
+                "hubu_authorize_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        let terminal = json!({
+            "decision":"deny",
+            "decision_id":"terminal-decision",
+            "operation_handle":stale_resolution.operation_handle
+        });
+        first
+            .record_authorization_result(&stale_resolution.operation_handle, &terminal)
+            .unwrap();
+
+        assert_eq!(
+            first
+                .mark_dispatch_started(&stale_resolution.operation_handle)
+                .unwrap(),
+            Some(terminal)
+        );
     }
 
     #[test]
