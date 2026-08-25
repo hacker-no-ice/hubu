@@ -705,8 +705,11 @@ impl OperationRegistry {
 
     fn remove_expired_authorization_identifiers(&mut self) -> Result<()> {
         let now = Utc::now();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let rows = {
-            let mut statement = self.connection.prepare(
+            let mut statement = transaction.prepare(
                 "SELECT operation_handle, authorization_expires_at, result_json
                  FROM harness_operations
                  WHERE auth_token_id IS NOT NULL
@@ -739,13 +742,15 @@ impl OperationRegistry {
                     Ok(serde_json::to_string(&value)?)
                 })
                 .transpose()?;
-            self.connection.execute(
+            transaction.execute(
                 "UPDATE harness_operations
                  SET auth_token_id = NULL, result_json = ?2
-                 WHERE operation_handle = ?1",
+                 WHERE operation_handle = ?1
+                   AND gongbu_create_started_at IS NULL",
                 params![handle, result_json],
             )?;
         }
+        transaction.commit()?;
         Ok(())
     }
 }
