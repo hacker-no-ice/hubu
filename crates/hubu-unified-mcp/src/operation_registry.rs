@@ -681,6 +681,7 @@ impl OperationRegistry {
             .query_row(
                 "SELECT operation_handle, operation_state, gongbu_execution_id,
                         operation_result_code, tool_name, decision, auth_token_id,
+                        authorization_expires_at,
                         COALESCE(operation_updated_at, result_recorded_at,
                                  dispatch_started_at, created_at)
                  FROM harness_operations WHERE operation_handle = ?1",
@@ -694,7 +695,8 @@ impl OperationRegistry {
                         row.get::<_, String>(4)?,
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, Option<String>>(6)?,
-                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(8)?,
                     ))
                 },
             )
@@ -705,7 +707,7 @@ impl OperationRegistry {
             None => pre_execution_projection(
                 &persisted.4,
                 persisted.5.as_deref(),
-                persisted.6.is_some(),
+                authorization_is_live(persisted.6.as_deref(), persisted.7.as_deref()),
             )?,
         };
         Ok(DurableOperationStatus {
@@ -713,7 +715,7 @@ impl OperationRegistry {
             state,
             execution_id: persisted.2,
             result_code,
-            updated_at: persisted.7,
+            updated_at: persisted.8,
         })
     }
 
@@ -1270,6 +1272,18 @@ fn pre_execution_projection(
     Ok((projection.0.to_owned(), projection.1.map(str::to_owned)))
 }
 
+fn authorization_is_live(auth_token_id: Option<&str>, expires_at: Option<&str>) -> bool {
+    if auth_token_id.is_none() {
+        return false;
+    }
+    let Some(expires_at) = expires_at else {
+        return true;
+    };
+    DateTime::parse_from_rfc3339(expires_at)
+        .map(|expires_at| expires_at.with_timezone(&Utc) > Utc::now())
+        .unwrap_or(true)
+}
+
 fn ensure_lease_update(changed: usize) -> Result<()> {
     if changed == 1 {
         Ok(())
@@ -1589,6 +1603,32 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("does not belong to an execution authorization"));
+
+        let expired = registry
+            .resolve_or_allocate(
+                &codex("status-expired-authorization"),
+                "hubu_authorize_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        registry
+            .record_authorization_result(
+                &expired.operation_handle,
+                &json!({
+                    "decision":"allow",
+                    "auth_token_id":"expired-status-token",
+                    "authorization_expires_at":"2000-01-01T00:00:00Z"
+                }),
+            )
+            .unwrap();
+        let status = registry
+            .durable_operation_status(&expired.operation_handle)
+            .unwrap();
+        assert_eq!(status.state, "failed");
+        assert_eq!(
+            status.result_code.as_deref(),
+            Some("authorization_continuation_unavailable")
+        );
     }
 
     #[test]
