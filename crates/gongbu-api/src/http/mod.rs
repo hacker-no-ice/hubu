@@ -1048,7 +1048,13 @@ mod tests {
             &self,
             spend_auth_token_id: &str,
         ) -> Result<crate::hubu::ExecutorSpendResponse, HttpClientError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            let previous_calls = self.calls.fetch_add(1, Ordering::SeqCst);
+            if spend_auth_token_id.starts_with("consumed-legacy-replay") && previous_calls > 0 {
+                return Err(HttpClientError::Status {
+                    status: 409,
+                    body: "authorization already consumed".into(),
+                });
+            }
             let mut response = crate::hubu::ExecutorSpendResponse {
                 operation_key: spend_auth_token_id.into(),
                 reason: "test execution".into(),
@@ -1553,6 +1559,31 @@ mod tests {
         assert_eq!(replay.status, 200);
         assert_eq!(execution(&replay).execution_id, created.execution_id);
         assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), calls_before);
+    }
+
+    #[test]
+    fn pre_snapshot_consumed_authorization_replays_without_resolution() {
+        let fixture = fixture();
+        let submitted = request("consumed-legacy-replay-token");
+        let created = execution(&call_create(&fixture, &submitted));
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture
+                .repository
+                .delete_hubu_authorization_snapshot(&created.execution_id)
+                .unwrap(),
+            1
+        );
+
+        let replay = call_create(&fixture, &submitted);
+        assert_eq!(replay.status, 200);
+        assert_eq!(execution(&replay).execution_id, created.execution_id);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+
+        let mut changed = submitted;
+        changed["input"] = json!({"prompt":"different","image_count":1});
+        assert_eq!(call_create(&fixture, &changed).status, 409);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
