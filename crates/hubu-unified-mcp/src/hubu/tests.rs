@@ -64,6 +64,7 @@ fn server_with_backends(
         snapshot: Arc::new(Mutex::new(snapshot)),
         transition_state: Arc::new(transition_state),
         capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
+        operation_tick: DEFAULT_OPERATION_TICK,
         probe_timings: Arc::new(Mutex::new(ProbeTimings {
             hubu: BackendProbeTiming::new(now, DEFAULT_CAPABILITY_POLL_INTERVAL, false, 7),
             gongbu: BackendProbeTiming::new(now, DEFAULT_CAPABILITY_POLL_INTERVAL, false, 11),
@@ -168,9 +169,10 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
     let server = server_with_backends("http://127.0.0.1:1", None, false, None);
     let actual = server.list_tools_for_snapshot();
     assert_eq!(actual[0], capability_tool());
+    assert_eq!(actual[1], gongbu::operation_status_definition());
 
     let expected = super::catalog::tool_definitions();
-    assert_eq!(&actual[1..], expected.as_slice());
+    assert_eq!(&actual[2..], expected.as_slice());
     assert_eq!(expected.len(), 28);
     assert!(!actual.iter().any(|tool| {
         matches!(
@@ -192,7 +194,8 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 33);
+    assert_eq!(tools.len(), 34);
+    assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
         .chain(gongbu::tool_definitions())
@@ -209,7 +212,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 32);
+    assert_eq!(degraded.len(), 33);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -228,10 +231,11 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.hubu.reason_code = Some("health_unavailable");
     }
     let hubu_down = server.list_tools_for_snapshot();
-    assert_eq!(hubu_down.len(), 4);
+    assert_eq!(hubu_down.len(), 5);
     assert!(!hubu_down.iter().any(|tool| tool["name"]
         .as_str()
-        .is_some_and(|name| name.starts_with("hubu_") && name != "hubu_unified_capabilities")));
+        .is_some_and(|name| name.starts_with("hubu_")
+            && !matches!(name, "hubu_unified_capabilities" | "hubu_operation_status"))));
     assert!(!hubu_down
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));

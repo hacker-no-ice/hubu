@@ -19,6 +19,32 @@ pub(super) fn tool_definitions() -> Vec<Value> {
     ]
 }
 
+pub(super) fn operation_status_definition() -> Value {
+    json!({
+        "name": "hubu_operation_status",
+        "description": "Observe one durable operation by its safe public handle. Once accepted, keep observing this operation and do not submit a replacement.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["operation_handle"],
+            "properties": {
+                "operation_handle": {
+                    "type": "string",
+                    "minLength": 27,
+                    "maxLength": 160,
+                    "pattern": "^hubu:public-operation:v1:[a-f0-9]{32}$"
+                }
+            }
+        },
+        "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+        }
+    })
+}
+
 fn id_schema(field: &str) -> Value {
     let mut properties = Map::new();
     properties.insert(

@@ -1,7 +1,7 @@
 #[allow(dead_code)]
 mod support;
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, thread, time::Duration};
 
 use serde_json::{json, Value};
 use support::{BackendKind, BackendStub, McpProcess};
@@ -500,6 +500,14 @@ fn all_mapped_tools_have_unified_owned_golden_routing_coverage() {
                 "hubu-mcp-client-approval-v1"
             );
             continue;
+        }
+        if case.name == "gongbu_create_execution" {
+            for _ in 0..100 {
+                if gongbu.request_count(case.method, case.path) > 0 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
         }
         if case.name == "gongbu_get_artifact" {
             assert_eq!(response["result"]["content"][1]["type"], "image");

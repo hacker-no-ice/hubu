@@ -70,6 +70,17 @@ impl ToolError {
             is_error: true,
         }
     }
+
+    pub(super) fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub(super) fn retryable(&self) -> bool {
+        matches!(
+            self.code,
+            "gongbu_unavailable" | "gongbu_internal_error" | "rate_limited"
+        )
+    }
 }
 
 pub(super) fn api_error(

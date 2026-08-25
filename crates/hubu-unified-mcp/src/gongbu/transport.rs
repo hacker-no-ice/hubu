@@ -22,6 +22,21 @@ pub(crate) struct CallOutcome {
     pub(crate) lifecycle: Option<crate::operation_registry::GongbuLifecycle>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DurableCallError {
+    pub(crate) code: &'static str,
+    pub(crate) retryable: bool,
+}
+
+impl From<ToolError> for DurableCallError {
+    fn from(error: ToolError) -> Self {
+        Self {
+            code: error.code(),
+            retryable: error.retryable(),
+        }
+    }
+}
+
 pub(super) fn call_tool(
     client: &BackendClient,
     name: &str,
@@ -38,6 +53,35 @@ pub(super) fn call_tool(
             lifecycle: None,
         },
     }
+}
+
+pub(super) fn create_durable_execution(
+    client: &BackendClient,
+    arguments: Value,
+    expected: &crate::operation_registry::GongbuContinuation,
+) -> Result<crate::operation_registry::GongbuLifecycle, DurableCallError> {
+    let prepared = request::prepare("gongbu_create_execution", arguments)?;
+    let (_, lifecycle) = execute(client, prepared, Some(expected))?;
+    lifecycle.ok_or(DurableCallError {
+        code: "invalid_execution_response",
+        retryable: false,
+    })
+}
+
+pub(super) fn observe_durable_execution(
+    client: &BackendClient,
+    execution_id: &str,
+    expected: &crate::operation_registry::GongbuContinuation,
+) -> Result<crate::operation_registry::GongbuLifecycle, DurableCallError> {
+    let prepared = request::prepare(
+        "gongbu_get_execution",
+        serde_json::json!({"execution_id": execution_id}),
+    )?;
+    let (_, lifecycle) = execute(client, prepared, Some(expected))?;
+    lifecycle.ok_or(DurableCallError {
+        code: "invalid_execution_response",
+        retryable: false,
+    })
 }
 
 fn execute(

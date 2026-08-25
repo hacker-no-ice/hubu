@@ -20,6 +20,7 @@
     { "name": "hubu_list_claims_requiring_reconciliation", "owner": "hubu" },
     { "name": "hubu_list_ledger", "owner": "hubu" },
     { "name": "hubu_list_users", "owner": "hubu" },
+    { "name": "hubu_operation_status", "owner": "router" },
     { "name": "hubu_policy_diff", "owner": "hubu" },
     { "name": "hubu_policy_history", "owner": "hubu" },
     { "name": "hubu_reconcile_vendor_billed_claim", "owner": "hubu" },

@@ -26,6 +26,22 @@ struct CapabilityMonitor {
     handle: Option<thread::JoinHandle<()>>,
 }
 
+struct OperationWorker {
+    stop: Arc<AtomicBool>,
+    wake: mpsc::Sender<()>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for OperationWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.wake.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl Drop for CapabilityMonitor {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -42,6 +58,7 @@ pub(super) fn run(
     mut output: impl Write,
 ) -> io::Result<()> {
     thread::scope(|scope| {
+        let operation_worker = spawn_operation_worker(&server);
         let (event_tx, event_rx) = mpsc::channel();
         let input_tx = event_tx.clone();
         scope.spawn(move || {
@@ -110,8 +127,24 @@ pub(super) fn run(
             }
         };
         drop(monitor);
+        drop(operation_worker);
         result
     })
+}
+
+fn spawn_operation_worker(server: &Server) -> OperationWorker {
+    let server = server.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let (wake_tx, wake_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        crate::operation_worker::run(server, &thread_stop, &wake_rx);
+    });
+    OperationWorker {
+        stop,
+        wake: wake_tx,
+        handle: Some(handle),
+    }
 }
 
 fn spawn_capability_monitor(
