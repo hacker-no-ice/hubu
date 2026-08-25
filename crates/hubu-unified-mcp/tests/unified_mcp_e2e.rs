@@ -57,6 +57,225 @@ fn wait_for_backend_states(
     panic!("backend states did not stabilize as {expected_hubu}/{expected_gongbu}")
 }
 
+fn assert_public_spend_result(response: &Value) -> &Value {
+    assert!(
+        response.get("error").is_none(),
+        "unexpected response: {response}"
+    );
+    let result = &response["result"]["structuredContent"];
+    assert!(result["operation_handle"]
+        .as_str()
+        .unwrap()
+        .starts_with("hubu:public-operation:v1:"));
+    assert_eq!(
+        result["agent_guidance"]["on_ambiguous_result"],
+        "redeliver_exact_call"
+    );
+    assert_eq!(
+        result["agent_guidance"]["replacement_call"],
+        "do_not_submit"
+    );
+    let serialized = response.to_string();
+    assert!(!serialized.contains("operation_key"));
+    result
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn normalized_spend_wire_lifecycle_survives_redelivery_collision_and_restart() {
+    const PRIVATE_RESPONSE_CANARY: &str = "backend-private-operation-canary";
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let state = tempfile::tempdir().unwrap();
+    let state_path = state.path().join("operations.sqlite3");
+    let backend_result = json!({
+        "operation_key": PRIVATE_RESPONSE_CANARY,
+        "task_id": "backend-private-task",
+        "decision": "allow",
+        "decision_id": "decision-125",
+        "auth_token_id": "authorization-125",
+        "authorization_expires_at": "2099-08-24T00:00:00Z",
+        "requires_human_approval": false
+    });
+    hubu.respond_json("POST", "/spend/authorize", 200, backend_result.clone());
+    hubu.respond_json("POST", "/spend", 200, backend_result);
+    let arguments = json!({
+        "account_id":"account-125",
+        "amount_cents":25,
+        "reason":"HUB-125 wire lifecycle"
+    });
+
+    let mut first =
+        McpProcess::start_with_operation_state(Some((&hubu, HUBU_TOKEN)), None, &state_path);
+    first.initialize();
+    let codex = first.call_with_meta(
+        10,
+        "hubu_authorize_spend",
+        arguments.clone(),
+        json!({"callId":"codex-call-125"}),
+    );
+    let codex_result = assert_public_spend_result(&codex);
+    assert_eq!(codex_result["auth_token_id"], "authorization-125");
+    assert_eq!(codex_result["task_id"], "backend-private-task");
+    let codex_handle = codex_result["operation_handle"].clone();
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+    let first_request_body = hubu
+        .requests()
+        .into_iter()
+        .find(|request| request.path == "/spend/authorize")
+        .and_then(|request| request.raw.split("\r\n\r\n").nth(1).map(str::to_owned))
+        .map(|body| serde_json::from_str::<Value>(&body).unwrap())
+        .unwrap();
+    let first_private_key = first_request_body["operation_key"].clone();
+    assert_eq!(first_request_body["task_id"], Value::Null);
+    assert!(first_request_body.get("_meta").is_none());
+
+    let exact_redelivery = first.call_with_meta(
+        11,
+        "hubu_authorize_spend",
+        arguments.clone(),
+        json!({"callId":"codex-call-125"}),
+    );
+    assert_eq!(exact_redelivery["result"], codex["result"]);
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+
+    let collision = first.call_with_meta(
+        12,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-125","amount_cents":30,"reason":"changed"}),
+        json!({"callId":"codex-call-125"}),
+    );
+    assert!(collision["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("refusing backend access"));
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+
+    for (id, protected) in [
+        (13, "operation_key"),
+        (14, "task_id"),
+        (15, "operation_handle"),
+    ] {
+        let mut spoofed = arguments.clone();
+        spoofed[protected] = json!("model-owned");
+        let rejected = first.call_with_meta(
+            id,
+            "hubu_authorize_spend",
+            spoofed,
+            json!({"callId":format!("spoof-{protected}")}),
+        );
+        assert!(rejected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("trusted platform state"));
+    }
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+
+    let distinct = first.call_with_meta(
+        16,
+        "hubu_authorize_spend",
+        arguments.clone(),
+        json!({"callId":"codex-call-125-distinct"}),
+    );
+    let distinct_result = assert_public_spend_result(&distinct);
+    assert_ne!(distinct_result["operation_handle"], codex_handle);
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 2);
+    let second_private_key = hubu
+        .requests()
+        .into_iter()
+        .filter(|request| request.path == "/spend/authorize")
+        .nth(1)
+        .and_then(|request| request.raw.split("\r\n\r\n").nth(1).map(str::to_owned))
+        .map(|body| serde_json::from_str::<Value>(&body).unwrap()["operation_key"].clone())
+        .unwrap();
+    assert_ne!(second_private_key, first_private_key);
+
+    let claude = first.call_with_meta(
+        17,
+        "hubu_submit_spend",
+        arguments.clone(),
+        json!({"claudecode/toolUseId":"toolu_hub_125"}),
+    );
+    let claude_result = assert_public_spend_result(&claude);
+    let claude_handle = claude_result["operation_handle"].clone();
+    assert_eq!(hubu.request_count("POST", "/spend"), 1);
+    let claude_request_body = hubu
+        .requests()
+        .into_iter()
+        .find(|request| request.path == "/spend")
+        .and_then(|request| request.raw.split("\r\n\r\n").nth(1).map(str::to_owned))
+        .map(|body| serde_json::from_str::<Value>(&body).unwrap())
+        .unwrap();
+    assert_eq!(claude_request_body["task_id"], Value::Null);
+    assert!(claude_request_body.get("_meta").is_none());
+
+    let claude_redelivery = first.call_with_meta(
+        18,
+        "hubu_submit_spend",
+        arguments.clone(),
+        json!({"claudecode/toolUseId":"toolu_hub_125"}),
+    );
+    assert_eq!(claude_redelivery["result"], claude["result"]);
+    assert_eq!(hubu.request_count("POST", "/spend"), 1);
+
+    let claude_collision = first.call_with_meta(
+        19,
+        "hubu_submit_spend",
+        json!({"account_id":"account-125","amount_cents":30,"reason":"changed"}),
+        json!({"claudecode/toolUseId":"toolu_hub_125"}),
+    );
+    assert!(claude_collision["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("refusing backend access"));
+    assert_eq!(hubu.request_count("POST", "/spend"), 1);
+
+    let mut claude_spoofed = arguments.clone();
+    claude_spoofed["operation_key"] = json!("model-owned");
+    let claude_spoof = first.call_with_meta(
+        20,
+        "hubu_submit_spend",
+        claude_spoofed,
+        json!({"claudecode/toolUseId":"toolu_hub_125_spoof"}),
+    );
+    assert!(claude_spoof["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("trusted platform state"));
+    assert_eq!(hubu.request_count("POST", "/spend"), 1);
+
+    let claude_distinct = first.call_with_meta(
+        21,
+        "hubu_submit_spend",
+        arguments.clone(),
+        json!({"claudecode/toolUseId":"toolu_hub_125_distinct"}),
+    );
+    let claude_distinct_result = assert_public_spend_result(&claude_distinct);
+    assert_ne!(claude_distinct_result["operation_handle"], claude_handle);
+    assert_eq!(hubu.request_count("POST", "/spend"), 2);
+    first.finish(&[HUBU_TOKEN, PRIVATE_RESPONSE_CANARY]);
+
+    let mut restarted =
+        McpProcess::start_with_operation_state(Some((&hubu, HUBU_TOKEN)), None, &state_path);
+    restarted.initialize();
+    let recovered = restarted.call_with_meta(
+        30,
+        "hubu_authorize_spend",
+        arguments.clone(),
+        json!({"callId":"codex-call-125"}),
+    );
+    assert_eq!(recovered["result"], codex["result"]);
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 2);
+    let claude_recovered = restarted.call_with_meta(
+        31,
+        "hubu_submit_spend",
+        arguments,
+        json!({"claudecode/toolUseId":"toolu_hub_125"}),
+    );
+    assert_eq!(claude_recovered["result"], claude["result"]);
+    assert_eq!(hubu.request_count("POST", "/spend"), 2);
+    restarted.finish(&[HUBU_TOKEN, PRIVATE_RESPONSE_CANARY]);
+}
+
 #[test]
 #[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn exact_hub_88_catalog_and_representative_governed_artifact_flow() {

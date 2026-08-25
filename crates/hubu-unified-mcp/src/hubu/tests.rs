@@ -8,7 +8,10 @@ use std::{
 
 use serde_json::{json, Value};
 
-use super::routing::{route_tool_call_v1, HubuRequestCapabilityV1};
+use super::routing::{
+    public_spend_result, route_tool_call_v1, spend_response_with_approval_hint,
+    HubuRequestCapabilityV1,
+};
 use crate::{
     capability::{BackendReport, BackendState, CapabilitySnapshot, ContractVersions},
     operation_registry::OperationResolution,
@@ -17,8 +20,10 @@ use crate::{
 
 fn resolved_operation() -> OperationResolution {
     OperationResolution {
-        operation_key: "hubu:operation:v1:test:fixed".into(),
+        operation_key: Some("hubu:operation:v1:test:fixed".into()),
+        operation_handle: "hubu:public-operation:v1:fixed".into(),
         task_id: Some("linear:HUB-124".into()),
+        recorded_result: None,
     }
 }
 
@@ -626,7 +631,14 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
     assert_eq!(body["task_id"], "linear:HUB-124");
     assert!(body.get("_meta").is_none());
     assert!(body.get("platform").is_none());
-    assert_eq!(response["result"], owned_routing_result);
+    assert_eq!(
+        response["result"]["structuredContent"]["decision"],
+        owned_routing_result["structuredContent"]["decision"]
+    );
+    assert!(response["result"]["structuredContent"]["operation_handle"]
+        .as_str()
+        .unwrap()
+        .starts_with("hubu:public-operation:v1:"));
     assert_eq!(
         response["result"]["structuredContent"]["requires_human_approval"],
         true
@@ -635,6 +647,36 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
         response["result"]["content"][0]["text"],
         serde_json::to_string_pretty(&response["result"]["structuredContent"]).unwrap()
     );
+}
+
+#[test]
+fn public_spend_results_preserve_policy_semantics_and_remove_private_identity_recursively() {
+    for (decision, requires_human_approval) in
+        [("allow", false), ("deny", false), ("needs_approval", true)]
+    {
+        let response = public_spend_result(
+            spend_response_with_approval_hint(json!({
+                "decision": decision,
+                "operation_key": "private-root",
+                "task_id": "trusted-task",
+                "reason": "backend mentioned private-root",
+                "retry_guidance": {"operation_key":"private-nested"},
+                "approval": {"review":{"operation_key":"private-review"}}
+            })),
+            "hubu:public-operation:v1:test",
+            Some("private-root"),
+        );
+        assert_eq!(response["decision"], decision);
+        assert_eq!(response["requires_human_approval"], requires_human_approval);
+        assert_eq!(
+            response["operation_handle"],
+            "hubu:public-operation:v1:test"
+        );
+        let serialized = response.to_string();
+        assert!(!serialized.contains("operation_key"));
+        assert!(!serialized.contains("private-"));
+        assert_eq!(response["task_id"], "trusted-task");
+    }
 }
 
 #[test]
@@ -663,6 +705,44 @@ fn spend_identity_collision_fails_before_a_second_backend_request() {
         .as_str()
         .unwrap()
         .contains("refusing backend access"));
+}
+
+#[test]
+fn ambiguous_spend_result_returns_safe_handle_and_exact_redelivery_guidance() {
+    let (endpoint, request, handle) = one_shot_http_server(200, "not-json");
+    let server = server_with_backends(&endpoint, None, false, None);
+    let response = tool_call(
+        &server,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-1","amount_cents":25,"reason":"ambiguous"}),
+        Some(json!({"callId":"ambiguous-call-125"})),
+    );
+    let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+
+    let private_key = serde_json::from_str::<Value>(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+        ["operation_key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("hubu:public-operation:v1:"));
+    assert!(message.contains("same call identity"));
+    assert!(message.contains("do not submit a replacement"));
+    assert!(!message.contains(&private_key));
+}
+
+#[test]
+fn spend_application_error_cannot_echo_private_operation_key() {
+    let operation = resolved_operation();
+    let private_key = operation.operation_key.as_deref().unwrap();
+    let message = super::operation_failure_message(
+        &format!("backend rejected operation {private_key}"),
+        &operation,
+        false,
+    );
+    assert!(!message.contains(private_key));
+    assert!(message.contains("<private operation redacted>"));
 }
 
 #[test]

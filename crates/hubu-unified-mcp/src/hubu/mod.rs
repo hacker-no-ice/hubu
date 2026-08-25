@@ -11,7 +11,9 @@ use crate::{
 };
 
 use response::ForwardError;
-use routing::{route_tool_call_v1, tool_result_v1};
+use routing::{
+    public_spend_result, route_tool_call_v1, tool_result_v1, validate_model_spend_arguments,
+};
 pub use transport::RoutingConfig;
 
 pub(crate) use catalog::tool_definitions;
@@ -39,6 +41,9 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
         return success_response(id, tool_result_v1(catalog::approval_profile()));
     }
     let operation = if matches!(name.as_str(), "hubu_submit_spend" | "hubu_authorize_spend") {
+        if let Err(error) = validate_model_spend_arguments(&call.arguments) {
+            return error_response(id, -32000, &error.to_string());
+        }
         let identity = match crate::operation_registry::NormalizedHarnessIdentity::from_meta(
             call.meta.as_ref(),
         ) {
@@ -46,7 +51,17 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
             Err(error) => return error_response(id, -32000, &error.to_string()),
         };
         match server.resolve_harness_operation(&identity, &name, &call.arguments) {
-            Ok(operation) => Some(operation),
+            Ok(operation) => {
+                if let Some(result) = operation.recorded_result.clone() {
+                    return success_response(id, tool_result_v1(result));
+                }
+                match server.mark_harness_operation_dispatch_started(&operation.operation_handle) {
+                    Ok(Some(result)) => return success_response(id, tool_result_v1(result)),
+                    Ok(None) => {}
+                    Err(error) => return error_response(id, -32000, &error.to_string()),
+                }
+                Some(operation)
+            }
             Err(error) => return error_response(id, -32000, &error.to_string()),
         }
     } else {
@@ -60,10 +75,35 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
     match route_tool_call_v1(
         params,
         server.hubu_routing.trusted_client_approval,
-        operation,
+        operation.clone(),
         |request| client.execute_hubu(request, &server.hubu_routing),
     ) {
-        Ok(result) => success_response(id, result),
+        Ok(result) => {
+            if let Some(operation) = operation.as_ref() {
+                let response = result
+                    .get("structuredContent")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let response = public_spend_result(
+                    response,
+                    &operation.operation_handle,
+                    operation.operation_key.as_deref(),
+                );
+                return match server
+                    .record_harness_operation_result(&operation.operation_handle, &response)
+                {
+                    Ok(authoritative_response) => {
+                        success_response(id, tool_result_v1(authoritative_response))
+                    }
+                    Err(error) => {
+                        let message =
+                            operation_failure_message(&error.to_string(), operation, true);
+                        error_response(id, -32000, &message)
+                    }
+                };
+            }
+            success_response(id, result)
+        }
         Err(error)
             if matches!(
                 error.downcast_ref::<ForwardError>(),
@@ -73,7 +113,41 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
             server.mark_hubu_unavailable();
             backend_error_response(id, &name, BackendOwner::Hubu, ToolRejection::Unavailable)
         }
-        Err(error) => error_response(id, -32000, &error.to_string()),
+        Err(error) => {
+            let message = operation.as_ref().map_or_else(
+                || error.to_string(),
+                |operation| {
+                    operation_failure_message(
+                        &error.to_string(),
+                        operation,
+                        matches!(
+                            error.downcast_ref::<ForwardError>(),
+                            Some(ForwardError::AmbiguousTransport | ForwardError::InvalidResponse)
+                        ),
+                    )
+                },
+            );
+            error_response(id, -32000, &message)
+        }
+    }
+}
+
+fn operation_failure_message(
+    message: &str,
+    operation: &crate::operation_registry::OperationResolution,
+    ambiguous: bool,
+) -> String {
+    let message = operation.operation_key.as_deref().map_or_else(
+        || message.to_string(),
+        |operation_key| message.replace(operation_key, "<private operation redacted>"),
+    );
+    if ambiguous {
+        format!(
+            "{message}. Operation handle: {}. Redeliver this exact harness call with the same call identity; do not submit a replacement spend call",
+            operation.operation_handle
+        )
+    } else {
+        message
     }
 }
 

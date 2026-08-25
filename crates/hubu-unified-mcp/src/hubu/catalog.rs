@@ -175,7 +175,7 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "hubu_submit_spend",
-            "Submit an agent spend request. Trusted platform metadata supplies operation and optional task identity outside model arguments. Human approval is only required when the returned decision is needs_approval.",
+            "Submit an agent spend request. Trusted harness metadata supplies normalized operation and optional task identity outside model arguments. Returns a public operation handle and exact-redelivery guidance; human approval is only required when the decision is needs_approval.",
             json_schema_required(json!({
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
@@ -187,7 +187,7 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "hubu_authorize_spend",
-            "Authorize an agent spend request. Trusted platform metadata supplies operation and optional task identity outside model arguments.",
+            "Authorize an agent spend request. Trusted harness metadata supplies normalized operation and optional task identity outside model arguments. Returns a public operation handle and exact-redelivery guidance without exposing the private backend operation key.",
             json_schema_required(json!({
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },

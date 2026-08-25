@@ -253,28 +253,97 @@ pub(crate) fn trusted_spend_arguments(
     mut arguments: Value,
     operation: Option<&OperationResolution>,
 ) -> Result<Value> {
+    validate_model_spend_arguments(&arguments)?;
     let arguments = arguments
         .as_object_mut()
         .ok_or_else(|| anyhow!("Hubu spend tool arguments must be an object"))?;
-    for protected in ["operation_key", "task_id"] {
-        if arguments.contains_key(protected) {
-            bail!(
-                "{protected} is trusted platform state and must not be supplied in model-authored arguments"
-            );
-        }
-    }
     let trusted = operation.ok_or_else(|| {
         anyhow!("Hubu spend tools require a resolved trusted harness operation identity")
     })?;
+    let operation_key = trusted
+        .operation_key
+        .as_ref()
+        .ok_or_else(|| anyhow!("normalized operation no longer requires backend dispatch"))?;
     arguments.insert(
         "operation_key".to_string(),
-        Value::String(trusted.operation_key.clone()),
+        Value::String(operation_key.clone()),
     );
     arguments.insert(
         "task_id".to_string(),
         trusted.task_id.clone().map_or(Value::Null, Value::String),
     );
     Ok(Value::Object(arguments.clone()))
+}
+
+pub(crate) fn validate_model_spend_arguments(arguments: &Value) -> Result<()> {
+    let arguments = arguments
+        .as_object()
+        .ok_or_else(|| anyhow!("Hubu spend tool arguments must be an object"))?;
+    for protected in [
+        "operation_key",
+        "operation_handle",
+        "task_id",
+        "platform",
+        "installation_id",
+        "invocation_id",
+        "call_id",
+        "callId",
+        "tool_use_id",
+        "claudecode/toolUseId",
+        "_meta",
+    ] {
+        if arguments.contains_key(protected) {
+            bail!(
+                "{protected} is trusted platform state and must not be supplied in model-authored arguments"
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn public_spend_result(
+    mut response: Value,
+    operation_handle: &str,
+    private_operation_key: Option<&str>,
+) -> Value {
+    remove_private_operation_identity(&mut response, private_operation_key);
+    if let Some(object) = response.as_object_mut() {
+        object.insert(
+            "operation_handle".to_string(),
+            Value::String(operation_handle.to_string()),
+        );
+        object.insert(
+            "agent_guidance".to_string(),
+            json!({
+                "on_ambiguous_result": "redeliver_exact_call",
+                "replacement_call": "do_not_submit",
+                "message": "If the client-visible result is ambiguous, redeliver this exact harness call with the same call identity; do not submit a replacement spend call."
+            }),
+        );
+    }
+    response
+}
+
+fn remove_private_operation_identity(value: &mut Value, private_operation_key: Option<&str>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                remove_private_operation_identity(value, private_operation_key);
+            }
+        }
+        Value::Object(object) => {
+            object.remove("operation_key");
+            for value in object.values_mut() {
+                remove_private_operation_identity(value, private_operation_key);
+            }
+        }
+        Value::String(text) => {
+            if let Some(operation_key) = private_operation_key {
+                *text = text.replace(operation_key, "<private operation redacted>");
+            }
+        }
+        _ => {}
+    }
 }
 
 fn policy_inspection_path(action: &str, arguments: &Value) -> Result<String> {
