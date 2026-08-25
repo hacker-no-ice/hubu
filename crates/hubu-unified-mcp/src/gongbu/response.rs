@@ -114,22 +114,22 @@ pub(super) fn execution_result(
         status: response.status.clone(),
         outcome: response.outcome.clone(),
     };
+    let private_operation_key = response.operation_key.clone();
     let public = PublicExecutionResponse {
         schema_version: response.schema_version,
         execution_id: response.execution_id,
         operation_handle: expected.map(|expected| expected.operation_handle.clone()),
         status: response.status,
         outcome: response.outcome,
-        failure: response.failure.map(|mut failure| {
-            scrub_private_text(&mut failure.message, Some(&response.operation_key));
-            failure
-        }),
+        failure: response.failure,
         authorization: response.authorization,
         created_at: response.created_at,
         updated_at: response.updated_at,
         started_at: response.started_at,
         completed_at: response.completed_at,
     };
+    let mut public = serde_json::to_value(public).expect("public execution response serializes");
+    scrub_private_projection(&mut public, &private_operation_key);
     Ok((text_result(&public), lifecycle))
 }
 
@@ -201,6 +201,22 @@ fn scrub_private_text(text: &mut String, private_operation_key: Option<&str>) {
     }
     if text.contains("hubu:operation:v1:") {
         *text = "<private operation redacted>".into();
+    }
+}
+
+fn scrub_private_projection(value: &mut Value, private_operation_key: &str) {
+    match value {
+        Value::Object(object) => {
+            object.retain(|key, _| key != "operation_key");
+            object
+                .values_mut()
+                .for_each(|value| scrub_private_projection(value, private_operation_key));
+        }
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| scrub_private_projection(value, private_operation_key)),
+        Value::String(text) => scrub_private_text(text, Some(private_operation_key)),
+        _ => {}
     }
 }
 
