@@ -165,11 +165,11 @@ Required for every non-fixture adapter. **Defined by the provider.** Use the exa
 
 ### `targets.settings.config.timeout_ms`
 
-Required positive invocation budget in milliseconds for every non-fixture adapter. It covers the complete adapter operation described by its schema, which may include submission, polling, and artifact retrieval.
+Required invocation budget in milliseconds for every non-fixture adapter. The accepted range is `1..=270000` (up to 270 seconds). It covers the complete adapter operation described by its schema, which may include submission, polling, and artifact retrieval.
 
 ### `targets.settings.config.max_retries`
 
-Optional unsigned integer; defaults to `0`. A retry is allowed only when the adapter can preserve vendor-enforced idempotency. Increasing this value does not weaken that safety check.
+Optional unsigned integer; defaults to `0`. The only currently accepted value is `0` for every non-fixture adapter; Gongbu rejects nonzero values during provider-profile validation. Provider-level retries are not enabled even when an adapter exposes an idempotency header.
 
 ### `targets.settings.config.headers`
 
@@ -185,7 +185,7 @@ Required only for `gemini_image`. **Defined by the provider deployment.** Use a 
 
 ### `targets.settings.config.approved_artifact_hosts`
 
-Optional list for `gemini_image`, `flux2_api`, and `ideogram_image`; defaults to empty. It allowlists hosts from which Gongbu may retrieve provider-referenced artifacts. Add only provider-controlled hosts required by the adapter response contract.
+Artifact-host allowlist for provider-referenced downloads. It is optional for `gemini_image` and defaults to empty. It is required and must contain at least one host for `flux2_api` and `ideogram_image`. Add only provider-controlled hosts required by the adapter response contract.
 
 ### `targets.settings.config.poll_interval_ms`
 
