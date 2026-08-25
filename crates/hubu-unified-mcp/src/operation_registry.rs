@@ -1,6 +1,7 @@
 use std::{fs, path::Path, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -15,8 +16,9 @@ const MAX_PLATFORM_BYTES: usize = 64;
 const MAX_HARNESS_ID_BYTES: usize = 512;
 const MAX_TASK_ID_BYTES: usize = 512;
 const MAX_TOOL_NAME_BYTES: usize = 128;
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x4855_424f;
+const MAX_RESULT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NormalizedHarnessIdentity {
@@ -159,18 +161,23 @@ fn validate_identifier(field: &str, value: &str, maximum: usize) -> Result<()> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OperationResolution {
-    pub(crate) operation_key: String,
+    pub(crate) operation_key: Option<String>,
+    pub(crate) operation_handle: String,
     pub(crate) task_id: Option<String>,
+    pub(crate) recorded_result: Option<Value>,
 }
 
 #[derive(Debug)]
 struct PersistedOperation {
     request_hash: String,
-    operation_key: String,
+    operation_key: Option<String>,
+    operation_handle: String,
     codex_call_id: Option<String>,
     claude_tool_use_id: Option<String>,
     hubu_invocation_id: Option<String>,
     task_id: Option<String>,
+    decision: Option<String>,
+    result_json: Option<String>,
 }
 
 pub(crate) struct OperationRegistry {
@@ -236,32 +243,9 @@ impl OperationRegistry {
             |row| row.get::<_, i64>(0),
         )?;
         if application_id == 0 && version == 0 && user_table_count == 0 {
-            connection.execute_batch(&format!(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE installation_identity (
-                     singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
-                     installation_id TEXT NOT NULL UNIQUE CHECK(length(installation_id) BETWEEN 1 AND 128),
-                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                 );
-                 CREATE TABLE harness_operations (
-                     platform TEXT NOT NULL CHECK(length(platform) BETWEEN 1 AND 64),
-                     installation_id TEXT NOT NULL CHECK(length(installation_id) BETWEEN 1 AND 128),
-                     harness_call_id TEXT NOT NULL CHECK(length(harness_call_id) BETWEEN 1 AND 512),
-                     request_hash TEXT NOT NULL CHECK(length(request_hash) = 71),
-                     operation_key TEXT NOT NULL UNIQUE CHECK(length(operation_key) BETWEEN 1 AND 160),
-                     codex_call_id TEXT CHECK(codex_call_id IS NULL OR length(codex_call_id) BETWEEN 1 AND 512),
-                     claude_tool_use_id TEXT CHECK(claude_tool_use_id IS NULL OR length(claude_tool_use_id) BETWEEN 1 AND 512),
-                     hubu_invocation_id TEXT CHECK(hubu_invocation_id IS NULL OR length(hubu_invocation_id) BETWEEN 1 AND 512),
-                     controlled_installation_id TEXT CHECK(controlled_installation_id IS NULL OR length(controlled_installation_id) BETWEEN 1 AND 512),
-                     task_id TEXT CHECK(task_id IS NULL OR length(task_id) BETWEEN 1 AND 512),
-                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                     PRIMARY KEY(platform, installation_id, harness_call_id),
-                     FOREIGN KEY(installation_id) REFERENCES installation_identity(installation_id)
-                 );
-                 PRAGMA application_id = {APPLICATION_ID};
-                 PRAGMA user_version = {SCHEMA_VERSION};
-                 COMMIT;"
-            ))?;
+            create_schema(&connection)?;
+        } else if application_id == APPLICATION_ID && version == 1 {
+            migrate_v1_to_v2(&mut connection)?;
         } else if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
             bail!("unified MCP operation registry identity or schema version is unsupported; refusing to modify the configured database");
         }
@@ -286,10 +270,12 @@ impl OperationRegistry {
         )?;
         transaction.commit()?;
         validate_identifier("installation_id", &installation_id, 128)?;
-        Ok(Self {
+        let mut registry = Self {
             connection,
             installation_id,
-        })
+        };
+        registry.remove_expired_authorization_identifiers()?;
+        Ok(registry)
     }
 
     #[cfg(test)]
@@ -314,8 +300,9 @@ impl OperationRegistry {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
-                "SELECT request_hash, operation_key, codex_call_id, claude_tool_use_id,
-                        hubu_invocation_id, task_id
+                "SELECT request_hash, operation_key, operation_handle, codex_call_id,
+                        claude_tool_use_id, hubu_invocation_id, task_id, decision,
+                        result_json
                  FROM harness_operations
                  WHERE platform = ?1 AND installation_id = ?2 AND harness_call_id = ?3",
                 params![
@@ -327,10 +314,13 @@ impl OperationRegistry {
                     Ok(PersistedOperation {
                         request_hash: row.get(0)?,
                         operation_key: row.get(1)?,
-                        codex_call_id: row.get(2)?,
-                        claude_tool_use_id: row.get(3)?,
-                        hubu_invocation_id: row.get(4)?,
-                        task_id: row.get(5)?,
+                        operation_handle: row.get(2)?,
+                        codex_call_id: row.get(3)?,
+                        claude_tool_use_id: row.get(4)?,
+                        hubu_invocation_id: row.get(5)?,
+                        task_id: row.get(6)?,
+                        decision: row.get(7)?,
+                        result_json: row.get(8)?,
                     })
                 },
             )
@@ -345,9 +335,22 @@ impl OperationRegistry {
                 bail!("trusted harness call identity was already used for a different operation; refusing backend access");
             }
             transaction.commit()?;
+            let recorded_result = if matches!(existing.decision.as_deref(), Some("allow" | "deny"))
+            {
+                existing
+                    .result_json
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("decode recorded normalized operation result")?
+            } else {
+                None
+            };
             return Ok(OperationResolution {
                 operation_key: existing.operation_key,
+                operation_handle: existing.operation_handle,
                 task_id: existing.task_id,
+                recorded_result,
             });
         }
 
@@ -356,18 +359,21 @@ impl OperationRegistry {
             identity.platform,
             Uuid::new_v4().simple()
         );
+        let operation_handle = format!("hubu:public-operation:v1:{}", Uuid::new_v4().simple());
         transaction.execute(
             "INSERT INTO harness_operations (
                  platform, installation_id, harness_call_id, request_hash, operation_key,
+                 operation_handle,
                  codex_call_id, claude_tool_use_id, hubu_invocation_id,
                  controlled_installation_id, task_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 identity.platform,
                 self.installation_id,
                 identity.harness_call_id,
                 request_hash,
                 operation_key,
+                operation_handle,
                 identity.codex_call_id,
                 identity.claude_tool_use_id,
                 identity.hubu_invocation_id,
@@ -377,10 +383,293 @@ impl OperationRegistry {
         )?;
         transaction.commit()?;
         Ok(OperationResolution {
-            operation_key,
+            operation_key: Some(operation_key),
+            operation_handle,
             task_id: identity.task_id.clone(),
+            recorded_result: None,
         })
     }
+
+    pub(crate) fn mark_dispatch_started(&mut self, operation_handle: &str) -> Result<()> {
+        let changed = self.connection.execute(
+            "UPDATE harness_operations
+             SET dispatch_started_at = COALESCE(dispatch_started_at, CURRENT_TIMESTAMP)
+             WHERE operation_handle = ?1 AND operation_key IS NOT NULL",
+            [operation_handle],
+        )?;
+        if changed != 1 {
+            bail!("normalized operation cannot be dispatched");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_authorization_result(
+        &mut self,
+        operation_handle: &str,
+        result: &Value,
+    ) -> Result<()> {
+        if contains_protected_identity(result) {
+            bail!("normalized operation result contains protected backend identity");
+        }
+        let result_json = serde_json::to_string(result)?;
+        if result_json.len() > MAX_RESULT_BYTES {
+            bail!("Hubu spend authorization result is too large to persist safely");
+        }
+        let private_operation_key = self
+            .connection
+            .query_row(
+                "SELECT operation_key FROM harness_operations WHERE operation_handle = ?1",
+                [operation_handle],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("normalized operation result has no matching operation"))?;
+        if private_operation_key
+            .as_deref()
+            .is_some_and(|operation_key| result_json.contains(operation_key))
+        {
+            bail!("normalized operation result contains private backend identity");
+        }
+        let decision = result
+            .get("decision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("Hubu spend authorization result is missing decision"))?;
+        if !matches!(decision, "allow" | "deny" | "needs_approval") {
+            bail!("Hubu spend authorization result has an unsupported decision");
+        }
+        let decision_id = optional_string(result, "decision_id")?;
+        let auth_token_id = optional_string(result, "auth_token_id")?
+            .or(optional_string(result, "spend_auth_token_id")?);
+        let approval_request_id = result
+            .get("approval")
+            .and_then(|approval| approval.get("approval_request_id"))
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow!("approval_request_id must be a string"))
+            })
+            .transpose()?;
+        let authorization_expires_at = optional_string(result, "authorization_expires_at")?;
+        let terminal = matches!(decision, "allow" | "deny");
+        let changed = self.connection.execute(
+            "UPDATE harness_operations
+             SET decision = ?2,
+                 decision_id = ?3,
+                 auth_token_id = ?4,
+                 approval_request_id = ?5,
+                 authorization_expires_at = ?6,
+                 result_json = ?7,
+                 result_recorded_at = CURRENT_TIMESTAMP,
+                 operation_key = CASE WHEN ?8 THEN NULL ELSE operation_key END
+             WHERE operation_handle = ?1",
+            params![
+                operation_handle,
+                decision,
+                decision_id,
+                auth_token_id,
+                approval_request_id,
+                authorization_expires_at,
+                result_json,
+                terminal,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("normalized operation result has no matching operation");
+        }
+        Ok(())
+    }
+
+    fn remove_expired_authorization_identifiers(&mut self) -> Result<()> {
+        let now = Utc::now();
+        let rows = {
+            let mut statement = self.connection.prepare(
+                "SELECT operation_handle, authorization_expires_at, result_json
+                 FROM harness_operations
+                 WHERE auth_token_id IS NOT NULL AND authorization_expires_at IS NOT NULL",
+            )?;
+            let mapped = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (handle, expires_at, result_json) in rows {
+            let Ok(expires_at) = DateTime::parse_from_rfc3339(&expires_at) else {
+                continue;
+            };
+            if expires_at.with_timezone(&Utc) > now {
+                continue;
+            }
+            let result_json = result_json
+                .map(|value| -> Result<String> {
+                    let mut value: Value = serde_json::from_str(&value)?;
+                    if let Some(object) = value.as_object_mut() {
+                        object.remove("auth_token_id");
+                        object.remove("spend_auth_token_id");
+                    }
+                    Ok(serde_json::to_string(&value)?)
+                })
+                .transpose()?;
+            self.connection.execute(
+                "UPDATE harness_operations
+                 SET auth_token_id = NULL, result_json = ?2
+                 WHERE operation_handle = ?1",
+                params![handle, result_json],
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn contains_protected_identity(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(contains_protected_identity),
+        Value::Object(object) => {
+            object.contains_key("operation_key") || object.values().any(contains_protected_identity)
+        }
+        _ => false,
+    }
+}
+
+fn create_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(&format!(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE installation_identity (
+             singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
+             installation_id TEXT NOT NULL UNIQUE CHECK(length(installation_id) BETWEEN 1 AND 128),
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         CREATE TABLE harness_operations (
+             platform TEXT NOT NULL CHECK(length(platform) BETWEEN 1 AND 64),
+             installation_id TEXT NOT NULL CHECK(length(installation_id) BETWEEN 1 AND 128),
+             harness_call_id TEXT NOT NULL CHECK(length(harness_call_id) BETWEEN 1 AND 512),
+             request_hash TEXT NOT NULL CHECK(length(request_hash) = 71),
+             operation_key TEXT UNIQUE CHECK(operation_key IS NULL OR length(operation_key) BETWEEN 1 AND 160),
+             operation_handle TEXT NOT NULL UNIQUE CHECK(length(operation_handle) BETWEEN 1 AND 160),
+             codex_call_id TEXT CHECK(codex_call_id IS NULL OR length(codex_call_id) BETWEEN 1 AND 512),
+             claude_tool_use_id TEXT CHECK(claude_tool_use_id IS NULL OR length(claude_tool_use_id) BETWEEN 1 AND 512),
+             hubu_invocation_id TEXT CHECK(hubu_invocation_id IS NULL OR length(hubu_invocation_id) BETWEEN 1 AND 512),
+             controlled_installation_id TEXT CHECK(controlled_installation_id IS NULL OR length(controlled_installation_id) BETWEEN 1 AND 512),
+             task_id TEXT CHECK(task_id IS NULL OR length(task_id) BETWEEN 1 AND 512),
+             decision TEXT CHECK(decision IS NULL OR decision IN ('allow', 'deny', 'needs_approval')),
+             decision_id TEXT,
+             auth_token_id TEXT,
+             approval_request_id TEXT,
+             authorization_expires_at TEXT,
+             result_json TEXT,
+             dispatch_started_at TEXT,
+             result_recorded_at TEXT,
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+             PRIMARY KEY(platform, installation_id, harness_call_id),
+             FOREIGN KEY(installation_id) REFERENCES installation_identity(installation_id)
+         );
+         PRAGMA application_id = {APPLICATION_ID};
+         PRAGMA user_version = {SCHEMA_VERSION};
+         COMMIT;"
+    ))?;
+    Ok(())
+}
+
+fn migrate_v1_to_v2(connection: &mut Connection) -> Result<()> {
+    #[allow(clippy::type_complexity)]
+    let existing = {
+        let mut statement = connection.prepare(
+            "SELECT platform, installation_id, harness_call_id, request_hash, operation_key,
+                    codex_call_id, claude_tool_use_id, hubu_invocation_id,
+                    controlled_installation_id, task_id, created_at
+             FROM harness_operations",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "ALTER TABLE harness_operations RENAME TO harness_operations_v1;
+         CREATE TABLE harness_operations (
+             platform TEXT NOT NULL CHECK(length(platform) BETWEEN 1 AND 64),
+             installation_id TEXT NOT NULL CHECK(length(installation_id) BETWEEN 1 AND 128),
+             harness_call_id TEXT NOT NULL CHECK(length(harness_call_id) BETWEEN 1 AND 512),
+             request_hash TEXT NOT NULL CHECK(length(request_hash) = 71),
+             operation_key TEXT UNIQUE CHECK(operation_key IS NULL OR length(operation_key) BETWEEN 1 AND 160),
+             operation_handle TEXT NOT NULL UNIQUE CHECK(length(operation_handle) BETWEEN 1 AND 160),
+             codex_call_id TEXT CHECK(codex_call_id IS NULL OR length(codex_call_id) BETWEEN 1 AND 512),
+             claude_tool_use_id TEXT CHECK(claude_tool_use_id IS NULL OR length(claude_tool_use_id) BETWEEN 1 AND 512),
+             hubu_invocation_id TEXT CHECK(hubu_invocation_id IS NULL OR length(hubu_invocation_id) BETWEEN 1 AND 512),
+             controlled_installation_id TEXT CHECK(controlled_installation_id IS NULL OR length(controlled_installation_id) BETWEEN 1 AND 512),
+             task_id TEXT CHECK(task_id IS NULL OR length(task_id) BETWEEN 1 AND 512),
+             decision TEXT CHECK(decision IS NULL OR decision IN ('allow', 'deny', 'needs_approval')),
+             decision_id TEXT,
+             auth_token_id TEXT,
+             approval_request_id TEXT,
+             authorization_expires_at TEXT,
+             result_json TEXT,
+             dispatch_started_at TEXT,
+             result_recorded_at TEXT,
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+             PRIMARY KEY(platform, installation_id, harness_call_id),
+             FOREIGN KEY(installation_id) REFERENCES installation_identity(installation_id)
+         );",
+    )?;
+    for row in existing {
+        transaction.execute(
+            "INSERT INTO harness_operations (
+                 platform, installation_id, harness_call_id, request_hash, operation_key,
+                 operation_handle, codex_call_id, claude_tool_use_id, hubu_invocation_id,
+                 controlled_installation_id, task_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                row.0,
+                row.1,
+                row.2,
+                row.3,
+                row.4,
+                format!("hubu:public-operation:v1:{}", Uuid::new_v4().simple()),
+                row.5,
+                row.6,
+                row.7,
+                row.8,
+                row.9,
+                row.10,
+            ],
+        )?;
+    }
+    transaction.execute_batch(&format!(
+        "DROP TABLE harness_operations_v1;
+         PRAGMA user_version = {SCHEMA_VERSION};"
+    ))?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn optional_string(value: &Value, field: &str) -> Result<Option<String>> {
+    value
+        .get(field)
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("{field} must be a string"))
+        })
+        .transpose()
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
@@ -390,8 +679,11 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     connection
         .prepare(
             "SELECT platform, installation_id, harness_call_id, request_hash, operation_key,
+                    operation_handle,
                     codex_call_id, claude_tool_use_id, hubu_invocation_id,
-                    controlled_installation_id, task_id, created_at
+                    controlled_installation_id, task_id, decision, decision_id,
+                    auth_token_id, approval_request_id, authorization_expires_at,
+                    result_json, dispatch_started_at, result_recorded_at, created_at
              FROM harness_operations LIMIT 0",
         )
         .context("validate unified MCP operation registry operation schema")?;
@@ -507,7 +799,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(retry, first);
-        assert!(first.operation_key.starts_with("hubu:operation:v1:codex:"));
+        assert!(first
+            .operation_key
+            .as_deref()
+            .unwrap()
+            .starts_with("hubu:operation:v1:codex:"));
 
         let error = registry
             .resolve_or_allocate(
@@ -575,6 +871,214 @@ mod tests {
             .resolve_or_allocate(&codex("restart"), "hubu_authorize_spend", &json!({"a": 1}))
             .unwrap();
         assert_eq!(recovered, first);
+    }
+
+    #[test]
+    fn terminal_result_replays_without_private_key_and_pending_result_remains_dispatchable() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let pending = registry
+            .resolve_or_allocate(
+                &codex("lifecycle"),
+                "hubu_authorize_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        registry
+            .mark_dispatch_started(&pending.operation_handle)
+            .unwrap();
+        registry
+            .record_authorization_result(
+                &pending.operation_handle,
+                &json!({
+                    "decision":"needs_approval",
+                    "decision_id":"decision-1",
+                    "approval":{"approval_request_id":"approval-1"},
+                    "operation_handle":pending.operation_handle
+                }),
+            )
+            .unwrap();
+        let recovered_pending = registry
+            .resolve_or_allocate(
+                &codex("lifecycle"),
+                "hubu_authorize_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        assert!(recovered_pending.operation_key.is_some());
+        assert!(recovered_pending.recorded_result.is_none());
+
+        let terminal = json!({
+            "decision":"allow",
+            "decision_id":"decision-1",
+            "auth_token_id":"authorization-1",
+            "operation_handle":pending.operation_handle
+        });
+        registry
+            .record_authorization_result(&pending.operation_handle, &terminal)
+            .unwrap();
+        let recovered_terminal = registry
+            .resolve_or_allocate(
+                &codex("lifecycle"),
+                "hubu_authorize_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        assert!(recovered_terminal.operation_key.is_none());
+        assert_eq!(recovered_terminal.recorded_result, Some(terminal));
+        let stored: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = registry
+            .connection
+            .query_row(
+                "SELECT operation_key, decision_id, auth_token_id, approval_request_id
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&pending.operation_handle],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            (
+                None,
+                Some("decision-1".into()),
+                Some("authorization-1".into()),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn private_operation_key_is_rejected_from_recorded_result() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let operation = registry
+            .resolve_or_allocate(&codex("protected"), "hubu_submit_spend", &json!({"a": 1}))
+            .unwrap();
+        for result in [
+            json!({"decision":"allow","operation_key":"private"}),
+            json!({"decision":"deny","nested":{"operation_key":"private"}}),
+            json!({
+                "decision":"allow",
+                "reason":operation.operation_key.as_deref().unwrap()
+            }),
+        ] {
+            assert!(registry
+                .record_authorization_result(&operation.operation_handle, &result)
+                .unwrap_err()
+                .to_string()
+                .contains("backend identity"));
+        }
+    }
+
+    #[test]
+    fn expired_authorization_identifier_is_removed_on_restart() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("operations.sqlite3");
+        let mut registry = OperationRegistry::open(&path).unwrap();
+        let operation = registry
+            .resolve_or_allocate(&codex("expired"), "hubu_authorize_spend", &json!({"a": 1}))
+            .unwrap();
+        registry
+            .record_authorization_result(
+                &operation.operation_handle,
+                &json!({
+                    "decision":"allow",
+                    "auth_token_id":"expired-authorization",
+                    "authorization_expires_at":"2020-01-01T00:00:00Z",
+                    "operation_handle":operation.operation_handle
+                }),
+            )
+            .unwrap();
+        drop(registry);
+
+        let mut restarted = OperationRegistry::open(&path).unwrap();
+        let recovered = restarted
+            .resolve_or_allocate(&codex("expired"), "hubu_authorize_spend", &json!({"a": 1}))
+            .unwrap();
+        assert!(recovered
+            .recorded_result
+            .unwrap()
+            .get("auth_token_id")
+            .is_none());
+        let stored: Option<String> = restarted
+            .connection
+            .query_row(
+                "SELECT auth_token_id FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.is_none());
+    }
+
+    #[test]
+    fn v1_registry_migrates_with_stable_public_handle() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("operations.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE installation_identity (
+                     singleton INTEGER NOT NULL PRIMARY KEY,
+                     installation_id TEXT NOT NULL UNIQUE,
+                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                 );
+                 INSERT INTO installation_identity(singleton, installation_id)
+                 VALUES(1, 'installation-v1');
+                 CREATE TABLE harness_operations (
+                     platform TEXT NOT NULL,
+                     installation_id TEXT NOT NULL,
+                     harness_call_id TEXT NOT NULL,
+                     request_hash TEXT NOT NULL,
+                     operation_key TEXT NOT NULL UNIQUE,
+                     codex_call_id TEXT,
+                     claude_tool_use_id TEXT,
+                     hubu_invocation_id TEXT,
+                     controlled_installation_id TEXT,
+                     task_id TEXT,
+                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                     PRIMARY KEY(platform, installation_id, harness_call_id)
+                 );
+                 INSERT INTO harness_operations(
+                     platform, installation_id, harness_call_id, request_hash,
+                     operation_key, codex_call_id
+                 ) VALUES(
+                     'codex', 'installation-v1', 'migration-call',
+                     '{}', 'hubu:operation:v1:codex:migrated', 'migration-call'
+                 );
+                 PRAGMA application_id = {APPLICATION_ID};
+                 PRAGMA user_version = 1;",
+                canonical_request_hash("hubu_submit_spend", &json!({"a": 1})).unwrap()
+            ))
+            .unwrap();
+        drop(connection);
+
+        let first = OperationRegistry::open(&path)
+            .unwrap()
+            .resolve_or_allocate(
+                &codex("migration-call"),
+                "hubu_submit_spend",
+                &json!({"a": 1}),
+            )
+            .unwrap();
+        let second = OperationRegistry::open(&path)
+            .unwrap()
+            .resolve_or_allocate(
+                &codex("migration-call"),
+                "hubu_submit_spend",
+                &json!({"a": 1}),
+            )
+            .unwrap();
+        assert_eq!(first, second);
+        assert!(first
+            .operation_handle
+            .starts_with("hubu:public-operation:v1:"));
+        assert_eq!(
+            first.operation_key.as_deref(),
+            Some("hubu:operation:v1:codex:migrated")
+        );
     }
 
     #[cfg(unix)]

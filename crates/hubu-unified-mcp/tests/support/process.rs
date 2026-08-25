@@ -4,6 +4,7 @@ use std::{
     env,
     ffi::OsString,
     io::{BufRead, BufReader, Read, Write},
+    path::Path,
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc,
     thread,
@@ -15,7 +16,7 @@ use super::BackendStub;
 const RECONCILIATION_TOKEN: &str = "hub107-reconciliation-capability";
 
 pub struct McpProcess {
-    _state: tempfile::TempDir,
+    _state: Option<tempfile::TempDir>,
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: mpsc::Receiver<Value>,
@@ -26,9 +27,27 @@ pub struct McpProcess {
 
 impl McpProcess {
     pub fn start(hubu: Option<(&BackendStub, &str)>, gongbu: Option<(&BackendStub, &str)>) -> Self {
+        let state = tempfile::tempdir().unwrap();
+        let state_path = state.path().join("operations.sqlite3");
+        Self::start_configured(hubu, gongbu, &state_path, Some(state))
+    }
+
+    pub fn start_with_operation_state(
+        hubu: Option<(&BackendStub, &str)>,
+        gongbu: Option<(&BackendStub, &str)>,
+        operation_state_path: &Path,
+    ) -> Self {
+        Self::start_configured(hubu, gongbu, operation_state_path, None)
+    }
+
+    fn start_configured(
+        hubu: Option<(&BackendStub, &str)>,
+        gongbu: Option<(&BackendStub, &str)>,
+        operation_state_path: &Path,
+        state: Option<tempfile::TempDir>,
+    ) -> Self {
         let executable = env::var_os("HUBU_UNIFIED_MCP_CANARY_BIN")
             .unwrap_or_else(|| OsString::from(env!("CARGO_BIN_EXE_hubu-unified-mcp")));
-        let state = tempfile::tempdir().unwrap();
         let mut command = Command::new(executable);
         command
             .env_remove("HUBU_UNIFIED_HUBU_ENDPOINT")
@@ -36,10 +55,7 @@ impl McpProcess {
             .env_remove("HUBU_UNIFIED_GONGBU_ENDPOINT")
             .env_remove("HUBU_UNIFIED_GONGBU_BEARER_TOKEN")
             .env("HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS", "1000")
-            .env(
-                "HUBU_UNIFIED_OPERATION_STATE_PATH",
-                state.path().join("operations.sqlite3"),
-            )
+            .env("HUBU_UNIFIED_OPERATION_STATE_PATH", operation_state_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -59,7 +75,7 @@ impl McpProcess {
         Self::spawn(command, state)
     }
 
-    fn spawn(mut command: Command, state: tempfile::TempDir) -> Self {
+    fn spawn(mut command: Command, state: Option<tempfile::TempDir>) -> Self {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

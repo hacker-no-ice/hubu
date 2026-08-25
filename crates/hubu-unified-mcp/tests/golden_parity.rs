@@ -395,6 +395,14 @@ fn success_body(case: &GoldenCase) -> Value {
         "gongbu_create_execution" | "gongbu_get_execution" => execution_response(),
         "gongbu_list_artifacts" => artifact_list_response(),
         "gongbu_get_artifact" => unreachable!("artifact success uses image bytes"),
+        "hubu_authorize_spend" | "hubu_submit_spend" => json!({
+            "fixture":"HUB-125",
+            "tool":case.name,
+            "status":"ok",
+            "decision":"allow",
+            "decision_id":format!("decision-{}", case.name),
+            "auth_token_id":format!("authorization-{}", case.name)
+        }),
         _ => json!({"fixture":"HUB-107","tool":case.name,"status":"ok"}),
     }
 }

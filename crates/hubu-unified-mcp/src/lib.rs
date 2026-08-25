@@ -789,6 +789,35 @@ impl Server {
             .resolve_or_allocate(identity, tool_name, arguments)
     }
 
+    fn mark_harness_operation_dispatch_started(
+        &self,
+        operation_handle: &str,
+    ) -> anyhow::Result<()> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("Hubu billable tools require an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mark_dispatch_started(operation_handle)
+    }
+
+    fn record_harness_operation_result(
+        &self,
+        operation_handle: &str,
+        result: &Value,
+    ) -> anyhow::Result<()> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("Hubu billable tools require an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_authorization_result(operation_handle, result)
+    }
+
     fn snapshot(&self) -> CapabilitySnapshot {
         self.snapshot
             .lock()

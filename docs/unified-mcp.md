@@ -88,7 +88,9 @@ The server supports JSON-RPC `initialize`, `ping`, `tools/list`, and
 `tools/call` over stdio. Unknown methods return `-32601`; malformed call
 parameters return `-32602`. Input schemas reject additional properties.
 
-The router preserves backend result semantics:
+The router preserves backend result semantics. Hubu spend results additionally
+replace private backend identity with a stable public operation handle and
+concise recovery guidance:
 
 - Hubu successes contain pretty-printed JSON text and identical
   `structuredContent`.
@@ -97,6 +99,25 @@ The router preserves backend result semantics:
 - `gongbu_get_artifact` returns safe metadata followed by PNG or JPEG content.
 - Gongbu application errors remain `isError: true` with their sanitized error
   object.
+
+For example, an agent-facing spend result includes:
+
+```json
+{
+  "operation_handle": "hubu:public-operation:v1:8e8ca8d0f42a4d0e8a781d61b30f55ce",
+  "decision": "allow",
+  "auth_token_id": "authorization-record-id",
+  "requires_human_approval": false,
+  "agent_guidance": {
+    "on_ambiguous_result": "redeliver_exact_call",
+    "replacement_call": "do_not_submit"
+  }
+}
+```
+
+The authorization token ID is a scoped continuation identifier, not a service
+credential. Gongbu still authenticates independently and Hubu validates the
+stored authorization, scope, expiry, and claim state.
 
 The router does not add a success envelope, rename fields, translate currency
 units, expose filesystem locations, or convert an application error into a
@@ -250,17 +271,41 @@ the registry installation nor participates in operation-key authority or the
 core deduplication tuple. On first successful registry startup the router
 persists its own stable local installation identity. For each call it validates bounded identifiers,
 canonically hashes the tool name and model-authored arguments, and atomically
-resolves or allocates a private `hubu:operation:v1:*` key by platform, local
-installation, and harness call ID. Exact redelivery reuses the key. Reusing the
-same identity with different arguments or trusted aliases fails before backend
-access, while a different call ID creates a distinct operation.
+resolves or allocates a private backend operation key plus an independent public
+`hubu:public-operation:v1:*` handle by platform, local installation, and harness
+call ID. Exact redelivery reuses the normalized operation. Reusing the same
+identity with different arguments or trusted aliases fails before backend
+access, while a different call ID creates a distinct operation even when its
+arguments are identical.
 
 Only common identity columns and the typed Codex, Claude Code, and controlled
 envelope aliases are stored; arbitrary `_meta` content is not persisted. The
 router injects the private key and an explicit null task ID when none exists.
+Neither field appears in model-authored tool schemas. Spend results recursively
+remove every raw `operation_key` location from text content, structured content,
+and agent-facing errors. Trusted `task_id` remains visible as non-authoritative
+business correlation for compatibility, audit context, and human review. The
+router returns the public operation handle and persists the sanitized replay
+payload separately from the bounded continuation columns `decision_id`,
+`auth_token_id`, and `approval_request_id`.
+
+Before forwarding a spend mutation, the registry durably marks dispatch. A
+terminal `allow` or `deny` result is stored before it is returned and exact
+redelivery reads that result without another backend mutation. The registry then
+erases its private backend key. A `needs_approval` result or ambiguous dispatch
+retains the key so an exact redelivery can recover Hubu's durable state. Expired
+authorization token IDs are removed opportunistically. The public handle cannot
+retrieve or replay an operation: recovery requires the original normalized
+harness call identity.
+
+One distinct harness spend call remains one distinct potentially billable
+operation. The router does not infer retries across call IDs. If acknowledgment
+is ambiguous, the returned guidance tells the agent to redeliver the exact call
+with the same harness identity and never submit a replacement spend call.
+
 The registry is adapter state and remains separate from both the Hubu and
 Gongbu databases, credentials, provider execution, artifacts, and failure
-domains. HUB-125 owns broader spend workflow routing changes.
+domains. The existing agent-orchestrated Gongbu handoff remains unchanged.
 
 The v1 normalizer fails closed when more than one primary identity source is
 present in the same call. It does not apply metadata precedence or correlate
