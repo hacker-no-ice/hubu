@@ -2,7 +2,7 @@ use gongbu_api::{
     application::ArtifactServiceActivities,
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
     execution::{Execution, Repository},
-    http::{Api, AuthenticatedCaller, ExecutionResponse},
+    http::{Api, ArtifactListResponse, AuthenticatedCaller, ExecutionResponse, ExecutionStatus},
     hubu::{HubuClient, ProductionHubuActivities},
     provider::{
         contract::{
@@ -30,7 +30,7 @@ use std::{
     net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Arc,
+    sync::{Arc, Barrier},
     thread,
     time::Duration,
 };
@@ -59,7 +59,7 @@ rules:
 #[ignore = "run through scripts/integration-hubu-gongbu-executor.sh"]
 fn deterministic_hubu_to_gongbu_executor_contract() {
     let mut workspace = TestWorkspace::start();
-    let provisioned = workspace.admin.provision();
+    let [agent_a, agent_b] = workspace.admin.provision();
     let repository = Repository::open(workspace.root().join("gongbu.sqlite3"), Redactor::default())
         .expect("open isolated Gongbu state");
     let artifact_service = ArtifactService::new(
@@ -88,22 +88,47 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
         repository: &repository,
     };
 
-    let success = run_success(
+    let success_a = run_success(
         &workspace,
-        &provisioned,
+        &agent_a,
         &artifact_activities,
         &admission,
-        "hub-83:success-replay",
+        "hub-140:agent-a-success-replay",
         Fault::None,
     );
-    assert_eq!(success.provider_calls, 1);
-    assert_eq!(success.hubu_settle_calls, 1);
-    assert_eq!(success.hubu_release_calls, 0);
-    assert_terminal_claim(&workspace, &success.claim_id, "settled", ACTUAL_MINOR);
+    assert_eq!(success_a.provider_calls, 1);
+    assert_eq!(success_a.hubu_settle_calls, 1);
+    assert_eq!(success_a.hubu_release_calls, 0);
+    assert_terminal_claim(
+        &workspace,
+        &agent_a,
+        &success_a.claim_id,
+        "settled",
+        ACTUAL_MINOR,
+    );
+
+    let success_b = run_success(
+        &workspace,
+        &agent_b,
+        &artifact_activities,
+        &admission,
+        "hub-140:agent-b-success-replay",
+        Fault::None,
+    );
+    assert_eq!(success_b.provider_calls, 1);
+    assert_eq!(success_b.hubu_settle_calls, 1);
+    assert_eq!(success_b.hubu_release_calls, 0);
+    assert_terminal_claim(
+        &workspace,
+        &agent_b,
+        &success_b.claim_id,
+        "settled",
+        ACTUAL_MINOR,
+    );
 
     let failed = run_provider_failure(
         &workspace,
-        &provisioned,
+        &agent_a,
         &artifact_activities,
         &admission,
         "hub-83:proven-provider-failure",
@@ -111,11 +136,17 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     assert_eq!(failed.provider_calls, 1);
     assert_eq!(failed.hubu_settle_calls, 0);
     assert_eq!(failed.hubu_release_calls, 1);
-    assert_terminal_claim(&workspace, &failed.claim_id, "released", ACTUAL_MINOR);
+    assert_terminal_claim(
+        &workspace,
+        &agent_a,
+        &failed.claim_id,
+        "released",
+        ACTUAL_MINOR,
+    );
 
     let ambiguous_claim = run_ambiguous_claim_recovery(
         &workspace,
-        &provisioned,
+        &agent_a,
         &artifact_activities,
         &admission,
         "hub-83:ambiguous-claim",
@@ -125,6 +156,7 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     assert_eq!(ambiguous_claim.hubu_release_calls, 1);
     assert_terminal_claim(
         &workspace,
+        &agent_a,
         &ambiguous_claim.claim_id,
         "released",
         ACTUAL_MINOR,
@@ -132,7 +164,7 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
 
     let ambiguous_settlement = run_success(
         &workspace,
-        &provisioned,
+        &agent_a,
         &artifact_activities,
         &admission,
         "hub-83:ambiguous-settlement",
@@ -143,22 +175,23 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     assert_eq!(ambiguous_settlement.hubu_release_calls, 0);
     assert_terminal_claim(
         &workspace,
+        &agent_a,
         &ambiguous_settlement.claim_id,
         "settled",
         ACTUAL_MINOR * 2,
     );
 
-    let budget = workspace.admin.get("/budgets")["budgets"][0].clone();
-    assert_eq!(budget["consumed_amount_cents"], ACTUAL_MINOR * 2);
-    assert_eq!(budget["frozen_amount_cents"], 0);
-    assert_eq!(budget["remaining_amount_cents"], 1_000 - ACTUAL_MINOR * 2);
+    let budget_a = workspace.admin.budget_for(&agent_a.agent_id);
+    assert_eq!(budget_a["consumed_amount_cents"], ACTUAL_MINOR * 2);
+    assert_eq!(budget_a["frozen_amount_cents"], 0);
+    assert_eq!(budget_a["remaining_amount_cents"], 1_000 - ACTUAL_MINOR * 2);
+    let budget_b = workspace.admin.budget_for(&agent_b.agent_id);
+    assert_eq!(budget_b["consumed_amount_cents"], ACTUAL_MINOR);
+    assert_eq!(budget_b["frozen_amount_cents"], 0);
+    assert_eq!(budget_b["remaining_amount_cents"], 1_000 - ACTUAL_MINOR);
 
-    let concurrent_a = workspace
-        .admin
-        .authorize(&provisioned, "hub-122:concurrent-a");
-    let concurrent_b = workspace
-        .admin
-        .authorize(&provisioned, "hub-122:concurrent-b");
+    let concurrent_a = workspace.admin.authorize(&agent_a, "hub-122:concurrent-a");
+    let concurrent_b = workspace.admin.authorize(&agent_a, "hub-122:concurrent-b");
     let admitted_a = admit_execution(
         admission.api,
         admission.owner,
@@ -174,13 +207,48 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
         &concurrent_b,
     );
     assert_ne!(admitted_a.execution_id, admitted_b.execution_id);
-    let budget = workspace.admin.get("/budgets")["budgets"][0].clone();
-    assert_eq!(budget["consumed_amount_cents"], ACTUAL_MINOR * 2);
-    assert_eq!(budget["frozen_amount_cents"], AUTHORIZED_MINOR * 2);
+    let budget_a = workspace.admin.budget_for(&agent_a.agent_id);
+    assert_eq!(budget_a["consumed_amount_cents"], ACTUAL_MINOR * 2);
+    assert_eq!(budget_a["frozen_amount_cents"], AUTHORIZED_MINOR * 2);
     assert_eq!(
-        budget["remaining_amount_cents"],
+        budget_a["remaining_amount_cents"],
         1_000 - ACTUAL_MINOR * 2 - AUTHORIZED_MINOR * 2
     );
+
+    let restarted_repository =
+        Repository::open(workspace.root().join("gongbu.sqlite3"), Redactor::default())
+            .expect("reopen Gongbu state after simulated process restart");
+    let restarted_artifacts = ArtifactService::new(
+        restarted_repository.clone(),
+        LocalFsStorage::new(workspace.root().join("artifacts")),
+        ArtifactLimits::default(),
+    );
+    let restarted_api = Api::new_with_authorization_resolver(
+        restarted_repository.clone(),
+        restarted_artifacts,
+        admission_catalog(),
+        Arc::new(AdmissionScheduler),
+        i64::MAX,
+        Arc::new(ProductionHubuActivities::new(
+            workspace.hubu_client(),
+            restarted_repository.clone(),
+        )),
+        || NOW.to_string(),
+    );
+    for result in [&success_a, &success_b] {
+        let replay = admit_execution_with_token(
+            &restarted_api,
+            &owner,
+            &restarted_repository,
+            &result.operation_key,
+            &result.spend_auth_token_id,
+        );
+        assert_eq!(replay.execution_id, result.execution_id);
+        assert_eq!(
+            assert_known_execution_and_artifact(&restarted_api, &owner, &result.execution_id),
+            result.artifact_id
+        );
+    }
 
     let log = fs::read_to_string(&workspace.log_path).expect("read Hubu server log");
     for route in [
@@ -208,6 +276,10 @@ enum Fault {
 }
 
 struct ScenarioResult {
+    execution_id: String,
+    operation_key: String,
+    spend_auth_token_id: String,
+    artifact_id: String,
     claim_id: String,
     provider_calls: usize,
     hubu_claim_calls: usize,
@@ -230,21 +302,13 @@ fn run_success(
     fault: Fault,
 ) -> ScenarioResult {
     let authorization = workspace.admin.authorize(provisioned, operation_key);
-    let execution = admit_execution(
+    let execution = concurrently_admit_execution(
         admission.api,
         admission.owner,
         admission.repository,
         operation_key,
         &authorization,
     );
-    let replay = admit_execution(
-        admission.api,
-        admission.owner,
-        admission.repository,
-        operation_key,
-        &authorization,
-    );
-    assert_eq!(execution.execution_id, replay.execution_id);
 
     let provider = DeterministicProvider::success();
     let hubu = FaultingProductionHubu::new(
@@ -275,6 +339,12 @@ fn run_success(
         first
     };
     assert_eq!(completed.status, "succeeded");
+    let snapshot = admission
+        .repository
+        .get_hubu_authorization_snapshot(&execution.execution_id)
+        .expect("load authoritative Hubu principal snapshot");
+    assert_eq!(snapshot.agent_id, provisioned.agent_id);
+    assert_eq!(snapshot.account_id, provisioned.account_id);
 
     let terminal_replay = workflow
         .run(&execution.execution_id, NOW)
@@ -317,8 +387,17 @@ fn run_success(
             .settlement_id
             .as_deref()
     );
+    let artifact_id = assert_known_execution_and_artifact(
+        admission.api,
+        admission.owner,
+        &execution.execution_id,
+    );
 
     ScenarioResult {
+        execution_id: execution.execution_id,
+        operation_key: operation_key.to_string(),
+        spend_auth_token_id: string_at(&authorization, "auth_token_id"),
+        artifact_id,
         claim_id,
         provider_calls: provider.calls.get(),
         hubu_claim_calls: hubu.claim_calls.get(),
@@ -380,6 +459,10 @@ fn run_provider_failure(
         .is_err());
 
     ScenarioResult {
+        execution_id: execution.execution_id,
+        operation_key: operation_key.to_string(),
+        spend_auth_token_id: string_at(&authorization, "auth_token_id"),
+        artifact_id: String::new(),
         claim_id: done.hubu_claim_id.expect("persisted Hubu claim"),
         provider_calls: provider.calls.get(),
         hubu_claim_calls: hubu.claim_calls.get(),
@@ -442,6 +525,10 @@ fn run_ambiguous_claim_recovery(
     );
 
     ScenarioResult {
+        execution_id: execution.execution_id,
+        operation_key: operation_key.to_string(),
+        spend_auth_token_id: string_at(&authorization, "auth_token_id"),
+        artifact_id: String::new(),
         claim_id: first_claim_id,
         provider_calls: provider.calls.get(),
         hubu_claim_calls: hubu.claim_calls.get(),
@@ -457,9 +544,25 @@ fn admit_execution(
     operation_key: &str,
     authorization: &Value,
 ) -> Execution {
+    admit_execution_with_token(
+        api,
+        owner,
+        repository,
+        operation_key,
+        &string_at(authorization, "auth_token_id"),
+    )
+}
+
+fn admit_execution_with_token(
+    api: &Api,
+    owner: &AuthenticatedCaller,
+    repository: &Repository,
+    operation_key: &str,
+    spend_auth_token_id: &str,
+) -> Execution {
     let body = serde_json::to_vec(&json!({
         "schema_version": 2,
-        "spend_auth_token_id": string_at(authorization, "auth_token_id"),
+        "spend_auth_token_id": spend_auth_token_id,
         "input": {"prompt":"deterministic blue pixel","image_count":1},
         "input_schema_version": 1,
         "workload_type": "image_generation",
@@ -479,6 +582,73 @@ fn admit_execution(
     repository
         .get_execution(&admitted.execution_id)
         .expect("load admitted Gongbu execution")
+}
+
+fn concurrently_admit_execution(
+    api: &Api,
+    owner: &AuthenticatedCaller,
+    repository: &Repository,
+    operation_key: &str,
+    authorization: &Value,
+) -> Execution {
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = [api.clone(), api.clone()]
+        .into_iter()
+        .map(|api| {
+            let barrier = barrier.clone();
+            let owner = *owner;
+            let repository = repository.clone();
+            let operation_key = operation_key.to_string();
+            let authorization = authorization.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                admit_execution(&api, &owner, &repository, &operation_key, &authorization)
+            })
+        })
+        .collect();
+    let admitted: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("duplicate admission thread"))
+        .collect();
+    assert_eq!(admitted[0].execution_id, admitted[1].execution_id);
+    admitted.into_iter().next().unwrap()
+}
+
+fn assert_known_execution_and_artifact(
+    api: &Api,
+    caller: &AuthenticatedCaller,
+    execution_id: &str,
+) -> String {
+    let execution = api.handle(
+        "GET",
+        &format!("/v1/executions/{execution_id}"),
+        Some(caller),
+        &[],
+    );
+    assert_eq!(execution.status, 200);
+    let execution: ExecutionResponse = serde_json::from_slice(&execution.body).unwrap();
+    assert_eq!(execution.status, ExecutionStatus::Succeeded);
+
+    let listed = api.handle(
+        "GET",
+        &format!("/v1/executions/{execution_id}/artifacts"),
+        Some(caller),
+        &[],
+    );
+    assert_eq!(listed.status, 200);
+    let listed: ArtifactListResponse = serde_json::from_slice(&listed.body).unwrap();
+    assert_eq!(listed.artifacts.len(), 1);
+    let artifact = &listed.artifacts[0];
+    let downloaded = api.handle(
+        "GET",
+        &format!("/v1/artifacts/{}", artifact.artifact_id),
+        Some(caller),
+        &[],
+    );
+    assert_eq!(downloaded.status, 200);
+    assert_eq!(downloaded.content_type, "image/png");
+    assert_eq!(downloaded.body.len() as i64, artifact.size_bytes);
+    artifact.artifact_id.clone()
 }
 
 fn admission_catalog() -> ValidatedProviderCatalog {
@@ -693,34 +863,50 @@ struct HubuAdmin {
 }
 
 impl HubuAdmin {
-    fn provision(&self) -> Provisioned {
+    fn provision(&self) -> [Provisioned; 2] {
         let user = self.post(
             "/init",
             json!({
-                "username":"hub-83-e2e",
-                "display_name":"HUB-83 E2E",
-                "email":"hub-83@example.invalid"
+                "username":"hub-140-e2e",
+                "display_name":"HUB-140 E2E",
+                "email":"hub-140@example.invalid"
             }),
         );
         assert!(string_at(&user, "user_id").starts_with("usr_"));
-        let registration = self.post(
-            "/agents/register",
-            json!({"name":"hub-83-e2e-agent","version":"HUB-83"}),
-        );
-        let provisioned = Provisioned {
+        let provisioned = [
+            self.register_agent("hub-140-agent-a"),
+            self.register_agent("hub-140-agent-b"),
+        ];
+        self.post("/policies", json!({"policy_yaml":POLICY}));
+        for agent in &provisioned {
+            self.post(
+                "/budgets",
+                json!({
+                    "agent_id":agent.agent_id,
+                    "amount_cents":1_000,
+                    "ending_before":"2999-01-01T00:00:00Z"
+                }),
+            );
+        }
+        provisioned
+    }
+
+    fn register_agent(&self, name: &str) -> Provisioned {
+        let registration = self.post("/agents/register", json!({"name":name,"version":"HUB-140"}));
+        Provisioned {
             agent_id: string_at(&registration, "agent_id"),
             account_id: string_at(&registration, "account_id"),
-        };
-        self.post("/policies", json!({"policy_yaml":POLICY}));
-        self.post(
-            "/budgets",
-            json!({
-                "agent_id":provisioned.agent_id,
-                "amount_cents":1_000,
-                "ending_before":"2999-01-01T00:00:00Z"
-            }),
-        );
-        provisioned
+        }
+    }
+
+    fn budget_for(&self, agent_id: &str) -> Value {
+        self.get("/budgets")["budgets"]
+            .as_array()
+            .expect("budget list")
+            .iter()
+            .find(|budget| budget["agent_id"] == agent_id)
+            .unwrap_or_else(|| panic!("missing budget for {agent_id}"))
+            .clone()
     }
 
     fn authorize(&self, provisioned: &Provisioned, operation_key: &str) -> Value {
@@ -885,6 +1071,7 @@ fn reserve_address() -> SocketAddr {
 
 fn assert_terminal_claim(
     workspace: &TestWorkspace,
+    provisioned: &Provisioned,
     claim_id: &str,
     status: &str,
     expected_total_consumed: i64,
@@ -894,6 +1081,8 @@ fn assert_terminal_claim(
         .inspect_claim(claim_id)
         .expect("inspect Hubu claim over HTTP");
     assert_eq!(claim.status, status);
+    assert_eq!(claim.spend.agent_id, provisioned.agent_id);
+    assert_eq!(claim.spend.account_id, provisioned.account_id);
     assert!(claim.finalized_at.is_some());
     assert!(!claim.reconciliation_required);
     assert_eq!(claim.spend.budget_hold.status, status);

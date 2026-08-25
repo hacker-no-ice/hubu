@@ -93,91 +93,6 @@ hubu_auth = $(quote "${hubu_auth}")
 hubu_approval = $(quote "${hubu_approval}")
 hubu_reconciliation = $(quote "${hubu_reconciliation}")
 gongbu_caller = $(quote "${gongbu_caller}")
-EOF
-
-cat >"${profile}/providers.toml" <<'EOF'
-schema_version = 1
-mode = "disabled"
-EOF
-
-cat >"${profile}/stack.toml" <<EOF
-schema_version = 1
-allow_development_builds = true
-
-[binaries]
-hubu = $(quote "${hubu_bin}")
-hubu_server = $(quote "${hubu_server_bin}")
-hubu_unified_mcp = $(quote "${mcp_bin}")
-
-[hubu]
-ownership = "managed"
-endpoint = $(quote "${hubu_endpoint}")
-listen = "127.0.0.1:${hubu_port}"
-database_path = $(quote "${workspace}/hubu.sqlite3")
-log_file = $(quote "${workspace}/hubu.log")
-
-[gongbu]
-ownership = "external"
-endpoint = $(quote "${gongbu_endpoint}")
-EOF
-
-"${hubu_bin}" stack doctor --profile "${profile}" >/dev/null
-if first_start="$("${hubu_bin}" stack start --profile "${profile}" 2>&1)"; then
-  fail "external Gongbu unexpectedly existed before bootstrap"
-fi
-grep -F 'external component is unavailable' <<<"${first_start}" >/dev/null
-stack_started=1
-
-hubu() {
-  env -u HUBU_AUTH_TOKEN -u HUBU_APPROVAL_TOKEN -u HUBU_RECONCILIATION_TOKEN \
-    HUBU_URL="${hubu_endpoint}" \
-    HUBU_AUTH_TOKEN_FILE="${hubu_auth}" \
-    "${hubu_bin}" "$@"
-}
-
-human_output="$(hubu register human --username hub-105-owner --display-name 'HUB-105 Owner')"
-[[ -n "$(field "${human_output}" user_id)" ]] || fail "could not register the clean-profile owner"
-agent_output="$(hubu register agent --name hub-105-canary --version v1)"
-agent_id="$(field "${agent_output}" agent_id)"
-account_id="$(field "${agent_output}" account_id)"
-[[ -n "${agent_id}" && -n "${account_id}" ]] || fail "could not register the clean-profile agent"
-hubu budget create --agent-id "${agent_id}" --amount 1 >/dev/null
-
-policy="${workspace}/fixture-policy.yaml"
-cat >"${policy}" <<'EOF'
-id: hub_105_fixture
-version: v1
-default_effect: deny
-rules:
-  - id: allow_local_fixture
-    effect: allow
-    reason: deterministic local-stack acceptance fixture
-    when:
-      op: eq
-      field: provider
-      value:
-        string: provider:local:fixture
-EOF
-hubu policy add --path "${policy}" >/dev/null
-
-authorization="$(hubu spend authorize \
-  --operation-key hub-105-fixture \
-  --account-id "${account_id}" \
-  --amount 0.01 \
-  --currency USD \
-  --reason 'local stack acceptance fixture' \
-  --provider provider:local:fixture \
-  --executor executor:gongbu:image \
-  --capability capability:image:generate \
-  --billing-merchant merchant:local \
-  --lease-profile default)"
-spend_auth_token_id="$(field "${authorization}" auth_token_id)"
-[[ -n "${spend_auth_token_id}" ]] || fail "Hubu did not issue fixture authorization"
-
-"${hubu_bin}" stack stop --profile "${profile}" >/dev/null
-stack_started=0
-
-cat >>"${profile}/credentials.toml" <<'EOF'
 
 [opaque.gongbu_hubu]
 service = "hubu.local-fixture"
@@ -287,90 +202,253 @@ dependency_check_interval_ms = 250
 worker_drain_timeout_ms = 15000
 EOF
 
+if grep -Eq '^\[identity(\.|])' "${profile}/stack.toml" "${profile}/providers.toml"; then
+  fail "principal-neutral infrastructure/provider configuration contains stack identity"
+fi
+
 export GONGBU_LOCAL_FIXTURE_CANARY=1
 export GONGBU_LOCAL_FIXTURE_SECRET_DIR="${workspace}"
 export HUBU_LOCAL_FIXTURE_CANARY=1
-render_output="$("${hubu_bin}" stack render --profile "${profile}")"
-generation="$(awk '/validated staged generation:/ { print $4; exit }' <<<"${render_output}")"
-[[ -n "${generation}" ]] || fail "managed fixture generation was not staged"
-"${hubu_bin}" stack activate --generation "${generation}" --profile "${profile}" >/dev/null
-if ! start_output="$("${hubu_bin}" stack start --profile "${profile}" 2>&1)"; then
+lifecycle_log="${workspace}/lifecycle.log"
+stack_lifecycle() {
+  printf '%s\n' "$1" >>"${lifecycle_log}"
+  "${hubu_bin}" stack "$@" --profile "${profile}"
+}
+
+"${hubu_bin}" stack doctor --profile "${profile}" >/dev/null
+render_output="$(stack_lifecycle render)"
+generation="$(awk '/rendered generation:/ { print $3; exit } /validated staged generation:/ { print $4; exit }' <<<"${render_output}")"
+if [[ -z "${generation}" ]]; then
+  echo "${render_output}" >&2
+  fail "managed fixture generation was not rendered"
+fi
+grep -F 'active manifest:' <<<"${render_output}" >/dev/null || fail "first managed generation did not activate automatically"
+if ! start_output="$(stack_lifecycle start 2>&1)"; then
   echo "${start_output}" >&2
   fail "managed Hubu/Gongbu stack did not start"
 fi
 stack_started=1
 jq -e '.classification == "running_ready"' < <("${hubu_bin}" stack status --json --profile "${profile}") >/dev/null
 
-submission_response="$(curl --silent --show-error --write-out '\n%{http_code}' \
+curl --fail --silent "${hubu_endpoint}/health" >/dev/null
+curl --fail --silent "${gongbu_endpoint}/readyz" >/dev/null
+lifecycle_count_before_registration="$(wc -l <"${lifecycle_log}" | tr -d ' ')"
+
+hubu() {
+  env -u HUBU_AUTH_TOKEN -u HUBU_APPROVAL_TOKEN -u HUBU_RECONCILIATION_TOKEN \
+    HUBU_URL="${hubu_endpoint}" \
+    HUBU_AUTH_TOKEN_FILE="${hubu_auth}" \
+    "${hubu_bin}" "$@"
+}
+
+human_output="$(hubu register human --username hub-140-owner --display-name 'HUB-140 Owner')"
+[[ -n "$(field "${human_output}" user_id)" ]] || fail "could not register the post-start owner"
+agent_a_output="$(hubu register agent --name hub-140-agent-a --version v1)"
+agent_b_output="$(hubu register agent --name hub-140-agent-b --version v1)"
+agent_a_id="$(field "${agent_a_output}" agent_id)"
+agent_a_account_id="$(field "${agent_a_output}" account_id)"
+agent_b_id="$(field "${agent_b_output}" agent_id)"
+agent_b_account_id="$(field "${agent_b_output}" account_id)"
+[[ -n "${agent_a_id}" && -n "${agent_a_account_id}" ]] || fail "could not register Agent A"
+[[ -n "${agent_b_id}" && -n "${agent_b_account_id}" ]] || fail "could not register Agent B"
+[[ "${agent_a_id}" != "${agent_b_id}" ]] || fail "two registrations resolved to one agent"
+hubu budget create --agent-id "${agent_a_id}" --amount 1 >/dev/null
+hubu budget create --agent-id "${agent_b_id}" --amount 1 >/dev/null
+
+policy="${workspace}/fixture-policy.yaml"
+cat >"${policy}" <<'EOF'
+id: hub_140_fixture
+version: v1
+default_effect: deny
+rules:
+  - id: allow_local_fixture
+    effect: allow
+    reason: deterministic local-stack acceptance fixture
+    when:
+      op: eq
+      field: provider
+      value:
+        string: provider:local:fixture
+EOF
+hubu policy add --path "${policy}" >/dev/null
+
+authorize_agent() {
+  local label="$1"
+  local account_id="$2"
+  local authorization
+  authorization="$(hubu spend authorize \
+    --operation-key "hub-140-${label}" \
+    --account-id "${account_id}" \
+    --amount 0.01 \
+    --currency USD \
+    --reason "local stack acceptance ${label}" \
+    --provider provider:local:fixture \
+    --executor executor:gongbu:image \
+    --capability capability:image:generate \
+    --billing-merchant merchant:local \
+    --lease-profile default)"
+  field "${authorization}" auth_token_id
+}
+
+execution_body() {
+  jq -n --arg token "$1" --arg label "$2" \
+    '{schema_version:2,spend_auth_token_id:$token,input:{prompt:("acceptance canary " + $label),image_count:1,image_size:"1k"},input_schema_version:1,workload_type:"default",provider:"example",adapter:"fixture",model:"image-v1"}'
+}
+
+submit_execution() {
+  local token="$1"
+  local label="$2"
+  local response status body
+  response="$(curl --silent --show-error --write-out '\n%{http_code}' \
+    -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
+    -H 'Content-Type: application/json' \
+    -d "$(execution_body "${token}" "${label}")" \
+    "${gongbu_endpoint}/v2/executions")"
+  status="$(tail -n 1 <<<"${response}")"
+  body="$(sed '$d' <<<"${response}")"
+  if [[ ! "${status}" =~ ^2 ]]; then
+    echo "${body}" >&2
+    fail "Gongbu rejected ${label} with HTTP ${status}"
+  fi
+  jq -r '.execution_id' <<<"${body}"
+}
+
+wait_for_execution() {
+  local execution_id="$1"
+  local terminal=''
+  for _ in {1..150}; do
+    terminal="$(curl --fail --silent \
+      -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
+      "${gongbu_endpoint}/v1/executions/${execution_id}")"
+    if [[ "$(jq -r '.status' <<<"${terminal}")" == "succeeded" ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "${terminal}" >&2
+  tail -n 40 "${workspace}/gongbu.log" >&2 || true
+  tail -n 40 "${workspace}/hubu.log" >&2 || true
+  fail "execution ${execution_id} did not succeed"
+}
+
+retrieve_artifact() {
+  local execution_id="$1"
+  local destination="$2"
+  local artifacts artifact_id artifact_sha
+  artifacts="$(curl --fail --silent \
+    -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
+    "${gongbu_endpoint}/v1/executions/${execution_id}/artifacts")"
+  artifact_id="$(jq -r '.artifacts[0].artifact_id' <<<"${artifacts}")"
+  artifact_sha="$(jq -r '.artifacts[0].sha256' <<<"${artifacts}")"
+  [[ "${artifact_id}" != "null" && -n "${artifact_id}" ]] || fail "execution ${execution_id} has no artifact"
+  curl --fail --silent \
+    -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
+    "${gongbu_endpoint}/v1/artifacts/${artifact_id}" \
+    -o "${destination}"
+  [[ "$(shasum -a 256 "${destination}" | awk '{ print $1 }')" == "${artifact_sha}" ]] || fail "retrieved artifact digest changed"
+  printf '%s|%s\n' "${artifact_id}" "${artifact_sha}"
+}
+
+agent_a_token="$(authorize_agent agent-a "${agent_a_account_id}")"
+agent_b_token="$(authorize_agent agent-b "${agent_b_account_id}")"
+[[ -n "${agent_a_token}" && -n "${agent_b_token}" ]] || fail "Hubu did not issue both authorizations"
+[[ "${agent_a_token}" != "${agent_b_token}" ]] || fail "two agents received one authorization token"
+
+invalid_caller_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Authorization: Bearer invalid-installation-caller' \
+  "${gongbu_endpoint}/v1/executions/known-only")"
+[[ "${invalid_caller_status}" == "401" ]] || fail "Gongbu accepted an invalid caller capability"
+caller_identity_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
   -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
   -H 'Content-Type: application/json' \
-  -d "$(jq -n --arg token "${spend_auth_token_id}" '{schema_version:2,spend_auth_token_id:$token,input:{prompt:"acceptance canary",image_count:1,image_size:"1k"},input_schema_version:1,workload_type:"default",provider:"example",adapter:"fixture",model:"image-v1"}')" \
+  -d "$(execution_body "${agent_a_token}" agent-a | jq --arg account "${agent_a_account_id}" '. + {account_id:$account}')" \
   "${gongbu_endpoint}/v2/executions")"
-submission_status="$(tail -n 1 <<<"${submission_response}")"
-submission="$(sed '$d' <<<"${submission_response}")"
-if [[ ! "${submission_status}" =~ ^2 ]]; then
-  echo "${submission}" >&2
-  fail "Gongbu rejected the governed fixture submission with HTTP ${submission_status}"
-fi
-execution_id="$(jq -r '.execution_id' <<<"${submission}")"
-[[ "${execution_id}" != "null" && -n "${execution_id}" ]] || fail "Gongbu did not create the fixture execution"
+[[ "${caller_identity_status}" == "400" ]] || fail "Gongbu accepted caller-supplied execution identity"
 
-terminal=''
-for _ in {1..150}; do
-  terminal="$(curl --fail --silent \
-    -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
-    "${gongbu_endpoint}/v1/executions/${execution_id}")"
-  if [[ "$(jq -r '.status' <<<"${terminal}")" == "succeeded" ]]; then
-    break
-  fi
-  sleep 0.1
+agent_a_execution_id="$(submit_execution "${agent_a_token}" agent-a)"
+agent_b_execution_id="$(submit_execution "${agent_b_token}" agent-b)"
+[[ -n "${agent_a_execution_id}" && -n "${agent_b_execution_id}" ]] || fail "Gongbu omitted an execution ID"
+[[ "${agent_a_execution_id}" != "${agent_b_execution_id}" ]] || fail "two agents converged on one execution"
+wait_for_execution "${agent_a_execution_id}"
+wait_for_execution "${agent_b_execution_id}"
+
+for execution_id in "${agent_a_execution_id}" "${agent_b_execution_id}"; do
+  pricing_record="$(sqlite3 "${workspace}/gongbu.sqlite3" "SELECT pricing_schema_version || '|' || json_extract(pricing_snapshot_json, '$.schema_version') || '|' || json_extract(pricing_snapshot_json, '$.pricing_rule_id') || '|' || json_extract(pricing_snapshot_json, '$.selector.image_size') FROM executions WHERE execution_id = '${execution_id}';")"
+  [[ "${pricing_record}" == "2|2|fixture-image-1k|1k" ]] || fail "execution ${execution_id} did not persist the selected schema-v2 1k price"
+  temporal workflow describe \
+    --address "127.0.0.1:${temporal_port}" \
+    --namespace default \
+    --workflow-id "gongbu-execution-${execution_id}" >/dev/null
 done
-[[ "$(jq -r '.status' <<<"${terminal}")" == "succeeded" ]] || fail "fixture execution did not succeed"
-pricing_record="$(sqlite3 "${workspace}/gongbu.sqlite3" "SELECT pricing_schema_version || '|' || json_extract(pricing_snapshot_json, '$.schema_version') || '|' || json_extract(pricing_snapshot_json, '$.pricing_rule_id') || '|' || json_extract(pricing_snapshot_json, '$.selector.image_size') FROM executions WHERE execution_id = '${execution_id}';")"
-[[ "${pricing_record}" == "2|2|fixture-image-1k|1k" ]] || fail "fixture execution did not persist the selected schema-v2 1k price"
 
-workflow_id="gongbu-execution-${execution_id}"
-temporal workflow describe \
-  --address "127.0.0.1:${temporal_port}" \
-  --namespace default \
-  --workflow-id "${workflow_id}" >/dev/null
+agent_a_attribution="$(sqlite3 "${workspace}/gongbu.sqlite3" "SELECT agent_id || '|' || account_id || '|' || operation_key FROM hubu_authorization_snapshots WHERE execution_id = '${agent_a_execution_id}';")"
+agent_b_attribution="$(sqlite3 "${workspace}/gongbu.sqlite3" "SELECT agent_id || '|' || account_id || '|' || operation_key FROM hubu_authorization_snapshots WHERE execution_id = '${agent_b_execution_id}';")"
+[[ "${agent_a_attribution}" == "${agent_a_id}|${agent_a_account_id}|hub-140-agent-a" ]] || fail "Agent A attribution changed"
+[[ "${agent_b_attribution}" == "${agent_b_id}|${agent_b_account_id}|hub-140-agent-b" ]] || fail "Agent B attribution changed"
 
-artifacts="$(curl --fail --silent \
-  -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
-  "${gongbu_endpoint}/v1/executions/${execution_id}/artifacts")"
-artifact_id="$(jq -r '.artifacts[0].artifact_id' <<<"${artifacts}")"
-artifact_sha="$(jq -r '.artifacts[0].sha256' <<<"${artifacts}")"
-[[ "${artifact_id}" != "null" && -n "${artifact_id}" ]] || fail "fixture execution has no artifact"
-curl --fail --silent \
-  -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
-  "${gongbu_endpoint}/v1/artifacts/${artifact_id}" \
-  -o "${workspace}/artifact.png"
-[[ "$(shasum -a 256 "${workspace}/artifact.png" | awk '{ print $1 }')" == "${artifact_sha}" ]] || fail "retrieved artifact digest changed"
+budgets="$(curl --fail --silent \
+  -H "Authorization: Bearer $(tr -d '\r\n' <"${hubu_auth}")" \
+  "${hubu_endpoint}/budgets")"
+jq -e --arg agent "${agent_a_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 1 and .frozen_amount_cents == 0 and .remaining_amount_cents == 99' <<<"${budgets}" >/dev/null || fail "Agent A budget did not settle independently"
+jq -e --arg agent "${agent_b_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 1 and .frozen_amount_cents == 0 and .remaining_amount_cents == 99' <<<"${budgets}" >/dev/null || fail "Agent B budget did not settle independently"
+
+agent_a_artifact_record="$(retrieve_artifact "${agent_a_execution_id}" "${workspace}/agent-a.png")"
+agent_b_artifact_record="$(retrieve_artifact "${agent_b_execution_id}" "${workspace}/agent-b.png")"
+agent_a_artifact_id="${agent_a_artifact_record%%|*}"
+agent_b_artifact_id="${agent_b_artifact_record%%|*}"
+[[ "${agent_a_artifact_id}" != "${agent_b_artifact_id}" ]] || fail "two executions shared one artifact identity"
+
+[[ "$(submit_execution "${agent_a_token}" agent-a)" == "${agent_a_execution_id}" ]] || fail "Agent A settled-token replay changed execution"
+[[ "$(submit_execution "${agent_b_token}" agent-b)" == "${agent_b_execution_id}" ]] || fail "Agent B settled-token replay changed execution"
+
+[[ "$(wc -l <"${lifecycle_log}" | tr -d ' ')" == "${lifecycle_count_before_registration}" ]] || fail "stack lifecycle changed between registration and execution"
+[[ "$(grep -c '^render$' "${lifecycle_log}")" == "1" ]] || fail "stack rendered again after registration"
+if grep -q '^activate$' "${lifecycle_log}"; then
+  fail "stack activated explicitly after its automatic first-generation activation"
+fi
 
 if grep -R -F 'hub-105-human-reconciliation-never-given-to-gongbu' "${profile}/generated" >/dev/null; then
   fail "generated stack artifacts contain the human reconciliation capability"
 fi
+for secret in hub-105-local-broad-bearer hub-105-local-approval hub-105-gongbu-caller hub-105-fixture-provider; do
+  if grep -R -F "${secret}" "${profile}/generated" >/dev/null; then
+    fail "generated stack artifacts contain secret ${secret}"
+  fi
+done
 
-"${hubu_bin}" stack stop --profile "${profile}" >/dev/null
+stack_lifecycle stop >/dev/null
 stack_started=0
-"${hubu_bin}" stack start --profile "${profile}" >/dev/null
+stack_lifecycle start >/dev/null
 stack_started=1
-temporal workflow describe \
-  --address "127.0.0.1:${temporal_port}" \
-  --namespace default \
-  --workflow-id "${workflow_id}" >/dev/null
-persisted="$(curl --fail --silent \
-  -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
-  "${gongbu_endpoint}/v1/executions/${execution_id}")"
-[[ "$(jq -r '.status' <<<"${persisted}")" == "succeeded" ]] || fail "execution state did not survive whole-stack restart"
-curl --fail --silent \
-  -H "Authorization: Bearer $(tr -d '\r\n' <"${gongbu_caller}")" \
-  "${gongbu_endpoint}/v1/artifacts/${artifact_id}" \
-  -o "${workspace}/artifact-after-restart.png"
-cmp "${workspace}/artifact.png" "${workspace}/artifact-after-restart.png" >/dev/null || fail "artifact did not survive whole-stack restart"
+[[ "$(grep -c '^start$' "${lifecycle_log}")" == "2" && "$(grep -c '^stop$' "${lifecycle_log}")" == "1" ]] || fail "managed stack restart count changed"
 
-"${hubu_bin}" stack stop --profile "${profile}" >/dev/null
+for label in agent-a agent-b; do
+  if [[ "${label}" == "agent-a" ]]; then
+    token="${agent_a_token}"
+    execution_id="${agent_a_execution_id}"
+    artifact_before="${workspace}/agent-a.png"
+  else
+    token="${agent_b_token}"
+    execution_id="${agent_b_execution_id}"
+    artifact_before="${workspace}/agent-b.png"
+  fi
+  temporal workflow describe \
+    --address "127.0.0.1:${temporal_port}" \
+    --namespace default \
+    --workflow-id "gongbu-execution-${execution_id}" >/dev/null
+  [[ "$(submit_execution "${token}" "${label}")" == "${execution_id}" ]] || fail "${label} replay changed after restart"
+  artifact_after="${workspace}/${label}-after-restart.png"
+  retrieve_artifact "${execution_id}" "${artifact_after}" >/dev/null
+  cmp "${artifact_before}" "${artifact_after}" >/dev/null || fail "${label} artifact did not survive whole-stack restart"
+done
+
+budgets_after_restart="$(curl --fail --silent \
+  -H "Authorization: Bearer $(tr -d '\r\n' <"${hubu_auth}")" \
+  "${hubu_endpoint}/budgets")"
+[[ "${budgets_after_restart}" == "${budgets}" ]] || fail "budget settlement changed during restart/replay"
+
+stack_lifecycle stop >/dev/null
 stack_started=0
 [[ ! -e "${profile}/runtime/launcher-state.json" ]] || fail "graceful stop left launcher ownership state"
 
-echo "Local-stack acceptance passed: real init/doctor/render/start, governed fixture execution, Temporal workflow and artifact discovery, whole-stack restart persistence, and graceful shutdown"
+echo "Local-stack acceptance passed: principal-neutral start, post-start two-agent registration, isolated settlement, installation-wide reads, settled-token replay, one whole-stack restart, and graceful shutdown"
