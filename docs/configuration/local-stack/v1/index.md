@@ -11,7 +11,7 @@ Schema version 1 is the operator-owned configuration contract for the local Hubu
 | File | Controls | Typical value sources | Detailed reference |
 | --- | --- | --- | --- |
 | `stack.toml` | Binaries, topology, Temporal, state paths, lifecycle, and runtime limits | Hubu discovery and explicit operator choices | [`stack.toml`](stack-toml.md) |
-| `credentials.toml` | File paths and opaque Keychain coordinates that refer to credentials | Hubu bootstrap output and Gongbu/provider credential setup | [`credentials.toml`](credentials-toml.md) |
+| `credentials.toml` | Provider references plus optional external-service credential overrides | Gongbu/provider setup; managed service references are derived internally | [`credentials.toml`](credentials-toml.md) |
 | `providers.toml` | Disabled/live mode, provider targets, frozen pricing, spend ceiling, and the live-spend gate | Provider documentation and explicit operator approval | [`providers.toml`](providers-toml.md) |
 
 All three files use `schema_version = 1` and reject unknown fields. A value that parses as TOML can still be incomplete or unsafe; always run doctor before rendering.
@@ -59,7 +59,10 @@ Never put any of these values in the TOML files:
 - credential-file contents;
 - secrets copied out of Keychain.
 
-`credentials.toml` contains references only. The renderer validates their shape and existence but does not read, copy, compare, or serialize the credential values.
+`credentials.toml` contains references only. For managed services, omitted
+references are derived internally and may remain pending until `stack start`.
+For explicit external references, the renderer validates shape and existence.
+It never reads, copies, compares, or serializes credential values.
 
 Keep Hubu and Gongbu separate even though the profile coordinates them. They retain separate processes, databases, credentials, provider execution, artifacts, and failure domains. They communicate through the versioned executor contract.
 
@@ -69,7 +72,9 @@ Keep Hubu and Gongbu separate even though the profile coordinates them. They ret
 
 1. Read the [provider-disabled example](examples.md#provider-disabled-local-profile).
 2. Use the [`stack.toml` reference](stack-toml.md) for topology and runtime boundaries.
-3. Use the [`credentials.toml` reference](credentials-toml.md) for capability-file paths.
+3. Leave managed service credential fields omitted; use the
+   [`credentials.toml` reference](credentials-toml.md) only for provider
+   references or external-service overrides.
 4. Set only `schema_version = 1` and `mode = "disabled"` in `providers.toml`.
 5. Run doctor and follow the reported field paths.
 
@@ -92,7 +97,8 @@ Read [managed versus external ownership](decisions.md#managed-versus-external-ow
 | Comment only | No runtime component | Doctor and render may produce a new source digest; review the plan. |
 | Binary or topology field | Launcher and the selected backend | Doctor → render → whole-stack stop → activate → start. |
 | New Hubu agent registration | Hubu governance state only | No render, activation, stop, restart, or Gongbu configuration change. |
-| Credential reference path or coordinate | Owning backend and possibly MCP handoff | Create the replacement reference first, then doctor → render → stop → activate → start. |
+| Managed service credential | Internal lifecycle state and MCP handoff | No source edit; start creates or reuses it. Managed rotation is a separate lifecycle operation. |
+| External/provider reference path or coordinate | Owning backend and possibly MCP handoff | Create the replacement reference first, then doctor → render → stop → activate → start. |
 | Provider target, settings, or pricing | Gongbu | Doctor → render → stop → activate → start. |
 | Runtime or logging policy | Managed process configuration | Doctor → render → stop → activate → start. |
 
@@ -123,7 +129,7 @@ The opaque table name is a local reference key. Its `service` and `account` valu
 ## Reference index
 
 - [`stack.toml`: binaries, topology, Temporal, and runtime](stack-toml.md)
-- [`credentials.toml`: credential-file paths and opaque references](credentials-toml.md)
+- [`credentials.toml`: managed defaults and advanced references](credentials-toml.md)
 - [`providers.toml`: modes, targets, settings, pricing, and spend gate](providers-toml.md)
 - [Decision guides](decisions.md)
 - [Complete annotated examples](examples.md)

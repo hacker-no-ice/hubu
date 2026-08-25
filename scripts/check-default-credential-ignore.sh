@@ -26,6 +26,7 @@ CHECK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hubu-credential-ignore.XXXXXX")"
 trap cleanup EXIT
 
 cargo build --locked --bin hubu-server
+cargo build --locked -p hubu-cli --bin hubu
 
 CHECKOUT_DIR="${CHECK_DIR}/checkout"
 git clone --quiet --no-hardlinks "${ROOT_DIR}" "${CHECKOUT_DIR}"
@@ -100,4 +101,30 @@ for ignored_path in \
   fi
 done
 
-echo "root and nested default auth, approval, and reconciliation credential files are ignored"
+MANAGED_CHECKOUT="${CHECK_DIR}/managed-checkout"
+MANAGED_PROFILE="${MANAGED_CHECKOUT}/profile"
+git init --quiet "${MANAGED_CHECKOUT}"
+"${ROOT_DIR}/target/debug/hubu" stack init --profile "${MANAGED_PROFILE}" >/dev/null
+mkdir -p "${MANAGED_PROFILE}/state/credentials/hubu" \
+  "${MANAGED_PROFILE}/state/credentials/gongbu"
+managed_credentials=(
+  "${MANAGED_PROFILE}/state/credentials/hubu/auth"
+  "${MANAGED_PROFILE}/state/credentials/hubu/approval"
+  "${MANAGED_PROFILE}/state/credentials/hubu/reconciliation"
+  "${MANAGED_PROFILE}/state/credentials/gongbu/hubu-executor"
+  "${MANAGED_PROFILE}/state/credentials/gongbu/caller"
+)
+for credential in "${managed_credentials[@]}"; do
+  printf '%s\n' 'managed-secret-fixture' >"${credential}"
+  if ! git -C "${MANAGED_CHECKOUT}" check-ignore --quiet -- "${credential}"; then
+    echo "managed profile credential $(basename "${credential}") is not ignored" >&2
+    exit 1
+  fi
+done
+if [[ -n "$(git -C "${MANAGED_CHECKOUT}" status --porcelain --untracked-files=all -- \
+  "${managed_credentials[@]}")" ]]; then
+  echo "a managed profile credential file is eligible for commit" >&2
+  exit 1
+fi
+
+echo "default and managed-profile credential files are ignored"

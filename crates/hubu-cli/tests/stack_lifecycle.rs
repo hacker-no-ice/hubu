@@ -156,6 +156,11 @@ fn wait_until_closed(address: SocketAddr) {
 #[test]
 fn managed_hubu_lifecycle_is_idempotent_and_never_owns_external_gongbu() {
     let root = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let profile = root.path().join("profile");
     fs::create_dir_all(&profile).unwrap();
 
@@ -210,6 +215,11 @@ http.server.ThreadingHTTPServer(("127.0.0.1", {}), Handler).serve_forever()
     ];
     for (name, value) in credentials {
         fs::write(root.path().join(name), value).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.path().join(name), fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
     let database = root.path().join("hubu.sqlite3");
     let log = root.path().join("hubu.log");

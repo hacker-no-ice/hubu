@@ -203,9 +203,12 @@ For a rendered local stack profile:
 hubu init codex --stack-profile /absolute/path/to/profile
 ```
 
-The command writes the managed MCP entry, creates or reuses local capability
-files, and renders Hubu's approval profile into client tool settings. Restart
-Codex after changing the generated configuration.
+With `--stack-profile`, the command consumes the verified handoff from an
+already running stack and writes the managed MCP entry; managed startup has
+already created the required capabilities. The non-stack setup form may create
+or reuse its manual local defaults. Both forms render Hubu's approval profile
+into client tool settings. Restart Codex after changing the generated
+configuration.
 
 The lifecycle is:
 
@@ -345,6 +348,8 @@ Gongbu databases, credentials, provider execution, artifacts, and failure
 domains. Continuation binding composes agent calls, not backend storage or
 process ownership: the router still makes one bounded request to Gongbu, and
 Gongbu performs its own Hubu resolution, persistence, scheduling, and recovery.
+For a managed stack, the router's client references come from the verified
+post-start handoff; it does not participate in service credential bootstrap.
 
 Registry schema v3 intentionally does not upgrade a v2 registry. V2 terminal
 authorization rows erased the private operation identity, so their continuation

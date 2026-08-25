@@ -24,6 +24,11 @@ const PROFILE_REGISTRY_SCHEMA_VERSION: u32 = 1;
 const PROFILE_LIST_SCHEMA_VERSION: u32 = 1;
 const PROFILE_REGISTRY_FILE: &str = "stack-profiles.json";
 const LIVE_SPEND_ACKNOWLEDGEMENT: &str = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND";
+const MANAGED_GONGBU_SECRET_SERVICE: &str = "hubu.managed-stack.v1";
+const MANAGED_GONGBU_HUBU_ACCOUNT: &str = "hubu-executor";
+const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
+const MANAGED_CREDENTIAL_IGNORE: &[u8] =
+    b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -189,11 +194,163 @@ struct CredentialFiles {
     gongbu_caller: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug)]
+struct ResolvedCredentialPaths {
+    hubu_auth: PathBuf,
+    hubu_approval: PathBuf,
+    hubu_reconciliation: PathBuf,
+    gongbu_caller: PathBuf,
+    gongbu_secret_dir: PathBuf,
+    managed_gongbu_handoff: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct OpaqueReference {
     service: Option<String>,
     account: Option<String>,
+}
+
+fn managed_credential_root(profile: &Path) -> PathBuf {
+    profile.join("state/credentials")
+}
+
+fn managed_hubu_credential_root(profile: &Path) -> PathBuf {
+    managed_credential_root(profile).join("hubu")
+}
+
+fn managed_gongbu_credential_root(profile: &Path) -> PathBuf {
+    managed_credential_root(profile).join("gongbu")
+}
+
+fn uses_managed_gongbu_handoff(stack: &StackSource, credentials: &CredentialsSource) -> bool {
+    stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed)
+        && !credentials.opaque.contains_key("gongbu_hubu")
+        && !credentials.opaque.contains_key("gongbu_caller")
+}
+
+fn managed_gongbu_reference(account: &str) -> OpaqueReference {
+    OpaqueReference {
+        service: Some(MANAGED_GONGBU_SECRET_SERVICE.into()),
+        account: Some(account.into()),
+    }
+}
+
+fn gongbu_bootstrap_references(
+    stack: &StackSource,
+    credentials: &CredentialsSource,
+) -> Result<(OpaqueReference, OpaqueReference)> {
+    if uses_managed_gongbu_handoff(stack, credentials) {
+        return Ok((
+            managed_gongbu_reference(MANAGED_GONGBU_HUBU_ACCOUNT),
+            managed_gongbu_reference(MANAGED_GONGBU_CALLER_ACCOUNT),
+        ));
+    }
+    let hubu = credentials
+        .opaque
+        .get("gongbu_hubu")
+        .cloned()
+        .ok_or_else(|| anyhow!("credentials.toml:opaque.gongbu_hubu is required"))?;
+    let caller = credentials
+        .opaque
+        .get("gongbu_caller")
+        .cloned()
+        .ok_or_else(|| anyhow!("credentials.toml:opaque.gongbu_caller is required"))?;
+    if [&hubu, &caller]
+        .iter()
+        .any(|reference| reference.service.as_deref() == Some(MANAGED_GONGBU_SECRET_SERVICE))
+    {
+        bail!(
+            "credentials.toml explicit Gongbu overrides cannot use the reserved managed-stack secret service"
+        );
+    }
+    Ok((hubu, caller))
+}
+
+fn resolve_credential_paths(
+    profile: &Path,
+    stack: &StackSource,
+    credentials: &CredentialsSource,
+) -> Result<ResolvedCredentialPaths> {
+    let files = credentials.files.as_ref();
+    let hubu_managed =
+        stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed);
+    let gongbu_handoff_managed = uses_managed_gongbu_handoff(stack, credentials);
+    let hubu_root = managed_hubu_credential_root(profile);
+    let gongbu_root = managed_gongbu_credential_root(profile);
+    let hubu_auth = resolve_credential_path(
+        files.and_then(|value| value.hubu_auth.as_deref()),
+        hubu_managed,
+        &hubu_root.join("auth"),
+        "credentials.toml:files.hubu_auth",
+    )?;
+    let hubu_approval = resolve_credential_path(
+        files.and_then(|value| value.hubu_approval.as_deref()),
+        hubu_managed,
+        &hubu_root.join("approval"),
+        "credentials.toml:files.hubu_approval",
+    )?;
+    let hubu_reconciliation = resolve_credential_path(
+        files.and_then(|value| value.hubu_reconciliation.as_deref()),
+        hubu_managed,
+        &hubu_root.join("reconciliation"),
+        "credentials.toml:files.hubu_reconciliation",
+    )?;
+    let gongbu_caller = resolve_credential_path(
+        files.and_then(|value| value.gongbu_caller.as_deref()),
+        gongbu_handoff_managed,
+        &gongbu_root.join("caller"),
+        "credentials.toml:files.gongbu_caller",
+    )?;
+    let gongbu_secret_dir = resolve_existing_prefix(&gongbu_root)?;
+    let gongbu_hubu = resolve_existing_prefix(&gongbu_root.join("hubu-executor"))?;
+    if gongbu_handoff_managed && gongbu_caller != gongbu_secret_dir.join("caller") {
+        bail!("managed Gongbu caller file overrides require explicit opaque bootstrap references");
+    }
+    let paths = [
+        &hubu_auth,
+        &hubu_approval,
+        &hubu_reconciliation,
+        &gongbu_caller,
+        &gongbu_hubu,
+    ];
+    for (index, path) in paths.iter().enumerate() {
+        for prior in &paths[..index] {
+            if paths_resolve_to_same_resource(path, prior)? {
+                bail!("managed credential references must identify distinct resources");
+            }
+        }
+    }
+    Ok(ResolvedCredentialPaths {
+        hubu_auth,
+        hubu_approval,
+        hubu_reconciliation,
+        gongbu_caller,
+        gongbu_secret_dir,
+        managed_gongbu_handoff: gongbu_handoff_managed,
+    })
+}
+
+fn resolve_credential_path(
+    configured: Option<&Path>,
+    provisioned_by_managed_stack: bool,
+    managed_default: &Path,
+    field: &str,
+) -> Result<PathBuf> {
+    match configured {
+        Some(path) => {
+            validate_safe_absolute(path, field)?;
+            existing_absolute(path, field)
+        }
+        None if provisioned_by_managed_stack => {
+            validate_safe_absolute(managed_default, field)?;
+            if managed_default.exists() && !managed_default.is_file() {
+                bail!("{field} must name a regular file when it already exists");
+            }
+            resolve_existing_prefix(managed_default)
+        }
+        None => bail!("{field} is required for an external credential owner"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -320,6 +477,51 @@ pub(crate) fn codex_handoff(profile: &Path, hubu_home: &Path) -> Result<CodexHan
     Ok(handoff)
 }
 
+fn active_credential_paths(
+    profile: &Path,
+    manifest: &ActiveManifest,
+) -> Result<(ResolvedCredentialPaths, u64)> {
+    let generation = active_generation_path(&profile.join("generated"), manifest)?;
+    verify_generated_file(&generation, manifest, "client-handoff.json")?;
+    let handoff: CodexHandoff = read_json(&generation.join("client-handoff.json"))?;
+    if handoff.schema_version != 2 {
+        bail!("active client handoff has an unsupported schema_version");
+    }
+
+    let gongbu_root = managed_gongbu_credential_root(profile);
+    let gongbu_secret_dir = resolve_existing_prefix(&gongbu_root)?;
+    let mut managed_gongbu_handoff = false;
+    let mut startup_timeout_ms = 30_000;
+    if manifest
+        .generated_file_digests
+        .contains_key("gongbu-server.json")
+    {
+        verify_generated_file(&generation, manifest, "gongbu-server.json")?;
+        let config: Value = read_json(&generation.join("gongbu-server.json"))?;
+        let hubu_reference = &config["hubu"]["credential_reference"];
+        let caller_reference = &config["authentication"]["bearer_credential_reference"];
+        managed_gongbu_handoff = hubu_reference["service"].as_str()
+            == Some(MANAGED_GONGBU_SECRET_SERVICE)
+            && hubu_reference["account"].as_str() == Some(MANAGED_GONGBU_HUBU_ACCOUNT)
+            && caller_reference["service"].as_str() == Some(MANAGED_GONGBU_SECRET_SERVICE)
+            && caller_reference["account"].as_str() == Some(MANAGED_GONGBU_CALLER_ACCOUNT);
+        startup_timeout_ms = config["hubu"]["startup_timeout_ms"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("active Gongbu config has no valid Hubu startup timeout"))?;
+    }
+    Ok((
+        ResolvedCredentialPaths {
+            hubu_auth: handoff.hubu_token_file,
+            hubu_approval: handoff.approval_token_file,
+            hubu_reconciliation: handoff.reconciliation_token_file,
+            gongbu_caller: handoff.gongbu_token_file,
+            gongbu_secret_dir,
+            managed_gongbu_handoff,
+        },
+        startup_timeout_ms,
+    ))
+}
+
 fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     if take_help(&mut args) {
         print_init_help();
@@ -329,6 +531,7 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     ensure_no_args(args)?;
     create_secure_dir(&profile)?;
     create_secure_dir(&profile.join("generated"))?;
+    let credential_ignore_created = ensure_managed_credential_ignore(&profile)?;
 
     let files = [
         ("README.md", readme_template()),
@@ -345,6 +548,12 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         }
     }
     register_profile(&profile, hubu_home, false)?;
+    let credential_ignore = managed_credential_root(&profile).join(".gitignore");
+    if credential_ignore_created {
+        println!("created: {}", credential_ignore.display());
+    } else {
+        println!("preserved: {}", credential_ignore.display());
+    }
     println!("profile: {}", profile.display());
     let input_files = files_needing_input(&profile);
     if input_files.is_empty() {
@@ -688,6 +897,8 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
     }
     validate_provider_source(&providers)?;
     validate_topology(&stack)?;
+    let credential_paths = resolve_credential_paths(profile, &stack, &credentials)?;
+    validate_credential_resource_separation(profile, &stack, &credential_paths)?;
 
     let binaries = stack.binaries.as_ref().expect("checked");
     let hubu_bin = existing_absolute(binaries.hubu.as_deref().expect("checked"), "binaries.hubu")?;
@@ -730,35 +941,6 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
         negotiate_principal_neutral_gongbu_schema(gongbu)?;
     }
 
-    let files = credentials.files.as_ref().expect("checked");
-    let hubu_auth = existing_absolute(
-        files.hubu_auth.as_deref().expect("checked"),
-        "files.hubu_auth",
-    )?;
-    let hubu_approval = existing_absolute(
-        files.hubu_approval.as_deref().expect("checked"),
-        "files.hubu_approval",
-    )?;
-    let hubu_reconciliation = existing_absolute(
-        files.hubu_reconciliation.as_deref().expect("checked"),
-        "files.hubu_reconciliation",
-    )?;
-    let gongbu_caller_file = existing_absolute(
-        files.gongbu_caller.as_deref().expect("checked"),
-        "files.gongbu_caller",
-    )?;
-    let credential_paths = [
-        &hubu_auth,
-        &hubu_approval,
-        &hubu_reconciliation,
-        &gongbu_caller_file,
-    ];
-    for (index, path) in credential_paths.iter().enumerate() {
-        if credential_paths[..index].contains(path) {
-            bail!("credentials.toml file references must be distinct capabilities");
-        }
-    }
-
     let source_digests = BTreeMap::from([
         ("credentials.toml".to_string(), digest(&credential_bytes)),
         ("providers.toml".to_string(), digest(&provider_bytes)),
@@ -796,10 +978,10 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
                 hubu_server.as_deref(),
                 gongbu_server.as_deref(),
                 &unified_mcp,
-                &hubu_auth,
-                &hubu_approval,
-                &hubu_reconciliation,
-                &gongbu_caller_file,
+                &credential_paths.hubu_auth,
+                &credential_paths.hubu_approval,
+                &credential_paths.hubu_reconciliation,
+                &credential_paths.gongbu_caller,
                 &source_digests,
                 &generation_id,
                 &relative_generation,
@@ -862,10 +1044,10 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
                 hubu_server.as_deref(),
                 gongbu_server.as_deref(),
                 &unified_mcp,
-                &hubu_auth,
-                &hubu_approval,
-                &hubu_reconciliation,
-                &gongbu_caller_file,
+                &credential_paths.hubu_auth,
+                &credential_paths.hubu_approval,
+                &credential_paths.hubu_reconciliation,
+                &credential_paths.gongbu_caller,
                 &source_digests,
                 &generation_id,
                 &relative_generation,
@@ -901,10 +1083,10 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
         hubu_server.as_deref(),
         gongbu_server.as_deref(),
         &unified_mcp,
-        &hubu_auth,
-        &hubu_approval,
-        &hubu_reconciliation,
-        &gongbu_caller_file,
+        &credential_paths.hubu_auth,
+        &credential_paths.hubu_approval,
+        &credential_paths.hubu_reconciliation,
+        &credential_paths.gongbu_caller,
         &source_digests,
         &generation_id,
         &relative_generation,
@@ -967,14 +1149,18 @@ fn render_generation(
 
     if hubu.ownership == Some(Ownership::Managed) {
         let hubu_server = hubu_server.expect("selected managed binary");
+        let credential_files = credentials.files.as_ref();
         let launch = json!({
             "schema_version": 1,
             "listen": hubu.listen.expect("checked"),
             "database_path": hubu.database_path.as_ref().expect("checked"),
             "log_file": hubu.log_file,
             "auth_token_file": hubu_auth,
+            "auth_token_file_generated": credential_files.and_then(|files| files.hubu_auth.as_ref()).is_none(),
             "approval_token_file": hubu_approval,
+            "approval_token_file_generated": credential_files.and_then(|files| files.hubu_approval.as_ref()).is_none(),
             "reconciliation_token_file": hubu_reconciliation,
+            "reconciliation_token_file_generated": credential_files.and_then(|files| files.hubu_reconciliation.as_ref()).is_none(),
         });
         write_generated_json(
             generation,
@@ -1005,8 +1191,7 @@ fn render_generation(
 
     if gongbu.ownership == Some(Ownership::Managed) {
         let gongbu_server = gongbu_server.expect("selected managed binary");
-        let gongbu_hubu = credentials.opaque.get("gongbu_hubu").expect("checked");
-        let gongbu_caller = credentials.opaque.get("gongbu_caller").expect("checked");
+        let (gongbu_hubu, gongbu_caller) = gongbu_bootstrap_references(stack, credentials)?;
         let temporal = render_temporal(stack.temporal.as_ref().expect("checked"))?;
         let gongbu_version = provenances
             .iter()
@@ -1028,12 +1213,12 @@ fn render_generation(
                 "allowlisted_hosts": [],
                 "expected_product_version": gongbu_version.product_version,
                 "expected_executor_contract": gongbu_version.executor_contract,
-                "credential_reference": gongbu_hubu,
+                "credential_reference": &gongbu_hubu,
                 "startup_policy": stack.runtime.hubu_startup_policy,
                 "startup_timeout_ms": stack.runtime.hubu_startup_timeout_ms,
             },
             "authentication": {
-                "bearer_credential_reference": gongbu_caller,
+                "bearer_credential_reference": &gongbu_caller,
             },
             "providers": provider_json,
             "artifacts": {
@@ -1745,6 +1930,130 @@ fn validate_managed_resources(stack: &StackSource) -> Result<()> {
     Ok(())
 }
 
+fn validate_credential_resource_separation(
+    profile: &Path,
+    stack: &StackSource,
+    paths: &ResolvedCredentialPaths,
+) -> Result<()> {
+    let mut backend_resources = Vec::new();
+    if let Some(hubu) = stack
+        .hubu
+        .as_ref()
+        .filter(|service| service.ownership == Some(Ownership::Managed))
+    {
+        push_resource(
+            &mut backend_resources,
+            "stack.toml:hubu.database_path",
+            hubu.database_path.as_deref(),
+            ManagedResourceKind::File,
+        );
+        push_resource(
+            &mut backend_resources,
+            "stack.toml:hubu.log_file",
+            hubu.log_file.as_deref(),
+            ManagedResourceKind::File,
+        );
+    }
+    if let Some(gongbu) = stack
+        .gongbu
+        .as_ref()
+        .filter(|service| service.ownership == Some(Ownership::Managed))
+    {
+        push_resource(
+            &mut backend_resources,
+            "stack.toml:gongbu.database_path",
+            gongbu.database_path.as_deref(),
+            ManagedResourceKind::File,
+        );
+        push_resource(
+            &mut backend_resources,
+            "stack.toml:gongbu.artifact_root",
+            gongbu.artifact_root.as_deref(),
+            ManagedResourceKind::Directory,
+        );
+        push_resource(
+            &mut backend_resources,
+            "stack.toml:gongbu.log_file",
+            gongbu.log_file.as_deref(),
+            ManagedResourceKind::File,
+        );
+    }
+    if let Some(temporal) = stack
+        .temporal
+        .as_ref()
+        .filter(|temporal| temporal.mode == Some(TemporalMode::ManagedLocal))
+    {
+        push_resource(
+            &mut backend_resources,
+            "stack.toml:temporal.data_path",
+            temporal.data_path.as_deref(),
+            ManagedResourceKind::Directory,
+        );
+    }
+
+    let credential_root = managed_credential_root(profile);
+    let mut credential_resources = vec![
+        (
+            "Hubu authentication credential",
+            paths.hubu_auth.as_path(),
+            ManagedResourceKind::File,
+        ),
+        (
+            "Hubu approval credential",
+            paths.hubu_approval.as_path(),
+            ManagedResourceKind::File,
+        ),
+        (
+            "Hubu reconciliation credential",
+            paths.hubu_reconciliation.as_path(),
+            ManagedResourceKind::File,
+        ),
+        (
+            "Gongbu caller credential",
+            paths.gongbu_caller.as_path(),
+            ManagedResourceKind::File,
+        ),
+    ];
+    let has_managed_credentials = stack.hubu.as_ref().and_then(|value| value.ownership)
+        == Some(Ownership::Managed)
+        || paths.managed_gongbu_handoff;
+    if has_managed_credentials {
+        credential_resources.push((
+            "managed credential state",
+            credential_root.as_path(),
+            ManagedResourceKind::Directory,
+        ));
+    }
+
+    for credential in &credential_resources {
+        for backend in &backend_resources {
+            if managed_resources_overlap(credential, backend)? {
+                bail!(
+                    "{} and {} must not overlap credential and managed service state",
+                    credential.0,
+                    backend.0
+                );
+            }
+        }
+    }
+    let operation_state = profile.join("state/hubu-unified-operations.sqlite3");
+    let operation = (
+        "generated client handoff operation_state_path",
+        operation_state.as_path(),
+        ManagedResourceKind::File,
+    );
+    for credential in &credential_resources {
+        if managed_resources_overlap(credential, &operation)? {
+            bail!(
+                "{} and {} must not overlap credential and unified MCP state",
+                credential.0,
+                operation.0
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_operation_state_separation(stack: &StackSource, operation_state: &Path) -> Result<()> {
     let operation = (
         "generated client handoff operation_state_path",
@@ -1965,32 +2274,45 @@ fn missing_fields(
     if stack.gongbu.as_ref().and_then(|v| v.ownership) == Some(Ownership::Managed) {
         check_temporal_missing(stack.temporal.as_ref(), &mut missing);
     }
-    if let Some(files) = credentials.files.as_ref() {
-        for (value, path) in [
-            (files.hubu_auth.as_ref(), "credentials.toml:files.hubu_auth"),
-            (
-                files.hubu_approval.as_ref(),
-                "credentials.toml:files.hubu_approval",
-            ),
-            (
-                files.hubu_reconciliation.as_ref(),
-                "credentials.toml:files.hubu_reconciliation",
-            ),
-            (
-                files.gongbu_caller.as_ref(),
-                "credentials.toml:files.gongbu_caller",
-            ),
-        ] {
-            if value.is_none() {
-                missing.push(path.into());
-            }
+    let files = credentials.files.as_ref();
+    let hubu_external =
+        stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::External);
+    for (value, path) in [
+        (
+            files.and_then(|value| value.hubu_auth.as_ref()),
+            "credentials.toml:files.hubu_auth",
+        ),
+        (
+            files.and_then(|value| value.hubu_approval.as_ref()),
+            "credentials.toml:files.hubu_approval",
+        ),
+        (
+            files.and_then(|value| value.hubu_reconciliation.as_ref()),
+            "credentials.toml:files.hubu_reconciliation",
+        ),
+    ] {
+        if hubu_external && value.is_none() {
+            missing.push(path.into());
         }
-    } else {
-        missing.push("credentials.toml:files".into());
     }
-    if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
-        for key in ["gongbu_hubu", "gongbu_caller"] {
-            if !credentials.opaque.contains_key(key) {
+    let gongbu_ownership = stack.gongbu.as_ref().and_then(|value| value.ownership);
+    let has_gongbu_hubu_reference = credentials.opaque.contains_key("gongbu_hubu");
+    let has_gongbu_caller_reference = credentials.opaque.contains_key("gongbu_caller");
+    let explicit_gongbu_bootstrap = has_gongbu_hubu_reference || has_gongbu_caller_reference;
+    if (gongbu_ownership == Some(Ownership::External)
+        || (gongbu_ownership == Some(Ownership::Managed) && explicit_gongbu_bootstrap))
+        && files
+            .and_then(|value| value.gongbu_caller.as_ref())
+            .is_none()
+    {
+        missing.push("credentials.toml:files.gongbu_caller".into());
+    }
+    if gongbu_ownership == Some(Ownership::Managed) && explicit_gongbu_bootstrap {
+        for (key, present) in [
+            ("gongbu_hubu", has_gongbu_hubu_reference),
+            ("gongbu_caller", has_gongbu_caller_reference),
+        ] {
+            if !present {
                 missing.push(format!("credentials.toml:opaque.{key}"));
             }
         }
@@ -2302,6 +2624,34 @@ fn create_secure_dir(path: &Path) -> Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+fn ensure_managed_credential_ignore(profile: &Path) -> Result<bool> {
+    let root = managed_credential_root(profile);
+    create_secure_dir(&root)?;
+    let metadata =
+        fs::symlink_metadata(&root).with_context(|| format!("inspect `{}`", root.display()))?;
+    if !metadata.file_type().is_dir() {
+        bail!("managed credential root must be a real directory");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            bail!("managed credential root must exclude group and other access");
+        }
+    }
+
+    let ignore = root.join(".gitignore");
+    let created = write_new_secure(&ignore, MANAGED_CREDENTIAL_IGNORE)?;
+    if !created {
+        let metadata = fs::symlink_metadata(&ignore)
+            .with_context(|| format!("inspect `{}`", ignore.display()))?;
+        if !metadata.file_type().is_file() || fs::read(&ignore)? != MANAGED_CREDENTIAL_IGNORE {
+            bail!("managed credential ignore guard is missing or modified");
+        }
+    }
+    Ok(created)
 }
 
 fn existing_absolute(path: &Path, field: &str) -> Result<PathBuf> {
@@ -2708,17 +3058,22 @@ log_format = "text"
 }
 
 fn credentials_template() -> String {
-    r#"# Credential references only. Never paste bearer tokens or provider secrets here.
+    r#"# Managed-local service credentials are provisioned inside this profile by
+# `hubu stack start`; no token values or file locations belong in this file.
+# Explicit service file and reserved Gongbu references are advanced overrides
+# for externally provisioned credentials. Provider opaque references are normal
+# live-target inputs. Never paste bearer tokens or provider secrets here.
 # Reference: https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/credentials-toml
 schema_version = 1
 
-[files]
+# External/advanced service example:
+# [files]
 # hubu_auth = "/absolute/path/to/hubu.auth-token"
 # hubu_approval = "/absolute/path/to/hubu.approval-token"
 # hubu_reconciliation = "/absolute/path/to/hubu.reconciliation-token"
 # gongbu_caller = "/absolute/path/to/gongbu.caller-token"
 
-# Opaque references are resolved by the owning service, not by stack rendering.
+# Advanced Gongbu bootstrap overrides are resolved by Gongbu, not by rendering.
 # [opaque.gongbu_hubu]
 # service = "<keychain service>"
 # account = "<keychain account>"
@@ -2785,8 +3140,9 @@ This directory is operator-owned. `hubu stack init` never overwrites these
 files and never starts a service.
 
 - `stack.toml`: topology, binaries, state locations, Temporal, and lifecycle.
-- `credentials.toml`: absolute credential-file paths and opaque references;
-  never raw secret values.
+- `credentials.toml`: provider references and advanced external-service
+  credential overrides; never raw secret values. Managed-local service
+  credentials and their locations are selected internally during start.
 - `providers.toml`: disabled or live provider mode, targets, frozen pricing,
   spend ceiling, and the explicit live-spend gate.
 - `generated/`: validated implementation output; do not edit it.
@@ -2795,19 +3151,22 @@ Start with every uncommented example that matches your topology, fill the
 commented fields you choose, and leave unrelated examples commented. Then run
 `hubu stack select --profile /absolute/path/to/this/profile`, followed by
 `hubu stack doctor`. When the profile is `ready_to_render`, run
-`hubu stack start`. Start runs doctor and render as needed, launches only
-configured managed services, and leaves external services and the client-owned
-unified MCP process untouched. Use `hubu stack status` and `hubu stack logs`
-for the combined operator view. An explicit `--profile` temporarily overrides
-the selection without changing it; `hubu stack profiles` lists known profiles.
+`hubu stack start`. Start runs doctor and render as needed, starts the final
+managed Hubu so it can create its private
+capabilities, completes Gongbu's internal handoff, and then starts Gongbu. It
+leaves external services and the client-owned unified MCP process untouched.
+Use `hubu stack status` and `hubu stack logs` for the combined operator view.
+An explicit `--profile` temporarily overrides the selection without changing
+it; `hubu stack profiles` lists known profiles.
 
 For later changes, edit the operator-owned TOML and run `hubu stack render`.
 The validated generation is staged without replacing the active generation.
 Review the reported filenames and affected components, then use the printed
 generation ID with `hubu stack stop`, `hubu stack activate`, and `hubu stack
-start`. Rotate file-based credentials by changing only their paths in
-`credentials.toml`; do not overwrite a secret in place or put secret values in
-this profile. `hubu stack
+start`. Rotate explicit external file references by changing only their paths
+in `credentials.toml`; do not overwrite a secret in place or put secret values
+in this profile. Managed-local credentials are lifecycle state, not editable
+source. `hubu stack
 generations` lists retained generations. Rollback requires restoring the exact
 operator-owned TOML for the target generation before `hubu stack rollback`.
 There is no stack restart command and no per-component repair path.
@@ -2948,6 +3307,16 @@ mod tests {
         assert!(providers.contains("selector = { image_size = \"1k\" }"));
         assert!(providers.contains("rate_numerator_minor = 1"));
         assert!(profile.join("generated").is_dir());
+        assert_eq!(
+            fs::read(managed_credential_root(&profile).join(".gitignore")).unwrap(),
+            MANAGED_CREDENTIAL_IGNORE
+        );
+        assert_eq!(
+            fs::read_dir(managed_credential_root(&profile))
+                .unwrap()
+                .count(),
+            1
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -3187,7 +3556,7 @@ mod tests {
         let error = render_profile(&profile).unwrap_err().to_string();
         assert!(error.contains("stack.toml:hubu.ownership"));
         assert!(error.contains("stack.toml:gongbu.ownership"));
-        assert!(error.contains("credentials.toml:files.hubu_auth"));
+        assert!(!error.contains("credentials.toml:files.hubu_auth"));
         assert!(error.contains("providers.toml:mode"));
         assert!(!error.contains("identity"));
         assert!(!profile.join("generated/active-manifest.json").exists());
@@ -3206,6 +3575,110 @@ mod tests {
         assert!(missing_fields(&stack, &credentials, &providers)
             .iter()
             .all(|field| !field.contains("identity")));
+    }
+
+    #[test]
+    fn managed_topology_derives_private_credentials_while_external_owners_require_refs() {
+        let root = tempdir().unwrap();
+        let profile = root.path().join("profile");
+        create_secure_dir(&profile).unwrap();
+        let managed: StackSource = toml::from_str(
+            r#"schema_version = 1
+[hubu]
+ownership = "managed"
+[gongbu]
+ownership = "managed"
+"#,
+        )
+        .unwrap();
+        let external: StackSource = toml::from_str(
+            r#"schema_version = 1
+[hubu]
+ownership = "external"
+[gongbu]
+ownership = "external"
+"#,
+        )
+        .unwrap();
+        let credentials: CredentialsSource = toml::from_str("schema_version = 1\n").unwrap();
+        let providers: ProvidersSource =
+            toml::from_str("schema_version = 1\nmode = \"disabled\"\n").unwrap();
+
+        let managed_missing = missing_fields(&managed, &credentials, &providers);
+        assert!(managed_missing
+            .iter()
+            .all(|field| !field.starts_with("credentials.toml:")));
+        let paths = resolve_credential_paths(&profile, &managed, &credentials).unwrap();
+        let canonical_profile = fs::canonicalize(&profile).unwrap();
+        assert_eq!(
+            paths.hubu_auth,
+            canonical_profile.join("state/credentials/hubu/auth")
+        );
+        assert_eq!(
+            paths.gongbu_caller,
+            canonical_profile.join("state/credentials/gongbu/caller")
+        );
+        assert!(paths.managed_gongbu_handoff);
+        assert!(!paths.hubu_auth.exists());
+        assert!(!paths.gongbu_caller.exists());
+
+        let missing_override = profile.join("operator-auth");
+        let credentials_with_missing_override: CredentialsSource = toml::from_str(&format!(
+            "schema_version = 1\n[files]\nhubu_auth = {}\n",
+            quote(missing_override.display().to_string())
+        ))
+        .unwrap();
+        assert!(
+            resolve_credential_paths(&profile, &managed, &credentials_with_missing_override)
+                .unwrap_err()
+                .to_string()
+                .contains("credentials.toml:files.hubu_auth")
+        );
+        assert!(!missing_override.exists());
+
+        let external_missing = missing_fields(&external, &credentials, &providers);
+        for field in [
+            "credentials.toml:files.hubu_auth",
+            "credentials.toml:files.hubu_approval",
+            "credentials.toml:files.hubu_reconciliation",
+            "credentials.toml:files.gongbu_caller",
+        ] {
+            assert!(external_missing.contains(&field.to_string()));
+        }
+
+        let managed_hubu_external_gongbu: StackSource = toml::from_str(
+            r#"schema_version = 1
+[hubu]
+ownership = "managed"
+[gongbu]
+ownership = "external"
+"#,
+        )
+        .unwrap();
+        let mixed_missing = missing_fields(&managed_hubu_external_gongbu, &credentials, &providers);
+        assert_eq!(
+            mixed_missing
+                .iter()
+                .filter(|field| field.starts_with("credentials.toml:"))
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["credentials.toml:files.gongbu_caller".to_owned()]
+        );
+
+        let external_hubu_managed_gongbu: StackSource = toml::from_str(
+            r#"schema_version = 1
+[hubu]
+ownership = "external"
+[gongbu]
+ownership = "managed"
+"#,
+        )
+        .unwrap();
+        let mixed_missing = missing_fields(&external_hubu_managed_gongbu, &credentials, &providers);
+        assert!(mixed_missing.contains(&"credentials.toml:files.hubu_auth".into()));
+        assert!(mixed_missing.contains(&"credentials.toml:files.hubu_approval".into()));
+        assert!(mixed_missing.contains(&"credentials.toml:files.hubu_reconciliation".into()));
+        assert!(!mixed_missing.contains(&"credentials.toml:files.gongbu_caller".into()));
     }
 
     #[test]
@@ -3354,6 +3827,66 @@ artifact_root = {shared}
         let error = validate_topology(&stack).unwrap_err().to_string();
         assert!(error.contains("gongbu.database_path"));
         assert!(error.contains("gongbu.artifact_root"));
+    }
+
+    #[test]
+    fn managed_service_state_cannot_overlap_derived_credentials() {
+        let root = tempdir().unwrap();
+        let profile = root.path().join("profile");
+        create_secure_dir(&profile).unwrap();
+        let credentials: CredentialsSource = toml::from_str("schema_version = 1\n").unwrap();
+        let stack = |gongbu_log: &Path, artifacts: &Path| {
+            toml::from_str::<StackSource>(&format!(
+                r#"schema_version = 1
+[hubu]
+ownership = "managed"
+endpoint = "http://127.0.0.1:8787"
+listen = "127.0.0.1:8787"
+database_path = {}
+[gongbu]
+ownership = "managed"
+endpoint = "http://127.0.0.1:8788"
+listen = "127.0.0.1:8788"
+database_path = {}
+artifact_root = {}
+log_file = {}
+"#,
+                quote(profile.join("state/hubu.sqlite3").display().to_string()),
+                quote(profile.join("state/gongbu.sqlite3").display().to_string()),
+                quote(artifacts.display().to_string()),
+                quote(gongbu_log.display().to_string()),
+            ))
+            .unwrap()
+        };
+
+        let caller = profile.join("state/credentials/gongbu/caller");
+        let distinct_artifacts = profile.join("artifacts");
+        let stack_with_log_collision = stack(&caller, &distinct_artifacts);
+        let paths =
+            resolve_credential_paths(&profile, &stack_with_log_collision, &credentials).unwrap();
+        assert!(validate_credential_resource_separation(
+            &profile,
+            &stack_with_log_collision,
+            &paths
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("gongbu.log_file"));
+
+        let credential_artifacts = profile.join("state/credentials/gongbu");
+        let distinct_log = profile.join("logs/gongbu.jsonl");
+        let stack_with_artifact_collision = stack(&distinct_log, &credential_artifacts);
+        let paths =
+            resolve_credential_paths(&profile, &stack_with_artifact_collision, &credentials)
+                .unwrap();
+        assert!(validate_credential_resource_separation(
+            &profile,
+            &stack_with_artifact_collision,
+            &paths
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("gongbu.artifact_root"));
     }
 
     #[cfg(unix)]
@@ -3620,6 +4153,16 @@ account = "gongbu-caller"
         let active_path = profile.join("generated/active-manifest.json");
         let active = fs::read(&active_path).unwrap();
         let initial_manifest: ActiveManifest = read_json(&active_path).unwrap();
+        let hubu_config: Value = read_json(
+            &profile
+                .join("generated")
+                .join(&initial_manifest.generation)
+                .join("hubu-launch.json"),
+        )
+        .unwrap();
+        assert_eq!(hubu_config["auth_token_file_generated"], false);
+        assert_eq!(hubu_config["approval_token_file_generated"], false);
+        assert_eq!(hubu_config["reconciliation_token_file_generated"], false);
         let gongbu_config: Value = read_json(
             &profile
                 .join("generated")

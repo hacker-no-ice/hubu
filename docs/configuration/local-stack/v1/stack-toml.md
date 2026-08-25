@@ -71,6 +71,18 @@ block. Stack startup selects no execution account or agent. For each new
 execution, Hubu spend authorization supplies authoritative account and agent
 attribution and Gongbu persists that immutable snapshot.
 
+### `identity.account_id`
+
+Deprecated compatibility field. When present, it must be a non-empty string,
+but rendering ignores it. Do not add it to new profiles; Hubu authorization
+supplies the authoritative execution account.
+
+### `identity.agent_id`
+
+Deprecated compatibility field. When present, it must be a non-empty string,
+but rendering ignores it. Do not add it to new profiles; Hubu authorization
+supplies the authoritative execution agent.
+
 ## `[hubu]`
 
 ### `hubu.ownership`

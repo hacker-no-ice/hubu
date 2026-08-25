@@ -37,6 +37,9 @@ fn run() -> anyhow::Result<()> {
                 "HUBU_AUTH_TOKEN",
                 "HUBU_APPROVAL_TOKEN",
                 "HUBU_RECONCILIATION_TOKEN",
+                hubu_api::launch_config::AUTH_TOKEN_FILE_GENERATED_ENV,
+                hubu_api::launch_config::APPROVAL_TOKEN_FILE_GENERATED_ENV,
+                hubu_api::launch_config::RECONCILIATION_TOKEN_FILE_GENERATED_ENV,
                 "HUBU_LOG_FILE",
                 "HUBU_LOG_STDERR",
                 "HUBU_LEASE_CONFIG",
@@ -50,6 +53,22 @@ fn run() -> anyhow::Result<()> {
                 "HUBU_RECONCILIATION_TOKEN_FILE",
                 &config.reconciliation_token_file,
             );
+            for (generated, name) in [
+                (
+                    config.auth_token_file_generated,
+                    hubu_api::launch_config::AUTH_TOKEN_FILE_GENERATED_ENV,
+                ),
+                (
+                    config.approval_token_file_generated,
+                    hubu_api::launch_config::APPROVAL_TOKEN_FILE_GENERATED_ENV,
+                ),
+                (
+                    config.reconciliation_token_file_generated,
+                    hubu_api::launch_config::RECONCILIATION_TOKEN_FILE_GENERATED_ENV,
+                ),
+            ] {
+                std::env::set_var(name, if generated { "1" } else { "0" });
+            }
             if let Some(path) = &config.log_file {
                 std::env::set_var("HUBU_LOG_FILE", path);
                 std::env::set_var("HUBU_LOG_STDERR", "0");

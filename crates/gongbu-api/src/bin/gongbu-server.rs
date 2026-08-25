@@ -1,7 +1,7 @@
 use gongbu_api::server;
 use std::path::PathBuf;
 
-const HELP: &str = "gongbu-server\n\nUSAGE:\n    gongbu-server serve --config /absolute/path/gongbu.json\n    gongbu-server validate-config --config /absolute/path/gongbu.json\n    gongbu-server --version\n\nThe persistent local Gongbu service. Hubu must be started independently.";
+const HELP: &str = "gongbu-server\n\nUSAGE:\n    gongbu-server serve --config /absolute/path/gongbu.json\n    gongbu-server validate-config --config /absolute/path/gongbu.json\n    gongbu-server credentials bootstrap-managed --config CONFIG --hubu-token-file FILE --caller-token-file FILE --secret-dir DIR\n    gongbu-server --version\n\nThe persistent local Gongbu service. Hubu must be started independently. The bootstrap-managed command is an internal interface for launcher-owned local stacks.";
 
 #[tokio::main]
 async fn main() {
@@ -62,6 +62,36 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             );
             Ok(())
         }
+        [command, action, rest @ ..]
+            if command == "credentials" && action == "bootstrap-managed" =>
+        {
+            bootstrap_managed(rest)?;
+            Ok(())
+        }
         _ => Err(std::io::Error::other(HELP).into()),
     }
+}
+
+fn bootstrap_managed(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn value(args: &[String], flag: &str) -> Result<PathBuf, std::io::Error> {
+        let matches = args
+            .windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| PathBuf::from(&pair[1]))
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(std::io::Error::other(HELP));
+        }
+        Ok(matches[0].clone())
+    }
+    if args.len() != 8 {
+        return Err(std::io::Error::other(HELP).into());
+    }
+    let config = value(args, "--config")?;
+    let hubu = value(args, "--hubu-token-file")?;
+    let caller = value(args, "--caller-token-file")?;
+    let directory = value(args, "--secret-dir")?;
+    let result = gongbu_api::config::setup::bootstrap_managed(&config, &hubu, &caller, &directory)?;
+    println!("{result}");
+    Ok(())
 }
