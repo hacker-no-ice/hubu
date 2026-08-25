@@ -11,6 +11,10 @@ cleanup() {
   if [[ "${stack_started}" == "1" && -x "${root_dir}/target/debug/hubu" ]]; then
     "${root_dir}/target/debug/hubu" stack stop --profile "${profile}" >/dev/null 2>&1 || true
   fi
+  if [[ "${HUBU_ACCEPTANCE_PRESERVE:-0}" == "1" ]]; then
+    echo "local-stack acceptance preserved workspace: ${workspace}" >&2
+    return "${status}"
+  fi
   rm -rf "${workspace}"
   return "${status}"
 }
@@ -28,6 +32,10 @@ quote() {
 
 field() {
   awk -v name="$2" '$1 == name ":" { print $2; exit }' <<<"$1"
+}
+
+file_mode() {
+  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
 }
 
 if ! command -v temporal >/dev/null 2>&1; then
@@ -48,7 +56,7 @@ cargo build --locked --bin hubu-server --bin hubu-unified-mcp
 cargo build --locked -p gongbu-api --bin gongbu-server --features local-fixture-canary
 
 hubu_bin="${root_dir}/target/debug/hubu"
-hubu_server_bin="${root_dir}/target/debug/hubu-server"
+real_hubu_server_bin="${root_dir}/target/debug/hubu-server"
 gongbu_server_bin="${root_dir}/target/debug/gongbu-server"
 mcp_bin="${root_dir}/target/debug/hubu-unified-mcp"
 temporal_bin="$(command -v temporal)"
@@ -61,46 +69,44 @@ read -r hubu_port gongbu_port temporal_port temporal_ui_port < <(
 
 hubu_endpoint="http://127.0.0.1:${hubu_port}"
 gongbu_endpoint="http://127.0.0.1:${gongbu_port}"
-hubu_auth="${workspace}/hubu-auth"
-hubu_approval="${workspace}/hubu-approval"
-hubu_reconciliation="${workspace}/hubu-reconciliation"
-gongbu_caller="${workspace}/gongbu-caller"
 provider_secret="${workspace}/provider"
-printf '%s\n' 'hub-105-local-broad-bearer' >"${hubu_auth}"
-printf '%s\n' 'hub-105-local-approval' >"${hubu_approval}"
-printf '%s\n' 'hub-105-human-reconciliation-never-given-to-gongbu' >"${hubu_reconciliation}"
-printf '%s\n' 'hub-105-gongbu-caller' >"${gongbu_caller}"
 printf '%s\n' 'hub-105-fixture-provider' >"${provider_secret}"
-chmod 600 "${hubu_auth}" "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}" "${provider_secret}"
+chmod 600 "${provider_secret}"
+
+hubu_serve_trace="${workspace}/hubu-serve.trace"
+hubu_server_bin="${workspace}/hubu-server"
+cat >"${hubu_server_bin}" <<EOF
+#!/bin/sh
+if [ "\$1" = "serve" ] && [ "\$2" = "--config" ]; then
+  printf '%s|%s\n' "\$\$" "\$3" >>$(quote "${hubu_serve_trace}")
+fi
+exec $(quote "${real_hubu_server_bin}") "\$@"
+EOF
+chmod 700 "${hubu_server_bin}"
 
 init_output="$("${hubu_bin}" stack init --profile "${profile}")"
+profile_canonical="$(cd "${profile}" && pwd -P)"
+managed_credential_root="${profile_canonical}/state/credentials"
 grep -F 'input needed:' <<<"${init_output}" >/dev/null
 for name in README.md stack.toml credentials.toml providers.toml; do
   [[ -f "${profile}/${name}" ]] || fail "init omitted ${name}"
 done
 [[ ! -e "${profile}/runtime/launcher-state.json" ]] || fail "init started or recorded a service"
+[[ -f "${managed_credential_root}/.gitignore" ]] || fail "init omitted the managed credential ignore guard"
+if grep -Eq '^\[files\]|^\[opaque\.gongbu_(hubu|caller)\]|state/credentials' "${profile}/credentials.toml"; then
+  fail "init exposed managed credential implementation details in operator source"
+fi
+[[ -z "$(find "${managed_credential_root}" -type f ! -name .gitignore -print -quit)" ]] || fail "init created credential material"
 
 doctor_output="$("${hubu_bin}" stack doctor --profile "${profile}" 2>&1 || true)"
 grep -F 'stack.toml:hubu.ownership' <<<"${doctor_output}" >/dev/null
-grep -F 'credentials.toml:files.hubu_auth' <<<"${doctor_output}" >/dev/null
+if grep -F 'credentials.toml:files.hubu_auth' <<<"${doctor_output}" >/dev/null; then
+  fail "managed Hubu capability paths were presented as user input"
+fi
 grep -F 'providers.toml:mode' <<<"${doctor_output}" >/dev/null
 
 cat >"${profile}/credentials.toml" <<EOF
 schema_version = 1
-
-[files]
-hubu_auth = $(quote "${hubu_auth}")
-hubu_approval = $(quote "${hubu_approval}")
-hubu_reconciliation = $(quote "${hubu_reconciliation}")
-gongbu_caller = $(quote "${gongbu_caller}")
-
-[opaque.gongbu_hubu]
-service = "hubu.local-fixture"
-account = "executor"
-
-[opaque.gongbu_caller]
-service = "hubu.local-fixture"
-account = "caller"
 
 [opaque.fixture_provider]
 service = "hubu.local-fixture"
@@ -215,8 +221,14 @@ stack_lifecycle() {
   "${hubu_bin}" stack "$@" --profile "${profile}"
 }
 
-"${hubu_bin}" stack doctor --profile "${profile}" >/dev/null
+managed_doctor="$("${hubu_bin}" stack doctor --profile "${profile}")"
+grep -F 'managed_credential_pending' <<<"${managed_doctor}" >/dev/null || fail "doctor did not classify unprovisioned managed credentials"
+[[ -z "$(find "${managed_credential_root}" -type f ! -name .gitignore -print -quit)" ]] || fail "doctor provisioned managed credentials"
+if grep -Eq '^\[files\]|^\[opaque\.gongbu_(hubu|caller)\]|state/credentials' "${profile}/credentials.toml"; then
+  fail "managed credential implementation details leaked into operator source"
+fi
 render_output="$(stack_lifecycle render)"
+[[ -z "$(find "${managed_credential_root}" -type f ! -name .gitignore -print -quit)" ]] || fail "render provisioned managed credentials"
 generation="$(awk '/rendered generation:/ { print $3; exit } /validated staged generation:/ { print $4; exit }' <<<"${render_output}")"
 if [[ -z "${generation}" ]]; then
   echo "${render_output}" >&2
@@ -229,6 +241,38 @@ if ! start_output="$(stack_lifecycle start 2>&1)"; then
 fi
 stack_started=1
 jq -e '.classification == "running_ready"' < <("${hubu_bin}" stack status --json --profile "${profile}") >/dev/null
+
+active_manifest="${profile}/generated/active-manifest.json"
+active_generation="$(jq -r '.generation' "${active_manifest}")"
+client_handoff="${profile}/generated/${active_generation}/client-handoff.json"
+hubu_auth="$(jq -r '.hubu_token_file' "${client_handoff}")"
+hubu_approval="$(jq -r '.approval_token_file' "${client_handoff}")"
+hubu_reconciliation="$(jq -r '.reconciliation_token_file' "${client_handoff}")"
+gongbu_caller="$(jq -r '.gongbu_token_file' "${client_handoff}")"
+gongbu_hubu="${managed_credential_root}/gongbu/hubu-executor"
+for directory in "${managed_credential_root}" "${managed_credential_root}/hubu" "${managed_credential_root}/gongbu"; do
+  [[ "$(file_mode "${directory}")" == "700" ]] || fail "managed credential directory permissions are not private"
+done
+for credential in "${hubu_auth}" "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}" "${gongbu_hubu}"; do
+  [[ "${credential}" == "${managed_credential_root}/"* ]] || fail "managed credential escaped the private profile state"
+  [[ -s "${credential}" ]] || fail "managed credential was not provisioned"
+  [[ "$(file_mode "${credential}")" == "600" ]] || fail "managed credential permissions are not private"
+done
+cmp "${hubu_auth}" "${gongbu_hubu}" >/dev/null || fail "Gongbu's internal Hubu handoff does not match the verified Hubu capability"
+credential_digests_before="$(shasum -a 256 "${hubu_auth}" "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}")"
+[[ "$(cut -d' ' -f1 <<<"${credential_digests_before}" | sort -u | wc -l | tr -d ' ')" == "4" ]] || fail "managed credential classes reused material"
+serve_record="$(cat "${hubu_serve_trace}")"
+[[ "$(wc -l <<<"${serve_record}" | tr -d ' ')" == "1" ]] || fail "first startup launched more than one Hubu server"
+serve_pid="${serve_record%%|*}"
+serve_config="${serve_record#*|}"
+launcher_pid="$(jq -r '.processes["hubu-server"].pid' "${profile}/runtime/launcher-state.json")"
+[[ "${serve_pid}" == "${launcher_pid}" ]] || fail "first Hubu process was not launcher-owned"
+[[ "${serve_config}" == "${profile}/generated/${active_generation}/hubu-launch.json" ]] || fail "first Hubu process did not use the active managed config"
+running_doctor="$("${hubu_bin}" stack doctor --json --profile "${profile}")"
+jq -e '[.checks[] | select(.code == "credential_file_available")] | length == 4 and all(has("field") | not)' <<<"${running_doctor}" >/dev/null || fail "running doctor exposed derived credential paths as source fields"
+if jq -e '.checks[] | select(.code == "managed_credential_pending")' <<<"${running_doctor}" >/dev/null; then
+  fail "running doctor still classified a managed credential as pending"
+fi
 
 curl --fail --silent "${hubu_endpoint}/health" >/dev/null
 curl --fail --silent "${gongbu_endpoint}/readyz" >/dev/null
@@ -407,12 +451,10 @@ if grep -q '^activate$' "${lifecycle_log}"; then
   fail "stack activated explicitly after its automatic first-generation activation"
 fi
 
-if grep -R -F 'hub-105-human-reconciliation-never-given-to-gongbu' "${profile}/generated" >/dev/null; then
-  fail "generated stack artifacts contain the human reconciliation capability"
-fi
-for secret in hub-105-local-broad-bearer hub-105-local-approval hub-105-gongbu-caller hub-105-fixture-provider; do
-  if grep -R -F "${secret}" "${profile}/generated" >/dev/null; then
-    fail "generated stack artifacts contain secret ${secret}"
+for credential in "${hubu_auth}" "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}" "${provider_secret}"; do
+  secret="$(tr -d '\r\n' <"${credential}")"
+  if grep -R -F "${secret}" "${profile}/generated" "${workspace}/hubu.log" "${workspace}/gongbu.log" >/dev/null; then
+    fail "generated artifacts or service logs exposed credential material"
   fi
 done
 
@@ -421,6 +463,8 @@ stack_started=0
 stack_lifecycle start >/dev/null
 stack_started=1
 [[ "$(grep -c '^start$' "${lifecycle_log}")" == "2" && "$(grep -c '^stop$' "${lifecycle_log}")" == "1" ]] || fail "managed stack restart count changed"
+[[ "$(wc -l <"${hubu_serve_trace}" | tr -d ' ')" == "2" ]] || fail "restart did not preserve one managed Hubu process per start"
+[[ "$(shasum -a 256 "${hubu_auth}" "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}")" == "${credential_digests_before}" ]] || fail "managed credentials changed during restart"
 
 for label in agent-a agent-b; do
   if [[ "${label}" == "agent-a" ]]; then
@@ -447,8 +491,21 @@ budgets_after_restart="$(curl --fail --silent \
   "${hubu_endpoint}/budgets")"
 [[ "${budgets_after_restart}" == "${budgets}" ]] || fail "budget settlement changed during restart/replay"
 
+stable_credential_digests="$(shasum -a 256 "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}")"
+hubu_auth_digest_before="$(shasum -a 256 "${hubu_auth}" | awk '{ print $1 }')"
+stack_lifecycle stop >/dev/null
+stack_started=0
+rm -f "${hubu_auth}"
+stack_lifecycle start >/dev/null
+stack_started=1
+[[ "$(wc -l <"${hubu_serve_trace}" | tr -d ' ')" == "3" ]] || fail "Hubu credential recovery did not use one final managed process"
+hubu_auth_digest_after="$(shasum -a 256 "${hubu_auth}" | awk '{ print $1 }')"
+[[ "${hubu_auth_digest_after}" != "${hubu_auth_digest_before}" ]] || fail "Hubu did not regenerate the removed managed capability"
+cmp "${hubu_auth}" "${gongbu_hubu}" >/dev/null || fail "Gongbu did not refresh its verified Hubu credential handoff"
+[[ "$(shasum -a 256 "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}")" == "${stable_credential_digests}" ]] || fail "Hubu credential recovery changed unrelated managed capabilities"
+
 stack_lifecycle stop >/dev/null
 stack_started=0
 [[ ! -e "${profile}/runtime/launcher-state.json" ]] || fail "graceful stop left launcher ownership state"
 
-echo "Local-stack acceptance passed: principal-neutral start, post-start two-agent registration, isolated settlement, installation-wide reads, settled-token replay, one whole-stack restart, and graceful shutdown"
+echo "Local-stack acceptance passed: one final Hubu per start, managed credential bootstrap and recovery, principal-neutral two-agent execution, restart persistence, and graceful shutdown"

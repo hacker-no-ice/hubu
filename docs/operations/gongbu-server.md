@@ -17,10 +17,21 @@ runtime configuration source; unknown fields are rejected and changes require
 a graceful restart.
 
 All state, catalog, artifact, and managed Temporal paths must be absolute. Raw
-tokens and provider keys never belong in JSON. Configuration references
-operator-owned Keychain items. Schema version 3 selects no execution account or
-agent: the authenticated caller capability identifies the installation/service
-and contains no execution identity claim.
+tokens and provider keys never belong in JSON. Provider and explicit service
+overrides use Gongbu-owned secret coordinates. A launcher-managed stack instead
+uses fixed internal service references backed by private profile state; those
+locations are derived and never become operator JSON or TOML input. Schema
+version 3 selects no execution account or agent: the authenticated caller
+capability identifies the installation/service and contains no execution
+identity claim.
+
+`gongbu-server credentials bootstrap-managed` is a launcher-internal interface,
+not a human setup command. After the final Hubu process is ready, it reads the
+Hubu capability from a file descriptor-safe private path, proves that capability
+against a protected Hubu route, and creates or reuses Gongbu's caller and Hubu
+handoff state with private permissions. Repeated calls are idempotent, conflicts
+fail closed, and output is categorical; secret values never enter arguments,
+configuration, output, or logs.
 
 Use `providers: {"mode":"disabled"}` for dependency or configuration work that
 must not permit provider traffic. Live mode requires an exact target, complete
@@ -49,8 +60,10 @@ Gongbu never starts or stops external Temporal. In both modes, readiness
 requires an active worker polling the configured task queue.
 
 After startup, a single failed Temporal or Hubu dependency probe does not stop
-Gongbu. The supervisor allows a fixed 30-second recovery grace so routine gRPC
-connection rotation and other transient transport failures can reconnect.
+Gongbu. Hubu probes include protected access with the credential Gongbu loaded,
+not just public health and version. The supervisor allows a fixed 30-second
+recovery grace so routine gRPC connection rotation and other transient
+transport failures can reconnect.
 Readiness and new execution admission are withdrawn on the first failed sample
 and restored only after every dependency is healthy. A healthy sample resets
 its grace window; continuously unhealthy probes still shut down the process.
@@ -135,8 +148,9 @@ drains its worker within a bound, and stops only a managed Temporal child. Hubu
 and external Temporal remain untouched.
 
 For a consistent cold backup, stop Gongbu and copy its SQLite database,
-artifact root, and managed Temporal data directory together. Do not restore
-only one part of that set.
+artifact root, managed bootstrap credential state, and managed Temporal data
+directory together. Do not restore only one part of that set. Treat the backup
+as secret material and preserve private access controls.
 
 When billing is ambiguous, preserve the execution and provider evidence and use
 the authenticated reconciliation path. Do not create a new operation key,

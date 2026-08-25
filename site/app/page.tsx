@@ -3,7 +3,7 @@ import { searchDocuments } from "./lib/docs";
 
 const stackSteps = [
   ["01", "Initialize", "hubu stack init", "Create an operator-owned profile without starting services."],
-  ["02", "Configure", "stack.toml · credentials.toml · providers.toml", "Choose ownership, binaries, identities, credential references, providers, and spend gates."],
+  ["02", "Configure", "stack.toml · credentials.toml · providers.toml", "Choose ownership, binaries, provider references, targets, and spend gates; managed service credentials stay internal."],
   ["03", "Start in one shot", "hubu stack start", "Validate, render, and start missing managed components in dependency order."],
   ["04", "Check readiness", "hubu stack status", "Inspect the whole stack through one stable, redacted readiness view."],
   ["05", "Connect Codex", "hubu init codex --stack-profile …", "Install the unified MCP handoff, restart Codex, and inspect capabilities."],

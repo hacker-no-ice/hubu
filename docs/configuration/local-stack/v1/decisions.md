@@ -50,16 +50,25 @@ Registering or funding another agent after startup changes Hubu governance
 state only. It requires no stack render, activation, stop, restart, or Gongbu
 configuration change.
 
-## Credential files versus opaque references
+## Managed credentials versus explicit references
 
-The profile has two credential-reference mechanisms because two owners resolve credentials differently:
+Choose by ownership, not by storage technology:
 
-| Mechanism | Example | Resolver | Contains secret? |
+| Situation | Source profile | Provisioner/resolver | User chooses a location? |
 | --- | --- | --- | --- |
-| Absolute file path | `files.hubu_auth` | Hubu CLI or unified MCP client | No; points to a file |
-| Opaque coordinate | `[opaque.provider_image]` | Gongbu | No; names Keychain service/account |
+| Managed Hubu | Omit the three Hubu file fields | Final `hubu-server` creates or reuses private capabilities during start | No |
+| Managed Gongbu default | Omit caller file and both reserved opaque tables | Gongbu-owned bootstrap runs after Hubu readiness and before Gongbu serve | No |
+| External Hubu | Supply three absolute file references | External operator provisions; Hubu CLI and unified MCP consume | Yes |
+| External Gongbu | Supply the caller file reference | External operator provisions; unified MCP consumes | Yes |
+| Managed Gongbu explicit override | Supply both reserved opaque references and caller file | Gongbu's normal secret backend plus operator-provisioned client side | Yes |
+| Provider credential | Supply `[opaque.<key>]` and reference its key from a target | Gongbu's provider-secret backend | Yes, as opaque metadata |
 
-Never convert one mechanism into the other by copying secret bytes into TOML. The renderer checks reference shape and ownership contracts but does not read secret values.
+The managed profile contract does not expose the internal credential paths.
+Current local storage is file-backed so existing clients can consume the
+handoff, but it may change without adding file locations to operator source.
+Never convert a file or opaque mechanism by copying secret bytes into TOML. The
+renderer checks reference shape and ownership contracts but does not read
+secret values.
 
 ## Disabled versus live provider mode
 

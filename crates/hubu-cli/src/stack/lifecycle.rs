@@ -540,9 +540,6 @@ fn refuse_partial_or_unhealthy_stack(
     stack: &StackSource,
     state: &RuntimeState,
 ) -> Result<()> {
-    if state.processes.is_empty() {
-        return Ok(());
-    }
     let report = doctor::inspect_profile(profile);
     let managed = [
         (
@@ -556,6 +553,20 @@ fn refuse_partial_or_unhealthy_stack(
             stack.gongbu.as_ref().and_then(|value| value.ownership),
         ),
     ];
+    for (key, component, ownership) in &managed {
+        if *ownership == Some(Ownership::Managed)
+            && !state.processes.contains_key(*key)
+            && report.component_ready(component)
+        {
+            bail!(
+                "managed {component} endpoint is served by a compatible process with no launcher ownership metadata; stop that process before running `hubu stack start --profile {}`",
+                profile.display()
+            );
+        }
+    }
+    if state.processes.is_empty() {
+        return Ok(());
+    }
     let needs_recovery = managed.iter().any(|(key, component, ownership)| {
         if *ownership != Some(Ownership::Managed) {
             return false;
@@ -585,6 +596,7 @@ fn start_missing_components(
     mut state: RuntimeState,
 ) -> Result<()> {
     validate_start_prerequisites(profile, stack)?;
+    prepare_managed_credential_storage(profile, manifest)?;
     let mut started = Vec::<StartedProcess>::new();
     let mut preserve_started_on_error = false;
     let result = (|| {
@@ -615,6 +627,7 @@ fn start_missing_components(
             if !doctor::inspect_profile(profile).component_ready("hubu") {
                 bail!("Hubu did not pass its dependency gate before Gongbu startup");
             }
+            bootstrap_managed_gongbu_credentials(profile, manifest)?;
             let process = spawn_component(profile, manifest, "gongbu-server")?;
             state
                 .processes
@@ -661,6 +674,91 @@ fn start_missing_components(
         profile.display()
     );
     Ok(())
+}
+
+fn prepare_managed_credential_storage(profile: &Path, manifest: &ActiveManifest) -> Result<()> {
+    ensure_managed_credential_ignore(profile)?;
+    let (paths, _) = active_credential_paths(profile, manifest)?;
+    let mut directories = Vec::new();
+    if manifest
+        .generated_file_digests
+        .contains_key("hubu-launch.json")
+    {
+        for path in [
+            &paths.hubu_auth,
+            &paths.hubu_approval,
+            &paths.hubu_reconciliation,
+        ] {
+            if let Some(parent) = path.parent() {
+                directories.push(parent.to_path_buf());
+            }
+        }
+    }
+    if paths.managed_gongbu_handoff {
+        directories.push(paths.gongbu_secret_dir);
+    }
+    directories.sort();
+    directories.dedup();
+    for directory in directories {
+        create_secure_dir(&directory)?;
+        let metadata = fs::symlink_metadata(&directory)
+            .with_context(|| "inspect managed credential directory")?;
+        if !metadata.file_type().is_dir() {
+            bail!("managed credential directory is unsafe");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                bail!("managed credential directory must exclude group and other access");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bootstrap_managed_gongbu_credentials(profile: &Path, manifest: &ActiveManifest) -> Result<()> {
+    let (paths, startup_timeout_ms) = active_credential_paths(profile, manifest)?;
+    if !paths.managed_gongbu_handoff {
+        return Ok(());
+    }
+    let generation = active_generation_path(&profile.join("generated"), manifest)?;
+    verify_generated_file(&generation, manifest, "gongbu-server.json")?;
+    let binary = manifest
+        .binary_provenance
+        .iter()
+        .find(|value| value.component == "gongbu-server")
+        .map(|value| value.path.clone())
+        .ok_or_else(|| anyhow!("active manifest has no managed Gongbu binary"))?;
+    let mut child = Command::new(&binary)
+        .args(["credentials", "bootstrap-managed", "--config"])
+        .arg(generation.join("gongbu-server.json"))
+        .arg("--hubu-token-file")
+        .arg(&paths.hubu_auth)
+        .arg("--caller-token-file")
+        .arg(&paths.gongbu_caller)
+        .arg("--secret-dir")
+        .arg(&paths.gongbu_secret_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| "start managed Gongbu credential handoff")?;
+    let deadline = Instant::now() + Duration::from_millis(startup_timeout_ms);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if status.success() {
+                return Ok(());
+            }
+            bail!("managed Gongbu credential handoff failed without starting Gongbu");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("managed Gongbu credential handoff timed out without starting Gongbu");
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    }
 }
 
 fn validate_start_prerequisites(profile: &Path, stack: &StackSource) -> Result<()> {
@@ -820,6 +918,14 @@ fn spawn_component(
         .args(["serve", "--config"])
         .arg(&config)
         .stdin(Stdio::null());
+    if component == "gongbu-server" {
+        let (paths, _) = active_credential_paths(profile, manifest)?;
+        if paths.managed_gongbu_handoff {
+            command.env("GONGBU_MANAGED_CREDENTIAL_DIR", paths.gongbu_secret_dir);
+        } else {
+            command.env_remove("GONGBU_MANAGED_CREDENTIAL_DIR");
+        }
+    }
     if component == "hubu-server" {
         let stderr_log_file = hubu_stderr_log_file(profile);
         if let Some(parent) = stderr_log_file.parent() {

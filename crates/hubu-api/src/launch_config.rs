@@ -51,47 +51,129 @@ impl HubuLaunchConfig {
         if !self.listen.ip().is_loopback() {
             return Err(invalid("listen address must be loopback"));
         }
-        validate_safe_absolute(&self.database_path, "database_path", false)?;
+        validate_safe_absolute(&self.database_path, "database_path")?;
         if let Some(path) = &self.log_file {
-            validate_safe_absolute(path, "log_file", false)?;
+            validate_safe_absolute(path, "log_file")?;
         }
         for (path, name) in [
             (&self.auth_token_file, "auth_token_file"),
             (&self.approval_token_file, "approval_token_file"),
             (&self.reconciliation_token_file, "reconciliation_token_file"),
         ] {
-            validate_safe_absolute(path, name, true)?;
+            validate_safe_absolute(path, name)?;
         }
         if let Some(path) = &self.lease_config {
-            validate_safe_absolute(path, "lease_config", true)?;
+            validate_safe_absolute(path, "lease_config")?;
+            if !path.is_file() {
+                return Err(invalid("lease_config must name an existing regular file"));
+            }
         }
-        let auth = fs::canonicalize(&self.auth_token_file)?;
-        let approval = fs::canonicalize(&self.approval_token_file)?;
-        let reconciliation = fs::canonicalize(&self.reconciliation_token_file)?;
-        if auth == approval || auth == reconciliation || approval == reconciliation {
-            return Err(invalid("credential-file references must be distinct"));
+        let mut resources = vec![
+            (
+                "database_path",
+                resolve_credential_destination(&self.database_path, "database_path")?,
+            ),
+            (
+                "auth_token_file",
+                resolve_credential_destination(&self.auth_token_file, "auth_token_file")?,
+            ),
+            (
+                "approval_token_file",
+                resolve_credential_destination(&self.approval_token_file, "approval_token_file")?,
+            ),
+            (
+                "reconciliation_token_file",
+                resolve_credential_destination(
+                    &self.reconciliation_token_file,
+                    "reconciliation_token_file",
+                )?,
+            ),
+        ];
+        if let Some(path) = &self.log_file {
+            resources.push((
+                "log_file",
+                resolve_credential_destination(path, "log_file")?,
+            ));
+        }
+        if let Some(path) = &self.lease_config {
+            resources.push((
+                "lease_config",
+                resolve_credential_destination(path, "lease_config")?,
+            ));
+        }
+        for index in 0..resources.len() {
+            for other in &resources[index + 1..] {
+                if same_file_resource(&resources[index].1, &other.1)? {
+                    return Err(invalid(format!(
+                        "{} and {} must identify distinct file resources",
+                        resources[index].0, other.0
+                    )));
+                }
+            }
         }
         Ok(())
     }
 }
 
-fn validate_safe_absolute(
-    path: &Path,
-    name: &str,
-    require_file: bool,
-) -> Result<(), LaunchConfigError> {
+fn validate_safe_absolute(path: &Path, name: &str) -> Result<(), LaunchConfigError> {
     if !path.is_absolute()
         || path == Path::new("/")
         || path.components().any(|part| part == Component::ParentDir)
     {
         return Err(invalid(format!("{name} must be a safe absolute path")));
     }
-    if require_file && !path.is_file() {
-        return Err(invalid(format!(
-            "{name} must name an existing regular file"
-        )));
-    }
     Ok(())
+}
+
+fn resolve_credential_destination(path: &Path, name: &str) -> Result<PathBuf, LaunchConfigError> {
+    let mut existing = path;
+    let mut suffix = Vec::new();
+    loop {
+        match fs::symlink_metadata(existing) {
+            Ok(metadata) => {
+                if suffix.is_empty() {
+                    if !metadata.file_type().is_file() {
+                        return Err(invalid(format!(
+                            "{name} must name a regular file when it already exists"
+                        )));
+                    }
+                } else if !metadata.file_type().is_dir() {
+                    return Err(invalid(format!(
+                        "{name} must have an existing directory ancestor"
+                    )));
+                }
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let leaf = existing
+                    .file_name()
+                    .ok_or_else(|| invalid(format!("{name} has no file name")))?;
+                suffix.push(leaf.to_os_string());
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| invalid(format!("{name} has no existing ancestor")))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut resolved = fs::canonicalize(existing)?;
+    for part in suffix.into_iter().rev() {
+        resolved.push(part);
+    }
+    Ok(resolved)
+}
+
+fn same_file_resource(left: &Path, right: &Path) -> Result<bool, LaunchConfigError> {
+    #[cfg(unix)]
+    if left.exists() && right.exists() {
+        use std::os::unix::fs::MetadataExt;
+        let left = fs::metadata(left)?;
+        let right = fs::metadata(right)?;
+        if left.dev() == right.dev() && left.ino() == right.ino() {
+            return Ok(true);
+        }
+    }
+    Ok(left == right)
 }
 
 fn invalid(message: impl Into<String>) -> LaunchConfigError {
@@ -132,6 +214,25 @@ mod tests {
     }
 
     #[test]
+    fn accepts_distinct_missing_managed_credential_destinations_without_creating_them() {
+        let root = tempdir().unwrap();
+        let config = config(root.path());
+        for path in [
+            &config.auth_token_file,
+            &config.approval_token_file,
+            &config.reconciliation_token_file,
+        ] {
+            fs::remove_file(path).unwrap();
+        }
+
+        config.validate().unwrap();
+
+        assert!(!config.auth_token_file.exists());
+        assert!(!config.approval_token_file.exists());
+        assert!(!config.reconciliation_token_file.exists());
+    }
+
+    #[test]
     fn rejects_unsafe_paths_and_reused_capabilities() {
         let root = tempdir().unwrap();
         let mut launch = config(root.path());
@@ -141,6 +242,22 @@ mod tests {
         let mut launch = config(root.path());
         launch.approval_token_file = launch.auth_token_file.clone();
         assert!(launch.validate().is_err());
+
+        let mut launch = config(root.path());
+        launch.log_file = Some(launch.auth_token_file.clone());
+        assert!(launch
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("auth_token_file and log_file"));
+
+        let mut launch = config(root.path());
+        launch.database_path = launch.approval_token_file.clone();
+        assert!(launch
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("database_path and approval_token_file"));
     }
 
     #[cfg(unix)]

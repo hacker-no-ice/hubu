@@ -63,6 +63,12 @@ impl HubuClient {
         self.get_json("/version")
     }
 
+    /// Verify that the configured bearer reaches a protected Hubu route
+    /// without performing an execution or mutating Hubu state.
+    pub fn check_credential(&self) -> Result<serde_json::Value, HttpClientError> {
+        self.get_json("/agents")
+    }
+
     pub fn validate(
         &self,
         request: &ExecutorSpendRequest,

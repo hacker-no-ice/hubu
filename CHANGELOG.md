@@ -24,6 +24,13 @@ Future release template
 
 ## Unreleased
 
+### Highlights
+
+- Removed the temporary Hubu bootstrap from managed local-stack setup. Managed
+  users no longer configure service credential locations: `stack start`
+  launches the final Hubu once, lets it create private capabilities, completes
+  a Gongbu-owned credential handoff, and then starts Gongbu.
+
 ### Breaking or operational changes
 
 - Advanced the executor contract to `hubu-spend-executor-v4.3`: Hubu's

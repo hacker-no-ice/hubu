@@ -1,9 +1,19 @@
-//! Operator-owned secret references and the local macOS Keychain backend.
-use std::process::Command;
+//! Operator-owned secret references and credential backends.
+use std::{
+    fs::OpenOptions,
+    io::Read,
+    path::{Component, Path, PathBuf},
+    process::Command,
+};
 use thiserror::Error;
 
 #[cfg(feature = "local-fixture-canary")]
-use std::{fs, path::PathBuf};
+use std::fs;
+
+pub const MANAGED_CREDENTIAL_DIR_ENV: &str = "GONGBU_MANAGED_CREDENTIAL_DIR";
+pub const MANAGED_STACK_SERVICE: &str = "hubu.managed-stack.v1";
+pub const MANAGED_HUBU_ACCOUNT: &str = "hubu-executor";
+pub const MANAGED_CALLER_ACCOUNT: &str = "gongbu-caller";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretReference {
@@ -105,6 +115,103 @@ impl SecretProvider for MacOsKeychain {
     }
 }
 
+/// Gongbu-owned bootstrap credentials for a launcher-managed local stack.
+/// The fixed reference vocabulary prevents generated provider configuration
+/// from selecting arbitrary files beneath this private directory.
+pub struct ManagedStackSecrets {
+    root: PathBuf,
+}
+
+impl ManagedStackSecrets {
+    pub fn from_environment() -> Result<Self> {
+        let root = std::env::var_os(MANAGED_CREDENTIAL_DIR_ENV)
+            .map(PathBuf::from)
+            .ok_or(SecretError::Unavailable)?;
+        validate_managed_root(&root)?;
+        Ok(Self { root })
+    }
+
+    pub fn from_root(root: PathBuf) -> Result<Self> {
+        validate_managed_root(&root)?;
+        Ok(Self { root })
+    }
+}
+
+impl SecretProvider for ManagedStackSecrets {
+    fn resolve(&self, reference: &SecretReference) -> Result<ProviderSecret> {
+        let name = match (reference.service(), reference.account()) {
+            (MANAGED_STACK_SERVICE, MANAGED_HUBU_ACCOUNT) => "hubu-executor",
+            (MANAGED_STACK_SERVICE, MANAGED_CALLER_ACCOUNT) => "caller",
+            _ => return Err(SecretError::Unavailable),
+        };
+        ProviderSecret::new(read_private_secret(&self.root.join(name))?)
+    }
+}
+
+fn validate_managed_root(root: &Path) -> Result<()> {
+    if !root.is_absolute()
+        || root == Path::new("/")
+        || root
+            .components()
+            .any(|component| component == Component::ParentDir)
+    {
+        return Err(SecretError::InvalidReference);
+    }
+    let metadata = std::fs::symlink_metadata(root).map_err(|_| SecretError::Unavailable)?;
+    if !metadata.file_type().is_dir() {
+        return Err(SecretError::Unavailable);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(SecretError::Unavailable);
+        }
+    }
+    Ok(())
+}
+
+fn read_private_secret(path: &Path) -> Result<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|_| SecretError::Unavailable)?;
+    let metadata = file.metadata().map_err(|_| SecretError::Unavailable)?;
+    if !metadata.file_type().is_file() {
+        return Err(SecretError::Unavailable);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(SecretError::Unavailable);
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SecretError::Unavailable)?;
+    if bytes.len() > 4096 {
+        bytes.fill(0);
+        return Err(SecretError::Unavailable);
+    }
+    while bytes
+        .last()
+        .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+    {
+        bytes.pop();
+    }
+    if bytes.is_empty() || bytes.iter().any(|byte| byte.is_ascii_control()) {
+        bytes.fill(0);
+        return Err(SecretError::Unavailable);
+    }
+    Ok(bytes)
+}
+
 /// File-backed secrets for the explicit, feature-gated local acceptance
 /// canary. Release builds do not contain this provider.
 #[cfg(feature = "local-fixture-canary")]
@@ -151,6 +258,8 @@ pub(crate) fn secret_for_test(value: &str) -> ProviderSecret {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
     #[test]
     fn reference_is_strict_and_errors_are_stable() {
         assert_eq!(
@@ -187,5 +296,27 @@ mod tests {
             provider.0.lock().unwrap().as_slice(),
             &[SecretReference::new("gongbu.vendor", "production").unwrap()]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_stack_provider_resolves_only_fixed_private_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(root.path().join("hubu-executor"), b"hubu-secret\n").unwrap();
+        fs::write(root.path().join("caller"), b"caller-secret\n").unwrap();
+        for name in ["hubu-executor", "caller"] {
+            fs::set_permissions(root.path().join(name), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let provider = ManagedStackSecrets::from_root(root.path().to_path_buf()).unwrap();
+        let hubu = provider
+            .resolve(&SecretReference::new(MANAGED_STACK_SERVICE, MANAGED_HUBU_ACCOUNT).unwrap())
+            .unwrap();
+        assert_eq!(hubu.expose(), b"hubu-secret");
+        assert!(provider
+            .resolve(&SecretReference::new(MANAGED_STACK_SERVICE, "provider").unwrap())
+            .is_err());
     }
 }

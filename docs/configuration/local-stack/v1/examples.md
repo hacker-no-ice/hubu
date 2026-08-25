@@ -1,6 +1,9 @@
 # Complete local stack configuration examples
 
-These examples show the relationships among all three source files. Replace every `/absolute/...` path and public ID with values from your installation. A path example does not become valid until the referenced binary, directory ancestor, or credential file exists as required.
+These examples show the relationships among all three source files. Replace
+every active `/absolute/...` path and public ID with values from your
+installation. Managed service credential locations are not active fields in
+these examples; the launcher selects them internally.
 
 ## Provider-disabled local profile
 
@@ -63,24 +66,11 @@ log_format = "text"
 
 ### `credentials.toml`
 
-The four file paths refer to existing capability files. The two opaque pairs are Gongbu-owned Keychain coordinates. None of these strings is a credential value.
+Managed Hubu and Gongbu need no service credential references. The final Hubu
+process and the Gongbu-owned handoff provision them during `stack start`.
 
 ```toml
 schema_version = 1
-
-[files]
-hubu_auth = "/absolute/path/to/profile/state/hubu/hubu.auth-token"
-hubu_approval = "/absolute/path/to/profile/state/hubu/hubu.approval-token"
-hubu_reconciliation = "/absolute/path/to/profile/state/hubu/hubu.reconciliation-token"
-gongbu_caller = "/absolute/path/to/profile/state/gongbu/gongbu.caller-token"
-
-[opaque.gongbu_hubu]
-service = "gongbu.hubu"
-account = "local-stack"
-
-[opaque.gongbu_caller]
-service = "gongbu.caller"
-account = "local-stack"
 ```
 
 ### `providers.toml`
@@ -98,7 +88,10 @@ mode = "disabled"
 hubu stack doctor --profile /absolute/path/to/profile
 ```
 
-Doctor should move from `incomplete` to `ready_to_render` only after every path, coordinate, port, version, and credential reference is valid. Provider readiness is reported separately as disabled.
+Doctor should move from `incomplete` to `ready_to_render` after every topology
+path, port, version, and explicit reference is valid. Before first start it
+reports the derived managed credentials as pending managed work. Provider
+readiness is reported separately as disabled.
 
 ## Representative live-provider profile
 
@@ -112,24 +105,10 @@ Use the same complete `stack.toml` from the provider-disabled example. Provider 
 
 ### `credentials.toml`
 
-Add one opaque provider reference to the complete credential file:
+Add only the opaque provider reference needed by the live target:
 
 ```toml
 schema_version = 1
-
-[files]
-hubu_auth = "/absolute/path/to/profile/state/hubu/hubu.auth-token"
-hubu_approval = "/absolute/path/to/profile/state/hubu/hubu.approval-token"
-hubu_reconciliation = "/absolute/path/to/profile/state/hubu/hubu.reconciliation-token"
-gongbu_caller = "/absolute/path/to/profile/state/gongbu/gongbu.caller-token"
-
-[opaque.gongbu_hubu]
-service = "gongbu.hubu"
-account = "local-stack"
-
-[opaque.gongbu_caller]
-service = "gongbu.caller"
-account = "local-stack"
 
 # Replace with the Keychain coordinates created for the selected provider.
 [opaque.provider_image]
@@ -190,8 +169,8 @@ If the selected model enables `2k` or `4k`, add a separate selector-qualified ru
 
 - [ ] All four binaries share one verified Hubu release lineage.
 - [ ] Each agent that will request spend is registered in Hubu and has the intended policy and budget.
-- [ ] File paths refer to distinct existing capability files.
-- [ ] Opaque coordinates resolve under the Gongbu process identity without exposing values.
+- [ ] Managed service credentials are omitted; or every advanced/external file override is distinct, private, and owned by the selected service.
+- [ ] Provider opaque coordinates resolve under the Gongbu process identity without exposing values.
 - [ ] Provider, adapter, model, endpoint, API version, region/project fields, and artifact hosts are authoritative.
 - [ ] `provider_config_version` and `catalog_version` have never represented different content.
 - [ ] Every enabled request selector has exactly one matching pricing rule.
@@ -206,6 +185,11 @@ If the selected model enables `2k` or `4k`, add a separate selector-qualified ru
 For external Hubu, retain `hubu.ownership` and `hubu.endpoint` but omit managed-only `hubu.listen`, `hubu.database_path`, and `binaries.hubu_server`. The endpoint remains an explicit loopback origin in schema version 1.
 
 For external Gongbu, retain `gongbu.ownership` and `gongbu.endpoint` but omit managed-only Gongbu binary, state, artifact, and local Temporal configuration. Provider readiness is owned by external Gongbu and reported as unknown by the local profile rather than certified from unused local provider inputs.
+
+External Hubu requires all three Hubu file references in `credentials.toml`.
+External Gongbu requires `files.gongbu_caller`. See the
+[`credentials.toml` reference](credentials-toml.md) for explicit managed-Gongbu
+override requirements.
 
 For external Temporal with managed Gongbu:
 

@@ -15,7 +15,10 @@ use crate::{
         targets::ProviderTargetConfig,
     },
     redaction::Redactor,
-    secrets::{MacOsKeychain, SecretProvider, SecretReference},
+    secrets::{
+        MacOsKeychain, ManagedStackSecrets, SecretProvider, SecretReference,
+        MANAGED_CREDENTIAL_DIR_ENV,
+    },
     temporal::TemporalWorkerConfig,
 };
 use axum::http::{header, HeaderMap};
@@ -506,8 +509,9 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     prepare_state_paths(&config)?;
     normalize_paths(&mut config)?;
 
-    let secrets = startup_secret_provider()?;
-    let caller_secret = secrets
+    let bootstrap_secrets = startup_bootstrap_secret_provider()?;
+    let provider_secrets = startup_provider_secret_provider()?;
+    let caller_secret = bootstrap_secrets
         .resolve(
             &config
                 .authentication
@@ -515,7 +519,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
                 .validated()?,
         )
         .map_err(|_| invalid("caller capability credential is unavailable"))?;
-    let hubu_secret = secrets
+    let hubu_secret = bootstrap_secrets
         .resolve(&config.hubu.credential_reference.validated()?)
         .map_err(|_| invalid("Hubu scoped credential is unavailable"))?;
 
@@ -529,7 +533,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         .revisions()
         .filter(|target| target.is_execution_enabled())
     {
-        let secret = secrets
+        let secret = provider_secrets
             .resolve(
                 &target
                     .secret_reference()
@@ -558,11 +562,11 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     let expected_hubu_version = config.hubu.expected_product_version.clone();
     let expected_hubu_contract = config.hubu.expected_executor_contract.clone();
     let dependency_checker: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
-        health_client.health().is_ok()
-            && health_client.version().is_ok_and(|version| {
-                version.product_version == expected_hubu_version
-                    && version.executor_contract == expected_hubu_contract
-            })
+        hubu_is_compatible(
+            &health_client,
+            &expected_hubu_version,
+            &expected_hubu_contract,
+        )
     });
     let hubu = Arc::new(ProductionHubuActivities::new(
         hubu_client,
@@ -605,7 +609,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         providers,
         hubu: hubu.clone(),
         hubu_authorizations: hubu,
-        secrets,
+        secrets: provider_secrets,
         provider_activities: None,
         artifact_activities: None,
         temporal_runtime,
@@ -738,7 +742,16 @@ fn reject_fixture_targets(targets: &ProviderTargetConfig) -> Result<(), ServerEr
     Ok(())
 }
 
-fn startup_secret_provider() -> Result<Arc<dyn SecretProvider>, ServerError> {
+fn startup_bootstrap_secret_provider() -> Result<Arc<dyn SecretProvider>, ServerError> {
+    if std::env::var_os(MANAGED_CREDENTIAL_DIR_ENV).is_some() {
+        return ManagedStackSecrets::from_environment()
+            .map(|provider| Arc::new(provider) as Arc<dyn SecretProvider>)
+            .map_err(|_| invalid("managed stack credential directory is unavailable"));
+    }
+    startup_provider_secret_provider()
+}
+
+fn startup_provider_secret_provider() -> Result<Arc<dyn SecretProvider>, ServerError> {
     #[cfg(feature = "local-fixture-canary")]
     if std::env::var("GONGBU_LOCAL_FIXTURE_CANARY").as_deref() == Ok("1") {
         return crate::secrets::LocalFixtureSecrets::from_environment()
@@ -822,11 +835,11 @@ async fn wait_for_hubu_compatibility(
 ) -> Result<(), BoxError> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(config.startup_timeout_ms);
     loop {
-        let compatible = client.health().is_ok()
-            && client.version().is_ok_and(|version| {
-                version.product_version == config.expected_product_version
-                    && version.executor_contract == config.expected_executor_contract
-            });
+        let compatible = hubu_is_compatible(
+            client,
+            &config.expected_product_version,
+            &config.expected_executor_contract,
+        );
         if compatible {
             return Ok(());
         }
@@ -835,6 +848,14 @@ async fn wait_for_hubu_compatibility(
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+fn hubu_is_compatible(client: &HubuClient, product_version: &str, contract: &str) -> bool {
+    client.health().is_ok()
+        && client.version().is_ok_and(|version| {
+            version.product_version == product_version && version.executor_contract == contract
+        })
+        && client.check_credential().is_ok()
 }
 
 struct ManagedTemporalChild(Child);
@@ -1196,5 +1217,49 @@ mod tests {
         headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
         assert!(authenticator.authenticate(&headers).is_ok());
         assert!(!format!("{:?}", authenticator.token_digest).contains("secret"));
+    }
+
+    #[test]
+    fn hubu_compatibility_requires_protected_access() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                stream.read_to_string(&mut request).unwrap();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap();
+                let (status, body) = match path {
+                    "/health" => ("200 OK", r#"{"status":"ok"}"#),
+                    "/version" => (
+                        "200 OK",
+                        r#"{"product_version":"0.1.0","executor_contract":"hubu-executor.v1"}"#,
+                    ),
+                    "/agents" => ("401 Unauthorized", r#"{"error":"unauthorized"}"#),
+                    _ => unreachable!(),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let client = HubuClient::new(format!("http://{address}"))
+            .with_bearer_token(b"wrong-credential".to_vec());
+
+        assert!(!hubu_is_compatible(&client, "0.1.0", "hubu-executor.v1"));
+        server.join().unwrap();
     }
 }

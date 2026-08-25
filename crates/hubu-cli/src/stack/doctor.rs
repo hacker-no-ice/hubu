@@ -449,60 +449,117 @@ fn inspect_profile_with(
         "selected binaries share compatible safe provenance",
     ));
 
-    let Some(files) = credentials.files.as_ref() else {
-        return report;
+    let credential_paths = match resolve_credential_paths(profile, &stack, &credentials) {
+        Ok(paths) => paths,
+        Err(_) => {
+            report.checks.push(check(
+                CheckLayer::Renderability,
+                CheckStatus::Fail,
+                "credential_reference_invalid",
+                "credentials",
+                Some("credentials.toml".into()),
+                "credential references are unsafe, conflicting, or unavailable to their selected owner",
+            ));
+            return report;
+        }
     };
+    let configured_files = credentials.files.as_ref();
+    let hubu_managed =
+        stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed);
     let credential_fields = [
         (
             "hubu_auth",
+            "hubu",
             "credentials.toml:files.hubu_auth",
-            files.hubu_auth.as_deref(),
+            credential_paths.hubu_auth.clone(),
+            hubu_managed,
+            configured_files
+                .and_then(|files| files.hubu_auth.as_ref())
+                .is_some(),
         ),
         (
             "hubu_approval",
+            "hubu",
             "credentials.toml:files.hubu_approval",
-            files.hubu_approval.as_deref(),
+            credential_paths.hubu_approval.clone(),
+            hubu_managed,
+            configured_files
+                .and_then(|files| files.hubu_approval.as_ref())
+                .is_some(),
         ),
         (
             "hubu_reconciliation",
+            "hubu",
             "credentials.toml:files.hubu_reconciliation",
-            files.hubu_reconciliation.as_deref(),
+            credential_paths.hubu_reconciliation.clone(),
+            hubu_managed,
+            configured_files
+                .and_then(|files| files.hubu_reconciliation.as_ref())
+                .is_some(),
         ),
         (
             "gongbu_caller",
+            "gongbu",
             "credentials.toml:files.gongbu_caller",
-            files.gongbu_caller.as_deref(),
+            credential_paths.gongbu_caller.clone(),
+            credential_paths.managed_gongbu_handoff,
+            configured_files
+                .and_then(|files| files.gongbu_caller.as_ref())
+                .is_some(),
         ),
     ];
-    let expected_credential_count = credential_fields.len();
     let mut resolved_credentials = BTreeMap::new();
-    for (component, field, path) in credential_fields {
-        let Some(path) = path.and_then(|path| existing_absolute(path, field).ok()) else {
-            report.checks.push(check(
-                CheckLayer::Renderability,
-                CheckStatus::Fail,
-                "credential_file_unavailable",
-                component,
-                Some(field.to_owned()),
-                "select an existing readable regular file containing only this capability",
-            ));
-            continue;
-        };
-        if fs::File::open(&path).is_err() {
-            report.checks.push(check(
-                CheckLayer::Renderability,
-                CheckStatus::Fail,
-                "credential_file_unreadable",
-                component,
-                Some(field.to_owned()),
-                "make the referenced capability file readable by the current user",
-            ));
-            continue;
+    let mut pending_managed_owners = BTreeSet::new();
+    for (component, owner, field, path, provisioned_by_managed_start, explicitly_configured) in
+        credential_fields
+    {
+        let source_field = explicitly_configured.then(|| field.to_owned());
+        match inspect_credential_file(&path) {
+            CredentialFileState::Ready => {
+                report.checks.push(check(
+                    CheckLayer::Renderability,
+                    CheckStatus::Pass,
+                    "credential_file_available",
+                    component,
+                    source_field,
+                    "credential capability is private and available; its value was not displayed",
+                ));
+            }
+            CredentialFileState::Unsafe => {
+                report.checks.push(check(
+                    CheckLayer::Renderability,
+                    CheckStatus::Fail,
+                    "credential_file_unsafe",
+                    component,
+                    source_field,
+                    "make the capability a non-empty readable regular file that excludes group and other access",
+                ));
+                return report;
+            }
+            CredentialFileState::Missing if provisioned_by_managed_start => {
+                pending_managed_owners.insert(owner);
+                report.checks.push(check(
+                    CheckLayer::Renderability,
+                    CheckStatus::Pass,
+                    "managed_credential_pending",
+                    component,
+                    source_field,
+                    "managed startup will provision this private capability before its consumer starts",
+                ));
+            }
+            CredentialFileState::Missing => {
+                report.checks.push(check(
+                    CheckLayer::Renderability,
+                    CheckStatus::Fail,
+                    "credential_file_unavailable",
+                    component,
+                    source_field,
+                    "select an existing readable regular file containing only this externally owned capability",
+                ));
+                return report;
+            }
         }
         resolved_credentials.insert(component, path);
-    }
-    if resolved_credentials.len() != expected_credential_count {
-        return report;
     }
     let credential_targets = resolved_credentials.values().collect::<Vec<_>>();
     for index in 0..credential_targets.len() {
@@ -523,13 +580,13 @@ fn inspect_profile_with(
     report.checks.push(check(
         CheckLayer::Renderability,
         CheckStatus::Pass,
-        "credential_files_available",
+        "credential_references_ready",
         "credentials",
         None,
-        "credential files are readable and distinct; values were not displayed",
+        "credential references are distinct and either available or owned by managed startup",
     ));
 
-    let opaque_keys = required_opaque_keys(&stack, &providers);
+    let opaque_keys = required_opaque_keys(&stack, &credentials, &providers);
     let mut opaque_available = true;
     for key in opaque_keys {
         let Some(reference) = credentials.opaque.get(&key) else {
@@ -707,7 +764,19 @@ fn inspect_profile_with(
         &mut report.checks,
     );
 
+    let pending_while_running = (pending_managed_owners.contains("hubu")
+        && hubu_ready != ServiceProbe::NotRunning)
+        || (pending_managed_owners.contains("gongbu") && gongbu_ready != ServiceProbe::NotRunning);
+    if pending_while_running {
+        report.checks.push(runtime_fail(
+            "managed_credential_missing_while_running",
+            "credentials",
+            "a running managed component has lost a required private capability; stop the whole stack before recovery",
+        ));
+    }
+
     let required_external_ready = opaque_available
+        && !pending_while_running
         && service_can_start(hubu.ownership.expect("complete"), hubu_ready)
         && service_can_start(gongbu.ownership.expect("complete"), gongbu_ready)
         && temporal_ready;
@@ -715,6 +784,7 @@ fn inspect_profile_with(
         report.classification = ProfileClassification::ReadyToStart;
     }
     if opaque_available
+        && !pending_while_running
         && hubu_ready == ServiceProbe::Ready
         && gongbu_ready == ServiceProbe::Ready
         && temporal_ready
@@ -1408,11 +1478,17 @@ fn provider_readiness(source: &ProvidersSource) -> ProviderReadiness {
     }
 }
 
-fn required_opaque_keys(stack: &StackSource, providers: &ProvidersSource) -> BTreeSet<String> {
+fn required_opaque_keys(
+    stack: &StackSource,
+    credentials: &CredentialsSource,
+    providers: &ProvidersSource,
+) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
-        keys.insert("gongbu_hubu".to_owned());
-        keys.insert("gongbu_caller".to_owned());
+        if !uses_managed_gongbu_handoff(stack, credentials) {
+            keys.insert("gongbu_hubu".to_owned());
+            keys.insert("gongbu_caller".to_owned());
+        }
         if providers.mode == Some(ProviderMode::Live) {
             keys.extend(
                 providers
@@ -1495,6 +1571,43 @@ fn read_secret(path: &Path) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CredentialFileState {
+    Ready,
+    Missing,
+    Unsafe,
+}
+
+fn inspect_credential_file(path: &Path) -> CredentialFileState {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CredentialFileState::Missing;
+        }
+        Err(_) => return CredentialFileState::Unsafe,
+    };
+    if !metadata.file_type().is_file() || metadata.len() == 0 {
+        return CredentialFileState::Unsafe;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return CredentialFileState::Unsafe;
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).custom_flags(libc::O_NOFOLLOW);
+        if options.open(path).is_err() {
+            return CredentialFileState::Unsafe;
+        }
+    }
+    #[cfg(not(unix))]
+    if OpenOptions::new().read(true).open(path).is_err() {
+        return CredentialFileState::Unsafe;
+    }
+    CredentialFileState::Ready
 }
 
 fn redacted_toml_error(error: &toml::de::Error) -> (&'static str, String) {
@@ -1791,6 +1904,8 @@ mod tests {
 
     #[cfg(unix)]
     fn write_complete_managed_profile(root: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
         let profile = root.join("profile");
         let binaries = root.join("bin");
         let credential_root = root.join("credentials");
@@ -1805,6 +1920,11 @@ mod tests {
         fs::write(&temporal, b"temporal fixture").unwrap();
         for name in ["auth", "approval", "reconciliation", "gongbu-caller"] {
             fs::write(credential_root.join(name), format!("{name}-secret")).unwrap();
+            fs::set_permissions(
+                credential_root.join(name),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
         }
         fs::write(
             profile.join("stack.toml"),
@@ -1941,7 +2061,7 @@ account = "gongbu-caller"
         let json = serde_json::to_string(&report).unwrap();
         assert!(json.contains("stack.toml:hubu.ownership"));
         assert!(json.contains("stack.toml:gongbu.ownership"));
-        assert!(json.contains("credentials.toml:files.hubu_auth"));
+        assert!(!json.contains("credentials.toml:files.hubu_auth"));
         assert!(json.contains("providers.toml:mode"));
         assert!(!json.contains("stack.toml:identity"));
         let after = ["stack.toml", "credentials.toml", "providers.toml"]
@@ -1973,6 +2093,32 @@ account = "gongbu-caller"
             .contains("static-principal server config schema version 2"));
         assert!(diagnostic.message.contains("upgrade Gongbu"));
         assert!(diagnostic.message.contains("schema version 3 or newer"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_credentials_are_pending_before_first_start_without_doctor_mutation() {
+        let root = tempdir().unwrap();
+        let (profile, renderer) = write_complete_managed_profile(root.path());
+        fs::write(profile.join("credentials.toml"), "schema_version = 1\n").unwrap();
+        let managed_root = profile.join("state/credentials");
+
+        let report = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+
+        assert_eq!(report.classification, ProfileClassification::ReadyToRender);
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .filter(|check| check.code == "managed_credential_pending")
+                .count(),
+            4
+        );
+        assert!(!managed_root.exists());
+        assert!(report.checks.iter().all(|check| {
+            check.code != "credential_file_unavailable"
+                && check.code != "opaque_credential_reference_missing"
+        }));
     }
 
     #[test]
@@ -2064,6 +2210,8 @@ schema_version = 1
     #[cfg(unix)]
     #[test]
     fn external_gongbu_does_not_certify_local_provider_or_artifact_contracts() {
+        use std::os::unix::fs::PermissionsExt;
+
         let root = tempdir().unwrap();
         let profile = root.path().join("profile");
         let binaries = root.path().join("bin");
@@ -2076,6 +2224,7 @@ schema_version = 1
         }
         for name in ["auth", "approval", "reconciliation", "gongbu-caller"] {
             fs::write(credentials.join(name), format!("{name}-secret")).unwrap();
+            fs::set_permissions(credentials.join(name), fs::Permissions::from_mode(0o600)).unwrap();
         }
         fs::write(
             profile.join("stack.toml"),
@@ -2298,12 +2447,23 @@ deliberately_unvalidated_external_shape = true
                 ("/health", 200, r#"{"status":"ok"}"#),
                 ("/version", 200, version),
                 ("/agents", 200, "[]"),
+                ("/health", 200, r#"{"status":"ok"}"#),
+                ("/version", 200, version),
+                ("/agents", 200, "[]"),
             ],
             None,
         );
         let gongbu_server = spawn_http_server(
             gongbu_listener,
             vec![
+                ("/livez", 200, r#"{"status":"live"}"#),
+                ("/readyz", 200, r#"{"status":"ready"}"#),
+                ("/version", 200, version),
+                (
+                    "/v1/executions/__stack_doctor_read_only_probe__",
+                    404,
+                    r#"{"error":{"code":"not_found"}}"#,
+                ),
                 ("/livez", 200, r#"{"status":"live"}"#),
                 ("/readyz", 200, r#"{"status":"ready"}"#),
                 ("/version", 200, version),
@@ -2330,6 +2490,14 @@ deliberately_unvalidated_external_shape = true
             .checks
             .iter()
             .any(|check| check.code == "temporal_reachable"));
+
+        fs::remove_file(root.path().join("credentials/approval")).unwrap();
+        let degraded = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+        assert_ne!(degraded.classification, ProfileClassification::RunningReady);
+        assert!(degraded
+            .checks
+            .iter()
+            .any(|check| check.code == "managed_credential_missing_while_running"));
         hubu_server.join().unwrap();
         gongbu_server.join().unwrap();
     }

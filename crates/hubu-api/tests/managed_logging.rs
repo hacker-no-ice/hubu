@@ -20,6 +20,13 @@ fn managed_server_writes_each_structured_event_once() {
     for name in ["auth", "approval", "reconciliation"] {
         fs::write(root.path().join(name), format!("{name}-token")).unwrap();
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["auth", "approval", "reconciliation"] {
+            fs::set_permissions(root.path().join(name), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let listen = listener.local_addr().unwrap();
     drop(listener);

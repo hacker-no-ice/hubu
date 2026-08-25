@@ -12,8 +12,10 @@ stack init -> operator edit -> stack start -> stack status -> init codex
 ```
 
 `stack start` runs doctor and render as needed, then starts only missing managed
-components after their dependencies pass. The stack profile never starts or
-supervises the client-owned `hubu-unified-mcp` stdio process.
+components after their dependencies pass. For a fully managed profile it also
+provisions service credentials at private profile-owned locations; those paths
+are implementation state, not operator input. The stack profile never starts
+or supervises the client-owned `hubu-unified-mcp` stdio process.
 
 Later source or credential-reference changes use a reviewable two-phase flow:
 
@@ -52,6 +54,9 @@ PROFILE_ROOT/
   credentials.toml
   providers.toml
   generated/
+  state/
+    credentials/
+      .gitignore
 ```
 
 For field-by-field meaning, value sources, conditional requirements, and
@@ -60,14 +65,24 @@ annotated examples, use the public
 
 - `stack.toml` describes topology, binary selection, loopback addresses,
   persistent state roots, Temporal mode, and lifecycle policy.
-- `credentials.toml` contains opaque credential references or absolute
-  credential-file paths, never bearer or provider-secret values.
+- `credentials.toml` contains provider references and optional advanced
+  overrides for externally owned service credentials, never bearer or
+  provider-secret values. A normal managed-local profile does not name service
+  credential files or the internal Gongbu handoff references.
 - `providers.toml` contains operator-selected targets, pricing, spend ceilings,
   and the explicit live-execution gate.
 - `generated/generations/` contains immutable validated runtime generations,
   each with a redacted manifest.
 - `generated/active-manifest.json` is the atomic pointer to the selected
   generation. Generated content is never an editing surface.
+
+On first managed start, Hubu and Gongbu create private service credential state
+under `PROFILE_ROOT/state/credentials/`. The launcher derives those locations;
+users do not choose them, and they are not source configuration. File-backed
+storage is an internal compatibility detail that can be replaced without
+changing the managed profile contract. Initialization creates only the private
+directory and its local ignore guard so later credentials cannot be staged by
+an enclosing Git checkout.
 
 Live profiles use pricing catalog schema v2 exclusively. Each pricing rule in
 `providers.toml` supplies exact rational components and may qualify an image
@@ -165,8 +180,8 @@ Doctor evaluates four layers:
 1. Source syntax and schema compatibility.
 2. Completeness, reported by starter file and stable field path.
 3. Renderability, including paths, ports, binary provenance, component
-   compatibility, credential references, and managed-Gongbu
-   provider and artifact contracts.
+   compatibility, external and provider credential references, provisionable
+   managed credentials, and managed-Gongbu provider and artifact contracts.
 4. Runtime readiness for already-running components and external dependencies.
 
 The report classification is `incomplete`, `invalid`, `ready_to_render`,
@@ -180,11 +195,13 @@ It omits configured endpoints, binary paths, service/account values, credential
 values, and raw service responses.
 
 For a complete profile, doctor uses bounded subprocesses and network probes to
-check binary provenance, opaque credential-reference existence, active
-generation digests, service-owned production validators, backend liveness and
-version compatibility, protected reads, Gongbu worker readiness, and required
-Temporal reachability. A failed probe never causes doctor to start or repair a
-component.
+check binary provenance, explicit opaque credential-reference existence,
+active generation digests, service-owned production validators, backend
+liveness and version compatibility, protected reads, Gongbu worker readiness,
+and required Temporal reachability. Before first start, missing managed
+capabilities are reported as pending managed work rather than invalid external
+references. A failed probe never causes doctor to create a credential, start a
+service, or repair a component.
 
 External Gongbu retains authority for its provider and artifact configuration,
 so doctor reports local provider readiness as `unknown` rather than certifying
@@ -200,8 +217,9 @@ hubu stack render --profile /absolute/path/to/profile
 
 Rendering validates source syntax, required decisions, path and port safety,
 binary provenance, component compatibility, provider catalogs, pricing, spend
-gates, and credential references. It then uses service-owned
-production validators to stage a complete generation.
+gates, explicit credential references, and the derived destinations for
+managed credentials. It does not create or read managed credential values. It
+then uses service-owned production validators to stage a complete generation.
 
 A first successful render:
 
@@ -226,8 +244,13 @@ provider keys, human-approval capabilities, or reconciliation capabilities.
 
 ## Updates and credential-reference rotation
 
-The three TOML files remain the source of truth. To update configuration or
-rotate one of the temporary file-based credential references:
+The three TOML files remain the source of truth for configuration. Managed
+service credentials are lifecycle state: their paths are derived and their
+values are created or reused during `stack start`. They are intentionally not
+rotated by editing `credentials.toml`; richer managed rotation and migration
+remain separate lifecycle work.
+
+For an advanced external-service credential reference:
 
 1. Create the replacement credential file with operator-controlled permissions.
 2. Edit only its absolute path in `credentials.toml`; do not put the credential
@@ -247,18 +270,15 @@ hubu stack start --profile /absolute/path/to/profile
 
 Rendering and activation never read, copy, compare, or rewrite credential
 values. They validate reference shape and the owning service's configuration
-contract. Overwriting a credential value at the same path is therefore not a
-detectable or supported rotation: create a new file and change the reference so
-Hubu and the client-owned MCP handoff move together. Keep the previous
-credential available until the new generation is running and verified. If the
-client handoff is affected, rerun
+contract. Overwriting an external credential value at the same path is
+therefore not a detectable or supported rotation: create a new file and change
+the reference so the backend and client-owned MCP handoff move together. Keep
+the previous credential available until the new generation is running and
+verified. If the client handoff is affected, rerun
 `hubu init codex --stack-profile ...` and restart Codex after backend startup.
-Native macOS Keychain loading and migration are tracked separately; this V1
-workflow intentionally preserves file-based Hubu and unified-MCP references.
-Gongbu's credential references remain Gongbu-owned opaque Keychain coordinates.
-The renderer does not read those secrets or prove that a Gongbu-to-Hubu caller
-value matches the Hubu bearer, so an operator rotating that shared capability
-must update both owning references before the whole-stack stop/start cycle.
+For explicit Gongbu Keychain overrides, Gongbu continues to own resolution and
+the operator must update both sides of a shared caller capability before the
+whole-stack stop/start cycle.
 
 Stack startup selects no Hubu execution account or agent. The Gongbu caller
 bearer capability authenticates this installation/service and carries no
@@ -292,7 +312,8 @@ contract safe.
 
 ## Codex handoff
 
-Once the profile has a valid active generation, configure Codex with:
+After the stack is running with a valid active generation, configure Codex
+with:
 
 ```sh
 hubu init codex --stack-profile /absolute/path/to/profile
@@ -300,10 +321,12 @@ hubu init codex --stack-profile /absolute/path/to/profile
 
 The command reads the active manifest, verifies the selected unified MCP binary,
 and writes the managed `[mcp_servers.hubu]` entry with separate Hubu and Gongbu
-endpoint and credential-file references plus a separate unified-MCP operation
-registry path. If the active handoff is rejected, rerender or reinitialize the
-stack profile, rerun this command, and restart Codex. It does not copy raw
-credentials into Codex configuration or start the stdio process.
+endpoint and credential references plus a separate unified-MCP operation
+registry path. The generated handoff may contain internal profile-owned paths,
+but the user neither selects nor copies them. If the active handoff is rejected,
+rerender or reinitialize the stack profile, rerun this command, and restart
+Codex. It does not copy raw credentials into Codex configuration or start the
+stdio process.
 
 Stack doctor reports an uninitialized or unusable operation registry as a
 degraded billable capability, not a backend startup failure. Hubu, Gongbu, and
@@ -322,11 +345,17 @@ hubu stack status --profile /absolute/path/to/profile
 hubu stack status --profile /absolute/path/to/profile --json
 ```
 
-Hubu must be ready, version-compatible, and accessible through its protected
-probe before managed Gongbu starts. Gongbu then owns its Temporal worker and,
-in `managed_local` mode, its Temporal child. Stack readiness means both HTTP
-backends and the worker are ready; the unified MCP remains client-owned and is
-reported as a compatible handoff rather than a running stack process.
+For a fully managed first start, the launcher creates only private credential
+directories, then starts the final Hubu process once. That process creates or
+reuses its three capabilities. After Hubu passes a protected readiness probe,
+the launcher invokes a narrow Gongbu-owned bootstrap command that verifies the
+Hubu capability, creates or reuses the Gongbu caller capability, and persists
+Gongbu's private handoff state without putting secret values in arguments,
+generated configuration, output, or logs. Only then does the launcher start
+Gongbu. Gongbu owns its Temporal worker and, in `managed_local` mode, its
+Temporal child. Stack readiness means both HTTP backends and the worker are
+ready; the unified MCP remains client-owned and is reported as a compatible
+handoff rather than a running stack process.
 
 Repeated start is a no-op for a healthy, current stack. Start never repairs,
 signals, or selectively restarts a partially running, unhealthy, changed, or
@@ -378,7 +407,9 @@ on Unix, including the new active file opened after rotation.
 
 Stop proceeds in reverse dependency order: Gongbu drains first and shuts down
 its managed worker and Temporal child, then Hubu stops. Startup rollback also
-touches only children created by that invocation.
+touches only children created by that invocation. Capabilities created before a
+downstream startup failure remain private lifecycle state and are reused on a
+retry; rollback never prints or deletes them.
 
 ```sh
 hubu stack stop --profile /absolute/path/to/profile
@@ -430,10 +461,15 @@ From a source checkout with the Temporal CLI on `PATH`, run:
 ```
 
 The canary builds source-only, feature-gated fixture support and then exercises
-the real process boundary end to end. It starts from a clean profile, runs
-annotated non-starting init, verifies incremental doctor diagnostics, renders
-and activates strict service-owned configuration, and starts the actual
-`hubu-server`, `gongbu-server`, Gongbu worker, and managed Temporal child. It
+the real process boundary end to end. It starts from a clean profile with no
+service credential files or configured service credential paths, runs annotated
+non-starting init, verifies doctor and render do not create credentials, and
+starts the actual `hubu-server`, `gongbu-server`, Gongbu worker, and managed
+Temporal child. A pass-through probe proves the first launch contains exactly
+one final Hubu `serve` process and that its PID and config match launcher state.
+The canary verifies five private credential files representing four distinct
+materials are created, none appear in generated configuration or logs, and
+restart reuses them. It
 then obtains governed Hubu authorizations, registers a second agent after
 startup without rerendering or restarting, submits deterministic Gongbu HTTP
 executions for both agents through the same installation caller, discovers the
@@ -442,12 +478,11 @@ the whole stack, starts it again against the same state, and verifies the
 completed executions and artifacts remain available.
 
 This is a local fixture canary, not an unattended-production credential model.
-For V1 it temporarily lets the deterministic execution test use the existing
-broad local Hubu bearer, which remains process-owned test data and is never
-placed in model input, output, logs, or generated configuration. Gongbu is
-never given Hubu's human reconciliation capability. Credential
-pre-provisioning/bootstrap and complete removal of the temporary Hubu workflow
-remain follow-up work in HUB-69/HUB-134.
+For V1 the deterministic execution test uses the existing broad local Hubu
+bearer for Gongbu's executor calls; it remains process-owned state and is never
+placed in model input, output, logs, or generated configuration. Gongbu is never
+given Hubu's human approval or reconciliation capabilities. Narrower scoped
+credentials and managed rotation remain follow-up lifecycle work.
 
 The canary uses an explicit one-cent fixture catalog, acknowledgement, and
 process-owned dummy provider reference to prove the fail-closed live-provider
@@ -464,8 +499,8 @@ store. Each component retains its own readiness, shutdown, backup, and recovery
 procedure:
 
 - Hubu recovery covers its database and capabilities.
-- Gongbu recovery covers its database, artifact root, and managed Temporal data
-  as one consistent unit.
+- Gongbu recovery covers its database, artifact root, managed bootstrap
+  credential state, and managed Temporal data as one consistent unit.
 - External Temporal instances remain under the external operator's control.
 - Restarting the agent client does not restart either backend.
 - Re-rendering configuration does not roll back databases, artifacts, or

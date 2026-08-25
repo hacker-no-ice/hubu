@@ -481,7 +481,7 @@ fn load_local_auth_token() -> Result<LoadedLocalAuthToken> {
     }
 
     let path = auth_token_file_path();
-    match fs::read_to_string(&path) {
+    match read_token_file(&path) {
         Ok(contents) => {
             let token = contents.trim().to_string();
             if token.is_empty() {
@@ -490,6 +490,7 @@ fn load_local_auth_token() -> Result<LoadedLocalAuthToken> {
                     path.display()
                 ));
             }
+            validate_generated_file_token(&token, "hubu_", &path)?;
             Ok(LoadedLocalAuthToken {
                 value: token,
                 source: path.display().to_string(),
@@ -531,7 +532,7 @@ fn load_local_reconciliation_token() -> Result<LoadedLocalAuthToken> {
     }
 
     let path = reconciliation_token_file_path();
-    match fs::read_to_string(&path) {
+    match read_token_file(&path) {
         Ok(contents) => {
             let token = contents.trim().to_string();
             if token.is_empty() {
@@ -540,6 +541,7 @@ fn load_local_reconciliation_token() -> Result<LoadedLocalAuthToken> {
                     path.display()
                 ));
             }
+            validate_generated_file_token(&token, "hubu_reconcile_", &path)?;
             Ok(LoadedLocalAuthToken {
                 value: token,
                 source: path.display().to_string(),
@@ -578,7 +580,7 @@ fn load_local_approval_token() -> Result<LoadedLocalAuthToken> {
     }
 
     let path = approval_token_file_path();
-    match fs::read_to_string(&path) {
+    match read_token_file(&path) {
         Ok(contents) => {
             let token = contents.trim().to_string();
             if token.is_empty() {
@@ -587,6 +589,7 @@ fn load_local_approval_token() -> Result<LoadedLocalAuthToken> {
                     path.display()
                 ));
             }
+            validate_generated_file_token(&token, "hubu_approve_", &path)?;
             Ok(LoadedLocalAuthToken {
                 value: token,
                 source: path.display().to_string(),
@@ -636,19 +639,10 @@ fn create_token_file(path: &Path, prefix: &str) -> Result<String> {
     }
 
     let token = format!("{prefix}{}", AgentSessionId::new());
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-
-    match options.open(path) {
-        Ok(mut file) => {
-            writeln!(file, "{token}")
-                .with_context(|| format!("write Hubu auth token file `{}`", path.display()))?;
-            Ok(token)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let token = fs::read_to_string(path)
+    match publish_new_private_file(path, token.as_bytes()) {
+        Ok(true) => Ok(token),
+        Ok(false) => {
+            let token = read_token_file(path)
                 .with_context(|| {
                     format!("read existing Hubu auth token file `{}`", path.display())
                 })?
@@ -660,6 +654,7 @@ fn create_token_file(path: &Path, prefix: &str) -> Result<String> {
                     path.display()
                 ))
             } else {
+                validate_generated_file_token(&token, prefix, path)?;
                 Ok(token)
             }
         }
@@ -667,6 +662,89 @@ fn create_token_file(path: &Path, prefix: &str) -> Result<String> {
             Err(error).with_context(|| format!("create Hubu auth token file `{}`", path.display()))
         }
     }
+}
+
+fn publish_new_private_file(path: &Path, value: &[u8]) -> std::io::Result<bool> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let leaf = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "credential path has no file name",
+        )
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        leaf.to_string_lossy(),
+        AgentSessionId::new()
+    ));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let mut file = options.open(&temporary)?;
+        file.write_all(value)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        match fs::hard_link(&temporary, path) {
+            Ok(()) => {
+                #[cfg(unix)]
+                if let Ok(directory) = fs::File::open(parent) {
+                    let _ = directory.sync_all();
+                }
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        }
+    })();
+    let _ = fs::remove_file(&temporary);
+    result
+}
+
+fn validate_generated_file_token(token: &str, prefix: &str, path: &Path) -> Result<()> {
+    if token.starts_with(prefix)
+        && token
+            .strip_prefix(prefix)
+            .is_none_or(|suffix| suffix.parse::<AgentSessionId>().is_err())
+    {
+        return Err(anyhow!(
+            "Hubu auth token file `{}` contains incomplete generated credential state",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn read_token_file(path: &Path) -> std::io::Result<String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let mut file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "credential path is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "credential file permissions must exclude group and other access",
+            ));
+        }
+    }
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
 }
 
 fn hash_token(token: &str) -> String {
@@ -5536,6 +5614,39 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_credentials_publish_atomically_and_reject_partial_state() {
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        let root = tempdir().unwrap();
+        let credential = root.path().join("auth");
+        let token = create_token_file(&credential, "hubu_").unwrap();
+        assert!(token
+            .strip_prefix("hubu_")
+            .is_some_and(|suffix| suffix.parse::<AgentSessionId>().is_ok()));
+        assert_eq!(
+            fs::metadata(&credential).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(fs::read_dir(root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+
+        let partial = root.path().join("partial");
+        fs::write(&partial, b"hubu_\n").unwrap();
+        fs::set_permissions(&partial, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(create_token_file(&partial, "hubu_")
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete generated credential state"));
+    }
 
     #[test]
     fn parses_lease_config_yaml() {

@@ -102,6 +102,19 @@ test("documents every schema-v1 local-stack source field", async () => {
   }
 });
 
+test("keeps managed credential locations out of the first-run profile", async () => {
+  const [examples, localStack, readme] = await Promise.all([
+    readFile(new URL("../../docs/configuration/local-stack/v1/examples.md", import.meta.url), "utf8"),
+    readFile(new URL("../../docs/local-stack.md", import.meta.url), "utf8"),
+    readFile(new URL("../../README.md", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(examples, /^\[files\]$/m);
+  assert.doesNotMatch(examples, /^\[opaque\.gongbu_(hubu|caller)\]$/m);
+  assert.doesNotMatch(`${localStack}\n${readme}`, /temporary Hubu process|pre-provision(?:ing)? workaround/i);
+  assert.match(localStack, /starts the final Hubu process once/i);
+  assert.match(localStack, /Gongbu-owned bootstrap/i);
+});
+
 test("renders the concise canonical overview", async () => {
   const response = await render("/docs/overview");
   assert.equal(response.status, 200);

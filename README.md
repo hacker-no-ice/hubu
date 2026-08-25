@@ -39,36 +39,18 @@ install -m 0755 "${asset%.tar.gz}"/{hubu,hubu-server,hubu-unified-mcp,gongbu-ser
 Ensure `~/.local/bin` is on your `PATH`, then create an operator-owned stack
 profile. This quick start uses the generated managed-Hubu endpoint and database;
 for an external Hubu or a custom database, follow the
-[local stack guide](docs/local-stack.md) and bootstrap directly against that
-final backend instead.
+[local stack guide](docs/local-stack.md) and configure explicit
+external-service credential references.
 
-Initialize the profile. Current releases still use a temporary Hubu process to
-pre-provision its capability files; this bootstrap does not register or select
-an execution account or agent:
+Initialize the profile, complete the non-secret topology and provider choices,
+and start the principal-neutral stack:
 
 ```sh
 profile=/absolute/path/to/profile
 hubu stack init --profile "$profile"
 hubu stack select --profile "$profile"
-
-mkdir -p "$profile/state/hubu"
-export HUBU_DB_PATH="$profile/state/hubu/hubu.sqlite3"
-export HUBU_AUTH_TOKEN_FILE="$profile/state/hubu/hubu.auth-token"
-export HUBU_APPROVAL_TOKEN_FILE="$profile/state/hubu/hubu.approval-token"
-export HUBU_RECONCILIATION_TOKEN_FILE="$profile/state/hubu/hubu.reconciliation-token"
-hubu-server &
-bootstrap_pid=$!
-until hubu health >/dev/null 2>&1; do sleep 1; done
-kill "$bootstrap_pid"
-wait "$bootstrap_pid" || true
-```
-
-Complete `stack.toml`, `credentials.toml`, and the managed Gongbu/Temporal and
-provider decisions without an `[identity]` block, then start the
-principal-neutral stack. Register and fund agents against the running Hubu
-service:
-
-```sh
+# Edit stack.toml and providers.toml. Add credentials.toml provider references
+# only for live targets; managed service credential paths are internal.
 hubu stack start
 hubu stack status
 hubu protocol agent-registration
@@ -88,9 +70,10 @@ hubu policy apply --path "$profile/starter-policy.yaml"
 hubu budget create --agent-id agt_... --amount 25
 ```
 
-`stack start` validates and renders the profile, then starts the managed Hubu
-control plane and Gongbu execution plane and, when configured, Gongbu's managed
-Temporal runtime. Connect the running stack to Codex:
+`stack start` validates and renders the profile, starts the final managed Hubu
+process, lets it create its private capabilities at profile-owned locations,
+completes Gongbu's internal credential handoff, and then starts Gongbu and, when
+configured, its managed Temporal runtime. Connect the running stack to Codex:
 
 ```sh
 hubu init codex --stack-profile "$profile"
@@ -101,10 +84,6 @@ through Hubu's unified MCP tools: Hubu authorizes and reserves budget, Gongbu
 executes the work and stores its artifacts, and Hubu records the outcome. Live
 provider execution is experimental and can incur charges; use explicit targets
 and conservative spend ceilings.
-
-Credential pre-provisioning and removal of the temporary-Hubu bootstrap
-workaround are still tracked in HUB-69/HUB-134; this quick start does not claim
-that credential-bootstrap work is complete.
 
 ## Documentation
 
