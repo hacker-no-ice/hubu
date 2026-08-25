@@ -1098,10 +1098,9 @@ impl OperationRegistry {
             mapped.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (handle, expires_at, result_json) in rows {
-            let Ok(expires_at) = DateTime::parse_from_rfc3339(&expires_at) else {
-                continue;
-            };
-            if expires_at.with_timezone(&Utc) > now {
+            if DateTime::parse_from_rfc3339(&expires_at)
+                .is_ok_and(|expires_at| expires_at.with_timezone(&Utc) > now)
+            {
                 continue;
             }
             let result_json = result_json
@@ -1281,7 +1280,7 @@ fn authorization_is_live(auth_token_id: Option<&str>, expires_at: Option<&str>) 
     };
     DateTime::parse_from_rfc3339(expires_at)
         .map(|expires_at| expires_at.with_timezone(&Utc) > Utc::now())
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn ensure_lease_update(changed: usize) -> Result<()> {
@@ -1629,6 +1628,40 @@ mod tests {
             status.result_code.as_deref(),
             Some("authorization_continuation_unavailable")
         );
+
+        let malformed = registry
+            .resolve_or_allocate(
+                &codex("status-malformed-authorization-expiry"),
+                "hubu_authorize_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        registry
+            .record_authorization_result(
+                &malformed.operation_handle,
+                &json!({
+                    "decision":"allow",
+                    "auth_token_id":"malformed-expiry-token",
+                    "authorization_expires_at":"not-a-timestamp"
+                }),
+            )
+            .unwrap();
+        let status = registry
+            .durable_operation_status(&malformed.operation_handle)
+            .unwrap();
+        assert_eq!(status.state, "failed");
+        assert_eq!(
+            status.result_code.as_deref(),
+            Some("authorization_continuation_unavailable")
+        );
+        let error = registry
+            .resolve_gongbu_continuation(
+                "malformed-expiry-token",
+                &execution_arguments("malformed-expiry-token"),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown or expired"));
     }
 
     #[test]
