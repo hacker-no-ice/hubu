@@ -406,8 +406,15 @@ impl Repository {
         self.reject_registered_secrets([normalized_input.as_str(), pricing_snapshot.as_str()])?;
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,'pending',?23,?23,0)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,n.authorized_minor,n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,n.provider_config_digest,j(&n.pricing_snapshot),n.pricing_schema_version,execution_scope,n.created_at])?;
-        let e = query_key(&tx, &n.account_id, &n.operation_key)?;
+        if let Ok(existing) = query_token(&tx, n.hubu_token_reference.as_str()) {
+            return Ok(existing);
+        }
+        let inserted = tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,'pending',?23,?23,0)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,n.authorized_minor,n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,n.provider_config_digest,j(&n.pricing_snapshot),n.pricing_schema_version,execution_scope,n.created_at])?;
+        let e = if inserted == 1 {
+            query_id(&tx, &id)?
+        } else {
+            query_key(&tx, &n.account_id, &n.operation_key)?
+        };
         if let Some(authorization) = authorization {
             if e.execution_id == id {
                 tx.execute(
@@ -454,6 +461,13 @@ impl Repository {
             )
             .optional()?
             .ok_or(Error::NotFound)
+    }
+
+    pub fn get_execution_by_spend_auth_token(
+        &self,
+        spend_auth_token_id: &str,
+    ) -> Result<Execution> {
+        query_token(&self.0.lock().unwrap(), spend_auth_token_id)
     }
 
     pub fn get_hubu_authorization_snapshot(
@@ -1376,6 +1390,17 @@ fn query_id(c: &Connection, id: &str) -> Result<Execution> {
     .optional()?
     .ok_or(Error::NotFound)
 }
+fn query_token(c: &Connection, spend_auth_token_id: &str) -> Result<Execution> {
+    c.query_row(
+        &format!(
+            "{EXECUTION_SELECT} WHERE execution_id=(SELECT execution_id FROM hubu_authorization_snapshots WHERE spend_auth_token_id=?1)"
+        ),
+        [spend_auth_token_id],
+        map,
+    )
+    .optional()?
+    .ok_or(Error::NotFound)
+}
 const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,release_transmission_started_at,version,execution_scope_json FROM executions";
 fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
     let i: String = r.get(8)?;
@@ -1571,6 +1596,7 @@ mod tests {
         sync::Barrier,
         thread,
     };
+    use tempfile::tempdir;
     fn new(a: &str, k: &str) -> CreateExecutionParams {
         CreateExecutionParams {
             account_id: a.into(),
@@ -1633,11 +1659,13 @@ mod tests {
             let body = raw.split_once("\r\n\r\n").unwrap().1;
             serde_json::from_str(body).unwrap()
         });
+        let root = tempdir().unwrap();
+        let repository =
+            Repository::open(root.path().join("hubu.sqlite3"), Redactor::default()).unwrap();
         let hubu = crate::hubu::ProductionHubuActivities::new(
             crate::hubu::HubuClient::new(format!("http://{address}")),
-            "gongbu",
-        )
-        .unwrap();
+            repository,
+        );
         crate::workflow::HubuActivities::claim(&hubu, execution)
             .expect_err("capture server rejects after receiving the claim");
         server.join().unwrap()

@@ -3,7 +3,7 @@ use gongbu_api::{
     application::{ApplicationDependencies, ArtifactServiceActivities, Authenticator},
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
     execution::{Execution, Repository},
-    http::{ArtifactListResponse, AuthenticatedAccount, ExecutionResponse, ExecutionStatus},
+    http::{ArtifactListResponse, AuthenticatedCaller, ExecutionResponse, ExecutionStatus},
     hubu::{BudgetHold, ExecutorSpendResponse, HttpClientError, SpendAuthorizationResolver},
     provider::{
         contract::{
@@ -588,7 +588,7 @@ impl Authenticator for TestAuthenticator {
     fn authenticate(
         &self,
         headers: &axum::http::HeaderMap,
-    ) -> Result<AuthenticatedAccount, gongbu_api::application::AuthenticationError> {
+    ) -> Result<AuthenticatedCaller, gongbu_api::application::AuthenticationError> {
         let expected = format!("Bearer {CALLER_TOKEN}");
         if headers
             .get(axum::http::header::AUTHORIZATION)
@@ -597,8 +597,7 @@ impl Authenticator for TestAuthenticator {
         {
             return Err(gongbu_api::application::AuthenticationError);
         }
-        AuthenticatedAccount::from_verified_claim("account")
-            .map_err(|_| gongbu_api::application::AuthenticationError)
+        Ok(AuthenticatedCaller::service_installation())
     }
 }
 

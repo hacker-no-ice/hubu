@@ -9,7 +9,7 @@ pub mod runtime;
 use crate::{
     application::GenericProviderActivities,
     artifact::ArtifactLimits,
-    execution::Execution,
+    execution::{Execution, Repository},
     hubu::{
         BudgetHold, ExecutorSpendResponse, HttpClientError, HubuClient, ProductionHubuActivities,
         SpendAuthorizationResolver,
@@ -1350,7 +1350,10 @@ fn deterministic_id(kind: &str, seed: u64, key: &str) -> String {
     format!("{kind}-{short}")
 }
 
-fn real_hubu_activities(config: &HubuConfig) -> Result<ProductionHubuActivities, SandboxError> {
+fn real_hubu_activities(
+    config: &HubuConfig,
+    repository: Repository,
+) -> Result<ProductionHubuActivities, SandboxError> {
     if config.mode != BoundaryMode::Real {
         return invalid("production Hubu activities require real Hubu configuration");
     }
@@ -1359,8 +1362,7 @@ fn real_hubu_activities(config: &HubuConfig) -> Result<ProductionHubuActivities,
         Some(token) => client.with_bearer_token(token.0.clone()),
         None => client,
     };
-    ProductionHubuActivities::new(client, config.agent_id.clone())
-        .map_err(|error| SandboxError::Invalid(error.into()))
+    Ok(ProductionHubuActivities::new(client, repository))
 }
 
 pub struct DeterministicProvider {
@@ -1619,13 +1621,18 @@ impl SandboxWiring {
         Arc::new(FaultInjectingArtifacts::new(delegate, self.artifact_fault))
     }
 
-    pub fn from_config(config: &SandboxConfig) -> Result<Self, SandboxError> {
+    pub fn from_config(
+        config: &SandboxConfig,
+        repository: Repository,
+    ) -> Result<Self, SandboxError> {
         config.validate()?;
         let hubu = match config.hubu.mode {
             BoundaryMode::Mock => {
                 HubuWiring::Mock(Arc::new(MockHubu::new(config.hubu.clone(), config.seed)?))
             }
-            BoundaryMode::Real => HubuWiring::Real(Arc::new(real_hubu_activities(&config.hubu)?)),
+            BoundaryMode::Real => {
+                HubuWiring::Real(Arc::new(real_hubu_activities(&config.hubu, repository)?))
+            }
         };
         let (provider, providers) = match config.provider.mode {
             BoundaryMode::Mock => {
@@ -1938,7 +1945,13 @@ mod tests {
         config.hubu.scoped_credential_reference = Some("keychain:hubu-sandbox".into());
         config.hubu.isolated_test_account = Some("aga_sandbox".into());
         config.hubu.agent_id = "agt_sandbox".into();
-        let activities = real_hubu_activities(&config.hubu).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let repository = Repository::open(
+            root.path().join("gongbu.sqlite3"),
+            crate::redaction::Redactor::default(),
+        )
+        .unwrap();
+        let activities = real_hubu_activities(&config.hubu, repository).unwrap();
         let execution = execution();
         let request = activities.spend(&execution);
 
@@ -2024,7 +2037,14 @@ mod tests {
                 config.provider.live_spend_acknowledgement =
                     Some(LIVE_SPEND_ACKNOWLEDGEMENT.into());
             }
-            let wiring = SandboxWiring::from_config(&config).unwrap();
+            let repository = Repository::open(
+                files
+                    .path()
+                    .join(format!("gongbu-{hubu:?}-{provider:?}.sqlite3")),
+                crate::redaction::Redactor::default(),
+            )
+            .unwrap();
+            let wiring = SandboxWiring::from_config(&config, repository).unwrap();
             assert_eq!(
                 matches!(&wiring.hubu, HubuWiring::Mock(_)),
                 hubu == BoundaryMode::Mock

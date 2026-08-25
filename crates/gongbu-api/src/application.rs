@@ -8,7 +8,7 @@
 use crate::{
     artifact::ArtifactService,
     execution::{Execution, Repository},
-    http::{Api, AuthenticatedAccount, HttpResponse},
+    http::{Api, AuthenticatedCaller, HttpResponse},
     hubu::SpendAuthorizationResolver,
     lifecycle::{DependencyName, DependencyProbeOutcome, LifecycleReason},
     provider::{
@@ -336,11 +336,9 @@ pub fn production_provider_execution_runner(
 }
 
 pub trait Authenticator: Send + Sync + 'static {
-    /// Validate transport credentials and return the trusted account principal.
-    fn authenticate(
-        &self,
-        headers: &HeaderMap,
-    ) -> Result<AuthenticatedAccount, AuthenticationError>;
+    /// Validate the installation-scoped service capability.
+    fn authenticate(&self, headers: &HeaderMap)
+        -> Result<AuthenticatedCaller, AuthenticationError>;
 }
 
 #[derive(Clone, Copy, Debug, Error)]

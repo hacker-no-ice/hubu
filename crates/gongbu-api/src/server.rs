@@ -100,8 +100,6 @@ pub struct HubuConfig {
     pub allowlisted_hosts: Vec<String>,
     pub expected_product_version: String,
     pub expected_executor_contract: String,
-    pub account_id: String,
-    pub agent_id: String,
     pub credential_reference: SecretReferenceConfig,
     pub startup_policy: StartupPolicy,
     pub startup_timeout_ms: u64,
@@ -117,7 +115,6 @@ pub enum StartupPolicy {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthenticationConfig {
-    pub caller_account_id: String,
     pub bearer_credential_reference: SecretReferenceConfig,
 }
 
@@ -243,22 +240,26 @@ impl ServerConfig {
         if !path.is_absolute() {
             return Err(invalid("--config must be an absolute path"));
         }
-        let config: Self = serde_json::from_slice(&fs::read(path)?)?;
+        let bytes = fs::read(path)?;
+        let document: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let schema_version = document
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| invalid("missing or invalid server configuration schema_version"))?;
+        if matches!(schema_version, 1 | 2) {
+            return Err(invalid(format!(
+                "server configuration schema_version {schema_version} requires upgrade to schema_version {}; legacy static execution-principal bindings cannot be activated",
+                gongbu_build_info::SERVER_CONFIG_SCHEMA_VERSION
+            )));
+        }
+        let config: Self = serde_json::from_value(document)?;
         config.validate()?;
         Ok(config)
     }
 
     pub fn validate(&self) -> Result<(), ServerError> {
-        if !matches!(
-            self.schema_version,
-            1 | gongbu_build_info::SERVER_CONFIG_SCHEMA_VERSION
-        ) {
+        if self.schema_version != gongbu_build_info::SERVER_CONFIG_SCHEMA_VERSION {
             return Err(invalid("unsupported server configuration schema_version"));
-        }
-        if self.schema_version == 1 && self.providers.mode != ProviderMode::Live {
-            return Err(invalid(
-                "disabled provider mode requires server configuration schema_version 2",
-            ));
         }
         if !self.http.listen.ip().is_loopback() {
             return Err(invalid("HTTP listen address must be loopback"));
@@ -268,13 +269,8 @@ impl ServerConfig {
         self.providers.validate()?;
         if self.hubu.expected_product_version.trim().is_empty()
             || self.hubu.expected_executor_contract != gongbu_build_info::HUBU_EXECUTOR_CONTRACT
-            || self.hubu.account_id.trim().is_empty()
-            || self.hubu.agent_id.trim().is_empty()
-            || self.authentication.caller_account_id != self.hubu.account_id
         {
-            return Err(invalid(
-                "invalid or contradictory Hubu identity/contract settings",
-            ));
+            return Err(invalid("invalid Hubu compatibility settings"));
         }
         validate_duration(self.hubu.startup_timeout_ms, "Hubu startup timeout")?;
         validate_hubu_endpoint(&self.hubu.endpoint, &self.hubu.allowlisted_hosts)?;
@@ -568,10 +564,10 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
                     && version.executor_contract == expected_hubu_contract
             })
     });
-    let hubu = Arc::new(
-        ProductionHubuActivities::new(hubu_client, config.hubu.agent_id.clone())
-            .map_err(invalid)?,
-    );
+    let hubu = Arc::new(ProductionHubuActivities::new(
+        hubu_client,
+        repository.clone(),
+    ));
 
     let mut temporal_child = start_managed_temporal(&config.temporal)?;
     let temporal_address = config.temporal.address();
@@ -588,10 +584,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     let temporal_client =
         Client::new(connection, ClientOptions::new(namespace.to_owned()).build())?;
     let temporal_runtime = Arc::new(Runtime::new_assume_tokio(Default::default())?);
-    let authenticator = Arc::new(CapabilityAuthenticator::new(
-        caller_secret.expose(),
-        config.authentication.caller_account_id.clone(),
-    )?);
+    let authenticator = Arc::new(CapabilityAuthenticator::new(caller_secret.expose())?);
     drop(caller_secret);
     drop(hubu_secret);
     for value in &mut redaction_values {
@@ -936,17 +929,15 @@ async fn wait_for_temporal_port(
 
 struct CapabilityAuthenticator {
     token_digest: [u8; 32],
-    account_id: String,
 }
 
 impl CapabilityAuthenticator {
-    fn new(token: &[u8], account_id: String) -> Result<Self, ServerError> {
-        if token.is_empty() || account_id.trim().is_empty() {
+    fn new(token: &[u8]) -> Result<Self, ServerError> {
+        if token.is_empty() {
             return Err(invalid("invalid caller capability"));
         }
         Ok(Self {
             token_digest: Sha256::digest(token).into(),
-            account_id,
         })
     }
 }
@@ -955,7 +946,7 @@ impl Authenticator for CapabilityAuthenticator {
     fn authenticate(
         &self,
         headers: &HeaderMap,
-    ) -> Result<crate::http::AuthenticatedAccount, AuthenticationError> {
+    ) -> Result<crate::http::AuthenticatedCaller, AuthenticationError> {
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -973,8 +964,7 @@ impl Authenticator for CapabilityAuthenticator {
         if !equal {
             return Err(AuthenticationError);
         }
-        crate::http::AuthenticatedAccount::from_verified_claim(&self.account_id)
-            .map_err(|_| AuthenticationError)
+        Ok(crate::http::AuthenticatedCaller::service_installation())
     }
 }
 
@@ -1018,7 +1008,7 @@ mod tests {
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         }
         ServerConfig {
-            schema_version: 1,
+            schema_version: gongbu_build_info::SERVER_CONFIG_SCHEMA_VERSION,
             http: HttpConfig {
                 listen: "127.0.0.1:8788".parse().unwrap(),
             },
@@ -1041,8 +1031,6 @@ mod tests {
                 allowlisted_hosts: vec![],
                 expected_product_version: "0.1.0".into(),
                 expected_executor_contract: gongbu_build_info::HUBU_EXECUTOR_CONTRACT.into(),
-                account_id: "account-1".into(),
-                agent_id: "agent-1".into(),
                 credential_reference: SecretReferenceConfig {
                     service: "gongbu.hubu".into(),
                     account: "local".into(),
@@ -1051,7 +1039,6 @@ mod tests {
                 startup_timeout_ms: 1_000,
             },
             authentication: AuthenticationConfig {
-                caller_account_id: "account-1".into(),
                 bearer_credential_reference: SecretReferenceConfig {
                     service: "gongbu.caller".into(),
                     account: "local".into(),
@@ -1089,17 +1076,41 @@ mod tests {
     #[test]
     fn strict_config_accepts_only_safe_production_shape() {
         let root = tempdir().unwrap();
-        let legacy = config(root.path());
-        legacy.validate().unwrap();
-        assert!(serde_json::to_value(&legacy).unwrap()["providers"]
-            .get("mode")
+        let current = config(root.path());
+        current.validate().unwrap();
+        let serialized = serde_json::to_value(&current).unwrap();
+        assert!(serialized["providers"].get("mode").is_none());
+        assert!(serialized["hubu"].get("account_id").is_none());
+        assert!(serialized["hubu"].get("agent_id").is_none());
+        assert!(serialized["authentication"]
+            .get("caller_account_id")
             .is_none());
+        let round_trip: ServerConfig = serde_json::from_value(serialized).unwrap();
+        round_trip.validate().unwrap();
         let mut legacy_contract = config(root.path());
         legacy_contract.hubu.expected_executor_contract = "hubu-spend-executor-v4.1".into();
         assert!(legacy_contract.validate().is_err());
         let mut value = serde_json::to_value(config(root.path())).unwrap();
         value["mock_hubu"] = serde_json::json!(true);
         assert!(serde_json::from_value::<ServerConfig>(value).is_err());
+    }
+
+    #[test]
+    fn legacy_principal_bound_configs_receive_upgrade_diagnostics() {
+        for schema_version in [1, 2] {
+            let root = tempdir().unwrap();
+            let mut legacy = serde_json::to_value(config(root.path())).unwrap();
+            legacy["schema_version"] = serde_json::json!(schema_version);
+            legacy["hubu"]["account_id"] = serde_json::json!("account-1");
+            legacy["hubu"]["agent_id"] = serde_json::json!("agent-1");
+            legacy["authentication"]["caller_account_id"] = serde_json::json!("account-1");
+            let path = root.path().join("legacy-gongbu.json");
+            fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+            let error = ServerConfig::from_path(&path).unwrap_err().to_string();
+            assert!(error.contains(&format!("schema_version {schema_version} requires upgrade")));
+            assert!(error.contains("static execution-principal bindings cannot be activated"));
+        }
     }
 
     #[test]
@@ -1177,8 +1188,8 @@ mod tests {
     }
 
     #[test]
-    fn capability_authentication_is_account_bound_and_opaque() {
-        let authenticator = CapabilityAuthenticator::new(b"secret", "account-1".into()).unwrap();
+    fn capability_authentication_is_identity_free_and_opaque() {
+        let authenticator = CapabilityAuthenticator::new(b"secret").unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer wrong".parse().unwrap());
         assert!(authenticator.authenticate(&headers).is_err());

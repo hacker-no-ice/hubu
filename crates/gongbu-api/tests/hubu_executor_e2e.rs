@@ -2,7 +2,7 @@ use gongbu_api::{
     application::ArtifactServiceActivities,
     artifact::{ArtifactLimits, ArtifactService, LocalFsStorage},
     execution::{Execution, Repository},
-    http::{Api, AuthenticatedAccount, ExecutionResponse},
+    http::{Api, AuthenticatedCaller, ExecutionResponse},
     hubu::{HubuClient, ProductionHubuActivities},
     provider::{
         contract::{
@@ -75,13 +75,13 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
         admission_catalog(),
         Arc::new(AdmissionScheduler),
         i64::MAX,
-        Arc::new(
-            ProductionHubuActivities::new(workspace.hubu_client(), provisioned.agent_id.clone())
-                .unwrap(),
-        ),
+        Arc::new(ProductionHubuActivities::new(
+            workspace.hubu_client(),
+            repository.clone(),
+        )),
         || NOW.to_string(),
     );
-    let owner = AuthenticatedAccount::from_verified_claim(provisioned.account_id.clone()).unwrap();
+    let owner = AuthenticatedCaller::service_installation();
     let admission = AdmissionContext {
         api: &admission_api,
         owner: &owner,
@@ -217,7 +217,7 @@ struct ScenarioResult {
 
 struct AdmissionContext<'a> {
     api: &'a Api,
-    owner: &'a AuthenticatedAccount,
+    owner: &'a AuthenticatedCaller,
     repository: &'a Repository,
 }
 
@@ -249,7 +249,7 @@ fn run_success(
     let provider = DeterministicProvider::success();
     let hubu = FaultingProductionHubu::new(
         workspace.base_url(),
-        &provisioned.agent_id,
+        admission.repository.clone(),
         matches!(fault, Fault::DropSettlementResponse),
         false,
     );
@@ -343,8 +343,12 @@ fn run_provider_failure(
         &authorization,
     );
     let provider = DeterministicProvider::proven_failure();
-    let hubu =
-        FaultingProductionHubu::new(workspace.base_url(), &provisioned.agent_id, false, false);
+    let hubu = FaultingProductionHubu::new(
+        workspace.base_url(),
+        admission.repository.clone(),
+        false,
+        false,
+    );
     let workflow = ExecutionWorkflow {
         repository: admission.repository,
         hubu: &hubu,
@@ -400,8 +404,12 @@ fn run_ambiguous_claim_recovery(
         &authorization,
     );
     let provider = DeterministicProvider::success();
-    let hubu =
-        FaultingProductionHubu::new(workspace.base_url(), &provisioned.agent_id, false, true);
+    let hubu = FaultingProductionHubu::new(
+        workspace.base_url(),
+        admission.repository.clone(),
+        false,
+        true,
+    );
     let workflow = ExecutionWorkflow {
         repository: admission.repository,
         hubu: &hubu,
@@ -444,7 +452,7 @@ fn run_ambiguous_claim_recovery(
 
 fn admit_execution(
     api: &Api,
-    owner: &AuthenticatedAccount,
+    owner: &AuthenticatedCaller,
     repository: &Repository,
     operation_key: &str,
     authorization: &Value,
@@ -606,13 +614,17 @@ struct FaultingProductionHubu {
 }
 
 impl FaultingProductionHubu {
-    fn new(base_url: &str, agent_id: &str, drop_settlement: bool, drop_claim: bool) -> Self {
+    fn new(
+        base_url: &str,
+        repository: Repository,
+        drop_settlement: bool,
+        drop_claim: bool,
+    ) -> Self {
         Self {
             inner: ProductionHubuActivities::new(
                 HubuClient::new(base_url).with_bearer_token(AUTH_TOKEN.as_bytes()),
-                agent_id,
-            )
-            .unwrap(),
+                repository,
+            ),
             drop_settlement_response: Cell::new(drop_settlement),
             drop_claim_response: Cell::new(drop_claim),
             first_claim_id: RefCell::new(None),

@@ -87,9 +87,14 @@ fn prepare_external_hubu_auth(config: &mut SandboxConfig) -> Result<(), BoxError
 }
 
 async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(), BoxError> {
-    let wiring = SandboxWiring::from_config(config)?;
     let token = format!("gongbu-sandbox-{}", Uuid::new_v4());
     write_operator_token(run.root(), &token)?;
+
+    let repository = Repository::open(
+        Path::new(&run.manifest().database_path),
+        Redactor::new([token.as_bytes()]),
+    )?;
+    let wiring = SandboxWiring::from_config(config, repository.clone())?;
 
     let mut temporal_child = start_temporal(config, run)?;
     let temporal_address = run.manifest().temporal_address.clone();
@@ -110,10 +115,6 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
     )?;
     let temporal_runtime = Arc::new(Runtime::new_assume_tokio(Default::default())?);
 
-    let repository = Repository::open(
-        Path::new(&run.manifest().database_path),
-        Redactor::new([token.as_bytes()]),
-    )?;
     let artifact_service = ArtifactService::new(
         repository.clone(),
         LocalFsStorage::new(&run.manifest().artifact_root),
@@ -169,14 +170,7 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
             .unwrap_or(config.hubu.maximum_authorization_minor),
         dependency_checker: None,
         worker_drain_timeout: Duration::from_secs(30),
-        authenticator: Arc::new(SandboxAuthenticator {
-            token,
-            account_id: config
-                .hubu
-                .isolated_test_account
-                .clone()
-                .unwrap_or_else(|| "sandbox-account".into()),
-        }),
+        authenticator: Arc::new(SandboxAuthenticator { token }),
         now,
     };
     let result = application::serve(listener, dependencies, async {
@@ -194,14 +188,13 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
 
 struct SandboxAuthenticator {
     token: String,
-    account_id: String,
 }
 
 impl Authenticator for SandboxAuthenticator {
     fn authenticate(
         &self,
         headers: &HeaderMap,
-    ) -> Result<crate::http::AuthenticatedAccount, AuthenticationError> {
+    ) -> Result<crate::http::AuthenticatedCaller, AuthenticationError> {
         let expected = format!("Bearer {}", self.token);
         if headers
             .get(header::AUTHORIZATION)
@@ -210,8 +203,7 @@ impl Authenticator for SandboxAuthenticator {
         {
             return Err(AuthenticationError);
         }
-        crate::http::AuthenticatedAccount::from_verified_claim(&self.account_id)
-            .map_err(|_| AuthenticationError)
+        Ok(crate::http::AuthenticatedCaller::service_installation())
     }
 }
 
