@@ -14,6 +14,24 @@ Constraints:
 - Summarize the diff, tests run, and any caveats.
 - If a Codex review is requested, address review comments in a follow-up commit.
 
+## PR completion workflow
+
+For requests to implement, fix, execute, or take work to completion, continue
+through the full PR lifecycle unless the user says otherwise:
+
+1. Complete the implementation and required validation.
+2. Rebase onto the latest `origin/main` if needed, then publish a non-draft PR.
+3. Request review with `@codex review`.
+4. Address only P0/P1 findings and re-request review after remediation, for at
+   most 2 remediation rounds.
+5. Merge when required checks pass and no P0/P1 findings remain. If they remain
+   after 2 rounds, or remediation requires an ambiguous product or design
+   decision, stop and wait for human input.
+
+P2+ findings do not block merge unless they expose a correctness or safety issue
+that should reasonably be treated as P0/P1. Requests only to scope, investigate,
+review, plan, or discuss do not trigger this lifecycle.
+
 ## Unified workspace discipline
 
 Hubu and Gongbu live in this repository's single Rust workspace. Run Cargo
