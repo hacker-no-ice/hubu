@@ -937,7 +937,7 @@ fn render_generation(
         let gongbu_schema_version = gongbu_version.server_config_schema_version.unwrap_or(1);
         let provider_json =
             render_provider_config(providers, gongbu_schema_version, runtime_generation)?;
-        let config = json!({
+        let mut config = json!({
             "schema_version": gongbu_schema_version,
             "http": {"listen": gongbu.listen.expect("checked")},
             "state": {
@@ -976,6 +976,15 @@ fn render_generation(
             "logging": {"level": stack.runtime.log_level, "format": stack.runtime.log_format},
             "shutdown": {"worker_drain_timeout_ms": stack.runtime.worker_drain_timeout_ms},
         });
+        if gongbu_schema_version >= 3 {
+            let hubu = config["hubu"].as_object_mut().expect("rendered object");
+            hubu.remove("account_id");
+            hubu.remove("agent_id");
+            config["authentication"]
+                .as_object_mut()
+                .expect("rendered object")
+                .remove("caller_account_id");
+        }
         write_generated_json(
             generation,
             "gongbu-server.json",
@@ -2648,6 +2657,25 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    #[cfg(unix)]
+    fn write_fake_gongbu_v3_binary(path: &Path, reject_validation: bool) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let validation = if reject_validation {
+            "exit 9"
+        } else {
+            "if grep -Eq '\"(account_id|agent_id|caller_account_id)\"' \"$3\"; then exit 8; fi\n  exit 0"
+        };
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo '{{\"product_version\":\"0.1.0\",\"source_commit\":\"unknown\",\"executor_contract\":\"hubu-executor.v1\",\"server_config_schema_version\":3}}'\n  exit 0\nfi\nif [ \"$1\" = \"validate-config\" ]; then\n  {validation}\nfi\nexit 2\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     #[test]
     fn init_is_annotated_incomplete_and_byte_preserving() {
         let root = tempdir().unwrap();
@@ -3067,9 +3095,10 @@ gongbu_caller = {}
         let hubu_addr = hubu_listener.local_addr().unwrap();
         let gongbu_addr = gongbu_listener.local_addr().unwrap();
         fs::create_dir(&binaries).unwrap();
-        for name in ["hubu", "hubu-server", "gongbu-server", "hubu-unified-mcp"] {
+        for name in ["hubu", "hubu-server", "hubu-unified-mcp"] {
             write_fake_binary(&binaries.join(name), false);
         }
+        write_fake_gongbu_v3_binary(&binaries.join("gongbu-server"), false);
         let credentials = root.path().join("credentials");
         fs::create_dir(&credentials).unwrap();
         for name in ["auth", "approval", "reconciliation", "gongbu-caller"] {
@@ -3158,6 +3187,19 @@ account = "gongbu-caller"
         let active_path = profile.join("generated/active-manifest.json");
         let active = fs::read(&active_path).unwrap();
         let initial_manifest: ActiveManifest = read_json(&active_path).unwrap();
+        let gongbu_config: Value = read_json(
+            &profile
+                .join("generated")
+                .join(&initial_manifest.generation)
+                .join("gongbu-server.json"),
+        )
+        .unwrap();
+        assert_eq!(gongbu_config["schema_version"], 3);
+        assert!(gongbu_config["hubu"].get("account_id").is_none());
+        assert!(gongbu_config["hubu"].get("agent_id").is_none());
+        assert!(gongbu_config["authentication"]
+            .get("caller_account_id")
+            .is_none());
         assert!(profile
             .join("generated")
             .join(&initial_manifest.generation)
@@ -3167,9 +3209,9 @@ account = "gongbu-caller"
         assert_eq!(handoff.hubu_endpoint, format!("http://{hubu_addr}"));
         render_profile_with_renderer(&profile, &binaries.join("hubu")).unwrap();
         assert_eq!(fs::read(&active_path).unwrap(), active);
-        write_fake_binary(&binaries.join("gongbu-server"), true);
+        write_fake_gongbu_v3_binary(&binaries.join("gongbu-server"), true);
         assert!(render_profile_with_renderer(&profile, &binaries.join("hubu")).is_err());
-        write_fake_binary(&binaries.join("gongbu-server"), false);
+        write_fake_gongbu_v3_binary(&binaries.join("gongbu-server"), false);
 
         fs::write(
             profile.join("providers.toml"),
@@ -3279,11 +3321,11 @@ account = "gongbu-caller"
             "schema_version = 1\nmode = \"disabled\"\n# changed again\n",
         )
         .unwrap();
-        write_fake_binary(&binaries.join("gongbu-server"), true);
+        write_fake_gongbu_v3_binary(&binaries.join("gongbu-server"), true);
         assert!(render_profile_with_renderer(&profile, &binaries.join("hubu")).is_err());
         assert_eq!(fs::read(&active_path).unwrap(), comment_only_active);
 
-        write_fake_binary(&binaries.join("gongbu-server"), false);
+        write_fake_gongbu_v3_binary(&binaries.join("gongbu-server"), false);
         fs::write(
             profile.join("providers.toml"),
             "schema_version = 1\nmode = \"disabled\"\n# changed\n",
