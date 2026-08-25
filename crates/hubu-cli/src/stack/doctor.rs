@@ -395,6 +395,31 @@ fn inspect_profile_with(
         ));
         return report;
     }
+    if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+        let gongbu = provenances
+            .iter()
+            .find(|provenance| provenance.component == "gongbu-server")
+            .expect("managed Gongbu provenance was resolved");
+        if let Err(error) = negotiate_principal_neutral_gongbu_schema(gongbu) {
+            report.checks.push(check(
+                CheckLayer::Renderability,
+                CheckStatus::Fail,
+                "gongbu_principal_neutral_schema_unsupported",
+                "gongbu-server",
+                Some("stack.toml:binaries.gongbu_server".into()),
+                error.to_string(),
+            ));
+            return report;
+        }
+        report.checks.push(check(
+            CheckLayer::Renderability,
+            CheckStatus::Pass,
+            "gongbu_principal_neutral_schema_supported",
+            "gongbu-server",
+            Some("stack.toml:binaries.gongbu_server".into()),
+            "selected Gongbu binary supports principal-neutral server config rendering",
+        ));
+    }
     if renderer
         .and_then(|renderer| {
             validate_renderer_identity(
@@ -1732,6 +1757,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_fake_gongbu_v3_binary(path: &Path, reject_validation: bool) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let validation = if reject_validation {
+            "exit 9"
+        } else {
+            "exit 0"
+        };
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo '{{\"product_version\":\"0.1.0\",\"source_commit\":\"unknown\",\"executor_contract\":\"hubu-executor.v1\",\"server_config_schema_version\":3}}'\n  exit 0\nfi\nif [ \"$1\" = \"validate-config\" ]; then\n  {validation}\nfi\nexit 2\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
     fn write_hanging_binary(path: &Path, hang_on: &str) {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1753,9 +1797,10 @@ mod tests {
         fs::create_dir(&profile).unwrap();
         fs::create_dir(&binaries).unwrap();
         fs::create_dir(&credential_root).unwrap();
-        for name in ["hubu", "hubu-server", "gongbu-server", "hubu-unified-mcp"] {
+        for name in ["hubu", "hubu-server", "hubu-unified-mcp"] {
             write_fake_binary(&binaries.join(name), false);
         }
+        write_fake_gongbu_v3_binary(&binaries.join("gongbu-server"), false);
         let temporal = binaries.join("temporal");
         fs::write(&temporal, b"temporal fixture").unwrap();
         for name in ["auth", "approval", "reconciliation", "gongbu-caller"] {
@@ -1771,9 +1816,6 @@ hubu = {}
 hubu_server = {}
 gongbu_server = {}
 hubu_unified_mcp = {}
-[identity]
-account_id = "account-1"
-agent_id = "agent-1"
 [hubu]
 ownership = "managed"
 endpoint = "http://127.0.0.1:41001"
@@ -1901,10 +1943,36 @@ account = "gongbu-caller"
         assert!(json.contains("stack.toml:gongbu.ownership"));
         assert!(json.contains("credentials.toml:files.hubu_auth"));
         assert!(json.contains("providers.toml:mode"));
+        assert!(!json.contains("stack.toml:identity"));
         let after = ["stack.toml", "credentials.toml", "providers.toml"]
             .map(|name| fs::read(profile.join(name)).unwrap());
         assert_eq!(before, after);
         assert!(!profile.join("generated/active-manifest.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_principal_gongbu_binary_reports_upgrade_diagnostic() {
+        let root = tempdir().unwrap();
+        let (profile, renderer) = write_complete_managed_profile(root.path());
+        write_fake_binary(&root.path().join("bin/gongbu-server"), false);
+
+        let report = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+        assert_eq!(report.classification, ProfileClassification::Invalid);
+        let diagnostic = report
+            .checks
+            .iter()
+            .find(|check| check.code == "gongbu_principal_neutral_schema_unsupported")
+            .expect("schema incompatibility diagnostic");
+        assert_eq!(
+            diagnostic.field.as_deref(),
+            Some("stack.toml:binaries.gongbu_server")
+        );
+        assert!(diagnostic
+            .message
+            .contains("static-principal server config schema version 2"));
+        assert!(diagnostic.message.contains("upgrade Gongbu"));
+        assert!(diagnostic.message.contains("schema version 3 or newer"));
     }
 
     #[test]

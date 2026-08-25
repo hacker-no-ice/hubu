@@ -254,10 +254,6 @@ hubu_server = $(quote "${hubu_server_bin}")
 gongbu_server = $(quote "${gongbu_server_bin}")
 hubu_unified_mcp = $(quote "${mcp_bin}")
 
-[identity]
-account_id = $(quote "${account_id}")
-agent_id = $(quote "${agent_id}")
-
 [hubu]
 ownership = "managed"
 endpoint = $(quote "${hubu_endpoint}")

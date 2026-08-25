@@ -18,6 +18,7 @@ mod lifecycle;
 
 const SOURCE_SCHEMA_VERSION: u32 = 1;
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
+const PRINCIPAL_NEUTRAL_GONGBU_SCHEMA_VERSION: u32 = 3;
 const DEFAULT_PROFILE: &str = "default";
 const LIVE_SPEND_ACKNOWLEDGEMENT: &str = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND";
 
@@ -28,7 +29,10 @@ struct StackSource {
     #[serde(default)]
     allow_development_builds: bool,
     binaries: Option<BinarySource>,
-    identity: Option<IdentitySource>,
+    // Accepted only for source schema v1 compatibility; remove when that
+    // compatibility window closes. Rendering never consumes these values.
+    #[serde(rename = "identity")]
+    _legacy_identity: Option<LegacyIdentitySource>,
     hubu: Option<ServiceSource>,
     gongbu: Option<GongbuSource>,
     temporal: Option<TemporalSource>,
@@ -47,9 +51,11 @@ struct BinarySource {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct IdentitySource {
-    account_id: Option<String>,
-    agent_id: Option<String>,
+struct LegacyIdentitySource {
+    #[serde(rename = "account_id")]
+    _account_id: Option<String>,
+    #[serde(rename = "agent_id")]
+    _agent_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -650,6 +656,12 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
     }
     provenances.push(binary_provenance("hubu-unified-mcp", &unified_mcp)?);
     validate_release_lineage(&provenances, stack.allow_development_builds)?;
+    if let Some(gongbu) = provenances
+        .iter()
+        .find(|provenance| provenance.component == "gongbu-server")
+    {
+        negotiate_principal_neutral_gongbu_schema(gongbu)?;
+    }
 
     let files = credentials.files.as_ref().expect("checked");
     let hubu_auth = existing_absolute(
@@ -926,7 +938,6 @@ fn render_generation(
 
     if gongbu.ownership == Some(Ownership::Managed) {
         let gongbu_server = gongbu_server.expect("selected managed binary");
-        let identity = stack.identity.as_ref().expect("checked");
         let gongbu_hubu = credentials.opaque.get("gongbu_hubu").expect("checked");
         let gongbu_caller = credentials.opaque.get("gongbu_caller").expect("checked");
         let temporal = render_temporal(stack.temporal.as_ref().expect("checked"))?;
@@ -934,10 +945,10 @@ fn render_generation(
             .iter()
             .find(|item| item.component == "gongbu-server")
             .expect("probed");
-        let gongbu_schema_version = gongbu_version.server_config_schema_version.unwrap_or(1);
+        let gongbu_schema_version = negotiate_principal_neutral_gongbu_schema(gongbu_version)?;
         let provider_json =
             render_provider_config(providers, gongbu_schema_version, runtime_generation)?;
-        let mut config = json!({
+        let config = json!({
             "schema_version": gongbu_schema_version,
             "http": {"listen": gongbu.listen.expect("checked")},
             "state": {
@@ -950,14 +961,11 @@ fn render_generation(
                 "allowlisted_hosts": [],
                 "expected_product_version": gongbu_version.product_version,
                 "expected_executor_contract": gongbu_version.executor_contract,
-                "account_id": identity.account_id.as_ref().expect("checked"),
-                "agent_id": identity.agent_id.as_ref().expect("checked"),
                 "credential_reference": gongbu_hubu,
                 "startup_policy": stack.runtime.hubu_startup_policy,
                 "startup_timeout_ms": stack.runtime.hubu_startup_timeout_ms,
             },
             "authentication": {
-                "caller_account_id": identity.account_id.as_ref().expect("checked"),
                 "bearer_credential_reference": gongbu_caller,
             },
             "providers": provider_json,
@@ -976,15 +984,6 @@ fn render_generation(
             "logging": {"level": stack.runtime.log_level, "format": stack.runtime.log_format},
             "shutdown": {"worker_drain_timeout_ms": stack.runtime.worker_drain_timeout_ms},
         });
-        if gongbu_schema_version >= 3 {
-            let hubu = config["hubu"].as_object_mut().expect("rendered object");
-            hubu.remove("account_id");
-            hubu.remove("agent_id");
-            config["authentication"]
-                .as_object_mut()
-                .expect("rendered object")
-                .remove("caller_account_id");
-        }
         write_generated_json(
             generation,
             "gongbu-server.json",
@@ -1894,18 +1893,6 @@ fn missing_fields(
     } else {
         missing.push("stack.toml:binaries".into());
     }
-    if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
-        if let Some(identity) = stack.identity.as_ref() {
-            if identity.account_id.as_deref().is_none_or(str::is_empty) {
-                missing.push("stack.toml:identity.account_id".into());
-            }
-            if identity.agent_id.as_deref().is_none_or(str::is_empty) {
-                missing.push("stack.toml:identity.agent_id".into());
-            }
-        } else {
-            missing.push("stack.toml:identity".into());
-        }
-    }
     check_service_missing(stack.hubu.as_ref(), "hubu", &mut missing);
     check_gongbu_missing(stack.gongbu.as_ref(), &mut missing);
     if stack.gongbu.as_ref().and_then(|v| v.ownership) == Some(Ownership::Managed) {
@@ -2163,6 +2150,18 @@ fn validate_release_lineage(items: &[BinaryProvenance], allow_development: bool)
         eprintln!("warning: rendering an explicit development profile with unstamped binaries");
     }
     Ok(())
+}
+
+fn negotiate_principal_neutral_gongbu_schema(provenance: &BinaryProvenance) -> Result<u32> {
+    match provenance.server_config_schema_version {
+        Some(version) if version >= PRINCIPAL_NEUTRAL_GONGBU_SCHEMA_VERSION => Ok(version),
+        Some(version) => bail!(
+            "selected managed Gongbu binary supports only static-principal server config schema version {version}; upgrade Gongbu to a build supporting principal-neutral server config schema version {PRINCIPAL_NEUTRAL_GONGBU_SCHEMA_VERSION} or newer"
+        ),
+        None => bail!(
+            "selected managed Gongbu binary does not report a server config schema version and cannot negotiate principal-neutral rendering; upgrade Gongbu to a build supporting principal-neutral server config schema version {PRINCIPAL_NEUTRAL_GONGBU_SCHEMA_VERSION} or newer"
+        ),
+    }
 }
 
 fn validate_with_binary(binary: &Path, config: &Path) -> Result<()> {
@@ -2424,10 +2423,6 @@ allow_development_builds = false
 {}
 {}
 {}
-
-[identity]
-# account_id = "<existing Hubu account public id>"
-# agent_id = "<existing Hubu agent public id>"
 
 [hubu]
 # ownership = "managed" # or "external"
@@ -2697,12 +2692,14 @@ mod tests {
             b"operator-owned\n"
         );
         assert!(!stack_before.is_empty());
+        let stack_template = String::from_utf8(stack_before).unwrap();
+        assert!(!stack_template.contains("[identity]"));
+        assert!(!stack_template.contains("account_id"));
+        assert!(!stack_template.contains("agent_id"));
         let providers = fs::read_to_string(profile.join("providers.toml")).unwrap();
         let stack_reference =
             "https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/stack-toml";
-        assert!(String::from_utf8(stack_before)
-            .unwrap()
-            .contains(stack_reference));
+        assert!(stack_template.contains(stack_reference));
         assert!(fs::read_to_string(profile.join("README.md"))
             .unwrap()
             .contains("https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/"));
@@ -2794,7 +2791,45 @@ mod tests {
         assert!(error.contains("stack.toml:gongbu.ownership"));
         assert!(error.contains("credentials.toml:files.hubu_auth"));
         assert!(error.contains("providers.toml:mode"));
+        assert!(!error.contains("identity"));
         assert!(!profile.join("generated/active-manifest.json").exists());
+    }
+
+    #[test]
+    fn legacy_identity_is_accepted_but_not_a_completion_decision() {
+        let stack: StackSource = toml::from_str(
+            "schema_version = 1\n[identity]\naccount_id = \"legacy-account\"\nagent_id = \"legacy-agent\"\n",
+        )
+        .unwrap();
+        let credentials: CredentialsSource = toml::from_str("schema_version = 1\n").unwrap();
+        let providers: ProvidersSource =
+            toml::from_str("schema_version = 1\nmode = \"disabled\"\n").unwrap();
+
+        assert!(missing_fields(&stack, &credentials, &providers)
+            .iter()
+            .all(|field| !field.contains("identity")));
+    }
+
+    #[test]
+    fn static_principal_gongbu_schemas_have_actionable_upgrade_errors() {
+        for version in [1, 2] {
+            let provenance = BinaryProvenance {
+                component: "gongbu-server".into(),
+                path: "/gongbu-server".into(),
+                product_version: "0.1.0".into(),
+                source_commit: "commit".into(),
+                executor_contract: "hubu-executor.v1".into(),
+                server_config_schema_version: Some(version),
+            };
+            let error = negotiate_principal_neutral_gongbu_schema(&provenance)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&format!(
+                "static-principal server config schema version {version}"
+            )));
+            assert!(error.contains("upgrade Gongbu"));
+            assert!(error.contains("schema version 3 or newer"));
+        }
     }
 
     #[test]
@@ -3086,7 +3121,7 @@ gongbu_caller = {}
 
     #[cfg(unix)]
     #[test]
-    fn disabled_profile_renders_idempotently_and_failed_validation_preserves_active() {
+    fn principal_neutral_profile_ignores_registration_state_and_preserves_active_on_failure() {
         let root = tempdir().unwrap();
         let profile = root.path().join("profile");
         let binaries = root.path().join("bin");
@@ -3207,7 +3242,20 @@ account = "gongbu-caller"
             .is_file());
         let handoff = codex_handoff(&profile, root.path()).unwrap();
         assert_eq!(handoff.hubu_endpoint, format!("http://{hubu_addr}"));
+        fs::create_dir_all(profile.join("state")).unwrap();
+        fs::write(
+            profile.join("state/hubu.sqlite3"),
+            b"simulated post-render agent registration",
+        )
+        .unwrap();
         render_profile_with_renderer(&profile, &binaries.join("hubu")).unwrap();
+        assert_eq!(fs::read(&active_path).unwrap(), active);
+        write_fake_binary(&binaries.join("gongbu-server"), false);
+        let upgrade = render_profile_with_renderer(&profile, &binaries.join("hubu"))
+            .unwrap_err()
+            .to_string();
+        assert!(upgrade.contains("static-principal server config schema version 2"));
+        assert!(upgrade.contains("upgrade Gongbu"));
         assert_eq!(fs::read(&active_path).unwrap(), active);
         write_fake_gongbu_v3_binary(&binaries.join("gongbu-server"), true);
         assert!(render_profile_with_renderer(&profile, &binaries.join("hubu")).is_err());
