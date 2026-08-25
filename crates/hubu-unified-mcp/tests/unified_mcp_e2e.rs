@@ -1,5 +1,6 @@
 mod support;
 
+use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::{
     thread,
@@ -28,6 +29,33 @@ fn execution_arguments() -> Value {
         "provider":"fixture",
         "adapter":"fixture",
         "model":"fixture-v1"
+    })
+}
+
+fn private_operation_key(mcp: &McpProcess, auth_token_id: &str) -> String {
+    Connection::open(mcp.operation_state_path())
+        .unwrap()
+        .query_row(
+            "SELECT operation_key FROM harness_operations WHERE auth_token_id = ?1",
+            [auth_token_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn execution_response(operation_key: &str, status: &str) -> Value {
+    json!({
+        "schema_version":2,
+        "execution_id":"exec-93",
+        "operation_key":operation_key,
+        "status":status,
+        "outcome":if status == "succeeded" { Some("gongbu-state-marker") } else { None },
+        "failure":null,
+        "authorization":{"amount_minor":25,"currency":"USD"},
+        "created_at":"2026-08-18T00:00:00Z",
+        "updated_at":"2026-08-18T00:00:01Z",
+        "started_at":null,
+        "completed_at":null
     })
 }
 
@@ -96,8 +124,22 @@ fn normalized_spend_wire_lifecycle_survives_redelivery_collision_and_restart() {
         "authorization_expires_at": "2099-08-24T00:00:00Z",
         "requires_human_approval": false
     });
-    hubu.respond_json("POST", "/spend/authorize", 200, backend_result.clone());
-    hubu.respond_json("POST", "/spend", 200, backend_result);
+    let mut distinct_authorization = backend_result.clone();
+    distinct_authorization["auth_token_id"] = json!("authorization-125-distinct");
+    hubu.respond_sequence_json(
+        "POST",
+        "/spend/authorize",
+        [(200, backend_result.clone()), (200, distinct_authorization)],
+    );
+    let mut submitted = backend_result.clone();
+    submitted["auth_token_id"] = json!("authorization-submit-125");
+    let mut distinct_submission = backend_result;
+    distinct_submission["auth_token_id"] = json!("authorization-submit-125-distinct");
+    hubu.respond_sequence_json(
+        "POST",
+        "/spend",
+        [(200, submitted), (200, distinct_submission)],
+    );
     let arguments = json!({
         "account_id":"account-125",
         "amount_cents":25,
@@ -278,6 +320,136 @@ fn normalized_spend_wire_lifecycle_survives_redelivery_collision_and_restart() {
 
 #[test]
 #[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn private_gongbu_continuation_binds_replays_restarts_and_redacts_recursively() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let state = tempfile::tempdir().unwrap();
+    let state_path = state.path().join("operations.sqlite3");
+    let mut first = McpProcess::start_with_operation_state(
+        Some((&hubu, HUBU_TOKEN)),
+        Some((&gongbu, GONGBU_TOKEN)),
+        &state_path,
+    );
+    first.initialize();
+    let authorized = first.call_with_meta(
+        3,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-93","amount_cents":25,"reason":"HUB-126 binding"}),
+        json!({"callId":"hub-126-authorization"}),
+    );
+    let public_handle = authorized["result"]["structuredContent"]["operation_handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let operation_key = private_operation_key(&first, "hubu-spend-token-93");
+    let mut failed = execution_response(&operation_key, "failed");
+    failed["failure"] = json!({
+        "code":"provider_failed",
+        "message":format!("nested private identity: {operation_key}")
+    });
+    gongbu.respond_json("POST", "/v2/executions", 200, failed);
+
+    let created = first.call(4, "gongbu_create_execution", execution_arguments());
+    assert_eq!(created["result"]["isError"], false);
+    let created_text = created["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(created_text.contains(&public_handle));
+    assert!(!created_text.contains("operation_key") && !created_text.contains(&operation_key));
+    assert!(created_text.contains("<private operation redacted>"));
+
+    let replay = first.call(5, "gongbu_create_execution", execution_arguments());
+    assert_eq!(replay["result"]["isError"], false);
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 2);
+
+    let mut changed = execution_arguments();
+    changed["model"] = json!("spoofed-model");
+    let conflict = first.call(6, "gongbu_create_execution", changed);
+    assert!(conflict["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("different execution intent"));
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 2);
+
+    for (id, protected) in [
+        (7, "operation_key"),
+        (8, "endpoint"),
+        (9, "credentials"),
+        (10, "retry"),
+        (11, "task_id"),
+    ] {
+        let mut spoofed = execution_arguments();
+        spoofed["input"][protected] = json!("model-owned");
+        let rejected = first.call(id, "gongbu_create_execution", spoofed);
+        assert_eq!(rejected["result"]["isError"], true);
+        assert!(rejected["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("protected_override"));
+    }
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 2);
+
+    let mut conflicting_execution = execution_response(&operation_key, "pending");
+    conflicting_execution["execution_id"] = json!("exec-conflict");
+    gongbu.respond_json("POST", "/v2/executions", 200, conflicting_execution);
+    let identity_conflict = first.call(12, "gongbu_create_execution", execution_arguments());
+    assert_eq!(identity_conflict["result"]["isError"], true);
+    assert!(identity_conflict["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("identity_conflict"));
+
+    first.finish(&[HUBU_TOKEN, GONGBU_TOKEN, &operation_key]);
+
+    gongbu.respond_json(
+        "POST",
+        "/v2/executions",
+        200,
+        execution_response(&operation_key, "succeeded"),
+    );
+    gongbu.respond_json(
+        "GET",
+        "/v1/executions/exec-93",
+        200,
+        execution_response(&operation_key, "succeeded"),
+    );
+    let mut restarted = McpProcess::start_with_operation_state(
+        Some((&hubu, HUBU_TOKEN)),
+        Some((&gongbu, GONGBU_TOKEN)),
+        &state_path,
+    );
+    restarted.initialize();
+    let recovered = restarted.call(13, "gongbu_create_execution", execution_arguments());
+    assert_eq!(recovered["result"]["isError"], false);
+    let status = restarted.call(
+        14,
+        "gongbu_get_execution",
+        json!({"execution_id":"exec-93"}),
+    );
+    let serialized = status.to_string();
+    assert!(serialized.contains(&public_handle));
+    assert!(!serialized.contains("operation_key") && !serialized.contains(&operation_key));
+
+    let persisted: (String, String, Option<String>) = Connection::open(&state_path)
+        .unwrap()
+        .query_row(
+            "SELECT gongbu_execution_id, gongbu_status, gongbu_outcome
+             FROM harness_operations WHERE auth_token_id = ?1",
+            ["hubu-spend-token-93"],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        persisted,
+        (
+            "exec-93".into(),
+            "succeeded".into(),
+            Some("gongbu-state-marker".into())
+        )
+    );
+    restarted.finish(&[HUBU_TOKEN, GONGBU_TOKEN, &operation_key]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn exact_hub_88_catalog_and_representative_governed_artifact_flow() {
     let hubu = BackendStub::start(BackendKind::Hubu);
     let gongbu = BackendStub::start(BackendKind::Gongbu);
@@ -329,8 +501,23 @@ fn exact_hub_88_catalog_and_representative_governed_artifact_flow() {
         authorized["result"]["structuredContent"]["spend_auth_token_id"],
         "hubu-spend-token-93"
     );
+    let operation_key = private_operation_key(&mcp, "hubu-spend-token-93");
+    gongbu.respond_json(
+        "POST",
+        "/v2/executions",
+        200,
+        execution_response(&operation_key, "succeeded"),
+    );
+    gongbu.respond_json(
+        "GET",
+        "/v1/executions/exec-93",
+        200,
+        execution_response(&operation_key, "succeeded"),
+    );
     let execution = mcp.call(6, "gongbu_create_execution", execution_arguments());
     assert_eq!(execution["result"]["isError"], false);
+    let serialized = execution.to_string();
+    assert!(!serialized.contains("operation_key") && !serialized.contains(&operation_key));
     let execution = mcp.call(7, "gongbu_get_execution", json!({"execution_id":"exec-93"}));
     assert_eq!(execution["result"]["isError"], false);
     let artifacts = mcp.call(
@@ -769,6 +956,14 @@ fn governed_hubu_to_gongbu_execution_fails_closed_without_hubu() {
     assert!(authorization_request
         .raw
         .contains("\"operation_key\":\"hubu:operation:v1:codex:"));
+
+    let operation_key = private_operation_key(&mcp, "hubu-spend-token-93");
+    gongbu.respond_json(
+        "POST",
+        "/v2/executions",
+        200,
+        execution_response(&operation_key, "pending"),
+    );
 
     let executed = mcp.call(4, "gongbu_create_execution", execution_arguments());
     assert_eq!(

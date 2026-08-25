@@ -67,7 +67,7 @@ pub(super) fn api_error(status: StatusCode, body: Option<&[u8]>) -> ToolError {
         (StatusCode::NOT_FOUND, _) => ToolError::new("not_found", "resource was not found"),
         (StatusCode::CONFLICT, Some("immutable_scope_conflict")) => ToolError::new(
             "immutable_scope_conflict",
-            "operation key was already used with different immutable input",
+            "authorization continuation was already used with different immutable input",
         ),
         (StatusCode::TOO_MANY_REQUESTS, _) => {
             ToolError::new("rate_limited", "Gongbu rate limit exceeded")
@@ -87,6 +87,50 @@ pub(super) fn text_result(value: &impl Serialize) -> ToolResult {
         }],
         is_error: false,
     }
+}
+
+pub(super) fn execution_result(
+    response: ExecutionResponse,
+    expected: Option<&crate::operation_registry::GongbuContinuation>,
+) -> Result<(ToolResult, crate::operation_registry::GongbuLifecycle), ToolError> {
+    if expected.is_some_and(|expected| expected.operation_key != response.operation_key) {
+        return Err(ToolError::new(
+            "identity_conflict",
+            "Gongbu returned an execution for a different normalized operation",
+        ));
+    }
+    if expected
+        .and_then(|expected| expected.execution_id.as_deref())
+        .is_some_and(|execution_id| execution_id != response.execution_id)
+    {
+        return Err(ToolError::new(
+            "identity_conflict",
+            "Gongbu returned a conflicting execution identity",
+        ));
+    }
+    let lifecycle = crate::operation_registry::GongbuLifecycle {
+        execution_id: response.execution_id.clone(),
+        operation_key: response.operation_key.clone(),
+        status: response.status.clone(),
+        outcome: response.outcome.clone(),
+    };
+    let private_operation_key = response.operation_key.clone();
+    let public = PublicExecutionResponse {
+        schema_version: response.schema_version,
+        execution_id: response.execution_id,
+        operation_handle: expected.map(|expected| expected.operation_handle.clone()),
+        status: response.status,
+        outcome: response.outcome,
+        failure: response.failure,
+        authorization: response.authorization,
+        created_at: response.created_at,
+        updated_at: response.updated_at,
+        started_at: response.started_at,
+        completed_at: response.completed_at,
+    };
+    let mut public = serde_json::to_value(public).expect("public execution response serializes");
+    scrub_private_projection(&mut public, &private_operation_key);
+    Ok((text_result(&public), lifecycle))
 }
 
 pub(super) fn artifact_result(
@@ -129,6 +173,7 @@ fn scrub_metadata(value: &mut Value) {
                 let key = key.to_ascii_lowercase();
                 !key.contains("storage_key")
                     && !key.contains("storage_path")
+                    && key != "operation_key"
                     && key != "path"
                     && !key.ends_with("_path")
             });
@@ -145,6 +190,32 @@ fn scrub_metadata(value: &mut Value) {
             }
         }
         Value::Array(values) => values.iter_mut().for_each(scrub_metadata),
+        Value::String(text) => scrub_private_text(text, None),
+        _ => {}
+    }
+}
+
+fn scrub_private_text(text: &mut String, private_operation_key: Option<&str>) {
+    if let Some(operation_key) = private_operation_key {
+        *text = text.replace(operation_key, "<private operation redacted>");
+    }
+    if text.contains("hubu:operation:v1:") {
+        *text = "<private operation redacted>".into();
+    }
+}
+
+fn scrub_private_projection(value: &mut Value, private_operation_key: &str) {
+    match value {
+        Value::Object(object) => {
+            object.retain(|key, _| key != "operation_key");
+            object
+                .values_mut()
+                .for_each(|value| scrub_private_projection(value, private_operation_key));
+        }
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| scrub_private_projection(value, private_operation_key)),
+        Value::String(text) => scrub_private_text(text, Some(private_operation_key)),
         _ => {}
     }
 }
@@ -161,6 +232,22 @@ pub(super) struct ExecutionResponse {
     schema_version: u32,
     execution_id: String,
     operation_key: String,
+    status: String,
+    outcome: Option<String>,
+    failure: Option<FailureResponse>,
+    authorization: Money,
+    created_at: String,
+    updated_at: String,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicExecutionResponse {
+    schema_version: u32,
+    execution_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_handle: Option<String>,
     status: String,
     outcome: Option<String>,
     failure: Option<FailureResponse>,

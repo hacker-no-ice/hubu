@@ -5,6 +5,7 @@ use std::{
     ffi::OsString,
     io::{BufRead, BufReader, Read, Write},
     path::Path,
+    path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc,
     thread,
@@ -17,6 +18,7 @@ const RECONCILIATION_TOKEN: &str = "hub107-reconciliation-capability";
 
 pub struct McpProcess {
     _state: Option<tempfile::TempDir>,
+    state_path: PathBuf,
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: mpsc::Receiver<Value>,
@@ -72,10 +74,10 @@ impl McpProcess {
         command
             .env("HUBU_MCP_TRUST_CLIENT_APPROVAL", "1")
             .env("HUBU_RECONCILIATION_TOKEN", RECONCILIATION_TOKEN);
-        Self::spawn(command, state)
+        Self::spawn(command, state, operation_state_path.to_path_buf())
     }
 
-    fn spawn(mut command: Command, state: Option<tempfile::TempDir>) -> Self {
+    fn spawn(mut command: Command, state: Option<tempfile::TempDir>, state_path: PathBuf) -> Self {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -96,6 +98,7 @@ impl McpProcess {
         });
         Self {
             _state: state,
+            state_path,
             child,
             stdin: Some(stdin),
             stdout,
@@ -103,6 +106,10 @@ impl McpProcess {
             transcript: Vec::new(),
             notifications: VecDeque::new(),
         }
+    }
+
+    pub fn operation_state_path(&self) -> &Path {
+        &self.state_path
     }
 
     pub fn request(&mut self, request: Value) -> Value {

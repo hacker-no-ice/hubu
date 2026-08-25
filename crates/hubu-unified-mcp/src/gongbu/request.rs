@@ -12,7 +12,12 @@ pub(super) enum PreparedCall {
 
 pub(super) fn prepare(name: &str, arguments: Value) -> Result<PreparedCall, ToolError> {
     match name {
-        "gongbu_create_execution" => Ok(PreparedCall::Create(parse(arguments)?)),
+        "gongbu_create_execution" => {
+            reject_protected_overrides(&arguments)?;
+            let request: CreateExecutionRequest = parse(arguments)?;
+            validate_id(&request.spend_auth_token_id)?;
+            Ok(PreparedCall::Create(request))
+        }
         "gongbu_get_execution" => {
             let input: ExecutionIdInput = parse(arguments)?;
             validate_id(&input.execution_id)?;
@@ -32,6 +37,19 @@ pub(super) fn prepare(name: &str, arguments: Value) -> Result<PreparedCall, Tool
     }
 }
 
+pub(super) fn create_continuation_id(arguments: &Value) -> Result<String, ToolError> {
+    reject_protected_overrides(arguments)?;
+    let request: CreateExecutionRequest = parse(arguments.clone())?;
+    validate_id(&request.spend_auth_token_id)?;
+    Ok(request.spend_auth_token_id)
+}
+
+pub(super) fn status_execution_id(arguments: &Value) -> Result<String, ToolError> {
+    let input: ExecutionIdInput = parse(arguments.clone())?;
+    validate_id(&input.execution_id)?;
+    Ok(input.execution_id)
+}
+
 fn parse<T: DeserializeOwned>(arguments: Value) -> Result<T, ToolError> {
     serde_json::from_value(arguments).map_err(|_| ToolError::invalid())
 }
@@ -46,6 +64,57 @@ fn validate_id(value: &str) -> Result<(), ToolError> {
         Err(ToolError::invalid())
     } else {
         Ok(())
+    }
+}
+
+fn reject_protected_overrides(arguments: &Value) -> Result<(), ToolError> {
+    let input = arguments.get("input").ok_or_else(ToolError::invalid)?;
+    if contains_protected_override(input) {
+        return Err(ToolError::new(
+            "protected_override",
+            "execution input contains protected platform or transport controls",
+        ));
+    }
+    Ok(())
+}
+
+fn contains_protected_override(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(contains_protected_override),
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            let normalized = key.to_ascii_lowercase().replace('-', "_");
+            matches!(
+                normalized.as_str(),
+                "operation_key"
+                    | "operation_handle"
+                    | "task_id"
+                    | "auth_token_id"
+                    | "spend_auth_token_id"
+                    | "decision_id"
+                    | "claim_id"
+                    | "hubu_claim_id"
+                    | "execution_id"
+                    | "execution_status"
+                    | "continuation_state"
+                    | "lifecycle_state"
+                    | "gongbu_status"
+                    | "endpoint"
+                    | "base_url"
+                    | "api_key"
+                    | "credential"
+                    | "credentials"
+                    | "authorization_header"
+                    | "bearer_token"
+                    | "header"
+                    | "headers"
+                    | "retry"
+                    | "retries"
+                    | "max_retries"
+                    | "retry_delay"
+                    | "retry_backoff"
+            ) || contains_protected_override(value)
+        }),
+        _ => false,
     }
 }
 

@@ -1,7 +1,7 @@
 [
   {
     "name": "gongbu_create_execution",
-    "description": "Create or replay a Gongbu execution from a Hubu spend authorization token and execution intent.",
+    "description": "Continue one authorized normalized operation into one Gongbu execution using its opaque continuation identifier and execution intent.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
