@@ -23,6 +23,7 @@ use thiserror::Error;
 #[cfg(feature = "local-fixture-canary")]
 use super::contract::{
     AdapterCapabilities, AdapterOutcome, NormalizedArtifact, NormalizedRequest, ProviderFailure,
+    ProviderPhase,
 };
 #[cfg(feature = "local-fixture-canary")]
 use crate::secrets::ProviderSecret;
@@ -125,7 +126,7 @@ impl ProviderAdapter for LocalFixtureAdapter {
 
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
-            vendor_enforced_idempotency: false,
+            vendor_enforced_idempotency: true,
         }
     }
 
@@ -134,8 +135,16 @@ impl ProviderAdapter for LocalFixtureAdapter {
         _: &NormalizedRequest,
         _: &serde_json::Value,
         _: &ProviderSecret,
-        _: Option<&str>,
+        vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome, ProviderFailure> {
+        let provider_request_id = vendor_idempotency_key
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                ProviderFailure::release(
+                    "fixture_idempotency_key_missing",
+                    ProviderPhase::Submission,
+                )
+            })?;
         Ok(AdapterOutcome {
             usage: Some(crate::provider_contract::NormalizedUsage {
                 images: Some(1),
@@ -143,7 +152,7 @@ impl ProviderAdapter for LocalFixtureAdapter {
             }),
             provider_amount_minor: Some(1),
             provider_currency: Some("USD".into()),
-            provider_request_id: Some("local-fixture-request".into()),
+            provider_request_id: Some(format!("local-fixture-request-{provider_request_id}")),
             provider_operation_id: None,
             artifacts: vec![NormalizedArtifact {
                 media_type: "image/png".into(),
@@ -247,10 +256,11 @@ impl ValidatedProviderCatalog {
     }
 
     pub fn needs_stable_idempotency_key(target: &ProviderConfigVersion) -> bool {
-        matches!(
-            target.settings(),
-            AdapterSettings::Flux2Api(config) if config.idempotency_header.is_some()
-        )
+        match target.settings() {
+            AdapterSettings::Fixture => true,
+            AdapterSettings::Flux2Api(config) => config.idempotency_header.is_some(),
+            _ => false,
+        }
     }
 }
 
@@ -319,6 +329,17 @@ mod tests {
             catalog.resolve_active(&key).unwrap_err(),
             RegistryError::TargetUnavailable
         );
+    }
+
+    #[test]
+    fn local_fixture_uses_operation_scoped_provider_request_identity() {
+        let targets = fixture_targets();
+        let target = targets
+            .resolve("image_generation", "example", "fixture", "image-v1")
+            .unwrap();
+        assert!(ValidatedProviderCatalog::needs_stable_idempotency_key(
+            target
+        ));
     }
 
     #[test]
