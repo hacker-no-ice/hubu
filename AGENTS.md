@@ -24,13 +24,16 @@ through the full PR lifecycle unless the user says otherwise:
 3. Request review with `@codex review`.
 4. Address only P0/P1 findings and re-request review after remediation, for at
    most 2 remediation rounds.
-5. After the requested review completes, merge when required checks pass and no
-   P0/P1 findings remain. If they remain after 2 rounds, or remediation requires
-   an ambiguous product or design decision, stop and wait for human input.
+5. After the requested review completes and required checks pass, leave the PR
+   open and report that it is ready for human review and merge. Do not merge
+   unless the user explicitly asks.
+6. If P0/P1 findings remain after 2 rounds, or remediation requires an ambiguous
+   product or design decision, stop and wait for human input.
 
-P2+ findings do not block merge unless they expose a correctness or safety issue
-that should reasonably be treated as P0/P1. Requests only to scope, investigate,
-review, plan, or discuss do not trigger this lifecycle.
+P2+ findings do not block handoff for human review unless they expose a
+correctness or safety issue that should reasonably be treated as P0/P1. Requests
+only to scope, investigate, review, plan, or discuss do not trigger this
+lifecycle.
 
 ## Unified workspace discipline
 
