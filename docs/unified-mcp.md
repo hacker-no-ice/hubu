@@ -154,6 +154,13 @@ ambiguous provider mutation performed no work. Every acknowledged state sets
 `reconciliation_required` record after adapter reconciliation exhaustion so
 later operator evidence can still settle or release the financial state.
 
+The same status tool safely projects handles before Gongbu acknowledgement:
+`awaiting_hubu_result` requires exact redelivery of the original harness call,
+`approval_required` requires resolving the existing human approval, an allowed
+authorization is `authorized`, and a synchronous `hubu_submit_spend` result is
+already terminal. Denied or malformed allowed authorizations are terminal
+failures rather than executable continuations.
+
 The router does not add a success envelope, rename fields, translate currency
 units, expose filesystem locations, or convert an application error into a
 successful payload.

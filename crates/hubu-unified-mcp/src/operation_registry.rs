@@ -216,6 +216,7 @@ pub(crate) struct ClaimedDurableOperation {
 #[derive(Debug)]
 struct PersistedOperation {
     request_hash: String,
+    tool_name: String,
     operation_key: Option<String>,
     operation_handle: String,
     codex_call_id: Option<String>,
@@ -345,7 +346,7 @@ impl OperationRegistry {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
-                "SELECT request_hash, operation_key, operation_handle, codex_call_id,
+                "SELECT request_hash, tool_name, operation_key, operation_handle, codex_call_id,
                         claude_tool_use_id, hubu_invocation_id, task_id, decision,
                         result_json
                  FROM harness_operations
@@ -358,20 +359,22 @@ impl OperationRegistry {
                 |row| {
                     Ok(PersistedOperation {
                         request_hash: row.get(0)?,
-                        operation_key: row.get(1)?,
-                        operation_handle: row.get(2)?,
-                        codex_call_id: row.get(3)?,
-                        claude_tool_use_id: row.get(4)?,
-                        hubu_invocation_id: row.get(5)?,
-                        task_id: row.get(6)?,
-                        decision: row.get(7)?,
-                        result_json: row.get(8)?,
+                        tool_name: row.get(1)?,
+                        operation_key: row.get(2)?,
+                        operation_handle: row.get(3)?,
+                        codex_call_id: row.get(4)?,
+                        claude_tool_use_id: row.get(5)?,
+                        hubu_invocation_id: row.get(6)?,
+                        task_id: row.get(7)?,
+                        decision: row.get(8)?,
+                        result_json: row.get(9)?,
                     })
                 },
             )
             .optional()?;
         if let Some(existing) = existing {
             if existing.request_hash != request_hash
+                || existing.tool_name != tool_name
                 || existing.codex_call_id != identity.codex_call_id
                 || existing.claude_tool_use_id != identity.claude_tool_use_id
                 || existing.hubu_invocation_id != identity.hubu_invocation_id
@@ -407,16 +410,17 @@ impl OperationRegistry {
         let operation_handle = format!("hubu:public-operation:v1:{}", Uuid::new_v4().simple());
         transaction.execute(
             "INSERT INTO harness_operations (
-                 platform, installation_id, harness_call_id, request_hash, operation_key,
+                 platform, installation_id, harness_call_id, request_hash, tool_name, operation_key,
                  operation_handle,
                  codex_call_id, claude_tool_use_id, hubu_invocation_id,
                  controlled_installation_id, task_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 identity.platform,
                 self.installation_id,
                 identity.harness_call_id,
                 request_hash,
+                tool_name,
                 operation_key,
                 operation_handle,
                 identity.codex_call_id,
@@ -599,7 +603,7 @@ impl OperationRegistry {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let continuation = transaction
             .query_row(
-                "SELECT operation_key, operation_handle, decision,
+                "SELECT operation_key, operation_handle, tool_name, decision,
                         gongbu_request_hash, gongbu_execution_id
                  FROM harness_operations WHERE auth_token_id = ?1",
                 [auth_token_id],
@@ -607,9 +611,10 @@ impl OperationRegistry {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(2)?,
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
@@ -618,11 +623,14 @@ impl OperationRegistry {
         let operation_key = continuation.0.ok_or_else(|| {
             anyhow!("authorization continuation is missing private operation identity")
         })?;
-        if continuation.2.as_deref() != Some("allow") {
+        if continuation.2 != "hubu_authorize_spend" {
+            bail!("authorization continuation does not belong to an execution authorization");
+        }
+        if continuation.3.as_deref() != Some("allow") {
             bail!("authorization continuation is not executable");
         }
         if continuation
-            .3
+            .4
             .as_deref()
             .is_some_and(|existing| existing != request_hash)
         {
@@ -659,7 +667,7 @@ impl OperationRegistry {
         Ok(GongbuContinuation {
             operation_key,
             operation_handle: continuation.1,
-            execution_id: continuation.4,
+            execution_id: continuation.5,
         })
     }
 
@@ -668,26 +676,45 @@ impl OperationRegistry {
         operation_handle: &str,
     ) -> Result<DurableOperationStatus> {
         validate_public_operation_handle(operation_handle)?;
-        self.connection
+        let persisted = self
+            .connection
             .query_row(
                 "SELECT operation_handle, operation_state, gongbu_execution_id,
-                        operation_result_code, COALESCE(operation_updated_at, created_at)
+                        operation_result_code, tool_name, decision, auth_token_id,
+                        COALESCE(operation_updated_at, result_recorded_at,
+                                 dispatch_started_at, created_at)
                  FROM harness_operations WHERE operation_handle = ?1",
                 [operation_handle],
                 |row| {
-                    Ok(DurableOperationStatus {
-                        operation_handle: row.get(0)?,
-                        state: row
-                            .get::<_, Option<String>>(1)?
-                            .unwrap_or_else(|| "authorized".into()),
-                        execution_id: row.get(2)?,
-                        result_code: row.get(3)?,
-                        updated_at: row.get(4)?,
-                    })
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
                 },
             )
             .optional()?
-            .ok_or_else(|| anyhow!("public operation handle is unknown"))
+            .ok_or_else(|| anyhow!("public operation handle is unknown"))?;
+        let (state, result_code) = match persisted.1 {
+            Some(state) => (state, persisted.3),
+            None => pre_execution_projection(
+                &persisted.4,
+                persisted.5.as_deref(),
+                persisted.6.is_some(),
+            )?,
+        };
+        Ok(DurableOperationStatus {
+            operation_handle: persisted.0,
+            state,
+            execution_id: persisted.2,
+            result_code,
+            updated_at: persisted.7,
+        })
     }
 
     pub(crate) fn promote_accepted_operations(&mut self) -> Result<usize> {
@@ -1121,6 +1148,7 @@ fn create_schema(connection: &Connection) -> Result<()> {
              installation_id TEXT NOT NULL CHECK(length(installation_id) BETWEEN 1 AND 128),
              harness_call_id TEXT NOT NULL CHECK(length(harness_call_id) BETWEEN 1 AND 512),
              request_hash TEXT NOT NULL CHECK(length(request_hash) = 71),
+             tool_name TEXT NOT NULL CHECK(length(tool_name) BETWEEN 1 AND 128),
              operation_key TEXT UNIQUE CHECK(operation_key IS NULL OR length(operation_key) BETWEEN 1 AND 160),
              operation_handle TEXT NOT NULL UNIQUE CHECK(length(operation_handle) BETWEEN 1 AND 160),
              codex_call_id TEXT CHECK(codex_call_id IS NULL OR length(codex_call_id) BETWEEN 1 AND 512),
@@ -1220,6 +1248,28 @@ fn public_terminal_projection(lifecycle: &GongbuLifecycle) -> (&'static str, &'s
     }
 }
 
+fn pre_execution_projection(
+    tool_name: &str,
+    decision: Option<&str>,
+    has_authorization: bool,
+) -> Result<(String, Option<String>)> {
+    let projection = match (tool_name, decision, has_authorization) {
+        ("hubu_authorize_spend", Some("allow"), true) => ("authorized", None),
+        ("hubu_authorize_spend", Some("allow"), false) => {
+            ("failed", Some("authorization_continuation_unavailable"))
+        }
+        ("hubu_authorize_spend", Some("deny"), _) => ("failed", Some("authorization_denied")),
+        ("hubu_submit_spend", Some("allow"), _) => ("succeeded", Some("spend_succeeded")),
+        ("hubu_submit_spend", Some("deny"), _) => ("failed", Some("spend_denied")),
+        ("hubu_authorize_spend" | "hubu_submit_spend", Some("needs_approval"), _) => {
+            ("approval_required", Some("human_approval_required"))
+        }
+        ("hubu_authorize_spend" | "hubu_submit_spend", None, _) => ("awaiting_hubu_result", None),
+        _ => bail!("normalized operation has an unsupported pre-execution state"),
+    };
+    Ok((projection.0.to_owned(), projection.1.map(str::to_owned)))
+}
+
 fn ensure_lease_update(changed: usize) -> Result<()> {
     if changed == 1 {
         Ok(())
@@ -1247,7 +1297,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         .context("validate unified MCP operation registry installation schema")?;
     connection
         .prepare(
-            "SELECT platform, installation_id, harness_call_id, request_hash, operation_key,
+            "SELECT platform, installation_id, harness_call_id, request_hash, tool_name, operation_key,
                     operation_handle,
                     codex_call_id, claude_tool_use_id, hubu_invocation_id,
                     controlled_installation_id, task_id, decision, decision_id,
@@ -1454,6 +1504,91 @@ mod tests {
             .resolve_or_allocate(&codex("call-2"), "hubu_submit_spend", &json!({"a": 1}))
             .unwrap();
         assert_ne!(first.operation_key, second.operation_key);
+    }
+
+    #[test]
+    fn pre_execution_status_uses_tool_and_decision_instead_of_assuming_authorized() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let pending = registry
+            .resolve_or_allocate(
+                &codex("status-pending"),
+                "hubu_authorize_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        assert_eq!(
+            registry
+                .durable_operation_status(&pending.operation_handle)
+                .unwrap()
+                .state,
+            "awaiting_hubu_result"
+        );
+
+        let cases = [
+            (
+                "status-denied",
+                "hubu_authorize_spend",
+                json!({"decision":"deny"}),
+                "failed",
+                Some("authorization_denied"),
+            ),
+            (
+                "status-approval",
+                "hubu_authorize_spend",
+                json!({"decision":"needs_approval"}),
+                "approval_required",
+                Some("human_approval_required"),
+            ),
+            (
+                "status-missing-token",
+                "hubu_authorize_spend",
+                json!({"decision":"allow"}),
+                "failed",
+                Some("authorization_continuation_unavailable"),
+            ),
+            (
+                "status-submitted",
+                "hubu_submit_spend",
+                json!({"decision":"allow","auth_token_id":"unused-submit-token"}),
+                "succeeded",
+                Some("spend_succeeded"),
+            ),
+        ];
+        for (call_id, tool_name, result, expected_state, expected_code) in cases {
+            let operation = registry
+                .resolve_or_allocate(&codex(call_id), tool_name, &json!({"amount": 1}))
+                .unwrap();
+            registry
+                .record_authorization_result(&operation.operation_handle, &result)
+                .unwrap();
+            let status = registry
+                .durable_operation_status(&operation.operation_handle)
+                .unwrap();
+            assert_eq!(status.state, expected_state);
+            assert_eq!(status.result_code.as_deref(), expected_code);
+        }
+
+        let submitted = registry
+            .resolve_or_allocate(
+                &codex("status-submit-no-continuation"),
+                "hubu_submit_spend",
+                &json!({"amount": 1}),
+            )
+            .unwrap();
+        registry
+            .record_authorization_result(
+                &submitted.operation_handle,
+                &json!({"decision":"allow","auth_token_id":"submit-is-not-continuation"}),
+            )
+            .unwrap();
+        let error = registry
+            .resolve_gongbu_continuation(
+                "submit-is-not-continuation",
+                &execution_arguments("submit-is-not-continuation"),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not belong to an execution authorization"));
     }
 
     #[test]

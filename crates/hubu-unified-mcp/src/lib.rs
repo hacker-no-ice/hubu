@@ -1144,12 +1144,22 @@ impl Server {
 }
 
 fn operation_status_result(status: &operation_registry::DurableOperationStatus) -> Value {
-    let guidance = if status.state == "authorized" {
-        "Submit this authorization continuation once with gongbu_create_execution."
-    } else if status.terminal() {
-        "This operation is terminal. Do not submit a replacement for the acknowledged operation."
-    } else {
-        "The operation was acknowledged. Do not submit a replacement; observe this operation_handle until it is terminal."
+    let guidance = match status.state.as_str() {
+        "authorized" => {
+            "Submit this authorization continuation once with gongbu_create_execution."
+        }
+        "approval_required" => {
+            "Human approval is required. Do not submit a replacement; resolve the existing approval and redeliver the exact original harness call."
+        }
+        "awaiting_hubu_result" => {
+            "The Hubu result is not established. Do not submit a replacement; redeliver the exact original harness call with the same identity."
+        }
+        _ if status.terminal() => {
+            "This operation is terminal. Do not submit a replacement for this operation."
+        }
+        _ => {
+            "The operation was acknowledged. Do not submit a replacement; observe this operation_handle until it is terminal."
+        }
     };
     let projection = json!({
         "schema_version": 1,
@@ -1347,6 +1357,22 @@ mod tests {
         ] {
             assert!(!serialized.contains(private));
         }
+    }
+
+    #[test]
+    fn pre_execution_status_never_offers_continuation_for_required_approval() {
+        let response = operation_status_result(&operation_registry::DurableOperationStatus {
+            operation_handle: format!("hubu:public-operation:v1:{}", "b".repeat(32)),
+            state: "approval_required".into(),
+            execution_id: None,
+            result_code: Some("human_approval_required".into()),
+            updated_at: "2026-08-25T00:00:00.000Z".into(),
+        });
+        assert_eq!(response["structuredContent"]["terminal"], false);
+        assert_eq!(response["structuredContent"]["replacement_safe"], false);
+        let guidance = response["structuredContent"]["guidance"].as_str().unwrap();
+        assert!(guidance.contains("Human approval"));
+        assert!(!guidance.contains("gongbu_create_execution"));
     }
 
     #[test]
