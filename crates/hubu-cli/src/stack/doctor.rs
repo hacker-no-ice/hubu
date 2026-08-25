@@ -472,7 +472,10 @@ fn inspect_profile_with(
             "hubu",
             "credentials.toml:files.hubu_auth",
             credential_paths.hubu_auth.clone(),
-            hubu_managed,
+            hubu_managed
+                && configured_files
+                    .and_then(|files| files.hubu_auth.as_ref())
+                    .is_none(),
             configured_files
                 .and_then(|files| files.hubu_auth.as_ref())
                 .is_some(),
@@ -482,7 +485,10 @@ fn inspect_profile_with(
             "hubu",
             "credentials.toml:files.hubu_approval",
             credential_paths.hubu_approval.clone(),
-            hubu_managed,
+            hubu_managed
+                && configured_files
+                    .and_then(|files| files.hubu_approval.as_ref())
+                    .is_none(),
             configured_files
                 .and_then(|files| files.hubu_approval.as_ref())
                 .is_some(),
@@ -492,7 +498,10 @@ fn inspect_profile_with(
             "hubu",
             "credentials.toml:files.hubu_reconciliation",
             credential_paths.hubu_reconciliation.clone(),
-            hubu_managed,
+            hubu_managed
+                && configured_files
+                    .and_then(|files| files.hubu_reconciliation.as_ref())
+                    .is_none(),
             configured_files
                 .and_then(|files| files.hubu_reconciliation.as_ref())
                 .is_some(),
@@ -2121,6 +2130,28 @@ account = "gongbu-caller"
         }));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn missing_explicit_managed_hubu_override_is_not_pending_managed_work() {
+        let root = tempdir().unwrap();
+        let (profile, renderer) = write_complete_managed_profile(root.path());
+        let explicit_auth = root.path().join("credentials/auth");
+        fs::remove_file(&explicit_auth).unwrap();
+
+        let report = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+
+        assert_eq!(report.classification, ProfileClassification::Invalid);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.code == "credential_reference_invalid"));
+        assert!(report
+            .checks
+            .iter()
+            .all(|check| check.code != "managed_credential_pending"));
+        assert!(!explicit_auth.exists());
+    }
+
     #[test]
     fn parse_errors_are_redacted_and_unknown_fields_are_actionable() {
         let root = tempdir().unwrap();
@@ -2410,8 +2441,44 @@ deliberately_unvalidated_external_shape = true
     #[cfg(unix)]
     #[test]
     fn protected_runtime_probes_produce_running_ready() {
+        use std::os::unix::fs::PermissionsExt;
+
         let root = tempdir().unwrap();
         let (profile, renderer) = write_complete_managed_profile(root.path());
+        let managed_hubu = profile.join("state/credentials/hubu");
+        fs::create_dir_all(&managed_hubu).unwrap();
+        fs::set_permissions(&managed_hubu, fs::Permissions::from_mode(0o700)).unwrap();
+        for (name, value) in [
+            ("auth", "auth-secret"),
+            ("approval", "approval-secret"),
+            ("reconciliation", "reconciliation-secret"),
+        ] {
+            let path = managed_hubu.join(name);
+            fs::write(&path, value).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        fs::write(
+            profile.join("credentials.toml"),
+            format!(
+                r#"schema_version = 1
+[files]
+gongbu_caller = {}
+[opaque.gongbu_hubu]
+service = "hubu-test"
+account = "gongbu-hubu"
+[opaque.gongbu_caller]
+service = "hubu-test"
+account = "gongbu-caller"
+"#,
+                quote(
+                    root.path()
+                        .join("credentials/gongbu-caller")
+                        .display()
+                        .to_string()
+                )
+            ),
+        )
+        .unwrap();
         let hubu_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let gongbu_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let temporal_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2491,7 +2558,7 @@ deliberately_unvalidated_external_shape = true
             .iter()
             .any(|check| check.code == "temporal_reachable"));
 
-        fs::remove_file(root.path().join("credentials/approval")).unwrap();
+        fs::remove_file(managed_hubu.join("approval")).unwrap();
         let degraded = inspect_profile_with(&profile, opaque_available, Some(&renderer));
         assert_ne!(degraded.classification, ProfileClassification::RunningReady);
         assert!(degraded

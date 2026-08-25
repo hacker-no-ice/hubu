@@ -52,9 +52,9 @@ gongbu_caller = "/absolute/path/to/gongbu.caller-token"
 
 All configured paths must be safe and absolute, must identify distinct
 capabilities, and must never point at the source TOML or backend databases.
-External owners must provide existing readable regular files. An advanced
-managed-Hubu destination may be absent before first start because the final
-Hubu process owns creation.
+Every explicit override is operator-owned and must provide an existing readable
+regular file. Only omitted, profile-derived managed destinations may be absent
+before first start and created by the final Hubu process.
 
 ### `files.hubu_auth`
 

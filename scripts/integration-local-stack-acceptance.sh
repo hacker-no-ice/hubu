@@ -222,7 +222,10 @@ stack_lifecycle() {
 }
 
 managed_doctor="$("${hubu_bin}" stack doctor --profile "${profile}")"
-grep -F 'managed_credential_pending' <<<"${managed_doctor}" >/dev/null || fail "doctor did not classify unprovisioned managed credentials"
+if ! grep -F 'managed_credential_pending' <<<"${managed_doctor}" >/dev/null; then
+  printf '%s\n' "${managed_doctor}" >&2
+  fail "doctor did not classify unprovisioned managed credentials"
+fi
 [[ -z "$(find "${managed_credential_root}" -type f ! -name .gitignore -print -quit)" ]] || fail "doctor provisioned managed credentials"
 if grep -Eq '^\[files\]|^\[opaque\.gongbu_(hubu|caller)\]|state/credentials' "${profile}/credentials.toml"; then
   fail "managed credential implementation details leaked into operator source"
@@ -268,6 +271,11 @@ serve_config="${serve_record#*|}"
 launcher_pid="$(jq -r '.processes["hubu-server"].pid' "${profile}/runtime/launcher-state.json")"
 [[ "${serve_pid}" == "${launcher_pid}" ]] || fail "first Hubu process was not launcher-owned"
 [[ "${serve_config}" == "${profile}/generated/${active_generation}/hubu-launch.json" ]] || fail "first Hubu process did not use the active managed config"
+jq -e '
+  .auth_token_file_generated == true and
+  .approval_token_file_generated == true and
+  .reconciliation_token_file_generated == true
+' "${serve_config}" >/dev/null || fail "derived Hubu credential ownership was not preserved in the active config"
 running_doctor="$("${hubu_bin}" stack doctor --json --profile "${profile}")"
 jq -e '[.checks[] | select(.code == "credential_file_available")] | length == 4 and all(has("field") | not)' <<<"${running_doctor}" >/dev/null || fail "running doctor exposed derived credential paths as source fields"
 if jq -e '.checks[] | select(.code == "managed_credential_pending")' <<<"${running_doctor}" >/dev/null; then

@@ -481,6 +481,10 @@ fn load_local_auth_token() -> Result<LoadedLocalAuthToken> {
     }
 
     let path = auth_token_file_path();
+    let file_generated = credential_file_is_generated(
+        AUTH_TOKEN_FILE_ENV,
+        launch_config::AUTH_TOKEN_FILE_GENERATED_ENV,
+    );
     match read_token_file(&path) {
         Ok(contents) => {
             let token = contents.trim().to_string();
@@ -490,14 +494,22 @@ fn load_local_auth_token() -> Result<LoadedLocalAuthToken> {
                     path.display()
                 ));
             }
-            validate_generated_file_token(&token, "hubu_", &path)?;
+            if file_generated {
+                validate_generated_file_token(&token, "hubu_", &path)?;
+            }
             Ok(LoadedLocalAuthToken {
                 value: token,
                 source: path.display().to_string(),
             })
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let token = create_auth_token_file(&path)?;
+            if !file_generated {
+                return Err(anyhow!(
+                    "Hubu auth token file `{}` is externally supplied and does not exist",
+                    path.display()
+                ));
+            }
+            let token = create_auth_token_file(&path, file_generated)?;
             Ok(LoadedLocalAuthToken {
                 value: token,
                 source: path.display().to_string(),
@@ -532,6 +544,10 @@ fn load_local_reconciliation_token() -> Result<LoadedLocalAuthToken> {
     }
 
     let path = reconciliation_token_file_path();
+    let file_generated = credential_file_is_generated(
+        RECONCILIATION_TOKEN_FILE_ENV,
+        launch_config::RECONCILIATION_TOKEN_FILE_GENERATED_ENV,
+    );
     match read_token_file(&path) {
         Ok(contents) => {
             let token = contents.trim().to_string();
@@ -541,14 +557,22 @@ fn load_local_reconciliation_token() -> Result<LoadedLocalAuthToken> {
                     path.display()
                 ));
             }
-            validate_generated_file_token(&token, "hubu_reconcile_", &path)?;
+            if file_generated {
+                validate_generated_file_token(&token, "hubu_reconcile_", &path)?;
+            }
             Ok(LoadedLocalAuthToken {
                 value: token,
                 source: path.display().to_string(),
             })
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let token = create_token_file(&path, "hubu_reconcile_")?;
+            if !file_generated {
+                return Err(anyhow!(
+                    "Hubu reconciliation token file `{}` is externally supplied and does not exist",
+                    path.display()
+                ));
+            }
+            let token = create_token_file(&path, "hubu_reconcile_", file_generated)?;
             Ok(LoadedLocalAuthToken {
                 value: token,
                 source: path.display().to_string(),
@@ -580,6 +604,10 @@ fn load_local_approval_token() -> Result<LoadedLocalAuthToken> {
     }
 
     let path = approval_token_file_path();
+    let file_generated = credential_file_is_generated(
+        APPROVAL_TOKEN_FILE_ENV,
+        launch_config::APPROVAL_TOKEN_FILE_GENERATED_ENV,
+    );
     match read_token_file(&path) {
         Ok(contents) => {
             let token = contents.trim().to_string();
@@ -589,14 +617,22 @@ fn load_local_approval_token() -> Result<LoadedLocalAuthToken> {
                     path.display()
                 ));
             }
-            validate_generated_file_token(&token, "hubu_approve_", &path)?;
+            if file_generated {
+                validate_generated_file_token(&token, "hubu_approve_", &path)?;
+            }
             Ok(LoadedLocalAuthToken {
                 value: token,
                 source: path.display().to_string(),
             })
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let token = create_token_file(&path, "hubu_approve_")?;
+            if !file_generated {
+                return Err(anyhow!(
+                    "Hubu approval token file `{}` is externally supplied and does not exist",
+                    path.display()
+                ));
+            }
+            let token = create_token_file(&path, "hubu_approve_", file_generated)?;
             Ok(LoadedLocalAuthToken {
                 value: token,
                 source: path.display().to_string(),
@@ -625,11 +661,31 @@ fn approval_token_file_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_APPROVAL_TOKEN_FILE))
 }
 
-fn create_auth_token_file(path: &Path) -> Result<String> {
-    create_token_file(path, "hubu_")
+fn credential_file_is_generated(path_env: &str, generated_env: &str) -> bool {
+    let path = env::var_os(path_env).map(PathBuf::from);
+    let generated = env::var(generated_env).ok();
+    credential_file_is_generated_state(path.as_deref(), generated.as_deref())
 }
 
-fn create_token_file(path: &Path, prefix: &str) -> Result<String> {
+fn credential_file_is_generated_state(path: Option<&Path>, generated: Option<&str>) -> bool {
+    match generated {
+        Some("1") => true,
+        Some("0") => false,
+        _ => path.is_none_or(|path| !path.exists()),
+    }
+}
+
+fn create_auth_token_file(path: &Path, file_generated: bool) -> Result<String> {
+    create_token_file(path, "hubu_", file_generated)
+}
+
+fn create_token_file(path: &Path, prefix: &str, file_generated: bool) -> Result<String> {
+    if !file_generated && !path.exists() {
+        return Err(anyhow!(
+            "Hubu credential file `{}` is externally supplied and does not exist",
+            path.display()
+        ));
+    }
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -654,7 +710,9 @@ fn create_token_file(path: &Path, prefix: &str) -> Result<String> {
                     path.display()
                 ))
             } else {
-                validate_generated_file_token(&token, prefix, path)?;
+                if file_generated {
+                    validate_generated_file_token(&token, prefix, path)?;
+                }
                 Ok(token)
             }
         }
@@ -706,12 +764,10 @@ fn publish_new_private_file(path: &Path, value: &[u8]) -> std::io::Result<bool> 
 }
 
 fn validate_generated_file_token(token: &str, prefix: &str, path: &Path) -> Result<()> {
-    let truncated_prefix = !token.is_empty() && prefix.starts_with(token);
-    let malformed_generated_token = token.starts_with(prefix)
-        && token
-            .strip_prefix(prefix)
-            .is_none_or(|suffix| suffix.parse::<AgentSessionId>().is_err());
-    if truncated_prefix || malformed_generated_token {
+    let valid = token
+        .strip_prefix(prefix)
+        .is_some_and(|suffix| suffix.parse::<AgentSessionId>().is_ok());
+    if !valid {
         return Err(anyhow!(
             "Hubu auth token file `{}` contains incomplete generated credential state",
             path.display()
@@ -5624,7 +5680,7 @@ mod tests {
 
         let root = tempdir().unwrap();
         let credential = root.path().join("auth");
-        let token = create_token_file(&credential, "hubu_").unwrap();
+        let token = create_token_file(&credential, "hubu_", true).unwrap();
         assert!(token
             .strip_prefix("hubu_")
             .is_some_and(|suffix| suffix.parse::<AgentSessionId>().is_ok()));
@@ -5653,19 +5709,48 @@ mod tests {
             let partial = root.path().join(name);
             fs::write(&partial, format!("{contents}\n")).unwrap();
             fs::set_permissions(&partial, fs::Permissions::from_mode(0o600)).unwrap();
-            assert!(create_token_file(&partial, prefix)
+            assert!(create_token_file(&partial, prefix, true)
                 .unwrap_err()
                 .to_string()
                 .contains("incomplete generated credential state"));
         }
 
+        let tampered = root.path().join("tampered-managed");
+        fs::write(&tampered, b"arbitrary-capability\n").unwrap();
+        fs::set_permissions(&tampered, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(create_token_file(&tampered, "hubu_", true)
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete generated credential state"));
+
         let external = root.path().join("operator-supplied");
-        fs::write(&external, b"operator-supplied-capability\n").unwrap();
+        fs::write(&external, b"hubu_custom_secret\n").unwrap();
         fs::set_permissions(&external, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
-            create_token_file(&external, "hubu_").unwrap(),
-            "operator-supplied-capability"
+            create_token_file(&external, "hubu_", false).unwrap(),
+            "hubu_custom_secret"
         );
+
+        let missing_external = root.path().join("missing-operator-supplied");
+        assert!(create_token_file(&missing_external, "hubu_", false)
+            .unwrap_err()
+            .to_string()
+            .contains("externally supplied and does not exist"));
+        assert!(!missing_external.exists());
+
+        assert!(!credential_file_is_generated_state(Some(&external), None));
+        assert!(credential_file_is_generated_state(
+            Some(&missing_external),
+            None
+        ));
+        assert!(credential_file_is_generated_state(
+            Some(&external),
+            Some("1")
+        ));
+        assert!(!credential_file_is_generated_state(
+            Some(&missing_external),
+            Some("0")
+        ));
     }
 
     #[test]

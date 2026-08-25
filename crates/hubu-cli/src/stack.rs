@@ -337,19 +337,19 @@ fn resolve_credential_path(
     managed_default: &Path,
     field: &str,
 ) -> Result<PathBuf> {
-    let path = match configured {
-        Some(path) => path,
-        None if provisioned_by_managed_stack => managed_default,
-        None => bail!("{field} is required for an external credential owner"),
-    };
-    validate_safe_absolute(path, field)?;
-    if provisioned_by_managed_stack {
-        if path.exists() && !path.is_file() {
-            bail!("{field} must name a regular file when it already exists");
+    match configured {
+        Some(path) => {
+            validate_safe_absolute(path, field)?;
+            existing_absolute(path, field)
         }
-        resolve_existing_prefix(path)
-    } else {
-        existing_absolute(path, field)
+        None if provisioned_by_managed_stack => {
+            validate_safe_absolute(managed_default, field)?;
+            if managed_default.exists() && !managed_default.is_file() {
+                bail!("{field} must name a regular file when it already exists");
+            }
+            resolve_existing_prefix(managed_default)
+        }
+        None => bail!("{field} is required for an external credential owner"),
     }
 }
 
@@ -1149,14 +1149,18 @@ fn render_generation(
 
     if hubu.ownership == Some(Ownership::Managed) {
         let hubu_server = hubu_server.expect("selected managed binary");
+        let credential_files = credentials.files.as_ref();
         let launch = json!({
             "schema_version": 1,
             "listen": hubu.listen.expect("checked"),
             "database_path": hubu.database_path.as_ref().expect("checked"),
             "log_file": hubu.log_file,
             "auth_token_file": hubu_auth,
+            "auth_token_file_generated": credential_files.and_then(|files| files.hubu_auth.as_ref()).is_none(),
             "approval_token_file": hubu_approval,
+            "approval_token_file_generated": credential_files.and_then(|files| files.hubu_approval.as_ref()).is_none(),
             "reconciliation_token_file": hubu_reconciliation,
+            "reconciliation_token_file_generated": credential_files.and_then(|files| files.hubu_reconciliation.as_ref()).is_none(),
         });
         write_generated_json(
             generation,
@@ -3618,6 +3622,20 @@ ownership = "external"
         assert!(!paths.hubu_auth.exists());
         assert!(!paths.gongbu_caller.exists());
 
+        let missing_override = profile.join("operator-auth");
+        let credentials_with_missing_override: CredentialsSource = toml::from_str(&format!(
+            "schema_version = 1\n[files]\nhubu_auth = {}\n",
+            quote(missing_override.display().to_string())
+        ))
+        .unwrap();
+        assert!(
+            resolve_credential_paths(&profile, &managed, &credentials_with_missing_override)
+                .unwrap_err()
+                .to_string()
+                .contains("credentials.toml:files.hubu_auth")
+        );
+        assert!(!missing_override.exists());
+
         let external_missing = missing_fields(&external, &credentials, &providers);
         for field in [
             "credentials.toml:files.hubu_auth",
@@ -4135,6 +4153,16 @@ account = "gongbu-caller"
         let active_path = profile.join("generated/active-manifest.json");
         let active = fs::read(&active_path).unwrap();
         let initial_manifest: ActiveManifest = read_json(&active_path).unwrap();
+        let hubu_config: Value = read_json(
+            &profile
+                .join("generated")
+                .join(&initial_manifest.generation)
+                .join("hubu-launch.json"),
+        )
+        .unwrap();
+        assert_eq!(hubu_config["auth_token_file_generated"], false);
+        assert_eq!(hubu_config["approval_token_file_generated"], false);
+        assert_eq!(hubu_config["reconciliation_token_file_generated"], false);
         let gongbu_config: Value = read_json(
             &profile
                 .join("generated")
