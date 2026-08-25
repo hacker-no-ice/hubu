@@ -61,7 +61,16 @@ pub(super) fn create_durable_execution(
     expected: &crate::operation_registry::GongbuContinuation,
 ) -> Result<crate::operation_registry::GongbuLifecycle, DurableCallError> {
     let prepared = request::prepare("gongbu_create_execution", arguments)?;
-    let (_, lifecycle) = execute(client, prepared, Some(expected))?;
+    let (_, lifecycle) = execute(client, prepared, Some(expected)).map_err(|error| {
+        let code = error.code();
+        DurableCallError {
+            code,
+            // A successful create response that cannot be read or decoded is
+            // ambiguous: Gongbu may already have persisted the execution. The
+            // exact operation-key-bound request is safe to replay.
+            retryable: error.retryable() || code == "invalid_response",
+        }
+    })?;
     lifecycle.ok_or(DurableCallError {
         code: "invalid_execution_response",
         retryable: false,

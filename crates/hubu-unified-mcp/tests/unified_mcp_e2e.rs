@@ -301,6 +301,53 @@ fn transient_dispatch_exhaustion_reaches_safe_terminal_failure() {
 
 #[test]
 #[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn malformed_successful_create_response_replays_exact_request() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    mcp.initialize();
+    let authorized = mcp.call_with_meta(
+        45,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-93","amount_cents":25,"reason":"ambiguous create response"}),
+        json!({"callId":"malformed-create-response-call"}),
+    );
+    let handle = authorized["result"]["structuredContent"]["operation_handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let operation_key = private_operation_key(&mcp, "hubu-spend-token-93");
+    gongbu.respond_sequence_json(
+        "POST",
+        "/v2/executions",
+        [
+            (200, json!("truncated-success-response")),
+            (200, execution_response(&operation_key, "succeeded")),
+        ],
+    );
+
+    mcp.call(46, "gongbu_create_execution", execution_arguments());
+    let mut next_id = 3500;
+    let succeeded = wait_for_operation_state(&mut mcp, &mut next_id, &handle, "succeeded");
+    assert_eq!(
+        succeeded["result"]["structuredContent"]["result"]["code"],
+        "execution_succeeded"
+    );
+    let create_requests = gongbu
+        .requests()
+        .into_iter()
+        .filter(|request| request.method == "POST" && request.path == "/v2/executions")
+        .collect::<Vec<_>>();
+    assert_eq!(create_requests.len(), 2);
+    assert_eq!(
+        create_requests[0].raw.split_once("\r\n\r\n").unwrap().1,
+        create_requests[1].raw.split_once("\r\n\r\n").unwrap().1
+    );
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN, &operation_key]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn permanent_dispatch_failure_is_terminal_without_retry() {
     let hubu = BackendStub::start(BackendKind::Hubu);
     let gongbu = BackendStub::start(BackendKind::Gongbu);
