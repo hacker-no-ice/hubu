@@ -49,6 +49,7 @@ an execution account or agent:
 ```sh
 profile=/absolute/path/to/profile
 hubu stack init --profile "$profile"
+hubu stack select --profile "$profile"
 
 mkdir -p "$profile/state/hubu"
 export HUBU_DB_PATH="$profile/state/hubu/hubu.sqlite3"
@@ -68,8 +69,8 @@ principal-neutral stack. Register and fund agents against the running Hubu
 service:
 
 ```sh
-hubu stack start --profile "$profile"
-hubu stack status --profile "$profile"
+hubu stack start
+hubu stack status
 hubu protocol agent-registration
 hubu register human --username alice-example --display-name "Alice Example"
 hubu register agent --name local-agent --version local-dev

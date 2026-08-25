@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     fs::OpenOptions,
     io::Write,
@@ -20,7 +20,32 @@ const SOURCE_SCHEMA_VERSION: u32 = 1;
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
 const PRINCIPAL_NEUTRAL_GONGBU_SCHEMA_VERSION: u32 = 3;
 const DEFAULT_PROFILE: &str = "default";
+const PROFILE_REGISTRY_SCHEMA_VERSION: u32 = 1;
+const PROFILE_LIST_SCHEMA_VERSION: u32 = 1;
+const PROFILE_REGISTRY_FILE: &str = "stack-profiles.json";
 const LIVE_SPEND_ACKNOWLEDGEMENT: &str = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ProfileRegistry {
+    schema_version: u32,
+    selected: Option<PathBuf>,
+    profiles: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct ProfileListReport {
+    schema_version: u32,
+    profiles: Vec<ProfileListEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct ProfileListEntry {
+    path: PathBuf,
+    selected: bool,
+    #[serde(rename = "default")]
+    is_default: bool,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -263,6 +288,8 @@ pub(crate) fn command(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     args.remove(0);
     match subcommand.as_str() {
         "init" => init(args, hubu_home),
+        "select" => select_profile(args, hubu_home),
+        "profiles" => profiles(args, hubu_home),
         "doctor" => doctor::command(args, hubu_home),
         "render" => render(args, hubu_home),
         "activate" => activate(args, hubu_home),
@@ -317,6 +344,7 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
             println!("preserved: {}", path.display());
         }
     }
+    register_profile(&profile, hubu_home, false)?;
     println!("profile: {}", profile.display());
     let input_files = files_needing_input(&profile);
     if input_files.is_empty() {
@@ -331,6 +359,45 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         "next: edit the annotated files, then run `hubu stack doctor --profile {}`",
         profile.display()
     );
+    Ok(())
+}
+
+fn select_profile(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
+    if take_help(&mut args) {
+        print_select_help();
+        return Ok(());
+    }
+    let profile = take_required_profile(&mut args)?;
+    ensure_no_args(args)?;
+    let profile = initialized_profile_path(&profile, "--profile")?;
+    register_profile(&profile, hubu_home, true)?;
+    println!("selected profile: {}", profile.display());
+    Ok(())
+}
+
+fn profiles(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
+    if take_help(&mut args) {
+        print_profiles_help();
+        return Ok(());
+    }
+    let json_output = crate::take_flag(&mut args, "--json");
+    ensure_no_args(args)?;
+    let report = profile_list_report(hubu_home)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if report.profiles.is_empty() {
+        println!("No initialized stack profiles found.");
+    } else {
+        println!("SELECTED  DEFAULT  PATH");
+        for profile in report.profiles {
+            println!(
+                "{:<8}  {:<7}  {}",
+                if profile.selected { "*" } else { "" },
+                if profile.is_default { "yes" } else { "" },
+                profile.path.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2327,18 +2394,173 @@ fn resolve_profile(path: &Path, hubu_home: &Path) -> Result<PathBuf> {
 }
 
 fn take_profile(args: &mut Vec<String>, hubu_home: &Path) -> Result<PathBuf> {
-    let path = if let Some(index) = args.iter().position(|arg| arg == "--profile") {
-        args.remove(index);
-        if index >= args.len() {
-            bail!("missing value for --profile");
-        }
-        PathBuf::from(args.remove(index))
+    let path = if args.iter().any(|arg| arg == "--profile") {
+        take_required_profile(args)?
+    } else if let Some(selected) = read_profile_registry(hubu_home)?.selected {
+        initialized_profile_path(&selected, "selected profile").with_context(|| {
+            format!(
+                "selected stack profile `{}` is unavailable; select an initialized profile with `hubu stack select --profile ABSOLUTE_DIR`",
+                selected.display()
+            )
+        })?
     } else {
         default_stack_home(hubu_home)
             .join("stacks")
             .join(DEFAULT_PROFILE)
     };
     resolve_profile(&path, hubu_home)
+}
+
+fn take_required_profile(args: &mut Vec<String>) -> Result<PathBuf> {
+    let Some(index) = args.iter().position(|arg| arg == "--profile") else {
+        bail!("--profile is required");
+    };
+    args.remove(index);
+    if index >= args.len() || args[index].starts_with('-') {
+        bail!("missing value for --profile");
+    }
+    Ok(PathBuf::from(args.remove(index)))
+}
+
+fn profile_registry_path(hubu_home: &Path) -> PathBuf {
+    default_stack_home(hubu_home).join(PROFILE_REGISTRY_FILE)
+}
+
+fn empty_profile_registry() -> ProfileRegistry {
+    ProfileRegistry {
+        schema_version: PROFILE_REGISTRY_SCHEMA_VERSION,
+        selected: None,
+        profiles: Vec::new(),
+    }
+}
+
+fn read_profile_registry(hubu_home: &Path) -> Result<ProfileRegistry> {
+    let path = profile_registry_path(hubu_home);
+    if !path.exists() {
+        return Ok(empty_profile_registry());
+    }
+    let recovery = format!(
+        "inspect or move `{}` aside after review, then register a profile again with `hubu stack select --profile ABSOLUTE_DIR`",
+        path.display()
+    );
+    let mut registry: ProfileRegistry =
+        read_json(&path).with_context(|| format!("read stack profile registry; {recovery}"))?;
+    if registry.schema_version != PROFILE_REGISTRY_SCHEMA_VERSION {
+        bail!(
+            "stack profile registry has unsupported schema_version {}; upgrade Hubu or {recovery}",
+            registry.schema_version,
+        );
+    }
+    for profile in &registry.profiles {
+        validate_safe_absolute(profile, "registered profile")
+            .with_context(|| format!("invalid stack profile registry; {recovery}"))?;
+    }
+    if let Some(selected) = &registry.selected {
+        validate_safe_absolute(selected, "selected profile")
+            .with_context(|| format!("invalid stack profile registry; {recovery}"))?;
+        if !registry.profiles.contains(selected) {
+            bail!("stack profile registry selects an unregistered profile; {recovery}");
+        }
+    }
+    registry.profiles.sort();
+    registry.profiles.dedup();
+    Ok(registry)
+}
+
+fn write_profile_registry(hubu_home: &Path, registry: &ProfileRegistry) -> Result<()> {
+    let path = profile_registry_path(hubu_home);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("profile registry path has no parent"))?;
+    create_secure_dir(parent)?;
+    let temp = path.with_extension(format!("json.{}.tmp", Uuid::new_v4()));
+    let mut bytes = serde_json::to_vec_pretty(registry)?;
+    bytes.push(b'\n');
+    write_secure(&temp, &bytes)?;
+    if let Err(error) = fs::rename(&temp, &path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error).with_context(|| format!("update `{}`", path.display()));
+    }
+    Ok(())
+}
+
+fn initialized_profile_path(path: &Path, field: &str) -> Result<PathBuf> {
+    validate_safe_absolute(path, field)?;
+    if !path.is_dir()
+        || ["stack.toml", "credentials.toml", "providers.toml"]
+            .iter()
+            .any(|name| !path.join(name).is_file())
+    {
+        bail!(
+            "{field} must identify an initialized Hubu stack profile containing stack.toml, credentials.toml, and providers.toml"
+        );
+    }
+    fs::canonicalize(path).with_context(|| format!("canonicalize `{}`", path.display()))
+}
+
+fn register_profile(profile: &Path, hubu_home: &Path, select: bool) -> Result<()> {
+    let profile = initialized_profile_path(profile, "profile")?;
+    let mut registry = read_profile_registry(hubu_home)?;
+    let previous = registry.clone();
+    if !registry.profiles.contains(&profile) {
+        registry.profiles.push(profile.clone());
+        registry.profiles.sort();
+    }
+    if select {
+        registry.selected = Some(profile);
+    }
+    if registry != previous {
+        write_profile_registry(hubu_home, &registry)?;
+    }
+    Ok(())
+}
+
+fn profile_list_report(hubu_home: &Path) -> Result<ProfileListReport> {
+    let mut registry = read_profile_registry(hubu_home)?;
+    if let Some(selected) = &registry.selected {
+        initialized_profile_path(selected, "selected profile").with_context(|| {
+            format!(
+                "selected stack profile `{}` is unavailable; select an initialized profile with `hubu stack select --profile ABSOLUTE_DIR`",
+                selected.display()
+            )
+        })?;
+    }
+
+    let previous = registry.clone();
+    registry
+        .profiles
+        .retain(|profile| initialized_profile_path(profile, "registered profile").is_ok());
+    if registry != previous {
+        write_profile_registry(hubu_home, &registry)?;
+    }
+
+    let stack_root = default_stack_home(hubu_home).join("stacks");
+    let mut paths = registry.profiles.iter().cloned().collect::<BTreeSet<_>>();
+    if stack_root.is_dir() {
+        for entry in
+            fs::read_dir(&stack_root).with_context(|| format!("list `{}`", stack_root.display()))?
+        {
+            let path = entry?.path();
+            if let Ok(profile) = initialized_profile_path(&path, "profile") {
+                paths.insert(profile);
+            }
+        }
+    }
+
+    let default_path = stack_root.join(DEFAULT_PROFILE);
+    let default_path = fs::canonicalize(&default_path).unwrap_or(default_path);
+    let profiles = paths
+        .into_iter()
+        .map(|path| ProfileListEntry {
+            selected: registry.selected.as_ref() == Some(&path),
+            is_default: path == default_path,
+            path,
+        })
+        .collect();
+    Ok(ProfileListReport {
+        schema_version: PROFILE_LIST_SCHEMA_VERSION,
+        profiles,
+    })
 }
 
 fn take_option_value(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
@@ -2353,7 +2575,11 @@ fn take_option_value(args: &mut Vec<String>, name: &str) -> Result<Option<String
 }
 
 fn default_stack_home(hubu_home: &Path) -> PathBuf {
-    if env::var_os("HUBU_HOME").is_some() {
+    let implicit_hubu_home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".hubu");
+    if env::var_os("HUBU_HOME").is_some() || hubu_home != implicit_hubu_home {
         return hubu_home.to_path_buf();
     }
     dirs::config_dir()
@@ -2567,12 +2793,13 @@ files and never starts a service.
 
 Start with every uncommented example that matches your topology, fill the
 commented fields you choose, and leave unrelated examples commented. Then run
-`hubu stack doctor --profile /absolute/path/to/this/profile`. When the profile
-is `ready_to_render`, run
-`hubu stack start --profile /absolute/path/to/this/profile`. Start runs doctor
-and render as needed, launches only configured managed services, and leaves
-external services and the client-owned unified MCP process untouched. Use
-`hubu stack status` and `hubu stack logs` for the combined operator view.
+`hubu stack select --profile /absolute/path/to/this/profile`, followed by
+`hubu stack doctor`. When the profile is `ready_to_render`, run
+`hubu stack start`. Start runs doctor and render as needed, launches only
+configured managed services, and leaves external services and the client-owned
+unified MCP process untouched. Use `hubu stack status` and `hubu stack logs`
+for the combined operator view. An explicit `--profile` temporarily overrides
+the selection without changing it; `hubu stack profiles` lists known profiles.
 
 For later changes, edit the operator-owned TOML and run `hubu stack render`.
 The validated generation is staged without replacing the active generation.
@@ -2594,13 +2821,25 @@ https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/
 
 fn print_help() {
     println!(
-        "Manage the local Hubu stack profile\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack activate --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack rollback --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack generations [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]"
+        "Manage local Hubu stack profiles\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack select --profile ABSOLUTE_DIR\n  hubu stack profiles [--json]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack activate --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack rollback --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack generations [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]\n\nProfile precedence:\n  explicit --profile, selected profile, platform default"
     );
 }
 
 fn print_init_help() {
     println!(
         "Create annotated local stack starter files without overwriting input or starting services\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]"
+    );
+}
+
+fn print_select_help() {
+    println!(
+        "Register and select an initialized local stack profile\n\nUsage:\n  hubu stack select --profile ABSOLUTE_DIR\n\nThe selected profile is used when a stack command omits --profile. An explicit --profile remains a one-command override."
+    );
+}
+
+fn print_profiles_help() {
+    println!(
+        "List known initialized local stack profiles without scanning the machine\n\nUsage:\n  hubu stack profiles [--json]\n\nProfiles are read from the registry and the immediate children of the conventional stacks directory."
     );
 }
 
@@ -2732,6 +2971,165 @@ mod tests {
         let root = tempdir().unwrap();
         assert!(init(vec!["--profile".into()], root.path()).is_err());
         assert!(init(vec!["--profile".into(), "relative".into()], root.path()).is_err());
+    }
+
+    fn write_initialized_profile(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        for name in ["stack.toml", "credentials.toml", "providers.toml"] {
+            fs::write(path.join(name), "schema_version = 1\n").unwrap();
+        }
+    }
+
+    #[test]
+    fn init_registers_and_select_persists_an_external_profile() {
+        let root = tempdir().unwrap();
+        let initialized = root.path().join("initialized");
+        init(
+            vec!["--profile".into(), initialized.display().to_string()],
+            root.path(),
+        )
+        .unwrap();
+        let initialized = fs::canonicalize(initialized).unwrap();
+        assert_eq!(
+            read_profile_registry(root.path()).unwrap().profiles,
+            vec![initialized]
+        );
+
+        let external_root = tempdir().unwrap();
+        let external = external_root.path().join("external");
+        write_initialized_profile(&external);
+        select_profile(
+            vec!["--profile".into(), external.display().to_string()],
+            root.path(),
+        )
+        .unwrap();
+        let external = fs::canonicalize(external).unwrap();
+        let registry = read_profile_registry(root.path()).unwrap();
+        assert_eq!(registry.selected.as_ref(), Some(&external));
+        assert!(registry.profiles.contains(&external));
+        assert_eq!(
+            take_profile(&mut Vec::new(), root.path()).unwrap(),
+            external
+        );
+    }
+
+    #[test]
+    fn explicit_profile_overrides_selection_without_changing_it() {
+        let root = tempdir().unwrap();
+        let selected = root.path().join("selected");
+        let override_profile = root.path().join("override");
+        write_initialized_profile(&selected);
+        write_initialized_profile(&override_profile);
+        select_profile(
+            vec!["--profile".into(), selected.display().to_string()],
+            root.path(),
+        )
+        .unwrap();
+
+        let resolved = take_profile(
+            &mut vec!["--profile".into(), override_profile.display().to_string()],
+            root.path(),
+        )
+        .unwrap();
+        assert_eq!(resolved, override_profile);
+        assert_eq!(
+            read_profile_registry(root.path()).unwrap().selected,
+            Some(fs::canonicalize(selected).unwrap())
+        );
+    }
+
+    #[test]
+    fn profile_listing_combines_registry_and_conventional_discovery() {
+        let root = tempdir().unwrap();
+        let default = root.path().join("stacks/default");
+        let conventional = root.path().join("stacks/fixture");
+        let external_root = tempdir().unwrap();
+        let external = external_root.path().join("external");
+        write_initialized_profile(&default);
+        write_initialized_profile(&conventional);
+        write_initialized_profile(&external);
+        select_profile(
+            vec!["--profile".into(), external.display().to_string()],
+            root.path(),
+        )
+        .unwrap();
+        let external = fs::canonicalize(external).unwrap();
+
+        let report = profile_list_report(root.path()).unwrap();
+        assert_eq!(report.schema_version, PROFILE_LIST_SCHEMA_VERSION);
+        assert_eq!(report.profiles.len(), 3);
+        assert!(report
+            .profiles
+            .windows(2)
+            .all(|pair| pair[0].path < pair[1].path));
+        assert!(report
+            .profiles
+            .iter()
+            .any(|profile| profile.selected && profile.path == external));
+        assert!(report.profiles.iter().any(|profile| profile.is_default));
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["schema_version"], PROFILE_LIST_SCHEMA_VERSION);
+        assert!(json["profiles"][0].get("default").is_some());
+        assert!(json["profiles"][0].get("selected").is_some());
+        assert!(json["profiles"][0].get("path").is_some());
+    }
+
+    #[test]
+    fn listing_prunes_stale_unselected_entries_but_rejects_a_stale_selection() {
+        let root = tempdir().unwrap();
+        let stale = root.path().join("stale");
+        write_initialized_profile(&stale);
+        register_profile(&stale, root.path(), false).unwrap();
+        fs::remove_file(stale.join("stack.toml")).unwrap();
+        assert!(profile_list_report(root.path())
+            .unwrap()
+            .profiles
+            .is_empty());
+        assert!(read_profile_registry(root.path())
+            .unwrap()
+            .profiles
+            .is_empty());
+
+        write_initialized_profile(&stale);
+        register_profile(&stale, root.path(), true).unwrap();
+        fs::remove_file(stale.join("providers.toml")).unwrap();
+        let error = profile_list_report(root.path()).unwrap_err().to_string();
+        assert!(error.contains("selected stack profile"));
+        assert!(take_profile(&mut Vec::new(), root.path())
+            .unwrap_err()
+            .to_string()
+            .contains("selected stack profile"));
+    }
+
+    #[test]
+    fn registry_is_versioned_deduplicated_and_scoped_by_hubu_home() {
+        let first_root = tempdir().unwrap();
+        let second_root = tempdir().unwrap();
+        let profile = first_root.path().join("profile");
+        write_initialized_profile(&profile);
+        register_profile(&profile, first_root.path(), false).unwrap();
+        register_profile(&profile, first_root.path(), false).unwrap();
+        assert_eq!(
+            read_profile_registry(first_root.path())
+                .unwrap()
+                .profiles
+                .len(),
+            1
+        );
+        assert!(read_profile_registry(second_root.path())
+            .unwrap()
+            .profiles
+            .is_empty());
+
+        fs::write(
+            profile_registry_path(second_root.path()),
+            "{\"schema_version\":99,\"selected\":null,\"profiles\":[]}",
+        )
+        .unwrap();
+        assert!(read_profile_registry(second_root.path())
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported schema_version"));
     }
 
     #[test]

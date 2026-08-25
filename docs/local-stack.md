@@ -97,6 +97,39 @@ operator may instead provide an absolute profile path:
 hubu stack init --profile /absolute/path/to/profile
 ```
 
+Initialization registers the profile in the versioned stack-profile registry
+under Hubu's configuration root. Select a registered or legacy external profile
+once to use it for later stack commands:
+
+```sh
+hubu stack select --profile /absolute/path/to/profile
+hubu stack doctor
+hubu stack render
+hubu stack start
+```
+
+An explicit `--profile` remains a one-command override and does not change the
+saved selection. Profile resolution is explicit `--profile`, then the selected
+profile, then the platform default. If the selected profile is missing or the
+registry is corrupt, Hubu fails with recovery guidance instead of silently
+operating on a different profile.
+
+List known initialized profiles without scanning the home directory or the
+machine:
+
+```sh
+hubu stack profiles
+hubu stack profiles --json
+```
+
+The list combines registered paths with initialized immediate children of the
+conventional `stacks/` directory, marks the selected and default profiles, and
+includes incomplete profiles created by `stack init`. Listing performs no
+doctor, provider, network, or lifecycle probes. Profiles created before the
+registry existed at arbitrary absolute paths appear after one
+`hubu stack select --profile ...` invocation. Stale unselected registry entries
+are pruned; an unavailable selected profile remains an actionable error.
+
 ## Safe initialization
 
 Initialization creates annotated starter files, proposes safe local paths and
