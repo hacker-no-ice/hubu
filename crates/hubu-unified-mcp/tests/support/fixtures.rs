@@ -88,10 +88,12 @@ pub(super) fn default_responses(kind: BackendKind) -> HashMap<(String, String), 
                 "started_at":"2026-08-18T00:00:00Z",
                 "completed_at":"2026-08-18T00:00:01Z"
             });
+            let mut v1_execution = execution.clone();
+            v1_execution["schema_version"] = json!(1);
             insert(
                 "GET",
                 "/v1/executions/exec-93",
-                StubResponse::json(200, execution.clone()),
+                StubResponse::json(200, v1_execution),
             );
             insert("POST", "/v2/executions", StubResponse::json(200, execution));
             insert(
@@ -100,7 +102,7 @@ pub(super) fn default_responses(kind: BackendKind) -> HashMap<(String, String), 
                 StubResponse::json(
                     200,
                     json!({
-                        "schema_version":2,
+                        "schema_version":1,
                         "execution_id":"exec-93",
                         "artifacts":[{
                             "artifact_id":"artifact-93",

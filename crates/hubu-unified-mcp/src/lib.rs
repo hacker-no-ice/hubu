@@ -31,6 +31,7 @@ mod credential;
 mod diagnostics;
 mod notification;
 mod operation_registry;
+mod operation_worker;
 mod probe;
 mod stdio;
 
@@ -52,6 +53,7 @@ const GONGBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_GONGBU_ENDPOINT";
 const GONGBU_TOKEN_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN";
 const GONGBU_TOKEN_FILE_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE";
 const CAPABILITY_POLL_INTERVAL_ENV: &str = "HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS";
+const OPERATION_TICK_ENV: &str = "HUBU_UNIFIED_OPERATION_TICK_MS";
 const OPERATION_STATE_PATH_ENV: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
@@ -59,8 +61,11 @@ const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_CAPABILITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_OPERATION_TICK: Duration = Duration::from_secs(1);
 const MIN_CAPABILITY_POLL_INTERVAL_MS: u64 = 10;
 const MAX_CAPABILITY_POLL_INTERVAL_MS: u64 = 60_000;
+const MIN_OPERATION_TICK_MS: u64 = 10;
+const MAX_OPERATION_TICK_MS: u64 = 1_000;
 const MAX_CAPABILITY_FAILURE_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
@@ -182,6 +187,7 @@ pub struct Config {
     pub gongbu: Option<BackendConfig>,
     pub hubu_routing: HubuRoutingConfig,
     pub capability_poll_interval: Duration,
+    pub operation_tick: Duration,
     pub operation_state_path: Option<PathBuf>,
 }
 
@@ -192,6 +198,7 @@ impl Default for Config {
             gongbu: None,
             hubu_routing: HubuRoutingConfig::default(),
             capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
+            operation_tick: DEFAULT_OPERATION_TICK,
             operation_state_path: None,
         }
     }
@@ -236,9 +243,23 @@ impl Config {
             )?,
             hubu_routing,
             capability_poll_interval: poll_interval(lookup(CAPABILITY_POLL_INTERVAL_ENV))?,
+            operation_tick: operation_tick(lookup(OPERATION_TICK_ENV))?,
             operation_state_path,
         })
     }
+}
+
+fn operation_tick(value: Option<String>) -> Result<Duration, ConfigError> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_OPERATION_TICK);
+    };
+    let milliseconds = value
+        .parse::<u64>()
+        .map_err(|_| ConfigError::InvalidOperationTick)?;
+    if !(MIN_OPERATION_TICK_MS..=MAX_OPERATION_TICK_MS).contains(&milliseconds) {
+        return Err(ConfigError::InvalidOperationTick);
+    }
+    Ok(Duration::from_millis(milliseconds))
 }
 
 fn poll_interval(value: Option<String>) -> Result<Duration, ConfigError> {
@@ -307,6 +328,8 @@ pub enum ConfigError {
     InvalidEndpoint(BackendOwner),
     #[error("capability poll interval must be between 10 and 60000 milliseconds")]
     InvalidPollInterval,
+    #[error("durable operation tick must be between 10 and 1000 milliseconds")]
+    InvalidOperationTick,
 }
 
 impl fmt::Display for BackendOwner {
@@ -423,6 +446,7 @@ pub struct Server {
     snapshot: Arc<Mutex<CapabilitySnapshot>>,
     transition_state: Arc<TransitionState>,
     capability_poll_interval: Duration,
+    operation_tick: Duration,
     probe_timings: Arc<Mutex<ProbeTimings>>,
     probe_schedule_waker: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     hubu_routing: HubuRoutingConfig,
@@ -524,6 +548,7 @@ impl Server {
         };
         let hubu_routing = config.hubu_routing.clone();
         let capability_poll_interval = config.capability_poll_interval;
+        let operation_tick = config.operation_tick;
         let backends = BackendClients::new(config)?;
         let snapshot = backends.probe();
         let probed_at = Instant::now();
@@ -552,6 +577,7 @@ impl Server {
             snapshot: Arc::new(Mutex::new(snapshot)),
             transition_state: Arc::new(transition_state),
             capability_poll_interval,
+            operation_tick,
             probe_timings: Arc::new(Mutex::new(probe_timings)),
             probe_schedule_waker: Arc::new(Mutex::new(None)),
             hubu_routing,
@@ -633,6 +659,9 @@ impl Server {
             }
             return error_response(id, -32602, "Invalid params");
         }
+        if call.name == "hubu_operation_status" {
+            return self.call_operation_status(id, &call.arguments);
+        }
         let Some(owner) = DOMAIN_TOOLS
             .iter()
             .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
@@ -689,6 +718,9 @@ impl Server {
             }
             return error_response(id, -32602, "Invalid params");
         }
+        if call.name == "hubu_operation_status" {
+            return self.call_operation_status(id, &call.arguments);
+        }
         let Some(owner) = DOMAIN_TOOLS
             .iter()
             .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
@@ -718,6 +750,9 @@ impl Server {
     fn list_tools_for_snapshot(&self) -> Vec<Value> {
         let snapshot = self.snapshot();
         let mut tools = vec![capability_tool()];
+        if self.operation_registry_available() {
+            tools.push(gongbu::operation_status_definition());
+        }
         if tool_availability("hubu_health", BackendOwner::Hubu, &snapshot).is_ok() {
             tools.extend(hubu::tool_definitions().into_iter().filter(|tool| {
                 self.operation_registry_available()
@@ -748,6 +783,19 @@ impl Server {
             "reason_code": reason_code,
             "billable_operations_available": available
         });
+        capability["tools"]
+            .as_array_mut()
+            .expect("capability tools are an array")
+            .push(json!({
+                "name": "hubu_operation_status",
+                "owner": "router",
+                "available": available,
+                "reason_code": if available { None } else { Some("operation_registry_unavailable") }
+            }));
+        capability["tools"]
+            .as_array_mut()
+            .expect("capability tools are an array")
+            .sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
         if !available {
             for tool in capability["tools"]
                 .as_array_mut()
@@ -863,6 +911,41 @@ impl Server {
             .record_gongbu_lifecycle(operation_handle, lifecycle)
     }
 
+    fn durable_operation_status(
+        &self,
+        operation_handle: &str,
+    ) -> anyhow::Result<operation_registry::DurableOperationStatus> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("durable operation status requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .durable_operation_status(operation_handle)
+    }
+
+    fn call_operation_status(&self, id: Value, arguments: &Value) -> Value {
+        let Some(arguments) = arguments.as_object() else {
+            return error_response(id, -32602, "Invalid params");
+        };
+        if arguments.len() != 1 {
+            return error_response(id, -32602, "Invalid params");
+        }
+        let Some(operation_handle) = arguments.get("operation_handle").and_then(Value::as_str)
+        else {
+            return error_response(id, -32602, "Invalid params");
+        };
+        match self.durable_operation_status(operation_handle) {
+            Ok(status) => success_response(id, operation_status_result(&status)),
+            Err(_) => error_response(
+                id,
+                -32000,
+                "public operation handle is unknown or unavailable",
+            ),
+        }
+    }
+
     fn call_gongbu_tool(&self, id: Value, client: &BackendClient, call: ToolCall) -> Value {
         let expected = if call.name == "gongbu_create_execution" {
             let auth_token_id = match gongbu::create_continuation_id(&call.arguments) {
@@ -870,7 +953,14 @@ impl Server {
                 Err(result) => return success_response(id, result),
             };
             match self.resolve_gongbu_continuation(&auth_token_id, &call.arguments) {
-                Ok(continuation) => Some(continuation),
+                Ok(continuation) => {
+                    let status = match self.durable_operation_status(&continuation.operation_handle)
+                    {
+                        Ok(status) => status,
+                        Err(error) => return error_response(id, -32000, &error.to_string()),
+                    };
+                    return success_response(id, operation_status_result(&status));
+                }
                 Err(error) => return error_response(id, -32000, &error.to_string()),
             }
         } else if call.name == "gongbu_get_execution" {
@@ -1053,6 +1143,56 @@ impl Server {
     }
 }
 
+fn operation_status_result(status: &operation_registry::DurableOperationStatus) -> Value {
+    let guidance = match status.state.as_str() {
+        "authorized" => {
+            "Submit this authorization continuation once with gongbu_create_execution."
+        }
+        "approval_required" => {
+            "Human approval is required. Do not submit a replacement; resolve the existing approval and redeliver the exact original harness call."
+        }
+        "awaiting_hubu_result" => {
+            "The Hubu result is not established. Do not submit a replacement; redeliver the exact original harness call with the same identity."
+        }
+        _ if status.terminal() => {
+            "This operation is terminal. Do not submit a replacement for this operation."
+        }
+        _ => {
+            "The operation was acknowledged. Do not submit a replacement; observe this operation_handle until it is terminal."
+        }
+    };
+    let projection = json!({
+        "schema_version": 1,
+        "operation_handle": status.operation_handle,
+        "state": status.state,
+        "terminal": status.terminal(),
+        "replacement_safe": status.state == "authorized",
+        "execution_id": status.execution_id,
+        "result": operation_result_projection(status.result_code.as_deref()),
+        "updated_at": status.updated_at,
+        "guidance": guidance,
+    });
+    json!({
+        "content": [{"type":"text", "text": serde_json::to_string(&projection).expect("operation status serializes")}],
+        "structuredContent": projection,
+        "isError": false
+    })
+}
+
+fn operation_result_projection(code: Option<&str>) -> Option<Value> {
+    code.map(|code| {
+        if let Some(diagnostic) = gongbu::AdmissionDiagnostic::from_durable_result_code(code) {
+            json!({
+                "code": "execution_request_invalid",
+                "reason_code": diagnostic.reason_code(),
+                "fields": diagnostic.fields(),
+            })
+        } else {
+            json!({"code": code})
+        }
+    })
+}
+
 fn report_unavailable(report: &capability::BackendReport) -> bool {
     matches!(report.state, capability::BackendState::Unavailable)
 }
@@ -1183,6 +1323,115 @@ mod tests {
             poll_interval(Some("secret/path".into())).unwrap_err(),
             ConfigError::InvalidPollInterval
         );
+    }
+
+    #[test]
+    fn validates_injectable_durable_operation_tick() {
+        assert_eq!(operation_tick(None).unwrap(), Duration::from_secs(1));
+        assert_eq!(
+            operation_tick(Some("10".into())).unwrap(),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            operation_tick(Some("1000".into())).unwrap(),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            operation_tick(Some("9".into())).unwrap_err(),
+            ConfigError::InvalidOperationTick
+        );
+    }
+
+    #[test]
+    fn public_operation_status_is_terminal_actionable_and_secret_free() {
+        let status = operation_registry::DurableOperationStatus {
+            operation_handle: format!("hubu:public-operation:v1:{}", "a".repeat(32)),
+            state: "failed".into(),
+            execution_id: Some("execution-public".into()),
+            result_code: Some("reconciliation_exhausted".into()),
+            updated_at: "2026-08-25T00:00:00.000Z".into(),
+        };
+        let response = operation_status_result(&status);
+        assert_eq!(response["structuredContent"]["terminal"], true);
+        assert_eq!(response["structuredContent"]["replacement_safe"], false);
+        assert_eq!(
+            response["structuredContent"]["result"]["code"],
+            "reconciliation_exhausted"
+        );
+        assert!(response["structuredContent"]["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("Do not submit a replacement"));
+        let serialized = response.to_string();
+        for private in [
+            "operation_key",
+            "auth_token_id",
+            "provider-secret",
+            "storage_path",
+        ] {
+            assert!(!serialized.contains(private));
+        }
+    }
+
+    #[test]
+    fn durable_admission_diagnostics_project_static_public_fields() {
+        let cases = [
+            (
+                "execution_request_target_not_selectable",
+                "target_not_selectable",
+                json!(["workload_type", "provider", "adapter", "model"]),
+            ),
+            (
+                "execution_request_pricing_selector_not_matched",
+                "pricing_selector_not_matched",
+                json!(["input.image_size"]),
+            ),
+        ];
+        for (internal_code, reason_code, fields) in cases {
+            let response = operation_status_result(&operation_registry::DurableOperationStatus {
+                operation_handle: format!("hubu:public-operation:v1:{}", "d".repeat(32)),
+                state: "failed".into(),
+                execution_id: None,
+                result_code: Some(internal_code.into()),
+                updated_at: "2026-08-25T00:00:00.000Z".into(),
+            });
+            let structured = &response["structuredContent"];
+            assert_eq!(
+                structured["result"],
+                json!({
+                    "code": "execution_request_invalid",
+                    "reason_code": reason_code,
+                    "fields": fields,
+                })
+            );
+            assert_eq!(structured["terminal"], true);
+            assert_eq!(structured["replacement_safe"], false);
+            let text: Value =
+                serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(text, *structured);
+            assert!(!response.to_string().contains(internal_code));
+        }
+
+        assert_eq!(
+            operation_result_projection(Some("execution_request_invalid")),
+            Some(json!({"code":"execution_request_invalid"}))
+        );
+    }
+
+    #[test]
+    fn pre_execution_status_never_offers_continuation_for_required_approval() {
+        let response = operation_status_result(&operation_registry::DurableOperationStatus {
+            operation_handle: format!("hubu:public-operation:v1:{}", "b".repeat(32)),
+            state: "approval_required".into(),
+            execution_id: None,
+            result_code: Some("human_approval_required".into()),
+            updated_at: "2026-08-25T00:00:00.000Z".into(),
+        });
+        assert_eq!(response["structuredContent"]["terminal"], false);
+        assert_eq!(response["structuredContent"]["replacement_safe"], false);
+        let guidance = response["structuredContent"]["guidance"].as_str().unwrap();
+        assert!(guidance.contains("Human approval"));
+        assert!(!guidance.contains("gongbu_create_execution"));
     }
 
     #[test]
@@ -1410,7 +1659,7 @@ mod tests {
         let serialized = capability.to_string();
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 33);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 34);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

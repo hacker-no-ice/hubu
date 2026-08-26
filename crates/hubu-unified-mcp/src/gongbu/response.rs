@@ -4,15 +4,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-const MCP_SCHEMA_VERSION: u32 = 2;
-const TARGET_FIELDS: &[&str] = &["workload_type", "provider", "adapter", "model"];
-const PRICING_SELECTOR_FIELDS: &[&str] = &["input.image_size"];
+use super::AdmissionDiagnostic;
 
-#[derive(Clone, Copy, Debug)]
-struct ValidationDiagnostic {
-    reason_code: &'static str,
-    fields: &'static [&'static str],
-}
+const MCP_SCHEMA_VERSION: u32 = 2;
+pub(super) const EXECUTION_V1_SCHEMA_VERSION: u32 = 1;
+pub(super) const EXECUTION_V2_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ApiErrorContext {
@@ -20,11 +16,20 @@ pub(super) enum ApiErrorContext {
     CreateExecutionV2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ToolErrorClass {
+    Permanent,
+    Transient,
+    InvalidSuccessfulResponse,
+    IdentityConflict,
+}
+
 #[derive(Debug)]
 pub(super) struct ToolError {
     code: &'static str,
     message: &'static str,
-    diagnostic: Option<ValidationDiagnostic>,
+    diagnostic: Option<AdmissionDiagnostic>,
+    class: ToolErrorClass,
 }
 
 impl ToolError {
@@ -33,10 +38,11 @@ impl ToolError {
             code,
             message,
             diagnostic: None,
+            class: ToolErrorClass::Permanent,
         }
     }
 
-    fn with_diagnostic(mut self, diagnostic: Option<ValidationDiagnostic>) -> Self {
+    fn with_diagnostic(mut self, diagnostic: Option<AdmissionDiagnostic>) -> Self {
         self.diagnostic = diagnostic;
         self
     }
@@ -46,18 +52,45 @@ impl ToolError {
     }
 
     pub(super) fn transport() -> Self {
-        Self::new("gongbu_unavailable", "Gongbu could not be reached")
+        Self::transient("gongbu_unavailable", "Gongbu could not be reached")
     }
 
     pub(super) fn upstream(code: &'static str, message: &'static str) -> Self {
         Self::new(code, message)
     }
 
+    pub(super) fn transient(code: &'static str, message: &'static str) -> Self {
+        Self {
+            code,
+            message,
+            diagnostic: None,
+            class: ToolErrorClass::Transient,
+        }
+    }
+
+    pub(super) fn invalid_response() -> Self {
+        Self {
+            code: "invalid_response",
+            message: "Gongbu returned an invalid response",
+            diagnostic: None,
+            class: ToolErrorClass::InvalidSuccessfulResponse,
+        }
+    }
+
+    fn identity_conflict(message: &'static str) -> Self {
+        Self {
+            code: "identity_conflict",
+            message,
+            diagnostic: None,
+            class: ToolErrorClass::IdentityConflict,
+        }
+    }
+
     pub(super) fn into_result(self) -> ToolResult {
         let mut error = json!({ "code": self.code, "message": self.message });
         if let Some(diagnostic) = self.diagnostic {
-            error["reason_code"] = json!(diagnostic.reason_code);
-            error["fields"] = json!(diagnostic.fields);
+            error["reason_code"] = json!(diagnostic.reason_code());
+            error["fields"] = json!(diagnostic.fields());
         }
         ToolResult {
             content: vec![Content::Text {
@@ -69,6 +102,18 @@ impl ToolError {
             }],
             is_error: true,
         }
+    }
+
+    pub(super) fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub(super) fn class(&self) -> ToolErrorClass {
+        self.class
+    }
+
+    pub(super) fn admission_diagnostic(&self) -> Option<AdmissionDiagnostic> {
+        self.diagnostic
     }
 }
 
@@ -122,10 +167,14 @@ pub(super) fn api_error(
             "immutable_scope_conflict",
             "authorization continuation was already used with different immutable input",
         ),
+        (StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_EARLY, _) => ToolError::transient(
+            "gongbu_unavailable",
+            "Gongbu could not complete the request",
+        ),
         (StatusCode::TOO_MANY_REQUESTS, _) => {
-            ToolError::new("rate_limited", "Gongbu rate limit exceeded")
+            ToolError::transient("rate_limited", "Gongbu rate limit exceeded")
         }
-        _ if status.is_server_error() => ToolError::new(
+        _ if status.is_server_error() => ToolError::transient(
             "gongbu_internal_error",
             "Gongbu could not complete the request",
         ),
@@ -136,7 +185,7 @@ pub(super) fn api_error(
 fn allowlisted_validation_diagnostic(
     reason_code: Option<&Value>,
     fields: Option<&Value>,
-) -> Option<ValidationDiagnostic> {
+) -> Option<AdmissionDiagnostic> {
     let reason_code = reason_code?.as_str()?;
     let fields = fields?.as_array()?;
     let exactly_matches = |expected: &[&str]| {
@@ -147,15 +196,15 @@ fn allowlisted_validation_diagnostic(
                 .all(|(reported, expected)| reported.as_str() == Some(*expected))
     };
     match reason_code {
-        "target_not_selectable" if exactly_matches(TARGET_FIELDS) => Some(ValidationDiagnostic {
-            reason_code: "target_not_selectable",
-            fields: TARGET_FIELDS,
-        }),
-        "pricing_selector_not_matched" if exactly_matches(PRICING_SELECTOR_FIELDS) => {
-            Some(ValidationDiagnostic {
-                reason_code: "pricing_selector_not_matched",
-                fields: PRICING_SELECTOR_FIELDS,
-            })
+        "target_not_selectable"
+            if exactly_matches(AdmissionDiagnostic::TargetNotSelectable.fields()) =>
+        {
+            Some(AdmissionDiagnostic::TargetNotSelectable)
+        }
+        "pricing_selector_not_matched"
+            if exactly_matches(AdmissionDiagnostic::PricingSelectorNotMatched.fields()) =>
+        {
+            Some(AdmissionDiagnostic::PricingSelectorNotMatched)
         }
         _ => None,
     }
@@ -173,21 +222,28 @@ pub(super) fn text_result(value: &impl Serialize) -> ToolResult {
 pub(super) fn execution_result(
     response: ExecutionResponse,
     expected: Option<&crate::operation_registry::GongbuContinuation>,
+    requested_execution_id: Option<&str>,
+    expected_schema_version: u32,
 ) -> Result<(ToolResult, crate::operation_registry::GongbuLifecycle), ToolError> {
     if expected.is_some_and(|expected| expected.operation_key != response.operation_key) {
-        return Err(ToolError::new(
-            "identity_conflict",
+        return Err(ToolError::identity_conflict(
             "Gongbu returned an execution for a different normalized operation",
         ));
     }
-    if expected
-        .and_then(|expected| expected.execution_id.as_deref())
-        .is_some_and(|execution_id| execution_id != response.execution_id)
+    if requested_execution_id.is_some_and(|execution_id| execution_id != response.execution_id)
+        || expected
+            .and_then(|expected| expected.execution_id.as_deref())
+            .is_some_and(|execution_id| execution_id != response.execution_id)
     {
-        return Err(ToolError::new(
-            "identity_conflict",
+        return Err(ToolError::identity_conflict(
             "Gongbu returned a conflicting execution identity",
         ));
+    }
+    if response.schema_version != expected_schema_version
+        || !valid_execution_id(&response.execution_id)
+        || !valid_execution_status(&response.status)
+    {
+        return Err(ToolError::invalid_response());
     }
     let lifecycle = crate::operation_registry::GongbuLifecycle {
         execution_id: response.execution_id.clone(),
@@ -212,6 +268,29 @@ pub(super) fn execution_result(
     let mut public = serde_json::to_value(public).expect("public execution response serializes");
     scrub_private_projection(&mut public, &private_operation_key);
     Ok((text_result(&public), lifecycle))
+}
+
+fn valid_execution_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_execution_status(status: &str) -> bool {
+    matches!(
+        status,
+        "pending"
+            | "preflighting"
+            | "claimed"
+            | "executing"
+            | "settling"
+            | "succeeded"
+            | "released"
+            | "failed"
+            | "reconciliation_required"
+    )
 }
 
 pub(super) fn artifact_result(
@@ -383,4 +462,109 @@ enum Content {
         #[serde(rename = "mimeType")]
         mime_type: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operation_registry::GongbuContinuation;
+
+    fn execution() -> ExecutionResponse {
+        ExecutionResponse {
+            schema_version: EXECUTION_V2_SCHEMA_VERSION,
+            execution_id: "exec-1".into(),
+            operation_key: "operation-1".into(),
+            status: "executing".into(),
+            outcome: None,
+            failure: None,
+            authorization: Money {
+                amount_minor: 25,
+                currency: "USD".into(),
+            },
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    fn continuation(execution_id: Option<&str>) -> GongbuContinuation {
+        GongbuContinuation {
+            operation_key: "operation-1".into(),
+            operation_handle: "hubu:public-operation:v1:test".into(),
+            execution_id: execution_id.map(str::to_owned),
+        }
+    }
+
+    fn result_error(
+        result: Result<(ToolResult, crate::operation_registry::GongbuLifecycle), ToolError>,
+    ) -> ToolError {
+        match result {
+            Ok(_) => panic!("execution response unexpectedly passed validation"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn semantic_execution_response_failures_are_classified_before_persistence() {
+        let mut wrong_schema = execution();
+        wrong_schema.schema_version = 99;
+        let mut invalid_id = execution();
+        invalid_id.execution_id = "bad/execution".into();
+        let mut unknown_status = execution();
+        unknown_status.status = "future_status".into();
+
+        for response in [wrong_schema, invalid_id, unknown_status] {
+            let error = result_error(execution_result(
+                response,
+                Some(&continuation(None)),
+                None,
+                EXECUTION_V2_SCHEMA_VERSION,
+            ));
+            assert_eq!(error.code(), "invalid_response");
+            assert_eq!(error.class(), ToolErrorClass::InvalidSuccessfulResponse);
+        }
+    }
+
+    #[test]
+    fn execution_identity_conflicts_remain_permanent_and_fail_closed() {
+        let mut wrong_operation = execution();
+        wrong_operation.operation_key = "another-operation".into();
+        let error = result_error(execution_result(
+            wrong_operation,
+            Some(&continuation(None)),
+            None,
+            EXECUTION_V2_SCHEMA_VERSION,
+        ));
+        assert_eq!(error.code(), "identity_conflict");
+        assert_eq!(error.class(), ToolErrorClass::IdentityConflict);
+
+        let mut wrong_execution = execution();
+        wrong_execution.schema_version = EXECUTION_V1_SCHEMA_VERSION;
+        wrong_execution.execution_id = "another-execution".into();
+        let error = result_error(execution_result(
+            wrong_execution,
+            Some(&continuation(Some("exec-1"))),
+            Some("exec-1"),
+            EXECUTION_V1_SCHEMA_VERSION,
+        ));
+        assert_eq!(error.code(), "identity_conflict");
+        assert_eq!(error.class(), ToolErrorClass::IdentityConflict);
+    }
+
+    #[test]
+    fn additive_execution_response_fields_remain_forward_compatible() {
+        let mut value = serde_json::to_value(execution()).unwrap();
+        value["future_additive_field"] = json!({"safe":true});
+        let response: ExecutionResponse = serde_json::from_value(value).unwrap();
+        let (_, lifecycle) = execution_result(
+            response,
+            Some(&continuation(None)),
+            None,
+            EXECUTION_V2_SCHEMA_VERSION,
+        )
+        .unwrap();
+        assert_eq!(lifecycle.execution_id, "exec-1");
+        assert_eq!(lifecycle.status, "executing");
+    }
 }

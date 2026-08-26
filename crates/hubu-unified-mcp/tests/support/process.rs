@@ -57,6 +57,7 @@ impl McpProcess {
             .env_remove("HUBU_UNIFIED_GONGBU_ENDPOINT")
             .env_remove("HUBU_UNIFIED_GONGBU_BEARER_TOKEN")
             .env("HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS", "1000")
+            .env("HUBU_UNIFIED_OPERATION_TICK_MS", "10")
             .env("HUBU_UNIFIED_OPERATION_STATE_PATH", operation_state_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
