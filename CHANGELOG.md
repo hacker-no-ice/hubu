@@ -24,26 +24,66 @@ Future release template
 
 ## Unreleased
 
+## v0.2.0-rc.2 — 2026-08-25
+
 ### Highlights
 
 - Removed the temporary Hubu bootstrap from managed local-stack setup. Managed
   users no longer configure service credential locations: `stack start`
   launches the final Hubu once, lets it create private capabilities, completes
   a Gongbu-owned credential handoff, and then starts Gongbu.
+- Made Gongbu principal-neutral so multiple Hubu agents can execute against the
+  same running stack while Hubu remains authoritative for per-operation
+  identity, authorization, and settlement.
+- Added durable normalized operations to `hubu-unified-mcp`, including private
+  continuation binding, restart recovery, public status, and background
+  resolution of accepted work to a durable terminal adapter state while
+  preserving outcomes that still require financial reconciliation.
+- Added selectable stack-profile registration and a versioned local-stack
+  configuration reference covering topology, credentials, providers, examples,
+  and operator decisions.
 
 ### Breaking or operational changes
 
 - Advanced the executor contract to `hubu-spend-executor-v4.3`: Hubu's
-  `workload_profile` is now `lease_profile`, authorization TTL is global, lease
-  profiles configure claim TTL only, and Gongbu workload types no longer have
-  to equal Hubu lease profiles. Existing local profiles and databases must be
-  recreated.
+  `workload_profile` is now `lease_profile`, `default_profile` is now
+  `default_lease_profile`, and `profiles` is now `lease_profiles`. Authorization
+  TTL is global, lease profiles configure claim TTL only, and Gongbu workload
+  types no longer have to equal Hubu lease profiles. `HUBU_SPEND_TIMING_CONFIG`
+  is now `HUBU_LEASE_CONFIG`; existing local profiles and Hubu/Gongbu databases
+  must be recreated, and all four production binaries must be installed
+  together.
+- Recreated managed profiles generate Gongbu server configuration schema v3,
+  which no longer selects an account or agent at startup. Manually managed
+  configurations must migrate to v3 and remove `hubu.account_id`,
+  `hubu.agent_id`, and `authentication.caller_account_id`; schemas v1 and v2
+  are rejected.
+- Retired pricing catalog schema v1. Live profiles must define schema-v2 exact
+  rational price components and selector-qualified rules for every enabled
+  image size, replacing flat `unit` and `unit_amount_minor` fields with
+  `components` entries that use `rate_numerator_minor` and `rate_denominator`.
+- `gongbu_create_execution` now returns a durable acknowledgement instead of
+  waiting for provider completion; clients observe the returned public handle
+  with `hubu_operation_status` and never submit a replacement
+  (`replacement_safe` is false). An ambiguous initial call must be redelivered
+  exactly with the same harness identity. Unified-MCP operation-registry schema
+  v4 does not upgrade earlier registry state, so start this candidate with fresh
+  adapter registry state.
+- The temporary pre-launch release matrix remains limited to macOS Intel and
+  Apple silicon. This candidate remains experimental, local-first, backed by a
+  mock payment rail, and unsuitable for production or real-money use.
 
 ### Important fixes
 
 - Gongbu admission errors now distinguish unselectable target tuples from
   unmatched image-size pricing selectors through bounded API, unified-MCP, and
   process-log diagnostics without echoing submitted values.
+- Corrected Gongbu admission for sequential and concurrent executions that
+  share one agent-scoped budget while retaining per-hold validation.
+- Gongbu now withdraws readiness and admission immediately on dependency loss
+  but allows a 30-second continuous-failure grace before process shutdown.
+  Managed Hubu structured logs are bounded, and repeated capability-probe load
+  is reduced.
 
 ## v0.2.0-rc.1 — 2026-08-20
 

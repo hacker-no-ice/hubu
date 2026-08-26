@@ -10,6 +10,15 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/release.yml"
 PACKAGE_SCRIPT = ROOT / "scripts/package-release-archive.sh"
 SMOKE_SCRIPT = ROOT / "scripts/verify-release-archive.sh"
+CHANGELOG = ROOT / "CHANGELOG.md"
+RELEASE_DOC = ROOT / "docs/operations/releases.md"
+
+PRODUCTION_PACKAGE_MANIFESTS = {
+    "gongbu-api": ROOT / "crates/gongbu-api/Cargo.toml",
+    "hubu-api": ROOT / "crates/hubu-api/Cargo.toml",
+    "hubu-cli": ROOT / "crates/hubu-cli/Cargo.toml",
+    "hubu-unified-mcp": ROOT / "crates/hubu-unified-mcp/Cargo.toml",
+}
 
 PRODUCTION_BINARIES = (
     "hubu",
@@ -39,6 +48,8 @@ def fail(message: str) -> None:
 workflow = WORKFLOW.read_text(encoding="utf-8")
 package_script = PACKAGE_SCRIPT.read_text(encoding="utf-8")
 smoke_script = SMOKE_SCRIPT.read_text(encoding="utf-8")
+changelog = CHANGELOG.read_text(encoding="utf-8")
+release_doc = RELEASE_DOC.read_text(encoding="utf-8")
 workflow_lines = [line.strip() for line in workflow.splitlines()]
 
 for binary in PRODUCTION_BINARIES:
@@ -79,6 +90,13 @@ for required in (
     '"${INPUT_CHANNEL}" == "canary"',
     '"${INPUT_CHANNEL}" == "candidate"',
     "Candidate version must match vMAJOR.MINOR.PATCH-rc.NUMBER",
+    'candidate_base_version="${INPUT_VERSION#v}"',
+    'candidate_base_version="${candidate_base_version%-rc.*}"',
+    '"${candidate_base_version}" != "${base_version}"',
+    'stable_base_version="${INPUT_VERSION#v}"',
+    '"${stable_base_version}" != "${base_version}"',
+    "resolve_base_version",
+    "Release production packages must share one source package version",
     'RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}',
     'git checkout --detach "${source_commit}"',
     "prerelease_is_complete",
@@ -99,6 +117,48 @@ for required in (
     if required not in workflow:
         fail(f"release workflow is missing {required!r}")
 
+if workflow.count("cargo metadata --locked --no-deps --format-version 1") != 1:
+    fail("release identity must resolve locked source package versions in one helper")
+for package in PRODUCTION_PACKAGE_MANIFESTS:
+    if workflow.count(f'.name == "{package}"') != 1:
+        fail(f"release identity must include production package {package}")
+
+candidate_versions = re.findall(
+    r"(?m)^## (v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*) — ", changelog
+)
+if not candidate_versions:
+    fail("changelog must contain a versioned release candidate")
+latest_candidate = candidate_versions[0]
+stable_version = latest_candidate.removeprefix("v").split("-rc.", 1)[0]
+package_versions = {}
+for package, manifest in PRODUCTION_PACKAGE_MANIFESTS.items():
+    package_manifest = manifest.read_text(encoding="utf-8")
+    package_version = re.search(
+        r'(?m)^version\s*=\s*"([^"]+)"\s*$', package_manifest
+    )
+    if package_version is None:
+        fail(f"production package {package} has no explicit version")
+    package_versions[package] = package_version.group(1)
+source_versions = set(package_versions.values())
+if len(source_versions) != 1:
+    fail(f"production packages must share one version; found {package_versions!r}")
+source_version = next(iter(source_versions))
+if stable_version != source_version:
+    fail(
+        f"latest candidate {latest_candidate} does not match source package "
+        f"version {source_version}"
+    )
+candidate_examples = re.findall(
+    rf"(?m)^\s+-f version={re.escape(latest_candidate)}\s+\\\s*$", release_doc
+)
+stable_examples = re.findall(
+    rf"(?m)^\s+-f version=v{re.escape(stable_version)}\s+\\\s*$", release_doc
+)
+if len(candidate_examples) != 1:
+    fail(f"candidate runbook must select the latest changelog candidate {latest_candidate}")
+if len(stable_examples) != 1:
+    fail(f"stable runbook must promote the candidate base version v{stable_version}")
+
 if not re.search(r"(?m)^permissions:\n  contents: read$", workflow):
     fail("workflow-wide permissions must remain contents: read")
 if workflow.count("contents: write") != 1:
@@ -117,6 +177,6 @@ if unpinned:
 print(
     "validated immutable release workflow: four production binaries, exactly two "
     "temporary pre-launch macOS targets, scheduled and explicit canaries, "
-    "versioned candidates, shared build identity, bounded permissions, and pinned "
-    "actions"
+    "versioned candidates, source-version validation, synchronized release docs, "
+    "shared build identity, bounded permissions, and pinned actions"
 )
