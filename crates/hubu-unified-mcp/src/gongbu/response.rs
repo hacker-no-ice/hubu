@@ -5,16 +5,40 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const MCP_SCHEMA_VERSION: u32 = 2;
+const TARGET_FIELDS: &[&str] = &["workload_type", "provider", "adapter", "model"];
+const PRICING_SELECTOR_FIELDS: &[&str] = &["input.image_size"];
+
+#[derive(Clone, Copy, Debug)]
+struct ValidationDiagnostic {
+    reason_code: &'static str,
+    fields: &'static [&'static str],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ApiErrorContext {
+    General,
+    CreateExecutionV2,
+}
 
 #[derive(Debug)]
 pub(super) struct ToolError {
     code: &'static str,
     message: &'static str,
+    diagnostic: Option<ValidationDiagnostic>,
 }
 
 impl ToolError {
     pub(super) fn new(code: &'static str, message: &'static str) -> Self {
-        Self { code, message }
+        Self {
+            code,
+            message,
+            diagnostic: None,
+        }
+    }
+
+    fn with_diagnostic(mut self, diagnostic: Option<ValidationDiagnostic>) -> Self {
+        self.diagnostic = diagnostic;
+        self
     }
 
     pub(super) fn invalid() -> Self {
@@ -30,11 +54,16 @@ impl ToolError {
     }
 
     pub(super) fn into_result(self) -> ToolResult {
+        let mut error = json!({ "code": self.code, "message": self.message });
+        if let Some(diagnostic) = self.diagnostic {
+            error["reason_code"] = json!(diagnostic.reason_code);
+            error["fields"] = json!(diagnostic.fields);
+        }
         ToolResult {
             content: vec![Content::Text {
                 text: json!({
                     "schema_version": MCP_SCHEMA_VERSION,
-                    "error": { "code": self.code, "message": self.message }
+                    "error": error
                 })
                 .to_string(),
             }],
@@ -43,22 +72,46 @@ impl ToolError {
     }
 }
 
-pub(super) fn api_error(status: StatusCode, body: Option<&[u8]>) -> ToolError {
+pub(super) fn api_error(
+    status: StatusCode,
+    body: Option<&[u8]>,
+    context: ApiErrorContext,
+) -> ToolError {
     #[derive(Deserialize)]
     struct Envelope {
+        #[serde(default)]
+        schema_version: Option<u32>,
         error: ErrorCode,
     }
     #[derive(Deserialize)]
     struct ErrorCode {
         code: String,
+        #[serde(default)]
+        reason_code: Option<Value>,
+        #[serde(default)]
+        fields: Option<Value>,
     }
 
-    let reported = body
-        .and_then(|bytes| serde_json::from_slice::<Envelope>(bytes).ok())
-        .map(|value| value.error.code);
-    match (status, reported.as_deref()) {
+    let reported = body.and_then(|bytes| serde_json::from_slice::<Envelope>(bytes).ok());
+    match (
+        status,
+        reported.as_ref().map(|value| value.error.code.as_str()),
+    ) {
         (StatusCode::BAD_REQUEST, Some("invalid_request")) => {
+            let diagnostic = reported
+                .as_ref()
+                .filter(|reported| {
+                    context == ApiErrorContext::CreateExecutionV2
+                        && reported.schema_version == Some(2)
+                })
+                .and_then(|reported| {
+                    allowlisted_validation_diagnostic(
+                        reported.error.reason_code.as_ref(),
+                        reported.error.fields.as_ref(),
+                    )
+                });
             ToolError::new("invalid_request", "request validation failed")
+                .with_diagnostic(diagnostic)
         }
         (StatusCode::UNAUTHORIZED, _) => {
             ToolError::new("unauthorized", "Gongbu rejected operator authentication")
@@ -77,6 +130,34 @@ pub(super) fn api_error(status: StatusCode, body: Option<&[u8]>) -> ToolError {
             "Gongbu could not complete the request",
         ),
         _ => ToolError::new("gongbu_api_error", "Gongbu rejected the request"),
+    }
+}
+
+fn allowlisted_validation_diagnostic(
+    reason_code: Option<&Value>,
+    fields: Option<&Value>,
+) -> Option<ValidationDiagnostic> {
+    let reason_code = reason_code?.as_str()?;
+    let fields = fields?.as_array()?;
+    let exactly_matches = |expected: &[&str]| {
+        fields.len() == expected.len()
+            && fields
+                .iter()
+                .zip(expected)
+                .all(|(reported, expected)| reported.as_str() == Some(*expected))
+    };
+    match reason_code {
+        "target_not_selectable" if exactly_matches(TARGET_FIELDS) => Some(ValidationDiagnostic {
+            reason_code: "target_not_selectable",
+            fields: TARGET_FIELDS,
+        }),
+        "pricing_selector_not_matched" if exactly_matches(PRICING_SELECTOR_FIELDS) => {
+            Some(ValidationDiagnostic {
+                reason_code: "pricing_selector_not_matched",
+                fields: PRICING_SELECTOR_FIELDS,
+            })
+        }
+        _ => None,
     }
 }
 

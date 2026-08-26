@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use reqwest::StatusCode;
 use serde_json::{json, Value};
 
 use crate::{
@@ -13,7 +14,11 @@ use crate::{
     BackendOwner, Config,
 };
 
-use super::{catalog::tool_definitions, transport::call_tool};
+use super::{
+    catalog::tool_definitions,
+    response::{api_error, ApiErrorContext},
+    transport::call_tool,
+};
 
 const EXECUTION: &str = r#"{"schema_version":2,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":"backend echoed op-1","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
 
@@ -226,4 +231,134 @@ fn application_and_transport_failures_preserve_contract_without_retry() {
         .contains("gongbu_unavailable"));
     thread::sleep(Duration::from_millis(10));
     assert_eq!(*accepts.lock().unwrap(), 1);
+}
+
+fn projected_api_error(body: &str) -> Value {
+    projected_api_error_with_context(body, ApiErrorContext::CreateExecutionV2)
+}
+
+fn projected_api_error_with_context(body: &str, context: ApiErrorContext) -> Value {
+    let result = api_error(StatusCode::BAD_REQUEST, Some(body.as_bytes()), context).into_result();
+    let result = serde_json::to_value(result).unwrap();
+    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+#[test]
+fn validation_diagnostics_project_only_allowlisted_reason_and_fields() {
+    let target = projected_api_error(
+        r#"{"schema_version":2,"error":{"code":"invalid_request","message":"target secret-canary","reason_code":"target_not_selectable","fields":["workload_type","provider","adapter","model"],"private_detail":"secret-canary"}}"#,
+    );
+    assert_eq!(
+        target,
+        json!({
+            "schema_version": 2,
+            "error": {
+                "code": "invalid_request",
+                "message": "request validation failed",
+                "reason_code": "target_not_selectable",
+                "fields": ["workload_type", "provider", "adapter", "model"]
+            }
+        })
+    );
+    assert!(!target.to_string().contains("secret-canary"));
+
+    let pricing = projected_api_error(
+        r#"{"schema_version":2,"error":{"code":"invalid_request","message":"pricing secret-canary","reason_code":"pricing_selector_not_matched","fields":["input.image_size"],"private_detail":"secret-canary"}}"#,
+    );
+    assert_eq!(
+        pricing,
+        json!({
+            "schema_version": 2,
+            "error": {
+                "code": "invalid_request",
+                "message": "request validation failed",
+                "reason_code": "pricing_selector_not_matched",
+                "fields": ["input.image_size"]
+            }
+        })
+    );
+    assert!(!pricing.to_string().contains("secret-canary"));
+}
+
+#[test]
+fn validation_diagnostics_drop_unknown_malformed_or_spoofed_values() {
+    let generic = json!({
+        "schema_version": 2,
+        "error": {
+            "code": "invalid_request",
+            "message": "request validation failed"
+        }
+    });
+    for body in [
+        r#"{"schema_version":2,"error":{"code":"invalid_request","message":"secret-canary","reason_code":"secret-canary","fields":["input.image_size"]}}"#,
+        r#"{"schema_version":2,"error":{"code":"invalid_request","message":"secret-canary","reason_code":"target_not_selectable","fields":["workload_type","provider","adapter","model","secret-canary"]}}"#,
+        r#"{"schema_version":2,"error":{"code":"invalid_request","message":"secret-canary","reason_code":"pricing_selector_not_matched","fields":["secret-canary"]}}"#,
+        r#"{"schema_version":2,"error":{"code":"invalid_request","message":"secret-canary","reason_code":{"value":"target_not_selectable","canary":"secret-canary"},"fields":"secret-canary"}}"#,
+    ] {
+        let projected = projected_api_error(body);
+        assert_eq!(projected, generic, "body: {body}");
+        assert!(!projected.to_string().contains("secret-canary"));
+    }
+}
+
+#[test]
+fn validation_diagnostics_require_v2_create_context() {
+    let generic = json!({
+        "schema_version": 2,
+        "error": {
+            "code": "invalid_request",
+            "message": "request validation failed"
+        }
+    });
+    let diagnostic = |schema| {
+        format!(
+            r#"{{"schema_version":{schema},"error":{{"code":"invalid_request","message":"secret-canary","reason_code":"pricing_selector_not_matched","fields":["input.image_size"]}}}}"#
+        )
+    };
+
+    assert_eq!(
+        projected_api_error_with_context(&diagnostic(2), ApiErrorContext::General),
+        generic
+    );
+    assert_eq!(projected_api_error(&diagnostic(1)), generic);
+    assert_eq!(
+        projected_api_error(
+            r#"{"error":{"code":"invalid_request","message":"secret-canary","reason_code":"pricing_selector_not_matched","fields":["input.image_size"]}}"#,
+        ),
+        generic
+    );
+}
+
+#[test]
+fn transport_projects_admission_diagnostics_only_for_v2_create() {
+    const DIAGNOSTIC: &str = r#"{"schema_version":2,"error":{"code":"invalid_request","message":"secret-canary","reason_code":"pricing_selector_not_matched","fields":["input.image_size"]}}"#;
+    let (endpoint, requests) = mock_server(vec![
+        ("400 Bad Request", "application/json", DIAGNOSTIC),
+        ("400 Bad Request", "application/json", DIAGNOSTIC),
+    ]);
+    let client = client(&endpoint, "secret");
+
+    let created = call_tool(
+        &client,
+        "gongbu_create_execution",
+        create_arguments(),
+        Some(&continuation()),
+    )
+    .result;
+    assert!(created.to_string().contains("pricing_selector_not_matched"));
+    assert!(!created.to_string().contains("secret-canary"));
+
+    let fetched = call_tool(
+        &client,
+        "gongbu_get_execution",
+        json!({"execution_id":"exec-1"}),
+        None,
+    )
+    .result;
+    assert!(!fetched.to_string().contains("pricing_selector_not_matched"));
+    assert!(!fetched.to_string().contains("secret-canary"));
+
+    let requests = requests.lock().unwrap();
+    assert!(requests[0].starts_with("POST /v2/executions "));
+    assert!(requests[1].starts_with("GET /v1/executions/exec-1 "));
 }

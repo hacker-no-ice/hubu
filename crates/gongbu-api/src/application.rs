@@ -10,7 +10,7 @@ use crate::{
     execution::{Execution, Repository},
     http::{Api, AuthenticatedCaller, HttpResponse},
     hubu::SpendAuthorizationResolver,
-    lifecycle::{DependencyName, DependencyProbeOutcome, LifecycleReason},
+    lifecycle::{AdmissionRoute, DependencyName, DependencyProbeOutcome, LifecycleReason},
     provider::{
         contract::{
             enforce_cost, vendor_idempotency_key, AdapterOutcome, NormalizedRequest,
@@ -771,14 +771,25 @@ async fn dispatch(State(state): State<ApplicationState>, request: Request<Body>)
             json!({"schema_version":schema_version,"error":{"code":"not_ready","message":"execution admission is temporarily unavailable"}}),
         );
     }
+    let admission_route = match (method.as_str(), path.as_str()) {
+        ("POST", "/v1/executions") => Some(AdmissionRoute::CreateExecutionV1),
+        ("POST", "/v2/executions") => Some(AdmissionRoute::CreateExecutionV2),
+        _ => None,
+    };
     let account = state.authenticator.authenticate(request.headers()).ok();
     let body = match to_bytes(request.into_body(), MAX_REQUEST_BYTES).await {
         Ok(body) => body,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
     let api = state.api.clone();
-    match tokio::task::spawn_blocking(move || api.handle(&method, &path, account.as_ref(), &body))
-        .await
+    match tokio::task::spawn_blocking(move || {
+        let response = api.handle(&method, &path, account.as_ref(), &body);
+        if let Some(route) = admission_route {
+            crate::lifecycle::log_admission_rejection(route, response.status, &response.body);
+        }
+        response
+    })
+    .await
     {
         Ok(response) => into_axum(response),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

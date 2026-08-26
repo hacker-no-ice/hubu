@@ -101,6 +101,13 @@ concise recovery guidance:
 - Gongbu application errors remain `isError: true` with their sanitized error
   object.
 
+For `gongbu_create_execution`, the router preserves Gongbu's two allowlisted
+admission diagnostics: `target_not_selectable` with the four target field names,
+or `pricing_selector_not_matched` with `input.image_size`. These are field paths,
+not request or target values. Generic and unknown backend diagnostics are not
+promoted into agent-facing detail, and the backend's bounded process-log event
+does not cross the MCP boundary.
+
 For example, an agent-facing spend result includes:
 
 ```json
