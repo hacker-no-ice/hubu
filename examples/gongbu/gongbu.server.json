@@ -21,7 +21,7 @@
   "hubu": {
     "endpoint": "http://127.0.0.1:8787",
     "allowlisted_hosts": [],
-    "expected_product_version": "v0.1.0",
+    "expected_product_version": "REPLACE_WITH_EXACT_HUBU_PRODUCT_VERSION",
     "expected_executor_contract": "hubu-spend-executor-v4.3",
     "credential_reference": {
       "service": "gongbu.hubu",

@@ -14,7 +14,10 @@ cargo build --release --locked -p gongbu-api --bin gongbu-server
 Copy [`examples/gongbu/gongbu.server.json`](../../examples/gongbu/gongbu.server.json)
 to an operator-owned absolute path. The file passed to `--config` is the only
 runtime configuration source; unknown fields are rejected and changes require
-a graceful restart.
+a graceful restart. Replace `REPLACE_WITH_EXACT_HUBU_PRODUCT_VERSION` with the
+exact `product_version` reported by the selected `hubu-server --version`,
+including any leading `v` and prerelease suffix. Hubu and Gongbu binaries must
+come from the same verified release archive.
 
 All state, catalog, artifact, and managed Temporal paths must be absolute. Raw
 tokens and provider keys never belong in JSON. Provider and explicit service

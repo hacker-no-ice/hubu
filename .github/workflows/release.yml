@@ -57,6 +57,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          resolve_base_version() {
+            cargo metadata --locked --no-deps --format-version 1 |
+              jq -er '
+                [.packages[] |
+                  select(
+                    .name == "gongbu-api" or
+                    .name == "hubu-api" or
+                    .name == "hubu-cli" or
+                    .name == "hubu-unified-mcp"
+                  ) |
+                  .version] |
+                select(length == 4 and (unique | length) == 1) |
+                .[0]
+              '
+          }
+
           prerelease_is_complete() {
             release_json="$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets,isDraft,isPrerelease,targetCommitish 2>/dev/null)" || return 1
             jq -e \
@@ -80,10 +96,13 @@ jobs:
             git cat-file -e "${INPUT_SOURCE_COMMIT}^{commit}"
             git merge-base --is-ancestor "${INPUT_SOURCE_COMMIT}" origin/main
             source_commit="${INPUT_SOURCE_COMMIT}"
+            git checkout --detach "${source_commit}"
+            if ! base_version="$(resolve_base_version)"; then
+              echo "Release production packages must share one source package version" >&2
+              exit 1
+            fi
             if [[ "${INPUT_CHANNEL}" == "canary" ]]; then
-              git checkout --detach "${source_commit}"
               short_commit="${source_commit:0:12}"
-              base_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "hubu-api") | .version')"
               version="${base_version}-main.${short_commit}"
               tag="main-${source_commit}"
               prerelease=true
@@ -93,6 +112,12 @@ jobs:
                 echo "Candidate version must match vMAJOR.MINOR.PATCH-rc.NUMBER" >&2
                 exit 1
               fi
+              candidate_base_version="${INPUT_VERSION#v}"
+              candidate_base_version="${candidate_base_version%-rc.*}"
+              if [[ "${candidate_base_version}" != "${base_version}" ]]; then
+                echo "Candidate version ${INPUT_VERSION} does not match source package version ${base_version}" >&2
+                exit 1
+              fi
               version="${INPUT_VERSION}"
               tag="${INPUT_VERSION}"
               prerelease=true
@@ -100,6 +125,11 @@ jobs:
             elif [[ "${INPUT_CHANNEL}" == "stable" ]]; then
               if [[ ! "${INPUT_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                 echo "Stable version must match vMAJOR.MINOR.PATCH" >&2
+                exit 1
+              fi
+              stable_base_version="${INPUT_VERSION#v}"
+              if [[ "${stable_base_version}" != "${base_version}" ]]; then
+                echo "Stable version ${INPUT_VERSION} does not match source package version ${base_version}" >&2
                 exit 1
               fi
               version="${INPUT_VERSION}"
@@ -113,8 +143,12 @@ jobs:
           else
             git fetch origin main
             source_commit="$(git rev-parse origin/main)"
+            git checkout --detach "${source_commit}"
             short_commit="${source_commit:0:12}"
-            base_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "hubu-api") | .version')"
+            if ! base_version="$(resolve_base_version)"; then
+              echo "Release production packages must share one source package version" >&2
+              exit 1
+            fi
             version="${base_version}-main.${short_commit}"
             tag="main-${source_commit}"
             channel=canary
