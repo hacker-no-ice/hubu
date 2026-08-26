@@ -37,7 +37,9 @@ install -m 0755 "${asset%.tar.gz}"/{hubu,hubu-server,hubu-unified-mcp,gongbu-ser
 ```
 
 Ensure `~/.local/bin` is on your `PATH`, then create an operator-owned stack
-profile. This quick start uses the generated managed-Hubu endpoint and database;
+profile. Before testing, verify that `command -v hubu` resolves to this
+installation and that `hubu --version` reports the release version you intend
+to test. This quick start uses the generated managed-Hubu endpoint and database;
 for an external Hubu or a custom database, follow the
 [local stack guide](docs/local-stack.md) and configure explicit
 external-service credential references.
