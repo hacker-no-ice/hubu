@@ -386,9 +386,16 @@ fn execution_response() -> Value {
     execution_response_for("operation-107")
 }
 
+fn execution_observation_response_for(operation_key: &str, execution_id: &str) -> Value {
+    let mut response = execution_response_for(operation_key);
+    response["schema_version"] = json!(1);
+    response["execution_id"] = json!(execution_id);
+    response
+}
+
 fn artifact_list_response() -> Value {
     json!({
-        "schema_version":2,
+        "schema_version":1,
         "execution_id":"exec-107",
         "artifacts":[]
     })
@@ -396,7 +403,8 @@ fn artifact_list_response() -> Value {
 
 fn success_body(case: &GoldenCase) -> Value {
     match case.name {
-        "gongbu_create_execution" | "gongbu_get_execution" => execution_response(),
+        "gongbu_create_execution" => execution_response(),
+        "gongbu_get_execution" => execution_observation_response_for("operation-107", "exec-107"),
         "gongbu_list_artifacts" => artifact_list_response(),
         "gongbu_get_artifact" => unreachable!("artifact success uses image bytes"),
         "hubu_authorize_spend" => json!({
@@ -585,7 +593,12 @@ fn backend_application_failures_are_owned_redacted_and_isolated() {
         400,
         json!({"error":{"code":"invalid_request","secret":GONGBU_TOKEN}}),
     );
-    gongbu.respond_json("GET", "/v1/executions/exec-ok", 200, execution_response());
+    gongbu.respond_json(
+        "GET",
+        "/v1/executions/exec-ok",
+        200,
+        execution_observation_response_for("operation-107", "exec-ok"),
+    );
     let mut unified = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
     unified.initialize();
 

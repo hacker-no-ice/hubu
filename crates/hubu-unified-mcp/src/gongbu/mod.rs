@@ -1,8 +1,9 @@
 //! Gongbu-owned routes for the unified MCP adapter.
 //!
 //! This facade intentionally mirrors Gongbu's public MCP wire contract without
-//! depending on a Gongbu crate. Requests use fixed relative paths on the
-//! separately configured Gongbu client and are never retried by the router.
+//! depending on a Gongbu crate. Each HTTP attempt uses a fixed relative path
+//! with no inline retry; the durable worker separately schedules bounded exact
+//! create replay or read-only observation after safe transient failures.
 
 mod catalog;
 mod request;

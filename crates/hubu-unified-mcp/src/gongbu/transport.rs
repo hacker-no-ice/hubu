@@ -10,7 +10,8 @@ use super::{
     request::{self, PreparedCall},
     response::{
         api_error, artifact_result, execution_result, scrub_artifact_metadata, text_result,
-        ApiErrorContext, ArtifactListResponse, ExecutionResponse, ToolError, ToolResult,
+        ApiErrorContext, ArtifactListResponse, ExecutionResponse, ToolError, ToolErrorClass,
+        ToolResult, EXECUTION_V1_SCHEMA_VERSION, EXECUTION_V2_SCHEMA_VERSION,
     },
 };
 
@@ -32,7 +33,10 @@ impl From<ToolError> for DurableCallError {
     fn from(error: ToolError) -> Self {
         Self {
             code: error.code(),
-            retryable: error.retryable(),
+            retryable: matches!(
+                error.class(),
+                ToolErrorClass::Transient | ToolErrorClass::InvalidSuccessfulResponse
+            ),
         }
     }
 }
@@ -61,16 +65,7 @@ pub(super) fn create_durable_execution(
     expected: &crate::operation_registry::GongbuContinuation,
 ) -> Result<crate::operation_registry::GongbuLifecycle, DurableCallError> {
     let prepared = request::prepare("gongbu_create_execution", arguments)?;
-    let (_, lifecycle) = execute(client, prepared, Some(expected)).map_err(|error| {
-        let code = error.code();
-        DurableCallError {
-            code,
-            // A successful create response that cannot be read or decoded is
-            // ambiguous: Gongbu may already have persisted the execution. The
-            // exact operation-key-bound request is safe to replay.
-            retryable: error.retryable() || code == "invalid_response",
-        }
-    })?;
+    let (_, lifecycle) = execute(client, prepared, Some(expected))?;
     lifecycle.ok_or(DurableCallError {
         code: "invalid_execution_response",
         retryable: false,
@@ -114,7 +109,8 @@ fn execute(
             })?;
             let response: ExecutionResponse =
                 json_request(client, Method::POST, "v2/executions", Some(&request))?;
-            let (result, lifecycle) = execution_result(response, Some(expected))?;
+            let (result, lifecycle) =
+                execution_result(response, Some(expected), None, EXECUTION_V2_SCHEMA_VERSION)?;
             Ok((result, Some(lifecycle)))
         }
         PreparedCall::GetExecution(execution_id) => {
@@ -124,7 +120,12 @@ fn execute(
                 &format!("v1/executions/{execution_id}"),
                 None,
             )?;
-            let (result, lifecycle) = execution_result(response, expected)?;
+            let (result, lifecycle) = execution_result(
+                response,
+                expected,
+                Some(&execution_id),
+                EXECUTION_V1_SCHEMA_VERSION,
+            )?;
             Ok((result, expected.map(|_| lifecycle)))
         }
         PreparedCall::ListArtifacts(execution_id) => {
@@ -194,14 +195,12 @@ fn json_request<B: Serialize + ?Sized, R: DeserializeOwned>(
         .map_err(|_| ToolError::invalid())?;
     let response = send(client, method, path, body)?;
     let status = response.status();
-    let bytes = read_bounded(response, JSON_LIMIT).map_err(|()| {
-        ToolError::upstream("invalid_response", "Gongbu returned an invalid response")
-    })?;
     if !status.is_success() {
-        return Err(api_error(status, Some(&bytes), error_context));
+        let response_body = read_bounded(response, JSON_LIMIT).ok();
+        return Err(api_error(status, response_body.as_deref(), error_context));
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|_| ToolError::upstream("invalid_response", "Gongbu returned an invalid response"))
+    let bytes = read_bounded(response, JSON_LIMIT).map_err(|()| ToolError::invalid_response())?;
+    serde_json::from_slice(&bytes).map_err(|_| ToolError::invalid_response())
 }
 
 fn send(
@@ -242,5 +241,47 @@ fn read_bounded(response: reqwest::blocking::Response, limit: usize) -> Result<V
         Err(())
     } else {
         Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    fn durable(error: ToolError) -> DurableCallError {
+        error.into()
+    }
+
+    #[test]
+    fn durable_retry_policy_uses_internal_error_classes() {
+        for error in [
+            ToolError::transport(),
+            ToolError::transient("rate_limited", "rate limited"),
+            ToolError::transient("gongbu_internal_error", "backend failure"),
+            ToolError::invalid_response(),
+        ] {
+            assert!(durable(error).retryable);
+        }
+        for error in [
+            ToolError::invalid(),
+            ToolError::new("unauthorized", "unauthorized"),
+            ToolError::new("forbidden", "forbidden"),
+            ToolError::new("not_found", "not found"),
+            ToolError::new("immutable_scope_conflict", "conflict"),
+        ] {
+            assert!(!durable(error).retryable);
+        }
+    }
+
+    #[test]
+    fn http_status_remains_authoritative_without_an_error_body() {
+        let classify = |status| api_error(status, None, ApiErrorContext::General);
+        assert!(!durable(classify(StatusCode::UNAUTHORIZED)).retryable);
+        assert!(!durable(classify(StatusCode::CONFLICT)).retryable);
+        assert!(durable(classify(StatusCode::REQUEST_TIMEOUT)).retryable);
+        assert!(durable(classify(StatusCode::TOO_EARLY)).retryable);
+        assert!(durable(classify(StatusCode::TOO_MANY_REQUESTS)).retryable);
+        assert!(durable(classify(StatusCode::BAD_GATEWAY)).retryable);
     }
 }

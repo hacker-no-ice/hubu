@@ -67,6 +67,16 @@ fn execution_response_for(operation_key: &str, status: &str, execution_id: &str)
     })
 }
 
+fn observation_response(operation_key: &str, status: &str) -> Value {
+    observation_response_for(operation_key, status, "exec-93")
+}
+
+fn observation_response_for(operation_key: &str, status: &str, execution_id: &str) -> Value {
+    let mut response = execution_response_for(operation_key, status, execution_id);
+    response["schema_version"] = json!(1);
+    response
+}
+
 fn routing_fixture() -> Value {
     serde_json::from_str(include_str!(
         "../../../fixtures/unified-mcp-routing-v1.json"
@@ -248,7 +258,12 @@ fn ambiguous_provider_outcome_reconciles_then_fails_without_replacement_permissi
     let operation_key = private_operation_key(&mcp, "hubu-spend-token-93");
     let ambiguous = execution_response(&operation_key, "reconciliation_required");
     gongbu.respond_json("POST", "/v2/executions", 200, ambiguous.clone());
-    gongbu.respond_json("GET", "/v1/executions/exec-93", 200, ambiguous);
+    gongbu.respond_json(
+        "GET",
+        "/v1/executions/exec-93",
+        200,
+        observation_response(&operation_key, "reconciliation_required"),
+    );
     mcp.call(31, "gongbu_create_execution", execution_arguments());
     let mut next_id = 2000;
     let failed = wait_for_operation_state(&mut mcp, &mut next_id, &handle, "failed");
@@ -343,6 +358,154 @@ fn malformed_successful_create_response_replays_exact_request() {
         create_requests[0].raw.split_once("\r\n\r\n").unwrap().1,
         create_requests[1].raw.split_once("\r\n\r\n").unwrap().1
     );
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN, &operation_key]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn invalid_successful_observations_retry_without_create_replay() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    mcp.initialize();
+    let authorized = mcp.call_with_meta(
+        47,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-93","amount_cents":25,"reason":"invalid observation recovery"}),
+        json!({"callId":"invalid-observation-recovery-call"}),
+    );
+    let handle = authorized["result"]["structuredContent"]["operation_handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let operation_key = private_operation_key(&mcp, "hubu-spend-token-93");
+    gongbu.respond_json(
+        "POST",
+        "/v2/executions",
+        200,
+        execution_response(&operation_key, "executing"),
+    );
+    gongbu.respond_sequence_json(
+        "GET",
+        "/v1/executions/exec-93",
+        [
+            (200, json!("truncated-success-response")),
+            (
+                200,
+                observation_response(&operation_key, "unsupported_status"),
+            ),
+            (200, observation_response(&operation_key, "succeeded")),
+        ],
+    );
+
+    mcp.call(48, "gongbu_create_execution", execution_arguments());
+    let mut next_id = 3600;
+    let succeeded = wait_for_operation_state(&mut mcp, &mut next_id, &handle, "succeeded");
+    assert_eq!(
+        succeeded["result"]["structuredContent"]["result"]["code"],
+        "execution_succeeded"
+    );
+    assert_eq!(
+        succeeded["result"]["structuredContent"]["replacement_safe"],
+        false
+    );
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
+    assert_eq!(gongbu.request_count("GET", "/v1/executions/exec-93"), 3);
+    let persisted: (String, String, Option<String>, u32) =
+        Connection::open(mcp.operation_state_path())
+            .unwrap()
+            .query_row(
+                "SELECT gongbu_execution_id, operation_state, gongbu_request_json,
+                        observation_failures
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&handle],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+    assert_eq!(persisted, ("exec-93".into(), "succeeded".into(), None, 0));
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN, &operation_key]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn invalid_observation_exhaustion_is_terminal_without_create_replay() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    mcp.initialize();
+    let authorized = mcp.call_with_meta(
+        49,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-93","amount_cents":25,"reason":"invalid observation exhaustion"}),
+        json!({"callId":"invalid-observation-exhaustion-call"}),
+    );
+    let handle = authorized["result"]["structuredContent"]["operation_handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let operation_key = private_operation_key(&mcp, "hubu-spend-token-93");
+    gongbu.respond_json(
+        "POST",
+        "/v2/executions",
+        200,
+        execution_response(&operation_key, "executing"),
+    );
+    gongbu.respond_sequence_json(
+        "GET",
+        "/v1/executions/exec-93",
+        (0..5).map(|_| (200, json!("malformed-observation"))),
+    );
+
+    mcp.call(50, "gongbu_create_execution", execution_arguments());
+    let mut next_id = 3700;
+    let failed = wait_for_operation_state(&mut mcp, &mut next_id, &handle, "failed");
+    assert_eq!(
+        failed["result"]["structuredContent"]["result"]["code"],
+        "observation_retry_exhausted"
+    );
+    assert_eq!(
+        failed["result"]["structuredContent"]["replacement_safe"],
+        false
+    );
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
+    assert_eq!(gongbu.request_count("GET", "/v1/executions/exec-93"), 5);
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN, &operation_key]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn unreadable_permanent_http_error_is_not_retried() {
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
+    mcp.initialize();
+    let authorized = mcp.call_with_meta(
+        51,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-93","amount_cents":25,"reason":"unreadable permanent error"}),
+        json!({"callId":"unreadable-permanent-error-call"}),
+    );
+    let handle = authorized["result"]["structuredContent"]["operation_handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let operation_key = private_operation_key(&mcp, "hubu-spend-token-93");
+    gongbu.respond_bytes(
+        "POST",
+        "/v2/executions",
+        401,
+        "application/json",
+        vec![b'x'; 1024 * 1024 + 1],
+    );
+
+    mcp.call(52, "gongbu_create_execution", execution_arguments());
+    let mut next_id = 3800;
+    let failed = wait_for_operation_state(&mut mcp, &mut next_id, &handle, "failed");
+    assert_eq!(
+        failed["result"]["structuredContent"]["result"]["code"],
+        "gongbu_authentication_failed"
+    );
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN, &operation_key]);
 }
 
@@ -708,7 +871,7 @@ fn private_gongbu_continuation_binds_replays_restarts_and_redacts_recursively() 
         "GET",
         "/v1/executions/exec-93",
         200,
-        execution_response(&operation_key, "succeeded"),
+        observation_response(&operation_key, "succeeded"),
     );
     let mut restarted = McpProcess::start_with_operation_state(
         Some((&hubu, HUBU_TOKEN)),
@@ -825,7 +988,7 @@ fn exact_hub_88_catalog_and_representative_governed_artifact_flow() {
         "GET",
         "/v1/executions/exec-93",
         200,
-        execution_response(&operation_key, "succeeded"),
+        observation_response(&operation_key, "succeeded"),
     );
     let execution = mcp.call(6, "gongbu_create_execution", execution_arguments());
     assert_eq!(execution["result"]["isError"], false);
