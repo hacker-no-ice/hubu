@@ -4,18 +4,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use super::AdmissionDiagnostic;
+
 const MCP_SCHEMA_VERSION: u32 = 2;
 pub(super) const EXECUTION_V1_SCHEMA_VERSION: u32 = 1;
 pub(super) const EXECUTION_V2_SCHEMA_VERSION: u32 = 2;
-
-const TARGET_FIELDS: &[&str] = &["workload_type", "provider", "adapter", "model"];
-const PRICING_SELECTOR_FIELDS: &[&str] = &["input.image_size"];
-
-#[derive(Clone, Copy, Debug)]
-struct ValidationDiagnostic {
-    reason_code: &'static str,
-    fields: &'static [&'static str],
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ApiErrorContext {
@@ -35,7 +28,7 @@ pub(super) enum ToolErrorClass {
 pub(super) struct ToolError {
     code: &'static str,
     message: &'static str,
-    diagnostic: Option<ValidationDiagnostic>,
+    diagnostic: Option<AdmissionDiagnostic>,
     class: ToolErrorClass,
 }
 
@@ -49,7 +42,7 @@ impl ToolError {
         }
     }
 
-    fn with_diagnostic(mut self, diagnostic: Option<ValidationDiagnostic>) -> Self {
+    fn with_diagnostic(mut self, diagnostic: Option<AdmissionDiagnostic>) -> Self {
         self.diagnostic = diagnostic;
         self
     }
@@ -96,8 +89,8 @@ impl ToolError {
     pub(super) fn into_result(self) -> ToolResult {
         let mut error = json!({ "code": self.code, "message": self.message });
         if let Some(diagnostic) = self.diagnostic {
-            error["reason_code"] = json!(diagnostic.reason_code);
-            error["fields"] = json!(diagnostic.fields);
+            error["reason_code"] = json!(diagnostic.reason_code());
+            error["fields"] = json!(diagnostic.fields());
         }
         ToolResult {
             content: vec![Content::Text {
@@ -117,6 +110,10 @@ impl ToolError {
 
     pub(super) fn class(&self) -> ToolErrorClass {
         self.class
+    }
+
+    pub(super) fn admission_diagnostic(&self) -> Option<AdmissionDiagnostic> {
+        self.diagnostic
     }
 }
 
@@ -188,7 +185,7 @@ pub(super) fn api_error(
 fn allowlisted_validation_diagnostic(
     reason_code: Option<&Value>,
     fields: Option<&Value>,
-) -> Option<ValidationDiagnostic> {
+) -> Option<AdmissionDiagnostic> {
     let reason_code = reason_code?.as_str()?;
     let fields = fields?.as_array()?;
     let exactly_matches = |expected: &[&str]| {
@@ -199,15 +196,15 @@ fn allowlisted_validation_diagnostic(
                 .all(|(reported, expected)| reported.as_str() == Some(*expected))
     };
     match reason_code {
-        "target_not_selectable" if exactly_matches(TARGET_FIELDS) => Some(ValidationDiagnostic {
-            reason_code: "target_not_selectable",
-            fields: TARGET_FIELDS,
-        }),
-        "pricing_selector_not_matched" if exactly_matches(PRICING_SELECTOR_FIELDS) => {
-            Some(ValidationDiagnostic {
-                reason_code: "pricing_selector_not_matched",
-                fields: PRICING_SELECTOR_FIELDS,
-            })
+        "target_not_selectable"
+            if exactly_matches(AdmissionDiagnostic::TargetNotSelectable.fields()) =>
+        {
+            Some(AdmissionDiagnostic::TargetNotSelectable)
+        }
+        "pricing_selector_not_matched"
+            if exactly_matches(AdmissionDiagnostic::PricingSelectorNotMatched.fields()) =>
+        {
+            Some(AdmissionDiagnostic::PricingSelectorNotMatched)
         }
         _ => None,
     }

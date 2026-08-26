@@ -109,7 +109,12 @@ impl Server {
         error: gongbu::DurableCallError,
     ) -> Result<(), ()> {
         if !error.retryable {
-            return self.fail_operation(operation, durable_failure_code(error.code));
+            let diagnostic = if operation.execution_id.is_none() {
+                error.admission_diagnostic
+            } else {
+                None
+            };
+            return self.fail_operation(operation, durable_failure_code(error.code, diagnostic));
         }
         let (attempts, limit, base, pending_code, exhausted_code) =
             if operation.execution_id.is_none() {
@@ -167,13 +172,17 @@ impl Server {
     }
 }
 
-fn durable_failure_code(code: &str) -> &'static str {
-    match code {
-        "invalid_request" => "execution_request_invalid",
-        "unauthorized" => "gongbu_authentication_failed",
-        "forbidden" => "gongbu_access_forbidden",
-        "not_found" => "execution_not_found",
-        "immutable_scope_conflict" => "execution_intent_conflict",
+fn durable_failure_code(
+    code: &str,
+    diagnostic: Option<gongbu::AdmissionDiagnostic>,
+) -> &'static str {
+    match (code, diagnostic) {
+        ("invalid_request", Some(diagnostic)) => diagnostic.durable_result_code(),
+        ("invalid_request", None) => "execution_request_invalid",
+        ("unauthorized", _) => "gongbu_authentication_failed",
+        ("forbidden", _) => "gongbu_access_forbidden",
+        ("not_found", _) => "execution_not_found",
+        ("immutable_scope_conflict", _) => "execution_intent_conflict",
         _ => "execution_dispatch_failed",
     }
 }
@@ -202,12 +211,33 @@ mod tests {
     #[test]
     fn permanent_backend_errors_map_to_safe_codes() {
         assert_eq!(
-            durable_failure_code("unauthorized"),
+            durable_failure_code("unauthorized", None),
             "gongbu_authentication_failed"
         );
         assert_eq!(
-            durable_failure_code("unexpected-secret"),
+            durable_failure_code("unexpected-secret", None),
             "execution_dispatch_failed"
+        );
+    }
+
+    #[test]
+    fn admission_diagnostics_map_only_invalid_dispatch_requests() {
+        for diagnostic in [
+            gongbu::AdmissionDiagnostic::TargetNotSelectable,
+            gongbu::AdmissionDiagnostic::PricingSelectorNotMatched,
+        ] {
+            assert_eq!(
+                durable_failure_code("invalid_request", Some(diagnostic)),
+                diagnostic.durable_result_code()
+            );
+            assert_eq!(
+                durable_failure_code("unauthorized", Some(diagnostic)),
+                "gongbu_authentication_failed"
+            );
+        }
+        assert_eq!(
+            durable_failure_code("invalid_request", None),
+            "execution_request_invalid"
         );
     }
 }

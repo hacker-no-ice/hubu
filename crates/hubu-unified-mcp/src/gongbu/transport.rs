@@ -13,6 +13,7 @@ use super::{
         ApiErrorContext, ArtifactListResponse, ExecutionResponse, ToolError, ToolErrorClass,
         ToolResult, EXECUTION_V1_SCHEMA_VERSION, EXECUTION_V2_SCHEMA_VERSION,
     },
+    AdmissionDiagnostic,
 };
 
 const JSON_LIMIT: usize = 1024 * 1024;
@@ -27,16 +28,26 @@ pub(crate) struct CallOutcome {
 pub(crate) struct DurableCallError {
     pub(crate) code: &'static str,
     pub(crate) retryable: bool,
+    pub(crate) admission_diagnostic: Option<AdmissionDiagnostic>,
 }
 
 impl From<ToolError> for DurableCallError {
     fn from(error: ToolError) -> Self {
+        let code = error.code();
+        let class = error.class();
+        let admission_diagnostic =
+            if class == ToolErrorClass::Permanent && code == "invalid_request" {
+                error.admission_diagnostic()
+            } else {
+                None
+            };
         Self {
-            code: error.code(),
+            code,
             retryable: matches!(
-                error.class(),
+                class,
                 ToolErrorClass::Transient | ToolErrorClass::InvalidSuccessfulResponse
             ),
+            admission_diagnostic,
         }
     }
 }
@@ -69,6 +80,7 @@ pub(super) fn create_durable_execution(
     lifecycle.ok_or(DurableCallError {
         code: "invalid_execution_response",
         retryable: false,
+        admission_diagnostic: None,
     })
 }
 
@@ -85,6 +97,7 @@ pub(super) fn observe_durable_execution(
     lifecycle.ok_or(DurableCallError {
         code: "invalid_execution_response",
         retryable: false,
+        admission_diagnostic: None,
     })
 }
 
@@ -283,5 +296,69 @@ mod tests {
         assert!(durable(classify(StatusCode::TOO_EARLY)).retryable);
         assert!(durable(classify(StatusCode::TOO_MANY_REQUESTS)).retryable);
         assert!(durable(classify(StatusCode::BAD_GATEWAY)).retryable);
+    }
+
+    #[test]
+    fn durable_admission_diagnostics_are_closed_and_do_not_change_retryability() {
+        let cases = [
+            (
+                "target_not_selectable",
+                serde_json::json!(["workload_type", "provider", "adapter", "model"]),
+                AdmissionDiagnostic::TargetNotSelectable,
+            ),
+            (
+                "pricing_selector_not_matched",
+                serde_json::json!(["input.image_size"]),
+                AdmissionDiagnostic::PricingSelectorNotMatched,
+            ),
+        ];
+        for (reason_code, fields, expected) in cases {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "error": {
+                    "code": "invalid_request",
+                    "reason_code": reason_code,
+                    "fields": fields,
+                    "message": "must-not-persist"
+                }
+            }))
+            .unwrap();
+            let error = durable(api_error(
+                StatusCode::BAD_REQUEST,
+                Some(&body),
+                ApiErrorContext::CreateExecutionV2,
+            ));
+            assert_eq!(error.code, "invalid_request");
+            assert!(!error.retryable);
+            assert_eq!(error.admission_diagnostic, Some(expected));
+
+            let wrong_context = durable(api_error(
+                StatusCode::BAD_REQUEST,
+                Some(&body),
+                ApiErrorContext::General,
+            ));
+            assert_eq!(wrong_context.admission_diagnostic, None);
+        }
+
+        let spoofed_transient = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "error": {
+                "code": "invalid_request",
+                "reason_code": "target_not_selectable",
+                "fields": ["workload_type", "provider", "adapter", "model"]
+            }
+        }))
+        .unwrap();
+        let transient = durable(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some(&spoofed_transient),
+            ApiErrorContext::CreateExecutionV2,
+        ));
+        assert!(transient.retryable);
+        assert_eq!(transient.admission_diagnostic, None);
+        assert_eq!(
+            durable(ToolError::invalid_response()).admission_diagnostic,
+            None
+        );
     }
 }

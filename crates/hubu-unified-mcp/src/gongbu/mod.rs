@@ -19,6 +19,48 @@ use crate::BackendClient;
 
 pub(crate) use transport::{CallOutcome, DurableCallError};
 
+const TARGET_FIELDS: &[&str] = &["workload_type", "provider", "adapter", "model"];
+const PRICING_SELECTOR_FIELDS: &[&str] = &["input.image_size"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdmissionDiagnostic {
+    TargetNotSelectable,
+    PricingSelectorNotMatched,
+}
+
+impl AdmissionDiagnostic {
+    pub(crate) fn reason_code(self) -> &'static str {
+        match self {
+            Self::TargetNotSelectable => "target_not_selectable",
+            Self::PricingSelectorNotMatched => "pricing_selector_not_matched",
+        }
+    }
+
+    pub(crate) fn fields(self) -> &'static [&'static str] {
+        match self {
+            Self::TargetNotSelectable => TARGET_FIELDS,
+            Self::PricingSelectorNotMatched => PRICING_SELECTOR_FIELDS,
+        }
+    }
+
+    pub(crate) fn durable_result_code(self) -> &'static str {
+        match self {
+            Self::TargetNotSelectable => "execution_request_target_not_selectable",
+            Self::PricingSelectorNotMatched => "execution_request_pricing_selector_not_matched",
+        }
+    }
+
+    pub(crate) fn from_durable_result_code(code: &str) -> Option<Self> {
+        match code {
+            "execution_request_target_not_selectable" => Some(Self::TargetNotSelectable),
+            "execution_request_pricing_selector_not_matched" => {
+                Some(Self::PricingSelectorNotMatched)
+            }
+            _ => None,
+        }
+    }
+}
+
 pub(crate) fn tool_definitions() -> Vec<Value> {
     catalog::tool_definitions()
 }

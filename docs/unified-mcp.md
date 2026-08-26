@@ -110,9 +110,14 @@ concise recovery guidance:
 For `gongbu_create_execution`, the router preserves Gongbu's two allowlisted
 admission diagnostics: `target_not_selectable` with the four target field names,
 or `pricing_selector_not_matched` with `input.image_size`. These are field paths,
-not request or target values. Generic and unknown backend diagnostics are not
-promoted into agent-facing detail, and the backend's bounded process-log event
-does not cross the MCP boundary.
+not request or target values. Because create is acknowledged before background
+dispatch, a definitive admission rejection surfaces later in the terminal
+`hubu_operation_status.result` as the stable `execution_request_invalid` code
+plus the allowlisted `reason_code` and `fields`; the same projection survives
+exact redelivery and restart. It explains the failure but does not make the
+acknowledged operation replacement-safe. Generic and unknown backend
+diagnostics are not promoted into agent-facing detail, and the backend's bounded
+process-log event does not cross the MCP boundary.
 
 For example, an agent-facing spend result includes:
 

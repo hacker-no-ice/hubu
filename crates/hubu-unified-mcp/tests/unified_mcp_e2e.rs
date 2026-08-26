@@ -124,6 +124,31 @@ fn wait_for_operation_state(
     panic!("operation did not reach {expected}")
 }
 
+fn assert_terminal_admission_diagnostic(
+    response: &Value,
+    operation_handle: &str,
+    reason_code: &str,
+    fields: Value,
+) {
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["operation_handle"], operation_handle);
+    assert_eq!(structured["state"], "failed");
+    assert_eq!(structured["terminal"], true);
+    assert_eq!(structured["replacement_safe"], false);
+    assert_eq!(structured["execution_id"], Value::Null);
+    assert_eq!(
+        structured["result"],
+        json!({
+            "code": "execution_request_invalid",
+            "reason_code": reason_code,
+            "fields": fields,
+        })
+    );
+    let text: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text, *structured);
+}
+
 #[test]
 #[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
 fn durable_operations_cover_codex_claude_and_safe_transient_replay() {
@@ -537,8 +562,8 @@ fn permanent_dispatch_failure_is_terminal_without_retry() {
     let mut next_id = 4000;
     let failed = wait_for_operation_state(&mut mcp, &mut next_id, &handle, "failed");
     assert_eq!(
-        failed["result"]["structuredContent"]["result"]["code"],
-        "execution_request_invalid"
+        failed["result"]["structuredContent"]["result"],
+        json!({"code":"execution_request_invalid"})
     );
     assert_eq!(
         failed["result"]["structuredContent"]["replacement_safe"],
@@ -547,6 +572,155 @@ fn permanent_dispatch_failure_is_terminal_without_retry() {
     assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
     assert!(!failed.to_string().contains("private backend detail"));
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN, &operation_key]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn durable_admission_diagnostic_survives_replay_and_restart() {
+    const PRIVATE_DETAIL: &str = "durable-admission-private-detail";
+    const PROMPT: &str = "durable-admission-private-prompt";
+
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let state = tempfile::tempdir().unwrap();
+    let state_path = state.path().join("operations.sqlite3");
+    let arguments = execution_arguments_for("hubu-spend-token-93", PROMPT);
+    let mut first = McpProcess::start_with_operation_state(
+        Some((&hubu, HUBU_TOKEN)),
+        Some((&gongbu, GONGBU_TOKEN)),
+        &state_path,
+    );
+    first.initialize();
+    let authorized = first.call_with_meta(
+        53,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-93","amount_cents":25,"reason":"durable admission diagnostic"}),
+        json!({"callId":"durable-admission-diagnostic-call"}),
+    );
+    let handle = authorized["result"]["structuredContent"]["operation_handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let operation_key = private_operation_key(&first, "hubu-spend-token-93");
+    gongbu.respond_json(
+        "POST",
+        "/v2/executions",
+        400,
+        json!({
+            "schema_version": 2,
+            "error": {
+                "code": "invalid_request",
+                "message": format!("{PRIVATE_DETAIL}: {operation_key}"),
+                "reason_code": "target_not_selectable",
+                "fields": ["workload_type", "provider", "adapter", "model"],
+                "private_detail": PRIVATE_DETAIL
+            }
+        }),
+    );
+
+    let acknowledged = first.call(54, "gongbu_create_execution", arguments.clone());
+    assert!(acknowledged.get("error").is_none());
+    assert_eq!(
+        acknowledged["result"]["structuredContent"]["operation_handle"],
+        handle
+    );
+    assert_eq!(
+        acknowledged["result"]["structuredContent"]["replacement_safe"],
+        false
+    );
+
+    let mut next_id = 4100;
+    let failed = wait_for_operation_state(&mut first, &mut next_id, &handle, "failed");
+    assert_terminal_admission_diagnostic(
+        &failed,
+        &handle,
+        "target_not_selectable",
+        json!(["workload_type", "provider", "adapter", "model"]),
+    );
+    for private in [
+        PRIVATE_DETAIL,
+        PROMPT,
+        "hubu-spend-token-93",
+        operation_key.as_str(),
+    ] {
+        assert!(!failed.to_string().contains(private));
+    }
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
+
+    let persisted: (String, Option<String>, u32, Option<String>, Option<String>) =
+        Connection::open(&state_path)
+            .unwrap()
+            .query_row(
+                "SELECT operation_result_code, gongbu_request_json, dispatch_attempts,
+                    next_operation_attempt_at, worker_lease_id
+             FROM harness_operations WHERE operation_handle = ?1",
+                [&handle],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+    assert_eq!(persisted.0, "execution_request_target_not_selectable");
+    assert_eq!(persisted.1, None);
+    assert_eq!(persisted.2, 0);
+    assert_eq!(persisted.3, None);
+    assert_eq!(persisted.4, None);
+
+    let replay = first.call(55, "gongbu_create_execution", arguments.clone());
+    assert_terminal_admission_diagnostic(
+        &replay,
+        &handle,
+        "target_not_selectable",
+        json!(["workload_type", "provider", "adapter", "model"]),
+    );
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
+    first.finish(&[
+        HUBU_TOKEN,
+        GONGBU_TOKEN,
+        PRIVATE_DETAIL,
+        PROMPT,
+        &operation_key,
+    ]);
+
+    let mut restarted = McpProcess::start_with_operation_state(
+        Some((&hubu, HUBU_TOKEN)),
+        Some((&gongbu, GONGBU_TOKEN)),
+        &state_path,
+    );
+    restarted.initialize();
+    let recovered = restarted.call(
+        56,
+        "hubu_operation_status",
+        json!({"operation_handle":handle}),
+    );
+    assert_terminal_admission_diagnostic(
+        &recovered,
+        &handle,
+        "target_not_selectable",
+        json!(["workload_type", "provider", "adapter", "model"]),
+    );
+    let replay_after_restart = restarted.call(57, "gongbu_create_execution", arguments);
+    assert_terminal_admission_diagnostic(
+        &replay_after_restart,
+        &handle,
+        "target_not_selectable",
+        json!(["workload_type", "provider", "adapter", "model"]),
+    );
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
+    restarted.finish(&[
+        HUBU_TOKEN,
+        GONGBU_TOKEN,
+        PRIVATE_DETAIL,
+        PROMPT,
+        "hubu-spend-token-93",
+        &operation_key,
+    ]);
 }
 
 fn assert_public_spend_result(response: &Value) -> &Value {

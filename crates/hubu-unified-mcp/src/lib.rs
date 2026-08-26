@@ -1168,7 +1168,7 @@ fn operation_status_result(status: &operation_registry::DurableOperationStatus) 
         "terminal": status.terminal(),
         "replacement_safe": status.state == "authorized",
         "execution_id": status.execution_id,
-        "result": status.result_code.as_ref().map(|code| json!({"code": code})),
+        "result": operation_result_projection(status.result_code.as_deref()),
         "updated_at": status.updated_at,
         "guidance": guidance,
     });
@@ -1176,6 +1176,20 @@ fn operation_status_result(status: &operation_registry::DurableOperationStatus) 
         "content": [{"type":"text", "text": serde_json::to_string(&projection).expect("operation status serializes")}],
         "structuredContent": projection,
         "isError": false
+    })
+}
+
+fn operation_result_projection(code: Option<&str>) -> Option<Value> {
+    code.map(|code| {
+        if let Some(diagnostic) = gongbu::AdmissionDiagnostic::from_durable_result_code(code) {
+            json!({
+                "code": "execution_request_invalid",
+                "reason_code": diagnostic.reason_code(),
+                "fields": diagnostic.fields(),
+            })
+        } else {
+            json!({"code": code})
+        }
     })
 }
 
@@ -1357,6 +1371,51 @@ mod tests {
         ] {
             assert!(!serialized.contains(private));
         }
+    }
+
+    #[test]
+    fn durable_admission_diagnostics_project_static_public_fields() {
+        let cases = [
+            (
+                "execution_request_target_not_selectable",
+                "target_not_selectable",
+                json!(["workload_type", "provider", "adapter", "model"]),
+            ),
+            (
+                "execution_request_pricing_selector_not_matched",
+                "pricing_selector_not_matched",
+                json!(["input.image_size"]),
+            ),
+        ];
+        for (internal_code, reason_code, fields) in cases {
+            let response = operation_status_result(&operation_registry::DurableOperationStatus {
+                operation_handle: format!("hubu:public-operation:v1:{}", "d".repeat(32)),
+                state: "failed".into(),
+                execution_id: None,
+                result_code: Some(internal_code.into()),
+                updated_at: "2026-08-25T00:00:00.000Z".into(),
+            });
+            let structured = &response["structuredContent"];
+            assert_eq!(
+                structured["result"],
+                json!({
+                    "code": "execution_request_invalid",
+                    "reason_code": reason_code,
+                    "fields": fields,
+                })
+            );
+            assert_eq!(structured["terminal"], true);
+            assert_eq!(structured["replacement_safe"], false);
+            let text: Value =
+                serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(text, *structured);
+            assert!(!response.to_string().contains(internal_code));
+        }
+
+        assert_eq!(
+            operation_result_projection(Some("execution_request_invalid")),
+            Some(json!({"code":"execution_request_invalid"}))
+        );
     }
 
     #[test]
