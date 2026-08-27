@@ -1,0 +1,127 @@
+name: Docs site
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - "docs/**"
+      - "architecture/**"
+      - "README.md"
+      - "scripts/check-doc-links.py"
+      - ".github/workflows/docs-site.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "site/**"
+      - "docs/**"
+      - "architecture/**"
+      - ".github/workflows/docs-site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Check documentation links
+        run: python3 scripts/check-doc-links.py
+
+      - name: Install site dependencies
+        working-directory: site
+        run: npm ci
+
+      - name: Lint site
+        working-directory: site
+        run: npm run lint
+
+      - name: Build and test site
+        working-directory: site
+        run: npm test
+
+      - name: Validate Cloudflare deployment bundle
+        working-directory: site
+        run: npm run deploy -- --dry-run
+
+  deploy:
+    name: Deploy hubustack.dev
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: hubustack.dev
+      url: https://hubustack.dev
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install site dependencies
+        working-directory: site
+        run: npm ci
+
+      - name: Build and test site
+        working-directory: site
+        env:
+          HUBUSTACK_SOURCE_REVISION: ${{ github.sha }}
+        run: npm test
+
+      - name: Validate Cloudflare deployment bundle
+        working-directory: site
+        run: npm run deploy -- --dry-run
+
+      - name: Check Cloudflare credentials
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [[ -z "${CLOUDFLARE_ACCOUNT_ID}" || -z "${CLOUDFLARE_API_TOKEN}" ]]; then
+            echo "Configure CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in the hubustack.dev GitHub environment." >&2
+            exit 1
+          fi
+
+      - name: Deploy hubustack.dev
+        working-directory: site
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm run deploy
+
+      - name: Smoke-test production
+        run: |
+          set -euo pipefail
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 2 \
+            --dump-header - \
+            --output /dev/null \
+            "https://hubustack.dev/?revision=${GITHUB_SHA}" |
+            tr -d '\r' |
+            grep --ignore-case --fixed-strings --line-regexp "x-hubustack-revision: ${GITHUB_SHA}"

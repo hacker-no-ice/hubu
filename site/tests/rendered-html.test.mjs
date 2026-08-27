@@ -14,6 +14,10 @@ async function render(pathname = "/", origin = "http://localhost") {
 test("server-renders the Hubu documentation home", async () => {
   const response = await render();
   assert.equal(response.status, 200);
+  assert.equal(
+    response.headers.get("x-hubustack-revision"),
+    process.env.HUBUSTACK_SOURCE_REVISION ?? "local",
+  );
   const html = await response.text();
   assert.match(html, /Governed spend/);
   assert.match(html, /Experimental and local-first/);
@@ -187,4 +191,19 @@ test("publishes the original engineering architecture explorer separately", asyn
   assert.match(source, /Agent Spend Control Plane/);
   assert.match(source, /Major Components/);
   assert.equal(published, source);
+});
+
+test("builds the direct hubustack.dev Cloudflare deployment target", async () => {
+  const config = JSON.parse(
+    await readFile(new URL("../dist/server/wrangler.json", import.meta.url), "utf8"),
+  );
+  assert.equal(config.name, "hubustack-docs");
+  assert.equal(config.workers_dev, false);
+  assert.equal(config.preview_urls, false);
+  assert.deepEqual(config.routes, [
+    { pattern: "hubustack.dev/*", zone_name: "hubustack.dev" },
+  ]);
+  assert.equal(config.assets.binding, "ASSETS");
+  assert.equal(config.assets.directory, "../client");
+  assert.deepEqual(config.images, { binding: "IMAGES" });
 });
