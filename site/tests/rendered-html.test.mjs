@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import test from "node:test";
+import { waitForRevision } from "../scripts/verify-production-revision.mjs";
 
 async function render(pathname = "/", origin = "http://localhost") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -30,6 +31,57 @@ test("server-renders the Hubu documentation home", async () => {
   assert.match(html, /https:\/\/hubustack\.dev\/og-wordmark\.png/);
   assert.doesNotMatch(html, /not on main yet/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
+});
+
+test("reports the exact source revision for production verification", async () => {
+  const response = await render("/.well-known/hubustack-revision");
+  const expectedRevision = process.env.HUBUSTACK_SOURCE_REVISION ?? "local";
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(response.headers.get("x-hubustack-revision"), expectedRevision);
+  assert.equal(await response.text(), expectedRevision);
+  await assert.rejects(
+    access(new URL("../dist/client/.well-known/hubustack-revision", import.meta.url)),
+    { code: "ENOENT" },
+  );
+});
+
+test("waits for the deployed revision to replace a stale response", async () => {
+  const expectedRevision = "expected-revision";
+  const responses = [
+    new Response("stale-revision"),
+    new Response(expectedRevision),
+  ];
+  let attempts = 0;
+
+  await waitForRevision({
+    endpoint: "https://hubustack.dev/.well-known/hubustack-revision",
+    expectedRevision,
+    attempts: 2,
+    delayMs: 0,
+    fetchImpl: async () => {
+      attempts += 1;
+      return responses.shift();
+    },
+    sleep: async () => {},
+  });
+
+  assert.equal(attempts, 2);
+});
+
+test("fails when production never reports the expected revision", async () => {
+  await assert.rejects(
+    waitForRevision({
+      endpoint: "https://hubustack.dev/.well-known/hubustack-revision",
+      expectedRevision: "expected-revision",
+      attempts: 2,
+      delayMs: 0,
+      fetchImpl: async () => new Response("stale-revision"),
+      sleep: async () => {},
+    }),
+    /Expected production revision expected-revision after 2 attempts; last result: stale-revision/,
+  );
 });
 
 test("redirects the legacy Sites hostname to the canonical domain", async () => {
@@ -201,9 +253,10 @@ test("builds the direct hubustack.dev Cloudflare deployment target", async () =>
   assert.equal(config.workers_dev, false);
   assert.equal(config.preview_urls, false);
   assert.deepEqual(config.routes, [
-    { pattern: "hubustack.dev/*", zone_name: "hubustack.dev" },
+    { pattern: "hubustack.dev", custom_domain: true },
   ]);
   assert.equal(config.assets.binding, "ASSETS");
   assert.equal(config.assets.directory, "../client");
+  assert.equal(config.assets.run_worker_first, undefined);
   assert.deepEqual(config.images, { binding: "IMAGES" });
 });

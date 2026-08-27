@@ -111,17 +111,9 @@ jobs:
         run: npm run deploy
 
       - name: Smoke-test production
+        working-directory: site
         run: |
           set -euo pipefail
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --retry 5 \
-            --retry-all-errors \
-            --retry-delay 2 \
-            --dump-header - \
-            --output /dev/null \
-            "https://hubustack.dev/?revision=${GITHUB_SHA}" |
-            tr -d '\r' |
-            grep --ignore-case --fixed-strings --line-regexp "x-hubustack-revision: ${GITHUB_SHA}"
+          node scripts/verify-production-revision.mjs \
+            "https://hubustack.dev/.well-known/hubustack-revision?expected=${GITHUB_SHA}" \
+            "${GITHUB_SHA}"

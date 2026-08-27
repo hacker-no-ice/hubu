@@ -4,6 +4,8 @@ import handler from "vinext/server/app-router-entry";
 
 declare const __HUBUSTACK_SOURCE_REVISION__: string;
 
+const SOURCE_REVISION_PATH = "/.well-known/hubustack-revision";
+
 interface Env {
   ASSETS: Fetcher;
   IMAGES: {
@@ -39,6 +41,15 @@ function withSourceRevision(response: Response): Response {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === SOURCE_REVISION_PATH) {
+      return withSourceRevision(new Response(__HUBUSTACK_SOURCE_REVISION__, {
+        headers: {
+          "cache-control": "no-store",
+          "content-type": "text/plain; charset=utf-8",
+        },
+      }));
+    }
 
     if (url.hostname === "hubu-docs.water-no-ice.chatgpt.site") {
       url.protocol = "https:";
