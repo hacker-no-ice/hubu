@@ -27,13 +27,18 @@ test("server-renders the Hubu documentation home", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 
-test("renders canonical Markdown on a documentation route", async () => {
+test("renders the command-focused local stack quick start", async () => {
   const response = await render("/docs/local-stack");
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /Local stack configuration/);
+  assert.match(html, /Local stack quick start/);
+  assert.match(html, /hubu stack init/);
   assert.match(html, /stack doctor/);
   assert.match(html, /stack start/);
+  assert.match(html, /stack status/);
+  assert.match(html, /hubu init codex/);
+  assert.match(html, /href="https:\/\/hubu-docs\.water-no-ice\.chatgpt\.site\/configuration\/local-stack\/v1\/"/);
+  assert.doesNotMatch(html, /Component ownership|Clean-environment acceptance canary|Runtime and recovery boundaries/);
   assert.doesNotMatch(html, /not on main yet/i);
   assert.match(html, /On this page/);
   assert.match(html, /src="\/brand\/hubu-wordmark\.png"/);
@@ -109,16 +114,17 @@ test("documents every schema-v1 local-stack source field", async () => {
 });
 
 test("keeps managed credential locations out of the first-run profile", async () => {
-  const [examples, localStack, readme] = await Promise.all([
+  const [examples, credentials, localStack, readme] = await Promise.all([
     readFile(new URL("../../docs/configuration/local-stack/v1/examples.md", import.meta.url), "utf8"),
+    readFile(new URL("../../docs/configuration/local-stack/v1/credentials-toml.md", import.meta.url), "utf8"),
     readFile(new URL("../../docs/local-stack.md", import.meta.url), "utf8"),
     readFile(new URL("../../README.md", import.meta.url), "utf8"),
   ]);
   assert.doesNotMatch(examples, /^\[files\]$/m);
   assert.doesNotMatch(examples, /^\[opaque\.gongbu_(hubu|caller)\]$/m);
   assert.doesNotMatch(`${localStack}\n${readme}`, /temporary Hubu process|pre-provision(?:ing)? workaround/i);
-  assert.match(localStack, /starts the final Hubu process once/i);
-  assert.match(localStack, /Gongbu-owned bootstrap/i);
+  assert.match(credentials, /final managed `hubu-server` creates or\s+reuses those capabilities/i);
+  assert.match(credentials, /Gongbu-owned bootstrap/i);
 });
 
 test("renders the concise canonical overview", async () => {
