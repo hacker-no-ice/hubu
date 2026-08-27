@@ -1245,7 +1245,10 @@ mod tests {
                         "200 OK",
                         r#"{"product_version":"0.1.0","executor_contract":"hubu-executor.v1"}"#,
                     ),
-                    "/agents" => ("401 Unauthorized", r#"{"error":"unauthorized"}"#),
+                    "/agents?operational_probe=gongbu_credential_check" => {
+                        assert!(request.contains("Authorization: Bearer wrong-credential\r\n"));
+                        ("401 Unauthorized", r#"{"error":"unauthorized"}"#)
+                    }
                     _ => unreachable!(),
                 };
                 write!(

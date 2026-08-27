@@ -159,7 +159,7 @@ const components = {
       "Uses one stable platform operation key as the agent-scoped workflow identity, with immutable authorization revisions for safe scope correction after terminal denial.",
       "Returns immutable attempt audit and structured retry guidance, while SQLite atomically admits corrected revisions and rejects unsafe changed scope with conflict status.",
       "Uses SQLite as the finalization authority so receipt, claim, token, hold, and balance commit atomically, settle serializes against release, and identical executor or human reconciliation retries return stored state.",
-      "Writes managed structured events through one bounded JSONL sink, rotates four 10 MiB generations, keeps launcher stderr in a distinct per-start capture, suppresses successful health/version request noise, and retains failed probe diagnostics.",
+      "Writes managed structured events through one bounded JSONL sink, rotates four 10 MiB generations, keeps launcher stderr in a distinct per-start capture, suppresses successful liveness, version, and explicitly marked protected-readiness request noise, and retains unmarked reads plus failed probe diagnostics.",
     ],
     links: [sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, sharedLinks.telemetry],
     nodes: [

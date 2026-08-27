@@ -117,6 +117,13 @@ hubu stack logs --component gongbu --execution-id EXECUTION_ID
 hubu stack stop
 ```
 
+Managed Hubu omits routine request events for successful `GET /health`,
+`GET /version`, and Gongbu's marked
+`GET /agents?operational_probe=gongbu_credential_check` readiness probe.
+Unmarked agent-list reads and failed probes remain logged. The marker changes
+logging only; it conveys no caller identity or authorization. Structured logs
+remain bounded to one 10 MiB active file and four retained generations.
+
 There is no `hubu stack restart` command. For an unchanged unhealthy or partial
 managed stack, run `hubu stack stop`, then `hubu stack start`.
 

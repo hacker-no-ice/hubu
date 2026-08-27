@@ -1474,7 +1474,7 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     }
 
     let request = parse_request(&raw)?;
-    let operational_probe = is_operational_probe(&request.path);
+    let operational_probe = is_operational_probe(&request);
     if !operational_probe {
         log_event(
             "info",
@@ -1523,8 +1523,18 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     Ok(())
 }
 
-fn is_operational_probe(path: &str) -> bool {
-    matches!(path.split('?').next(), Some("/health" | "/version"))
+fn is_operational_probe(request: &HttpRequest) -> bool {
+    // The marker only controls routine request logging. Routing still performs
+    // normal authentication, authorization, and failure diagnostics.
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/health" | "/version") => true,
+        ("GET", "/agents") => {
+            request.query.len() == 1
+                && request.query.get("operational_probe").map(String::as_str)
+                    == Some("gongbu_credential_check")
+        }
+        _ => false,
+    }
 }
 
 fn read_http_request(stream: &mut TcpStream, deadline: Instant) -> Result<String> {
@@ -9489,10 +9499,36 @@ rules: []
     }
 
     #[test]
-    fn recognizes_only_health_and_version_probe_paths() {
-        assert!(is_operational_probe("/health"));
-        assert!(is_operational_probe("/version?verbose=true"));
-        assert!(!is_operational_probe("/health/details"));
-        assert!(!is_operational_probe("/spend/health"));
+    fn recognizes_only_explicit_operational_probe_requests() {
+        assert!(is_operational_probe(&public_request("GET", "/health")));
+        assert!(is_operational_probe(&public_request(
+            "GET",
+            "/version?verbose=true"
+        )));
+        assert!(is_operational_probe(&public_request(
+            "GET",
+            "/agents?operational_probe=gongbu_credential_check"
+        )));
+        assert!(!is_operational_probe(&public_request("GET", "/agents")));
+        assert!(!is_operational_probe(&public_request(
+            "GET",
+            "/agents?all=true"
+        )));
+        assert!(!is_operational_probe(&public_request(
+            "GET",
+            "/agents?all=true&operational_probe=gongbu_credential_check"
+        )));
+        assert!(!is_operational_probe(&public_request(
+            "POST",
+            "/agents?operational_probe=gongbu_credential_check"
+        )));
+        assert!(!is_operational_probe(&public_request(
+            "GET",
+            "/health/details"
+        )));
+        assert!(!is_operational_probe(&public_request(
+            "GET",
+            "/spend/health"
+        )));
     }
 }
