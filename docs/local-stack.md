@@ -2,12 +2,12 @@
 
 Use this guide to initialize, start, inspect, and connect a local Hubu stack.
 For configuration fields and design choices, use the public
-[schema-version-1 configuration reference](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/).
+[schema-version-1 configuration reference](https://hubustack.dev/configuration/local-stack/v1/).
 
 ## Check the binaries
 
 Install `hubu`, `hubu-server`, `gongbu-server`, and `hubu-unified-mcp` from the
-same [verified Hubu release](https://hubu-docs.water-no-ice.chatgpt.site/docs/operations/releases),
+same [verified Hubu release](https://hubustack.dev/docs/operations/releases),
 put them on `PATH`, and confirm that they report the intended release:
 
 ```sh
@@ -19,7 +19,7 @@ done
 
 If the profile will use managed-local Temporal, install the version-pinned
 Temporal CLI described in the
-[Temporal decision guide](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/decisions#managed-local-versus-external-temporal).
+[Temporal decision guide](https://hubustack.dev/configuration/local-stack/v1/decisions#managed-local-versus-external-temporal).
 
 ## Initialize and select a profile
 
@@ -58,12 +58,12 @@ choice is unclear:
 
 | File | What to choose | Detailed reference |
 | --- | --- | --- |
-| `stack.toml` | Binaries, managed or external services, Temporal, and local paths | [`stack.toml`](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/stack-toml) |
-| `credentials.toml` | Provider references or advanced external-service overrides | [`credentials.toml`](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/credentials-toml) |
-| `providers.toml` | Disabled or live mode, targets, pricing, and spend ceiling | [`providers.toml`](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/providers-toml) |
+| `stack.toml` | Binaries, managed or external services, Temporal, and local paths | [`stack.toml`](https://hubustack.dev/configuration/local-stack/v1/stack-toml) |
+| `credentials.toml` | Provider references or advanced external-service overrides | [`credentials.toml`](https://hubustack.dev/configuration/local-stack/v1/credentials-toml) |
+| `providers.toml` | Disabled or live mode, targets, pricing, and spend ceiling | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
 
 For a first local evaluation, start with the
-[provider-disabled example](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/examples#provider-disabled-local-profile).
+[provider-disabled example](https://hubustack.dev/configuration/local-stack/v1/examples#provider-disabled-local-profile).
 Never put bearer tokens, provider API keys, or other raw secrets in the TOML
 files. Live provider execution can incur charges.
 
@@ -157,14 +157,14 @@ If the rendered plan reports `hubu-unified-mcp-client-config` as affected,
 rerun `hubu init codex --stack-profile "$profile"` after the stack is ready and
 restart Codex.
 
-The [active-profile change guide](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/decisions#changing-an-active-profile)
+The [active-profile change guide](https://hubustack.dev/configuration/local-stack/v1/decisions#changing-an-active-profile)
 explains staging, credential-reference changes, and rollback requirements.
 
 ## More detail
 
 Use the managed lifecycle commands above for the persistent execution plane.
 
-- [Configuration reference](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/)
-- [Configuration decision guides](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/decisions)
-- [Complete profile examples](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/examples)
+- [Configuration reference](https://hubustack.dev/configuration/local-stack/v1/)
+- [Configuration decision guides](https://hubustack.dev/configuration/local-stack/v1/decisions)
+- [Complete profile examples](https://hubustack.dev/configuration/local-stack/v1/examples)
 - [Unified MCP surface](unified-mcp.md)

@@ -43,3 +43,7 @@ Deployment metadata lives in `.openai/hosting.json`. Build and publish through
 OpenAI Sites so the Cloudflare Worker-compatible output and static assets are
 packaged together. Do not add secrets to this repository; hosted runtime values
 belong in Sites.
+
+The canonical public origin is `https://hubustack.dev`. The original
+`hubu-docs.water-no-ice.chatgpt.site` hostname is retained only to redirect
+existing links to the same path on the canonical domain.
