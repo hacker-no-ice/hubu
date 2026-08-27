@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function render(pathname = "/") {
+async function render(pathname = "/", origin = "http://localhost") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}-${pathname}`);
+  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}-${origin}-${pathname}`);
   const { default: worker } = await import(workerUrl.href);
-  return worker.fetch(new Request(`http://localhost${pathname}`, { headers: { accept: "text/html" } }), {
+  return worker.fetch(new Request(new URL(pathname, origin), { headers: { accept: "text/html" } }), {
     ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
   }, { waitUntil() {}, passThroughOnException() {} });
 }
@@ -23,8 +23,18 @@ test("server-renders the Hubu documentation home", async () => {
   assert.match(html, /alt="Hubu"/);
   assert.match(html, /aria-label="Hubu documentation home"/);
   assert.match(html, /og-wordmark\.png/);
+  assert.match(html, /https:\/\/hubustack\.dev\/og-wordmark\.png/);
   assert.doesNotMatch(html, /not on main yet/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
+});
+
+test("redirects the legacy Sites hostname to the canonical domain", async () => {
+  const response = await render(
+    "/docs/overview?source=legacy",
+    "https://hubu-docs.water-no-ice.chatgpt.site",
+  );
+  assert.equal(response.status, 308);
+  assert.equal(response.headers.get("location"), "https://hubustack.dev/docs/overview?source=legacy");
 });
 
 test("renders the command-focused local stack quick start", async () => {
@@ -37,7 +47,7 @@ test("renders the command-focused local stack quick start", async () => {
   assert.match(html, /stack start/);
   assert.match(html, /stack status/);
   assert.match(html, /hubu init codex/);
-  assert.match(html, /href="https:\/\/hubu-docs\.water-no-ice\.chatgpt\.site\/configuration\/local-stack\/v1\/"/);
+  assert.match(html, /href="https:\/\/hubustack\.dev\/configuration\/local-stack\/v1\/"/);
   assert.doesNotMatch(html, /Component ownership|Clean-environment acceptance canary|Runtime and recovery boundaries/);
   assert.doesNotMatch(html, /not on main yet/i);
   assert.match(html, /On this page/);

@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { headers } from "next/headers";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -13,32 +12,26 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-export async function generateMetadata(): Promise<Metadata> {
-  const requestHeaders = await headers();
-  const forwardedHost = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost";
-  const host = /^[a-z0-9.-]+(?::\d+)?$/i.test(forwardedHost) ? forwardedHost : "localhost";
-  const protocol = requestHeaders.get("x-forwarded-proto") === "http" || host.startsWith("localhost") ? "http" : "https";
-  const metadataBase = new URL(`${protocol}://${host}`);
-  const image = new URL("/og-wordmark.png", metadataBase).toString();
+const metadataBase = new URL("https://hubustack.dev");
+const socialImage = new URL("/og-wordmark.png", metadataBase).toString();
 
-  return {
-    metadataBase,
-    title: { default: "Hubu Docs — Governed spend for AI agents", template: "%s · Hubu Docs" },
-    description: "Documentation for Hubu's local-first agent spend control plane and the Gongbu execution plane.",
-    openGraph: {
-      title: "Hubu / 户部",
-      description: "Architecture in service of trust · Hubu governs · Gongbu executes",
-      images: [{ url: image, width: 1200, height: 630 }],
-      type: "website",
-    },
-    twitter: {
-      card: "summary_large_image",
-      title: "Hubu / 户部",
-      description: "Architecture in service of trust · Hubu governs · Gongbu executes",
-      images: [image],
-    },
-  };
-}
+export const metadata: Metadata = {
+  metadataBase,
+  title: { default: "Hubu Docs — Governed spend for AI agents", template: "%s · Hubu Docs" },
+  description: "Documentation for Hubu's local-first agent spend control plane and the Gongbu execution plane.",
+  openGraph: {
+    title: "Hubu / 户部",
+    description: "Architecture in service of trust · Hubu governs · Gongbu executes",
+    images: [{ url: socialImage, width: 1200, height: 630 }],
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Hubu / 户部",
+    description: "Architecture in service of trust · Hubu governs · Gongbu executes",
+    images: [socialImage],
+  },
+};
 
 export default function RootLayout({
   children,

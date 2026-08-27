@@ -89,6 +89,6 @@ and conservative spend ceilings.
 
 ## Documentation
 
-[Read the Hubu documentation](https://hubu-docs.water-no-ice.chatgpt.site/)
+[Read the Hubu documentation](https://hubustack.dev/)
 for the project overview, concepts, architecture, setup, operations, and
 protocol references.
