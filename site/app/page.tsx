@@ -33,8 +33,8 @@ export default function Home() {
             <p className="eyebrow"><span /> Agent spend control plane</p>
             <h1>Governed spend<br />for AI agents.</h1>
             <p className="hero-lede">
-              Humans use Hubu to govern AI-agent spending through policy, budgets, authorization, and an auditable ledger.
-              Gongbu executes provider work behind a versioned contract. The boundary is the product.
+              Hubu governs AI-agent spend. Gongbu executes only Hubu-authorized provider work.
+              The ecosystem they form is the product.
             </p>
             <div className="hero-actions">
               <a className="button primary" href="/docs/local-stack">Start with the local stack <span>→</span></a>

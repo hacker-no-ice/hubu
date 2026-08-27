@@ -22,7 +22,9 @@ test("server-renders the Hubu documentation home", async () => {
   const html = await response.text();
   assert.match(html, /Governed spend/);
   assert.match(html, /Experimental and local-first/);
-  assert.match(html, /Humans use Hubu to govern AI-agent spending/);
+  assert.match(html, /Hubu governs AI-agent spend/);
+  assert.match(html, /Gongbu executes only Hubu-authorized provider work/);
+  assert.match(html, /The ecosystem they form is the product/);
   assert.match(html, /Initialize a profile/);
   assert.match(html, /hubu stack select --profile/);
   assert.match(html, /hubu stack start/);
