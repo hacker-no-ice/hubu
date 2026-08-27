@@ -123,13 +123,33 @@ for package in PRODUCTION_PACKAGE_MANIFESTS:
     if workflow.count(f'.name == "{package}"') != 1:
         fail(f"release identity must include production package {package}")
 
-candidate_versions = re.findall(
-    r"(?m)^## (v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*) — ", changelog
+changelog_parts = changelog.split("## Unreleased", 1)
+if len(changelog_parts) != 2:
+    fail("changelog must contain an Unreleased section before release history")
+release_headings = re.findall(r"(?m)^## (.+)$", changelog_parts[1])
+if not release_headings:
+    fail("changelog must contain release history after the Unreleased section")
+release_heading_pattern = re.compile(
+    r"(v[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?) — "
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}"
 )
-if not candidate_versions:
-    fail("changelog must contain a versioned release candidate")
-latest_candidate = candidate_versions[0]
-stable_version = latest_candidate.removeprefix("v").split("-rc.", 1)[0]
+release_versions = []
+for heading in release_headings:
+    match = release_heading_pattern.fullmatch(heading)
+    if match is None:
+        fail(f"invalid changelog release heading {heading!r}")
+    release_versions.append(match.group(1))
+latest_release = release_versions[0]
+changelog_base_version = latest_release.removeprefix("v").split("-rc.", 1)[0]
+if "-rc." not in latest_release:
+    retained_candidates = [
+        version for version in release_versions[1:] if "-rc." in version
+    ]
+    if retained_candidates:
+        fail(
+            f"stable changelog {latest_release} must fold and remove candidate "
+            f"history; found {retained_candidates!r}"
+        )
 package_versions = {}
 for package, manifest in PRODUCTION_PACKAGE_MANIFESTS.items():
     package_manifest = manifest.read_text(encoding="utf-8")
@@ -143,21 +163,39 @@ source_versions = set(package_versions.values())
 if len(source_versions) != 1:
     fail(f"production packages must share one version; found {package_versions!r}")
 source_version = next(iter(source_versions))
-if stable_version != source_version:
+if changelog_base_version != source_version:
     fail(
-        f"latest candidate {latest_candidate} does not match source package "
-        f"version {source_version}"
+        f"latest changelog release {latest_release} does not match source "
+        f"package version {source_version}"
     )
 candidate_examples = re.findall(
-    rf"(?m)^\s+-f version={re.escape(latest_candidate)}\s+\\\s*$", release_doc
+    r"(?m)^\s+-f version="
+    r"(v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*)\s+\\\s*$",
+    release_doc,
 )
 stable_examples = re.findall(
-    rf"(?m)^\s+-f version=v{re.escape(stable_version)}\s+\\\s*$", release_doc
+    r"(?m)^\s+-f version=(v[0-9]+\.[0-9]+\.[0-9]+)\s+\\\s*$",
+    release_doc,
 )
 if len(candidate_examples) != 1:
-    fail(f"candidate runbook must select the latest changelog candidate {latest_candidate}")
+    fail("candidate runbook must contain exactly one valid candidate version")
 if len(stable_examples) != 1:
-    fail(f"stable runbook must promote the candidate base version v{stable_version}")
+    fail("stable runbook must contain exactly one valid stable version")
+candidate_example = candidate_examples[0]
+candidate_base_version = candidate_example.removeprefix("v").split("-rc.", 1)[0]
+if candidate_base_version != source_version:
+    fail(
+        f"candidate runbook version {candidate_example} does not match source "
+        f"package version {source_version}"
+    )
+expected_stable = f"v{source_version}"
+if stable_examples[0] != expected_stable:
+    fail(f"stable runbook must select source package version {expected_stable}")
+if "-rc." in latest_release and candidate_example != latest_release:
+    fail(
+        f"candidate runbook must select the active changelog candidate "
+        f"{latest_release}"
+    )
 
 if not re.search(r"(?m)^permissions:\n  contents: read$", workflow):
     fail("workflow-wide permissions must remain contents: read")
