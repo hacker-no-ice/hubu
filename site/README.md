@@ -45,18 +45,24 @@ validated and deployed by `.github/workflows/docs-site.yml`. The workflow builds
 the Worker and static assets with vinext, then publishes the generated bundle
 with the repository-locked Wrangler version. Pull requests that affect the site
 run the same lint, build, smoke-test, and Wrangler dry-run checks without access
-to production credentials. Production builds stamp `x-hubustack-revision` with
-the source commit, and the workflow verifies that exact revision after deploy.
+to production credentials. Production builds publish the exact source revision
+at `/.well-known/hubustack-revision`, and the workflow verifies that value after
+deploy. No static asset exists at that path, so Cloudflare passes the request to
+the Worker while public static assets retain the asset-first serving path. The
+workflow polls through eventual edge propagation rather than accepting an older
+successful response.
 
 The `hubustack.dev` GitHub environment must define `CLOUDFLARE_ACCOUNT_ID` and
 `CLOUDFLARE_API_TOKEN`. Restrict the token to the target Cloudflare account and
 the `hubustack.dev` zone, with Workers Scripts edit, Workers Routes edit, and
 Zone read permissions. Never add those values to the repository.
 
-Production routing lives in `wrangler.jsonc`. It uses a Worker route in front of
-the existing proxied `hubustack.dev` DNS record, so deployment does not require
-a DNS cutover. The `.openai/hosting.json` file is retained only as metadata for
-the legacy OpenAI Sites project; the automatic workflow does not publish to it.
+Production routing lives in `wrangler.jsonc`. The `hubustack.dev` Worker Custom
+Domain makes the deployed Worker the canonical origin. The one-time migration
+requires detaching the hostname from OpenAI Sites and removing its existing DNS
+record before the first Custom Domain deployment. The `.openai/hosting.json`
+file is retained only as metadata for the legacy OpenAI Sites project; the
+automatic workflow does not publish to it.
 
 The canonical public origin is `https://hubustack.dev`. The original
 `hubu-docs.water-no-ice.chatgpt.site` hostname is retained only to redirect

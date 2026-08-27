@@ -6,12 +6,12 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
-  // Keep the current proxied DNS origin as a fallback; this route serves the
-  // canonical hostname without requiring a destructive DNS cutover.
+  // Make the docs Worker the canonical origin after the one-time migration
+  // away from the legacy OpenAI Sites custom-domain record.
   "routes": [
     {
-      "pattern": "hubustack.dev/*",
-      "zone_name": "hubustack.dev"
+      "pattern": "hubustack.dev",
+      "custom_domain": true
     }
   ],
   "assets": {
