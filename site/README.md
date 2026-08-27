@@ -1,7 +1,8 @@
 # Hubu documentation site
 
 This directory contains the public Hubu documentation website. The site is a
-vinext application deployed with OpenAI Sites.
+vinext application deployed directly to Cloudflare Workers at
+`https://hubustack.dev`.
 
 ## Canonical content
 
@@ -39,11 +40,25 @@ Run `npm test` for a production build and server-render smoke tests. Run
 
 ## Deployment
 
-Deployment metadata lives in `.openai/hosting.json`. Build and publish through
-OpenAI Sites so the Cloudflare Worker-compatible output and static assets are
-packaged together. Do not add secrets to this repository; hosted runtime values
-belong in Sites.
+Merges to `main` that change `site/**`, `docs/**`, or `architecture/**` are
+validated and deployed by `.github/workflows/docs-site.yml`. The workflow builds
+the Worker and static assets with vinext, then publishes the generated bundle
+with the repository-locked Wrangler version. Pull requests that affect the site
+run the same lint, build, smoke-test, and Wrangler dry-run checks without access
+to production credentials. Production builds stamp `x-hubustack-revision` with
+the source commit, and the workflow verifies that exact revision after deploy.
+
+The `hubustack.dev` GitHub environment must define `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_API_TOKEN`. Restrict the token to the target Cloudflare account and
+the `hubustack.dev` zone, with Workers Scripts edit, Workers Routes edit, and
+Zone read permissions. Never add those values to the repository.
+
+Production routing lives in `wrangler.jsonc`. It uses a Worker route in front of
+the existing proxied `hubustack.dev` DNS record, so deployment does not require
+a DNS cutover. The `.openai/hosting.json` file is retained only as metadata for
+the legacy OpenAI Sites project; the automatic workflow does not publish to it.
 
 The canonical public origin is `https://hubustack.dev`. The original
 `hubu-docs.water-no-ice.chatgpt.site` hostname is retained only to redirect
-existing links to the same path on the canonical domain.
+existing links to the same path on the canonical domain. That legacy Sites
+deployment remains frozen unless it is published manually.
