@@ -1,4 +1,5 @@
 import { Search } from "./Search";
+import { HubuWordmark } from "./HubuWordmark";
 import { adjacentDocuments, navGroups, searchDocuments, type Doc } from "../lib/docs";
 
 function Navigation({ current }: { current: string }) {
@@ -26,7 +27,7 @@ export function DocsShell({ document }: { document: Doc }) {
   return (
     <div className="docs-shell">
       <header className="docs-header">
-        <a className="brand" href="/" aria-label="Hubu documentation home"><span className="brand-seal" aria-hidden="true">户</span><span>Hubu <i>/ docs</i></span></a>
+        <a className="brand" href="/" aria-label="Hubu documentation home"><HubuWordmark className="brand-wordmark" decorative /><i>/ docs</i></a>
         <Search documents={searchDocuments} />
         <a className="github-compact" href="https://github.com/hacker-no-ice/hubu">GitHub ↗</a>
       </header>
