@@ -2,6 +2,7 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom},
     net::{TcpStream, ToSocketAddrs},
@@ -363,52 +364,242 @@ fn component_status(
 }
 
 fn print_status(report: &StackStatusReport) {
-    println!("profile: {}", report.profile.display());
-    println!("classification: {}", report.classification);
-    println!(
-        "generation: {}",
-        report.generation_id.as_deref().unwrap_or("not rendered")
+    print!("{}", render_status(crate::terminal::stdout(), report));
+}
+
+fn render_status(style: crate::terminal::TerminalStyle, report: &StackStatusReport) -> String {
+    let mut output = String::new();
+    writeln!(output, "{}", style.title("Hubu stack status")).unwrap();
+    writeln!(output).unwrap();
+    writeln!(output, "{}", style.heading("Summary")).unwrap();
+    write_status_field(
+        &mut output,
+        style,
+        "Profile",
+        style.accent(report.profile.display()),
     );
-    if report.source_or_render_drift {
-        println!("source/render drift: yes");
-    }
-    if !report.restart_impact.is_empty() {
-        println!("restart impact: {}", report.restart_impact.join(", "));
-    }
+    write_status_field(
+        &mut output,
+        style,
+        "Classification",
+        style.semantic(&report.classification),
+    );
+    write_status_field(
+        &mut output,
+        style,
+        "Generation",
+        report
+            .generation_id
+            .as_deref()
+            .map(|value| style.accent(value))
+            .unwrap_or_else(|| style.muted("not rendered")),
+    );
+    write_status_field(
+        &mut output,
+        style,
+        "Source/render drift",
+        if report.source_or_render_drift {
+            style.warning("yes")
+        } else {
+            style.success("no")
+        },
+    );
+    write_status_field(
+        &mut output,
+        style,
+        "Restart impact",
+        if report.restart_impact.is_empty() {
+            style.muted("none")
+        } else {
+            style.warning(report.restart_impact.join(", "))
+        },
+    );
+
+    writeln!(output).unwrap();
+    writeln!(output, "{}", style.heading("Components")).unwrap();
     for component in &report.components {
-        println!(
-            "{}: ownership={}, lifecycle={}, ready={}{}",
-            component.component,
-            component.ownership,
-            component.lifecycle,
-            component.ready,
-            component
-                .pid
-                .map(|pid| format!(", pid={pid}"))
-                .unwrap_or_default()
+        writeln!(output, "  {}", style.heading(component.component)).unwrap();
+        write_nested_status_field(
+            &mut output,
+            style,
+            "Ownership",
+            style.semantic(component.ownership),
         );
-        println!("  {}", component.guidance);
+        write_nested_status_field(
+            &mut output,
+            style,
+            "Lifecycle",
+            lifecycle_display(style, component.lifecycle),
+        );
+        write_nested_status_field(
+            &mut output,
+            style,
+            "Ready",
+            readiness_display(style, component.ready, component.lifecycle),
+        );
+        if let Some(pid) = component.pid {
+            write_nested_status_field(&mut output, style, "PID", style.accent(pid));
+        }
+        if let Some(path) = &component.log_file {
+            write_nested_status_field(&mut output, style, "Log", style.muted(path.display()));
+        }
+        write_nested_status_field(&mut output, style, "Guidance", &component.guidance);
     }
-    println!(
-        "Temporal: ownership={}, worker_ready={}, namespace={}, task_queue={}, ui={}",
-        report.temporal.ownership,
-        report.temporal.worker_ready,
-        report.temporal.namespace.as_deref().unwrap_or("unknown"),
-        report.temporal.task_queue.as_deref().unwrap_or("unknown"),
+
+    writeln!(output).unwrap();
+    writeln!(output, "{}", style.heading("Temporal")).unwrap();
+    write_status_field(
+        &mut output,
+        style,
+        "Ownership",
+        style.semantic(report.temporal.ownership),
+    );
+    write_status_field(
+        &mut output,
+        style,
+        "Worker ready",
+        readiness_display(
+            style,
+            report.temporal.worker_ready,
+            report
+                .components
+                .iter()
+                .find(|component| component.component == "gongbu")
+                .map(|component| component.lifecycle)
+                .unwrap_or(report.temporal.ownership),
+        ),
+    );
+    write_status_field(
+        &mut output,
+        style,
+        "Namespace",
+        report
+            .temporal
+            .namespace
+            .as_deref()
+            .map(|value| style.accent(value))
+            .unwrap_or_else(|| style.muted("unknown")),
+    );
+    write_status_field(
+        &mut output,
+        style,
+        "Task queue",
+        report
+            .temporal
+            .task_queue
+            .as_deref()
+            .map(|value| style.accent(value))
+            .unwrap_or_else(|| style.muted("unknown")),
+    );
+    write_status_field(
+        &mut output,
+        style,
+        "UI",
         report
             .temporal
             .ui_url
             .as_deref()
-            .unwrap_or("not configured")
+            .map(|value| style.command(value))
+            .unwrap_or_else(|| style.muted("not configured")),
     );
-    println!(
-        "unified MCP: lifecycle={}, compatible={}",
-        report.unified_mcp.lifecycle, report.unified_mcp.compatible
+
+    writeln!(output).unwrap();
+    writeln!(output, "{}", style.heading("Unified MCP")).unwrap();
+    write_status_field(
+        &mut output,
+        style,
+        "Lifecycle",
+        style.semantic(report.unified_mcp.lifecycle),
     );
-    println!("  {}", report.unified_mcp.guidance);
-    println!("commands:");
+    write_status_field(
+        &mut output,
+        style,
+        "Compatible",
+        compatibility_display(
+            style,
+            report.unified_mcp.compatible,
+            report.generation_id.is_some(),
+        ),
+    );
+    write_status_field(
+        &mut output,
+        style,
+        "Guidance",
+        style.command(&report.unified_mcp.guidance),
+    );
+
+    writeln!(output).unwrap();
+    writeln!(output, "{}", style.heading("Suggested commands")).unwrap();
+    let width = report.commands.keys().map(String::len).max().unwrap_or(0);
     for (name, command) in &report.commands {
-        println!("  {name}: {command}");
+        let name = format!("{name:<width$}");
+        writeln!(
+            output,
+            "  {}  {}",
+            style.label(name),
+            style.command(command)
+        )
+        .unwrap();
+    }
+    output
+}
+
+fn write_status_field(
+    output: &mut String,
+    style: crate::terminal::TerminalStyle,
+    label: &str,
+    value: impl std::fmt::Display,
+) {
+    let label = format!("{label:<20}");
+    writeln!(output, "  {}  {value}", style.label(label)).unwrap();
+}
+
+fn write_nested_status_field(
+    output: &mut String,
+    style: crate::terminal::TerminalStyle,
+    label: &str,
+    value: impl std::fmt::Display,
+) {
+    let label = format!("{label:<16}");
+    writeln!(output, "    {}  {value}", style.label(label)).unwrap();
+}
+
+fn lifecycle_display(style: crate::terminal::TerminalStyle, lifecycle: &str) -> String {
+    match lifecycle {
+        "owned_running" | "external_ready" | "compatible_unowned" => style.success(lifecycle),
+        "owned_unhealthy" | "owned_exited" | "stale_identity" | "external_unavailable" => {
+            style.error(lifecycle)
+        }
+        "stopped" | "unconfigured" => style.muted(lifecycle),
+        _ => style.semantic(lifecycle),
+    }
+}
+
+fn readiness_display(
+    style: crate::terminal::TerminalStyle,
+    ready: bool,
+    lifecycle: &str,
+) -> String {
+    if ready {
+        style.success("yes")
+    } else if matches!(lifecycle, "stopped" | "unconfigured") {
+        style.muted("no")
+    } else {
+        style.error("no")
+    }
+}
+
+fn compatibility_display(
+    style: crate::terminal::TerminalStyle,
+    compatible: bool,
+    rendered: bool,
+) -> String {
+    if compatible {
+        style.success("yes")
+    } else if rendered {
+        style.error("no")
+    } else {
+        style.muted("no")
     }
 }
 
@@ -418,6 +609,7 @@ fn print_logs(
     execution_id: Option<&str>,
     lines: usize,
 ) -> Result<()> {
+    let style = crate::terminal::stdout();
     let stack = read_toml::<StackSource>(&profile.join("stack.toml")).ok();
     let state = read_runtime_state(profile)?;
     let manifest = read_active_manifest(profile).ok();
@@ -445,7 +637,11 @@ fn print_logs(
             continue;
         }
         if ownership == Some(Ownership::External) {
-            println!("{label}: external logs remain the external operator's responsibility");
+            println!(
+                "{}: {}",
+                style.heading(label),
+                style.muted("external logs remain the external operator's responsibility")
+            );
             continue;
         }
         let Some(path) = state
@@ -453,7 +649,11 @@ fn print_logs(
             .and_then(|value| value.processes.get(state_key))
             .map(|value| value.log_file.as_path())
         else {
-            println!("{label}: no launcher-owned log has been recorded");
+            println!(
+                "{}: {}",
+                style.heading(label),
+                style.muted("no launcher-owned log has been recorded")
+            );
             continue;
         };
         let expected_log = manifest
@@ -465,16 +665,36 @@ fn print_logs(
                 "refusing to read unauthenticated launcher log path for {label}; render or repair ownership metadata"
             );
         }
-        println!("== {label} ({}) ==", path.display());
-        for line in tail_lines(path, execution_id, lines)? {
-            println!("{line}");
-        }
+        let log_lines = tail_lines(path, execution_id, lines)?;
+        print!("{}", render_log_section(style, label, path, &log_lines));
         printed = true;
     }
     if !printed && execution_id.is_some() {
-        println!("no launcher-owned log lines matched the execution id");
+        println!(
+            "{}",
+            style.warning("no launcher-owned log lines matched the execution id")
+        );
     }
     Ok(())
+}
+
+fn render_log_section(
+    style: crate::terminal::TerminalStyle,
+    label: &str,
+    path: &Path,
+    lines: &[String],
+) -> String {
+    let mut output = String::new();
+    writeln!(
+        output,
+        "{}",
+        style.heading(format!("== {label} ({}) ==", path.display()))
+    )
+    .unwrap();
+    for line in lines {
+        writeln!(output, "{line}").unwrap();
+    }
+    output
 }
 
 fn start_profile(profile: &Path) -> Result<()> {
@@ -668,10 +888,19 @@ fn start_missing_components(
         return Err(error);
     }
     drop(started);
-    println!("stack running_ready: {}", profile.display());
+    let style = crate::terminal::stdout();
     println!(
-        "next: hubu init codex --stack-profile {}",
-        profile.display()
+        "{}: {}",
+        style.success("stack running_ready"),
+        style.accent(profile.display())
+    );
+    println!(
+        "{}: {}",
+        style.label("next"),
+        style.command(format!(
+            "hubu init codex --stack-profile {}",
+            profile.display()
+        ))
     );
     Ok(())
 }
@@ -823,7 +1052,11 @@ fn stop_components(
     forget_stale: bool,
 ) -> Result<()> {
     let Some(mut state) = read_runtime_state(profile)? else {
-        println!("stack stop unchanged: no launcher-owned processes");
+        println!(
+            "{}: {}",
+            crate::terminal::stdout().muted("stack stop unchanged"),
+            crate::terminal::stdout().muted("no launcher-owned processes")
+        );
         return Ok(());
     };
     let worker_drain_timeout_ms = read_toml::<StackSource>(&profile.join("stack.toml"))
@@ -844,9 +1077,12 @@ fn stop_components(
                 state.processes.remove(key);
             }
             RecordedProcessState::IdentityMismatch if forget_stale => {
+                let style = crate::terminal::stdout();
                 println!(
-                    "forgot stale {key} ownership metadata without signalling PID {}",
-                    process.pid
+                    "{} {} ownership metadata without signalling PID {}",
+                    style.warning("forgot stale"),
+                    style.accent(key),
+                    style.accent(process.pid)
                 );
                 state.processes.remove(key);
             }
@@ -861,7 +1097,13 @@ fn stop_components(
                 };
                 stop_owned_process(&process, grace)?;
                 state.processes.remove(key);
-                println!("stopped {key} PID {}", process.pid);
+                let style = crate::terminal::stdout();
+                println!(
+                    "{} {} PID {}",
+                    style.success("stopped"),
+                    style.accent(key),
+                    style.accent(process.pid)
+                );
             }
         }
         write_or_remove_runtime_state(profile, &state)?;
@@ -1646,6 +1888,152 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use tempfile::tempdir;
+
+    fn strip_ansi(value: &str) -> String {
+        let mut output = String::new();
+        let mut chars = value.chars().peekable();
+        while let Some(character) = chars.next() {
+            if character == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
+                for code in chars.by_ref() {
+                    if code == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                output.push(character);
+            }
+        }
+        output
+    }
+
+    fn presentation_status() -> StackStatusReport {
+        StackStatusReport {
+            schema_version: STATUS_SCHEMA_VERSION,
+            profile: PathBuf::from("/profiles/demo"),
+            classification: "running_ready".into(),
+            generation_id: Some("a".repeat(64)),
+            source_or_render_drift: true,
+            restart_impact: vec!["gongbu-server".into()],
+            components: vec![
+                ComponentStatus {
+                    component: "hubu",
+                    ownership: "managed",
+                    lifecycle: "owned_running",
+                    ready: true,
+                    pid: Some(4242),
+                    log_file: Some(PathBuf::from("/profiles/demo/hubu.log")),
+                    guidance: "this profile may stop the recorded process".into(),
+                },
+                ComponentStatus {
+                    component: "gongbu",
+                    ownership: "managed",
+                    lifecycle: "owned_unhealthy",
+                    ready: false,
+                    pid: Some(4343),
+                    log_file: Some(PathBuf::from("/profiles/demo/gongbu.log")),
+                    guidance: "run stack stop, then stack start".into(),
+                },
+            ],
+            temporal: TemporalStatus {
+                ownership: "gongbu_managed_local",
+                ui_url: Some("http://127.0.0.1:8233".into()),
+                namespace: Some("default".into()),
+                task_queue: Some("gongbu".into()),
+                worker_ready: false,
+            },
+            unified_mcp: UnifiedMcpStatus {
+                lifecycle: "client_owned",
+                compatible: true,
+                guidance: "hubu init codex --stack-profile /profiles/demo".into(),
+            },
+            commands: BTreeMap::from([
+                (
+                    "doctor".into(),
+                    "hubu stack doctor --profile /profiles/demo".into(),
+                ),
+                (
+                    "start".into(),
+                    "hubu stack start --profile /profiles/demo".into(),
+                ),
+            ]),
+        }
+    }
+
+    #[test]
+    fn status_plain_output_has_readable_sections() {
+        let output = render_status(
+            crate::terminal::TerminalStyle::plain(),
+            &presentation_status(),
+        );
+
+        assert!(!output.contains('\u{1b}'));
+        assert!(output.starts_with("Hubu stack status\n\nSummary\n"));
+        for heading in [
+            "Components",
+            "Temporal",
+            "Unified MCP",
+            "Suggested commands",
+        ] {
+            assert!(output.contains(&format!("\n{heading}\n")));
+        }
+        assert!(output.contains("Lifecycle         owned_running"));
+        assert!(output.contains("Lifecycle         owned_unhealthy"));
+        assert!(output.contains("Source/render drift   yes"));
+        assert!(output.contains("doctor  hubu stack doctor --profile /profiles/demo"));
+    }
+
+    #[test]
+    fn status_ansi_output_preserves_plain_text() {
+        let report = presentation_status();
+        let plain = render_status(crate::terminal::TerminalStyle::plain(), &report);
+        let colored = render_status(crate::terminal::TerminalStyle::colored(), &report);
+
+        assert!(colored.contains("\u{1b}["));
+        assert!(colored.matches("\u{1b}[").count() >= 20);
+        assert_eq!(strip_ansi(&colored), plain);
+    }
+
+    #[test]
+    fn stopped_readiness_is_neutral_while_unhealthy_readiness_is_an_error() {
+        let style = crate::terminal::TerminalStyle::colored();
+
+        assert_eq!(
+            readiness_display(style, false, "stopped"),
+            style.muted("no")
+        );
+        assert_eq!(
+            readiness_display(style, false, "owned_unhealthy"),
+            style.error("no")
+        );
+        assert_eq!(
+            compatibility_display(style, false, false),
+            style.muted("no")
+        );
+        assert_eq!(compatibility_display(style, false, true), style.error("no"));
+    }
+
+    #[test]
+    fn log_section_styles_only_hubu_owned_header() {
+        let payload = r#"{"status":"failed","message":"red must stay data"}"#.to_string();
+        let colored = render_log_section(
+            crate::terminal::TerminalStyle::colored(),
+            "hubu",
+            Path::new("/profiles/demo/hubu.log"),
+            std::slice::from_ref(&payload),
+        );
+
+        assert!(colored.lines().next().unwrap().contains("\u{1b}["));
+        assert_eq!(colored.lines().nth(1), Some(payload.as_str()));
+        assert_eq!(
+            strip_ansi(&colored),
+            render_log_section(
+                crate::terminal::TerminalStyle::plain(),
+                "hubu",
+                Path::new("/profiles/demo/hubu.log"),
+                &[payload]
+            )
+        );
+    }
 
     fn process(component: &str, pid: u32, identity: String) -> OwnedProcess {
         OwnedProcess {

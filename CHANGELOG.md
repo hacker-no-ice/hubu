@@ -24,6 +24,11 @@ Future release template
 
 ## Unreleased
 
+- Made human-readable CLI diagnostics and status summaries easier to scan with
+  semantic terminal color, clearer sections, and consistent action styling.
+  Automatic TTY detection and `NO_COLOR` keep default redirected output plain,
+  while machine-readable output stays ANSI-free for every `--color` choice.
+
 ## v0.2.0 — 2026-08-26
 
 ### Highlights
