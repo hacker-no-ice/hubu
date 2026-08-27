@@ -1,51 +1,39 @@
-# Local stack configuration
+# Local stack quick start
 
-The local stack profile is an operator-owned configuration boundary for Hubu,
-Gongbu, Temporal, and the unified MCP client handoff. It coordinates compatible
-inputs without merging component ownership, runtime state, credentials, or
-failure domains.
+Use this guide to initialize, start, inspect, and connect a local Hubu stack.
+For configuration fields and design choices, use the public
+[schema-version-1 configuration reference](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/).
 
-The initial profile workflow is:
+## Check the binaries
 
-```text
-stack init -> operator edit -> stack start -> stack status -> init codex
+Install `hubu`, `hubu-server`, `gongbu-server`, and `hubu-unified-mcp` from the
+same [verified Hubu release](https://hubu-docs.water-no-ice.chatgpt.site/docs/operations/releases),
+put them on `PATH`, and confirm that they report the intended release:
+
+```sh
+for binary in hubu hubu-server gongbu-server hubu-unified-mcp; do
+  command -v "$binary"
+  "$binary" --version
+done
 ```
 
-`stack start` runs doctor and render as needed, then starts only missing managed
-components after their dependencies pass. For a fully managed profile it also
-provisions service credentials at private profile-owned locations; those paths
-are implementation state, not operator input. The stack profile never starts
-or supervises the client-owned `hubu-unified-mcp` stdio process.
+If the profile will use managed-local Temporal, install the version-pinned
+Temporal CLI described in the
+[Temporal decision guide](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/decisions#managed-local-versus-external-temporal).
 
-Later source or credential-reference changes use a reviewable two-phase flow:
+## Initialize and select a profile
 
-```text
-operator edit -> stack render -> review plan -> stack stop -> stack activate -> stack start
+Choose an absolute profile path, initialize it, and select it for later stack
+commands:
+
+```sh
+profile=/absolute/path/to/profile
+hubu stack init --profile "$profile"
+hubu stack select --profile "$profile"
 ```
 
-There is intentionally no `hubu stack restart` command. A changed, partial, or
-unhealthy managed stack is recovered as one dependency-ordered unit with an
-explicit graceful stop and start.
-
-## Component ownership
-
-| Component | Owner | State and credentials |
-| --- | --- | --- |
-| `hubu` CLI | Human/operator | No service state |
-| `hubu-server` | Hubu control plane | Hubu database and capabilities |
-| `gongbu-server` | Gongbu execution plane | Gongbu database, provider credentials, pricing, and artifacts |
-| Gongbu Temporal worker | Gongbu | Workflow and activity code, always owned by `gongbu-server` |
-| Temporal service/UI | Gongbu or external operator | Workflow history and service state |
-| `hubu-unified-mcp` | Agent client | Two isolated backend clients and no domain data |
-
-Gongbu is the only process that starts or stops its worker. In `managed_local`
-mode Gongbu also owns the Temporal child; in external mode it connects without
-lifecycle authority. Hubu and Gongbu continue to communicate through the
-versioned HTTP executor contract and never open one another's databases.
-
-## Profile layout
-
-`hubu stack init` creates an operator-owned profile:
+Initialization creates starter files without overwriting existing files or
+starting services:
 
 ```text
 PROFILE_ROOT/
@@ -59,452 +47,117 @@ PROFILE_ROOT/
       .gitignore
 ```
 
-For field-by-field meaning, value sources, conditional requirements, and
-annotated examples, use the public
-[schema-version-1 configuration reference](configuration/local-stack/v1/index.md).
+The three TOML files are the editable sources. A provider-disabled managed
+profile normally leaves `credentials.toml` at its generated schema-only
+content. Do not edit `generated/` or `state/`.
 
-- `stack.toml` describes topology, binary selection, loopback addresses,
-  persistent state roots, Temporal mode, and lifecycle policy.
-- `credentials.toml` contains provider references and optional advanced
-  overrides for externally owned service credentials, never bearer or
-  provider-secret values. A normal managed-local profile does not name service
-  credential files or the internal Gongbu handoff references.
-- `providers.toml` contains operator-selected targets, pricing, spend ceilings,
-  and the explicit live-execution gate.
-- `generated/generations/` contains immutable validated runtime generations,
-  each with a redacted manifest.
-- `generated/active-manifest.json` is the atomic pointer to the selected
-  generation. Generated content is never an editing surface.
+## Complete and validate the profile
 
-On first managed start, Hubu and Gongbu create private service credential state
-under `PROFILE_ROOT/state/credentials/`. The launcher derives those locations;
-users do not choose them, and they are not source configuration. File-backed
-storage is an internal compatibility detail that can be replaced without
-changing the managed profile contract. Initialization creates only the private
-directory and its local ignore guard so later credentials cannot be staged by
-an enclosing Git checkout.
+Follow the comments in the starter files and use the detailed reference when a
+choice is unclear:
 
-Live profiles use pricing catalog schema v2 exclusively. Each pricing rule in
-`providers.toml` supplies exact rational components and may qualify an image
-price with a normalized `1k`, `2k`, or `4k` selector:
+| File | What to choose | Detailed reference |
+| --- | --- | --- |
+| `stack.toml` | Binaries, managed or external services, Temporal, and local paths | [`stack.toml`](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/stack-toml) |
+| `credentials.toml` | Provider references or advanced external-service overrides | [`credentials.toml`](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/credentials-toml) |
+| `providers.toml` | Disabled or live mode, targets, pricing, and spend ceiling | [`providers.toml`](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/providers-toml) |
 
-```toml
-[[pricing_rules]]
-rule_id = "gemini-image-1k"
-provider = "google"
-model = "gemini-image"
-currency = "USD"
-selector = { image_size = "1k" }
-components = [
-  { unit = "image", rate_numerator_minor = 1, rate_denominator = 1 },
-]
-```
+For a first local evaluation, start with the
+[provider-disabled example](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/examples#provider-disabled-local-profile).
+Never put bearer tokens, provider API keys, or other raw secrets in the TOML
+files. Live provider execution can incur charges.
 
-Define one selector-qualified rule for every enabled image size. Managed-stack
-production validation does not accept or translate the retired flat `unit` and
-`unit_amount_minor` pricing shape.
-
-The default profile is `hubu/stacks/default` under the host platform's user
-configuration directory. `HUBU_HOME` overrides Hubu's configuration root. An
-operator may instead provide an absolute profile path:
+Check the profile and follow the reported field paths until it is ready:
 
 ```sh
-hubu stack init --profile /absolute/path/to/profile
+hubu stack doctor
 ```
 
-Initialization registers the profile in the versioned stack-profile registry
-under Hubu's configuration root. Select a registered or legacy external profile
-once to use it for later stack commands:
+Doctor is read-only. An explicit `--profile "$profile"` can override the saved
+selection for any one stack command.
+
+## Start and inspect the stack
+
+Start the stack, then confirm that its managed components are ready:
 
 ```sh
-hubu stack select --profile /absolute/path/to/profile
+hubu stack start
+hubu stack status
+```
+
+`stack start` runs doctor and render when needed. For a fully managed profile,
+it starts the final Hubu process, completes Gongbu's managed credential
+bootstrap, and starts Gongbu and its managed Temporal runtime. The client-owned
+`hubu-unified-mcp` process is not part of the managed stack.
+
+## Connect Codex
+
+After the stack is ready, write the managed MCP configuration:
+
+```sh
+hubu init codex --stack-profile "$profile"
+```
+
+Restart Codex so it launches the unified MCP process with the new handoff. See
+[Unified MCP setup](unified-mcp.md#setup) for discovery and compatibility
+details.
+
+## Routine operations
+
+```sh
+# List profiles and show machine-readable status.
+hubu stack profiles
+hubu stack status --json
+
+# Read launcher-owned logs.
+hubu stack logs --component all --lines 200
+hubu stack logs --component gongbu --execution-id EXECUTION_ID
+
+# Gracefully stop the complete managed stack.
+hubu stack stop
+```
+
+There is no `hubu stack restart` command. For an unchanged unhealthy or partial
+managed stack, run `hubu stack stop`, then `hubu stack start`.
+
+## Apply a configuration change
+
+Render and review a changed profile before activating it:
+
+```sh
 hubu stack doctor
 hubu stack render
+# Review the generation ID, changed files, and affected components.
+hubu stack stop
+hubu stack activate --generation GENERATION_ID
 hubu stack start
+hubu stack status
 ```
 
-An explicit `--profile` remains a one-command override and does not change the
-saved selection. Profile resolution is explicit `--profile`, then the selected
-profile, then the platform default. If the selected profile is missing or the
-registry is corrupt, Hubu fails with recovery guidance instead of silently
-operating on a different profile.
-
-List known initialized profiles without scanning the home directory or the
-machine:
+For rollback, first restore the exact operator-owned TOML and compatible
+binaries for the retained generation, then run:
 
 ```sh
-hubu stack profiles
-hubu stack profiles --json
+hubu stack generations
+hubu stack render
+hubu stack stop
+hubu stack rollback --generation PRIOR_GENERATION_ID
+hubu stack start
+hubu stack status
 ```
 
-The list combines registered paths with initialized immediate children of the
-conventional `stacks/` directory, marks the selected and default profiles, and
-includes incomplete profiles created by `stack init`. Listing performs no
-doctor, provider, network, or lifecycle probes. Profiles created before the
-registry existed at arbitrary absolute paths appear after one
-`hubu stack select --profile ...` invocation. Stale unselected registry entries
-are pruned; an unavailable selected profile remains an actionable error.
+If the rendered plan reports `hubu-unified-mcp-client-config` as affected,
+rerun `hubu init codex --stack-profile "$profile"` after the stack is ready and
+restart Codex.
 
-## Safe initialization
+The [active-profile change guide](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/decisions#changing-an-active-profile)
+explains staging, credential-reference changes, and rollback requirements.
 
-Initialization creates annotated starter files, proposes safe local paths and
-ports, and reports missing operator decisions. It deliberately supports an
-incomplete profile.
+## More detail
 
-It never:
+Use the managed lifecycle commands above for the persistent execution plane.
 
-- overwrites an existing operator-owned file;
-- starts, stops, or signals a service;
-- connects to a provider or performs provider work;
-- creates, copies, reveals, or tests a raw credential;
-- selects a provider, model, price, spend ceiling, execution account, execution
-  agent, or Temporal ownership mode; or
-- enables live execution.
-
-Repeated initialization leaves existing inputs byte-for-byte unchanged.
-Missing values remain omitted or documented as comments rather than fake IDs,
-placeholder secrets, or acknowledgements that could pass runtime validation.
-
-## Validation and readiness
-
-`hubu stack doctor` is read-only. It never writes source or generated files,
-creates credentials, starts services, or repairs dependencies:
-
-```sh
-hubu stack doctor --profile /absolute/path/to/profile
-hubu stack doctor --profile /absolute/path/to/profile --json
-```
-
-Doctor evaluates four layers:
-
-1. Source syntax and schema compatibility.
-2. Completeness, reported by starter file and stable field path.
-3. Renderability, including paths, ports, binary provenance, component
-   compatibility, external and provider credential references, provisionable
-   managed credentials, and managed-Gongbu provider and artifact contracts.
-4. Runtime readiness for already-running components and external dependencies.
-
-The report classification is `incomplete`, `invalid`, `ready_to_render`,
-`ready_to_start`, or `running_ready`. Provider readiness is reported separately
-as `unknown`, `disabled`, `fixture_only`, or `live_ready`.
-
-Human output may show the selected local profile path. The versioned JSON report
-contains only the classification, provider readiness, and ordered checks with
-stable reason codes, owning components, optional source fields, and remedies.
-It omits configured endpoints, binary paths, service/account values, credential
-values, and raw service responses.
-
-For a complete profile, doctor uses bounded subprocesses and network probes to
-check binary provenance, explicit opaque credential-reference existence,
-active generation digests, service-owned production validators, backend
-liveness and version compatibility, protected reads, Gongbu worker readiness,
-and required Temporal reachability. Before first start, missing managed
-capabilities are reported as pending managed work rather than invalid external
-references. A failed probe never causes doctor to create a credential, start a
-service, or repair a component.
-
-External Gongbu retains authority for its provider and artifact configuration,
-so doctor reports local provider readiness as `unknown` rather than certifying
-unused local provider inputs.
-
-## Rendering
-
-After editing the starter files, render the profile:
-
-```sh
-hubu stack render --profile /absolute/path/to/profile
-```
-
-Rendering validates source syntax, required decisions, path and port safety,
-binary provenance, component compatibility, provider catalogs, pricing, spend
-gates, explicit credential references, and the derived destinations for
-managed credentials. It does not create or read managed credential values. It
-then uses service-owned production validators to stage a complete generation.
-
-A first successful render:
-
-- writes immutable output below `generated/generations/`;
-- validates it with the selected service-owned production binaries;
-- atomically creates `generated/active-manifest.json` only when no generation
-  is active and no launcher-owned process state exists;
-- records source and output digests, schema versions, binary provenance, and
-  affected-component impact in a redacted per-generation manifest; and
-- leaves the source TOML unchanged.
-
-When a generation is already active, render validates and stages the new
-generation without changing the active manifest. Its redacted change plan
-contains changed source filenames, affected component names, the generation
-ID, and the exact activation command. Comment-only changes may have no affected
-component even though their source digest creates a distinct recoverable
-generation.
-
-An incomplete profile or validation failure leaves the previous active
-generation untouched. Generated files never contain raw bearer tokens,
-provider keys, human-approval capabilities, or reconciliation capabilities.
-
-## Updates and credential-reference rotation
-
-The three TOML files remain the source of truth for configuration. Managed
-service credentials are lifecycle state: their paths are derived and their
-values are created or reused during `stack start`. They are intentionally not
-rotated by editing `credentials.toml`; richer managed rotation and migration
-remain separate lifecycle work.
-
-For an advanced external-service credential reference:
-
-1. Create the replacement credential file with operator-controlled permissions.
-2. Edit only its absolute path in `credentials.toml`; do not put the credential
-   value in TOML.
-3. Run `stack doctor`, then `stack render` and review the reported source files,
-   affected components, and generation ID.
-4. If launcher-owned services are running, stop the whole managed stack.
-5. Activate the reviewed generation and start the whole managed stack.
-
-```sh
-hubu stack doctor --profile /absolute/path/to/profile
-hubu stack render --profile /absolute/path/to/profile
-hubu stack stop --profile /absolute/path/to/profile
-hubu stack activate --generation GENERATION_ID --profile /absolute/path/to/profile
-hubu stack start --profile /absolute/path/to/profile
-```
-
-Rendering and activation never read, copy, compare, or rewrite credential
-values. They validate reference shape and the owning service's configuration
-contract. Overwriting an external credential value at the same path is
-therefore not a detectable or supported rotation: create a new file and change
-the reference so the backend and client-owned MCP handoff move together. Keep
-the previous credential available until the new generation is running and
-verified. If the client handoff is affected, rerun
-`hubu init codex --stack-profile ...` and restart Codex after backend startup.
-For explicit Gongbu Keychain overrides, Gongbu continues to own resolution and
-the operator must update both sides of a shared caller capability before the
-whole-stack stop/start cycle.
-
-Stack startup selects no Hubu execution account or agent. The Gongbu caller
-bearer capability authenticates this installation/service and carries no
-execution identity claim. Registering another agent after startup changes only
-Hubu governance state: it requires no stack render, activation, stop, restart,
-or Gongbu configuration change. New executions receive their authoritative
-account and agent attribution from Hubu spend authorization.
-
-## Compatibility
-
-A profile selects these production binaries from one release lineage:
-
-- `hubu`
-- `hubu-server`
-- `gongbu-server`
-- `hubu-unified-mcp`
-
-An external Hubu or Gongbu service does not require or probe its corresponding
-local server binary. The local `hubu` and `hubu-unified-mcp` binaries still
-establish the client release lineage, and doctor compares each external
-service's safe version response with that lineage before reporting readiness.
-
-Product version and source commit must match for a packaged stack. Protocol
-checks still apply independently: Hubu and Gongbu must agree on the executor
-contract, the router must support both backend schema versions, and the
-selected Temporal mode must satisfy Gongbu's compatibility requirements.
-
-Matching product versions never substitute for protocol negotiation. A local
-development override must remain explicit and cannot make an unknown executor
-contract safe.
-
-## Codex handoff
-
-After the stack is running with a valid active generation, configure Codex
-with:
-
-```sh
-hubu init codex --stack-profile /absolute/path/to/profile
-```
-
-The command reads the active manifest, verifies the selected unified MCP binary,
-and writes the managed `[mcp_servers.hubu]` entry with separate Hubu and Gongbu
-endpoint and credential references plus a separate unified-MCP operation
-registry path. The generated handoff may contain internal profile-owned paths,
-but the user neither selects nor copies them. If the active handoff is rejected,
-rerender or reinitialize the stack profile, rerun this command, and restart
-Codex. It does not copy raw credentials into Codex configuration or start the
-stdio process.
-
-Stack doctor reports an uninitialized or unusable operation registry as a
-degraded billable capability, not a backend startup failure. Hubu, Gongbu, and
-unrelated read, status, and artifact tools remain available; new billable Hubu
-calls remain disabled until the client-owned unified MCP process can initialize
-the registry.
-
-## Lifecycle commands
-
-For a complete profile, one command validates, renders, and reconciles the
-launcher-owned processes:
-
-```sh
-hubu stack start --profile /absolute/path/to/profile
-hubu stack status --profile /absolute/path/to/profile
-hubu stack status --profile /absolute/path/to/profile --json
-```
-
-For a fully managed first start, the launcher creates only private credential
-directories, then starts the final Hubu process once. That process creates or
-reuses its three capabilities. After Hubu passes a protected readiness probe,
-the launcher invokes a narrow Gongbu-owned bootstrap command that verifies the
-Hubu capability, creates or reuses the Gongbu caller capability, and persists
-Gongbu's private handoff state without putting secret values in arguments,
-generated configuration, output, or logs. Only then does the launcher start
-Gongbu. Gongbu owns its Temporal worker and, in `managed_local` mode, its
-Temporal child. Stack readiness means both HTTP backends and the worker are
-ready; the unified MCP remains client-owned and is reported as a compatible
-handoff rather than a running stack process.
-
-Repeated start is a no-op for a healthy, current stack. Start never repairs,
-signals, or selectively restarts a partially running, unhealthy, changed, or
-drifted managed stack. For an unchanged unhealthy stack it asks for graceful
-whole-stack stop then start. For a validated staged update it additionally
-requires explicit generation activation while stopped:
-
-```sh
-hubu stack stop --profile /absolute/path/to/profile
-hubu stack activate --generation GENERATION_ID --profile /absolute/path/to/profile
-hubu stack start --profile /absolute/path/to/profile
-```
-
-Stop drains and stops the complete launcher-owned managed stack in reverse
-dependency order; the following start launches it in forward dependency order.
-External or compatible unowned processes are never signalled. When a managed
-prerequisite starts but a downstream external component is unavailable, the
-launcher leaves the prerequisite running and tells the external operator what
-must be restored before start is retried.
-
-Status distinguishes launcher-owned, compatible unowned, external, exited, and
-stale-identity processes. It also reports active generation and restart impact,
-Temporal ownership and worker readiness, the client-owned MCP handoff, and
-exact follow-up commands for doctor, logs, Codex initialization, Temporal
-workflow inspection, and artifact retrieval.
-
-Launcher-owned logs are available without mixing external service logs into the
-profile:
-
-```sh
-hubu stack logs --component all --lines 200 --profile /absolute/path/to/profile
-hubu stack logs --component gongbu --execution-id EXECUTION_ID --profile /absolute/path/to/profile
-```
-
-Managed Hubu writes structured events directly to its configured JSONL file;
-the launcher does not duplicate those events through stderr. Successful
-`/health` and `/version` probes are omitted from normal request logging, while
-failed probes remain visible. The structured log rotates at 10 MiB and retains
-four prior generations (`hubu.jsonl.1` through `hubu.jsonl.4`), bounding the
-visible structured history to approximately 50 MiB. Stack lifecycle commands
-preserve both the current file and its retained generations. A pre-existing
-file larger than the per-file limit is discarded at the next rotation instead
-of being retained as an oversized generation. Fatal process diagnostics and
-structured-log write errors use the separate
-`runtime/logs/hubu-server.stderr.log` capture, which is truncated on each
-managed Hubu start so JSONL rotation never orphans its file descriptor. Hubu
-creates every active structured-log generation with private `0600` permissions
-on Unix, including the new active file opened after rotation.
-
-Stop proceeds in reverse dependency order: Gongbu drains first and shuts down
-its managed worker and Temporal child, then Hubu stops. Startup rollback also
-touches only children created by that invocation. Capabilities created before a
-downstream startup failure remain private lifecycle state and are reused on a
-retry; rollback never prints or deletes them.
-
-```sh
-hubu stack stop --profile /absolute/path/to/profile
-```
-
-The launcher records a process start identity before it gains signal authority.
-If a PID was reused or the recorded identity does not match, lifecycle commands
-refuse to signal it. After independently confirming that ownership is gone, the
-operator can remove only the stale metadata with `stack stop --forget-stale`.
-Databases, artifacts, managed Temporal data, generated configurations, and logs
-are never deleted by start, activation, rollback, or stop.
-
-## Generation rollback and interrupted updates
-
-List the validated generations retained by the profile:
-
-```sh
-hubu stack generations --profile /absolute/path/to/profile
-```
-
-Rollback never silently rewrites operator-owned input. Restore the exact
-`stack.toml`, `credentials.toml`, and `providers.toml` bytes for the target
-generation from operator version control or backup, select the same compatible
-binaries, and render them. Then stop the managed stack and reactivate that
-generation explicitly:
-
-```sh
-hubu stack render --profile /absolute/path/to/profile
-hubu stack stop --profile /absolute/path/to/profile
-hubu stack rollback --generation PRIOR_GENERATION_ID --profile /absolute/path/to/profile
-hubu stack start --profile /absolute/path/to/profile
-```
-
-The rollback command fails closed when the requested generation does not match
-the current source and selected-binary provenance, when its manifest or output
-digests are invalid, or while launcher-owned process metadata remains. A failed
-render or interrupted pre-activation update leaves the active manifest
-unchanged. A failed atomic activation leaves the prior active manifest in
-place; rerun doctor/render and retry activation after confirming the stack is
-stopped. Corrupt active or retained manifests are reported rather than skipped
-or replaced.
-
-## Clean-environment acceptance canary
-
-From a source checkout with the Temporal CLI on `PATH`, run:
-
-```sh
-./scripts/integration-local-stack-acceptance.sh
-```
-
-The canary builds source-only, feature-gated fixture support and then exercises
-the real process boundary end to end. It starts from a clean profile with no
-service credential files or configured service credential paths, runs annotated
-non-starting init, verifies doctor and render do not create credentials, and
-starts the actual `hubu-server`, `gongbu-server`, Gongbu worker, and managed
-Temporal child. A pass-through probe proves the first launch contains exactly
-one final Hubu `serve` process and that its PID and config match launcher state.
-The canary verifies five private credential files representing four distinct
-materials are created, none appear in generated configuration or logs, and
-restart reuses them. It
-then obtains governed Hubu authorizations, registers a second agent after
-startup without rerendering or restarting, submits deterministic Gongbu HTTP
-executions for both agents through the same installation caller, discovers the
-Temporal workflows, downloads and verifies their artifacts, gracefully stops
-the whole stack, starts it again against the same state, and verifies the
-completed executions and artifacts remain available.
-
-This is a local fixture canary, not an unattended-production credential model.
-For V1 the deterministic execution test uses the existing broad local Hubu
-bearer for Gongbu's executor calls; it remains process-owned state and is never
-placed in model input, output, logs, or generated configuration. Gongbu is never
-given Hubu's human approval or reconciliation capabilities. Narrower scoped
-credentials and managed rotation remain follow-up lifecycle work.
-
-The canary uses an explicit one-cent fixture catalog, acknowledgement, and
-process-owned dummy provider reference to prove the fail-closed live-provider
-configuration path without making a billable request. Fixture support is
-compiled only when the non-default `local-fixture-canary` feature is selected
-and additionally requires an explicit canary environment switch. Normal and
-release `gongbu-server` builds omit that feature and continue to reject fixture
-providers.
-
-## Runtime and recovery boundaries
-
-The profile coordinates lifecycle without becoming a shared domain state
-store. Each component retains its own readiness, shutdown, backup, and recovery
-procedure:
-
-- Hubu recovery covers its database and capabilities.
-- Gongbu recovery covers its database, artifact root, managed bootstrap
-  credential state, and managed Temporal data as one consistent unit.
-- External Temporal instances remain under the external operator's control.
-- Restarting the agent client does not restart either backend.
-- Re-rendering configuration does not roll back databases, artifacts, or
-  workflow history.
-
-Use the managed lifecycle commands above for the persistent execution plane and
-[the unified MCP guide](unified-mcp.md) for client setup and backend discovery.
+- [Configuration reference](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/)
+- [Configuration decision guides](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/decisions)
+- [Complete profile examples](https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/examples)
+- [Unified MCP surface](unified-mcp.md)

@@ -86,8 +86,9 @@ done
 
 Every binary must report the product version and source commit recorded in the
 archive. Hubu and Gongbu must both report `hubu-spend-executor-v4.3`.
-`LOCAL-STACK.md` is the packaged bootstrap, lifecycle, recovery, and Codex
-handoff runbook for installing the four binaries outside a source checkout.
+`LOCAL-STACK.md` is the packaged, command-focused path for initializing,
+starting, inspecting, and connecting the four-binary stack outside a source
+checkout. It links to the public configuration reference for detailed choices.
 Its linked `unified-mcp.md` guide is included at the same relative path. The
 standalone Gongbu operations guide remains in the source documentation but is
 intentionally excluded from the managed-stack release bundle.

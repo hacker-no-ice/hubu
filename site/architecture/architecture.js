@@ -60,7 +60,7 @@ const components = {
     ],
     links: [
       ["Repository overview", "README.md"],
-      ["Local stack contract", "docs/local-stack.md"],
+      ["Local stack quick start", "docs/local-stack.md"],
       ["Local stack acceptance canary", "scripts/integration-local-stack-acceptance.sh"],
       ["Managed credential handoff", "crates/gongbu-api/src/config/setup.rs"],
       ["Spend lifecycle", "docs/spend-lifecycle.md"],

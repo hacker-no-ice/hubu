@@ -3171,8 +3171,9 @@ generations` lists retained generations. Rollback requires restoring the exact
 operator-owned TOML for the target generation before `hubu stack rollback`.
 There is no stack restart command and no per-component repair path.
 
-Durable contract: `docs/local-stack.md` in the Hubu repository.
-Public field reference:
+Quick start:
+https://hubu-docs.water-no-ice.chatgpt.site/docs/local-stack
+Public configuration reference:
 https://hubu-docs.water-no-ice.chatgpt.site/configuration/local-stack/v1/
 "#
     .into()

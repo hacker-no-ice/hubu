@@ -133,7 +133,7 @@ The opaque table name is a local reference key. Its `service` and `account` valu
 - [`providers.toml`: modes, targets, settings, pricing, and spend gate](providers-toml.md)
 - [Decision guides](decisions.md)
 - [Complete annotated examples](examples.md)
-- [Local stack operations and recovery](../../../local-stack.md)
+- [Local stack quick start](../../../local-stack.md)
 
 ## Versioning
 

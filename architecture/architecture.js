@@ -6,7 +6,7 @@ const sharedLinks = {
   cli: ["CLI", "crates/hubu-cli/src/main.rs"],
   stackLifecycle: ["Local stack lifecycle", "crates/hubu-cli/src/stack/lifecycle.rs"],
   managedCredentialHandoff: ["Managed Gongbu credential handoff", "crates/gongbu-api/src/config/setup.rs"],
-  localStack: ["Local stack runbook", "docs/local-stack.md"],
+  localStack: ["Local stack quick start", "docs/local-stack.md"],
   localStackAcceptance: ["Local stack acceptance canary", "scripts/integration-local-stack-acceptance.sh"],
   operationKeySkill: ["Operation-key skill", "skills/generate-hubu-operation-key/SKILL.md"],
   operationKeyHelper: ["Operation-key helper", "skills/generate-hubu-operation-key/scripts/operation_keys.py"],
