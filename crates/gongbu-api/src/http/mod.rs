@@ -115,6 +115,25 @@ pub struct ExecutionResponse {
     pub updated_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    pub timing: ExecutionTimingResponse,
+}
+
+/// Agent-safe elapsed time derived from Gongbu-owned durable timestamps.
+///
+/// The provider interval starts immediately before request transmission and
+/// ends when Gongbu durably records the provider result. It remains unavailable
+/// until both boundaries exist; raw provider-attempt identifiers and timestamps
+/// are intentionally not projected through the public execution contract.
+/// The execution interval spans durable admission through terminal completion;
+/// non-provider time is emitted only when checked subtraction of those two
+/// intervals is valid.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ExecutionTimingResponse {
+    pub schema_version: u32,
+    pub scope: String,
+    pub execution_total_ms: Option<u64>,
+    pub provider_interaction_ms: Option<u64>,
+    pub non_provider_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -394,7 +413,7 @@ impl Api {
                 }
                 return Ok(json_response(
                     200,
-                    &execution_response(existing, response_schema_version)?,
+                    &execution_response(&self.repository, existing, response_schema_version)?,
                 ));
             }
             Ok(_) => return Err(ApiError::conflict()),
@@ -552,7 +571,7 @@ impl Api {
             .map_err(|_| ApiError::internal())?;
         Ok(json_response(
             200,
-            &execution_response(execution, response_schema_version)?,
+            &execution_response(&self.repository, execution, response_schema_version)?,
         ))
     }
 
@@ -598,7 +617,7 @@ impl Api {
             .map_err(|_| ApiError::internal())?;
         Ok(json_response(
             202,
-            &execution_response(execution, V1_SCHEMA_VERSION)?,
+            &execution_response(&self.repository, execution, V1_SCHEMA_VERSION)?,
         ))
     }
 
@@ -610,6 +629,7 @@ impl Api {
         Ok(json_response(
             200,
             &execution_response(
+                &self.repository,
                 self.authorized_execution(caller, execution_id)?,
                 V1_SCHEMA_VERSION,
             )?,
@@ -873,6 +893,7 @@ fn canonicalize(value: &Value) -> Value {
 }
 
 fn execution_response(
+    repository: &Repository,
     execution: Execution,
     schema_version: u32,
 ) -> Result<ExecutionResponse, ApiError> {
@@ -894,6 +915,28 @@ fn execution_response(
             .failure_message_redacted
             .unwrap_or_else(|| "execution failed".into()),
     });
+    let execution_total_ms = elapsed_ms(
+        Some(execution.created_at.as_str()),
+        execution.completed_at.as_deref(),
+    );
+    let provider_interaction_ms =
+        match repository.get_provider_attempt_for_execution(&execution.execution_id) {
+            Ok(attempt) => elapsed_ms(
+                attempt.transmission_started_at.as_deref(),
+                attempt.completed_at.as_deref(),
+            ),
+            Err(PersistenceError::NotFound) => None,
+            Err(error) => return Err(map_persistence(error)),
+        };
+    let timing = ExecutionTimingResponse {
+        schema_version: 1,
+        scope: "gongbu_execution".into(),
+        execution_total_ms,
+        provider_interaction_ms,
+        non_provider_ms: execution_total_ms
+            .zip(provider_interaction_ms)
+            .and_then(|(total, provider)| total.checked_sub(provider)),
+    };
     Ok(ExecutionResponse {
         schema_version,
         execution_id: execution.execution_id,
@@ -909,7 +952,19 @@ fn execution_response(
         updated_at: execution.updated_at,
         started_at: execution.started_at,
         completed_at: execution.completed_at,
+        timing,
     })
+}
+
+fn elapsed_ms(started_at: Option<&str>, completed_at: Option<&str>) -> Option<u64> {
+    let started_at = DateTime::parse_from_rfc3339(started_at?).ok()?;
+    let completed_at = DateTime::parse_from_rfc3339(completed_at?).ok()?;
+    u64::try_from(
+        completed_at
+            .signed_duration_since(started_at)
+            .num_milliseconds(),
+    )
+    .ok()
 }
 
 fn artifact_response(artifact: Artifact) -> ArtifactResponse {
@@ -988,6 +1043,7 @@ mod tests {
     use super::*;
     use crate::{
         artifacts::{ArtifactLimits, LocalFsStorage},
+        execution::{AttemptResult, ExecutionUpdate},
         provider::{
             contract::{
                 AdapterCapabilities, AdapterOutcome, PricingCatalog, ProviderAdapter,
@@ -1323,6 +1379,11 @@ mod tests {
         assert_eq!(first.schema_version, 2);
         assert_eq!(first.status, ExecutionStatus::Pending);
         assert_eq!(first.authorization.amount_minor, 100);
+        assert_eq!(first.timing.schema_version, 1);
+        assert_eq!(first.timing.scope, "gongbu_execution");
+        assert_eq!(first.timing.execution_total_ms, None);
+        assert_eq!(first.timing.provider_interaction_ms, None);
+        assert_eq!(first.timing.non_provider_ms, None);
 
         // Object member ordering is immaterial to canonical immutable input.
         let mut reordered = request("operation-1");
@@ -1347,6 +1408,124 @@ mod tests {
         let fetched = execution(&fetched);
         assert_eq!(fetched.schema_version, 1);
         assert_eq!(fetched.execution_id, first.execution_id);
+    }
+
+    #[test]
+    fn elapsed_timing_rejects_missing_malformed_and_negative_boundaries() {
+        assert_eq!(
+            elapsed_ms(
+                Some("2026-08-05T00:00:02Z"),
+                Some("2026-08-05T00:00:05.500Z"),
+            ),
+            Some(3_500)
+        );
+        assert_eq!(
+            elapsed_ms(Some("not-a-timestamp"), Some("2026-08-05T00:00:05Z")),
+            None
+        );
+        assert_eq!(
+            elapsed_ms(Some("2026-08-05T00:00:05Z"), Some("2026-08-05T00:00:02Z"),),
+            None
+        );
+        assert_eq!(elapsed_ms(None, Some("2026-08-05T00:00:05Z")), None);
+    }
+
+    #[test]
+    fn execution_response_projects_provider_and_non_provider_durations() {
+        let fixture = fixture();
+        let created = execution(&call_create(&fixture, &request("timed-execution")));
+        let pending = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        let preflighting = fixture
+            .repository
+            .update_execution(
+                &pending.execution_id,
+                pending.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("2026-08-05T20:00:00.100Z".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-08-05T20:00:00.100Z",
+            )
+            .unwrap();
+        let claimed = fixture
+            .repository
+            .set_claim(
+                &preflighting.execution_id,
+                preflighting.version,
+                "claim-timing",
+                "2026-08-05T20:00:00.200Z",
+            )
+            .unwrap();
+        let attempt = fixture
+            .repository
+            .start_provider_attempt(&claimed, "2026-08-05T20:00:00.300Z")
+            .unwrap();
+        fixture
+            .repository
+            .begin_provider_transmission(&attempt.provider_attempt_id, "2026-08-05T20:00:00.400Z")
+            .unwrap();
+        fixture
+            .repository
+            .complete_provider_attempt(
+                &attempt.provider_attempt_id,
+                &AttemptResult {
+                    outcome: "failed".into(),
+                    completed_at: "2026-08-05T20:00:03.900Z".into(),
+                    usage: json!({}),
+                    usage_schema_version: 1,
+                    provider_amount_minor: None,
+                    provider_currency: None,
+                    failure_code: Some("provider_rejected".into()),
+                    failure_message_redacted: None,
+                    provider_request_id: None,
+                    provider_operation_id: None,
+                },
+            )
+            .unwrap();
+        let executing = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        fixture
+            .repository
+            .update_execution(
+                &executing.execution_id,
+                executing.version,
+                &ExecutionUpdate {
+                    status: "released".into(),
+                    outcome: Some("failed".into()),
+                    started_at: None,
+                    completed_at: Some("2026-08-05T20:00:04Z".into()),
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-08-05T20:00:04Z",
+            )
+            .unwrap();
+
+        let response = fixture.api.handle(
+            "GET",
+            &format!("/v1/executions/{}", created.execution_id),
+            Some(&fixture.caller),
+            &[],
+        );
+        let response = execution(&response);
+        assert_eq!(response.timing.execution_total_ms, Some(4_000));
+        assert_eq!(response.timing.provider_interaction_ms, Some(3_500));
+        assert_eq!(response.timing.non_provider_ms, Some(500));
     }
 
     #[test]

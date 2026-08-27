@@ -24,9 +24,14 @@ configuration, lifecycle, readiness, and failure domains. The router never
 forwards one backend credential to the other, copies artifact bytes into Hubu,
 or exposes provider credentials.
 
-A tool call is validated against its public schema and forwarded to exactly one
-owner. The router never composes a Hubu governance mutation and Gongbu execution
-mutation into one call.
+Most tool calls are validated against their public schema and forwarded to
+exactly one owner. The one intentional orchestration exception is
+`hubu_submit_governed_execution`: the router authorizes through Hubu, binds the
+allowed continuation to the existing durable Gongbu worker, observes that
+operation for a bounded time, and may deliver its artifacts in the same MCP
+response. This composes service calls and adapter state transitions; it does
+not merge backend state, credentials, provider work, artifacts, processes, or
+failure domains.
 
 ## Tool catalog
 
@@ -34,6 +39,14 @@ The router exposes two local read-only tools:
 
 - `hubu_unified_capabilities`
 - `hubu_operation_status`
+
+It also exposes one router-owned composite tool:
+
+- `hubu_submit_governed_execution`
+
+The composite is the preferred ordinary path when an agent has both spend
+authorization intent and an execution request. The primitive Hubu and Gongbu
+tools remain available for recovery, diagnostics, and backward compatibility.
 
 Hubu-owned tools cover health, registration, policies, budgets, spending
 targets, spend authorization and submission, ledger reads, executor claims,
@@ -103,9 +116,140 @@ concise recovery guidance:
   of waiting for provider work. Its result contains the public handle, adapter
   lifecycle state, terminal flag, replacement-safety flag, and guidance to
   observe the same operation rather than submit a replacement.
+- `hubu_submit_governed_execution` returns one composite outcome, the public
+  handle, adapter/execution status when available, server-observed timing, and
+  eligible inline artifacts when terminal execution and delivery fit its total
+  internal budget.
 - `gongbu_get_artifact` returns safe metadata followed by PNG or JPEG content.
 - Gongbu application errors remain `isError: true` with their sanitized error
   object.
+
+## Composite governed execution
+
+`hubu_submit_governed_execution` means “submit one governed execution
+request.” Hubu evaluates policy first. If Hubu allows the request, Gongbu
+executes through the existing durable worker and the router returns the result
+when it can. If Hubu requires human approval, no provider work starts and the
+request remains resumable. The tool does not assert that approval has already
+happened and it never treats an agent tool argument as human approval. Human
+resolution stays outside this composite in an existing or external protected
+path; this interface neither implements nor waits on that resolver.
+
+The input combines the existing authorization fields with the existing Gongbu
+execution intent. Trusted harness identity remains in MCP `_meta`, outside the
+model-authored arguments:
+
+```json
+{
+  "authorization": {
+    "account_id": "agent-account-id",
+    "amount_cents": 12,
+    "reason": "Generate one product illustration",
+    "execution_scope": {
+      "schema_version": 1,
+      "provider": "fixture",
+      "executor": "gongbu",
+      "capability": "image_generation",
+      "billing_merchant": "fixture"
+    }
+  },
+  "execution": {
+    "schema_version": 2,
+    "input": {
+      "prompt": "A deterministic blue circle",
+      "image_count": 1
+    },
+    "input_schema_version": 1,
+    "workload_type": "image_generation",
+    "provider": "fixture",
+    "adapter": "fixture",
+    "model": "fixture-v1"
+  }
+}
+```
+
+The router normalizes that complete request once. It performs the existing
+Hubu authorization mutation and, only after `allow`, binds the execution intent
+to the same private operation and wakes the existing durable operation worker.
+There is no second execution state machine and no router retry of a provider
+mutation. Exact redelivery with the same trusted harness identity recovers the
+same authorization, Gongbu execution, and provider attempt; changed arguments
+under that identity fail before backend access.
+
+The composite outcome is one of:
+
+| Outcome | Meaning |
+| --- | --- |
+| `succeeded` | Gongbu reached successful terminal execution during the internal budget; the response includes timing and eligible artifacts when delivery fits. Budget exhaustion after terminal success remains `succeeded` with an artifact-delivery warning. |
+| `denied` | Hubu denied authorization. This is terminal and no Gongbu or provider work starts. |
+| `approval_required` | Hubu persisted a pending human decision. The composite returns immediately with its public handle; no Gongbu or provider work starts. After an existing or external protected path resolves it, only exact redelivery of this composite call resumes the same operation. |
+| `in_progress` | The bounded wait ended before terminal execution. The durable worker continues the same operation and the public handle can be observed with `hubu_operation_status`. |
+| `failed` | The existing adapter or Gongbu execution reached a terminal failure. This outcome does not make a replacement safe; observe the existing handle and recovery guidance. |
+
+The composite handler uses a 45-second default end-to-end response target. Its
+clock starts before the forced capability refresh, so capability checks,
+authorization, worker wake/observation, and inline artifact work all consume
+the reported total and leave less time for the bounded waiter. A synchronous
+probe, Hubu request, or SQLite busy wait cannot be interrupted after it starts;
+those individually bounded calls may therefore briefly overrun a deliberately
+lowered test override. The 45-second production default leaves headroom under
+the generated Codex MCP
+configuration's 60-second per-tool timeout for final JSON-RPC serialization and
+delivery. It is not the provider deadline or the durable operation deadline.
+If execution is still nonterminal when the configured budget expires, the tool
+returns `in_progress` and the worker keeps the original operation alive under
+its existing 24-hour adapter deadline. If execution is already successfully
+terminal, artifact-budget exhaustion does not change the outcome to
+`in_progress`; the tool returns `succeeded` with a delivery warning and the
+primitive artifact recovery guidance. The composite does not wait for a human,
+raise the client timeout, derive target pricing, or change worker retry and
+reconciliation semantics.
+
+On `succeeded`, the router lists and fetches only PNG and JPEG artifacts and
+may append them as MCP image content up to a fixed 8 MiB aggregate raw-byte
+ceiling (about 10.7 MiB after base64 encoding) and at most 16 inline images.
+The optional `max_inline_artifact_bytes` input defaults to that ceiling and may
+lower, but never raise, the per-call aggregate. Artifact metadata remains
+sanitized. Artifacts that are unsupported, exceed either limit, or cannot be
+delivered inside the remaining internal budget stay available through
+`gongbu_list_artifacts` and `gongbu_get_artifact`; a delivery failure or retry
+never starts another provider attempt.
+
+The structured `timing` object uses milliseconds and has
+`scope: "composite_tool_server_observed"`. It reports `total_ms`,
+`hubu_authorization_ms`, `execution_wait_ms`, `artifact_delivery_ms`,
+`router_unattributed_ms`, the nullable Gongbu-owned fields
+`gongbu_execution_total_ms`, `provider_interaction_ms`, and
+`gongbu_non_provider_ms`, plus a display `summary`. The execution wait includes
+durable worker scheduling, Gongbu coordination, provider work, and observation;
+it must not be presented as provider-only time. The router fields form the
+composite handler's envelope view. The Gongbu fields are an owner-attributed
+breakdown inside that envelope, usually overlapping `execution_wait_ms`; the two
+views must not be added together.
+
+`human_approval_wait_ms` is explicitly null: the composite returns
+`approval_required` immediately and cannot measure the external human interval.
+
+The Gongbu fields come from durable execution and provider-attempt boundaries,
+not router polling. Gongbu measures execution total from execution creation to
+completion, provider interaction from immediately before request transmission
+to the durable provider result, and non-provider time as their checked
+difference. Those values remain null until both relevant timestamps exist;
+malformed, negative, or inconsistent intervals are unavailable. Raw provider
+attempt IDs and timestamps do not cross the MCP boundary.
+
+The same Gongbu-owned projection on execution reads is
+`timing: { schema_version: 1, scope: "gongbu_execution",
+execution_total_ms, provider_interaction_ms, non_provider_ms }`, with the three
+durations nullable under the same rules.
+
+The one-call artifact-delivery promise therefore applies to an ordinary
+auto-approved execution that reaches terminal state while its eligible
+artifacts fit the inline limits and remaining internal budget. A terminal
+success still returns in one call when delivery is partial, but the agent uses
+the primitive list/get tools to recover the omitted artifacts without rerunning
+the provider. The primitive authorization, create, status, list, and get tools
+remain the recovery and diagnostic surface for all other paths.
 
 For `gongbu_create_execution`, the router preserves Gongbu's two allowlisted
 admission diagnostics: `target_not_selectable` with the four target field names,
@@ -166,16 +310,17 @@ authorization is `authorized`, and a synchronous `hubu_submit_spend` result is
 already terminal. Denied or malformed allowed authorizations are terminal
 failures rather than executable continuations.
 
-The router does not add a success envelope, rename fields, translate currency
-units, expose filesystem locations, or convert an application error into a
-successful payload.
+Primitive pass-through routes do not add a success envelope, rename fields,
+translate currency units, expose filesystem locations, or convert an
+application error into a successful payload. The explicit composite uses its
+documented outcome envelope without changing either backend's wire contract.
 
 ## Discovery and compatibility
 
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 34 tool names with owner and
+state and compatible version metadata, and all 35 tool names with owner and
 availability.
 
 The version-1 compatibility boundary requires:
@@ -183,7 +328,7 @@ The version-1 compatibility boundary requires:
 | Surface | Required value |
 | --- | --- |
 | Unified contract | `hubu-gongbu-mcp-v1` |
-| Routing revision | `1` |
+| Routing revision | `2` |
 | MCP protocol | `2024-11-05` |
 | Hubu and Gongbu executor contract | `hubu-spend-executor-v4.3` |
 | Gongbu API schema | `2` |
@@ -208,7 +353,10 @@ Backend states determine the callable catalog:
 Partial availability is intentional. One unhealthy backend does not hide the
 capability tool or compatible tools owned by the other backend.
 `gongbu_create_execution` also depends on Hubu availability because it consumes
-a Hubu authorization.
+a Hubu authorization. `hubu_submit_governed_execution` additionally requires a
+healthy operation registry and safe Hubu and Gongbu admission boundaries. It
+is hidden when any of those prerequisites is unavailable; compatible primitive
+reads remain independently available.
 
 After the client completes the initialized lifecycle, the router emits one
 payload-free `notifications/tools/list_changed` when the effective catalog
@@ -239,6 +387,13 @@ the one-second production default are intended for deterministic local tests.
 Every acknowledgement also receives a durable 24-hour adapter deadline, so a
 permanently nonterminal backend record resolves to
 `operation_deadline_exhausted` rather than being orphaned indefinitely.
+
+The composite handler's end-to-end response target defaults to 45 seconds.
+Deterministic tests may set `HUBU_UNIFIED_GOVERNED_EXECUTION_WAIT_MS` between 10
+and 45000 milliseconds. Lower values principally reduce the time left for
+observation and artifact delivery; bounded synchronous pre-admission work may
+consume or briefly exceed a very low override. The setting does not change the
+durable worker or operation deadline.
 
 ## Setup
 
@@ -302,11 +457,16 @@ remain disabled unless the process is started with
 `HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. Approval is never accepted as a model-owned
 tool argument.
 
-Spend submission and authorization do not receive a generic pre-call prompt.
-Hubu evaluates policy and may return `requires_human_approval: true`; in that
-case no payment or provider execution has occurred. The client shows the
-returned immutable review and resolves the pending decision through the
-protected approval path.
+Spend submission, authorization, and composite governed execution do not
+receive a generic pre-call prompt. Hubu evaluates policy and may return
+`requires_human_approval: true`; the composite projects that state as
+`approval_required` and returns immediately. In that case no payment, Gongbu
+execution, or provider work has occurred. The client shows the returned
+immutable review and resolves the pending decision through the protected
+approval path outside the composite. The composite does not implement a human
+approval resolver and never holds its MCP call open while a human decides.
+After external resolution, only exact redelivery of the composite call with the
+same trusted harness identity resumes the canonical operation.
 
 Reconciliation requires a separate server-side capability in addition to the
 MCP prompt. An executor with only the normal Hubu bearer credential cannot
@@ -320,9 +480,10 @@ connect it to a real payment rail without a stronger authentication design.
 ## Trusted invocation metadata
 
 Spend tools expose business arguments such as account, amount, scope, workload,
-and reason. `operation_key` and optional `task_id` remain outside
-model-authored arguments. The router accepts exactly one supported trusted
-identity source per spend call:
+and reason. The composite nests the ordinary Hubu fields under `authorization`
+and the existing Gongbu intent under `execution`. `operation_key` and optional
+`task_id` remain outside model-authored arguments. The router accepts exactly
+one supported trusted identity source per spend call:
 
 - Codex `_meta.callId`
 - Claude Code `_meta["claudecode/toolUseId"]`
@@ -367,6 +528,15 @@ dispatch starts, the identifier is retained so an ambiguous response can
 recover Gongbu's locally persisted execution after restart. The public handle
 cannot retrieve or replay an operation: recovery requires the original
 normalized harness call identity or its authorized continuation flow.
+
+For `hubu_submit_governed_execution`, the normalized canonical request covers
+both nested objects and the composite tool name. The first invocation routes
+the authorization portion through the existing Hubu path. `deny` and
+`needs_approval` stop before execution admission. `allow` binds the execution
+portion to that same operation using the existing continuation rules, then the
+existing worker performs create replay and observation. The bounded MCP waiter
+reads adapter state; it is not a second worker and does not take ownership of
+Gongbu execution, provider calls, artifacts, or financial recovery.
 
 `gongbu_create_execution` accepts only the opaque `spend_auth_token_id` plus
 execution intent. Before acknowledging, the router requires that identifier to
@@ -438,10 +608,11 @@ correlation without changing v1's fail-closed behavior.
 Registry availability is independent of both backend capabilities. Missing or
 broken registry state does not stop unified MCP startup and does not hide Hubu
 reads, `gongbu_get_execution`, or artifact tools. It hides new Hubu billable
-tools, local `hubu_operation_status`, and `gongbu_create_execution` from
-discovery and rejects direct registry-dependent calls before backend access. The
-capability snapshot reports `operation_registry.state`, its stable reason code,
-and `billable_operations_available` for diagnosis.
+tools, local `hubu_operation_status`, `gongbu_create_execution`, and
+`hubu_submit_governed_execution` from discovery and rejects direct
+registry-dependent calls before backend access. The capability snapshot reports
+`operation_registry.state`, its stable reason code, and
+`billable_operations_available` for diagnosis.
 
 The router implementation and ownership map live in
 [`crates/hubu-unified-mcp`](../crates/hubu-unified-mcp).

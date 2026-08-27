@@ -16,22 +16,53 @@ use routing::{
 };
 pub use transport::RoutingConfig;
 
-pub(crate) use catalog::tool_definitions;
+pub(crate) use catalog::{execution_scope_input_schema, tool_definitions};
 
 pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
+    call_tool_with_operation_identity(server, id, call, None)
+}
+
+pub(super) fn call_governed_authorization(
+    server: &Server,
+    id: Value,
+    authorization: Value,
+    canonical_request: &Value,
+    meta: Option<Value>,
+) -> Value {
+    call_tool_with_operation_identity(
+        server,
+        id,
+        ToolCall {
+            name: "hubu_authorize_spend".into(),
+            arguments: authorization,
+            meta,
+        },
+        Some((crate::governed_execution::TOOL_NAME, canonical_request)),
+    )
+}
+
+fn call_tool_with_operation_identity(
+    server: &Server,
+    id: Value,
+    call: ToolCall,
+    operation_identity: Option<(&str, &Value)>,
+) -> Value {
     let snapshot = server.snapshot();
     if let Err(rejection) = tool_availability(&call.name, BackendOwner::Hubu, &snapshot) {
-        return backend_error_response(id, &call.name, BackendOwner::Hubu, rejection);
+        let public_name = operation_identity.map_or(call.name.as_str(), |(name, _)| name);
+        return backend_error_response(id, public_name, BackendOwner::Hubu, rejection);
     }
     let Some(client) = server.backends.hubu.as_ref() else {
+        let public_name = operation_identity.map_or(call.name.as_str(), |(name, _)| name);
         return backend_error_response(
             id,
-            &call.name,
+            public_name,
             BackendOwner::Hubu,
             ToolRejection::Unconfigured,
         );
     };
     let name = call.name;
+    let public_name = operation_identity.map_or(name.as_str(), |(name, _)| name);
     if name == "hubu_client_approval_profile"
         && call
             .arguments
@@ -50,7 +81,9 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
             Ok(identity) => identity,
             Err(error) => return error_response(id, -32000, &error.to_string()),
         };
-        match server.resolve_harness_operation(&identity, &name, &call.arguments) {
+        let (identity_name, identity_arguments) =
+            operation_identity.unwrap_or((name.as_str(), &call.arguments));
+        match server.resolve_harness_operation(&identity, identity_name, identity_arguments) {
             Ok(operation) => {
                 if let Some(result) = operation.recorded_result.clone() {
                     return success_response(id, tool_result_v1(result));
@@ -68,7 +101,7 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
         None
     };
     let params = json!({
-        "name": name,
+        "name": &name,
         "arguments": call.arguments,
         "_meta": call.meta
     });
@@ -111,7 +144,12 @@ pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
             ) =>
         {
             server.mark_hubu_unavailable();
-            backend_error_response(id, &name, BackendOwner::Hubu, ToolRejection::Unavailable)
+            backend_error_response(
+                id,
+                public_name,
+                BackendOwner::Hubu,
+                ToolRejection::Unavailable,
+            )
         }
         Err(error) => {
             let message = operation.as_ref().map_or_else(

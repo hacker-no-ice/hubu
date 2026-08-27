@@ -69,6 +69,8 @@ fn finish_block(block: &mut String, trust_client_approval: bool) {
     block.push_str(
         "\n[mcp_servers.hubu.tools.hubu_authorize_spend]\n\
          approval_mode = \"approve\"\n\n\
+         [mcp_servers.hubu.tools.hubu_submit_governed_execution]\n\
+         approval_mode = \"approve\"\n\n\
          [mcp_servers.hubu.tools.hubu_submit_spend]\n\
          approval_mode = \"approve\"\n",
     );
@@ -199,6 +201,9 @@ mod tests {
         assert!(block.contains("HUBU_UNIFIED_GONGBU_ENDPOINT"));
         assert!(block.contains(
             "HUBU_UNIFIED_OPERATION_STATE_PATH = \"/tmp/hubu\\\\unified-operations.sqlite3\""
+        ));
+        assert!(block.contains(
+            "[mcp_servers.hubu.tools.hubu_submit_governed_execution]\napproval_mode = \"approve\""
         ));
     }
 }

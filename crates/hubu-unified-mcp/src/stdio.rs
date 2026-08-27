@@ -137,6 +137,7 @@ fn spawn_operation_worker(server: &Server) -> OperationWorker {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let (wake_tx, wake_rx) = mpsc::channel();
+    server.install_operation_worker_waker(wake_tx.clone());
     let handle = thread::spawn(move || {
         crate::operation_worker::run(server, &thread_stop, &wake_rx);
     });

@@ -92,6 +92,19 @@ release Hubu's hold merely because a response was lost. Finalization uses the
 persisted execution agent and provider receipt and remains idempotent under
 repeated delivery.
 
+## Execution timing
+
+Execution responses include an additive, agent-safe `timing` projection. Gongbu
+derives `execution_total_ms` from its durable execution boundaries and
+`provider_interaction_ms` from the provider-attempt transmission and completion
+boundaries that it owns. When both are available, `non_provider_ms` is their
+checked difference. A missing, malformed, or non-monotonic boundary produces a
+null duration instead of an estimate.
+
+The projection contains elapsed durations only. It does not expose raw
+provider-attempt identifiers or timestamps, and callers must not infer provider
+time from how long an external observer sees the execution in `executing`.
+
 ## Provider targets and pricing
 
 Provider selection is an operator decision, not a caller override. A production

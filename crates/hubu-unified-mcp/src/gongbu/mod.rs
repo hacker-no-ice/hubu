@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::BackendClient;
 
-pub(crate) use transport::{CallOutcome, DurableCallError};
+pub(crate) use transport::{CallOutcome, DurableCallError, DurableExecutionObservation};
 
 const TARGET_FIELDS: &[&str] = &["workload_type", "provider", "adapter", "model"];
 const PRICING_SELECTOR_FIELDS: &[&str] = &["input.image_size"];
@@ -78,10 +78,47 @@ pub(crate) fn call_tool(
     transport::call_tool(client, name, arguments, expected)
 }
 
+pub(crate) fn fetch_artifact_bounded(
+    client: &BackendClient,
+    artifact_id: &str,
+    byte_limit: usize,
+) -> Value {
+    serde_json::to_value(transport::fetch_artifact_bounded(
+        client,
+        artifact_id,
+        byte_limit,
+    ))
+    .expect("Gongbu MCP artifact result serializes")
+}
+
 pub(crate) fn create_continuation_id(arguments: &Value) -> Result<String, Value> {
     request::create_continuation_id(arguments).map_err(|error| {
         serde_json::to_value(error.into_result()).expect("Gongbu MCP error serializes")
     })
+}
+
+pub(crate) fn governed_execution_arguments(
+    intent: &Value,
+    spend_auth_token_id: &str,
+) -> Result<Value, Value> {
+    let Some(mut arguments) = intent.as_object().cloned() else {
+        return Err(request_error_result());
+    };
+    if arguments.contains_key("spend_auth_token_id") {
+        return Err(request_error_result());
+    }
+    arguments.insert(
+        "spend_auth_token_id".into(),
+        Value::String(spend_auth_token_id.to_owned()),
+    );
+    let arguments = Value::Object(arguments);
+    create_continuation_id(&arguments)?;
+    Ok(arguments)
+}
+
+fn request_error_result() -> Value {
+    serde_json::to_value(response::ToolError::invalid().into_result())
+        .expect("Gongbu MCP error serializes")
 }
 
 pub(crate) fn status_execution_id(arguments: &Value) -> Result<String, Value> {
@@ -104,4 +141,12 @@ pub(crate) fn observe_durable_execution(
     expected: &crate::operation_registry::GongbuContinuation,
 ) -> Result<crate::operation_registry::GongbuLifecycle, DurableCallError> {
     transport::observe_durable_execution(client, execution_id, expected)
+}
+
+pub(crate) fn fetch_durable_execution_observation(
+    client: &BackendClient,
+    execution_id: &str,
+    expected: &crate::operation_registry::GongbuContinuation,
+) -> Result<DurableExecutionObservation, DurableCallError> {
+    transport::fetch_durable_execution_observation(client, execution_id, expected)
 }

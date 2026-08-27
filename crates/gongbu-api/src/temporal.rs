@@ -199,7 +199,7 @@ impl DurableExecutionRunner for PersistedExecutionRunner {
             crate::provider::http_kernel::ActivityDeadlineGuard::enter(activity_deadline)
                 .map_err(|error| error.to_string())?;
         self.workflow()
-            .run(execution_id, &(self.now)())
+            .run_with_clock(execution_id, self.now.as_ref())
             .map(|execution| execution.status)
             .map_err(|error| error.to_string())
     }
@@ -253,9 +253,13 @@ impl DurableExecutionRunner for PersistedExecutionRunner {
         execution_id: &str,
         activity_deadline: Option<SystemTime>,
     ) -> Result<ProviderPhaseOutcome, String> {
-        self.with_deadline(activity_deadline, |workflow, now| {
-            workflow.provider_phase(execution_id, now)
-        })
+        let _deadline =
+            crate::provider::http_kernel::ActivityDeadlineGuard::enter(activity_deadline)
+                .map_err(|error| error.to_string())?;
+        let phase_at = (self.now)();
+        self.workflow()
+            .provider_phase_with_clock(execution_id, &phase_at, self.now.as_ref())
+            .map_err(|error| error.to_string())
     }
     fn persist_artifacts(
         &self,
