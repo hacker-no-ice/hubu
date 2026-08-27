@@ -10,6 +10,8 @@ mod transport;
 use self::transport as simple_http;
 pub use self::transport::HttpClientError;
 
+const CREDENTIAL_CHECK_PATH: &str = "/agents?operational_probe=gongbu_credential_check";
+
 #[derive(Clone)]
 pub struct HubuClient {
     base_url: String,
@@ -66,7 +68,7 @@ impl HubuClient {
     /// Verify that the configured bearer reaches a protected Hubu route
     /// without performing an execution or mutating Hubu state.
     pub fn check_credential(&self) -> Result<serde_json::Value, HttpClientError> {
-        self.get_json("/agents")
+        self.get_json(CREDENTIAL_CHECK_PATH)
     }
 
     pub fn validate(
