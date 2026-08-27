@@ -24,6 +24,25 @@ Future release template
 
 ## Unreleased
 
+## v0.2.0 — 2026-08-26
+
+### Highlights
+
+- Promoted the source commit validated by `v0.2.0-rc.2` to the stable
+  `v0.2.0` release with no intervening source changes. The stable artifacts
+  were rebuilt with the stable product version and revalidated; see the
+  `v0.2.0-rc.2` entry below for the complete user-facing and operational
+  changes.
+
+### Breaking or operational changes
+
+- Compatibility requirements and experimental-use limitations are unchanged
+  from `v0.2.0-rc.2`.
+
+### Important fixes
+
+- No additional source fixes were introduced after `v0.2.0-rc.2`.
+
 ## v0.2.0-rc.2 — 2026-08-25
 
 ### Highlights
