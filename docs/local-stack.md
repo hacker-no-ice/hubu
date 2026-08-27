@@ -90,6 +90,26 @@ it starts the final Hubu process, completes Gongbu's managed credential
 bootstrap, and starts Gongbu and its managed Temporal runtime. The client-owned
 `hubu-unified-mcp` process is not part of the managed stack.
 
+### Terminal color and automation
+
+Human-readable CLI output uses semantic color and emphasis when its destination
+is an interactive terminal. Status words remain present: green highlights
+ready or successful state, yellow highlights warnings or required action, red
+highlights failures, and dimmed text identifies inactive or secondary details.
+Color is not the only signal.
+
+The global option `--color auto|always|never` controls rendering and may appear
+before or after the command. `auto` is the default, disables color for pipes and
+redirects, and also disables color when `TERM=dumb`. A non-empty `NO_COLOR`
+environment variable disables automatic color. An explicit `--color always` or
+`--color never` takes precedence over the environment.
+
+Machine-readable and raw data paths bypass terminal styling. In particular,
+all `--json` reports, version and protocol JSON, exported policy content,
+client-configuration dry runs, and individual `stack logs` payload lines remain
+ANSI-free even when `--color always` is selected. Hubu-owned log section headers
+may still use terminal styling without changing the stored log lines.
+
 ## Connect Codex
 
 After the stack is ready, write the managed MCP configuration:

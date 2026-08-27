@@ -4,6 +4,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use std::{
     collections::BTreeSet,
+    fmt::Write as _,
     io::Read,
     net::ToSocketAddrs,
     process::{ExitStatus, Stdio},
@@ -1740,26 +1741,151 @@ fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
 }
 
 pub(super) fn print_human(profile: &Path, report: &DoctorReport) {
-    println!("profile: {}", profile.display());
-    println!("classification: {}", enum_name(report.classification));
-    println!(
-        "provider readiness: {}",
-        provider_name(report.provider_readiness)
+    print!(
+        "{}",
+        render_human(crate::terminal::stdout(), profile, report)
     );
-    for item in &report.checks {
-        let field = item
-            .field
-            .as_deref()
-            .map(|field| format!(" ({field})"))
-            .unwrap_or_default();
-        println!(
-            "[{}] {} / {}{}: {}",
-            status_name(item.status),
-            item.component,
-            item.code,
-            field,
-            item.message
-        );
+}
+
+fn render_human(
+    style: crate::terminal::TerminalStyle,
+    profile: &Path,
+    report: &DoctorReport,
+) -> String {
+    let mut output = String::new();
+    let counts = |status| {
+        report
+            .checks
+            .iter()
+            .filter(|check| check.status == status)
+            .count()
+    };
+
+    writeln!(output, "{}", style.title("Hubu stack doctor")).unwrap();
+    writeln!(output).unwrap();
+    writeln!(output, "{}", style.heading("Summary")).unwrap();
+    write_summary_field(
+        &mut output,
+        style,
+        "Profile",
+        style.accent(profile.display()),
+    );
+    write_summary_field(
+        &mut output,
+        style,
+        "Classification",
+        classification_display(style, report.classification),
+    );
+    write_summary_field(
+        &mut output,
+        style,
+        "Provider readiness",
+        provider_display(style, report.provider_readiness),
+    );
+    write_summary_field(
+        &mut output,
+        style,
+        "Checks",
+        format!(
+            "{}  {}  {}  {}",
+            style.success(format!("{} pass", counts(CheckStatus::Pass))),
+            style.warning(format!("{} warning", counts(CheckStatus::Warning))),
+            style.error(format!("{} fail", counts(CheckStatus::Fail))),
+            style.muted(format!("{} skipped", counts(CheckStatus::Skipped))),
+        ),
+    );
+
+    for layer in [
+        CheckLayer::SourceSyntax,
+        CheckLayer::Completeness,
+        CheckLayer::Renderability,
+        CheckLayer::RuntimeReadiness,
+    ] {
+        let checks = report
+            .checks
+            .iter()
+            .filter(|check| check.layer == layer)
+            .collect::<Vec<_>>();
+        if checks.is_empty() {
+            continue;
+        }
+        writeln!(output).unwrap();
+        writeln!(
+            output,
+            "{}",
+            style.heading(format!(
+                "{} ({} {})",
+                layer_name(layer),
+                checks.len(),
+                if checks.len() == 1 { "check" } else { "checks" }
+            ))
+        )
+        .unwrap();
+        for check in checks {
+            writeln!(
+                output,
+                "  {} {}",
+                status_badge(style, check.status),
+                style.accent(format!("{} / {}", check.component, check.code))
+            )
+            .unwrap();
+            if let Some(field) = &check.field {
+                writeln!(output, "            {} {}", style.label("Field:"), field).unwrap();
+            }
+            writeln!(output, "            {}", check.message).unwrap();
+        }
+    }
+    output
+}
+
+fn write_summary_field(
+    output: &mut String,
+    style: crate::terminal::TerminalStyle,
+    label: &str,
+    value: impl std::fmt::Display,
+) {
+    let label = format!("{label:<20}");
+    writeln!(output, "  {}  {value}", style.label(label)).unwrap();
+}
+
+fn classification_display(
+    style: crate::terminal::TerminalStyle,
+    value: ProfileClassification,
+) -> String {
+    let name = enum_name(value);
+    match value {
+        ProfileClassification::Invalid => style.error(name),
+        ProfileClassification::Incomplete
+        | ProfileClassification::ReadyToRender
+        | ProfileClassification::ReadyToStart => style.warning(name),
+        ProfileClassification::RunningReady => style.success(name),
+    }
+}
+
+fn provider_display(style: crate::terminal::TerminalStyle, value: ProviderReadiness) -> String {
+    let name = provider_name(value);
+    match value {
+        ProviderReadiness::Unknown | ProviderReadiness::Disabled => style.muted(name),
+        ProviderReadiness::FixtureOnly => style.warning(name),
+        ProviderReadiness::LiveReady => style.success(name),
+    }
+}
+
+fn status_badge(style: crate::terminal::TerminalStyle, value: CheckStatus) -> String {
+    match value {
+        CheckStatus::Pass => style.success(format!("{:<9}", "[PASS]")),
+        CheckStatus::Fail => style.error(format!("{:<9}", "[FAIL]")),
+        CheckStatus::Warning => style.warning(format!("{:<9}", "[WARN]")),
+        CheckStatus::Skipped => style.muted(format!("{:<9}", "[SKIP]")),
+    }
+}
+
+fn layer_name(value: CheckLayer) -> &'static str {
+    match value {
+        CheckLayer::SourceSyntax => "Source syntax",
+        CheckLayer::Completeness => "Completeness",
+        CheckLayer::Renderability => "Renderability",
+        CheckLayer::RuntimeReadiness => "Runtime readiness",
     }
 }
 
@@ -1782,15 +1908,6 @@ fn provider_name(value: ProviderReadiness) -> &'static str {
     }
 }
 
-fn status_name(value: CheckStatus) -> &'static str {
-    match value {
-        CheckStatus::Pass => "pass",
-        CheckStatus::Fail => "fail",
-        CheckStatus::Warning => "warning",
-        CheckStatus::Skipped => "skipped",
-    }
-}
-
 fn print_help() {
     println!(
         "Diagnose a local stack profile without writing files or starting services\n\nUsage:\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n\nOptions:\n  --json   Print a stable, redacted machine-readable report"
@@ -1802,6 +1919,111 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use tempfile::tempdir;
+
+    fn strip_ansi(value: &str) -> String {
+        let mut output = String::new();
+        let mut chars = value.chars().peekable();
+        while let Some(character) = chars.next() {
+            if character == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
+                for code in chars.by_ref() {
+                    if code == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                output.push(character);
+            }
+        }
+        output
+    }
+
+    fn presentation_report() -> DoctorReport {
+        DoctorReport {
+            schema_version: REPORT_SCHEMA_VERSION,
+            classification: ProfileClassification::Incomplete,
+            provider_readiness: ProviderReadiness::FixtureOnly,
+            checks: vec![
+                check(
+                    CheckLayer::SourceSyntax,
+                    CheckStatus::Pass,
+                    "stack_source_valid",
+                    "stack",
+                    None,
+                    "stack.toml parsed successfully",
+                ),
+                check(
+                    CheckLayer::Completeness,
+                    CheckStatus::Fail,
+                    "required_field_missing",
+                    "stack",
+                    Some("stack.toml:hubu.ownership".into()),
+                    "choose managed or external ownership",
+                ),
+                check(
+                    CheckLayer::Renderability,
+                    CheckStatus::Warning,
+                    "development_binary",
+                    "hubu",
+                    None,
+                    "binary has no release stamp",
+                ),
+                check(
+                    CheckLayer::RuntimeReadiness,
+                    CheckStatus::Skipped,
+                    "runtime_probe_skipped",
+                    "gongbu",
+                    None,
+                    "complete the profile before probing runtime readiness",
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn human_report_plain_output_groups_checks_by_layer() {
+        let output = render_human(
+            crate::terminal::TerminalStyle::plain(),
+            Path::new("/profiles/demo"),
+            &presentation_report(),
+        );
+
+        assert!(!output.contains('\u{1b}'));
+        assert!(output.starts_with("Hubu stack doctor\n\nSummary\n"));
+        assert!(output.contains("Classification        incomplete"));
+        assert!(output.contains("1 pass  1 warning  1 fail  1 skipped"));
+        for heading in [
+            "Source syntax (1 check)",
+            "Completeness (1 check)",
+            "Renderability (1 check)",
+            "Runtime readiness (1 check)",
+        ] {
+            assert!(output.contains(heading));
+        }
+        assert!(output.contains("[PASS]    stack / stack_source_valid"));
+        assert!(output.contains("Field: stack.toml:hubu.ownership"));
+        assert!(output.contains("[FAIL]    stack / required_field_missing"));
+        assert!(output.contains("[WARN]    hubu / development_binary"));
+        assert!(output.contains("[SKIP]    gongbu / runtime_probe_skipped"));
+    }
+
+    #[test]
+    fn human_report_ansi_output_preserves_plain_text() {
+        let report = presentation_report();
+        let plain = render_human(
+            crate::terminal::TerminalStyle::plain(),
+            Path::new("/profiles/demo"),
+            &report,
+        );
+        let colored = render_human(
+            crate::terminal::TerminalStyle::colored(),
+            Path::new("/profiles/demo"),
+            &report,
+        );
+
+        assert!(colored.contains("\u{1b}["));
+        assert!(colored.matches("\u{1b}[").count() >= 12);
+        assert_eq!(strip_ansi(&colored), plain);
+    }
 
     #[test]
     fn operation_registry_path_reports_degraded_billable_capability_without_failing_stack() {

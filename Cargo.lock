@@ -938,6 +938,7 @@ dependencies = [
 name = "hubu-cli"
 version = "0.2.0"
 dependencies = [
+ "anstyle",
  "anyhow",
  "chrono",
  "dirs",

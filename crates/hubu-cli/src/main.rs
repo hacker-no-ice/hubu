@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 mod codex_mcp;
 mod stack;
+mod terminal;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
@@ -44,16 +45,82 @@ const DEFAULT_UNIFIED_OPERATION_STATE_FILE: &str = "hubu-unified-operations.sqli
 #[cfg(test)]
 const TEST_APPROVAL_TOKEN: &str = "test-human-approval-token";
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GlobalOptions {
+    base_url: Option<String>,
+    color: terminal::ColorChoice,
+}
+
+impl GlobalOptions {
+    fn color_choice(args: &[String]) -> Result<terminal::ColorChoice> {
+        let mut color = None;
+        let mut index = 0;
+        while index < args.len() {
+            if args[index] != "--color" {
+                index += 1;
+                continue;
+            }
+            let value = args
+                .get(index + 1)
+                .filter(|value| !value.starts_with('-'))
+                .ok_or_else(|| anyhow!("missing value for global option `--color`"))?;
+            let parsed = value
+                .parse()
+                .map_err(|reason| anyhow!("invalid value `{value}` for --color: {reason}"))?;
+            if color.replace(parsed).is_some() {
+                bail!("global option `--color` may only be provided once");
+            }
+            index += 2;
+        }
+        Ok(color.unwrap_or_default())
+    }
+
+    fn parse(args: &mut Vec<String>) -> Result<Self> {
+        let color = Self::color_choice(args)?;
+        let mut options = Self {
+            base_url: None,
+            color,
+        };
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--url" => {
+                    let value = take_global_option(args, index, "--url")?;
+                    if options.base_url.replace(value).is_some() {
+                        bail!("global option `--url` may only be provided once");
+                    }
+                }
+                "--color" => {
+                    take_global_option(args, index, "--color")?;
+                }
+                _ => index += 1,
+            }
+        }
+        Ok(options)
+    }
+}
+
+fn take_global_option(args: &mut Vec<String>, index: usize, name: &str) -> Result<String> {
+    args.remove(index);
+    if index >= args.len() || args[index].starts_with('-') {
+        bail!("missing value for global option `{name}`");
+    }
+    Ok(args.remove(index))
+}
+
 fn main() {
     if let Err(error) = run() {
-        eprintln!("error: {error:#}");
+        let output = terminal::stderr();
+        eprintln!("{}: {error:#}", output.error("error"));
         std::process::exit(1);
     }
 }
 
 fn run() -> Result<()> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
-    let explicit_base_url = take_global_value(&mut args, "--url");
+    terminal::configure(GlobalOptions::color_choice(&args)?);
+    let global = GlobalOptions::parse(&mut args)?;
+    let explicit_base_url = global.base_url;
     let base_url = explicit_base_url
         .clone()
         .or_else(|| env::var("HUBU_URL").ok())
@@ -559,7 +626,7 @@ fn register_human(base_url: &str, mut args: Vec<String>) -> Result<()> {
         }),
     )?;
 
-    println!("Human registered");
+    println!("{}", terminal::stdout().success("Human registered"));
     println!("  user_id: {}", string_at(&response, "user_id")?);
     println!(
         "  username: {}",
@@ -631,7 +698,10 @@ fn user_spending_target_set(base_url: &str, mut args: Vec<String>) -> Result<()>
         }),
     )?;
 
-    println!("Spending target set (advisory)");
+    println!(
+        "{}",
+        terminal::stdout().success("Spending target set (advisory)")
+    );
     print_spending_target(
         response
             .get("target")
@@ -660,7 +730,10 @@ fn user_spending_target_show(base_url: &str, mut args: Vec<String>) -> Result<()
         .ok_or_else(|| anyhow!("server response missing `targets`"))?;
 
     if targets.is_empty() {
-        println!("No spending targets configured.");
+        println!(
+            "{}",
+            terminal::stdout().muted("No spending targets configured.")
+        );
         return Ok(());
     }
 
@@ -686,7 +759,7 @@ fn user_spending_target_revoke(base_url: &str, mut args: Vec<String>) -> Result<
         }),
     )?;
 
-    println!("Spending target revoked");
+    println!("{}", terminal::stdout().warning("Spending target revoked"));
     print_spending_target(
         response
             .get("target")
@@ -703,7 +776,7 @@ fn user_list(base_url: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("server response missing `users`"))?;
 
     if users.is_empty() {
-        println!("No human users registered.");
+        println!("{}", terminal::stdout().muted("No human users registered."));
         return Ok(());
     }
 
@@ -747,6 +820,10 @@ fn user_list(base_url: &str) -> Result<()> {
 }
 
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    print!("{}", render_table(headers, rows, terminal::stdout()));
+}
+
+fn render_table(headers: &[&str], rows: &[Vec<String>], style: terminal::TerminalStyle) -> String {
     let widths = headers
         .iter()
         .enumerate()
@@ -760,33 +837,56 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
         })
         .collect::<Vec<_>>();
 
-    print_table_row(headers.iter().copied(), &widths);
-    print_table_separator(&widths);
+    let mut output = String::new();
+    write_table_header(&mut output, headers.iter().copied(), &widths, style);
+    write_table_separator(&mut output, &widths, style);
     for row in rows {
-        print_table_row(row.iter().map(String::as_str), &widths);
+        write_table_row(&mut output, row.iter().map(String::as_str), &widths);
     }
+    output
 }
 
-fn print_table_row<'a>(values: impl Iterator<Item = &'a str>, widths: &[usize]) {
+fn write_table_header<'a>(
+    output: &mut String,
+    values: impl Iterator<Item = &'a str>,
+    widths: &[usize],
+    style: terminal::TerminalStyle,
+) {
     let values = values.collect::<Vec<_>>();
     for (index, width) in widths.iter().enumerate() {
         if index > 0 {
-            print!("  ");
+            write!(output, "  ").unwrap();
         }
         let value = values.get(index).copied().unwrap_or("");
-        print!("{value:<width$}");
+        write!(output, "{}", style.heading(format!("{value:<width$}"))).unwrap();
     }
-    println!();
+    writeln!(output).unwrap();
 }
 
-fn print_table_separator(widths: &[usize]) {
+fn write_table_row<'a>(
+    output: &mut String,
+    values: impl Iterator<Item = &'a str>,
+    widths: &[usize],
+) {
+    let values = values.collect::<Vec<_>>();
     for (index, width) in widths.iter().enumerate() {
         if index > 0 {
-            print!("  ");
+            write!(output, "  ").unwrap();
         }
-        print!("{}", "-".repeat(*width));
+        let value = values.get(index).copied().unwrap_or("");
+        write!(output, "{value:<width$}").unwrap();
     }
-    println!();
+    writeln!(output).unwrap();
+}
+
+fn write_table_separator(output: &mut String, widths: &[usize], style: terminal::TerminalStyle) {
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            write!(output, "  ").unwrap();
+        }
+        write!(output, "{}", style.muted("-".repeat(*width))).unwrap();
+    }
+    writeln!(output).unwrap();
 }
 
 fn local_timestamp(timestamp: &str) -> String {
@@ -815,7 +915,7 @@ fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
     let response = post_json(base_url, "/agents/register", prepared.envelope.clone())?;
 
     print_registration_review(&prepared);
-    println!("Agent registered");
+    println!("{}", terminal::stdout().success("Agent registered"));
     println!("  agent_id: {}", string_at(&response, "agent_id")?);
     println!("  version_id: {}", string_at(&response, "version_id")?);
     println!("  account_id: {}", string_at(&response, "account_id")?);
@@ -921,9 +1021,10 @@ fn build_registration_envelope(
 }
 
 fn print_registration_review(prepared: &PreparedRegistration) {
-    println!("Registration review");
+    let style = terminal::stdout();
+    println!("{}", style.heading("Registration review"));
     for (label, value) in &prepared.review {
-        println!("  {label}: {value}");
+        println!("  {}: {value}", style.label(label));
     }
 }
 
@@ -1014,13 +1115,14 @@ fn validate_policy_file(mut args: Vec<String>) -> Result<()> {
 
     let policy =
         Policy::from_yaml_file(&path).with_context(|| format!("validate policy file `{path}`"))?;
-    println!("Policy valid");
+    println!("{}", terminal::stdout().success("Policy valid"));
     println!("  path: {path}");
     println!("  policy_id: {}", policy.id);
     println!("  policy_version: {}", policy.version);
+    let style = terminal::stdout();
     println!(
         "  default_decision: {}",
-        policy_effect_name(policy.default_effect)
+        style.semantic(policy_effect_name(policy.default_effect))
     );
     println!("  rules: {}", policy.rules.len());
     Ok(())
@@ -1055,7 +1157,10 @@ fn write_policy_template(policy_path: &str, force: bool) -> Result<()> {
 
     fs::write(path, default_policy_template())
         .with_context(|| format!("write default policy template to `{policy_path}`"))?;
-    println!("Hubu policy template created");
+    println!(
+        "{}",
+        terminal::stdout().success("Hubu policy template created")
+    );
     println!("  path: {policy_path}");
     println!("  next: edit the file, then run hubu policy apply --path {policy_path}");
     Ok(())
@@ -1109,14 +1214,20 @@ fn apply_policy(base_url: &str, mut args: Vec<String>, legacy_add: bool) -> Resu
 
     let response = post_json(base_url, "/policies", body)?;
 
+    let style = terminal::stdout();
+    let outcome = if legacy_add {
+        "added"
+    } else if response.get("changed").and_then(Value::as_bool) == Some(false) {
+        "unchanged"
+    } else {
+        "applied"
+    };
     println!(
         "Policy {}",
-        if legacy_add {
-            "added"
-        } else if response.get("changed").and_then(Value::as_bool) == Some(false) {
-            "unchanged"
+        if outcome == "unchanged" {
+            style.muted(outcome)
         } else {
-            "applied"
+            style.success(outcome)
         }
     );
     println!("  scope: {}", string_at(&response, "scope")?);
@@ -1134,7 +1245,7 @@ fn apply_policy(base_url: &str, mut args: Vec<String>, legacy_add: bool) -> Resu
     );
     println!(
         "  default_decision: {}",
-        string_at(&response, "default_decision")?
+        style.semantic(string_at(&response, "default_decision")?)
     );
     Ok(())
 }
@@ -1214,7 +1325,7 @@ fn policy_list(base_url: &str, mut args: Vec<String>) -> Result<()> {
         .ok_or_else(|| anyhow!("server response missing `policies`"))?;
 
     if policies.is_empty() {
-        println!("No policies attached.");
+        println!("{}", terminal::stdout().muted("No policies attached."));
         return Ok(());
     }
 
@@ -1297,7 +1408,7 @@ fn agent_list(base_url: &str, mut args: Vec<String>) -> Result<()> {
         .ok_or_else(|| anyhow!("server response missing `agents`"))?;
 
     if agents.is_empty() {
-        println!("No agents registered.");
+        println!("{}", terminal::stdout().muted("No agents registered."));
         return Ok(());
     }
 
@@ -1378,7 +1489,7 @@ fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
 
     let response = post_json(base_url, "/budgets", body)?;
 
-    println!("Budget created");
+    println!("{}", terminal::stdout().success("Budget created"));
     print_budget(
         response
             .get("budget")
@@ -1412,7 +1523,7 @@ fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> 
 
     let response = post_json(base_url, "/budgets/series", body)?;
 
-    println!("Budget series created");
+    println!("{}", terminal::stdout().success("Budget series created"));
     for budget in response
         .get("budgets")
         .and_then(Value::as_array)
@@ -1444,7 +1555,7 @@ fn budget_list(base_url: &str, args: Vec<String>) -> Result<()> {
         .ok_or_else(|| anyhow!("server response missing `budgets`"))?;
 
     if budgets.is_empty() {
-        println!("No budgets configured.");
+        println!("{}", terminal::stdout().muted("No budgets configured."));
         return Ok(());
     }
 
@@ -1470,7 +1581,7 @@ fn budget_revoke(base_url: &str, mut args: Vec<String>) -> Result<()> {
         }),
     )?;
 
-    println!("Budget revoked");
+    println!("{}", terminal::stdout().warning("Budget revoked"));
     print_budget(
         response
             .get("budget")
@@ -1497,14 +1608,14 @@ fn budget_replace(base_url: &str, mut args: Vec<String>) -> Result<()> {
         }),
     )?;
 
-    println!("Budget replaced");
-    println!("Revoked budget");
+    println!("{}", terminal::stdout().success("Budget replaced"));
+    println!("{}", terminal::stdout().heading("Revoked budget"));
     print_budget(
         response
             .get("revoked_budget")
             .ok_or_else(|| anyhow!("server response missing `revoked_budget`"))?,
     )?;
-    println!("Replacement budget");
+    println!("{}", terminal::stdout().heading("Replacement budget"));
     print_budget(
         response
             .get("budget")
@@ -1721,7 +1832,7 @@ fn print_spend_submission(
     merchant: Option<&str>,
     execution_scope: Option<&Value>,
 ) {
-    println!("Spend request inputs");
+    println!("{}", terminal::stdout().heading("Spend request inputs"));
     println!(
         "  amount: {} {} major units (supplied; {} minor units)",
         currency.to_string().to_ascii_uppercase(),
@@ -1788,7 +1899,10 @@ fn spend_reconcile_list(base_url: &str, args: Vec<String>) -> Result<()> {
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("server response missing `claims`"))?;
     if claims.is_empty() {
-        println!("No executor claims require reconciliation.");
+        println!(
+            "{}",
+            terminal::stdout().muted("No executor claims require reconciliation.")
+        );
         return Ok(());
     }
     for claim in claims {
@@ -1843,27 +1957,35 @@ fn spend_reconcile_resolve(
         body["receipt"] = receipt;
     }
     let response = post_reconciliation_json(base_url, &format!("/spend/executor/{action}"), body)?;
+    let style = terminal::stdout();
     println!(
-        "Claim reconciled: {}",
-        if vendor_billed {
+        "{}: {}",
+        style.success("Claim reconciled"),
+        style.semantic(if vendor_billed {
             "vendor billed; hold settled"
         } else {
             "vendor did not bill; hold released"
-        }
+        })
     );
     print_executor_claim(&response)
 }
 
 fn print_executor_claim(claim: &Value) -> Result<()> {
-    println!("Executor claim");
+    let style = terminal::stdout();
+    println!("{}", style.heading("Executor claim"));
     println!("  claim_id: {}", string_at(claim, "claim_id")?);
-    println!("  status: {}", string_at(claim, "status")?);
+    println!("  status: {}", style.semantic(string_at(claim, "status")?));
+    let reconciliation_required = claim
+        .get("reconciliation_required")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("server response missing `reconciliation_required`"))?;
     println!(
         "  reconciliation_required: {}",
-        claim
-            .get("reconciliation_required")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| anyhow!("server response missing `reconciliation_required`"))?
+        if reconciliation_required {
+            style.warning("true")
+        } else {
+            style.success("false")
+        }
     );
     println!("  operation_key: {}", string_at(claim, "operation_key")?);
     println!(
@@ -1895,7 +2017,10 @@ fn print_executor_claim(claim: &Value) -> Result<()> {
     let hold = spend
         .get("budget_hold")
         .ok_or_else(|| anyhow!("server response missing `budget_hold`"))?;
-    println!("  hold_status: {}", string_at(hold, "status")?);
+    println!(
+        "  hold_status: {}",
+        style.semantic(string_at(hold, "status")?)
+    );
     println!(
         "  frozen_amount: {}",
         money_at(hold, "frozen_amount_cents")?
@@ -1917,11 +2042,15 @@ fn require_spend_account_id(
 }
 
 fn print_spend_response(response: &Value) -> Result<()> {
-    println!("Spend evaluated");
+    let style = terminal::stdout();
+    println!("{}", style.heading("Spend evaluated"));
     println!("  operation_key: {}", string_at(response, "operation_key")?);
     println!("  account_id: {}", string_at(response, "account_id")?);
     println!("  agent_id: {}", string_at(response, "agent_id")?);
-    println!("  decision: {}", string_at(response, "decision")?);
+    println!(
+        "  decision: {}",
+        style.semantic(string_at(response, "decision")?)
+    );
     println!("  decision_id: {}", string_at(response, "decision_id")?);
     if let Some(approval) = response.get("approval").filter(|value| value.is_object()) {
         print_spend_approval_response(approval)?;
@@ -2010,8 +2139,11 @@ fn print_spend_response(response: &Value) -> Result<()> {
         .get("payment")
         .filter(|payment| payment.is_object())
     {
-        println!("Payment");
-        println!("  status: {}", string_at(payment, "status")?);
+        println!("{}", style.heading("Payment"));
+        println!(
+            "  status: {}",
+            style.semantic(string_at(payment, "status")?)
+        );
         println!("  payment_id: {}", string_at(payment, "payment_id")?);
         println!(
             "  owner_user: {} ({})",
@@ -2031,8 +2163,8 @@ fn print_spend_response(response: &Value) -> Result<()> {
     }
 
     if let Some(hold) = response.get("budget_hold").filter(|hold| hold.is_object()) {
-        println!("Budget hold");
-        println!("  status: {}", string_at(hold, "status")?);
+        println!("{}", style.heading("Budget hold"));
+        println!("  status: {}", style.semantic(string_at(hold, "status")?));
         println!("  hold_id: {}", string_at(hold, "hold_id")?);
         println!("  budget_id: {}", string_at(hold, "budget_id")?);
         println!("  amount: {}", money_at(hold, "amount_cents")?);
@@ -2044,12 +2176,16 @@ fn print_spend_response(response: &Value) -> Result<()> {
 }
 
 fn print_spend_approval_response(approval: &Value) -> Result<()> {
-    println!("Spend approval");
+    let style = terminal::stdout();
+    println!("{}", style.heading("Spend approval"));
     println!(
         "  approval_request_id: {}",
         string_at(approval, "approval_request_id")?
     );
-    println!("  status: {}", string_at(approval, "status")?);
+    println!(
+        "  status: {}",
+        style.semantic(string_at(approval, "status")?)
+    );
     let review = approval
         .get("review")
         .ok_or_else(|| anyhow!("server response missing `review`"))?;
@@ -2117,7 +2253,10 @@ fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
                 .ok_or_else(|| anyhow!("server response missing transactions"))?;
 
             if transactions.is_empty() {
-                println!("No ledger transactions recorded.");
+                println!(
+                    "{}",
+                    terminal::stdout().muted("No ledger transactions recorded.")
+                );
                 return Ok(());
             }
 
@@ -2153,11 +2292,12 @@ fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
 }
 
 fn print_budget(budget: &Value) -> Result<()> {
+    let style = terminal::stdout();
     println!(
         "  budget_id: {}  agent_id: {}  status: {}",
         string_at(budget, "budget_id")?,
         string_at(budget, "agent_id")?,
-        string_at(budget, "status")?
+        style.semantic(string_at(budget, "status")?)
     );
     println!(
         "    limit: {}  consumed: {}  frozen: {}  remaining: {}",
@@ -2177,10 +2317,11 @@ fn print_budget(budget: &Value) -> Result<()> {
 }
 
 fn print_spending_target(target: &Value) -> Result<()> {
+    let style = terminal::stdout();
     println!(
         "  target_id: {}  status: {}",
         string_at(target, "target_id")?,
-        string_at(target, "status")?
+        style.semantic(string_at(target, "status")?)
     );
     println!(
         "    target: {}  allocated: {}  exceeded by: {}",
@@ -2205,7 +2346,10 @@ fn print_spending_target_warnings(response: &Value) -> Result<()> {
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("server response missing `spending_target_warnings`"))?;
     for warning in warnings {
-        println!("Spending target warning (advisory)");
+        println!(
+            "{}",
+            terminal::stdout().warning("Spending target warning (advisory)")
+        );
         println!("  target_id: {}", string_at(warning, "target_id")?);
         println!(
             "  target: {}  allocated: {}  exceeded by: {}",
@@ -2220,7 +2364,12 @@ fn print_spending_target_warnings(response: &Value) -> Result<()> {
 
 fn health(base_url: &str) -> Result<()> {
     let response = get_json(base_url, "/health")?;
-    println!("Hubu server: {}", string_at(&response, "status")?);
+    let style = terminal::stdout();
+    println!(
+        "{}: {}",
+        style.label("Hubu server"),
+        style.semantic(string_at(&response, "status")?)
+    );
     Ok(())
 }
 
@@ -2442,10 +2591,6 @@ fn parse_http_response(raw: &str) -> Result<(u16, &str)> {
     Ok((status, body))
 }
 
-fn take_global_value(args: &mut Vec<String>, name: &str) -> Option<String> {
-    take_value(args, name)
-}
-
 fn take_help(args: &mut Vec<String>) -> bool {
     take_flag(args, "-h") || take_flag(args, "--help") || take_flag(args, "help")
 }
@@ -2508,7 +2653,7 @@ fn print_help() {
         "Hubu CLI
 
 Usage:
-  hubu [--url URL] <command>
+  hubu [--url URL] [--color auto|always|never] <command>
 
 Commands:
   stack      Configure and operate a unified local stack profile
@@ -2525,7 +2670,8 @@ Commands:
   version    Print product, source, and executor-contract versions
 
 Global options:
-  --url URL   Hubu server URL (default: http://127.0.0.1:8787)
+  --url URL                            Hubu server URL (default: http://127.0.0.1:8787)
+  --color auto|always|never            Terminal color policy (default: auto)
 
 Examples:
   hubu stack init
@@ -2981,6 +3127,95 @@ Example:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strip_ansi(value: &str) -> String {
+        let mut output = String::new();
+        let mut chars = value.chars().peekable();
+        while let Some(character) = chars.next() {
+            if character == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
+                for code in chars.by_ref() {
+                    if code == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                output.push(character);
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn global_options_are_removed_from_any_argument_position() {
+        let mut args = [
+            "stack",
+            "status",
+            "--color",
+            "always",
+            "--profile",
+            "/tmp/demo",
+            "--url",
+            "http://127.0.0.1:9999",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let options = GlobalOptions::parse(&mut args).unwrap();
+
+        assert_eq!(options.color, terminal::ColorChoice::Always);
+        assert_eq!(options.base_url.as_deref(), Some("http://127.0.0.1:9999"));
+        assert_eq!(
+            args,
+            ["stack", "status", "--profile", "/tmp/demo"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn global_options_reject_missing_invalid_and_duplicate_values() {
+        for values in [
+            vec!["stack", "status", "--color"],
+            vec!["stack", "status", "--color", "--json"],
+            vec!["--color", "sometimes", "stack", "status"],
+            vec!["--color", "auto", "--color", "never", "health"],
+            vec![
+                "--url",
+                "http://127.0.0.1:1",
+                "--url",
+                "http://127.0.0.1:2",
+                "health",
+            ],
+        ] {
+            let mut args = values.into_iter().map(str::to_string).collect();
+            assert!(GlobalOptions::parse(&mut args).is_err());
+        }
+    }
+
+    #[test]
+    fn colored_table_preserves_plain_alignment_and_text() {
+        let rows = vec![
+            vec!["alpha".to_string(), "running_ready".to_string()],
+            vec!["longer-name".to_string(), "stopped".to_string()],
+        ];
+        let plain = render_table(
+            &["COMPONENT", "STATUS"],
+            &rows,
+            terminal::TerminalStyle::plain(),
+        );
+        let colored = render_table(
+            &["COMPONENT", "STATUS"],
+            &rows,
+            terminal::TerminalStyle::colored(),
+        );
+
+        assert!(colored.contains("\u{1b}["));
+        assert_eq!(strip_ansi(&colored), plain);
+        assert!(plain.contains("COMPONENT    STATUS"));
+        assert!(plain.contains("alpha        running_ready"));
+    }
 
     fn legacy_spend_args() -> Vec<String> {
         [

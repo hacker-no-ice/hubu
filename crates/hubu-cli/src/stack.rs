@@ -529,6 +529,7 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     }
     let profile = take_profile(&mut args, hubu_home)?;
     ensure_no_args(args)?;
+    let style = crate::terminal::stdout();
     create_secure_dir(&profile)?;
     create_secure_dir(&profile.join("generated"))?;
     let credential_ignore_created = ensure_managed_credential_ignore(&profile)?;
@@ -542,31 +543,55 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     for (name, contents) in files {
         let path = profile.join(name);
         if write_new_secure(&path, contents.as_bytes())? {
-            println!("created: {}", path.display());
+            println!(
+                "{}: {}",
+                style.success("created"),
+                style.accent(path.display())
+            );
         } else {
-            println!("preserved: {}", path.display());
+            println!(
+                "{}: {}",
+                style.muted("preserved"),
+                style.accent(path.display())
+            );
         }
     }
     register_profile(&profile, hubu_home, false)?;
     let credential_ignore = managed_credential_root(&profile).join(".gitignore");
     if credential_ignore_created {
-        println!("created: {}", credential_ignore.display());
+        println!(
+            "{}: {}",
+            style.success("created"),
+            style.accent(credential_ignore.display())
+        );
     } else {
-        println!("preserved: {}", credential_ignore.display());
+        println!(
+            "{}: {}",
+            style.muted("preserved"),
+            style.accent(credential_ignore.display())
+        );
     }
-    println!("profile: {}", profile.display());
+    println!(
+        "{}: {}",
+        style.label("profile"),
+        style.accent(profile.display())
+    );
     let input_files = files_needing_input(&profile);
     if input_files.is_empty() {
-        println!("input needed: none");
+        println!("{}: {}", style.label("input needed"), style.success("none"));
     } else {
-        println!("input needed:");
+        println!("{}:", style.warning("input needed"));
         for path in input_files {
-            println!("  - {}", path.display());
+            println!("  - {}", style.accent(path.display()));
         }
     }
     println!(
-        "next: edit the annotated files, then run `hubu stack doctor --profile {}`",
-        profile.display()
+        "{}: edit the annotated files, then run {}",
+        style.label("next"),
+        style.command(format!(
+            "`hubu stack doctor --profile {}`",
+            profile.display()
+        ))
     );
     Ok(())
 }
@@ -580,7 +605,12 @@ fn select_profile(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     ensure_no_args(args)?;
     let profile = initialized_profile_path(&profile, "--profile")?;
     register_profile(&profile, hubu_home, true)?;
-    println!("selected profile: {}", profile.display());
+    let style = crate::terminal::stdout();
+    println!(
+        "{}: {}",
+        style.success("selected profile"),
+        style.accent(profile.display())
+    );
     Ok(())
 }
 
@@ -595,15 +625,27 @@ fn profiles(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else if report.profiles.is_empty() {
-        println!("No initialized stack profiles found.");
+        println!(
+            "{}",
+            crate::terminal::stdout().muted("No initialized stack profiles found.")
+        );
     } else {
-        println!("SELECTED  DEFAULT  PATH");
+        let style = crate::terminal::stdout();
+        println!("{}", style.heading("SELECTED  DEFAULT  PATH"));
         for profile in report.profiles {
             println!(
-                "{:<8}  {:<7}  {}",
-                if profile.selected { "*" } else { "" },
-                if profile.is_default { "yes" } else { "" },
-                profile.path.display()
+                "{}  {}  {}",
+                if profile.selected {
+                    style.success(format!("{:<8}", "*"))
+                } else {
+                    format!("{:<8}", "")
+                },
+                if profile.is_default {
+                    style.accent(format!("{:<7}", "yes"))
+                } else {
+                    format!("{:<7}", "")
+                },
+                style.accent(profile.path.display())
             );
         }
     }
@@ -713,7 +755,10 @@ fn generations(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     };
     let generations_dir = generated.join("generations");
     if !generations_dir.exists() {
-        println!("no recoverable generations");
+        println!(
+            "{}",
+            crate::terminal::stdout().muted("no recoverable generations")
+        );
         return Ok(());
     }
     let mut manifests = Vec::new();
@@ -755,20 +800,24 @@ fn generations(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     }
     manifests.sort_by(|left, right| left.generation_id.cmp(&right.generation_id));
     if manifests.is_empty() {
-        println!("no recoverable generations");
+        println!(
+            "{}",
+            crate::terminal::stdout().muted("no recoverable generations")
+        );
         return Ok(());
     }
+    let style = crate::terminal::stdout();
     for manifest in manifests {
+        let is_active = active
+            .as_ref()
+            .is_some_and(|value| value.generation_id == manifest.generation_id);
         println!(
             "{}{}",
-            manifest.generation_id,
-            if active
-                .as_ref()
-                .is_some_and(|value| value.generation_id == manifest.generation_id)
-            {
-                " active"
+            style.accent(&manifest.generation_id),
+            if is_active {
+                format!(" {}", style.success("active"))
             } else {
-                ""
+                String::new()
             }
         );
     }
@@ -827,7 +876,12 @@ fn activate_selected_generation_with_renderer(
             .as_ref()
             .is_some_and(|value| value.generation_id == requested)
     {
-        println!("activation unchanged: {requested}");
+        let style = crate::terminal::stdout();
+        println!(
+            "{}: {}",
+            style.muted("activation unchanged"),
+            style.accent(requested)
+        );
         return Ok(());
     }
     let path = generated.join("generations").join(requested);
@@ -835,33 +889,45 @@ fn activate_selected_generation_with_renderer(
     active_generation_path(&generated, &target)?;
     target.restart_impact = restart_impact_between(previous.as_ref(), &target);
     let plan = render_outcome(previous.as_ref(), &target, true);
+    let style = crate::terminal::stdout();
     println!(
-        "{} plan: {} -> {}",
-        if rollback { "rollback" } else { "activation" },
+        "{}: {} -> {}",
+        style.heading(if rollback {
+            "rollback plan"
+        } else {
+            "activation plan"
+        }),
         previous
             .as_ref()
             .map(|value| value.generation_id.as_str())
-            .unwrap_or("none"),
-        requested
+            .map(|value| style.accent(value))
+            .unwrap_or_else(|| style.muted("none")),
+        style.accent(requested)
     );
     println!(
-        "affected components: {}",
+        "{}: {}",
+        style.label("affected components"),
         if plan.affected_components.is_empty() {
-            "none".into()
+            style.muted("none")
         } else {
-            plan.affected_components.join(", ")
+            style.warning(plan.affected_components.join(", "))
         }
     );
     activate_manifest(&generated, &target)?;
     println!(
-        "{} generation: {requested}",
+        "{}: {}",
         if rollback {
-            "rolled back to"
+            style.success("rolled back to generation")
         } else {
-            "activated"
-        }
+            style.success("activated generation")
+        },
+        style.accent(requested)
     );
-    println!("next: hubu stack start --profile {}", profile.display());
+    println!(
+        "{}: {}",
+        style.label("next"),
+        style.command(format!("hubu stack start --profile {}", profile.display()))
+    );
     Ok(())
 }
 
@@ -997,8 +1063,17 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
                 gongbu_server.as_deref(),
             )?;
             persist_generation_manifest(&generated, active)?;
-            println!("render unchanged: {generation_id}");
-            println!("active manifest: {}", active_path.display());
+            let style = crate::terminal::stdout();
+            println!(
+                "{}: {}",
+                style.muted("render unchanged"),
+                style.accent(&generation_id)
+            );
+            println!(
+                "{}: {}",
+                style.label("active manifest"),
+                style.accent(active_path.display())
+            );
             return Ok(RenderOutcome {
                 generation_id,
                 activated: true,
@@ -1068,7 +1143,12 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
         }
         fs::remove_dir_all(&generation)
             .with_context(|| format!("discard incomplete generation `{generation_id}`"))?;
-        eprintln!("discarded incomplete staged generation: {generation_id}");
+        let style = crate::terminal::stderr();
+        eprintln!(
+            "{}: {}",
+            style.warning("discarded incomplete staged generation"),
+            style.accent(&generation_id)
+        );
     }
     create_secure_dir(&generated.join("generations"))?;
     create_secure_dir(&generation)?;
@@ -1111,9 +1191,22 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
     if previous_active.is_none() {
         lifecycle::ensure_profile_stopped(profile)?;
         activate_manifest(&generated, &manifest)?;
-        println!("rendered generation: {generation_id}");
-        println!("active manifest: {}", active_path.display());
-        println!("next: hubu stack doctor --profile {}", profile.display());
+        let style = crate::terminal::stdout();
+        println!(
+            "{}: {}",
+            style.success("rendered generation"),
+            style.accent(&generation_id)
+        );
+        println!(
+            "{}: {}",
+            style.label("active manifest"),
+            style.accent(active_path.display())
+        );
+        println!(
+            "{}: {}",
+            style.label("next"),
+            style.command(format!("hubu stack doctor --profile {}", profile.display()))
+        );
         return Ok(render_outcome(None, &manifest, true));
     }
     let outcome = render_outcome(previous_active.as_ref(), &manifest, false);
@@ -1566,27 +1659,38 @@ fn restart_impact_between(
 }
 
 fn print_staged_plan(profile: &Path, outcome: &RenderOutcome) {
-    println!("validated staged generation: {}", outcome.generation_id);
+    let style = crate::terminal::stdout();
     println!(
-        "changed source files: {}",
+        "{}: {}",
+        style.success("validated staged generation"),
+        style.accent(&outcome.generation_id)
+    );
+    println!(
+        "{}: {}",
+        style.label("changed source files"),
         if outcome.changed_source_files.is_empty() {
-            "none".into()
+            style.muted("none")
         } else {
-            outcome.changed_source_files.join(", ")
+            style.warning(outcome.changed_source_files.join(", "))
         }
     );
     println!(
-        "affected components: {}",
+        "{}: {}",
+        style.label("affected components"),
         if outcome.affected_components.is_empty() {
-            "none".into()
+            style.muted("none")
         } else {
-            outcome.affected_components.join(", ")
+            style.warning(outcome.affected_components.join(", "))
         }
     );
     println!(
-        "activation required: hubu stack activate --generation {} --profile {}",
-        outcome.generation_id,
-        profile.display()
+        "{}: {}",
+        style.warning("activation required"),
+        style.command(format!(
+            "hubu stack activate --generation {} --profile {}",
+            outcome.generation_id,
+            profile.display()
+        ))
     );
 }
 
@@ -2536,7 +2640,11 @@ fn validate_release_lineage(items: &[BinaryProvenance], allow_development: bool)
         bail!("selected binaries are unstamped development builds; set allow_development_builds = true only for an explicit local development profile");
     }
     if first.source_commit == "unknown" {
-        eprintln!("warning: rendering an explicit development profile with unstamped binaries");
+        let style = crate::terminal::stderr();
+        eprintln!(
+            "{}: rendering an explicit development profile with unstamped binaries",
+            style.warning("warning")
+        );
     }
     Ok(())
 }
