@@ -1,4 +1,5 @@
 import { Search } from "./components/Search";
+import { HubuWordmark } from "./components/HubuWordmark";
 import { searchDocuments } from "./lib/docs";
 
 const stackSteps = [
@@ -15,8 +16,8 @@ export default function Home() {
     <div className="home-shell">
       <header className="topbar">
         <a className="brand" href="/" aria-label="Hubu documentation home">
-          <span className="brand-seal" aria-hidden="true">户</span>
-          <span>Hubu <i>/ docs</i></span>
+          <HubuWordmark className="brand-wordmark" decorative />
+          <i>/ docs</i>
         </a>
         <nav aria-label="Primary navigation">
           <a href="/docs/overview">Documentation</a>
@@ -28,6 +29,7 @@ export default function Home() {
       <main id="main-content">
         <section className="hero">
           <div className="hero-copy">
+            <HubuWordmark className="hero-wordmark" />
             <p className="eyebrow"><span /> Agent spend control plane</p>
             <h1>Governed spend<br />for AI agents.</h1>
             <p className="hero-lede">

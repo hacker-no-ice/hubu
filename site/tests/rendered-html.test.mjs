@@ -19,6 +19,10 @@ test("server-renders the Hubu documentation home", async () => {
   assert.match(html, /Experimental and local-first/);
   assert.match(html, /hubu stack start/);
   assert.match(html, /MANAGED LIFECYCLE/);
+  assert.equal(html.match(/src="\/brand\/hubu-wordmark\.png"/g)?.length, 2);
+  assert.match(html, /alt="Hubu"/);
+  assert.match(html, /aria-label="Hubu documentation home"/);
+  assert.match(html, /og-wordmark\.png/);
   assert.doesNotMatch(html, /not on main yet/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
@@ -32,6 +36,8 @@ test("renders canonical Markdown on a documentation route", async () => {
   assert.match(html, /stack start/);
   assert.doesNotMatch(html, /not on main yet/i);
   assert.match(html, /On this page/);
+  assert.match(html, /src="\/brand\/hubu-wordmark\.png"/);
+  assert.match(html, /aria-label="Hubu documentation home"/);
 });
 
 test("publishes the versioned local-stack configuration reference at stable public routes", async () => {
