@@ -24,6 +24,14 @@ pub(crate) struct CallOutcome {
     pub(crate) lifecycle: Option<crate::operation_registry::GongbuLifecycle>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct DurableExecutionObservation {
+    pub(crate) lifecycle: crate::operation_registry::GongbuLifecycle,
+    pub(crate) execution_total_ms: Option<u64>,
+    pub(crate) provider_interaction_ms: Option<u64>,
+    pub(crate) non_provider_ms: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DurableCallError {
     pub(crate) code: &'static str,
@@ -89,15 +97,44 @@ pub(super) fn observe_durable_execution(
     execution_id: &str,
     expected: &crate::operation_registry::GongbuContinuation,
 ) -> Result<crate::operation_registry::GongbuLifecycle, DurableCallError> {
+    fetch_durable_execution_observation(client, execution_id, expected)
+        .map(|observation| observation.lifecycle)
+}
+
+pub(super) fn fetch_durable_execution_observation(
+    client: &BackendClient,
+    execution_id: &str,
+    expected: &crate::operation_registry::GongbuContinuation,
+) -> Result<DurableExecutionObservation, DurableCallError> {
     let prepared = request::prepare(
         "gongbu_get_execution",
         serde_json::json!({"execution_id": execution_id}),
     )?;
-    let (_, lifecycle) = execute(client, prepared, Some(expected))?;
-    lifecycle.ok_or(DurableCallError {
-        code: "invalid_execution_response",
-        retryable: false,
-        admission_diagnostic: None,
+    let PreparedCall::GetExecution(execution_id) = prepared else {
+        return Err(DurableCallError {
+            code: "invalid_execution_request",
+            retryable: false,
+            admission_diagnostic: None,
+        });
+    };
+    let response: ExecutionResponse = json_request::<Value, _>(
+        client,
+        Method::GET,
+        &format!("v1/executions/{execution_id}"),
+        None,
+    )?;
+    let timing = response.timing();
+    let (_, lifecycle) = execution_result(
+        response,
+        Some(expected),
+        Some(&execution_id),
+        EXECUTION_V1_SCHEMA_VERSION,
+    )?;
+    Ok(DurableExecutionObservation {
+        lifecycle,
+        execution_total_ms: timing.execution_total_ms,
+        provider_interaction_ms: timing.provider_interaction_ms,
+        non_provider_ms: timing.non_provider_ms,
     })
 }
 
@@ -152,12 +189,33 @@ fn execute(
             Ok((text_result(&response), None))
         }
         PreparedCall::GetArtifact(artifact_id) => {
-            get_artifact(client, artifact_id).map(|result| (result, None))
+            get_artifact(client, artifact_id, ARTIFACT_LIMIT).map(|result| (result, None))
         }
     }
 }
 
-fn get_artifact(client: &BackendClient, artifact_id: String) -> Result<ToolResult, ToolError> {
+pub(super) fn fetch_artifact_bounded(
+    client: &BackendClient,
+    artifact_id: &str,
+    byte_limit: usize,
+) -> ToolResult {
+    let prepared = request::prepare(
+        "gongbu_get_artifact",
+        serde_json::json!({"artifact_id": artifact_id}),
+    );
+    match prepared {
+        Ok(PreparedCall::GetArtifact(artifact_id)) if byte_limit > 0 => {
+            get_artifact(client, artifact_id, byte_limit).unwrap_or_else(ToolError::into_result)
+        }
+        Ok(_) | Err(_) => ToolError::invalid().into_result(),
+    }
+}
+
+fn get_artifact(
+    client: &BackendClient,
+    artifact_id: String,
+    byte_limit: usize,
+) -> Result<ToolResult, ToolError> {
     let response = send(
         client,
         Method::GET,
@@ -185,7 +243,7 @@ fn get_artifact(client: &BackendClient, artifact_id: String) -> Result<ToolResul
             )
         })?
         .to_owned();
-    let bytes = read_bounded(response, ARTIFACT_LIMIT).map_err(|()| {
+    let bytes = read_bounded(response, byte_limit).map_err(|()| {
         ToolError::upstream("invalid_artifact", "Gongbu returned an invalid artifact")
     })?;
     Ok(artifact_result(artifact_id, media_type, bytes))

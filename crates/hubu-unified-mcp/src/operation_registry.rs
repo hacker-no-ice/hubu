@@ -593,11 +593,9 @@ impl OperationRegistry {
         if !arguments.is_object() {
             bail!("Gongbu execution arguments must be an object");
         }
+        validate_gongbu_request_size(arguments)?;
         let request_hash = canonical_request_hash("gongbu_create_execution", arguments)?;
         let request_json = serde_json::to_string(&canonicalize(arguments))?;
-        if request_json.len() > MAX_REQUEST_BYTES {
-            bail!("Gongbu execution request exceeds the durable adapter limit");
-        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -623,7 +621,10 @@ impl OperationRegistry {
         let operation_key = continuation.0.ok_or_else(|| {
             anyhow!("authorization continuation is missing private operation identity")
         })?;
-        if continuation.2 != "hubu_authorize_spend" {
+        if !matches!(
+            continuation.2.as_str(),
+            "hubu_authorize_spend" | "hubu_submit_governed_execution"
+        ) {
             bail!("authorization continuation does not belong to an execution authorization");
         }
         if continuation.3.as_deref() != Some("allow") {
@@ -717,6 +718,30 @@ impl OperationRegistry {
             result_code,
             updated_at: persisted.8,
         })
+    }
+
+    pub(crate) fn fail_pre_execution_operation(
+        &mut self,
+        operation_handle: &str,
+        result_code: &str,
+    ) -> Result<DurableOperationStatus> {
+        validate_public_operation_handle(operation_handle)?;
+        validate_result_code(result_code)?;
+        self.connection.execute(
+            "UPDATE harness_operations
+             SET operation_state = 'failed', operation_result_code = ?2,
+                 gongbu_request_json = NULL, next_operation_attempt_at = NULL,
+                 operation_updated_at = CURRENT_TIMESTAMP
+             WHERE operation_handle = ?1
+               AND gongbu_execution_id IS NULL
+               AND operation_state IS NULL",
+            params![operation_handle, result_code],
+        )?;
+        let status = self.durable_operation_status(operation_handle)?;
+        if !status.terminal() {
+            bail!("pre-execution operation could not be made terminal");
+        }
+        Ok(status)
     }
 
     pub(crate) fn promote_accepted_operations(&mut self) -> Result<usize> {
@@ -1126,6 +1151,16 @@ impl OperationRegistry {
     }
 }
 
+pub(crate) fn validate_gongbu_request_size(arguments: &Value) -> Result<()> {
+    if !arguments.is_object() {
+        bail!("Gongbu execution arguments must be an object");
+    }
+    if serde_json::to_string(&canonicalize(arguments))?.len() > MAX_REQUEST_BYTES {
+        bail!("Gongbu execution request exceeds the durable adapter limit");
+    }
+    Ok(())
+}
+
 fn contains_protected_identity(value: &Value) -> bool {
     match value {
         Value::Array(values) => values.iter().any(contains_protected_identity),
@@ -1255,17 +1290,27 @@ fn pre_execution_projection(
     has_authorization: bool,
 ) -> Result<(String, Option<String>)> {
     let projection = match (tool_name, decision, has_authorization) {
-        ("hubu_authorize_spend", Some("allow"), true) => ("authorized", None),
-        ("hubu_authorize_spend", Some("allow"), false) => {
+        ("hubu_authorize_spend" | "hubu_submit_governed_execution", Some("allow"), true) => {
+            ("authorized", None)
+        }
+        ("hubu_authorize_spend" | "hubu_submit_governed_execution", Some("allow"), false) => {
             ("failed", Some("authorization_continuation_unavailable"))
         }
-        ("hubu_authorize_spend", Some("deny"), _) => ("failed", Some("authorization_denied")),
+        ("hubu_authorize_spend" | "hubu_submit_governed_execution", Some("deny"), _) => {
+            ("failed", Some("authorization_denied"))
+        }
         ("hubu_submit_spend", Some("allow"), _) => ("succeeded", Some("spend_succeeded")),
         ("hubu_submit_spend", Some("deny"), _) => ("failed", Some("spend_denied")),
-        ("hubu_authorize_spend" | "hubu_submit_spend", Some("needs_approval"), _) => {
-            ("approval_required", Some("human_approval_required"))
-        }
-        ("hubu_authorize_spend" | "hubu_submit_spend", None, _) => ("awaiting_hubu_result", None),
+        (
+            "hubu_authorize_spend" | "hubu_submit_spend" | "hubu_submit_governed_execution",
+            Some("needs_approval"),
+            _,
+        ) => ("approval_required", Some("human_approval_required")),
+        (
+            "hubu_authorize_spend" | "hubu_submit_spend" | "hubu_submit_governed_execution",
+            None,
+            _,
+        ) => ("awaiting_hubu_result", None),
         _ => bail!("normalized operation has an unsupported pre-execution state"),
     };
     Ok((projection.0.to_owned(), projection.1.map(str::to_owned)))

@@ -7,6 +7,7 @@
 //! crates.
 
 mod gongbu;
+mod governed_execution;
 mod hubu;
 
 use std::{
@@ -44,7 +45,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.3";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 1;
+pub const ROUTING_REVISION: u32 = 2;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -54,6 +55,7 @@ const GONGBU_TOKEN_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN";
 const GONGBU_TOKEN_FILE_ENV: &str = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE";
 const CAPABILITY_POLL_INTERVAL_ENV: &str = "HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS";
 const OPERATION_TICK_ENV: &str = "HUBU_UNIFIED_OPERATION_TICK_MS";
+const GOVERNED_EXECUTION_WAIT_ENV: &str = "HUBU_UNIFIED_GOVERNED_EXECUTION_WAIT_MS";
 const OPERATION_STATE_PATH_ENV: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
@@ -62,10 +64,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_CAPABILITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_OPERATION_TICK: Duration = Duration::from_secs(1);
+const DEFAULT_GOVERNED_EXECUTION_WAIT: Duration = Duration::from_secs(45);
 const MIN_CAPABILITY_POLL_INTERVAL_MS: u64 = 10;
 const MAX_CAPABILITY_POLL_INTERVAL_MS: u64 = 60_000;
 const MIN_OPERATION_TICK_MS: u64 = 10;
 const MAX_OPERATION_TICK_MS: u64 = 1_000;
+const MIN_GOVERNED_EXECUTION_WAIT_MS: u64 = 10;
+const MAX_GOVERNED_EXECUTION_WAIT_MS: u64 = 45_000;
 const MAX_CAPABILITY_FAILURE_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
@@ -188,6 +193,7 @@ pub struct Config {
     pub hubu_routing: HubuRoutingConfig,
     pub capability_poll_interval: Duration,
     pub operation_tick: Duration,
+    pub governed_execution_wait: Duration,
     pub operation_state_path: Option<PathBuf>,
 }
 
@@ -199,6 +205,7 @@ impl Default for Config {
             hubu_routing: HubuRoutingConfig::default(),
             capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
             operation_tick: DEFAULT_OPERATION_TICK,
+            governed_execution_wait: DEFAULT_GOVERNED_EXECUTION_WAIT,
             operation_state_path: None,
         }
     }
@@ -244,9 +251,23 @@ impl Config {
             hubu_routing,
             capability_poll_interval: poll_interval(lookup(CAPABILITY_POLL_INTERVAL_ENV))?,
             operation_tick: operation_tick(lookup(OPERATION_TICK_ENV))?,
+            governed_execution_wait: governed_execution_wait(lookup(GOVERNED_EXECUTION_WAIT_ENV))?,
             operation_state_path,
         })
     }
+}
+
+fn governed_execution_wait(value: Option<String>) -> Result<Duration, ConfigError> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_GOVERNED_EXECUTION_WAIT);
+    };
+    let milliseconds = value
+        .parse::<u64>()
+        .map_err(|_| ConfigError::InvalidGovernedExecutionWait)?;
+    if !(MIN_GOVERNED_EXECUTION_WAIT_MS..=MAX_GOVERNED_EXECUTION_WAIT_MS).contains(&milliseconds) {
+        return Err(ConfigError::InvalidGovernedExecutionWait);
+    }
+    Ok(Duration::from_millis(milliseconds))
 }
 
 fn operation_tick(value: Option<String>) -> Result<Duration, ConfigError> {
@@ -330,6 +351,8 @@ pub enum ConfigError {
     InvalidPollInterval,
     #[error("durable operation tick must be between 10 and 1000 milliseconds")]
     InvalidOperationTick,
+    #[error("governed execution wait must be between 10 and 45000 milliseconds")]
+    InvalidGovernedExecutionWait,
 }
 
 impl fmt::Display for BackendOwner {
@@ -447,10 +470,14 @@ pub struct Server {
     transition_state: Arc<TransitionState>,
     capability_poll_interval: Duration,
     operation_tick: Duration,
+    governed_execution_wait: Duration,
     probe_timings: Arc<Mutex<ProbeTimings>>,
     probe_schedule_waker: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    operation_worker_waker: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     hubu_routing: HubuRoutingConfig,
     operation_registry: Arc<OperationRegistryCapability>,
+    #[cfg(test)]
+    use_capability_snapshot_for_test: bool,
 }
 
 #[derive(Debug)]
@@ -549,6 +576,7 @@ impl Server {
         let hubu_routing = config.hubu_routing.clone();
         let capability_poll_interval = config.capability_poll_interval;
         let operation_tick = config.operation_tick;
+        let governed_execution_wait = config.governed_execution_wait;
         let backends = BackendClients::new(config)?;
         let snapshot = backends.probe();
         let probed_at = Instant::now();
@@ -578,10 +606,14 @@ impl Server {
             transition_state: Arc::new(transition_state),
             capability_poll_interval,
             operation_tick,
+            governed_execution_wait,
             probe_timings: Arc::new(Mutex::new(probe_timings)),
             probe_schedule_waker: Arc::new(Mutex::new(None)),
+            operation_worker_waker: Arc::new(Mutex::new(None)),
             hubu_routing,
             operation_registry: Arc::new(operation_registry),
+            #[cfg(test)]
+            use_capability_snapshot_for_test: false,
         })
     }
 
@@ -662,6 +694,12 @@ impl Server {
         if call.name == "hubu_operation_status" {
             return self.call_operation_status(id, &call.arguments);
         }
+        if call.name == governed_execution::TOOL_NAME {
+            let started = Instant::now();
+            let deadline = started + self.governed_execution_wait;
+            self.refresh_governed_execution_capabilities();
+            return governed_execution::call_tool(self, id, call, started, deadline);
+        }
         let Some(owner) = DOMAIN_TOOLS
             .iter()
             .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
@@ -721,6 +759,11 @@ impl Server {
         if call.name == "hubu_operation_status" {
             return self.call_operation_status(id, &call.arguments);
         }
+        if call.name == governed_execution::TOOL_NAME {
+            let started = Instant::now();
+            let deadline = started + self.governed_execution_wait;
+            return governed_execution::call_tool(self, id, call, started, deadline);
+        }
         let Some(owner) = DOMAIN_TOOLS
             .iter()
             .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
@@ -747,11 +790,22 @@ impl Server {
         self.list_tools_for_snapshot()
     }
 
+    fn refresh_governed_execution_capabilities(&self) {
+        #[cfg(test)]
+        if self.use_capability_snapshot_for_test {
+            return;
+        }
+        self.refresh_capabilities();
+    }
+
     fn list_tools_for_snapshot(&self) -> Vec<Value> {
         let snapshot = self.snapshot();
         let mut tools = vec![capability_tool()];
         if self.operation_registry_available() {
             tools.push(gongbu::operation_status_definition());
+            if governed_execution::backend_availability(&snapshot).is_ok() {
+                tools.push(governed_execution::tool_definition());
+            }
         }
         if tool_availability("hubu_health", BackendOwner::Hubu, &snapshot).is_ok() {
             tools.extend(hubu::tool_definitions().into_iter().filter(|tool| {
@@ -803,7 +857,12 @@ impl Server {
             {
                 if matches!(
                     tool["name"].as_str(),
-                    Some("hubu_authorize_spend" | "hubu_submit_spend" | "gongbu_create_execution")
+                    Some(
+                        "hubu_authorize_spend"
+                            | "hubu_submit_spend"
+                            | "gongbu_create_execution"
+                            | governed_execution::TOOL_NAME
+                    )
                 ) {
                     tool["available"] = json!(false);
                     tool["reason_code"] = json!("operation_registry_unavailable");
@@ -923,6 +982,21 @@ impl Server {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .durable_operation_status(operation_handle)
+    }
+
+    fn fail_pre_execution_operation(
+        &self,
+        operation_handle: &str,
+        result_code: &str,
+    ) -> anyhow::Result<operation_registry::DurableOperationStatus> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("pre-execution failure requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .fail_pre_execution_operation(operation_handle, result_code)
     }
 
     fn call_operation_status(&self, id: Value, arguments: &Value) -> Value {
@@ -1108,6 +1182,24 @@ impl Server {
             .probe_schedule_waker
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(waker);
+    }
+
+    pub(crate) fn install_operation_worker_waker(&self, waker: mpsc::Sender<()>) {
+        *self
+            .operation_worker_waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(waker);
+    }
+
+    fn wake_operation_worker(&self) {
+        let waker = self
+            .operation_worker_waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(waker) = waker {
+            let _ = waker.send(());
+        }
     }
 
     fn wake_probe_monitor(&self) {
@@ -1339,6 +1431,26 @@ mod tests {
         assert_eq!(
             operation_tick(Some("9".into())).unwrap_err(),
             ConfigError::InvalidOperationTick
+        );
+    }
+
+    #[test]
+    fn validates_bounded_governed_execution_wait() {
+        assert_eq!(
+            governed_execution_wait(None).unwrap(),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            governed_execution_wait(Some("10".into())).unwrap(),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            governed_execution_wait(Some("45000".into())).unwrap(),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            governed_execution_wait(Some("45001".into())).unwrap_err(),
+            ConfigError::InvalidGovernedExecutionWait
         );
     }
 
@@ -1659,7 +1771,8 @@ mod tests {
         let serialized = capability.to_string();
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 34);
+        assert_eq!(capability["routing_revision"], 2);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 35);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

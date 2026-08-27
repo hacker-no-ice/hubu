@@ -65,15 +65,18 @@ fn server_with_backends(
         transition_state: Arc::new(transition_state),
         capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
         operation_tick: DEFAULT_OPERATION_TICK,
+        governed_execution_wait: DEFAULT_GOVERNED_EXECUTION_WAIT,
         probe_timings: Arc::new(Mutex::new(ProbeTimings {
             hubu: BackendProbeTiming::new(now, DEFAULT_CAPABILITY_POLL_INTERVAL, false, 7),
             gongbu: BackendProbeTiming::new(now, DEFAULT_CAPABILITY_POLL_INTERVAL, false, 11),
         })),
         probe_schedule_waker: Arc::new(Mutex::new(None)),
+        operation_worker_waker: Arc::new(Mutex::new(None)),
         hubu_routing,
         operation_registry: Arc::new(OperationRegistryCapability::Available(Mutex::new(
             crate::operation_registry::OperationRegistry::open_in_memory().unwrap(),
         ))),
+        use_capability_snapshot_for_test: true,
     }
 }
 
@@ -194,7 +197,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 34);
+    assert_eq!(tools.len(), 35);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -246,13 +249,21 @@ fn unified_approval_profile_contains_only_callable_continuations() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let server = server_with_backends(&endpoint, None, false, None);
+    let server = server_with_backends(&endpoint, Some(&endpoint), false, None);
 
     let response = tool_call(&server, "hubu_client_approval_profile", json!({}), None);
     let profile = &response["result"]["structuredContent"];
     let serialized = profile.to_string();
     assert!(!serialized.contains("hubu_get_spend_approval"));
     assert!(!serialized.contains("hubu_resolve_spend_approval"));
+    assert!(profile["client_policy"]["auto_approve_tools"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(crate::governed_execution::TOOL_NAME)));
+    assert!(profile["client_policy"]["hubu_policy_conditional_tools"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(crate::governed_execution::TOOL_NAME)));
     assert_eq!(
         profile["response_contract"]["agent_action"],
         "Stop the spend workflow and surface approval_reason plus the structured response to the human."

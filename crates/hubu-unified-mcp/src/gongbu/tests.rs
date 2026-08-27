@@ -17,7 +17,7 @@ use crate::{
 use super::{
     catalog::tool_definitions,
     response::{api_error, ApiErrorContext},
-    transport::call_tool,
+    transport::{call_tool, fetch_durable_execution_observation},
 };
 
 const EXECUTION: &str = r#"{"schema_version":2,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":"backend echoed op-1","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
@@ -119,6 +119,28 @@ fn create_keeps_private_operation_identity_internal() {
     assert!(request.contains("authorization: bearer gongbu-execution-secret"));
     assert!(request.contains("\"spend_auth_token_id\":\"hubu-token-1\""));
     assert!(!request.contains("account_id"));
+}
+
+#[test]
+fn durable_observation_returns_only_validated_gongbu_timing() {
+    let response = r#"{"schema_version":1,"execution_id":"exec-1","operation_key":"op-1","status":"succeeded","outcome":"succeeded","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"2026-08-05T00:00:00Z","updated_at":"2026-08-05T00:00:04Z","started_at":"2026-08-05T00:00:00.100Z","completed_at":"2026-08-05T00:00:04Z","timing":{"schema_version":1,"scope":"gongbu_execution","execution_total_ms":4000,"provider_interaction_ms":3500,"non_provider_ms":500}}"#;
+    let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", response)]);
+    let mut expected = continuation();
+    expected.execution_id = Some("exec-1".into());
+    let observed = fetch_durable_execution_observation(
+        &client(&endpoint, "gongbu-execution-secret"),
+        "exec-1",
+        &expected,
+    )
+    .unwrap();
+
+    assert_eq!(observed.lifecycle.status, "succeeded");
+    assert_eq!(observed.execution_total_ms, Some(4_000));
+    assert_eq!(observed.provider_interaction_ms, Some(3_500));
+    assert_eq!(observed.non_provider_ms, Some(500));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("GET /v1/executions/exec-1 "));
 }
 
 #[test]

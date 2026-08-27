@@ -128,8 +128,20 @@ pub enum ProviderPhaseOutcome {
 
 impl ExecutionWorkflow<'_> {
     pub fn run(&self, execution_id: &str, now: &str) -> Result<Execution, WorkflowError> {
+        self.run_with_clock(execution_id, &|| now.to_owned())
+    }
+
+    /// Run using a fresh durable timestamp for each phase and both provider
+    /// transmission boundaries. Temporal's granular runner uses the same clock
+    /// path for its provider activity.
+    pub(crate) fn run_with_clock(
+        &self,
+        execution_id: &str,
+        clock: &dyn Fn() -> String,
+    ) -> Result<Execution, WorkflowError> {
         loop {
             let execution = self.repository.get_execution(execution_id)?;
+            let now = clock();
             if execution.status == "reconciliation_required"
                 && matches!(
                     self.repository.get_reconciliation(execution_id),
@@ -140,7 +152,7 @@ impl ExecutionWorkflow<'_> {
                     &execution,
                     "reconciliation_replay",
                     execution.failure_code.as_deref(),
-                    now,
+                    &now,
                 )?;
             }
             if terminal(&execution.status) {
@@ -148,25 +160,25 @@ impl ExecutionWorkflow<'_> {
             }
             match execution.status.as_str() {
                 "pending" => {
-                    self.preflight_phase(execution_id, now)?;
+                    self.preflight_phase(execution_id, &now)?;
                 }
                 "preflighting" => {
-                    self.claim_phase(execution_id, now)?;
+                    self.claim_phase(execution_id, &now)?;
                 }
                 "claimed" => {
-                    self.validate_claim_phase(execution_id, now)?;
+                    self.validate_claim_phase(execution_id, &now)?;
                 }
-                "executing" => match self.provider_phase(execution_id, now)? {
+                "executing" => match self.provider_phase_with_clock(execution_id, &now, clock)? {
                     ProviderPhaseOutcome::PersistArtifacts => {
-                        self.artifact_phase(execution_id, now)?;
+                        self.artifact_phase(execution_id, &clock())?;
                     }
                     ProviderPhaseOutcome::ReleaseAuthorization => {
-                        self.release_phase(execution_id, now)?;
+                        self.release_phase(execution_id, &clock())?;
                     }
                     ProviderPhaseOutcome::Complete(_) => {}
                 },
                 "settling" => {
-                    self.settlement_phase(execution_id, now)?;
+                    self.settlement_phase(execution_id, &now)?;
                 }
                 _ => return Err(PersistenceError::Invalid("workflow status").into()),
             }
@@ -260,6 +272,15 @@ impl ExecutionWorkflow<'_> {
         execution_id: &str,
         now: &str,
     ) -> Result<ProviderPhaseOutcome, WorkflowError> {
+        self.provider_phase_with_clock(execution_id, now, &|| now.to_owned())
+    }
+
+    pub(crate) fn provider_phase_with_clock(
+        &self,
+        execution_id: &str,
+        phase_at: &str,
+        clock: &dyn Fn() -> String,
+    ) -> Result<ProviderPhaseOutcome, WorkflowError> {
         let execution = self.repository.get_execution(execution_id)?;
         if execution.status != "executing" {
             return Ok(ProviderPhaseOutcome::Complete(execution.into()));
@@ -279,7 +300,7 @@ impl ExecutionWorkflow<'_> {
                 }
                 "failed" => Ok(ProviderPhaseOutcome::ReleaseAuthorization),
                 outcome => {
-                    self.advance_completed_attempt(&execution, outcome, now)?;
+                    self.advance_completed_attempt(&execution, outcome, phase_at)?;
                     Ok(ProviderPhaseOutcome::Complete(
                         self.repository.get_execution(execution_id)?.into(),
                     ))
@@ -291,29 +312,31 @@ impl ExecutionWorkflow<'_> {
                 &execution,
                 "reconciliation_required",
                 Some("provider_delivery_interrupted"),
-                now,
+                phase_at,
                 Some("ambiguous"),
                 None,
                 None,
             )?;
             return Ok(ProviderPhaseOutcome::Complete(held.into()));
         }
+        let transmission_started_at = clock();
         self.repository
-            .begin_provider_transmission(&attempt.provider_attempt_id, now)?;
-        match self
+            .begin_provider_transmission(&attempt.provider_attempt_id, &transmission_started_at)?;
+        let provider_result = self
             .provider
-            .invoke(&execution, &attempt.provider_attempt_id)
-        {
+            .invoke(&execution, &attempt.provider_attempt_id);
+        let completed_at = clock();
+        match provider_result {
             Ok(success) if success.artifacts.is_empty() => {
                 self.repository.complete_provider_attempt(
                     &attempt.provider_attempt_id,
-                    &successful_attempt(&success, now),
+                    &successful_attempt(&success, &completed_at),
                 )?;
                 let held = self.transition(
                     &execution,
                     "reconciliation_required",
                     Some("provider_returned_no_artifacts"),
-                    now,
+                    &completed_at,
                     Some("succeeded"),
                     Some("failed"),
                     None,
@@ -331,7 +354,7 @@ impl ExecutionWorkflow<'_> {
                     .collect::<Vec<_>>();
                 self.repository.complete_provider_attempt_with_artifacts(
                     &attempt.provider_attempt_id,
-                    &successful_attempt(&success, now),
+                    &successful_attempt(&success, &completed_at),
                     &staged,
                 )?;
                 Ok(ProviderPhaseOutcome::PersistArtifacts)
@@ -339,7 +362,7 @@ impl ExecutionWorkflow<'_> {
             Err(ActivityError::Proven(code)) => {
                 self.repository.complete_provider_attempt(
                     &attempt.provider_attempt_id,
-                    &attempt_failure("failed", &code, now),
+                    &attempt_failure("failed", &code, &completed_at),
                 )?;
                 Ok(ProviderPhaseOutcome::ReleaseAuthorization)
             }
@@ -348,7 +371,7 @@ impl ExecutionWorkflow<'_> {
                 request_id,
                 operation_id,
             }) => {
-                let mut failure = attempt_failure("failed", &code, now);
+                let mut failure = attempt_failure("failed", &code, &completed_at);
                 failure.provider_request_id = request_id;
                 failure.provider_operation_id = operation_id;
                 self.repository
@@ -358,13 +381,13 @@ impl ExecutionWorkflow<'_> {
             Err(ActivityError::Ambiguous(code)) => {
                 self.repository.complete_provider_attempt(
                     &attempt.provider_attempt_id,
-                    &attempt_failure("ambiguous", &code, now),
+                    &attempt_failure("ambiguous", &code, &completed_at),
                 )?;
                 let held = self.transition(
                     &execution,
                     "reconciliation_required",
                     Some(&code),
-                    now,
+                    &completed_at,
                     Some("ambiguous"),
                     None,
                     None,
@@ -376,7 +399,7 @@ impl ExecutionWorkflow<'_> {
                 request_id,
                 operation_id,
             }) => {
-                let mut failure = attempt_failure("ambiguous", &code, now);
+                let mut failure = attempt_failure("ambiguous", &code, &completed_at);
                 failure.provider_request_id = request_id;
                 failure.provider_operation_id = operation_id;
                 self.repository
@@ -385,7 +408,7 @@ impl ExecutionWorkflow<'_> {
                     &execution,
                     "reconciliation_required",
                     Some(&code),
-                    now,
+                    &completed_at,
                     Some("ambiguous"),
                     None,
                     None,
@@ -1317,6 +1340,77 @@ mod tests {
             .settlement_phase(&execution.execution_id, "settle-response-lost")
             .unwrap();
         assert_eq!(hubu.settles.get(), 1);
+    }
+
+    #[test]
+    fn provider_phase_records_distinct_transmission_boundaries_without_replay() {
+        let repo = Repository::in_memory().unwrap();
+        let execution = execution(&repo, "provider-timing");
+        let hubu = Hubu::default();
+        let provider = Provider::default();
+        let artifacts = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let workflow = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &hubu,
+            provider: &provider,
+            artifacts: &artifacts,
+        };
+        workflow
+            .preflight_phase(&execution.execution_id, "2026-08-05T00:00:00Z")
+            .unwrap();
+        workflow
+            .claim_phase(&execution.execution_id, "2026-08-05T00:00:00.500Z")
+            .unwrap();
+        workflow
+            .validate_claim_phase(&execution.execution_id, "2026-08-05T00:00:01Z")
+            .unwrap();
+
+        let clock_index = Cell::new(0);
+        let provider_clock = || {
+            let timestamps = ["2026-08-05T00:00:02Z", "2026-08-05T00:00:05.500Z"];
+            let index = clock_index.get();
+            clock_index.set(index + 1);
+            timestamps[index].to_owned()
+        };
+        assert_eq!(
+            workflow
+                .provider_phase_with_clock(
+                    &execution.execution_id,
+                    "2026-08-05T00:00:01Z",
+                    &provider_clock,
+                )
+                .unwrap(),
+            ProviderPhaseOutcome::PersistArtifacts
+        );
+        let attempt = repo
+            .get_provider_attempt_for_execution(&execution.execution_id)
+            .unwrap();
+        assert_eq!(
+            attempt.transmission_started_at.as_deref(),
+            Some("2026-08-05T00:00:02Z")
+        );
+        assert_eq!(
+            attempt.completed_at.as_deref(),
+            Some("2026-08-05T00:00:05.500Z")
+        );
+        assert_eq!(provider.calls.get(), 1);
+
+        // A redelivered activity observes the durable completion and neither
+        // consults the provider clock nor invokes the provider again.
+        assert_eq!(
+            workflow
+                .provider_phase_with_clock(
+                    &execution.execution_id,
+                    "2026-08-05T00:00:06Z",
+                    &|| panic!("completed provider activity must not sample transmission time"),
+                )
+                .unwrap(),
+            ProviderPhaseOutcome::PersistArtifacts
+        );
+        assert_eq!(provider.calls.get(), 1);
     }
 
     #[test]

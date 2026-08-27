@@ -277,7 +277,7 @@ fn json_schema(properties: Value) -> Value {
     })
 }
 
-fn execution_scope_input_schema() -> Value {
+pub(crate) fn execution_scope_input_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -369,7 +369,8 @@ fn tool(name: &str, description: &str, input_schema: Value, annotations: ToolAnn
 }
 
 pub(super) fn approval_profile() -> Value {
-    let definitions = tool_definitions();
+    let mut definitions = tool_definitions();
+    definitions.push(crate::governed_execution::tool_definition());
     let names_matching = |client_mode: &str, runtime_approval: Option<&str>| {
         definitions
             .iter()

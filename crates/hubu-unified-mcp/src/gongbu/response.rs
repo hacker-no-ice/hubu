@@ -251,6 +251,7 @@ pub(super) fn execution_result(
         status: response.status.clone(),
         outcome: response.outcome.clone(),
     };
+    let timing = response.timing();
     let private_operation_key = response.operation_key.clone();
     let public = PublicExecutionResponse {
         schema_version: response.schema_version,
@@ -264,6 +265,7 @@ pub(super) fn execution_result(
         updated_at: response.updated_at,
         started_at: response.started_at,
         completed_at: response.completed_at,
+        timing,
     };
     let mut public = serde_json::to_value(public).expect("public execution response serializes");
     scrub_private_projection(&mut public, &private_operation_key);
@@ -400,6 +402,30 @@ pub(super) struct ExecutionResponse {
     updated_at: String,
     started_at: Option<String>,
     completed_at: Option<String>,
+    #[serde(default)]
+    timing: ExecutionTiming,
+}
+
+impl ExecutionResponse {
+    pub(super) fn timing(&self) -> ExecutionTiming {
+        let timing = &self.timing;
+        let arithmetic_is_valid = match (
+            timing.execution_total_ms,
+            timing.provider_interaction_ms,
+            timing.non_provider_ms,
+        ) {
+            (Some(total), Some(provider), non_provider) => total
+                .checked_sub(provider)
+                .is_some_and(|expected| non_provider == Some(expected)),
+            (_, _, None) => true,
+            (_, _, Some(_)) => false,
+        };
+        if timing.schema_version == 1 && timing.scope == "gongbu_execution" && arithmetic_is_valid {
+            timing.clone()
+        } else {
+            ExecutionTiming::default()
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -416,6 +442,33 @@ struct PublicExecutionResponse {
     updated_at: String,
     started_at: Option<String>,
     completed_at: Option<String>,
+    timing: ExecutionTiming,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ExecutionTiming {
+    #[serde(default)]
+    pub(crate) schema_version: u32,
+    #[serde(default)]
+    pub(crate) scope: String,
+    #[serde(default)]
+    pub(crate) execution_total_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) provider_interaction_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) non_provider_ms: Option<u64>,
+}
+
+impl Default for ExecutionTiming {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            scope: "gongbu_execution".into(),
+            execution_total_ms: None,
+            provider_interaction_ms: None,
+            non_provider_ms: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -485,6 +538,7 @@ mod tests {
             updated_at: "now".into(),
             started_at: None,
             completed_at: None,
+            timing: ExecutionTiming::default(),
         }
     }
 
@@ -503,6 +557,13 @@ mod tests {
             Ok(_) => panic!("execution response unexpectedly passed validation"),
             Err(error) => error,
         }
+    }
+
+    fn result_json(result: ToolResult) -> Value {
+        let Content::Text { text } = &result.content[0] else {
+            panic!("execution result must begin with JSON text")
+        };
+        serde_json::from_str(text).unwrap()
     }
 
     #[test]
@@ -566,5 +627,53 @@ mod tests {
         .unwrap();
         assert_eq!(lifecycle.execution_id, "exec-1");
         assert_eq!(lifecycle.status, "executing");
+    }
+
+    #[test]
+    fn validated_gongbu_timing_is_projected_without_private_boundaries() {
+        let mut response = execution();
+        response.timing = ExecutionTiming {
+            schema_version: 1,
+            scope: "gongbu_execution".into(),
+            execution_total_ms: Some(4_000),
+            provider_interaction_ms: Some(3_500),
+            non_provider_ms: Some(500),
+        };
+        let (result, _) = execution_result(
+            response,
+            Some(&continuation(None)),
+            None,
+            EXECUTION_V2_SCHEMA_VERSION,
+        )
+        .unwrap();
+        let public = result_json(result);
+        assert_eq!(public["timing"]["schema_version"], 1);
+        assert_eq!(public["timing"]["scope"], "gongbu_execution");
+        assert_eq!(public["timing"]["execution_total_ms"], 4_000);
+        assert_eq!(public["timing"]["provider_interaction_ms"], 3_500);
+        assert_eq!(public["timing"]["non_provider_ms"], 500);
+        assert!(public["timing"].get("transmission_started_at").is_none());
+        assert!(public.get("operation_key").is_none());
+    }
+
+    #[test]
+    fn absent_or_inconsistent_timing_is_safely_unavailable() {
+        let mut legacy = serde_json::to_value(execution()).unwrap();
+        legacy.as_object_mut().unwrap().remove("timing");
+        let legacy: ExecutionResponse = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.timing(), ExecutionTiming::default());
+
+        let mut inconsistent = execution();
+        inconsistent.timing = ExecutionTiming {
+            schema_version: 1,
+            scope: "gongbu_execution".into(),
+            execution_total_ms: Some(3_000),
+            provider_interaction_ms: Some(3_500),
+            non_provider_ms: None,
+        };
+        assert_eq!(inconsistent.timing(), ExecutionTiming::default());
+
+        inconsistent.timing.scope = "router_polling".into();
+        assert_eq!(inconsistent.timing(), ExecutionTiming::default());
     }
 }

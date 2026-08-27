@@ -15,6 +15,7 @@ pub(super) fn prepare(name: &str, arguments: Value) -> Result<PreparedCall, Tool
         "gongbu_create_execution" => {
             reject_protected_overrides(&arguments)?;
             let request: CreateExecutionRequest = parse(arguments)?;
+            request.validate()?;
             validate_id(&request.spend_auth_token_id)?;
             Ok(PreparedCall::Create(request))
         }
@@ -40,6 +41,7 @@ pub(super) fn prepare(name: &str, arguments: Value) -> Result<PreparedCall, Tool
 pub(super) fn create_continuation_id(arguments: &Value) -> Result<String, ToolError> {
     reject_protected_overrides(arguments)?;
     let request: CreateExecutionRequest = parse(arguments.clone())?;
+    request.validate()?;
     validate_id(&request.spend_auth_token_id)?;
     Ok(request.spend_auth_token_id)
 }
@@ -129,6 +131,26 @@ pub(super) struct CreateExecutionRequest {
     provider: String,
     adapter: String,
     model: String,
+}
+
+impl CreateExecutionRequest {
+    fn validate(&self) -> Result<(), ToolError> {
+        if self.schema_version != 2
+            || !self.input.is_object()
+            || self.input_schema_version < 1
+            || [
+                self.workload_type.as_str(),
+                self.provider.as_str(),
+                self.adapter.as_str(),
+                self.model.as_str(),
+            ]
+            .into_iter()
+            .any(str::is_empty)
+        {
+            return Err(ToolError::invalid());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
