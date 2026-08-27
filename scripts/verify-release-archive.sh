@@ -43,7 +43,6 @@ expected_files=(
   THIRD-PARTY-LICENSES.txt
   THIRD-PARTY-NOTICES.md
   "${expected_binaries[@]}"
-  operations/gongbu-server.md
   unified-mcp.md
 )
 
@@ -53,6 +52,10 @@ for expected_file in "${expected_files[@]}"; do
     exit 1
   fi
 done
+if [[ -e "${package_dir}/operations" ]]; then
+  echo "release archive contains an excluded operations directory" >&2
+  exit 1
+fi
 if [[ -e "${package_dir}/hubu-bench" || -e "${package_dir}/gongbu-sandbox" ]]; then
   echo "release archive contains an excluded binary" >&2
   exit 1
@@ -93,7 +96,8 @@ jq -e \
    .target == $target and
    .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
    .supported_agent_surfaces == ["hubu-unified-mcp"] and
-   (.files | contains(["LOCAL-STACK.md", "operations/gongbu-server.md", "unified-mcp.md"])) and
+   (.files | contains(["LOCAL-STACK.md", "unified-mcp.md"])) and
+   (.files | index("operations/gongbu-server.md") == null) and
    .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
   "${package_dir}/MANIFEST.json" >/dev/null
 

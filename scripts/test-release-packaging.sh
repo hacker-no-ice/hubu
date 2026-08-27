@@ -46,7 +46,6 @@ verify_package() {
     hubu
     hubu-server
     hubu-unified-mcp
-    operations/gongbu-server.md
     unified-mcp.md
   )
   actual_files="$(cd "${package_dir}" && find . -type f -print | sed 's#^\./##' | LC_ALL=C sort)"
@@ -56,6 +55,7 @@ verify_package() {
   for expected_file in "${expected_files[@]}"; do
     test -s "${package_dir}/${expected_file}"
   done
+  test ! -e "${package_dir}/operations"
   test ! -e "${package_dir}/hubu-bench"
   test ! -e "${package_dir}/gongbu-sandbox"
   jq -e \
@@ -68,7 +68,8 @@ verify_package() {
      .target == $target and
      .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
      .supported_agent_surfaces == ["hubu-unified-mcp"] and
-     (.files | contains(["LOCAL-STACK.md", "operations/gongbu-server.md", "unified-mcp.md"])) and
+     (.files | contains(["LOCAL-STACK.md", "unified-mcp.md"])) and
+     (.files | index("operations/gongbu-server.md") == null) and
      .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
     "${package_dir}/MANIFEST.json" >/dev/null
   jq -e \

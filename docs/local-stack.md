@@ -506,6 +506,5 @@ procedure:
 - Re-rendering configuration does not roll back databases, artifacts, or
   workflow history.
 
-Use [Gongbu server operations](operations/gongbu-server.md) for the persistent
-execution plane and [the unified MCP guide](unified-mcp.md) for client setup and
-backend discovery.
+Use the managed lifecycle commands above for the persistent execution plane and
+[the unified MCP guide](unified-mcp.md) for client setup and backend discovery.
