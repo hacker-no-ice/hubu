@@ -24,6 +24,13 @@ artifact. Versioned release candidates use immutable `vX.Y.Z-rc.N` tags for
 human validation before stable promotion. Stable promotion is an explicit
 workflow dispatch, and no channel replaces an existing tag or asset.
 
+The changelog presents stable release history. While a release line is under
+validation, its top entry must use the active candidate version so the release
+checker can keep the runbook and source package version aligned. After stable
+promotion, fold the candidate notes into one self-contained stable entry that
+describes the complete change from the previous stable release, and remove
+candidate-specific chronology.
+
 ## Release contents
 
 Every target archive contains exactly these production binaries:
