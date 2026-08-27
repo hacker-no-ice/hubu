@@ -1,4 +1,4 @@
-use std::{fs, path::Path, time::Duration};
+use std::{fs, io, path::Path, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -1155,10 +1155,59 @@ pub(crate) fn validate_gongbu_request_size(arguments: &Value) -> Result<()> {
     if !arguments.is_object() {
         bail!("Gongbu execution arguments must be an object");
     }
-    if serde_json::to_string(&canonicalize(arguments))?.len() > MAX_REQUEST_BYTES {
+    if request_exceeds_durable_limit(arguments)? {
         bail!("Gongbu execution request exceeds the durable adapter limit");
     }
     Ok(())
+}
+
+pub(crate) fn validate_durable_request_size(arguments: &Value) -> Result<()> {
+    if !arguments.is_object() {
+        bail!("Durable operation arguments must be an object");
+    }
+    if request_exceeds_durable_limit(arguments)? {
+        bail!("Durable operation request exceeds the adapter limit");
+    }
+    Ok(())
+}
+
+fn request_exceeds_durable_limit(arguments: &Value) -> Result<bool> {
+    struct BoundedJsonCounter {
+        bytes: usize,
+        exceeded: bool,
+    }
+
+    impl io::Write for BoundedJsonCounter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            let Some(total) = self.bytes.checked_add(buffer.len()) else {
+                self.exceeded = true;
+                return Err(io::Error::other("durable request size limit exceeded"));
+            };
+            if total > MAX_REQUEST_BYTES {
+                self.exceeded = true;
+                return Err(io::Error::other("durable request size limit exceeded"));
+            }
+            self.bytes = total;
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Compact JSON has the same byte count regardless of object-key ordering,
+    // so a bounded streaming counter avoids cloning or buffering an oversized
+    // request solely to measure its canonical durable representation.
+    let mut counter = BoundedJsonCounter {
+        bytes: 0,
+        exceeded: false,
+    };
+    match serde_json::to_writer(&mut counter, arguments) {
+        Ok(()) => Ok(false),
+        Err(_) if counter.exceeded => Ok(true),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn contains_protected_identity(value: &Value) -> bool {

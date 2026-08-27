@@ -140,6 +140,9 @@ pub(super) fn call_tool(
     if let Err((owner, rejection)) = backend_availability(&server.snapshot()) {
         return backend_error_response(id, TOOL_NAME, owner, rejection);
     }
+    if operation_registry::validate_durable_request_size(&call.arguments).is_err() {
+        return error_response(id, -32602, "Invalid params");
+    }
     let input = match serde_json::from_value::<GovernedExecutionInput>(call.arguments.clone()) {
         Ok(input) if (1..=MAX_INLINE_ARTIFACT_BYTES).contains(&input.max_inline_artifact_bytes) => {
             input
@@ -2091,6 +2094,9 @@ mod tests {
         let mut oversized = composite_arguments();
         oversized["execution"]["input"]["prompt"] = "x".repeat(1024 * 1024 + 1024).into();
         cases.push(oversized);
+        let mut oversized_authorization = composite_arguments();
+        oversized_authorization["authorization"]["reason"] = "x".repeat(1024 * 1024 + 1024).into();
+        cases.push(oversized_authorization);
         let mut worst_case_token_boundary = composite_arguments();
         worst_case_token_boundary["execution"]["input"]["prompt"] = json!("");
         let one_byte_token_arguments =
@@ -2162,10 +2168,11 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(responses.len(), 9);
-        assert_eq!(responses[0]["error"]["code"], -32602);
-        assert_eq!(responses[1]["error"]["code"], -32602);
-        for response in &responses[2..] {
+        assert_eq!(responses.len(), 10);
+        for response in &responses[..3] {
+            assert_eq!(response["error"]["code"], -32602);
+        }
+        for response in &responses[3..] {
             assert_eq!(response["result"]["isError"], true);
         }
         assert!(hubu_requests
