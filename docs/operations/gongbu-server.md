@@ -17,7 +17,8 @@ runtime configuration source; unknown fields are rejected and changes require
 a graceful restart. Replace `REPLACE_WITH_EXACT_HUBU_PRODUCT_VERSION` with the
 exact `product_version` reported by the selected `hubu-server --version`,
 including any leading `v` and prerelease suffix. Hubu and Gongbu binaries must
-come from the same verified release archive.
+come from one compatible, release-stamped lineage. The exact-tag source
+installer is the recommended initial-user macOS path.
 
 All state, catalog, artifact, and managed Temporal paths must be absolute. Raw
 tokens and provider keys never belong in JSON. Provider and explicit service

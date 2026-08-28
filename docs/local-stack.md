@@ -6,9 +6,11 @@ For configuration fields and design choices, use the public
 
 ## Check the binaries
 
-Install `hubu`, `hubu-server`, `gongbu-server`, and `hubu-unified-mcp` from the
-same [verified Hubu release](https://hubustack.dev/docs/operations/releases),
-put them on `PATH`, and confirm that they report the intended release:
+On macOS, install `hubu`, `hubu-server`, `gongbu-server`, and
+`hubu-unified-mcp` together from one exact tag with the repository's
+[source installer](operations/releases.md#install-an-exact-release-from-source-macos).
+Put the selected prefix's `bin` directory on `PATH`, and confirm that all four
+report the intended release:
 
 ```sh
 for binary in hubu hubu-server gongbu-server hubu-unified-mcp; do
@@ -16,6 +18,11 @@ for binary in hubu hubu-server gongbu-server hubu-unified-mcp; do
   "$binary" --version
 done
 ```
+
+They must share one non-`unknown` full source commit and executor contract.
+Release-stamped source installations use the normal production lineage checks;
+do not enable `allow_development_builds`. The locally compiled executables are
+not Developer ID-signed, Apple-notarized, or Apple-verified.
 
 If the profile will use managed-local Temporal, install the version-pinned
 Temporal CLI described in the

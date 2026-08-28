@@ -203,6 +203,9 @@ jobs:
       - name: Test release packaging
         run: ./scripts/test-release-packaging.sh
 
+      - name: Test exact source installer
+        run: ./scripts/test-install-from-source.sh
+
       - name: Check immutable release workflow
         run: python3 scripts/check-release-workflow.py
 
@@ -252,7 +255,30 @@ jobs:
         if: runner.os == 'macOS'
         run: brew list protobuf >/dev/null 2>&1 || brew install protobuf
 
-      - name: Build locked release binaries
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          toolchain="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "${toolchain}" --profile minimal
+
+      - name: Prepare exact local version tag
+        if: needs.resolve.outputs.channel != 'canary'
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+        run: git tag "${RELEASE_TAG}" "${SOURCE_COMMIT}"
+
+      - name: Build and verify exact source installation
+        if: needs.resolve.outputs.channel != 'canary'
+        env:
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+        run: >-
+          ./scripts/install-from-source.sh
+          --expected-commit "${SOURCE_COMMIT}"
+          --prefix "${RUNNER_TEMP}/hubu-source-install"
+
+      - name: Build locked canary release binaries
+        if: needs.resolve.outputs.channel == 'canary'
         env:
           HUBU_PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
           HUBU_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
@@ -271,16 +297,26 @@ jobs:
           RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           TARGET: ${{ matrix.target }}
+          RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          actual_target="$(rustc -vV | sed -n 's/^host: //p')"
+          if [[ "${actual_target}" != "${TARGET}" ]]; then
+            echo "native Rust host ${actual_target} does not match package target ${TARGET}" >&2
+            exit 1
+          fi
+          binary_dir="target/${TARGET}/release"
+          if [[ "${RELEASE_CHANNEL}" != "canary" ]]; then
+            binary_dir="${RUNNER_TEMP}/hubu-source-install/bin"
+          fi
           ./scripts/package-release-archive.sh \
             "${RELEASE_VERSION}" \
             "${SOURCE_COMMIT}" \
             "${TARGET}" \
-            "target/${TARGET}/release" \
+            "${binary_dir}" \
             dist \
             "${REPOSITORY}" \
             "https://github.com/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}"
@@ -326,13 +362,13 @@ jobs:
         run: |
           set -euo pipefail
           prerelease_flag=()
-          channel_note="Stable version channel. Experimental, local-first software using a mock payment rail; not approved for real-money production use. Consumers may pin this exact tag and checksum."
+          channel_note="Stable version channel. For initial technical users, the recommended macOS path is to clone this exact tag, verify the full source commit above, and run scripts/install-from-source.sh. Locally compiled binaries are not Developer ID-signed, notarized, or Apple-verified. Archives are secondary automation evidence. Experimental, local-first software using a mock payment rail; not approved for real-money production use."
           if [[ "${PRERELEASE}" == "true" ]]; then
             prerelease_flag+=(--prerelease)
-            channel_note="Commit-addressed canary prerelease. Experimental, local-first software using a mock payment rail; not approved for real-money production use. Pin this exact tag and checksum; do not depend on a rolling newest build."
+            channel_note="Commit-addressed canary prerelease for automation and archive evidence. The source installer supports versioned stable and release-candidate tags, not main-* canary tags. Experimental, local-first software using a mock payment rail; not approved for real-money production use. Pin this exact tag and checksum; do not depend on a rolling newest build."
           fi
           if [[ "${RELEASE_CHANNEL}" == "candidate" ]]; then
-            channel_note="Versioned release candidate for validation before stable promotion. Experimental, local-first software using a mock payment rail; not approved for real-money production use. Pin this exact tag and checksum."
+            channel_note="Versioned release candidate for validation before stable promotion. For initial technical users, the recommended macOS path is to clone this exact tag, verify the full source commit above, and run scripts/install-from-source.sh. Locally compiled binaries are not Developer ID-signed, notarized, or Apple-verified. Archives are secondary automation evidence. Experimental, local-first software using a mock payment rail; not approved for real-money production use."
           fi
           notes=$(printf 'Hubu product version: `%s`\n\nSource commit: `%s`\n\nSupported agent surface: `hubu-unified-mcp`\n\nBinaries: `hubu`, `hubu-server`, `hubu-unified-mcp`, `gongbu-server`\n\nUnified MCP cutover: HUB-97; retired MCP source removal: HUB-98.\n\nExecutor contract: `hubu-spend-executor-v4.3`\n\n%s' "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${channel_note}")
           gh release create "${RELEASE_TAG}" \

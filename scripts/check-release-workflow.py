@@ -8,8 +8,11 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/release.yml"
+CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 PACKAGE_SCRIPT = ROOT / "scripts/package-release-archive.sh"
 SMOKE_SCRIPT = ROOT / "scripts/verify-release-archive.sh"
+SOURCE_INSTALLER = ROOT / "scripts/install-from-source.sh"
+SOURCE_INSTALLER_TEST = ROOT / "scripts/test-install-from-source.sh"
 CHANGELOG = ROOT / "CHANGELOG.md"
 RELEASE_DOC = ROOT / "docs/operations/releases.md"
 
@@ -46,8 +49,11 @@ def fail(message: str) -> None:
 
 
 workflow = WORKFLOW.read_text(encoding="utf-8")
+ci_workflow = CI_WORKFLOW.read_text(encoding="utf-8")
 package_script = PACKAGE_SCRIPT.read_text(encoding="utf-8")
 smoke_script = SMOKE_SCRIPT.read_text(encoding="utf-8")
+source_installer = SOURCE_INSTALLER.read_text(encoding="utf-8")
+source_installer_test = SOURCE_INSTALLER_TEST.read_text(encoding="utf-8")
 changelog = CHANGELOG.read_text(encoding="utf-8")
 release_doc = RELEASE_DOC.read_text(encoding="utf-8")
 workflow_lines = [line.strip() for line in workflow.splitlines()]
@@ -55,7 +61,7 @@ workflow_lines = [line.strip() for line in workflow.splitlines()]
 for binary in PRODUCTION_BINARIES:
     build_flag = f"--bin {binary}"
     if workflow_lines.count(build_flag) != 2:
-        fail(f"{build_flag!r} must appear in release checks and target builds")
+        fail(f"{build_flag!r} must appear in release checks and the canary fallback")
     if not re.search(rf"(?m)^  {re.escape(binary)}$", package_script):
         fail(f"packaging does not enumerate {binary}")
     if not re.search(rf"(?m)^  {re.escape(binary)}$", smoke_script):
@@ -66,6 +72,25 @@ for binary in EXCLUDED_BINARIES:
         fail(f"excluded binary {binary} must not be built for release")
     if re.search(rf'cp .*[/"]{re.escape(binary)}', package_script):
         fail(f"excluded binary {binary} must not be copied into release archives")
+
+installer_build_binaries = tuple(
+    re.findall(r"(?m)^\s*--bin\s+([a-z0-9-]+)\s*\\?\s*$", source_installer)
+)
+if installer_build_binaries != PRODUCTION_BINARIES:
+    fail(
+        "source installer must build the four production binaries exactly once "
+        f"and in canonical order; found {installer_build_binaries!r}"
+    )
+for binary in EXCLUDED_BINARIES:
+    if binary in installer_build_binaries:
+        fail(f"source installer must not build development binary {binary}")
+
+if workflow.count("./scripts/test-install-from-source.sh") != 1:
+    fail("release checks must run the focused source-installer test exactly once")
+if ci_workflow.count("./scripts/test-install-from-source.sh") != 1:
+    fail("ordinary CI must run the focused source-installer test exactly once")
+if "scripts/install-from-source.sh" not in source_installer_test:
+    fail("focused source-installer test must invoke the production installer")
 
 matrix_targets = re.findall(r"(?m)^\s+target: (\S+)$", workflow)
 expected_matrix_targets = [*RELEASE_TARGETS, *RELEASE_TARGETS]
@@ -110,8 +135,21 @@ for required in (
     "HUBU_PRODUCT_VERSION:",
     "HUBU_SOURCE_COMMIT:",
     "./scripts/test-release-packaging.sh",
+    "./scripts/test-install-from-source.sh",
     "./scripts/test-release-archive-runtime.sh",
     "./scripts/release-smoke-test.sh",
+    "./scripts/install-from-source.sh",
+    "Prepare exact local version tag",
+    'git tag "${RELEASE_TAG}" "${SOURCE_COMMIT}"',
+    "Build and verify exact source installation",
+    "if: needs.resolve.outputs.channel != 'canary'",
+    "if: needs.resolve.outputs.channel == 'canary'",
+    '--expected-commit "${SOURCE_COMMIT}"',
+    '--prefix "${RUNNER_TEMP}/hubu-source-install"',
+    'binary_dir="${RUNNER_TEMP}/hubu-source-install/bin"',
+    'actual_target="$(rustc -vV | sed -n',
+    '"${actual_target}" != "${TARGET}"',
+    "not Developer ID-signed, notarized, or Apple-verified",
     "hubu-spend-executor-v4.3",
 ):
     if required not in workflow:
@@ -122,6 +160,20 @@ if workflow.count("cargo metadata --locked --no-deps --format-version 1") != 1:
 for package in PRODUCTION_PACKAGE_MANIFESTS:
     if workflow.count(f'.name == "{package}"') != 1:
         fail(f"release identity must include production package {package}")
+
+for required in (
+    "cargo build",
+    "--release",
+    "--locked",
+    "HUBU_PRODUCT_VERSION=",
+    "HUBU_SOURCE_COMMIT=",
+    "GONGBU_PRODUCT_VERSION=",
+    "GONGBU_SOURCE_COMMIT=",
+    "GONGBU_BUILD_ID=",
+    "rust-toolchain.toml",
+):
+    if required not in source_installer:
+        fail(f"source installer is missing {required!r}")
 
 changelog_parts = changelog.split("## Unreleased", 1)
 if len(changelog_parts) != 2:
@@ -214,7 +266,8 @@ if unpinned:
 
 print(
     "validated immutable release workflow: four production binaries, exactly two "
-    "temporary pre-launch macOS targets, scheduled and explicit canaries, "
-    "versioned candidates, source-version validation, synchronized release docs, "
-    "shared build identity, bounded permissions, and pinned actions"
+    "temporary pre-launch macOS targets, exact-tag source installation for "
+    "versioned releases, scheduled and explicit canaries, versioned candidates, "
+    "source-version validation, synchronized release docs, shared build identity, "
+    "bounded permissions, and pinned actions"
 )
