@@ -149,6 +149,32 @@ accepted in execution requests, stored in repository records, included in
 fixtures, returned by APIs, written to Temporal payloads, or emitted in logs and
 errors.
 
+### FLUX settled cost units
+
+Black Forest Labs defines settled generation cost as the top-level numeric
+`cost` field in its
+[Get Result response](https://docs.bfl.ai/api-reference/utility/get-result),
+not as `result.cost`. A missing or null top-level field means the response did
+not provide settled-cost evidence; an undocumented nested-only value is ignored.
+A malformed, negative, overflowing, or excessively precise top-level value
+fails closed into reconciliation with the provider request and operation
+identifiers preserved.
+
+BFL reports this value in credits and defines
+[one credit as exactly USD 0.01](https://docs.bfl.ai/quick_start/pricing). The
+`flux2_api` adapter parses the JSON number's decimal lexeme exactly and applies
+that conversion once as a decimal scale offset: a source coefficient with
+credit scale `s` becomes the same coefficient with USD scale `s + 2`. For
+example, `1.0001` credits becomes
+`{amount: 10001, scale: 6, currency: "USD"}`, or USD 0.010001. Retaining the
+coefficient and provider precision makes the source value and fixed conversion
+reviewable without binary floating point.
+
+The converted exact USD value is persisted on the provider attempt and receipt.
+Normal settlement, restart, replay, and reconciliation reuse that value and the
+receipt's already-derived budget-cent amount; they never apply the credit
+conversion or conservative cent ceiling a second time.
+
 ### Certified FLUX.2 output dimensions
 
 The `flux2_api` adapter pins the non-preview `flux-2-pro` model described in the

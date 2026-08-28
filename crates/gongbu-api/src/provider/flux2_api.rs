@@ -32,6 +32,8 @@ pub const MIN_DIMENSION: u32 = 64;
 pub const DIMENSION_MULTIPLE: u32 = 16;
 pub const MAX_OUTPUT_PIXELS: u64 = 2048 * 2048;
 pub const SUPPORTED_PRESETS: &[&str] = &["1k", "2k", "4k"];
+/// BFL bills in credits and defines one credit as exactly USD 0.01.
+const BFL_CREDIT_USD_SCALE: u32 = 2;
 #[cfg(test)]
 const MAX_ARTIFACT_BYTES: usize = crate::artifact::DEFAULT_MAX_ENCODED_BYTES as usize;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -531,27 +533,13 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 operation_id.clone(),
             )
         })?;
-        let actual_vendor_cost = match current.pointer("/result/cost") {
-            None => None,
-            Some(Value::Number(number)) => Some(
-                ActualVendorCost::from_decimal_major_units(number.as_str(), "USD").map_err(
-                    |_| {
-                        with_evidence(
-                            "invalid_provider_cost",
-                            request_id.clone(),
-                            operation_id.clone(),
-                        )
-                    },
-                )?,
-            ),
-            Some(_) => {
-                return Err(with_evidence(
-                    "invalid_provider_cost",
-                    request_id,
-                    operation_id,
-                ));
-            }
-        };
+        let actual_vendor_cost = settled_cost(&current).map_err(|_| {
+            with_evidence(
+                "invalid_provider_cost",
+                request_id.clone(),
+                operation_id.clone(),
+            )
+        })?;
         Ok(AdapterOutcome {
             usage: Some(NormalizedUsage {
                 images: Some(1),
@@ -810,6 +798,23 @@ fn artifact_url(body: &Value) -> Option<&str> {
         .or_else(|| body.get("sample"))
         .and_then(Value::as_str)
 }
+
+/// Normalize BFL's documented top-level settled `cost` from credits into the
+/// HUB-33 exact USD representation. The coefficient and provider decimal
+/// precision remain intact; the fixed credit-to-USD conversion is one scale
+/// offset, not a floating-point multiplication.
+fn settled_cost(body: &Value) -> Result<Option<ActualVendorCost>> {
+    match body.get("cost") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => bfl_credit_cost_to_usd(number.as_str()).map(Some),
+        Some(_) => Err(provider_error("invalid_provider_cost")),
+    }
+}
+
+pub(crate) fn bfl_credit_cost_to_usd(raw: &str) -> Result<ActualVendorCost> {
+    ActualVendorCost::from_decimal_scaled_units(raw, "USD", BFL_CREDIT_USD_SCALE)
+}
+
 fn is_ready(body: &Value) -> bool {
     matches!(
         status(body).as_deref(),
@@ -1011,6 +1016,17 @@ mod tests {
         error.code
     }
 
+    fn invoke_ready_json(raw: &str) -> std::result::Result<AdapterOutcome, ProviderFailure> {
+        let ready = serde_json::from_str(raw).unwrap();
+        let (adapter, _) = fixture(vec![ready]);
+        adapter.invoke(
+            &request(),
+            &input(),
+            &secret_for_test("secret-canary"),
+            Some("opaque-key"),
+        )
+    }
+
     #[test]
     fn cross_adapter_conformance_matrix() {
         assert_body_and_artifact_bounds(
@@ -1111,24 +1127,90 @@ mod tests {
     }
 
     #[test]
-    fn parses_fractional_cent_cost_from_the_json_decimal_lexeme() {
-        let ready: Value = serde_json::from_str(
-            r#"{"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png","cost":0.0001}}"#,
+    fn parses_top_level_fractional_credit_cost_from_the_json_decimal_lexeme() {
+        let outcome = invoke_ready_json(
+            r#"{"id":"op-1","status":"Ready","cost":1.400,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
         )
         .unwrap();
-        let (adapter, _) = fixture(vec![ready]);
-        let outcome = adapter
-            .invoke(
-                &request(),
-                &input(),
-                &secret_for_test("secret-canary"),
-                Some("opaque-key"),
-            )
-            .unwrap();
         assert_eq!(
             outcome.actual_vendor_cost,
-            Some(ActualVendorCost::new(1, 4, "USD").unwrap())
+            Some(ActualVendorCost::new(1400, 5, "USD").unwrap())
         );
+    }
+
+    #[test]
+    fn ignores_undocumented_nested_cost_and_normalizes_missing_or_null_cost() {
+        for raw in [
+            r#"{"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png","cost":999}}"#,
+            r#"{"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":null,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+        ] {
+            assert_eq!(invoke_ready_json(raw).unwrap().actual_vendor_cost, None);
+        }
+    }
+
+    #[test]
+    fn top_level_cost_is_authoritative_over_nested_result_data() {
+        let outcome = invoke_ready_json(
+            r#"{"id":"op-1","status":"Ready","cost":4.5,"result":{"sample":"https://cdn.bfl.ai/out.png","cost":900}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.actual_vendor_cost,
+            Some(ActualVendorCost::new(45, 3, "USD").unwrap())
+        );
+    }
+
+    #[test]
+    fn credit_to_usd_conversion_is_exact_at_decimal_and_integer_boundaries() {
+        for (raw, expected, budget_cents) in [
+            ("0", ActualVendorCost::new(0, 2, "USD").unwrap(), 0),
+            ("1", ActualVendorCost::new(1, 2, "USD").unwrap(), 1),
+            ("1.0001", ActualVendorCost::new(10001, 6, "USD").unwrap(), 2),
+            (
+                "0.0000000000000001",
+                ActualVendorCost::new(1, 18, "USD").unwrap(),
+                1,
+            ),
+            (
+                "100e18",
+                ActualVendorCost::new(1_000_000_000_000_000_000, 0, "USD").unwrap(),
+                i64::MAX,
+            ),
+            (
+                "9223372036854775807e2",
+                ActualVendorCost::new(i64::MAX, 0, "USD").unwrap(),
+                i64::MAX,
+            ),
+        ] {
+            let converted = bfl_credit_cost_to_usd(raw).unwrap();
+            assert_eq!(converted, expected, "raw BFL credits: {raw}");
+            if raw == "100e18" || raw == "9223372036854775807e2" {
+                assert!(converted.to_budget_minor_units("USD").is_err());
+            } else {
+                assert_eq!(
+                    converted.to_budget_minor_units("USD").unwrap(),
+                    budget_cents,
+                    "raw BFL credits: {raw}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_negative_out_of_scale_and_overflowing_costs() {
+        for raw in [
+            r#"{"id":"op-1","status":"Ready","cost":"1.5","result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":{},"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":-0.01,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":0.00000000000000001,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":9223372036854775808e2,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+        ] {
+            let error = invoke_ready_json(raw).unwrap_err();
+            assert_eq!(error.code, "invalid_provider_cost");
+            assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
+            assert_eq!(error.evidence.operation_id.as_deref(), Some("op-1"));
+        }
     }
 
     #[test]
@@ -1588,7 +1670,10 @@ mod tests {
             "flux-2-pro".into(),
             Fixture {
                 submit: submits,
-                polls: Arc::new(Mutex::new(vec![json!({"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}})])),
+                polls: Arc::new(Mutex::new(vec![serde_json::from_str(
+                    r#"{"id":"op-1","status":"Ready","cost":45,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+                )
+                .unwrap()])),
                 artifact: png.clone(),
                 fail_submit: None,
                 fail_poll: None,
@@ -1608,13 +1693,19 @@ mod tests {
         let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"fixture-v2","rules":[{"rule_id":"flux2-pro-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]}]}"#).unwrap();
         let snapshot = pricing.snapshot(&request()).unwrap();
         assert_eq!(snapshot.estimated_amount_minor, 45);
+        let settlement = snapshot
+            .settle_precise(
+                outcome.usage.as_ref().unwrap(),
+                outcome.actual_vendor_cost.as_ref(),
+                45,
+            )
+            .unwrap();
+        assert_eq!(settlement.budget_amount_minor, 45);
         assert_eq!(
-            snapshot
-                .settle(outcome.usage.as_ref().unwrap(), 45)
-                .unwrap(),
-            45
+            settlement.actual_vendor_cost,
+            ActualVendorCost::new(45, 2, "USD").unwrap(),
+            "45 BFL credits are USD 0.45 and must not be multiplied by 100 twice"
         );
-        assert_eq!(outcome.actual_vendor_cost, None);
 
         let repository = Repository::in_memory().unwrap();
         let execution = repository

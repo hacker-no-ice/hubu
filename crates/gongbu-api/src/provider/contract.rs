@@ -73,8 +73,23 @@ impl ActualVendorCost {
         Ok(())
     }
 
-    /// Parse a JSON decimal lexeme without converting through binary floating point.
+    /// Parse a JSON decimal lexeme in major currency units without converting
+    /// through binary floating point.
     pub fn from_decimal_major_units(raw: &str, currency: &str) -> Result<Self> {
+        Self::from_decimal_scaled_units(raw, currency, 0)
+    }
+
+    /// Parse a JSON decimal lexeme expressed in source units worth
+    /// `10^-source_unit_scale` major currency units each.
+    ///
+    /// Applying the scale offset while parsing avoids an overflowing
+    /// intermediate source-unit coefficient when the converted currency value
+    /// itself still fits the exact representation.
+    pub fn from_decimal_scaled_units(
+        raw: &str,
+        currency: &str,
+        source_unit_scale: u32,
+    ) -> Result<Self> {
         let (significand, exponent) = match raw.split_once(['e', 'E']) {
             Some((significand, exponent))
                 if !significand.is_empty()
@@ -110,9 +125,12 @@ impl ActualVendorCost {
         let coefficient = digits
             .parse::<i128>()
             .map_err(|_| ContractError::IndeterminableCost)?;
+        let source_unit_scale =
+            i32::try_from(source_unit_scale).map_err(|_| ContractError::IndeterminableCost)?;
         let decimal_places = i32::try_from(fraction.len())
             .map_err(|_| ContractError::IndeterminableCost)?
             .checked_sub(exponent)
+            .and_then(|places| places.checked_add(source_unit_scale))
             .ok_or(ContractError::IndeterminableCost)?;
         let (amount, scale) = if decimal_places <= 0 {
             let power =
@@ -1112,6 +1130,37 @@ mod tests {
         assert!(ActualVendorCost::from_decimal_major_units("-0.01", "USD").is_err());
         assert!(
             ActualVendorCost::from_decimal_major_units("0.0000000000000000001", "USD").is_err()
+        );
+    }
+
+    #[test]
+    fn exact_scaled_unit_parser_applies_offset_before_checked_bounds() {
+        assert_eq!(
+            ActualVendorCost::from_decimal_scaled_units("1.4", "USD", 2).unwrap(),
+            ActualVendorCost::new(14, 3, "USD").unwrap()
+        );
+        assert_eq!(
+            ActualVendorCost::from_decimal_scaled_units("0.0100", "USD", 2).unwrap(),
+            ActualVendorCost::new(100, 6, "USD").unwrap()
+        );
+        assert_eq!(
+            ActualVendorCost::from_decimal_scaled_units("100e18", "USD", 2).unwrap(),
+            ActualVendorCost::new(1_000_000_000_000_000_000, 0, "USD").unwrap(),
+            "conversion must happen before the source-unit coefficient could overflow i64"
+        );
+        assert_eq!(
+            ActualVendorCost::from_decimal_scaled_units("9223372036854775807e2", "USD", 2).unwrap(),
+            ActualVendorCost::new(i64::MAX, 0, "USD").unwrap()
+        );
+        assert!(
+            ActualVendorCost::from_decimal_scaled_units("9223372036854775808e2", "USD", 2).is_err()
+        );
+        assert_eq!(
+            ActualVendorCost::from_decimal_scaled_units("0.0000000000000001", "USD", 2).unwrap(),
+            ActualVendorCost::new(1, MAX_VENDOR_COST_SCALE, "USD").unwrap()
+        );
+        assert!(
+            ActualVendorCost::from_decimal_scaled_units("0.00000000000000001", "USD", 2).is_err()
         );
     }
 
