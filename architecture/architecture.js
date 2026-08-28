@@ -121,7 +121,7 @@ const components = {
     copy:
       "The release workflow turns one exact main commit into an immutable tag, validates the recommended native source installation on both supported macOS architectures, and publishes secondary archives from the same four-binary workspace build.",
     responsibilities: [
-      "Creates a commit-addressed prerelease for each eligible main build and accepts explicit stable SemVer promotion for an exact main revision.",
+      "Publishes only after an explicit operator dispatch: a commit-addressed canary, a versioned candidate, or a stable SemVer release for an exact main revision.",
       "Runs formatting, Clippy, workspace tests, the core integration flow, and source-installer contract tests before publication.",
       "Exercises the exact-tag, full-commit source installer natively on Intel and Apple silicon; one locked build produces only hubu, hubu-server, hubu-unified-mcp, and gongbu-server with non-development version and provenance metadata.",
       "Stages and verifies all four binaries before installing them into the chosen prefix, without relying on Apple signing or notarization.",

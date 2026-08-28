@@ -24,6 +24,9 @@ Future release template
 
 ## Unreleased
 
+- Made release publication operator-triggered only. The daily canary schedule
+  is removed while manual canary, candidate, and stable dispatches retain their
+  immutable source, tag, and asset validation.
 - Aligned agent-facing denial recovery across unified MCP spend, governed
   execution, and public operation status. A definitive denial remains terminal,
   exact redelivery recovers that denial, and corrected work is submitted as a

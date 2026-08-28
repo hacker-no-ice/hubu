@@ -20,11 +20,12 @@ The distribution exposes two independent versions:
 - `executor_contract` identifies the Hubu-to-executor protocol and changes only
   with that protocol. The current value is `hubu-spend-executor-v4.3`.
 
-A scheduled workflow publishes at most one prerelease for each exact `main`
-commit, tagged `main-<full-source-commit>`. There is no mutable latest-main
-artifact. Versioned release candidates use immutable `vX.Y.Z-rc.N` tags for
-human validation before stable promotion. Stable promotion is an explicit
-workflow dispatch, and no channel replaces an existing tag or asset.
+Every release channel requires an explicit workflow dispatch. A manual canary
+dispatch publishes at most one prerelease for each exact `main` commit, tagged
+`main-<full-source-commit>`. There is no mutable latest-main artifact.
+Versioned release candidates use immutable `vX.Y.Z-rc.N` tags for human
+validation before stable promotion. No channel replaces an existing tag or
+asset.
 
 The changelog presents stable release history. While a release line is under
 validation, its top entry must use the active candidate version so the release
