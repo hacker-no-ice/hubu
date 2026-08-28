@@ -317,8 +317,7 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
                     .and_then(|v| v.get("output_tokens"))
                     .and_then(Value::as_i64),
             }),
-            provider_amount_minor: None,
-            provider_currency: None,
+            actual_vendor_cost: None,
             provider_request_id: request_id,
             provider_operation_id: None,
             artifacts: vec![artifact],

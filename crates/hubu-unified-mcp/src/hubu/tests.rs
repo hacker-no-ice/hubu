@@ -189,6 +189,26 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
 }
 
 #[test]
+fn billed_reconciliation_schema_exposes_exact_cost_and_legacy_cents() {
+    let tool = super::catalog::tool_definitions()
+        .into_iter()
+        .find(|tool| tool["name"] == "hubu_reconcile_vendor_billed_claim")
+        .expect("billed reconciliation tool");
+    let receipt = &tool["inputSchema"]["properties"]["receipt"];
+    let exact = &receipt["properties"]["actual_vendor_cost"];
+
+    assert_eq!(exact["properties"]["amount"]["type"], "integer");
+    assert_eq!(exact["properties"]["scale"]["maximum"], 18);
+    assert_eq!(exact["properties"]["currency"]["enum"], json!(["usd"]));
+    assert!(receipt["properties"]["actual_vendor_cost_cents"].is_object());
+    assert_eq!(receipt["oneOf"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        receipt["properties"]["price_model_snapshot"]["type"],
+        "object"
+    );
+}
+
+#[test]
 fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
     let server = server_with_backends(
         "http://127.0.0.1:1",

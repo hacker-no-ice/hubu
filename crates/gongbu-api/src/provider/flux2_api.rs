@@ -7,9 +7,9 @@
 
 use super::{
     contract::{
-        canonical_image_media_type, AdapterCapabilities, AdapterOutcome, ContractError,
-        NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter, ProviderFailure,
-        ProviderPhase, Result, RetryPolicy,
+        canonical_image_media_type, ActualVendorCost, AdapterCapabilities, AdapterOutcome,
+        ContractError, NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter,
+        ProviderFailure, ProviderPhase, Result, RetryPolicy,
     },
     http_kernel::{
         provider_request_id, read_bounded, shared_client, validate_https_origin,
@@ -527,23 +527,33 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 operation_id.clone(),
             )
         })?;
-        let provider_amount_minor = current
-            .pointer("/result/cost")
-            .and_then(Value::as_f64)
-            .and_then(|dollars| {
-                if dollars.is_finite() && dollars >= 0.0 {
-                    Some((dollars * 100.0).round() as i64)
-                } else {
-                    None
-                }
-            });
+        let actual_vendor_cost = match current.pointer("/result/cost") {
+            None => None,
+            Some(Value::Number(number)) => Some(
+                ActualVendorCost::from_decimal_major_units(number.as_str(), "USD").map_err(
+                    |_| {
+                        with_evidence(
+                            "invalid_provider_cost",
+                            request_id.clone(),
+                            operation_id.clone(),
+                        )
+                    },
+                )?,
+            ),
+            Some(_) => {
+                return Err(with_evidence(
+                    "invalid_provider_cost",
+                    request_id,
+                    operation_id,
+                ));
+            }
+        };
         Ok(AdapterOutcome {
             usage: Some(NormalizedUsage {
                 images: Some(1),
                 ..Default::default()
             }),
-            provider_amount_minor,
-            provider_currency: provider_amount_minor.map(|_| "USD".into()),
+            actual_vendor_cost,
             provider_request_id: request_id,
             provider_operation_id: operation_id,
             artifacts: vec![NormalizedArtifact {
@@ -962,9 +972,30 @@ mod tests {
         assert_eq!(*submits.lock().unwrap(), 1);
         assert_eq!(outcome.provider_operation_id.as_deref(), Some("op-1"));
         assert_eq!(outcome.provider_request_id.as_deref(), Some("req-1"));
-        assert_eq!(outcome.provider_amount_minor, None);
+        assert_eq!(outcome.actual_vendor_cost, None);
         assert_eq!(outcome.usage.unwrap().images, Some(1));
         assert_eq!(outcome.artifacts[0].bytes, png());
+    }
+
+    #[test]
+    fn parses_fractional_cent_cost_from_the_json_decimal_lexeme() {
+        let ready: Value = serde_json::from_str(
+            r#"{"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png","cost":0.0001}}"#,
+        )
+        .unwrap();
+        let (adapter, _) = fixture(vec![ready]);
+        let outcome = adapter
+            .invoke(
+                &request(),
+                &json!({"prompt":"cat"}),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap();
+        assert_eq!(
+            outcome.actual_vendor_cost,
+            Some(ActualVendorCost::new(1, 4, "USD").unwrap())
+        );
     }
 
     #[test]
@@ -1281,7 +1312,7 @@ mod tests {
                 .unwrap(),
             45
         );
-        assert_eq!(outcome.provider_amount_minor, None);
+        assert_eq!(outcome.actual_vendor_cost, None);
 
         let repository = Repository::in_memory().unwrap();
         let execution = repository

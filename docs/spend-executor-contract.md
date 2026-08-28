@@ -12,8 +12,9 @@ Hubu controls spend; executors do work.
 
 Gongbu can implement this contract for model calls, image generation, or other
 vendor-backed work. Hubu does not receive vendor credentials, provider payloads,
-prompts, or artifact contents. It does retain compact provider and artifact
-references needed for settlement auditability.
+prompts, or artifact contents. It does retain exact cost, the complete frozen
+pricing snapshot, and compact provider and artifact references needed for
+settlement auditability.
 
 ## Protocol Version
 
@@ -25,8 +26,15 @@ GET /spend/executor/guidance
 GET /.well-known/hubu-spend-executor.json
 ```
 
-V4.3 renames Hubu's `workload_profile` field to `lease_profile`, makes the
-authorization TTL global, and limits each lease profile to its claim TTL.
+The HUB-33 precise-cost extension is additive within v4.3. It adds a precise
+integer external-cost object, preserves the complete frozen pricing snapshot,
+and separates exact provider cost from the conservatively rounded number of
+cents charged to a Hubu budget. Normal and human-reconciled billed settlement
+use the same validation and rounding. Existing v4.3 callers may keep sending
+the cents-only receipt field described below while they migrate.
+
+V4.3 renamed Hubu's `workload_profile` field to `lease_profile`, made the
+authorization TTL global, and limited each lease profile to its claim TTL.
 Gongbu workload types remain independent execution-plane identities and no
 longer have to equal a Hubu lease profile. The breaking payload and guidance
 shape makes v4.3 intentionally startup-incompatible with v4.2.
@@ -34,8 +42,8 @@ shape makes v4.3 intentionally startup-incompatible with v4.2.
 V4.2 introduced the read-only `POST /spend/executor/resolve` capability used
 for token-only executor admission.
 
-The unified MCP continuation binding added for HUB-126 does not change the v4.3
-Hubu-to-executor wire shape. It makes the existing `auth_token_id` /
+The unified MCP continuation binding added for HUB-126 remains independent of
+the v4.3 cost fields. It makes the existing `auth_token_id` /
 `spend_auth_token_id` the agent-visible continuation identifier for one private
 normalized operation. The agent never supplies or receives `operation_key` on
 Gongbu tools. Gongbu learns it only from authenticated Hubu resolution and
@@ -49,7 +57,8 @@ key; one agent may not reuse an operation key for different work.
 V2's separate `executor_execution_id` is no longer part of the public contract.
 V4 adds durable provider receipts and actual-cost settlement to V3's exclusive
 claims, owner-scoped lookup, and human-gated reconciliation. Settlement consumes
-the actual vendor cost and releases the remainder of the authorized maximum.
+the conservative budget charge derived from exact vendor cost and releases the
+remainder of the authorized maximum.
 `POST /spend/executor/validate` remains available for scope inspection, but
 validation alone does not authorize irreversible work.
 
@@ -80,6 +89,11 @@ agent budget, not a separate task-level aggregate ceiling.
 One authorization covering several charges under a shared maximum is outside
 v4 and requires a new protocol version.
 
+Precise costs also remain operation-scoped. Two provider settlements keep two
+independent exact receipts, frozen pricing snapshots, ceiling conversions,
+holds, and idempotency identities. Hubu never combines sub-cent amounts across
+operations to change either operation's conservative budget charge.
+
 ## Boundary
 
 Hubu is responsible for:
@@ -89,8 +103,10 @@ Hubu is responsible for:
 - authoritative workflow state keyed by agent and operation
 - one agent-budget hold per spend decision
 - exclusive executor claims and claim leases
-- actual-cost budget settlement and release of unused authorization
-- durable provider request, price/model, and artifact references
+- exact-cost validation, conservative budget settlement, and release of unused
+  authorization
+- durable provider request, complete frozen price/model snapshot, and artifact
+  references
 - audit events for spend state transitions
 - durable provider references and evidence for human reconciliation decisions
 
@@ -113,9 +129,79 @@ Executors are responsible for:
   durable claim/finalization requests
 - claiming Hubu authorization before irreversible work
 - calling vendors or tools
-- reporting the actual vendor cost with a provider request ID, price/model
-  snapshot, and artifact reference
+- reporting the exact vendor cost with a provider request ID, complete frozen
+  price/model snapshot, and artifact reference
 - settling after billable work or releasing before billable work
+
+## Precise External Cost and Budget Conversion
+
+V4.3 represents an external vendor cost as an integer coefficient, a decimal
+scale, and an ISO currency code. The value is `amount × 10^-scale` currency
+units:
+
+```json
+{
+  "amount": 4000001,
+  "scale": 6,
+  "currency": "usd"
+}
+```
+
+This example is exactly USD 4.000001. `amount` is a non-negative JSON integer
+that must fit Hubu's signed 64-bit checked integer representation; `scale` is
+an integer from 0 through 18. V4 budgets and settlement currently support USD
+only. Input accepts the ISO code case-insensitively, and Hubu canonicalizes it
+to `usd` in persisted and response representations. Parsing, comparison,
+multiplication by powers of ten, and conversion must use checked integer
+arithmetic. Floating point is never permitted.
+
+Hubu budgets use cents in v4. For an exact non-negative cost in the authorized
+currency, Hubu computes `budget_charge_cents` by rounding toward positive
+infinity exactly once:
+
+```text
+scale > 2: ceil(amount / 10^(scale - 2))
+scale = 2: amount
+scale < 2: amount × 10^(2 - scale)
+```
+
+Every exponentiation, multiplication, addition, and division is checked for
+overflow. This conservative rule means any positive sub-cent cost consumes at
+least one cent and settlement never understates governed consumption. Hubu does
+not round individual pricing components and then add them; Gongbu preserves and
+evaluates its exact frozen pricing snapshot, and Hubu converts the final exact
+vendor cost once.
+
+For USD, the boundary behavior is deterministic:
+
+| Exact `actual_vendor_cost` | `budget_charge_cents` | Result against a 500-cent maximum |
+| --- | ---: | --- |
+| `{amount: 0, scale: 6}` | 0 | accepted |
+| `{amount: 1, scale: 6}` | 1 | accepted; positive fractional cent |
+| `{amount: 10000, scale: 6}` | 1 | accepted; exact one cent |
+| `{amount: 10001, scale: 6}` | 2 | accepted; just above one cent |
+| `{amount: 5000000, scale: 6}` | 500 | accepted at the exact maximum |
+| `{amount: 5000001, scale: 6}` | 501 | normal settlement rejected; reconcile |
+
+The receipt stores the exact `actual_vendor_cost` amount and original scale,
+plus the canonical USD code and complete `price_model_snapshot` supplied by
+Gongbu. Hubu preserves the snapshot as a complete semantic JSON value; it does
+not promise to retain source whitespace or object-key order, and it does not
+project, truncate, or recompute the fields. The snapshot is evidence, not
+permission to change price after authorization. Its currency must agree with
+the exact cost and authorization, and an identical retry must supply the same
+JSON value. A numerically equal cost encoded with a different amount or scale
+is changed receipt data and conflicts after settlement.
+
+For v4.3 input compatibility, a receipt may instead supply
+`actual_vendor_cost_cents`. Hubu maps that non-negative integer to
+`actual_vendor_cost = {amount: actual_vendor_cost_cents, scale: 2, currency:
+usd}` before validation and persistence. The frozen snapshot and authorization
+must also identify USD. A request must not
+supply both forms. New callers use `actual_vendor_cost`; v4.3 responses return
+the precise form and explicit budget accounting fields. They also retain
+`actual_vendor_cost_cents` as the legacy compatibility projection of
+`budget_charge_cents`; it is not a replacement for the exact cost object.
 
 ## Lease Profiles
 
@@ -387,27 +473,53 @@ guidance.
      "agent_id": "agt_example",
      "operation_key": "codex:tool-call:01JABC123",
      "receipt": {
-       "actual_vendor_cost_cents": 400,
+       "actual_vendor_cost": {
+         "amount": 4000001,
+         "scale": 6,
+         "currency": "usd"
+       },
        "provider_request_id": "provider-request-abc123",
        "price_model_snapshot": {
+         "schema_version": 2,
          "provider": "example-image-provider",
          "model": "image-model-v1",
-         "unit_price_cents": 400,
-         "pricing_unit": "image",
-         "currency": "usd"
+         "catalog_version": "prices-2026-08-28",
+         "catalog_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+         "pricing_rule_id": "image-model-v1",
+         "components": [{
+           "unit": "image",
+           "rate_numerator_minor": 4000001,
+           "rate_denominator": 10000,
+           "quantity": 1
+         }],
+         "exact_estimate_numerator": "4000001",
+         "exact_estimate_denominator": "10000",
+         "estimated_amount_minor": 401,
+         "currency": "USD"
        },
        "artifact_reference": "artifact://hubu-logo.png"
      }
    }
    ```
 
-   Hubu persists the receipt, marks the claim settled and token used, consumes
-   the 400-cent actual cost, and releases the 100-cent remainder in one SQLite
-   write transaction. Actual cost cannot be negative or exceed the 500-cent
-   authorized maximum. Hubu resolves the claim from the agent and operation key,
-   so an identical retry returns the original `settlement_id` and receipt even
-   if the caller lost the response. A retry with changed receipt data is
-   rejected, and budget is not consumed twice.
+   Hubu persists the exact USD 4.000001 receipt and complete pricing snapshot,
+   marks the claim settled and token used, conservatively consumes 401 cents,
+   and releases the 99-cent remainder in one SQLite write transaction. A normal
+   executor settlement is accepted only when its checked `budget_charge_cents`
+   does not exceed the 500-cent authorized maximum. Hubu resolves the claim
+   from the agent and operation key, so an identical retry returns the original
+   `settlement_id` and receipt even if the caller lost the response. A retry
+   with any changed exact-cost, currency, scale, snapshot, provider, or artifact
+   data is rejected, and budget is not consumed twice.
+
+   If a confirmed provider charge converts to more than the authorized maximum,
+   Hubu rejects normal settlement without consuming or releasing the hold.
+   Gongbu keeps the immutable exact provider-attempt cost, frozen pricing
+   snapshot, provider reference, and attempt evidence, marks the execution
+   `reconciliation_required`, and never repeats provider work merely because
+   settlement was rejected. After the claim lease expires, a human can
+   reconcile the legitimate billed overrun through the separately authorized
+   path below.
 
 7. If no irreversible billable work occurred, the executor releases without a
    receipt:
@@ -502,16 +614,34 @@ user, and timestamp.
   "status": "settled",
   "receipt": {
     "authorized_max_cents": 500,
-    "actual_vendor_cost_cents": 400,
-    "released_amount_cents": 100,
+    "actual_vendor_cost": {
+      "amount": 4000001,
+      "scale": 6,
+      "currency": "usd"
+    },
+    "actual_vendor_cost_cents": 401,
+    "budget_charge_cents": 401,
+    "released_amount_cents": 99,
+    "overrun_amount_cents": 0,
     "currency": "usd",
     "provider_request_id": "provider-request-abc123",
     "price_model_snapshot": {
+      "schema_version": 2,
       "provider": "example-image-provider",
       "model": "image-model-v1",
-      "unit_price_cents": 400,
-      "pricing_unit": "image",
-      "currency": "usd"
+      "catalog_version": "prices-2026-08-28",
+      "catalog_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pricing_rule_id": "image-model-v1",
+      "components": [{
+        "unit": "image",
+        "rate_numerator_minor": 4000001,
+        "rate_denominator": 10000,
+        "quantity": 1
+      }],
+      "exact_estimate_numerator": "4000001",
+      "exact_estimate_denominator": "10000",
+      "estimated_amount_minor": 401,
+      "currency": "USD"
     },
     "artifact_reference": "artifact://hubu-logo.png",
     "created_at": "2026-07-20T12:05:00Z"
@@ -528,8 +658,11 @@ check the claim against that timestamp, and atomically update:
 - the executor claim to `settled` with a stable `settlement_id`, or `released`
 - the spend authorization token to `used`, or `revoked`
 - the claimed budget hold to `settled`, or `released`
-- the immutable provider receipt for settlement
-- the budget balance from frozen to actual cost consumed plus the unused
+- the immutable exact provider receipt and complete frozen pricing snapshot for
+  settlement
+- the checked conservative `budget_charge_cents`, released remainder, and any
+  human-confirmed overrun
+- the budget balance from frozen to conservative cost consumed plus the unused
   remainder returned, or the full hold returned for release
 
 This removes the internal race where token and claim state could commit before
@@ -538,6 +671,43 @@ terminal transaction wins. If any update fails, SQLite rolls all five changes
 back. A claim that was active when the transaction began can complete even if
 wall-clock time passes its lease during the transaction; a claim at or past
 expiry when the transaction begins is rejected for reconciliation.
+
+## Persistence Migration and V4 Compatibility
+
+The precise receipt extension does not merge Hubu and Gongbu persistence. Each
+process upgrades only its own SQLite database during repository open and within
+its own failure domain:
+
+- Hubu maps every legacy `actual_vendor_cost_cents` receipt to exact
+  `{amount: legacy_cents, scale: 2, currency: stored_currency}`. Its historical
+  consumed amount becomes `budget_charge_cents`, its released amount is
+  preserved, `overrun_amount_cents` is zero, and the stored price/model snapshot
+  JSON remains unchanged.
+- Gongbu maps legacy provider-attempt and receipt minor-unit amounts to exact
+  `{amount: legacy_minor, scale: 2, currency: stored_currency}`. For a legacy
+  receipt it persists the exact old retry evidence: `provider_request_id` is
+  the receipt ID and `price_model_snapshot` is the reduced v4.3 projection
+  reconstructed from the unchanged frozen execution snapshot. New receipts
+  persist the provider-reported reference and complete snapshot. Execution,
+  attempt, receipt, settlement, catalog-version, and frozen execution-snapshot
+  identity remain stable.
+
+The migrations are idempotent: reopening an already upgraded database neither
+rewrites a precise receipt nor changes retry identity. Existing settlement IDs,
+claim IDs, Hubu operation keys, Gongbu execution IDs, and provider request IDs
+remain stable. A migrated receipt therefore compares equal to the canonical
+legacy request mapping and replays without another budget debit or provider
+call.
+
+The cents-only v4.3 request remains accepted by an upgraded Hubu, but new
+clients should send the precise object. If a precise-capable Gongbu reaches an
+older v4.3 Hubu that rejects the additive object, it must keep its exact receipt
+and frozen snapshot and enter reconciliation; it must not retry the provider or
+downgrade away the exact evidence. Upgrade the unified four-binary installation
+before resolving that charge. Operators should take independent cold backups
+of Hubu and Gongbu state before upgrade. Rolling back to binaries that know only
+the old schema requires restoring the corresponding pre-upgrade backup rather
+than pointing an old binary at an upgraded database.
 
 ## Expired Claims
 
@@ -566,14 +736,29 @@ X-Hubu-Reconciliation-Capability: HUMAN_CAPABILITY
   "provider_reference": "vendor-request-abc123",
   "evidence": "Provider usage export confirms the completed billed request.",
   "receipt": {
-    "actual_vendor_cost_cents": 400,
+    "actual_vendor_cost": {
+      "amount": 4000001,
+      "scale": 6,
+      "currency": "usd"
+    },
     "provider_request_id": "vendor-request-abc123",
     "price_model_snapshot": {
+      "schema_version": 2,
       "provider": "example-image-provider",
       "model": "image-model-v1",
-      "unit_price_cents": 400,
-      "pricing_unit": "image",
-      "currency": "usd"
+      "catalog_version": "prices-2026-08-28",
+      "catalog_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pricing_rule_id": "image-model-v1",
+      "components": [{
+        "unit": "image",
+        "rate_numerator_minor": 4000001,
+        "rate_denominator": 10000,
+        "quantity": 1
+      }],
+      "exact_estimate_numerator": "4000001",
+      "exact_estimate_denominator": "10000",
+      "estimated_amount_minor": 401,
+      "currency": "USD"
     },
     "artifact_reference": "artifact://hubu-logo.png"
   }
@@ -601,6 +786,22 @@ records the outcome, provider reference, evidence, resolving user, and
 timestamp. Evidence must not contain vendor credentials or sensitive provider
 payloads.
 
+Human-confirmed billed reconciliation applies the same exact-cost validation
+and checked ceiling conversion as normal settlement. Unlike an executor, the
+human may confirm a legitimate vendor charge whose `budget_charge_cents`
+exceeds the authorization. Hubu then records and consumes the full conservative
+charge, sets `released_amount_cents` to zero, and records
+`overrun_amount_cents = budget_charge_cents - authorized_max_cents`. The budget
+remaining balance may become negative; this is retrospective accounting for a
+charge that already occurred, not new authorization. The budget is exhausted
+and later reservations fail. For example, an exact USD 5.000001 charge against
+a 500-cent maximum consumes 501 cents and records a one-cent overrun.
+
+Normal executor settlement never gains this authority. An executor overrun
+must leave the hold claimed and route to human reconciliation with Gongbu's
+exact provider-attempt cost, frozen snapshot, and evidence intact. Hubu accepts
+that human resolution only after the claim lease expires.
+
 The reconciliation capability is loaded separately from
 `HUBU_RECONCILIATION_TOKEN` or `HUBU_RECONCILIATION_TOKEN_FILE`. It must not
 equal or be distributed with the normal Hubu bearer token. Executors receive
@@ -616,12 +817,11 @@ hubu spend reconcile list
 hubu spend reconcile billed --claim-id CLAIM_ID \
   --provider-reference VENDOR_REFERENCE \
   --evidence "Provider usage export confirms billing" \
-  --actual-vendor-cost-cents 400 \
+  --actual-vendor-cost-amount 4000001 \
+  --actual-vendor-cost-scale 6 \
+  --currency USD \
   --provider-request-id VENDOR_REQUEST_ID \
-  --provider example-image-provider \
-  --model image-model-v1 \
-  --unit-price-cents 400 \
-  --pricing-unit image \
+  --price-model-snapshot-json "$FROZEN_PRICING_SNAPSHOT_JSON" \
   --artifact-reference artifact://hubu-logo.png
 hubu spend reconcile not-billed --claim-id CLAIM_ID \
   --provider-reference VENDOR_REFERENCE \
@@ -641,8 +841,13 @@ with only the normal bearer are rejected.
 - Agent platforms must supply one stable operation key and reuse it for
   authorization, claim, finalization, and every retry.
 - Executors must settle after irreversible billable work succeeds.
-- Settlement must report actual vendor cost and immutable provider receipt
-  metadata; actual cost cannot exceed the authorized maximum.
+- Settlement must report exact vendor cost, currency, scale, the complete
+  frozen pricing snapshot, and immutable provider receipt metadata.
+- Hubu converts exact provider cost to cents with one checked ceiling operation;
+  normal executor settlement cannot exceed the authorized maximum.
+- A confirmed normal overrun stays claimed for human reconciliation. A human
+  billed resolution records and consumes the full conservative charge and its
+  overrun rather than hiding part of a legitimate vendor bill.
 - Executors must release only when no irreversible billable work occurred.
 - Agents and executors may retry any stage after an ambiguous response; Hubu
   returns stored workflow state for the same operation key and rejects changed

@@ -101,10 +101,22 @@ frozen -> settled
        -> released
 ```
 
-Settlement converts actual billable cost to consumed balance and releases any
-unused maximum. Failure, unused authorization, expiry, or a confirmed
-non-billable outcome releases the hold. Ambiguous provider outcomes enter
-reconciliation instead of being released optimistically.
+Settlement preserves exact external cost as an integer amount, decimal scale,
+and currency, then converts that value to budget cents with one checked ceiling
+operation. Any positive sub-cent charge therefore consumes at least one cent.
+A normal settlement consumes that conservative `budget_charge_cents` and
+releases any unused maximum. Failure, unused authorization, expiry, or a
+confirmed non-billable outcome releases the hold. Ambiguous provider outcomes
+and confirmed costs above the authorized maximum enter reconciliation instead
+of being released optimistically.
+
+An executor cannot settle above its maximum. Once the claim lease expires, a
+human reviewing provider evidence may confirm a legitimate billed overrun.
+Hubu then consumes the full conservatively rounded charge, records the overrun
+separately, releases none of the hold, and allows the remaining balance to become negative. That is
+retrospective accounting for an external charge that already occurred; it does
+not grant new spending authority, and the exhausted budget rejects subsequent
+reservations.
 
 ## Authorization paths
 
@@ -131,8 +143,11 @@ For Gongbu and other external executors:
 3. It persists its execution before scheduling provider work.
 4. Its durable workflow claims the authorization.
 5. It records a provider attempt before irreversible transmission.
-6. It settles with a stable receipt after confirmed billing, or releases after
-   confirmed non-billing.
+6. It persists the exact provider cost, currency, scale, complete frozen pricing
+   snapshot, and provider evidence.
+7. It settles with that stable receipt after confirmed billing, routes a
+   settlement overrun to reconciliation for human resolution after claim
+   expiry, or releases after confirmed non-billing.
 
 Provider credentials, provider retries, artifacts, and provider pricing remain
 owned by the executor. Sharing a Rust workspace does not turn this wire
@@ -166,13 +181,23 @@ movement.
 ## Failure and reconciliation invariants
 
 - Never execute provider work before a durable claim.
-- Never settle more than the authorized maximum.
+- Never accept a normal executor settlement above the authorized maximum.
+- Never discard exact cost or pricing evidence when a legitimate provider
+  charge exceeds that maximum; keep the hold claimed for human reconciliation.
+- Never convert external cost through floating point or round budget consumption
+  down; apply one checked ceiling conversion to the final exact cost.
 - Never release a hold merely because a timeout made billing ambiguous.
 - Never retry an ambiguous provider mutation under a new operation key.
 - Keep Hubu and executor databases, credentials, artifacts, and failure domains
   separate.
 - Preserve enough immutable evidence to reconcile billed and non-billed
   outcomes without trusting caller assertions.
+
+Legacy v4.3 cents receipts migrate to exact amount with scale 2. Hubu and Gongbu
+upgrade their own databases independently and preserve receipt, operation,
+execution, settlement, and provider-request identities. The detailed mapping,
+retry behavior, and rollback requirements are defined by the
+[spend executor contract](spend-executor-contract.md#persistence-migration-and-v4-compatibility).
 
 Core spend and budget behavior lives in [`crates/hubu-core`](../crates/hubu-core),
 while payment and ledger behavior lives in

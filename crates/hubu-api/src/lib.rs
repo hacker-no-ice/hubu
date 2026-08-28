@@ -61,9 +61,8 @@ use hubu_core::{
     registration::{AgentWithAccount, RegisterAgentRequest, RegistrationManager},
     spend::{
         LeaseConfig, SpendAttemptAuditRecord, SpendAuthorizationDecision, SpendDecisionRecord,
-        SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendExecutorPriceModelSnapshot,
-        SpendExecutorSettlementReceipt, SpendManager, SpendPaymentValidationRequest,
-        SpendRetryGuidance,
+        SpendExecutorClaimRecord, SpendExecutorClaimStatus, SpendExecutorSettlementReceipt,
+        SpendExecutorVendorCost, SpendManager, SpendPaymentValidationRequest, SpendRetryGuidance,
     },
     spending_target::{
         periods_overlap, CreateSpendingTargetRequest, SpendingTarget, SpendingTargetManager,
@@ -1399,11 +1398,15 @@ struct ExecutorSpendSettlementHttpResponse {
 #[derive(Debug, Serialize)]
 struct ExecutorSpendSettlementReceiptHttpResponse {
     authorized_max_cents: i64,
+    actual_vendor_cost: SpendExecutorVendorCost,
+    /// v4.3 compatibility projection of the conservative budget charge.
     actual_vendor_cost_cents: i64,
+    budget_charge_cents: i64,
     released_amount_cents: i64,
+    overrun_amount_cents: i64,
     currency: String,
     provider_request_id: String,
-    price_model_snapshot: SpendExecutorPriceModelSnapshot,
+    price_model_snapshot: Value,
     artifact_reference: String,
     created_at: String,
 }
@@ -1982,11 +1985,15 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "required": [
                 "agent_id",
                 "operation_key",
-                "receipt.actual_vendor_cost_cents",
+                "receipt.actual_vendor_cost.amount",
+                "receipt.actual_vendor_cost.scale",
+                "receipt.actual_vendor_cost.currency",
                 "receipt.provider_request_id",
                 "receipt.price_model_snapshot",
                 "receipt.artifact_reference"
-            ]
+            ],
+            "legacy_v4_3_input": "receipt.actual_vendor_cost_cents maps exactly to amount with scale 2 and usd; price_model_snapshot remains the complete immutable JSON snapshot",
+            "legacy_v4_3_response": "receipt.actual_vendor_cost_cents remains available as the conservative budget_charge_cents projection; actual_vendor_cost preserves the exact provider decimal"
         },
         "release_request": {
             "required": [
@@ -2001,7 +2008,9 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "evidence"
             ],
             "vendor_billed_required": [
-                "receipt.actual_vendor_cost_cents",
+                "receipt.actual_vendor_cost.amount",
+                "receipt.actual_vendor_cost.scale",
+                "receipt.actual_vendor_cost.currency",
                 "receipt.provider_request_id",
                 "receipt.price_model_snapshot",
                 "receipt.artifact_reference"
@@ -2035,8 +2044,9 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
         "settlement_rules": [
             "settle only after the executor has performed irreversible billable work",
             "release only before irreversible billable work has occurred",
-            "settlement atomically persists the immutable provider receipt, marks the claim settled and token used, consumes actual vendor cost, and releases the authorization remainder",
-            "the actual vendor cost must be non-negative and cannot exceed the authorized maximum",
+            "settlement atomically persists the immutable exact provider cost and full frozen pricing snapshot, marks the claim settled and token used, conservatively consumes the ceiling in budget cents, and releases the authorization remainder",
+            "actual vendor cost is an integer major-unit decimal with scale at most 18; Hubu never uses floating point and rounds fractional budget cents up",
+            "normal settlement rejects a conservative budget charge above the authorized maximum; human vendor-billed reconciliation records an already-incurred overrun explicitly",
             "an identical settlement retry returns the original settlement_id and receipt without consuming budget twice; a changed receipt is rejected",
             "finalization resolves by agent_id and operation_key, so a caller can recover the result even if it lost the claim response",
             "claim expiry is evaluated once when the settlement transaction starts",
@@ -4239,8 +4249,11 @@ fn settle_executor_spend_request(
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
         receipt: ExecutorSpendSettlementReceiptHttpResponse {
             authorized_max_cents: receipt.authorized_max_cents,
-            actual_vendor_cost_cents: receipt.receipt.actual_vendor_cost_cents,
+            actual_vendor_cost: receipt.receipt.actual_vendor_cost.clone(),
+            actual_vendor_cost_cents: receipt.budget_charge_cents,
+            budget_charge_cents: receipt.budget_charge_cents,
             released_amount_cents: receipt.released_amount_cents,
+            overrun_amount_cents: receipt.overrun_amount_cents,
             currency: receipt.currency.to_string(),
             provider_request_id: receipt.receipt.provider_request_id.clone(),
             price_model_snapshot: receipt.receipt.price_model_snapshot.clone(),
@@ -5961,6 +5974,27 @@ lease_profiles:
         })
     }
 
+    fn precise_settlement_receipt_json(amount: i64, scale: u32) -> Value {
+        json!({
+            "actual_vendor_cost": {
+                "amount": amount,
+                "scale": scale,
+                "currency": "USD"
+            },
+            "provider_request_id": "provider-request-precise",
+            "price_model_snapshot": {
+                "provider": "example-image-provider",
+                "model": "image-model-v1",
+                "quoted_amount": amount,
+                "quoted_scale": scale,
+                "pricing_unit": "image",
+                "currency": "USD",
+                "frozen_pricing_revision": "2026-08-28"
+            },
+            "artifact_reference": "artifact://hubu-logo.png",
+        })
+    }
+
     fn public_request(method: &str, path: &str) -> HttpRequest {
         let (path, query) = split_path_and_query(path);
         HttpRequest {
@@ -7302,7 +7336,7 @@ lease_profiles:
                 .as_array()
                 .expect("settlement fields should be an array")
                 .iter()
-                .any(|item| item == "receipt.actual_vendor_cost_cents"));
+                .any(|item| item == "receipt.actual_vendor_cost.amount"));
             assert_eq!(
                 response.body["operation_key_policy"]["namespace"],
                 json!(["agent_id", "operation_key"])
@@ -7469,7 +7503,7 @@ lease_profiles:
         let finalize = json!({
             "agent_id": agent.agent_id,
             "operation_key": claim.operation_key,
-            "receipt": settlement_receipt_json(400),
+            "receipt": precise_settlement_receipt_json(3_991, 3),
         });
         let settlement = settle_executor_spend(finalize.to_string(), &state)
             .expect("executor spend should settle");
@@ -7479,8 +7513,12 @@ lease_profiles:
         assert_eq!(settlement.spend.budget_hold.frozen_amount_cents, 0);
         assert_eq!(settlement.spend.budget_hold.remaining_amount_cents, 100);
         assert_eq!(settlement.receipt.authorized_max_cents, 500);
+        assert_eq!(settlement.receipt.actual_vendor_cost.amount, 3_991);
+        assert_eq!(settlement.receipt.actual_vendor_cost.scale, 3);
         assert_eq!(settlement.receipt.actual_vendor_cost_cents, 400);
+        assert_eq!(settlement.receipt.budget_charge_cents, 400);
         assert_eq!(settlement.receipt.released_amount_cents, 100);
+        assert_eq!(settlement.receipt.overrun_amount_cents, 0);
 
         let replay = settle_executor_spend(finalize.to_string(), &state)
             .expect("identical executor settlement should replay");

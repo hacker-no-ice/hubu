@@ -3,7 +3,9 @@
 use crate::redaction::Redactor;
 use crate::{
     execution_scope::{for_target, ExecutionScope},
-    provider_contract::{PricingSnapshot, PRICING_SNAPSHOT_SCHEMA_VERSION},
+    provider_contract::{
+        ActualVendorCost, NormalizedUsage, PricingSnapshot, PRICING_SNAPSHOT_SCHEMA_VERSION,
+    },
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
@@ -218,8 +220,7 @@ pub struct ProviderAttempt {
     pub outcome: String,
     pub usage: Option<Value>,
     pub usage_schema_version: Option<i64>,
-    pub provider_amount_minor: Option<i64>,
-    pub provider_currency: Option<String>,
+    pub actual_vendor_cost: Option<ActualVendorCost>,
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
     pub started_at: String,
@@ -232,8 +233,7 @@ pub struct AttemptResult {
     pub completed_at: String,
     pub usage: Value,
     pub usage_schema_version: i64,
-    pub provider_amount_minor: Option<i64>,
-    pub provider_currency: Option<String>,
+    pub actual_vendor_cost: Option<ActualVendorCost>,
     pub failure_code: Option<String>,
     pub failure_message_redacted: Option<String>,
     pub provider_request_id: Option<String>,
@@ -282,6 +282,7 @@ pub struct CreateReceiptParams {
     pub settlement_minor: i64,
     pub currency: String,
     pub pricing_catalog_version: String,
+    pub actual_vendor_cost: ActualVendorCost,
     pub created_at: String,
     pub settled_at: Option<String>,
     pub hubu_settlement_id: Option<String>,
@@ -294,6 +295,13 @@ pub struct Receipt {
     pub settlement_minor: i64,
     pub currency: String,
     pub pricing_catalog_version: String,
+    pub actual_vendor_cost: ActualVendorCost,
+    /// Exact provider identity sent on the Hubu settlement wire. This may be
+    /// the legacy deterministic receipt ID for receipts created before precise
+    /// provider evidence was added.
+    pub provider_request_id: String,
+    /// Exact JSON value sent as `price_model_snapshot` on every Hubu retry.
+    pub price_model_snapshot: Value,
     pub created_at: String,
     pub transmission_started_at: Option<String>,
     pub settled_at: Option<String>,
@@ -334,6 +342,7 @@ impl Repository {
         migrate_artifact_storage_columns(&c)?;
         migrate_resolved_target_columns(&c)?;
         migrate_execution_scope_column(&c)?;
+        migrate_precise_vendor_cost_columns(&c)?;
         Ok(Self(Arc::new(Mutex::new(c)), redactor))
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
@@ -687,8 +696,7 @@ impl Repository {
             outcome: "started".into(),
             usage: None,
             usage_schema_version: None,
-            provider_amount_minor: None,
-            provider_currency: None,
+            actual_vendor_cost: None,
             failure_code: None,
             failure_message_redacted: None,
             started_at: n.started_at.clone(),
@@ -743,8 +751,9 @@ impl Repository {
     pub fn complete_provider_attempt(&self, id: &str, r: &AttemptResult) -> Result<()> {
         safe_usage_json(&r.usage)?;
         if r.usage_schema_version < 1
-            || r.provider_amount_minor.is_some() != r.provider_currency.is_some()
-            || r.provider_amount_minor.is_some_and(|v| v < 0)
+            || r.actual_vendor_cost
+                .as_ref()
+                .is_some_and(|cost| cost.validate().is_err())
         {
             return Err(Error::Invalid("attempt result"));
         }
@@ -753,21 +762,36 @@ impl Repository {
             .as_deref()
             .map(|value| self.1.redact(value));
         let usage = j(&r.usage);
-        let numeric = [Some(r.usage_schema_version), r.provider_amount_minor];
+        let numeric = [
+            Some(r.usage_schema_version),
+            r.actual_vendor_cost.as_ref().map(|cost| cost.amount),
+            r.actual_vendor_cost
+                .as_ref()
+                .map(|cost| i64::from(cost.scale)),
+        ];
         self.reject_registered_numbers(numeric.into_iter().flatten())?;
         self.reject_registered_json([&r.usage])?;
         self.reject_registered_secrets([
             r.outcome.as_str(),
             r.completed_at.as_str(),
             usage.as_str(),
-            r.provider_currency.as_deref().unwrap_or(""),
+            r.actual_vendor_cost
+                .as_ref()
+                .map(|cost| cost.currency.as_str())
+                .unwrap_or(""),
             r.failure_code.as_deref().unwrap_or(""),
             failure.as_deref().unwrap_or(""),
             r.provider_request_id.as_deref().unwrap_or(""),
             r.provider_operation_id.as_deref().unwrap_or(""),
             id,
         ])?;
-        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=?7,failure_message_redacted=?8,provider_request_id=?9,provider_operation_id=?10 WHERE provider_attempt_id=?11 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.failure_code,failure,r.provider_request_id,r.provider_operation_id,id])?;
+        let compatibility_minor = r
+            .actual_vendor_cost
+            .as_ref()
+            .map(|cost| cost.to_budget_minor_units(&cost.currency))
+            .transpose()
+            .map_err(|_| Error::Invalid("attempt result"))?;
+        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,actual_vendor_cost_amount=?7,actual_vendor_cost_scale=?8,actual_vendor_cost_currency=?9,failure_code=?10,failure_message_redacted=?11,provider_request_id=?12,provider_operation_id=?13 WHERE provider_attempt_id=?14 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,compatibility_minor,r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.actual_vendor_cost.as_ref().map(|cost| cost.amount),r.actual_vendor_cost.as_ref().map(|cost| cost.scale),r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.failure_code,failure,r.provider_request_id,r.provider_operation_id,id])?;
         if n == 1 {
             Ok(())
         } else {
@@ -786,8 +810,9 @@ impl Repository {
         safe_usage_json(&r.usage)?;
         if r.outcome != "succeeded"
             || r.usage_schema_version < 1
-            || r.provider_amount_minor.is_some() != r.provider_currency.is_some()
-            || r.provider_amount_minor.is_some_and(|value| value < 0)
+            || r.actual_vendor_cost
+                .as_ref()
+                .is_some_and(|cost| cost.validate().is_err())
             || artifacts
                 .iter()
                 .any(|artifact| artifact.media_type.trim().is_empty())
@@ -796,25 +821,40 @@ impl Repository {
         }
         let usage = j(&r.usage);
         self.reject_registered_numbers(
-            [Some(r.usage_schema_version), r.provider_amount_minor]
-                .into_iter()
-                .flatten(),
+            [
+                Some(r.usage_schema_version),
+                r.actual_vendor_cost.as_ref().map(|cost| cost.amount),
+                r.actual_vendor_cost
+                    .as_ref()
+                    .map(|cost| i64::from(cost.scale)),
+            ]
+            .into_iter()
+            .flatten(),
         )?;
         self.reject_registered_json([&r.usage])?;
         self.reject_registered_secrets([
             r.outcome.as_str(),
             r.completed_at.as_str(),
             usage.as_str(),
-            r.provider_currency.as_deref().unwrap_or(""),
+            r.actual_vendor_cost
+                .as_ref()
+                .map(|cost| cost.currency.as_str())
+                .unwrap_or(""),
             r.provider_request_id.as_deref().unwrap_or(""),
             r.provider_operation_id.as_deref().unwrap_or(""),
             id,
         ])?;
         let mut connection = self.0.lock().unwrap();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let compatibility_minor = r
+            .actual_vendor_cost
+            .as_ref()
+            .map(|cost| cost.to_budget_minor_units(&cost.currency))
+            .transpose()
+            .map_err(|_| Error::Invalid("attempt result"))?;
         let changed = transaction.execute(
-            "UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,failure_code=NULL,failure_message_redacted=NULL,provider_request_id=?7,provider_operation_id=?8 WHERE provider_attempt_id=?9 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",
-            params![r.outcome,r.completed_at,usage,r.usage_schema_version,r.provider_amount_minor,r.provider_currency,r.provider_request_id,r.provider_operation_id,id],
+            "UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,actual_vendor_cost_amount=?7,actual_vendor_cost_scale=?8,actual_vendor_cost_currency=?9,failure_code=NULL,failure_message_redacted=NULL,provider_request_id=?10,provider_operation_id=?11 WHERE provider_attempt_id=?12 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",
+            params![r.outcome,r.completed_at,usage,r.usage_schema_version,compatibility_minor,r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.actual_vendor_cost.as_ref().map(|cost| cost.amount),r.actual_vendor_cost.as_ref().map(|cost| cost.scale),r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.provider_request_id,r.provider_operation_id,id],
         )?;
         if changed != 1 {
             return Err(Error::NotFound);
@@ -880,9 +920,15 @@ impl Repository {
         &self,
         execution_id: &str,
     ) -> Result<ProviderAttempt> {
-        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,usage_json,usage_schema_version,provider_amount_minor,provider_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
+        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
             let usage: Option<String> = r.get(6)?;
-            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, outcome:r.get(5)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(7)?, provider_amount_minor:r.get(8)?, provider_currency:r.get(9)?, failure_code:r.get(10)?, failure_message_redacted:r.get(11)?, started_at:r.get(12)?, transmission_started_at:r.get(13)?, completed_at:r.get(14)? })
+            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, outcome:r.get(5)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(7)?, actual_vendor_cost:actual_vendor_cost_from_row(r,8,9,10)?, failure_code:r.get(11)?, failure_message_redacted:r.get(12)?, started_at:r.get(13)?, transmission_started_at:r.get(14)?, completed_at:r.get(15)? })
+        }).optional()?.ok_or(Error::NotFound)
+    }
+    pub fn get_provider_attempt(&self, provider_attempt_id: &str) -> Result<ProviderAttempt> {
+        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE provider_attempt_id=?1", [provider_attempt_id], |r| {
+            let usage: Option<String> = r.get(6)?;
+            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, outcome:r.get(5)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(7)?, actual_vendor_cost:actual_vendor_cost_from_row(r,8,9,10)?, failure_code:r.get(11)?, failure_message_redacted:r.get(12)?, started_at:r.get(13)?, transmission_started_at:r.get(14)?, completed_at:r.get(15)? })
         }).optional()?.ok_or(Error::NotFound)
     }
     pub fn create_artifact(&self, n: &CreateArtifactParams) -> Result<Artifact> {
@@ -1055,19 +1101,37 @@ impl Repository {
             .map_err(Into::into)
     }
     pub fn create_receipt(&self, n: &CreateReceiptParams) -> Result<Receipt> {
+        n.actual_vendor_cost
+            .validate()
+            .map_err(|_| Error::Invalid("actual vendor cost"))?;
         self.reject_registered_secrets([
             n.receipt_id.as_str(),
             n.execution_id.as_str(),
             n.provider_attempt_id.as_str(),
             n.currency.as_str(),
             n.pricing_catalog_version.as_str(),
+            n.actual_vendor_cost.currency.as_str(),
             n.created_at.as_str(),
             n.settled_at.as_deref().unwrap_or(""),
             n.hubu_settlement_id.as_deref().unwrap_or(""),
         ])?;
-        self.reject_registered_numbers([n.settlement_minor])?;
+        self.reject_registered_numbers([
+            n.settlement_minor,
+            n.actual_vendor_cost.amount,
+            i64::from(n.actual_vendor_cost.scale),
+        ])?;
         if n.settlement_minor < 0 {
             return Err(Error::Invalid("settlement"));
+        }
+        let attempt = self.get_provider_attempt(&n.provider_attempt_id)?;
+        if attempt.execution_id != n.execution_id {
+            return Err(Error::Invalid("receipt attempt relationship"));
+        }
+        if attempt.outcome != "succeeded"
+            || attempt.completed_at.is_none()
+            || (attempt.provider_request_id.is_none() && attempt.provider_operation_id.is_none())
+        {
+            return Err(Error::Invalid("receipt requires a succeeded attempt"));
         }
         let c = self.0.lock().unwrap();
         let auth: (i64, String, String) = c
@@ -1078,46 +1142,46 @@ impl Repository {
             )
             .optional()?
             .ok_or(Error::NotFound)?;
-        let (attempt_execution, attempt_outcome, attempt_completed_at, provider_request_id, provider_operation_id): (
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = c
-            .query_row(
-                "SELECT execution_id,outcome,completed_at,provider_request_id,provider_operation_id FROM provider_attempts WHERE provider_attempt_id=?1",
-                [&n.provider_attempt_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?
-            .ok_or(Error::NotFound)?;
-        if attempt_execution != n.execution_id {
-            return Err(Error::Invalid("receipt attempt relationship"));
-        }
-        if attempt_outcome != "succeeded"
-            || attempt_completed_at.is_none()
-            || (provider_request_id.is_none() && provider_operation_id.is_none())
-        {
-            return Err(Error::Invalid("receipt requires a succeeded attempt"));
-        }
-        let snapshot: PricingSnapshot =
+        let price_model_snapshot: Value =
             serde_json::from_str(&auth.2).map_err(|_| Error::Invalid("pricing snapshot"))?;
+        let snapshot: PricingSnapshot = serde_json::from_value(price_model_snapshot.clone())
+            .map_err(|_| Error::Invalid("pricing snapshot"))?;
         snapshot
             .validate_integrity()
             .map_err(|_| Error::Invalid("pricing snapshot"))?;
         if n.pricing_catalog_version != snapshot.catalog_version {
             return Err(Error::Invalid("pricing catalog version"));
         }
-        if n.settlement_minor > auth.0
-            || n.settlement_minor > snapshot.estimated_amount_minor
+        let usage: NormalizedUsage = serde_json::from_value(
+            attempt
+                .usage
+                .clone()
+                .ok_or(Error::Invalid("receipt requires provider usage"))?,
+        )
+        .map_err(|_| Error::Invalid("provider usage"))?;
+        let expected = snapshot
+            .settle_precise(&usage, attempt.actual_vendor_cost.as_ref(), auth.0)
+            .map_err(|error| match error {
+                crate::provider_contract::ContractError::SettlementOverage => {
+                    Error::OverAuthorization
+                }
+                _ => Error::Invalid("precise settlement"),
+            })?;
+        if expected.budget_amount_minor != n.settlement_minor
+            || expected.actual_vendor_cost != n.actual_vendor_cost
             || !n.currency.eq_ignore_ascii_case(&auth.1)
             || !n.currency.eq_ignore_ascii_case(&snapshot.currency)
         {
             return Err(Error::OverAuthorization);
         }
+        let provider_request_id = attempt
+            .provider_request_id
+            .clone()
+            .or(attempt.provider_operation_id.clone())
+            .ok_or(Error::Invalid("receipt requires provider evidence"))?;
+        let pricing_snapshot_json = auth.2;
         c.execute(
-            "INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,created_at,settled_at,hubu_settlement_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            "INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,settled_at,hubu_settlement_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 n.receipt_id,
                 n.execution_id,
@@ -1125,6 +1189,11 @@ impl Repository {
                 n.settlement_minor,
                 n.currency,
                 n.pricing_catalog_version,
+                n.actual_vendor_cost.amount,
+                n.actual_vendor_cost.scale,
+                n.actual_vendor_cost.currency,
+                provider_request_id,
+                pricing_snapshot_json,
                 n.created_at,
                 n.settled_at,
                 n.hubu_settlement_id
@@ -1137,6 +1206,9 @@ impl Repository {
             settlement_minor: n.settlement_minor,
             currency: n.currency.clone(),
             pricing_catalog_version: n.pricing_catalog_version.clone(),
+            actual_vendor_cost: n.actual_vendor_cost.clone(),
+            provider_request_id,
+            price_model_snapshot,
             created_at: n.created_at.clone(),
             transmission_started_at: None,
             settled_at: n.settled_at.clone(),
@@ -1144,7 +1216,11 @@ impl Repository {
         })
     }
     pub fn get_receipt_for_execution(&self, execution_id: &str) -> Result<Receipt> {
-        self.0.lock().unwrap().query_row("SELECT receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,created_at,transmission_started_at,settled_at,hubu_settlement_id FROM receipts WHERE execution_id=?1",[execution_id],|r| Ok(Receipt { receipt_id:r.get(0)?,execution_id:r.get(1)?,provider_attempt_id:r.get(2)?,settlement_minor:r.get(3)?,currency:r.get(4)?,pricing_catalog_version:r.get(5)?,created_at:r.get(6)?,transmission_started_at:r.get(7)?,settled_at:r.get(8)?,hubu_settlement_id:r.get(9)? })).optional()?.ok_or(Error::NotFound)
+        self.0.lock().unwrap().query_row("SELECT receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,transmission_started_at,settled_at,hubu_settlement_id FROM receipts WHERE execution_id=?1",[execution_id],|r| {
+            let pricing_snapshot_json:String=r.get(10)?;
+            let price_model_snapshot=serde_json::from_str(&pricing_snapshot_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(pricing_snapshot_json.len(),rusqlite::types::Type::Text,Box::new(error)))?;
+            Ok(Receipt { receipt_id:r.get(0)?,execution_id:r.get(1)?,provider_attempt_id:r.get(2)?,settlement_minor:r.get(3)?,currency:r.get(4)?,pricing_catalog_version:r.get(5)?,actual_vendor_cost:actual_vendor_cost_from_row(r,6,7,8)?.ok_or_else(|| rusqlite::Error::InvalidColumnType(6,"actual_vendor_cost_amount".into(),rusqlite::types::Type::Null))?,provider_request_id:r.get(9)?,price_model_snapshot,created_at:r.get(11)?,transmission_started_at:r.get(12)?,settled_at:r.get(13)?,hubu_settlement_id:r.get(14)? })
+        }).optional()?.ok_or(Error::NotFound)
     }
     pub fn begin_settlement_transmission(&self, receipt_id: &str, at: &str) -> Result<()> {
         let changed = self.0.lock().unwrap().execute("UPDATE receipts SET transmission_started_at=?1 WHERE receipt_id=?2 AND transmission_started_at IS NULL AND settled_at IS NULL", params![at,receipt_id])?;
@@ -1190,13 +1266,14 @@ impl Repository {
             "pricing_snapshot": execution.pricing_snapshot,
             "authorization": {"account_id": execution.account_id, "operation_key": execution.operation_key, "spend_auth_token_id": execution.hubu_token_reference.as_str(), "claim_id": execution.hubu_claim_id, "authorized_minor": execution.authorized_minor, "currency": execution.authorization_currency},
             "provider_outcome": attempt.as_ref().map(|a| &a.outcome),
+            "actual_vendor_cost": attempt.as_ref().and_then(|a| a.actual_vendor_cost.as_ref()),
             "usage": attempt.as_ref().and_then(|a| a.usage.as_ref()),
-            "receipt": receipt.as_ref().map(|r| serde_json::json!({"receipt_id":r.receipt_id,"settlement_minor":r.settlement_minor,"currency":r.currency,"transmission_started_at":r.transmission_started_at,"settled_at":r.settled_at,"hubu_settlement_id":r.hubu_settlement_id})),
+            "receipt": receipt.as_ref().map(|r| serde_json::json!({"receipt_id":r.receipt_id,"settlement_minor":r.settlement_minor,"currency":r.currency,"actual_vendor_cost":r.actual_vendor_cost,"provider_request_id":r.provider_request_id,"price_model_snapshot":r.price_model_snapshot,"transmission_started_at":r.transmission_started_at,"settled_at":r.settled_at,"hubu_settlement_id":r.hubu_settlement_id})),
             "artifact_count": artifacts
         });
         self.reject_registered_json([&evidence])?;
         let c = self.0.lock().unwrap();
-        c.execute("INSERT INTO reconciliation_records(execution_id,evidence_json,evidence_schema_version,last_confirmed_step,entered_at,updated_at) VALUES(?1,?2,1,?3,?4,?4) ON CONFLICT(execution_id) DO UPDATE SET evidence_json=excluded.evidence_json,last_confirmed_step=excluded.last_confirmed_step,updated_at=excluded.updated_at", params![execution.execution_id,j(&evidence),last_confirmed_step,at])?;
+        c.execute("INSERT INTO reconciliation_records(execution_id,evidence_json,evidence_schema_version,last_confirmed_step,entered_at,updated_at) VALUES(?1,?2,2,?3,?4,?4) ON CONFLICT(execution_id) DO UPDATE SET evidence_json=excluded.evidence_json,evidence_schema_version=excluded.evidence_schema_version,last_confirmed_step=excluded.last_confirmed_step,updated_at=excluded.updated_at", params![execution.execution_id,j(&evidence),last_confirmed_step,at])?;
         drop(c);
         self.get_reconciliation(&execution.execution_id)
     }
@@ -1365,6 +1442,123 @@ fn migrate_execution_scope_column(c: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     Ok(())
+}
+fn migrate_precise_vendor_cost_columns(c: &Connection) -> rusqlite::Result<()> {
+    fn columns(
+        c: &Connection,
+        table: &str,
+    ) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+        let mut statement = c.prepare(&format!("PRAGMA table_info({table})"))?;
+        let collected = statement
+            .query_map([], |row| row.get(1))?
+            .collect::<rusqlite::Result<_>>();
+        collected
+    }
+
+    let attempt_columns = columns(c, "provider_attempts")?;
+    for (name, definition) in [
+        ("actual_vendor_cost_amount", "INTEGER"),
+        ("actual_vendor_cost_scale", "INTEGER"),
+        ("actual_vendor_cost_currency", "TEXT"),
+    ] {
+        if !attempt_columns.contains(name) {
+            c.execute(
+                &format!("ALTER TABLE provider_attempts ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+    }
+    // v4 stored provider amounts in currency minor units. That legacy value is
+    // exact at decimal scale 2 and remains a valid deterministic backfill.
+    c.execute(
+        "UPDATE provider_attempts SET actual_vendor_cost_amount=provider_amount_minor,actual_vendor_cost_scale=2,actual_vendor_cost_currency=upper(provider_currency) WHERE actual_vendor_cost_amount IS NULL AND provider_amount_minor IS NOT NULL AND provider_currency IS NOT NULL",
+        [],
+    )?;
+
+    let receipt_columns = columns(c, "receipts")?;
+    for (name, definition) in [
+        ("actual_vendor_cost_amount", "INTEGER"),
+        ("actual_vendor_cost_scale", "INTEGER"),
+        ("actual_vendor_cost_currency", "TEXT"),
+        ("provider_request_id", "TEXT"),
+        ("pricing_snapshot_json", "TEXT"),
+    ] {
+        if !receipt_columns.contains(name) {
+            c.execute(
+                &format!("ALTER TABLE receipts ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+    }
+    c.execute(
+        "UPDATE receipts SET actual_vendor_cost_amount=settlement_minor,actual_vendor_cost_scale=2,actual_vendor_cost_currency=upper(currency) WHERE actual_vendor_cost_amount IS NULL",
+        [],
+    )?;
+    // Before precise receipts, Gongbu deliberately used its deterministic
+    // receipt ID as the provider request reference on the Hubu wire. Preserve
+    // that exact value so a lost-response retry still compares equal in Hubu.
+    c.execute(
+        "UPDATE receipts SET provider_request_id=receipt_id WHERE provider_request_id IS NULL",
+        [],
+    )?;
+    // The legacy Hubu wire carried a reduced price-model object rather than the
+    // complete Gongbu pricing snapshot. Reconstruct that exact JSON value for
+    // already-created receipts; new receipts persist the full snapshot when
+    // they are created.
+    c.execute(
+        "UPDATE receipts
+         SET pricing_snapshot_json=(
+             SELECT json_object(
+                 'provider', executions.provider,
+                 'model', executions.model,
+                 'unit_price_cents', json_extract(executions.pricing_snapshot_json, '$.estimated_amount_minor'),
+                 'pricing_unit', 'execution',
+                 'currency', lower(executions.authorization_currency)
+             )
+             FROM executions
+             WHERE executions.execution_id=receipts.execution_id
+         )
+         WHERE pricing_snapshot_json IS NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+fn actual_vendor_cost_from_row(
+    row: &rusqlite::Row<'_>,
+    amount_index: usize,
+    scale_index: usize,
+    currency_index: usize,
+) -> rusqlite::Result<Option<ActualVendorCost>> {
+    let amount: Option<i64> = row.get(amount_index)?;
+    let scale: Option<i64> = row.get(scale_index)?;
+    let currency: Option<String> = row.get(currency_index)?;
+    match (amount, scale, currency) {
+        (None, None, None) => Ok(None),
+        (Some(amount), Some(scale), Some(currency)) => {
+            let scale = u32::try_from(scale).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    scale_index,
+                    rusqlite::types::Type::Integer,
+                    Box::new(error),
+                )
+            })?;
+            ActualVendorCost::new(amount, scale, currency)
+                .map(Some)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        amount_index,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })
+        }
+        _ => Err(rusqlite::Error::InvalidColumnType(
+            amount_index,
+            "actual_vendor_cost".into(),
+            rusqlite::types::Type::Null,
+        )),
+    }
 }
 const ARTIFACT_SELECT: &str = "SELECT a.artifact_id,a.execution_id,a.provider_attempt_id,a.kind,a.storage_backend,a.storage_key,a.media_type,a.size_bytes,a.sha256,a.metadata_json,a.metadata_schema_version,a.created_at FROM artifacts a";
 fn map_artifact(r: &rusqlite::Row) -> rusqlite::Result<Artifact> {
@@ -1720,8 +1914,7 @@ mod tests {
                 completed_at: "2026-08-05T20:02:00Z".into(),
                 usage: json!({"images":1}),
                 usage_schema_version: 1,
-                provider_amount_minor: Some(50),
-                provider_currency: Some("USD".into()),
+                actual_vendor_cost: Some(ActualVendorCost::new(100, 2, "USD").unwrap()),
                 failure_code: None,
                 failure_message_redacted: None,
                 provider_request_id: Some("provider-request".into()),
@@ -1838,6 +2031,8 @@ mod tests {
                 .unwrap(),
             0
         );
+        legacy.execute("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,provider_request_id,outcome,usage_json,usage_schema_version,provider_amount_minor,provider_currency,started_at,transmission_started_at,completed_at) VALUES('legacy-attempt','legacy-reconciliation','example','legacy-request','succeeded','{\"images\":1}',1,7,'usd','2026-08-05T20:00:10Z','2026-08-05T20:00:10Z','2026-08-05T20:00:20Z')", []).unwrap();
+        legacy.execute("INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,created_at) VALUES('legacy-receipt','legacy-reconciliation','legacy-attempt',7,'usd','prices-v2','2026-08-05T20:00:30Z')", []).unwrap();
         drop(legacy);
 
         let repository = Repository::open(&path, Redactor::default()).unwrap();
@@ -1862,6 +2057,31 @@ mod tests {
         );
         assert_eq!(reconciliation.automatic_attempts, 2);
         assert!(reconciliation.automatic_attempts_exhausted);
+        assert_eq!(
+            repository
+                .get_provider_attempt("legacy-attempt")
+                .unwrap()
+                .actual_vendor_cost,
+            Some(ActualVendorCost::new(7, 2, "USD").unwrap())
+        );
+        let legacy_receipt = repository
+            .get_receipt_for_execution("legacy-reconciliation")
+            .unwrap();
+        assert_eq!(
+            legacy_receipt.actual_vendor_cost,
+            ActualVendorCost::new(7, 2, "USD").unwrap()
+        );
+        assert_eq!(legacy_receipt.provider_request_id, "legacy-receipt");
+        assert_eq!(
+            legacy_receipt.price_model_snapshot,
+            json!({
+                "provider": "example",
+                "model": "image-v1",
+                "unit_price_cents": 100,
+                "pricing_unit": "execution",
+                "currency": "usd"
+            })
+        );
         assert!(repository
             .record_operator_action(
                 "legacy-reconciliation",
@@ -1874,6 +2094,10 @@ mod tests {
         drop(repository);
 
         let restarted = Repository::open(&path, Redactor::default()).unwrap();
+        let replay_receipt = restarted
+            .get_receipt_for_execution("legacy-reconciliation")
+            .unwrap();
+        assert_eq!(replay_receipt, legacy_receipt);
         let preserved = restarted
             .get_reconciliation("legacy-reconciliation")
             .unwrap();
@@ -2153,6 +2377,7 @@ mod tests {
             settlement_minor: 100,
             currency: "USD".into(),
             pricing_catalog_version: "prices-v2".into(),
+            actual_vendor_cost: ActualVendorCost::new(100, 2, "USD").unwrap(),
             created_at: "2026-08-05T20:03:00Z".into(),
             settled_at: None,
             hubu_settlement_id: None,
@@ -2173,8 +2398,7 @@ mod tests {
                     completed_at: "2026-08-05T20:02:00Z".into(),
                     usage: json!({"images":1}),
                     usage_schema_version: 1,
-                    provider_amount_minor: Some(50),
-                    provider_currency: Some("USD".into()),
+                    actual_vendor_cost: Some(ActualVendorCost::new(100, 2, "USD").unwrap()),
                     failure_code: None,
                     failure_message_redacted: None,
                     provider_request_id: Some(format!("provider-request-{n}")),
@@ -2245,6 +2469,7 @@ mod tests {
                 settlement_minor: 100,
                 currency: "USD".into(),
                 pricing_catalog_version: "prices-v2".into(),
+                actual_vendor_cost: ActualVendorCost::new(100, 2, "USD").unwrap(),
                 created_at: "2026-08-05T20:03:00Z".into(),
                 settled_at: None,
                 hubu_settlement_id: None,
@@ -2252,6 +2477,8 @@ mod tests {
             .unwrap();
         assert_eq!(receipt.receipt_id, "receipt-model");
         assert_eq!(receipt.settlement_minor, 100);
+        assert_eq!(receipt.provider_request_id, "provider-request");
+        assert_eq!(receipt.price_model_snapshot, execution.pricing_snapshot);
     }
     #[test]
     fn receipt_requires_a_successfully_completed_attempt() {
@@ -2265,6 +2492,7 @@ mod tests {
             settlement_minor: 100,
             currency: "USD".into(),
             pricing_catalog_version: "prices-v2".into(),
+            actual_vendor_cost: ActualVendorCost::new(100, 2, "USD").unwrap(),
             created_at: "2026-08-05T20:03:00Z".into(),
             settled_at: None,
             hubu_settlement_id: None,
@@ -2281,8 +2509,7 @@ mod tests {
                 completed_at: "2026-08-05T20:02:00Z".into(),
                 usage: json!({}),
                 usage_schema_version: 1,
-                provider_amount_minor: None,
-                provider_currency: None,
+                actual_vendor_cost: None,
                 failure_code: Some("provider_error".into()),
                 failure_message_redacted: Some("provider request failed".into()),
                 provider_request_id: None,
@@ -2313,6 +2540,7 @@ mod tests {
             settlement_minor: 101,
             currency: "USD".into(),
             pricing_catalog_version: "prices-v2".into(),
+            actual_vendor_cost: ActualVendorCost::new(100, 2, "USD").unwrap(),
             created_at: "2026-08-05T20:02:00Z".into(),
             settled_at: None,
             hubu_settlement_id: None,
@@ -2359,6 +2587,7 @@ mod tests {
             settlement_minor: 1,
             currency: "USD".into(),
             pricing_catalog_version: "v1".into(),
+            actual_vendor_cost: ActualVendorCost::new(1, 2, "USD").unwrap(),
             created_at: "2026-08-05T20:03:00Z".into(),
             settled_at: None,
             hubu_settlement_id: None,
@@ -2423,8 +2652,7 @@ mod tests {
             completed_at: "now".into(),
             usage: json!({}),
             usage_schema_version: 1,
-            provider_amount_minor: None,
-            provider_currency: None,
+            actual_vendor_cost: None,
             failure_code: None,
             failure_message_redacted: None,
             provider_request_id: Some(CANARY.into()),
@@ -2441,8 +2669,7 @@ mod tests {
                 completed_at: "now".into(),
                 usage: json!({}),
                 usage_schema_version: 1,
-                provider_amount_minor: None,
-                provider_currency: None,
+                actual_vendor_cost: None,
                 failure_code: Some("provider_error".into()),
                 failure_message_redacted: Some(format!("nested SDK error: api_key={CANARY}")),
                 provider_request_id: None,

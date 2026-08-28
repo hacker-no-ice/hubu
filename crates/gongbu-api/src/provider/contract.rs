@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const PRICING_SNAPSHOT_SCHEMA_VERSION: i64 = 2;
+pub const MAX_VENDOR_COST_SCALE: u32 = 18;
 const SUPPORTED_CURRENCIES: &[&str] = &["USD"];
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -35,6 +36,140 @@ pub enum ContractError {
 }
 
 pub type Result<T, E = ContractError> = std::result::Result<T, E>;
+
+/// An exact external-vendor charge in decimal major-currency units.
+///
+/// `amount / 10^scale` is the exact value reported by the provider (or derived
+/// from the frozen catalog). Budget accounting is deliberately a separate,
+/// conservative conversion so a sub-cent charge is never lost.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ActualVendorCost {
+    pub amount: i64,
+    pub scale: u32,
+    pub currency: String,
+}
+
+impl ActualVendorCost {
+    pub fn new(amount: i64, scale: u32, currency: impl AsRef<str>) -> Result<Self> {
+        let currency = currency.as_ref().trim().to_ascii_uppercase();
+        let value = Self {
+            amount,
+            scale,
+            currency,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.amount < 0
+            || self.scale > MAX_VENDOR_COST_SCALE
+            || self.currency.len() != 3
+            || !self.currency.bytes().all(|byte| byte.is_ascii_uppercase())
+        {
+            return Err(ContractError::IndeterminableCost);
+        }
+        Ok(())
+    }
+
+    /// Parse a JSON decimal lexeme without converting through binary floating point.
+    pub fn from_decimal_major_units(raw: &str, currency: &str) -> Result<Self> {
+        let (significand, exponent) = match raw.split_once(['e', 'E']) {
+            Some((significand, exponent))
+                if !significand.is_empty()
+                    && !exponent.is_empty()
+                    && !exponent.contains(['e', 'E']) =>
+            {
+                let exponent = exponent
+                    .parse::<i32>()
+                    .map_err(|_| ContractError::IndeterminableCost)?;
+                (significand, exponent)
+            }
+            Some(_) => return Err(ContractError::IndeterminableCost),
+            None => (raw, 0),
+        };
+        if significand.is_empty() || significand.starts_with(['-', '+']) {
+            return Err(ContractError::IndeterminableCost);
+        }
+        let (whole, fraction) = match significand.split_once('.') {
+            Some((whole, fraction))
+                if !whole.is_empty() && !fraction.is_empty() && !fraction.contains('.') =>
+            {
+                (whole, fraction)
+            }
+            Some(_) => return Err(ContractError::IndeterminableCost),
+            None => (significand, ""),
+        };
+        if !whole.bytes().all(|byte| byte.is_ascii_digit())
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(ContractError::IndeterminableCost);
+        }
+        let digits = format!("{whole}{fraction}");
+        let coefficient = digits
+            .parse::<i128>()
+            .map_err(|_| ContractError::IndeterminableCost)?;
+        let decimal_places = i32::try_from(fraction.len())
+            .map_err(|_| ContractError::IndeterminableCost)?
+            .checked_sub(exponent)
+            .ok_or(ContractError::IndeterminableCost)?;
+        let (amount, scale) = if decimal_places <= 0 {
+            let power =
+                u32::try_from(-decimal_places).map_err(|_| ContractError::IndeterminableCost)?;
+            let amount = coefficient
+                .checked_mul(checked_pow10(power)?)
+                .ok_or(ContractError::IndeterminableCost)?;
+            (amount, 0)
+        } else {
+            let scale =
+                u32::try_from(decimal_places).map_err(|_| ContractError::IndeterminableCost)?;
+            if scale > MAX_VENDOR_COST_SCALE {
+                return Err(ContractError::IndeterminableCost);
+            }
+            (coefficient, scale)
+        };
+        Self::new(
+            i64::try_from(amount).map_err(|_| ContractError::IndeterminableCost)?,
+            scale,
+            currency,
+        )
+    }
+
+    /// Convert to budget minor units by ceiling once. This intentionally never
+    /// understates a positive external charge.
+    pub fn to_budget_minor_units(&self, budget_currency: &str) -> Result<i64> {
+        self.validate()?;
+        if !self.currency.eq_ignore_ascii_case(budget_currency) {
+            return Err(ContractError::IndeterminableCost);
+        }
+        let amount = i128::from(self.amount);
+        let minor = if self.scale > 2 {
+            let divisor = checked_pow10(self.scale - 2)?;
+            amount
+                .checked_add(divisor - 1)
+                .ok_or(ContractError::IndeterminableCost)?
+                / divisor
+        } else {
+            amount
+                .checked_mul(checked_pow10(2 - self.scale)?)
+                .ok_or(ContractError::IndeterminableCost)?
+        };
+        i64::try_from(minor).map_err(|_| ContractError::IndeterminableCost)
+    }
+}
+
+fn checked_pow10(power: u32) -> Result<i128> {
+    10_i128
+        .checked_pow(power)
+        .ok_or(ContractError::IndeterminableCost)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreciseSettlement {
+    pub actual_vendor_cost: ActualVendorCost,
+    pub budget_amount_minor: i64,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -552,19 +687,40 @@ impl Rational {
         )
         .map_err(|_| ContractError::IndeterminableCost)
     }
-    // Settlement rounds the aggregate exact amount once, half up to currency minor units.
-    fn round_i64(self) -> Result<i64> {
-        i64::try_from(
-            self.n
-                .checked_mul(2)
-                .and_then(|n| n.checked_add(self.d))
-                .ok_or(ContractError::IndeterminableCost)?
-                / self
-                    .d
-                    .checked_mul(2)
-                    .ok_or(ContractError::IndeterminableCost)?,
+    fn to_actual_vendor_cost(self, currency: &str) -> Result<ActualVendorCost> {
+        let major_denominator = self
+            .d
+            .checked_mul(100)
+            .ok_or(ContractError::IndeterminableCost)?;
+        let divisor = gcd(self.n, major_denominator);
+        let numerator = self.n / divisor;
+        let mut denominator = major_denominator / divisor;
+        let mut twos = 0_u32;
+        let mut fives = 0_u32;
+        while denominator % 2 == 0 {
+            denominator /= 2;
+            twos += 1;
+        }
+        while denominator % 5 == 0 {
+            denominator /= 5;
+            fives += 1;
+        }
+        if denominator != 1 {
+            return Err(ContractError::IndeterminableCost);
+        }
+        let scale = twos.max(fives);
+        if scale > MAX_VENDOR_COST_SCALE {
+            return Err(ContractError::IndeterminableCost);
+        }
+        let decimal_denominator = checked_pow10(scale)?;
+        let amount = numerator
+            .checked_mul(decimal_denominator / (major_denominator / divisor))
+            .ok_or(ContractError::IndeterminableCost)?;
+        ActualVendorCost::new(
+            i64::try_from(amount).map_err(|_| ContractError::IndeterminableCost)?,
+            scale,
+            currency,
         )
-        .map_err(|_| ContractError::IndeterminableCost)
     }
 }
 fn gcd(mut a: i128, mut b: i128) -> i128 {
@@ -642,7 +798,12 @@ impl PricingSnapshot {
         }
         Ok(())
     }
-    pub fn settle(&self, usage: &NormalizedUsage, authorized_minor: i64) -> Result<i64> {
+    pub fn settle_precise(
+        &self,
+        usage: &NormalizedUsage,
+        provider_cost: Option<&ActualVendorCost>,
+        authorized_minor: i64,
+    ) -> Result<PreciseSettlement> {
         self.validate_integrity()?;
         let mut exact = Rational::zero();
         for component in self.effective_components()? {
@@ -657,11 +818,30 @@ impl PricingSnapshot {
                     .mul(quantity)?,
             )?;
         }
-        let amount = exact.round_i64()?;
+        let actual_vendor_cost = match provider_cost {
+            Some(cost) => {
+                cost.validate()?;
+                if cost.currency != self.currency {
+                    return Err(ContractError::IndeterminableCost);
+                }
+                cost.clone()
+            }
+            None => exact.to_actual_vendor_cost(&self.currency)?,
+        };
+        let amount = actual_vendor_cost.to_budget_minor_units(&self.currency)?;
         if amount > self.estimated_amount_minor || amount > authorized_minor {
             return Err(ContractError::SettlementOverage);
         }
-        Ok(amount)
+        Ok(PreciseSettlement {
+            actual_vendor_cost,
+            budget_amount_minor: amount,
+        })
+    }
+
+    pub fn settle(&self, usage: &NormalizedUsage, authorized_minor: i64) -> Result<i64> {
+        Ok(self
+            .settle_precise(usage, None, authorized_minor)?
+            .budget_amount_minor)
     }
 
     fn effective_components(&self) -> Result<Vec<FrozenPriceComponent>> {
@@ -716,8 +896,7 @@ impl NormalizedUsage {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AdapterOutcome {
     pub usage: Option<NormalizedUsage>,
-    pub provider_amount_minor: Option<i64>,
-    pub provider_currency: Option<String>,
+    pub actual_vendor_cost: Option<ActualVendorCost>,
     pub provider_request_id: Option<String>,
     pub provider_operation_id: Option<String>,
     pub artifacts: Vec<NormalizedArtifact>,
@@ -729,8 +908,10 @@ pub struct NormalizedArtifact {
 }
 impl AdapterOutcome {
     pub fn validate(&self) -> Result<()> {
-        if self.provider_amount_minor.is_some() != self.provider_currency.is_some()
-            || self.provider_amount_minor.is_some_and(|amount| amount < 0)
+        if self
+            .actual_vendor_cost
+            .as_ref()
+            .is_some_and(|cost| cost.validate().is_err())
         {
             return Err(ContractError::IndeterminableCost);
         }
@@ -865,6 +1046,64 @@ mod tests {
             max_output_tokens: None,
             image_size: None,
         }
+    }
+    #[test]
+    fn exact_decimal_cost_uses_conservative_minor_unit_ceiling() {
+        let cases = [(1, 1), (10, 1), (11, 2)];
+        for (amount, expected_minor) in cases {
+            let cost = ActualVendorCost::new(amount, 3, "USD").unwrap();
+            assert_eq!(cost.to_budget_minor_units("USD").unwrap(), expected_minor);
+        }
+        assert_eq!(
+            ActualVendorCost::new(1, 4, "USD")
+                .unwrap()
+                .to_budget_minor_units("USD")
+                .unwrap(),
+            1,
+            "a charge below half a cent must still consume one budget cent"
+        );
+    }
+
+    #[test]
+    fn exact_decimal_parser_preserves_scale_and_rejects_float_style_loss() {
+        assert_eq!(
+            ActualVendorCost::from_decimal_major_units("0.0100", "usd").unwrap(),
+            ActualVendorCost::new(100, 4, "USD").unwrap()
+        );
+        assert_eq!(
+            ActualVendorCost::from_decimal_major_units("1e-4", "USD").unwrap(),
+            ActualVendorCost::new(1, 4, "USD").unwrap()
+        );
+        assert!(ActualVendorCost::from_decimal_major_units("-0.01", "USD").is_err());
+        assert!(
+            ActualVendorCost::from_decimal_major_units("0.0000000000000000001", "USD").is_err()
+        );
+    }
+
+    #[test]
+    fn provider_exact_cost_is_authoritative_at_and_over_the_maximum() {
+        let snapshot = PricingCatalog::from_json(CATALOG.as_bytes())
+            .unwrap()
+            .snapshot(&request())
+            .unwrap();
+        let usage = NormalizedUsage {
+            images: Some(2),
+            ..Default::default()
+        };
+        let exact_max = ActualVendorCost::new(250, 2, "USD").unwrap();
+        let settlement = snapshot
+            .settle_precise(&usage, Some(&exact_max), 250)
+            .unwrap();
+        assert_eq!(settlement.actual_vendor_cost, exact_max);
+        assert_eq!(settlement.budget_amount_minor, 250);
+        assert_eq!(
+            snapshot.settle_precise(
+                &usage,
+                Some(&ActualVendorCost::new(25001, 4, "USD").unwrap()),
+                250
+            ),
+            Err(ContractError::SettlementOverage)
+        );
     }
     #[test]
     fn canonical_digest_is_format_independent_and_catalog_is_frozen() {
@@ -1168,8 +1407,7 @@ mod tests {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(AdapterOutcome {
                     usage: None,
-                    provider_amount_minor: None,
-                    provider_currency: None,
+                    actual_vendor_cost: None,
                     provider_request_id: None,
                     provider_operation_id: None,
                     artifacts: Vec::new(),

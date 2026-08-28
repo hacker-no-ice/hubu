@@ -150,8 +150,9 @@ impl ProviderAdapter for LocalFixtureAdapter {
                 images: Some(1),
                 ..Default::default()
             }),
-            provider_amount_minor: Some(1),
-            provider_currency: Some("USD".into()),
+            actual_vendor_cost: Some(
+                crate::provider_contract::ActualVendorCost::new(1, 2, "USD").unwrap(),
+            ),
             provider_request_id: Some(format!("local-fixture-request-{provider_request_id}")),
             provider_operation_id: None,
             artifacts: vec![NormalizedArtifact {

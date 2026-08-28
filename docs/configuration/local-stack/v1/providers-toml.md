@@ -261,7 +261,13 @@ components = [
 ]
 ```
 
-Gongbu computes an exact rational estimate and rounds conservatively when producing an integer authorization amount. Verify both the provider's unit and whether quoted prices include every billable component.
+Gongbu computes an exact rational estimate and rounds conservatively when
+producing an integer authorization amount. At settlement it preserves the final
+exact provider cost as an integer amount, decimal scale, and currency together
+with this complete frozen pricing snapshot. Hubu converts that final exact cost
+to budget cents once with checked ceiling, so it never understates a positive
+fractional-cent charge. Verify both the provider's unit and whether quoted
+prices include every billable component.
 
 ## Matching and ambiguity rules
 

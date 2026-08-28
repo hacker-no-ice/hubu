@@ -6,9 +6,9 @@
 
 use super::{
     contract::{
-        canonical_image_media_type, AdapterCapabilities, AdapterOutcome, ContractError,
-        NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter, ProviderFailure,
-        ProviderPhase, Result, RetryPolicy,
+        canonical_image_media_type, ActualVendorCost, AdapterCapabilities, AdapterOutcome,
+        ContractError, NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter,
+        ProviderFailure, ProviderPhase, Result, RetryPolicy,
     },
     http_kernel::{
         provider_request_id, read_bounded, shared_client, validate_https_origin,
@@ -421,21 +421,37 @@ impl<T: IdeogramTransport> ProviderAdapter for IdeogramImageAdapter<T> {
         }
         let media_type = canonical_image_media_type(None, &bytes)
             .map_err(|_| with_evidence("artifact_policy_failure", &request_id, &operation_id))?;
+        let actual_vendor_cost = match (
+            response
+                .body
+                .pointer("/usage/cost_minor")
+                .and_then(Value::as_i64),
+            response
+                .body
+                .pointer("/usage/currency")
+                .and_then(Value::as_str),
+        ) {
+            (None, None) => None,
+            (Some(amount), Some(currency)) => {
+                Some(ActualVendorCost::new(amount, 2, currency).map_err(|_| {
+                    with_evidence("invalid_provider_cost", &request_id, &operation_id)
+                })?)
+            }
+            _ => {
+                return Err(with_evidence(
+                    "invalid_provider_cost",
+                    &request_id,
+                    &operation_id,
+                ));
+            }
+        };
         Ok(AdapterOutcome {
             usage: Some(NormalizedUsage {
                 images: Some(1),
                 input_tokens: None,
                 output_tokens: None,
             }),
-            provider_amount_minor: response
-                .body
-                .pointer("/usage/cost_minor")
-                .and_then(Value::as_i64),
-            provider_currency: response
-                .body
-                .pointer("/usage/currency")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            actual_vendor_cost,
             provider_request_id: request_id,
             provider_operation_id: operation_id,
             artifacts: vec![NormalizedArtifact {
@@ -705,7 +721,7 @@ mod tests {
             Some("generation-1")
         );
         assert_eq!(outcome.usage.unwrap().images, Some(1));
-        assert_eq!(outcome.provider_amount_minor, None);
+        assert_eq!(outcome.actual_vendor_cost, None);
         assert_eq!(outcome.artifacts[0].bytes, png());
         assert_eq!(*calls.lock().unwrap(), 1);
     }

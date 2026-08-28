@@ -301,23 +301,21 @@ impl HubuActivities for ProductionHubuActivities {
         receipt_id: &str,
         amount_minor: i64,
     ) -> Result<String, ActivityError> {
-        let snapshot: crate::provider_contract::PricingSnapshot =
-            serde_json::from_value(execution.pricing_snapshot.clone())
-                .map_err(|_| ActivityError::Proven("pricing_snapshot_invalid".into()))?;
+        let receipt = self
+            .repository
+            .get_receipt_for_execution(&execution.execution_id)
+            .map_err(|_| ActivityError::Proven("gongbu_receipt_missing".into()))?;
+        if receipt.receipt_id != receipt_id || receipt.settlement_minor != amount_minor {
+            return Err(ActivityError::Proven("gongbu_receipt_mismatch".into()));
+        }
         self.client
             .settle(&ExecutorSpendFinalizationRequest {
                 agent_id: self.agent_id_for(execution)?,
                 operation_key: execution.operation_key.clone(),
                 receipt: Some(ProviderReceipt {
-                    actual_vendor_cost_cents: amount_minor,
-                    provider_request_id: receipt_id.into(),
-                    price_model_snapshot: PriceModelSnapshot {
-                        provider: execution.provider.clone(),
-                        model: execution.model.clone(),
-                        unit_price_cents: snapshot.estimated_amount_minor,
-                        pricing_unit: "execution".into(),
-                        currency: execution.authorization_currency.to_ascii_lowercase(),
-                    },
+                    actual_vendor_cost: receipt.actual_vendor_cost,
+                    provider_request_id: receipt.provider_request_id,
+                    price_model_snapshot: receipt.price_model_snapshot,
                     artifact_reference: format!("gongbu://execution/{}", execution.execution_id),
                 }),
             })
@@ -473,19 +471,10 @@ pub struct ExecutorSpendFinalizationRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderReceipt {
-    pub actual_vendor_cost_cents: i64,
+    pub actual_vendor_cost: crate::provider_contract::ActualVendorCost,
     pub provider_request_id: String,
-    pub price_model_snapshot: PriceModelSnapshot,
+    pub price_model_snapshot: serde_json::Value,
     pub artifact_reference: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PriceModelSnapshot {
-    pub provider: String,
-    pub model: String,
-    pub unit_price_cents: i64,
-    pub pricing_unit: String,
-    pub currency: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -604,6 +593,33 @@ mod tests {
     }
 
     #[test]
+    fn settlement_wire_preserves_exact_cost_and_complete_frozen_snapshot() {
+        let frozen = execution_params().pricing_snapshot;
+        let request = ExecutorSpendFinalizationRequest {
+            agent_id: "agent-1".into(),
+            operation_key: "operation-1".into(),
+            receipt: Some(ProviderReceipt {
+                actual_vendor_cost: crate::provider_contract::ActualVendorCost::new(1, 4, "USD")
+                    .unwrap(),
+                provider_request_id: "provider-request-1".into(),
+                price_model_snapshot: frozen.clone(),
+                artifact_reference: "gongbu://execution/execution-1".into(),
+            }),
+        };
+        let wire = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            wire["receipt"]["actual_vendor_cost"],
+            json!({"amount":1,"scale":4,"currency":"USD"})
+        );
+        assert!(wire["receipt"].get("actual_vendor_cost_cents").is_none());
+        assert_eq!(wire["receipt"]["price_model_snapshot"], frozen);
+        assert_eq!(
+            wire["receipt"]["price_model_snapshot"]["components"][0]["quantity"],
+            1
+        );
+    }
+
+    #[test]
     fn resolver_returns_authorization_without_a_configured_agent_binding() {
         let (client, _) = fake_hubu(vec![Some(json!({
             "operation_key":"op-1",
@@ -659,6 +675,96 @@ mod tests {
     }
 
     #[test]
+    fn migrated_lost_response_retries_the_exact_legacy_receipt_payload() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("legacy-lost-response.sqlite3");
+        let legacy = rusqlite::Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(include_str!(
+                "../../../../fixtures/gongbu-pre-authorization-snapshot.sql"
+            ))
+            .unwrap();
+        legacy
+            .execute(
+                "UPDATE executions SET hubu_claim_id='legacy-claim' WHERE execution_id='legacy-reconciliation'",
+                [],
+            )
+            .unwrap();
+        legacy.execute("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,provider_request_id,outcome,usage_json,usage_schema_version,provider_amount_minor,provider_currency,started_at,transmission_started_at,completed_at) VALUES('legacy-attempt','legacy-reconciliation','example','provider-before-upgrade','succeeded','{\"images\":1}',1,7,'usd','2026-08-05T20:00:10Z','2026-08-05T20:00:10Z','2026-08-05T20:00:20Z')", []).unwrap();
+        legacy.execute("INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,created_at,transmission_started_at) VALUES('legacy-receipt','legacy-reconciliation','legacy-attempt',7,'usd','prices-v2','2026-08-05T20:00:30Z','2026-08-05T20:00:31Z')", []).unwrap();
+        drop(legacy);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut inspection, _) = listener.accept().unwrap();
+            let mut raw = String::new();
+            inspection.read_to_string(&mut raw).unwrap();
+            assert!(raw.starts_with("GET /spend/executor/claim?claim_id=legacy-claim "));
+            let claim = json!({
+                "operation_key":"legacy-operation","claim_id":"legacy-claim",
+                "lease_profile":"default","status":"settled",
+                "claimed_at":"2026-08-05T20:00:00Z",
+                "claim_expires_at":"2099-01-01T00:00:00Z",
+                "finalized_at":"2026-08-05T20:00:31Z",
+                "settlement_id":"legacy-settlement","reconciliation_required":false,
+                "spend":{
+                    "operation_key":"legacy-operation","reason":"legacy execution",
+                    "spend_auth_token_id":"legacy-token","decision_id":"legacy-decision",
+                    "account_id":"account-a","agent_id":"legacy-agent","amount_cents":100,
+                    "currency":"USD","merchant":null,"execution_scope":null,"task_id":null,
+                    "lease_profile":"default","status":"settled",
+                    "expires_at":"2099-01-01T00:00:00Z",
+                    "budget_hold":{"hold_id":"legacy-hold","budget_id":"legacy-budget",
+                        "status":"settled","amount_cents":100,"consumed_amount_cents":7,
+                        "frozen_amount_cents":0,"remaining_amount_cents":93}
+                }
+            })
+            .to_string();
+            write!(
+                inspection,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                claim.len(),
+                claim
+            )
+            .unwrap();
+            drop(inspection);
+
+            let (mut settlement, _) = listener.accept().unwrap();
+            let mut raw = String::new();
+            settlement.read_to_string(&mut raw).unwrap();
+            assert!(raw.starts_with("POST /spend/executor/settle "));
+            serde_json::from_str::<serde_json::Value>(raw.split_once("\r\n\r\n").unwrap().1)
+                .unwrap()
+        });
+
+        let repository =
+            crate::execution::Repository::open(&path, crate::redaction::Redactor::default())
+                .unwrap();
+        let execution = repository.get_execution("legacy-reconciliation").unwrap();
+        let activities =
+            ProductionHubuActivities::new(HubuClient::new(format!("http://{address}")), repository);
+        activities
+            .settle(&execution, "legacy-receipt", 7)
+            .expect_err("the fixture drops the retried settlement response");
+        let wire = server.join().unwrap();
+        assert_eq!(wire["agent_id"], "legacy-agent");
+        assert_eq!(wire["operation_key"], "legacy-operation");
+        assert_eq!(
+            wire["receipt"],
+            json!({
+                "actual_vendor_cost":{"amount":7,"scale":2,"currency":"USD"},
+                "provider_request_id":"legacy-receipt",
+                "price_model_snapshot":{
+                    "provider":"example","model":"image-v1","unit_price_cents":100,
+                    "pricing_unit":"execution","currency":"usd"
+                },
+                "artifact_reference":"gongbu://execution/legacy-reconciliation"
+            })
+        );
+    }
+
+    #[test]
     fn legacy_finalization_agent_uses_immutable_claim_inspection_without_resolve() {
         let claim = json!({
             "operation_key":"operation-1","claim_id":"claim-1","lease_profile":"default",
@@ -704,15 +810,16 @@ mod tests {
                 agent_id: "agt_example".to_string(),
                 operation_key: "platform:op-1".to_string(),
                 receipt: Some(ProviderReceipt {
-                    actual_vendor_cost_cents: 500,
+                    actual_vendor_cost:
+                        crate::provider_contract::ActualVendorCost::new(500, 2, "USD").unwrap(),
                     provider_request_id: "provider-1".to_string(),
-                    price_model_snapshot: PriceModelSnapshot {
-                        provider: "example".to_string(),
-                        model: "image-v1".to_string(),
-                        unit_price_cents: 500,
-                        pricing_unit: "image".to_string(),
-                        currency: "usd".to_string(),
-                    },
+                    price_model_snapshot: json!({
+                        "schema_version":2,"provider":"example","model":"image-v1",
+                        "catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "b".repeat(64)),
+                        "pricing_rule_id":"image","components":[{"unit":"image","rate_numerator_minor":500,"rate_denominator":1,"quantity":1}],
+                        "exact_estimate_numerator":"500","exact_estimate_denominator":"1",
+                        "estimated_amount_minor":500,"currency":"USD"
+                    }),
                     artifact_reference: "artifact://image-1".to_string(),
                 }),
             })

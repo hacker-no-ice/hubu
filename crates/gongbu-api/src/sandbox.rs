@@ -1488,8 +1488,7 @@ impl DeterministicProvider {
                 images: Some(1),
                 ..Default::default()
             },
-            provider_amount_minor: None,
-            provider_currency: None,
+            actual_vendor_cost: None,
             artifacts: vec![ProviderArtifact {
                 media_type: "image/png".into(),
                 bytes: fixture_png(),

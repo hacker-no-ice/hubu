@@ -1950,7 +1950,17 @@ fn print_spend_submission(
 }
 
 fn format_major_amount(amount_cents: i64) -> String {
-    format!("{}.{:02}", amount_cents / 100, amount_cents % 100)
+    format_cents(amount_cents, "")
+}
+
+fn format_cents(amount_cents: i64, unit_prefix: &str) -> String {
+    let sign = if amount_cents < 0 { "-" } else { "" };
+    let magnitude = amount_cents.unsigned_abs();
+    format!(
+        "{sign}{unit_prefix}{}.{:02}",
+        magnitude / 100,
+        magnitude % 100
+    )
 }
 
 fn spend_reconcile(base_url: &CliContext, args: Vec<String>) -> Result<()> {
@@ -2001,29 +2011,55 @@ fn spend_reconcile_resolve(
     let provider_reference = take_required(&mut args, "--provider-reference")?;
     let evidence = take_required(&mut args, "--evidence")?;
     let receipt = if vendor_billed {
-        let actual_vendor_cost_cents = take_required(&mut args, "--actual-vendor-cost-cents")?
-            .parse::<i64>()
-            .context("--actual-vendor-cost-cents must be an integer")?;
         let provider_request_id = take_required(&mut args, "--provider-request-id")?;
-        let provider = take_required(&mut args, "--provider")?;
-        let model = take_required(&mut args, "--model")?;
-        let unit_price_cents = take_required(&mut args, "--unit-price-cents")?
-            .parse::<i64>()
-            .context("--unit-price-cents must be an integer")?;
-        let pricing_unit = take_required(&mut args, "--pricing-unit")?;
         let artifact_reference = take_required(&mut args, "--artifact-reference")?;
-        Some(json!({
-            "actual_vendor_cost_cents": actual_vendor_cost_cents,
-            "provider_request_id": provider_request_id,
-            "price_model_snapshot": {
-                "provider": provider,
-                "model": model,
-                "unit_price_cents": unit_price_cents,
-                "pricing_unit": pricing_unit,
-                "currency": "usd",
-            },
-            "artifact_reference": artifact_reference,
-        }))
+        if let Some(amount) = take_value(&mut args, "--actual-vendor-cost-amount") {
+            let amount = amount
+                .parse::<i64>()
+                .context("--actual-vendor-cost-amount must be an integer")?;
+            let scale = take_required(&mut args, "--actual-vendor-cost-scale")?
+                .parse::<u32>()
+                .context("--actual-vendor-cost-scale must be a non-negative integer")?;
+            let currency = take_value(&mut args, "--currency").unwrap_or_else(|| "usd".to_string());
+            let price_model_snapshot: Value =
+                serde_json::from_str(&take_required(&mut args, "--price-model-snapshot-json")?)
+                    .context("--price-model-snapshot-json must be valid JSON")?;
+            if !price_model_snapshot.is_object() {
+                bail!("--price-model-snapshot-json must contain a JSON object");
+            }
+            Some(json!({
+                "actual_vendor_cost": {
+                    "amount": amount,
+                    "scale": scale,
+                    "currency": currency.to_ascii_lowercase(),
+                },
+                "provider_request_id": provider_request_id,
+                "price_model_snapshot": price_model_snapshot,
+                "artifact_reference": artifact_reference,
+            }))
+        } else {
+            let actual_vendor_cost_cents = take_required(&mut args, "--actual-vendor-cost-cents")?
+                .parse::<i64>()
+                .context("--actual-vendor-cost-cents must be an integer")?;
+            let provider = take_required(&mut args, "--provider")?;
+            let model = take_required(&mut args, "--model")?;
+            let unit_price_cents = take_required(&mut args, "--unit-price-cents")?
+                .parse::<i64>()
+                .context("--unit-price-cents must be an integer")?;
+            let pricing_unit = take_required(&mut args, "--pricing-unit")?;
+            Some(json!({
+                "actual_vendor_cost_cents": actual_vendor_cost_cents,
+                "provider_request_id": provider_request_id,
+                "price_model_snapshot": {
+                    "provider": provider,
+                    "model": model,
+                    "unit_price_cents": unit_price_cents,
+                    "pricing_unit": pricing_unit,
+                    "currency": "usd",
+                },
+                "artifact_reference": artifact_reference,
+            }))
+        }
     } else {
         None
     };
@@ -2764,7 +2800,7 @@ fn money_at(value: &Value, key: &str) -> Result<String> {
         .get(key)
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow!("server response missing `{key}`"))?;
-    Ok(format!("${}.{:02}", cents / 100, cents.abs() % 100))
+    Ok(format_cents(cents, "$"))
 }
 
 fn amount_to_cents(value: &str) -> Result<i64> {
@@ -3183,7 +3219,7 @@ Usage:
   hubu spend approval deny --approval-request-id ID
   hubu spend claim --claim-id ID
   hubu spend reconcile list
-  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-cents CENTS --provider-request-id ID --provider NAME --model NAME --unit-price-cents CENTS --pricing-unit UNIT --artifact-reference REF
+  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-amount INTEGER --actual-vendor-cost-scale SCALE [--currency USD] --price-model-snapshot-json JSON --provider-request-id ID --artifact-reference REF
   hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
 
 Note:
@@ -3237,10 +3273,11 @@ fn print_spend_reconcile_help() {
 
 Usage:
   hubu spend reconcile list
+  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-amount INTEGER --actual-vendor-cost-scale SCALE [--currency USD] --price-model-snapshot-json JSON --provider-request-id ID --artifact-reference REF
   hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-cents CENTS --provider-request-id ID --provider NAME --model NAME --unit-price-cents CENTS --pricing-unit UNIT --artifact-reference REF
   hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
 
-The provider reference and evidence are stored with the atomic settlement or release. A billed resolution also records the actual vendor cost, provider request id, price/model snapshot, and artifact reference, then releases unused authorization. Currency is usd in this protocol version. Do not include vendor credentials or sensitive payloads."
+The provider reference and evidence are stored with the atomic settlement or release. A billed resolution also records the exact integer vendor-cost coefficient, decimal scale, ISO currency, full frozen pricing snapshot, provider request id, and artifact reference. Hubu conservatively rounds budget consumption up to cents; a human-confirmed overrun is recorded rather than discarded. The cents form remains available for v4.3 receipt compatibility. Do not include vendor credentials or sensitive payloads."
     );
 }
 
@@ -3472,6 +3509,31 @@ mod tests {
     fn decimal_major_unit_amounts_distinguish_five_from_five_cents() {
         assert_eq!(amount_to_cents("5").unwrap(), 500);
         assert_eq!(amount_to_cents("0.05").unwrap(), 5);
+    }
+
+    #[test]
+    fn cents_formatting_preserves_negative_sign_and_i64_boundaries() {
+        assert_eq!(format_major_amount(0), "0.00");
+        assert_eq!(format_major_amount(-1), "-0.01");
+        assert_eq!(format_major_amount(i64::MIN), "-92233720368547758.08");
+        assert_eq!(format_major_amount(i64::MAX), "92233720368547758.07");
+
+        assert_eq!(
+            money_at(
+                &json!({ "remaining_amount_cents": -1 }),
+                "remaining_amount_cents"
+            )
+            .unwrap(),
+            "-$0.01"
+        );
+        assert_eq!(
+            money_at(
+                &json!({ "remaining_amount_cents": i64::MIN }),
+                "remaining_amount_cents"
+            )
+            .unwrap(),
+            "-$92233720368547758.08"
+        );
     }
 
     #[test]

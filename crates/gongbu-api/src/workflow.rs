@@ -7,7 +7,7 @@ use crate::{
         AttemptResult, CreateReceiptParams, Error as PersistenceError, Execution, ExecutionUpdate,
         Repository, StagedProviderArtifact,
     },
-    provider_contract::{NormalizedUsage, PricingSnapshot},
+    provider_contract::{ActualVendorCost, ContractError, NormalizedUsage, PricingSnapshot},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::to_value;
@@ -23,9 +23,9 @@ pub struct ProviderSuccess {
     pub request_id: Option<String>,
     pub operation_id: Option<String>,
     pub usage: NormalizedUsage,
-    /// Provider-reported billing evidence. Settlement remains catalog-derived.
-    pub provider_amount_minor: Option<i64>,
-    pub provider_currency: Option<String>,
+    /// Exact provider-reported billing evidence. The frozen catalog is used
+    /// only when the provider does not report a charge.
+    pub actual_vendor_cost: Option<ActualVendorCost>,
     pub artifacts: Vec<ProviderArtifact>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -536,13 +536,22 @@ impl ExecutionWorkflow<'_> {
                 .ok_or(PersistenceError::Invalid("attempt usage"))?,
         )
         .map_err(|_| PersistenceError::Invalid("attempt usage"))?;
-        let amount = match snapshot.settle(&usage, execution.authorized_minor) {
-            Ok(amount) => amount,
-            Err(_) => {
+        let settlement = match snapshot.settle_precise(
+            &usage,
+            attempt.actual_vendor_cost.as_ref(),
+            execution.authorized_minor,
+        ) {
+            Ok(settlement) => settlement,
+            Err(error) => {
+                let failure_code = if error == ContractError::SettlementOverage {
+                    "settlement_over_authorization"
+                } else {
+                    "invalid_provider_usage"
+                };
                 return self.transition(
                     &execution,
                     "reconciliation_required",
-                    Some("invalid_provider_usage"),
+                    Some(failure_code),
                     now,
                     None,
                     None,
@@ -550,6 +559,7 @@ impl ExecutionWorkflow<'_> {
                 );
             }
         };
+        let amount = settlement.budget_amount_minor;
         let receipt = match self.repository.get_receipt_for_execution(execution_id) {
             Ok(receipt) => receipt,
             Err(PersistenceError::NotFound) => {
@@ -560,6 +570,7 @@ impl ExecutionWorkflow<'_> {
                     settlement_minor: amount,
                     currency: snapshot.currency.clone(),
                     pricing_catalog_version: snapshot.catalog_version,
+                    actual_vendor_cost: settlement.actual_vendor_cost,
                     created_at: now.into(),
                     settled_at: None,
                     hubu_settlement_id: None,
@@ -934,8 +945,7 @@ fn attempt_failure(outcome: &str, code: &str, now: &str) -> AttemptResult {
         completed_at: now.into(),
         usage: serde_json::json!({}),
         usage_schema_version: 1,
-        provider_amount_minor: None,
-        provider_currency: None,
+        actual_vendor_cost: None,
         failure_code: Some(code.into()),
         failure_message_redacted: None,
         provider_request_id: None,
@@ -948,8 +958,7 @@ fn successful_attempt(success: &ProviderSuccess, now: &str) -> AttemptResult {
         completed_at: now.into(),
         usage: usage_value(&success.usage),
         usage_schema_version: 1,
-        provider_amount_minor: success.provider_amount_minor,
-        provider_currency: success.provider_currency.clone(),
+        actual_vendor_cost: success.actual_vendor_cost.clone(),
         failure_code: None,
         failure_message_redacted: None,
         provider_request_id: success.request_id.clone(),
@@ -1095,8 +1104,7 @@ mod tests {
                         images: Some(self.image_usage.get()),
                         ..Default::default()
                     },
-                    provider_amount_minor: Some(999),
-                    provider_currency: Some("USD".into()),
+                    actual_vendor_cost: Some(ActualVendorCost::new(100, 2, "USD").unwrap()),
                     artifacts: if self.empty_artifacts.get() {
                         vec![]
                     } else {
@@ -1182,7 +1190,10 @@ mod tests {
         let attempt = repo
             .get_provider_attempt_for_execution(&e.execution_id)
             .unwrap();
-        assert_eq!(attempt.provider_amount_minor, Some(999));
+        assert_eq!(
+            attempt.actual_vendor_cost,
+            Some(ActualVendorCost::new(100, 2, "USD").unwrap())
+        );
         assert_eq!(
             repo.get_receipt_for_execution(&e.execution_id)
                 .unwrap()
