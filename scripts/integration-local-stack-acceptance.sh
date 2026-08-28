@@ -4,6 +4,7 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace="$(mktemp -d)"
 profile="${workspace}/profile"
+export HUBU_HOME="${workspace}/hubu-home"
 stack_started=0
 
 cleanup() {
@@ -85,6 +86,7 @@ EOF
 chmod 700 "${hubu_server_bin}"
 
 init_output="$("${hubu_bin}" stack init --profile "${profile}")"
+"${hubu_bin}" stack select --profile "${profile}" >/dev/null
 profile_canonical="$(cd "${profile}" && pwd -P)"
 managed_credential_root="${profile_canonical}/state/credentials"
 grep -F 'input needed:' <<<"${init_output}" >/dev/null
@@ -287,9 +289,13 @@ curl --fail --silent "${gongbu_endpoint}/readyz" >/dev/null
 lifecycle_count_before_registration="$(wc -l <"${lifecycle_log}" | tr -d ' ')"
 
 hubu() {
-  env -u HUBU_AUTH_TOKEN -u HUBU_APPROVAL_TOKEN -u HUBU_RECONCILIATION_TOKEN \
-    HUBU_URL="${hubu_endpoint}" \
-    HUBU_AUTH_TOKEN_FILE="${hubu_auth}" \
+  env HUBU_URL="http://127.0.0.1:1" \
+    HUBU_AUTH_TOKEN="stale-auth-token" \
+    HUBU_AUTH_TOKEN_FILE="${workspace}/stale-auth-token" \
+    HUBU_APPROVAL_TOKEN="stale-approval-token" \
+    HUBU_APPROVAL_TOKEN_FILE="${workspace}/stale-approval-token" \
+    HUBU_RECONCILIATION_TOKEN="stale-reconciliation-token" \
+    HUBU_RECONCILIATION_TOKEN_FILE="${workspace}/stale-reconciliation-token" \
     "${hubu_bin}" "$@"
 }
 

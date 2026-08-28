@@ -7,6 +7,7 @@ use std::{
     net::{Shutdown, TcpStream},
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -49,6 +50,85 @@ const TEST_APPROVAL_TOKEN: &str = "test-human-approval-token";
 struct GlobalOptions {
     base_url: Option<String>,
     color: terminal::ColorChoice,
+}
+
+#[derive(Debug)]
+struct CliContext {
+    explicit_base_url: Option<String>,
+    legacy_base_url: String,
+    hubu_home: PathBuf,
+    target: OnceLock<ClientTarget>,
+}
+
+#[derive(Debug)]
+struct ClientTarget {
+    base_url: String,
+    credentials: CredentialSources,
+}
+
+#[derive(Debug)]
+enum CredentialSources {
+    ActiveProfile {
+        auth: PathBuf,
+        approval: PathBuf,
+        reconciliation: PathBuf,
+    },
+    Legacy,
+}
+
+impl CliContext {
+    fn new(explicit_base_url: Option<String>, hubu_home: PathBuf) -> Self {
+        let legacy_base_url = explicit_base_url
+            .clone()
+            .or_else(|| env::var("HUBU_URL").ok())
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        Self {
+            explicit_base_url,
+            legacy_base_url,
+            hubu_home,
+            target: OnceLock::new(),
+        }
+    }
+
+    fn legacy_base_url(&self) -> &str {
+        &self.legacy_base_url
+    }
+
+    fn has_explicit_base_url(&self) -> bool {
+        self.explicit_base_url.is_some()
+    }
+
+    fn target(&self) -> Result<&ClientTarget> {
+        if let Some(target) = self.target.get() {
+            return Ok(target);
+        }
+        let target = self.resolve_target()?;
+        let _ = self.target.set(target);
+        Ok(self.target.get().expect("CLI target was initialized"))
+    }
+
+    fn resolve_target(&self) -> Result<ClientTarget> {
+        if let Some(base_url) = &self.explicit_base_url {
+            return Ok(ClientTarget {
+                base_url: base_url.clone(),
+                credentials: CredentialSources::Legacy,
+            });
+        }
+        if let Some(handoff) = stack::active_client_handoff(&self.hubu_home)? {
+            return Ok(ClientTarget {
+                base_url: handoff.hubu_endpoint,
+                credentials: CredentialSources::ActiveProfile {
+                    auth: handoff.hubu_token_file,
+                    approval: handoff.approval_token_file,
+                    reconciliation: handoff.reconciliation_token_file,
+                },
+            });
+        }
+        Ok(ClientTarget {
+            base_url: self.legacy_base_url.clone(),
+            credentials: CredentialSources::Legacy,
+        })
+    }
 }
 
 impl GlobalOptions {
@@ -120,11 +200,8 @@ fn run() -> Result<()> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     terminal::configure(GlobalOptions::color_choice(&args)?);
     let global = GlobalOptions::parse(&mut args)?;
-    let explicit_base_url = global.base_url;
-    let base_url = explicit_base_url
-        .clone()
-        .or_else(|| env::var("HUBU_URL").ok())
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+    let hubu_home = hubu_home();
+    let client = CliContext::new(global.base_url, hubu_home.clone());
 
     let Some(command) = args.first().cloned() else {
         print_help();
@@ -133,17 +210,21 @@ fn run() -> Result<()> {
     args.remove(0);
 
     match command.as_str() {
-        "init" => init(&base_url, explicit_base_url.is_some(), args),
-        "stack" => stack::command(args, &hubu_home()),
-        "register" => register(&base_url, args),
-        "protocol" => protocol(&base_url, args),
-        "user" => user(&base_url, args),
-        "policy" => policy(&base_url, args),
-        "agent" => agent(&base_url, args),
-        "budget" => budget(&base_url, args),
-        "spend" => spend(&base_url, args),
-        "ledger" => ledger(&base_url, args),
-        "health" => health(&base_url),
+        "init" => init(
+            client.legacy_base_url(),
+            client.has_explicit_base_url(),
+            args,
+        ),
+        "stack" => stack::command(args, &hubu_home),
+        "register" => register(&client, args),
+        "protocol" => protocol(&client, args),
+        "user" => user(&client, args),
+        "policy" => policy(&client, args),
+        "agent" => agent(&client, args),
+        "budget" => budget(&client, args),
+        "spend" => spend(&client, args),
+        "ledger" => ledger(&client, args),
+        "health" => health(&client),
         "version" | "--version" | "-V" => version(),
         "-h" | "--help" | "help" => {
             print_help();
@@ -560,7 +641,7 @@ fn restrict_token_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn protocol(base_url: &str, args: Vec<String>) -> Result<()> {
+fn protocol(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     match args.as_slice() {
         [] => {
             print_protocol_help();
@@ -577,13 +658,13 @@ fn protocol(base_url: &str, args: Vec<String>) -> Result<()> {
     }
 }
 
-fn agent_registration_protocol(base_url: &str) -> Result<()> {
+fn agent_registration_protocol(base_url: &CliContext) -> Result<()> {
     let response = get_json(base_url, "/registration/guidance")?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
 
-fn register(base_url: &str, args: Vec<String>) -> Result<()> {
+fn register(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     let Some(command) = args.first().cloned() else {
         print_register_help();
         return Ok(());
@@ -602,7 +683,7 @@ fn register(base_url: &str, args: Vec<String>) -> Result<()> {
     }
 }
 
-fn register_human(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn register_human(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_register_human_help();
         return Ok(());
@@ -639,7 +720,7 @@ fn register_human(base_url: &str, mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn user(base_url: &str, args: Vec<String>) -> Result<()> {
+fn user(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     match args.split_first() {
         None => {
             print_user_help();
@@ -657,7 +738,7 @@ fn user(base_url: &str, args: Vec<String>) -> Result<()> {
     }
 }
 
-fn user_spending_target(base_url: &str, args: Vec<String>) -> Result<()> {
+fn user_spending_target(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     let Some(command) = args.first().cloned() else {
         print_user_spending_target_help();
         return Ok(());
@@ -677,7 +758,7 @@ fn user_spending_target(base_url: &str, args: Vec<String>) -> Result<()> {
     }
 }
 
-fn user_spending_target_set(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn user_spending_target_set(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_user_spending_target_set_help();
         return Ok(());
@@ -710,7 +791,7 @@ fn user_spending_target_set(base_url: &str, mut args: Vec<String>) -> Result<()>
     Ok(())
 }
 
-fn user_spending_target_show(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn user_spending_target_show(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_user_spending_target_show_help();
         return Ok(());
@@ -743,7 +824,7 @@ fn user_spending_target_show(base_url: &str, mut args: Vec<String>) -> Result<()
     Ok(())
 }
 
-fn user_spending_target_revoke(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn user_spending_target_revoke(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_user_spending_target_revoke_help();
         return Ok(());
@@ -768,7 +849,7 @@ fn user_spending_target_revoke(base_url: &str, mut args: Vec<String>) -> Result<
     Ok(())
 }
 
-fn user_list(base_url: &str) -> Result<()> {
+fn user_list(base_url: &CliContext) -> Result<()> {
     let response = get_json(base_url, "/users")?;
     let users = response
         .get("users")
@@ -895,7 +976,7 @@ fn local_timestamp(timestamp: &str) -> String {
         .unwrap_or_else(|_| timestamp.to_string())
 }
 
-fn register_agent(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn register_agent(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_register_agent_help();
         return Ok(());
@@ -929,7 +1010,7 @@ struct PreparedRegistration {
 }
 
 fn build_registration_envelope(
-    base_url: &str,
+    base_url: &CliContext,
     name: Option<String>,
     version: &str,
 ) -> Result<PreparedRegistration> {
@@ -1078,7 +1159,7 @@ fn default_version_label() -> String {
         .unwrap_or_else(|| "dev".to_string())
 }
 
-fn policy(base_url: &str, args: Vec<String>) -> Result<()> {
+fn policy(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     let Some(command) = args.first().cloned() else {
         print_policy_help();
         return Ok(());
@@ -1174,7 +1255,7 @@ fn policy_effect_name(effect: Effect) -> &'static str {
     }
 }
 
-fn apply_policy(base_url: &str, mut args: Vec<String>, legacy_add: bool) -> Result<()> {
+fn apply_policy(base_url: &CliContext, mut args: Vec<String>, legacy_add: bool) -> Result<()> {
     if take_help(&mut args) {
         print_policy_add_help();
         return Ok(());
@@ -1262,7 +1343,7 @@ fn policy_query(mut args: Vec<String>) -> Result<String> {
     }
 }
 
-fn show_policy(base_url: &str, args: Vec<String>, export: bool) -> Result<()> {
+fn show_policy(base_url: &CliContext, args: Vec<String>, export: bool) -> Result<()> {
     let query = policy_query(args)?;
     let path = format!(
         "/policies/{}{}{}",
@@ -1279,7 +1360,7 @@ fn show_policy(base_url: &str, args: Vec<String>, export: bool) -> Result<()> {
     Ok(())
 }
 
-fn policy_history(base_url: &str, args: Vec<String>) -> Result<()> {
+fn policy_history(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     let query = policy_query(args)?;
     let path = format!(
         "/policies/history{}{}",
@@ -1291,7 +1372,7 @@ fn policy_history(base_url: &str, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn policy_diff(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn policy_diff(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let from_revision = take_required(&mut args, "--from-revision")?;
     let to_revision = take_value(&mut args, "--to-revision");
     let query = policy_query(args)?;
@@ -1311,7 +1392,7 @@ fn policy_diff(base_url: &str, mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn policy_list(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn policy_list(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_policy_list_help();
         return Ok(());
@@ -1378,7 +1459,7 @@ fn policy_list(base_url: &str, mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn agent(base_url: &str, args: Vec<String>) -> Result<()> {
+fn agent(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     match args.split_first() {
         None => {
             print_agent_help();
@@ -1393,7 +1474,7 @@ fn agent(base_url: &str, args: Vec<String>) -> Result<()> {
     }
 }
 
-fn agent_list(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn agent_list(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let include_all = take_flag(&mut args, "--all");
     ensure_no_args(args)?;
     let path = if include_all {
@@ -1445,7 +1526,7 @@ fn agent_list(base_url: &str, mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn budget(base_url: &str, args: Vec<String>) -> Result<()> {
+fn budget(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     let Some(command) = args.first().cloned() else {
         print_budget_help();
         return Ok(());
@@ -1467,7 +1548,7 @@ fn budget(base_url: &str, args: Vec<String>) -> Result<()> {
     }
 }
 
-fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn budget_create(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_budget_create_help();
         return Ok(());
@@ -1499,7 +1580,7 @@ fn budget_create(base_url: &str, mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn budget_create_recurring(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_budget_create_recurring_help();
         return Ok(());
@@ -1535,7 +1616,7 @@ fn budget_create_recurring(base_url: &str, mut args: Vec<String>) -> Result<()> 
     Ok(())
 }
 
-fn budget_list(base_url: &str, args: Vec<String>) -> Result<()> {
+fn budget_list(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     let mut args = args;
     if take_help(&mut args) {
         print_budget_list_help();
@@ -1565,7 +1646,7 @@ fn budget_list(base_url: &str, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn budget_revoke(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn budget_revoke(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_budget_revoke_help();
         return Ok(());
@@ -1590,7 +1671,7 @@ fn budget_revoke(base_url: &str, mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn budget_replace(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn budget_replace(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_budget_replace_help();
         return Ok(());
@@ -1625,7 +1706,7 @@ fn budget_replace(base_url: &str, mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn spend(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_spend_help();
         return Ok(());
@@ -1687,7 +1768,7 @@ fn spend(base_url: &str, mut args: Vec<String>) -> Result<()> {
     print_spend_response(&response)
 }
 
-fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn spend_authorize(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_spend_authorize_help();
         return Ok(());
@@ -1733,7 +1814,7 @@ fn spend_authorize(base_url: &str, mut args: Vec<String>) -> Result<()> {
     print_spend_response(&response)
 }
 
-fn spend_claim_status(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn spend_claim_status(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let claim_id = take_required(&mut args, "--claim-id")?;
     ensure_no_args(args)?;
     let response = get_json(
@@ -1743,7 +1824,7 @@ fn spend_claim_status(base_url: &str, mut args: Vec<String>) -> Result<()> {
     print_executor_claim(&response)
 }
 
-fn spend_approval(base_url: &str, mut args: Vec<String>) -> Result<()> {
+fn spend_approval(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_spend_approval_help();
         return Ok(());
@@ -1872,7 +1953,7 @@ fn format_major_amount(amount_cents: i64) -> String {
     format!("{}.{:02}", amount_cents / 100, amount_cents % 100)
 }
 
-fn spend_reconcile(base_url: &str, args: Vec<String>) -> Result<()> {
+fn spend_reconcile(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     let Some(command) = args.first().cloned() else {
         print_spend_reconcile_help();
         return Ok(());
@@ -1891,7 +1972,7 @@ fn spend_reconcile(base_url: &str, args: Vec<String>) -> Result<()> {
     }
 }
 
-fn spend_reconcile_list(base_url: &str, args: Vec<String>) -> Result<()> {
+fn spend_reconcile_list(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     ensure_no_args(args)?;
     let response = get_json(base_url, "/spend/executor/reconciliation")?;
     let claims = response
@@ -1912,7 +1993,7 @@ fn spend_reconcile_list(base_url: &str, args: Vec<String>) -> Result<()> {
 }
 
 fn spend_reconcile_resolve(
-    base_url: &str,
+    base_url: &CliContext,
     mut args: Vec<String>,
     vendor_billed: bool,
 ) -> Result<()> {
@@ -2235,7 +2316,7 @@ fn print_execution_scope(value: &Value) {
     }
 }
 
-fn ledger(base_url: &str, args: Vec<String>) -> Result<()> {
+fn ledger(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     match args.as_slice() {
         [] => {
             print_ledger_help();
@@ -2362,7 +2443,7 @@ fn print_spending_target_warnings(response: &Value) -> Result<()> {
     Ok(())
 }
 
-fn health(base_url: &str) -> Result<()> {
+fn health(base_url: &CliContext) -> Result<()> {
     let response = get_json(base_url, "/health")?;
     let style = terminal::stdout();
     println!(
@@ -2379,20 +2460,22 @@ fn version() -> Result<()> {
 }
 
 fn request_json(
-    base_url: &str,
+    client: &CliContext,
     method: &str,
     path: &str,
     body: Option<Value>,
     include_approval_capability: bool,
     include_reconciliation_capability: bool,
 ) -> Result<Value> {
-    let (host, port) = parse_base_url(base_url)?;
+    let target = client.target()?;
+    let (host, port) = parse_base_url(&target.base_url)?;
     let body_text = body.map(|body| body.to_string()).unwrap_or_default();
-    let authorization_header = auth_token()?
+    let authorization_header = target
+        .auth_token()?
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
     let reconciliation_header = if include_reconciliation_capability {
-        let token = reconciliation_token()?.ok_or_else(|| {
+        let token = target.reconciliation_token()?.ok_or_else(|| {
             anyhow!(
                 "human reconciliation requires {RECONCILIATION_TOKEN_ENV} or {RECONCILIATION_TOKEN_FILE_ENV}"
             )
@@ -2402,7 +2485,7 @@ fn request_json(
         String::new()
     };
     let approval_header = if include_approval_capability {
-        let token = approval_token()?.ok_or_else(|| {
+        let token = target.approval_token()?.ok_or_else(|| {
             anyhow!("human approval requires {APPROVAL_TOKEN_ENV} or {APPROVAL_TOKEN_FILE_ENV}")
         })?;
         format!("{APPROVAL_CAPABILITY_HEADER}: {token}\r\n")
@@ -2410,7 +2493,7 @@ fn request_json(
         String::new()
     };
     let mut stream = TcpStream::connect((host.as_str(), port))
-        .with_context(|| format!("connect to Hubu server at {base_url}"))?;
+        .with_context(|| format!("connect to Hubu server at {}", target.base_url))?;
 
     write!(
         stream,
@@ -2437,23 +2520,67 @@ fn request_json(
     Ok(json)
 }
 
-fn get_json(base_url: &str, path: &str) -> Result<Value> {
-    request_json(base_url, "GET", path, None, false, false)
+fn get_json(client: &CliContext, path: &str) -> Result<Value> {
+    request_json(client, "GET", path, None, false, false)
 }
 
-fn post_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body), false, false)
+fn post_json(client: &CliContext, path: &str, body: Value) -> Result<Value> {
+    request_json(client, "POST", path, Some(body), false, false)
 }
 
-fn post_approval_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body), true, false)
+fn post_approval_json(client: &CliContext, path: &str, body: Value) -> Result<Value> {
+    request_json(client, "POST", path, Some(body), true, false)
 }
 
-fn post_reconciliation_json(base_url: &str, path: &str, body: Value) -> Result<Value> {
-    request_json(base_url, "POST", path, Some(body), false, true)
+fn post_reconciliation_json(client: &CliContext, path: &str, body: Value) -> Result<Value> {
+    request_json(client, "POST", path, Some(body), false, true)
 }
 
-fn auth_token() -> Result<Option<String>> {
+impl ClientTarget {
+    fn auth_token(&self) -> Result<Option<String>> {
+        match &self.credentials {
+            CredentialSources::ActiveProfile { auth, .. } => {
+                read_active_profile_token(auth, "authentication").map(Some)
+            }
+            CredentialSources::Legacy => legacy_auth_token(),
+        }
+    }
+
+    fn reconciliation_token(&self) -> Result<Option<String>> {
+        match &self.credentials {
+            CredentialSources::ActiveProfile { reconciliation, .. } => {
+                read_active_profile_token(reconciliation, "reconciliation").map(Some)
+            }
+            CredentialSources::Legacy => legacy_reconciliation_token(),
+        }
+    }
+
+    fn approval_token(&self) -> Result<Option<String>> {
+        match &self.credentials {
+            CredentialSources::ActiveProfile { approval, .. } => {
+                read_active_profile_token(approval, "approval").map(Some)
+            }
+            CredentialSources::Legacy => legacy_approval_token(),
+        }
+    }
+}
+
+fn read_active_profile_token(path: &Path, capability: &str) -> Result<String> {
+    let contents = fs::read_to_string(path).with_context(|| {
+        format!(
+            "active stack profile {capability} credential is unavailable; run `hubu stack start` for the active profile or pass an explicit `--url` for manual mode"
+        )
+    })?;
+    let token = contents.trim().to_string();
+    if token.is_empty() {
+        bail!(
+            "active stack profile {capability} credential is empty; run `hubu stack start` for the active profile or pass an explicit `--url` for manual mode"
+        );
+    }
+    Ok(token)
+}
+
+fn legacy_auth_token() -> Result<Option<String>> {
     if let Ok(token) = env::var(AUTH_TOKEN_ENV) {
         let token = token.trim().to_string();
         if token.is_empty() {
@@ -2478,7 +2605,7 @@ fn auth_token() -> Result<Option<String>> {
     }
 }
 
-fn reconciliation_token() -> Result<Option<String>> {
+fn legacy_reconciliation_token() -> Result<Option<String>> {
     if let Ok(token) = env::var(RECONCILIATION_TOKEN_ENV) {
         let token = token.trim().to_string();
         if token.is_empty() {
@@ -2505,7 +2632,7 @@ fn reconciliation_token() -> Result<Option<String>> {
     }
 }
 
-fn approval_token() -> Result<Option<String>> {
+fn legacy_approval_token() -> Result<Option<String>> {
     #[cfg(test)]
     if env::var(APPROVAL_TOKEN_ENV).is_err() && env::var(APPROVAL_TOKEN_FILE_ENV).is_err() {
         return Ok(Some(TEST_APPROVAL_TOKEN.to_string()));
@@ -2670,8 +2797,13 @@ Commands:
   version    Print product, source, and executor-contract versions
 
 Global options:
-  --url URL                            Hubu server URL (default: http://127.0.0.1:8787)
+  --url URL                            Manual Hubu URL; bypasses the active stack profile
   --color auto|always|never            Terminal color policy (default: auto)
+
+Connection precedence:
+  explicit --url and legacy credential environment/files; otherwise the selected
+  profile's active client handoff; otherwise the active default profile; otherwise
+  HUBU_URL and legacy credential environment/files (default URL: http://127.0.0.1:8787)
 
 Examples:
   hubu stack init
@@ -3233,7 +3365,7 @@ mod tests {
         .collect()
     }
 
-    fn capture_cli_request(run: impl FnOnce(&str) -> Result<()>) -> (String, Value) {
+    fn capture_cli_request(run: impl FnOnce(&CliContext) -> Result<()>) -> (String, Value) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -3259,7 +3391,11 @@ mod tests {
             (path, serde_json::from_str(body).unwrap())
         });
 
-        let error = run(&format!("http://{address}")).unwrap_err();
+        let client = CliContext::new(
+            Some(format!("http://{address}")),
+            std::env::temp_dir().join("hubu-cli-unit-test-home"),
+        );
+        let error = run(&client).unwrap_err();
         assert!(error.to_string().contains("captured"));
         server.join().unwrap()
     }

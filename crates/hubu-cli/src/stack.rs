@@ -477,6 +477,39 @@ pub(crate) fn codex_handoff(profile: &Path, hubu_home: &Path) -> Result<CodexHan
     Ok(handoff)
 }
 
+pub(crate) fn active_client_handoff(hubu_home: &Path) -> Result<Option<CodexHandoff>> {
+    let registry = read_profile_registry(hubu_home)?;
+    if let Some(selected) = registry.selected {
+        let profile = initialized_profile_path(&selected, "selected profile").with_context(|| {
+            format!(
+                "selected stack profile `{}` is unavailable; select an initialized profile with `hubu stack select --profile ABSOLUTE_DIR` or pass an explicit `--url` for manual mode",
+                selected.display()
+            )
+        })?;
+        return codex_handoff(&profile, hubu_home)
+            .with_context(|| {
+                format!(
+                    "selected stack profile `{}` has no usable active client handoff; run `hubu stack start` for that profile or pass an explicit `--url` for manual mode",
+                    profile.display()
+                )
+            })
+            .map(Some);
+    }
+
+    let profile = default_stack_home(hubu_home)
+        .join("stacks")
+        .join(DEFAULT_PROFILE);
+    if !profile.join("generated/active-manifest.json").is_file() {
+        return Ok(None);
+    }
+    let profile = initialized_profile_path(&profile, "default profile")?;
+    codex_handoff(&profile, hubu_home)
+        .context(
+            "the default stack profile has no usable active client handoff; run `hubu stack start` for that profile or pass an explicit `--url` for manual mode",
+        )
+        .map(Some)
+}
+
 fn active_credential_paths(
     profile: &Path,
     manifest: &ActiveManifest,
@@ -3265,7 +3298,10 @@ capabilities, completes Gongbu's internal handoff, and then starts Gongbu. It
 leaves external services and the client-owned unified MCP process untouched.
 Use `hubu stack status` and `hubu stack logs` for the combined operator view.
 An explicit `--profile` temporarily overrides the selection without changing
-it; `hubu stack profiles` lists known profiles.
+it; `hubu stack profiles` lists known profiles. Normal server-bound `hubu`
+commands use the selected profile's active client handoff as one endpoint and
+credential bundle. Pass an explicit global `--url` to use manual environment
+or file credentials instead.
 
 For later changes, edit the operator-owned TOML and run `hubu stack render`.
 The validated generation is staged without replacing the active generation.
@@ -3301,7 +3337,7 @@ fn print_init_help() {
 
 fn print_select_help() {
     println!(
-        "Register and select an initialized local stack profile\n\nUsage:\n  hubu stack select --profile ABSOLUTE_DIR\n\nThe selected profile is used when a stack command omits --profile. An explicit --profile remains a one-command override."
+        "Register and select an initialized local stack profile\n\nUsage:\n  hubu stack select --profile ABSOLUTE_DIR\n\nThe selected profile is used when a stack command omits --profile. Server-bound CLI commands use its active client handoff for the Hubu endpoint and credentials. An explicit --profile remains a one-command stack override; an explicit global --url selects manual endpoint and credential resolution."
     );
 }
 

@@ -62,6 +62,12 @@ Required when Hubu is external. This is the client-side authentication bearer
 used by the Hubu CLI and unified MCP protected calls. For a managed Hubu it is
 normally omitted and derived internally.
 
+After the profile has an active generated handoff, the Hubu CLI resolves this
+file together with the profile's endpoint and other human capability files.
+Selecting a profile therefore overrides ambient CLI endpoint and token
+variables as one atomic connection context. An explicit global `--url` opts
+out of profile resolution and uses manual environment/file credentials.
+
 ### `files.hubu_approval`
 
 Required when Hubu is external. This is the human approval capability and must

@@ -97,6 +97,17 @@ it starts the final Hubu process, completes Gongbu's managed credential
 bootstrap, and starts Gongbu and its managed Temporal runtime. The client-owned
 `hubu-unified-mcp` process is not part of the managed stack.
 
+Once an active handoff exists, normal server-bound `hubu` commands take the
+Hubu endpoint and authentication, approval, and reconciliation credential file
+paths from the selected profile as one bundle. If there is no explicit
+selection, an active conventional `default` profile is used. Ambient
+`HUBU_URL` and token variables are ignored in either case. If a selected
+profile has no valid active handoff, the command fails instead of silently
+using another server. Pass an explicit global `--url` to opt into manual mode,
+where the existing environment and token-file precedence remains available.
+Local-only commands such as profile inspection and policy file creation do not
+require an active handoff.
+
 ### Terminal color and automation
 
 Human-readable CLI output uses semantic color and emphasis when its destination
