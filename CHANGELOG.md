@@ -24,6 +24,11 @@ Future release template
 
 ## Unreleased
 
+- Aligned agent-facing denial recovery across unified MCP spend, governed
+  execution, and public operation status. A definitive denial remains terminal,
+  exact redelivery recovers that denial, and corrected work is submitted as a
+  new logical operation without exposing or asking agents to reuse Hubu's
+  private backend operation key.
 - Made exact-tag, full-commit source installation the primary macOS onboarding
   path for initial technical users. The reviewed installer builds and stamps
   the four production binaries together from the locked workspace without

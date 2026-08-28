@@ -1236,24 +1236,32 @@ impl Server {
 }
 
 fn operation_status_result(status: &operation_registry::DurableOperationStatus) -> Value {
-    let guidance = match status.state.as_str() {
-        "authorized" => {
-            "Submit this authorization continuation once with gongbu_create_execution."
-        }
-        "approval_required" => {
-            "Human approval is required. Do not submit a replacement; resolve the existing approval and redeliver the exact original harness call."
-        }
-        "awaiting_hubu_result" => {
-            "The Hubu result is not established. Do not submit a replacement; redeliver the exact original harness call with the same identity."
-        }
-        _ if status.terminal() => {
-            "This operation is terminal. Do not submit a replacement for this operation."
-        }
-        _ => {
-            "The operation was acknowledged. Do not submit a replacement; observe this operation_handle until it is terminal."
+    let denied = matches!(
+        status.result_code.as_deref(),
+        Some("authorization_denied" | "spend_denied")
+    );
+    let guidance = if denied {
+        hubu::DENIED_OPERATION_GUIDANCE
+    } else {
+        match status.state.as_str() {
+            "authorized" => {
+                "Submit this authorization continuation once with gongbu_create_execution."
+            }
+            "approval_required" => {
+                "Human approval is required. Do not submit a replacement; resolve the existing approval and redeliver the exact original harness call."
+            }
+            "awaiting_hubu_result" => {
+                "The Hubu result is not established. Do not submit a replacement; redeliver the exact original harness call with the same identity."
+            }
+            _ if status.terminal() => {
+                "This operation is terminal. Do not submit a replacement for this operation."
+            }
+            _ => {
+                "The operation was acknowledged. Do not submit a replacement; observe this operation_handle until it is terminal."
+            }
         }
     };
-    let projection = json!({
+    let mut projection = json!({
         "schema_version": 1,
         "operation_handle": status.operation_handle,
         "state": status.state,
@@ -1264,6 +1272,9 @@ fn operation_status_result(status: &operation_registry::DurableOperationStatus) 
         "updated_at": status.updated_at,
         "guidance": guidance,
     });
+    if denied {
+        projection["retry_guidance"] = hubu::denied_retry_guidance();
+    }
     json!({
         "content": [{"type":"text", "text": serde_json::to_string(&projection).expect("operation status serializes")}],
         "structuredContent": projection,
@@ -1482,6 +1493,32 @@ mod tests {
             "storage_path",
         ] {
             assert!(!serialized.contains(private));
+        }
+    }
+
+    #[test]
+    fn denied_operation_status_requires_a_new_logical_operation() {
+        for result_code in ["authorization_denied", "spend_denied"] {
+            let response = operation_status_result(&operation_registry::DurableOperationStatus {
+                operation_handle: format!("hubu:public-operation:v1:{}", "e".repeat(32)),
+                state: "failed".into(),
+                execution_id: None,
+                result_code: Some(result_code.into()),
+                updated_at: "2026-08-28T00:00:00.000Z".into(),
+            });
+            let structured = &response["structuredContent"];
+            assert_eq!(structured["terminal"], true);
+            assert_eq!(structured["replacement_safe"], false);
+            assert_eq!(
+                structured["retry_guidance"]["action"],
+                "create_new_operation"
+            );
+            assert!(structured["guidance"]
+                .as_str()
+                .unwrap()
+                .contains("new logical operation"));
+            assert!(!response.to_string().contains("operation_key"));
+            assert!(!response.to_string().contains("reuse_operation_key"));
         }
     }
 

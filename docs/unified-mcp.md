@@ -105,7 +105,11 @@ parameters return `-32602`. Input schemas reject additional properties.
 
 The router preserves backend result semantics. Hubu spend results additionally
 replace private backend identity with a stable public operation handle and
-concise recovery guidance:
+concise, boundary-specific recovery guidance. A raw Hubu client that owns an
+operation key may follow `reuse_operation_key` after a side-effect-free denial,
+but the unified MCP router never exposes that key. It translates a definitive
+denial to `create_new_operation`: corrected work is a new tool call with a new
+trusted harness identity and a newly allocated private operation key.
 
 - Hubu successes contain pretty-printed JSON text and identical
   `structuredContent`.
@@ -181,7 +185,7 @@ The composite outcome is one of:
 | Outcome | Meaning |
 | --- | --- |
 | `succeeded` | Gongbu reached successful terminal execution during the internal budget; the response includes timing and eligible artifacts when delivery fits. Budget exhaustion after terminal success remains `succeeded` with an artifact-delivery warning. |
-| `denied` | Hubu denied authorization. This is terminal and no Gongbu or provider work starts. |
+| `denied` | Hubu denied authorization. This operation is terminal and no Gongbu or provider work starts. Exact redelivery only recovers the same denial; corrected work is submitted as a new tool call and logical operation. |
 | `approval_required` | Hubu persisted a pending human decision. The composite returns immediately with its public handle; no Gongbu or provider work starts. After an existing or external protected path resolves it, only exact redelivery of this composite call resumes the same operation. |
 | `in_progress` | The bounded wait ended before terminal execution. The durable worker continues the same operation and the public handle can be observed with `hubu_operation_status`. |
 | `failed` | The existing adapter or Gongbu execution reached a terminal failure. This outcome does not make a replacement safe; observe the existing handle and recovery guidance. |
@@ -278,6 +282,25 @@ For example, an agent-facing spend result includes:
 }
 ```
 
+A definitive denial instead carries decision-aware guidance without exposing
+or asking the agent to reuse the private backend key:
+
+```json
+{
+  "operation_handle": "hubu:public-operation:v1:edb9e31c9a4245aab93b30bc29607f22",
+  "decision": "deny",
+  "retry_guidance": {
+    "action": "create_new_operation",
+    "message": "This denied operation is terminal. Exact redelivery only recovers the same denial. Submit corrected work as a new tool call so the harness creates a new logical operation."
+  },
+  "agent_guidance": {
+    "on_ambiguous_result": "redeliver_exact_call",
+    "on_denied_result": "create_new_operation",
+    "replacement_call": "create_new_operation"
+  }
+}
+```
+
 The authorization token ID is a scoped continuation identifier, not a service
 credential. For `gongbu_create_execution`, the router resolves that identifier
 to exactly one normalized operation in its registry before contacting Gongbu.
@@ -308,7 +331,12 @@ The same status tool safely projects handles before Gongbu acknowledgement:
 `approval_required` requires resolving the existing human approval, an allowed
 authorization is `authorized`, and a synchronous `hubu_submit_spend` result is
 already terminal. Denied or malformed allowed authorizations are terminal
-failures rather than executable continuations.
+failures rather than executable continuations. For `authorization_denied` and
+`spend_denied`, status repeats `create_new_operation` guidance. Its
+`replacement_safe: false` describes the existing public handle: the handle and
+call identity cannot be repurposed, while corrected work may be submitted as a
+distinct logical operation. Other terminal failures retain no-replacement
+guidance because provider or financial side effects may be unresolved.
 
 Primitive pass-through routes do not add a success envelope, rename fields,
 translate currency units, expose filesystem locations, or convert an
@@ -530,6 +558,14 @@ recover Gongbu's locally persisted execution after restart. The public handle
 cannot retrieve or replay an operation: recovery requires the original
 normalized harness call identity or its authorized continuation flow.
 
+For a denial, the router replaces any backend-oriented
+`reuse_operation_key` guidance before persisting or returning the sanitized
+result. Exact redelivery with the original call identity therefore recovers the
+same terminal denial. A corrected request uses a distinct harness call identity,
+which allocates a different private key and public handle; changing arguments
+under the denied identity remains an identity collision rejected before Hubu
+access.
+
 For `hubu_submit_governed_execution`, the normalized canonical request covers
 both nested objects and the composite tool name. The first invocation routes
 the authorization portion through the existing Hubu path. `deny` and
@@ -582,7 +618,9 @@ Gongbu retains its separate unresolved record.
 One distinct harness spend call remains one distinct potentially billable
 operation. The router does not infer retries across call IDs. If acknowledgment
 is ambiguous, the returned guidance tells the agent to redeliver the exact call
-with the same harness identity and never submit a replacement spend call.
+with the same harness identity and never submit a replacement spend call. Once
+a denial is established, that operation is terminal and corrected work is a
+new call ID and logical operation rather than a changed replay.
 
 The registry and worker are adapter state and remain separate from both the Hubu
 and Gongbu databases, credentials, provider execution, artifacts, and failure

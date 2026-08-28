@@ -21,9 +21,13 @@ request
 
 Every spend operation has a stable, agent-scoped `operation_key` supplied by a
 trusted client platform or orchestrator. Hubu stores the workflow under that
-key. An identical retry recovers the existing operation; a retry that changes
-the account, amount, reason, lease profile, task correlation, or execution
-scope is rejected.
+key. An identical retry recovers the existing operation. A trusted direct Hubu
+client may change scope under that key only when Hubu explicitly returns
+`reuse_operation_key` after an entirely denied, side-effect-free history. The
+unified MCP agent surface does not expose or reuse the private key after denial:
+corrected work is a new tool call and logical operation. All other retries that
+change the account, amount, reason, lease profile, task correlation, or
+execution scope are rejected.
 
 `task_id` is optional trusted business correlation. `reason` is descriptive,
 model-visible audit context. Neither field owns a budget or replaces the

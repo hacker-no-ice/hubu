@@ -11,6 +11,7 @@ use crate::{
 };
 
 use response::ForwardError;
+pub(crate) use routing::{denied_retry_guidance, DENIED_OPERATION_GUIDANCE};
 use routing::{
     public_spend_result, route_tool_call_v1, tool_result_v1, validate_model_spend_arguments,
 };

@@ -79,7 +79,7 @@ const components = {
     ],
     responsibilities: [
       "Discover the currently eligible tool catalog.",
-      "Reuse stable operation identity across retries.",
+      "Reuse stable operation identity for exact recovery; after a definitive denial, submit corrected work as a new logical operation.",
       "Submit structured, canonical spend and execution inputs.",
     ],
     links: [["Registration protocol", "docs/agent-registration.md"], ["Unified MCP setup", "docs/unified-mcp.md"]],

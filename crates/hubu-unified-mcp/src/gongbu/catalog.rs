@@ -22,7 +22,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
 pub(super) fn operation_status_definition() -> Value {
     json!({
         "name": "hubu_operation_status",
-        "description": "Observe one durable operation by its safe public handle. Once accepted, keep observing this operation and do not submit a replacement.",
+        "description": "Observe one durable operation by its safe public handle. Keep observing accepted nonterminal work instead of replacing it. A definitive denial is terminal; corrected work must be submitted as a new logical operation.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,
