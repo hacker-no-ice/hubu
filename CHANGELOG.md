@@ -29,6 +29,11 @@ Future release template
   exact redelivery recovers that denial, and corrected work is submitted as a
   new logical operation without exposing or asking agents to reuse Hubu's
   private backend operation key.
+- Fixed CLI authentication after local-stack startup by resolving the selected
+  profile's active endpoint and authentication, approval, and reconciliation
+  credential files as one handoff. Explicit `--url` remains the manual-mode
+  escape hatch, and legacy environment/file resolution remains unchanged when
+  no active selected/default profile exists.
 - Made exact-tag, full-commit source installation the primary macOS onboarding
   path for initial technical users. The reviewed installer builds and stamps
   the four production binaries together from the locked workspace without

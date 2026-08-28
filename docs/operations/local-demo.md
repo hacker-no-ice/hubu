@@ -58,8 +58,12 @@ cargo run -p hubu-api --bin hubu-server
 
 The server listens on `http://127.0.0.1:8787` by default. It reads
 `HUBU_AUTH_TOKEN`, or creates and reuses `hubu.auth-token` in its working
-directory. The CLI reads the same environment variable or token file. Set
-`HUBU_AUTH_TOKEN_FILE` when the processes use different working directories.
+directory. When no active selected/default stack profile exists, or when an
+explicit global `--url` selects manual mode, the CLI reads the same environment
+variable or token file. Set `HUBU_AUTH_TOKEN_FILE` when the processes use
+different working directories. With an active profile handoff, the CLI instead
+uses that handoff's endpoint and credential files and ignores these ambient
+connection variables.
 
 The local HTTP server and mock rail are development surfaces. They do not
 provide a production authentication, concurrency, payment, or threat model.

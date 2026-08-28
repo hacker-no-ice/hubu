@@ -71,7 +71,7 @@ const components = {
       "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, approve or deny pending spend, review protected actions, and reconcile uncertain expired claims.",
       "Agents discover Hubu governance and Gongbu execution/artifact primitives plus one router-owned `hubu_submit_governed_execution` composite through `hubu-unified-mcp`; trusted client metadata supplies operation and optional task identity outside model-authored arguments.",
       "For local dogfooding, a repository Codex skill allocates a model-managed operation key once, binds it to immutable spend scope, and persists recovery state outside the Hubu server.",
-      "The CLI derives private managed credential locations, starts the final Hubu once, waits for protected readiness, invokes Gongbu's credential handoff, and only then starts Gongbu; external services and the client-owned unified MCP process remain untouched.",
+      "The CLI derives private managed credential locations, starts the final Hubu once, waits for protected readiness, invokes Gongbu's credential handoff, and only then starts Gongbu; server-bound CLI calls then consume the active profile's endpoint and capability paths as one authenticated client context.",
       "Stack startup is principal-neutral: registration after startup needs no render, activation, stop, or restart, and each new Gongbu execution persists the account and agent resolved from Hubu authorization.",
       "The clean-environment canary proves one launcher-owned final Hubu process, private credential materialization and reuse without leaks, then starts the real Gongbu, worker, and managed Temporal processes with source-only fixture support that release binaries omit.",
       "Local HTTP callers reach the API with the Hubu bearer token before protected routes resolve user authority.",
@@ -472,7 +472,7 @@ const components = {
       "Ships a one-command acceptance canary that proves no temporary Hubu process or credential leak, then verifies governed deterministic execution, Temporal workflow discovery, artifact retrieval, restart persistence, and graceful shutdown without billable provider spend.",
       "Writes a managed Codex config block that lets agents in other projects discover Hubu MCP tools without reading the Hubu repo.",
       "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
-      "Loads the local Hubu bearer and owner capability tokens from env or files, sending approval and reconciliation capabilities only on their human mutations.",
+      "Resolves the selected profile's authenticated client handoff lazily and atomically for server-bound commands, while explicit `--url` or the absence of an active profile preserves manual environment/file credential resolution; approval and reconciliation capabilities are sent only on their human mutations.",
     ],
     links: [sharedLinks.cli, sharedLinks.stackLifecycle, sharedLinks.managedCredentialHandoff, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
@@ -482,7 +482,7 @@ const components = {
       { id: "managedHubu", label: "Final managed Hubu", sub: "creates capabilities once", x: 750, y: 72, w: 250, h: 92, tone: "core", path: "crates/hubu-api/src/lib.rs" },
       { id: "credentialHandoff", label: "Private credential state", sub: "Gongbu-owned handoff", x: 750, y: 236, w: 250, h: 92, tone: "data", path: "crates/gongbu-api/src/config/setup.rs" },
       { id: "managedGongbu", label: "Managed Gongbu", sub: "starts after handoff", x: 750, y: 400, w: 250, h: 92, tone: "executor", path: "crates/gongbu-api/src/server.rs" },
-      { id: "handoff", label: "Codex handoff", sub: "client-owned MCP", x: 380, y: 490, w: 220, h: 92, tone: "agent" },
+      { id: "handoff", label: "Client handoff", sub: "CLI + client-owned MCP", x: 380, y: 490, w: 220, h: 92, tone: "agent" },
     ],
     edges: [
       ["commands", "profile", "configure"],
@@ -491,6 +491,7 @@ const components = {
       ["managedHubu", "credentialHandoff", "create + verify"],
       ["credentialHandoff", "managedGongbu", "bootstrap before serve"],
       ["profile", "handoff", "verified post-start refs"],
+      ["handoff", "commands", "endpoint + capabilities", { fromSide: "left", toSide: "bottom", waypoints: [{ x: 175, y: 536 }, { x: 175, y: 244 }], labelSegment: 0, labelDy: -12 }],
     ],
   },
   mcp: {

@@ -63,6 +63,13 @@ hubu register human --username alice-example --display-name "Alice Example"
 hubu register agent --name local-agent --version local-dev
 ```
 
+After `stack start`, ordinary server-bound CLI commands use the selected
+profile's authenticated client handoff, including its Hubu endpoint and
+authentication, approval, and reconciliation credential files. Stale
+`HUBU_URL` and token environment variables therefore cannot split a command
+across different profiles. An explicit global `--url` opts into manual mode
+and keeps the legacy environment/file credential behavior.
+
 Registration happens against the running Hubu service and does not require a
 new stack render, activation, stop, or restart. Replace `agt_...` below with the
 printed agent ID, then apply a starter policy and create the agent's active USD
