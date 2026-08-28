@@ -337,8 +337,9 @@ The version-1 compatibility boundary requires:
 | Source commits | Known, exact, matching 40-character Git SHA values |
 
 Unstamped local builds intentionally fail the source-commit compatibility
-check. For an operator deployment, install every runtime binary from one
-verified release archive.
+check. For an operator deployment, install every runtime binary together from
+one exact, release-stamped lineage. The source installer is the recommended
+initial-user macOS path.
 
 Backend states determine the callable catalog:
 

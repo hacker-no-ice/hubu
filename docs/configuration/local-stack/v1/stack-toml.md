@@ -36,7 +36,10 @@ Set `true` only when **every selected binary** is an unstamped local development
 
 ## `[binaries]`
 
-All binary fields are safe absolute paths to existing executable files. `stack init` fills a path only when it safely discovers the executable. Selected packaged binaries must come from one release lineage.
+All binary fields are safe absolute paths to existing executable files. `stack
+init` fills a path only when it safely discovers the executable. Selected
+release-stamped binaries, whether installed from exact source or a future
+supported package, must come from one release lineage.
 
 ### `binaries.hubu`
 

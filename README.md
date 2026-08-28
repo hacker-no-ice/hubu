@@ -17,31 +17,34 @@ systems keep separate processes, storage, credentials, and failure domains.
 
 ## Quick Start
 
-Install all four binaries from one
-[verified Hubu release](docs/operations/releases.md#pin-verify-and-install), then
-install them into `~/.local/bin`. For example, on a Mac with Apple silicon,
-replace `vX.Y.Z` with an exact release:
+For `v0.2.1` and later during the initial technical-user phase, build all four
+production binaries locally from one exact macOS source release. Choose an
+immutable `vX.Y.Z` tag and copy its published full source commit from the
+matching GitHub Release, then run the reviewed installer from that checkout:
 
 ```sh
 tag=vX.Y.Z
-asset="hubu-${tag}-aarch64-apple-darwin.tar.gz"
+expected_commit=FULL_40_CHARACTER_COMMIT_SHA
 
-gh release download "$tag" --repo hacker-no-ice/hubu \
-  --pattern "$asset" --pattern SHA256SUMS
-grep "  $asset" SHA256SUMS | \
-  (command -v sha256sum >/dev/null && sha256sum -c - || shasum -a 256 -c -)
-tar -xzf "$asset"
-mkdir -p "$HOME/.local/bin"
-install -m 0755 "${asset%.tar.gz}"/{hubu,hubu-server,hubu-unified-mcp,gongbu-server} \
-  "$HOME/.local/bin/"
+git clone --depth 1 --branch "$tag" https://github.com/hacker-no-ice/hubu.git
+cd hubu
+./scripts/install-from-source.sh --expected-commit "$expected_commit"
 ```
 
-Ensure `~/.local/bin` is on your `PATH`, then create an operator-owned stack
-profile. Before testing, verify that `command -v hubu` resolves to this
-installation and that `hubu --version` reports the release version you intend
-to test. This quick start uses the generated managed-Hubu endpoint and database;
-for an external Hubu or a custom database, follow the
-[local stack guide](docs/local-stack.md) and configure explicit
+The installer requires macOS, Xcode Command Line Tools, `rustup`, and `protoc`;
+it uses the exact Rust toolchain and dependency lockfile in the checkout. It
+installs to `~/.local/bin` by default. See
+[release installation](docs/operations/releases.md#install-an-exact-release-from-source-macos)
+for prerequisite, trust, custom-prefix, update, and uninstall details.
+
+These executables are compiled locally. They are not Developer ID-signed,
+Apple-notarized, or otherwise Apple-verified, and the supported flow does not
+ask you to bypass Gatekeeper. Ensure `~/.local/bin` is on your `PATH`, then
+create an operator-owned stack profile. Before testing, verify that
+`command -v hubu` resolves to this installation and that `hubu --version`
+reports the release you intended to build. This quick start uses the generated
+managed-Hubu endpoint and database; for an external Hubu or a custom database,
+follow the [local stack guide](docs/local-stack.md) and configure explicit
 external-service credential references.
 
 Initialize the profile, complete the non-secret topology and provider choices,

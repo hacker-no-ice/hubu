@@ -139,4 +139,8 @@ The opaque table name is a local reference key. Its `service` and `account` valu
 
 This reference documents source schema version 1 for the current Hubu release line. Use the documentation version that matches the installed binaries. A future incompatible source shape must use a new schema version rather than silently changing the meaning of version 1.
 
-Run each selected binary with `--version` to inspect its safe version metadata. Packaged profiles require Hubu, Gongbu, the unified MCP server, and managed server binaries from one compatible release lineage.
+Run each selected binary with `--version` to inspect its safe version metadata.
+Production profiles require Hubu, Gongbu, the unified MCP server, and managed
+server binaries from one compatible, release-stamped lineage. This includes
+binaries installed from an exact source release; they keep
+`allow_development_builds = false`.

@@ -24,6 +24,11 @@ Future release template
 
 ## Unreleased
 
+- Made exact-tag, full-commit source installation the primary macOS onboarding
+  path for initial technical users. The reviewed installer builds and stamps
+  the four production binaries together from the locked workspace without
+  requiring Apple signing credentials or Gatekeeper workarounds; the resulting
+  local binaries are not Developer ID-signed, notarized, or Apple-verified.
 - Made human-readable CLI diagnostics and status summaries easier to scan with
   semantic terminal color, clearer sections, and consistent action styling.
   Automatic TTY detection and `NO_COLOR` keep default redirected output plain,
