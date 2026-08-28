@@ -1,5 +1,5 @@
 use super::http_kernel::{
-    valid_provider_deadline_ms, validate_https_origin, validate_safe_headers,
+    url_has_explicit_port, valid_provider_deadline_ms, validate_https_origin, validate_safe_headers,
 };
 use crate::secrets::{SecretError, SecretReference};
 use reqwest::{header::HeaderName, Url};
@@ -15,6 +15,7 @@ use thiserror::Error;
 
 const PROVIDER_CONFIG_ENV: &str = "GONGBU_PROVIDER_CONFIG";
 const CURRENT_SCHEMA_VERSION: u32 = 2;
+const BFL_API_HOSTS: &[&str] = &["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"];
 pub const LEGACY_UNRESOLVED_DIGEST: &str = "legacy-unresolved";
 
 #[derive(Debug, Error)]
@@ -569,7 +570,15 @@ fn validate_settings(key: &TargetKey, settings: &AdapterSettings) -> Result<()> 
             )?;
             if c.poll_interval_ms == 0
                 || c.poll_interval_ms > c.timeout_ms
-                || !valid_artifact_hosts(&c.approved_artifact_hosts, true)
+                || url_has_explicit_port(&c.endpoint)
+                || Url::parse(&c.endpoint)
+                    .ok()
+                    .is_none_or(|url| !valid_bfl_api_host(url.host_str()))
+                || !valid_artifact_hosts(&c.approved_artifact_hosts, false)
+                || !c
+                    .approved_artifact_hosts
+                    .iter()
+                    .all(|host| valid_bfl_delivery_host(host))
             {
                 return Err(Error::InvalidTransportSettings);
             }
@@ -700,6 +709,35 @@ pub(crate) fn valid_artifact_hosts(hosts: &[String], required: bool) -> bool {
             && url.query().is_none()
             && url.fragment().is_none()
     })
+}
+
+pub(crate) fn valid_bfl_api_host(host: Option<&str>) -> bool {
+    host.is_some_and(|host| BFL_API_HOSTS.contains(&host))
+}
+
+/// FLUX artifacts use BFL's fixed provider-specific delivery family, not a
+/// configurable general-purpose wildcard. A region is exactly one DNS label.
+pub(crate) fn valid_bfl_delivery_host(host: &str) -> bool {
+    let Some(region) = host
+        .strip_prefix("delivery.")
+        .and_then(|value| value.strip_suffix(".bfl.ai"))
+    else {
+        return false;
+    };
+    !region.is_empty()
+        && region.len() <= 63
+        && !region.contains('.')
+        && region
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && region
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && region
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
 }
 
 fn canonicalize(value: &Value) -> Value {
@@ -852,5 +890,65 @@ mod tests {
         let mut maximum = base();
         maximum["provider_configs"][0]["settings"]["config"]["timeout_ms"] = Value::from(270_000);
         assert!(serde_json::from_value::<ProviderTargetConfig>(maximum).is_ok());
+    }
+
+    #[test]
+    fn flux_transport_origins_and_artifact_pins_are_provider_specific() {
+        let base = || {
+            serde_json::json!({"schema_version":2,"provider_configs":[{
+                "provider_config_version":"flux-v1",
+                "workload_type":"image_generation",
+                "provider":"flux",
+                "adapter":"flux2_api",
+                "model":"flux-2-pro",
+                "secret_service":"gongbu.flux",
+                "secret_account":"local",
+                "settings":{"type":"flux2_api","config":{
+                    "endpoint":"https://api.bfl.ai",
+                    "api_version":"v1",
+                    "timeout_ms":1000,
+                    "poll_interval_ms":10,
+                    "approved_artifact_hosts":[]
+                }}
+            }]})
+        };
+        for endpoint in [
+            "https://api.bfl.ai",
+            "https://api.eu.bfl.ai",
+            "https://api.us.bfl.ai",
+        ] {
+            let mut value = base();
+            value["provider_configs"][0]["settings"]["config"]["endpoint"] =
+                Value::String(endpoint.into());
+            assert!(serde_json::from_value::<ProviderTargetConfig>(value).is_ok());
+        }
+        for endpoint in [
+            "https://api.bfl.ai:443",
+            "https://api.us1.bfl.ai",
+            "https://api.bfl.ai.evil.example",
+            "https://evil.api.bfl.ai",
+        ] {
+            let mut value = base();
+            value["provider_configs"][0]["settings"]["config"]["endpoint"] =
+                Value::String(endpoint.into());
+            assert!(serde_json::from_value::<ProviderTargetConfig>(value).is_err());
+        }
+        for hosts in [
+            serde_json::json!(["delivery.us.bfl.ai"]),
+            serde_json::json!(["delivery.eu-2.bfl.ai"]),
+        ] {
+            let mut value = base();
+            value["provider_configs"][0]["settings"]["config"]["approved_artifact_hosts"] = hosts;
+            assert!(serde_json::from_value::<ProviderTargetConfig>(value).is_ok());
+        }
+        for hosts in [
+            serde_json::json!(["cdn.bfl.ai"]),
+            serde_json::json!(["delivery.us.east.bfl.ai"]),
+            serde_json::json!(["delivery.us.bfl.ai.evil.example"]),
+        ] {
+            let mut value = base();
+            value["provider_configs"][0]["settings"]["config"]["approved_artifact_hosts"] = hosts;
+            assert!(serde_json::from_value::<ProviderTargetConfig>(value).is_err());
+        }
     }
 }

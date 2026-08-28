@@ -1313,7 +1313,7 @@ mod tests {
                     "api_version":"v1",
                     "timeout_ms":1000,
                     "poll_interval_ms":10,
-                    "approved_artifact_hosts":["cdn.bfl.ai"]
+                    "approved_artifact_hosts":["delivery.us.bfl.ai"]
                 }}
             }]
         }))

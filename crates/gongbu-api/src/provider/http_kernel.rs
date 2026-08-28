@@ -182,6 +182,31 @@ pub fn validate_https_origin(
     Ok(())
 }
 
+/// `url::Url` canonicalizes an explicit default port such as HTTPS `:443`
+/// away. Inspect the raw authority when policy forbids any explicit port.
+pub fn url_has_explicit_port(raw: &str) -> bool {
+    let Some((_, remainder)) = raw.split_once(':') else {
+        return false;
+    };
+    // Special-scheme URL parsing accepts and canonicalizes mixed or excess
+    // slash/backslash separators. Skip the full run so the raw authority's
+    // explicit default port cannot disappear during `Url` normalization.
+    let remainder = remainder.trim_start_matches(['/', '\\']);
+    let authority = remainder
+        .split(['/', '\\', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let host_and_port = authority.rsplit('@').next().unwrap_or_default();
+    if host_and_port.starts_with('[') {
+        return host_and_port.find(']').is_some_and(|end| {
+            host_and_port
+                .get(end + 1..)
+                .is_some_and(|tail| tail.starts_with(':'))
+        });
+    }
+    host_and_port.contains(':')
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CredentialForwarding {
     #[default]
@@ -367,5 +392,14 @@ mod tests {
         ] {
             assert!(validate_https_origin(&Url::parse(url).unwrap(), None).is_err());
         }
+        assert!(url_has_explicit_port("https://api.example:443/"));
+        assert!(url_has_explicit_port("https://api.example:8443/"));
+        assert!(url_has_explicit_port("HTTPS://api.example:443/"));
+        assert!(url_has_explicit_port("https:\\\\api.example:443/"));
+        assert!(url_has_explicit_port("https:///api.example:443/"));
+        assert!(url_has_explicit_port(r"https:/\api.example:443/"));
+        assert!(url_has_explicit_port(r"https:\/api.example:443/"));
+        assert!(url_has_explicit_port("https:////api.example:443/"));
+        assert!(!url_has_explicit_port("https://api.example/"));
     }
 }
