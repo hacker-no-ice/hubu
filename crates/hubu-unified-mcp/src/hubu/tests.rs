@@ -794,6 +794,37 @@ fn resolved_spend_dispatch_uses_supplied_identity_without_registry_persistence()
 }
 
 #[test]
+fn resumed_spend_expiry_requires_the_machine_readable_backend_code() {
+    for (body, expected_expired) in [
+        (
+            r#"{"error":"spend authorization rejected payment request: spend auth token is expired","error_code":"spend_auth_token_expired","retry_guidance":null}"#,
+            true,
+        ),
+        (
+            r#"{"error":"spend authorization rejected payment request: spend auth token is expired","retry_guidance":null}"#,
+            false,
+        ),
+        (
+            r#"{"error":"some other application rejection","error_code":"some_other_code"}"#,
+            false,
+        ),
+    ] {
+        let (endpoint, request, handle) = one_shot_http_server(400, body);
+        let server = server_with_backends(&endpoint, None, false, None);
+        let error = super::dispatch_resolved_spend(
+            &server,
+            "hubu_submit_spend",
+            json!({"account_id":"account-1","amount_cents":25,"reason":"resume"}),
+            &resolved_operation(),
+        )
+        .unwrap_err();
+        request.recv_timeout(Duration::from_secs(2)).unwrap();
+        handle.join().unwrap();
+        assert_eq!(super::is_expired_resume_failure(&error), expected_expired);
+    }
+}
+
+#[test]
 fn spend_approval_read_is_automatic_and_redacts_private_operation_identity() {
     let approval_request_id = "11111111-1111-4111-8111-111111111111";
     let (endpoint, request, handle) = one_shot_http_server(

@@ -132,6 +132,10 @@ Hubu exposes two related paths:
 
 An authorization token points to the immutable spend decision and expires. It
 can be claimed only by the executor and scope authorized by that decision.
+For unified-MCP human approvals, the explicit public-handle resume must happen
+before that lease expires. An expired pre-resume authorization is terminal for
+that operation and requires a new logical operation; it never starts provider
+work.
 Detailed external-executor rules are defined by the
 [spend executor contract](spend-executor-contract.md).
 

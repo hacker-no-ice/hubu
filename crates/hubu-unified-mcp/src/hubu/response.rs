@@ -48,5 +48,9 @@ pub(super) enum ForwardError {
     #[error("Hubu reconciliation credential is invalid")]
     InvalidReconciliationCapability,
     #[error("Hubu server returned HTTP {status}: {message}")]
-    Application { status: u16, message: String },
+    Application {
+        status: u16,
+        message: String,
+        error_code: Option<String>,
+    },
 }

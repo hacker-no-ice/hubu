@@ -19,6 +19,19 @@ pub use transport::RoutingConfig;
 
 pub(crate) use catalog::{execution_scope_input_schema, tool_definitions};
 
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct ResumeSpendFailure {
+    authorization_expired: bool,
+    message: String,
+}
+
+pub(crate) fn is_expired_resume_failure(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ResumeSpendFailure>()
+        .is_some_and(|failure| failure.authorization_expired)
+}
+
 pub(super) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
     call_tool_with_operation_identity(server, id, call, None)
 }
@@ -99,11 +112,19 @@ pub(crate) fn dispatch_resolved_spend(
                 error.downcast_ref::<ForwardError>(),
                 Some(ForwardError::AmbiguousTransport | ForwardError::InvalidResponse)
             );
-            Err(anyhow::anyhow!(resume_failure_message(
-                &error.to_string(),
-                operation,
-                ambiguous,
-            )))
+            let authorization_expired = matches!(
+                error.downcast_ref::<ForwardError>(),
+                Some(ForwardError::Application {
+                    status: 400,
+                    error_code: Some(error_code),
+                    ..
+                }) if error_code == "spend_auth_token_expired"
+            );
+            Err(ResumeSpendFailure {
+                authorization_expired,
+                message: resume_failure_message(&error.to_string(), operation, ambiguous),
+            }
+            .into())
         }
     }
 }
@@ -124,22 +145,6 @@ fn resume_failure_message(
         )
     } else {
         message
-    }
-}
-
-pub(crate) fn call_resumed_spend(
-    server: &Server,
-    id: Value,
-    plan: &crate::operation_registry::ResumeOperationPlan,
-) -> Value {
-    match dispatch_resolved_spend(
-        server,
-        plan.hubu_tool_name(),
-        plan.hubu_arguments.clone(),
-        &plan.operation,
-    ) {
-        Ok(result) => success_response(id, tool_result_v1(result)),
-        Err(error) => error_response(id, -32000, &error.to_string()),
     }
 }
 

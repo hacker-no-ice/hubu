@@ -164,6 +164,10 @@ impl BackendClient {
             return Err(ForwardError::Application {
                 status: status.as_u16(),
                 message,
+                error_code: body
+                    .get("error_code")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             }
             .into());
         }

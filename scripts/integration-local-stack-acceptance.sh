@@ -644,6 +644,29 @@ try:
     if execution_count() != approved_before:
         fail("approval or status synchronization started provider work")
 
+    original_redelivery = call(
+        "hubu_submit_governed_execution",
+        governed_arguments("approve"),
+        "local-stack-approval-approve",
+    )
+    if original_redelivery.get("operation_handle") != approved_handle:
+        fail(f"original redelivery changed the public handle: {original_redelivery}")
+    if original_redelivery.get("state") != "resume_required":
+        fail(f"original redelivery bypassed handle resume: {original_redelivery}")
+    if original_redelivery.get("outcome") != "resume_required":
+        fail(f"original redelivery returned stale approval outcome: {original_redelivery}")
+    if (
+        original_redelivery.get("authorization", {})
+        .get("retry_guidance", {})
+        .get("action")
+        != "resume_operation"
+    ):
+        fail(f"original redelivery returned stale retry guidance: {original_redelivery}")
+    if "hubu_resume_operation" not in original_redelivery.get("guidance", ""):
+        fail(f"original redelivery omitted handle-resume guidance: {original_redelivery}")
+    if execution_count() != approved_before:
+        fail("original approved-call redelivery started Gongbu or provider work")
+
     resumed = call("hubu_resume_operation", {"operation_handle": approved_handle})
     if resumed.get("state") not in {
         "accepted",

@@ -243,13 +243,22 @@ It is not recorded as a Hubu denial. A denial exists only after an explicit
 Neither reading nor resolving an approval starts Gongbu execution, payment, or
 provider work. An approval reserves the original immutable maximum and moves
 the public operation to `resume_required`; provider work can begin only after
-the separate resume call. A denial is terminal and resume fails closed without
-contacting Gongbu. The CLI remains a supported external decision surface, and
-the next status or resume call synchronizes that authoritative Hubu decision
-into the router registry. Because the router stores the validated intent before
-authorization dispatch, the public handle still resumes that exact intent after
-the stdio MCP process restarts; callers do not need to reconstruct its private
-key or original arguments.
+the separate resume call. Once the original call records `needs_approval`, its
+redelivery is permanently replay-only: even a concurrent or later response
+cannot advance it to execution. A denial is terminal and resume fails closed
+without contacting Gongbu. The CLI remains a supported external decision
+surface, and the next status or resume call synchronizes that authoritative
+Hubu decision into the router registry. Because the router stores the validated
+intent before authorization dispatch, the public handle still resumes that
+exact intent after the stdio MCP process restarts; callers do not need to
+reconstruct its private key or original arguments.
+
+If the approved authorization lease expires before resume, the router records
+terminal `authorization_expired_before_resume`, starts no Gongbu or provider
+work, and directs the caller to create a new logical operation. Hubu exposes a
+machine-readable expiry code for the submit-spend replay path; unrelated or
+ambiguous backend failures remain nonterminal and continue to require a retry
+with the same public handle.
 
 The composite handler uses a 45-second default end-to-end response target. Its
 clock starts before the forced capability refresh, so capability checks,

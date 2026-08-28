@@ -1394,7 +1394,11 @@ fn operation_status_result(status: &operation_registry::DurableOperationStatus) 
         status.result_code.as_deref(),
         Some("approval_denied" | "authorization_denied" | "spend_denied")
     );
-    let guidance = if denied {
+    let authorization_expired =
+        status.result_code.as_deref() == Some("authorization_expired_before_resume");
+    let guidance = if authorization_expired {
+        "The approved authorization expired before it could be resumed. This operation is terminal; create a new logical operation for the work."
+    } else if denied {
         hubu::DENIED_OPERATION_GUIDANCE
     } else {
         match status.state.as_str() {
@@ -1423,13 +1427,18 @@ fn operation_status_result(status: &operation_registry::DurableOperationStatus) 
         "operation_handle": status.operation_handle,
         "state": status.state,
         "terminal": status.terminal(),
-        "replacement_safe": status.state == "authorized",
+        "replacement_safe": status.state == "authorized" || authorization_expired,
         "execution_id": status.execution_id,
         "result": operation_result_projection(status.result_code.as_deref()),
         "updated_at": status.updated_at,
         "guidance": guidance,
     });
-    if denied {
+    if authorization_expired {
+        projection["retry_guidance"] = json!({
+            "action": "create_new_operation",
+            "message": "The prior approved authorization expired before resume. Create a new logical operation; the expired operation cannot be resumed."
+        });
+    } else if denied {
         projection["retry_guidance"] = hubu::denied_retry_guidance();
     }
     json!({
@@ -1687,6 +1696,29 @@ mod tests {
             assert!(!response.to_string().contains("operation_key"));
             assert!(!response.to_string().contains("reuse_operation_key"));
         }
+    }
+
+    #[test]
+    fn expired_approval_status_is_terminal_and_replacement_safe() {
+        let response = operation_status_result(&operation_registry::DurableOperationStatus {
+            operation_handle: format!("hubu:public-operation:v1:{}", "f".repeat(32)),
+            state: "failed".into(),
+            execution_id: None,
+            result_code: Some("authorization_expired_before_resume".into()),
+            updated_at: "2026-08-28T00:00:00.000Z".into(),
+        });
+        let structured = &response["structuredContent"];
+        assert_eq!(structured["terminal"], true);
+        assert_eq!(structured["replacement_safe"], true);
+        assert_eq!(
+            structured["retry_guidance"]["action"],
+            "create_new_operation"
+        );
+        assert!(structured["guidance"].as_str().unwrap().contains("expired"));
+        assert!(structured["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("new logical operation"));
     }
 
     #[test]

@@ -98,7 +98,7 @@ pub(super) fn backend_availability(
 pub(super) fn tool_definition() -> Value {
     json!({
         "name": TOOL_NAME,
-        "description": "Submit one governed execution request. Hubu evaluates policy first. If allowed, Gongbu executes and returns the result. If human approval is required, no provider work starts and the request remains resumable by exact redelivery after approval. A definitive denial is terminal; corrected work must be submitted as a new tool call.",
+        "description": "Submit one governed execution request. Hubu evaluates policy first. If allowed, Gongbu executes and returns the result. If human approval is required, no provider work starts; after approval, continue only with hubu_resume_operation and the returned public handle. A definitive denial is terminal; corrected work must be submitted as a new tool call.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,
@@ -231,10 +231,15 @@ pub(super) fn call_tool(
                 )
             }
         };
-        let outcome = if decision == Some("deny") {
-            "denied"
-        } else {
-            "approval_required"
+        let outcome = match (
+            status.state.as_str(),
+            status.result_code.as_deref(),
+            decision,
+        ) {
+            ("resume_required", _, _) => "resume_required",
+            ("failed", Some("approval_denied"), _) | (_, _, Some("deny")) => "denied",
+            ("failed", _, _) => "failed",
+            _ => "approval_required",
         };
         return success_response(
             id,
@@ -817,16 +822,23 @@ fn composite_result(
         display_millis(timing.gongbu.non_provider_ms),
     );
     let (artifacts, artifact_delivery) = artifact_delivery;
+    let authorization = authorization_projection_for_outcome(
+        authorization,
+        outcome,
+        &status.operation_handle,
+        status.result_code.as_deref(),
+    );
     let structured = json!({
         "schema_version": 1,
         "outcome": outcome,
         "operation_handle": status.operation_handle,
         "state": status.state,
         "terminal": status.terminal(),
-        "replacement_safe": status.state == "authorized",
+        "replacement_safe": status.state == "authorized"
+            || status.result_code.as_deref() == Some("authorization_expired_before_resume"),
         "execution_id": status.execution_id,
         "result": super::operation_result_projection(status.result_code.as_deref()),
-        "authorization": authorization_projection(authorization),
+        "authorization": authorization,
         "artifacts": artifacts,
         "artifact_delivery": artifact_delivery,
         "timing": {
@@ -843,7 +855,7 @@ fn composite_result(
             "human_approval_wait_ms": Value::Null,
             "summary": summary
         },
-        "guidance": outcome_guidance(outcome)
+        "guidance": outcome_guidance(outcome, status.result_code.as_deref())
     });
     let mut content = Vec::with_capacity(images.len() + 1);
     content.push(json!({
@@ -857,6 +869,58 @@ fn composite_result(
         "structuredContent": structured,
         "isError": false
     })
+}
+
+fn authorization_projection_for_outcome(
+    authorization: &Value,
+    outcome: &str,
+    operation_handle: &str,
+    result_code: Option<&str>,
+) -> Value {
+    let mut projection = authorization_projection(authorization);
+    let Some(object) = projection.as_object_mut() else {
+        return projection;
+    };
+    if result_code == Some("authorization_expired_before_resume") {
+        object.insert("requires_human_approval".into(), Value::Bool(false));
+        object.insert(
+            "retry_guidance".into(),
+            json!({
+                "action": "create_new_operation",
+                "message": "The prior approved authorization expired before resume. Create a new logical operation; the expired operation cannot be resumed."
+            }),
+        );
+        return projection;
+    }
+    match outcome {
+        "approval_required" => {
+            object.insert("requires_human_approval".into(), Value::Bool(true));
+            object.insert(
+                "retry_guidance".into(),
+                json!({
+                    "action": "resolve_then_resume",
+                    "operation_handle": operation_handle,
+                    "message": "Resolve the existing human approval, then continue only with hubu_resume_operation and this public handle."
+                }),
+            );
+        }
+        "resume_required" => {
+            object.insert("requires_human_approval".into(), Value::Bool(false));
+            if let Some(approval) = object.get_mut("approval").and_then(Value::as_object_mut) {
+                approval.insert("status".into(), Value::String("approved".into()));
+            }
+            object.insert(
+                "retry_guidance".into(),
+                json!({
+                    "action": "resume_operation",
+                    "operation_handle": operation_handle,
+                    "message": "Human approval is recorded. Continue only with hubu_resume_operation and this public handle."
+                }),
+            );
+        }
+        _ => {}
+    }
+    projection
 }
 
 pub(crate) fn authorization_projection(authorization: &Value) -> Value {
@@ -934,10 +998,16 @@ fn redact_authorization_identity(value: &mut Value, private_values: &[&str]) {
     }
 }
 
-fn outcome_guidance(outcome: &str) -> &'static str {
+fn outcome_guidance(outcome: &str, result_code: Option<&str>) -> &'static str {
+    if result_code == Some("authorization_expired_before_resume") {
+        return "The approved authorization expired before resume. This operation is terminal and no provider work started; create a new logical operation.";
+    }
     match outcome {
         "approval_required" => {
-            "Human approval is required and no provider work started. Resolve the existing approval, then redeliver this exact composite call with the same identity; do not submit a replacement."
+            "Human approval is required and no provider work started. Resolve the existing approval, then continue only with hubu_resume_operation and this operation_handle; do not redeliver the original composite call or submit a replacement."
+        }
+        "resume_required" => {
+            "Human approval is recorded and no provider work started. Continue this exact operation with hubu_resume_operation and this operation_handle; do not redeliver the original composite call or submit a replacement."
         }
         "in_progress" => {
             "The durable worker continues this execution. Observe operation_handle with hubu_operation_status; do not submit a replacement."
