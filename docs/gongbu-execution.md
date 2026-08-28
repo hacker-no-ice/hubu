@@ -38,10 +38,12 @@ intent and an operator-configured target to `POST /v2/executions`.
 
 For a new execution, Gongbu then:
 
-1. Resolves Hubu's read-only authorization snapshot, which is authoritative for
+1. Derives the provider, adapter, model, execution scope, normalized provider
+   input, and price from its operator-controlled catalog. Provider-specific
+   billable dimensions and the matching selector-qualified pricing rule are
+   frozen at this boundary.
+2. Resolves Hubu's read-only authorization snapshot, which is authoritative for
    account and agent attribution.
-2. Derives the provider, adapter, model, execution scope, and price from its
-   operator-controlled catalog.
 3. Requires exact agreement on the operation key, amount, currency, lease
    profile, expiry, and typed execution scope, and accepts account and agent
    only from Hubu.
@@ -146,6 +148,43 @@ Provider credentials belong to Gongbu's runtime identity. They are never
 accepted in execution requests, stored in repository records, included in
 fixtures, returned by APIs, written to Temporal payloads, or emitted in logs and
 errors.
+
+### Certified FLUX.2 output dimensions
+
+The `flux2_api` adapter pins the non-preview `flux-2-pro` model described in the
+[official FLUX.2 overview](https://docs.bfl.ai/flux_2/flux2_overview). Its
+initial certified output profile is intentionally limited:
+
+| Normalized preset | Exact BFL width and height |
+| --- | --- |
+| `1k` | `1024` × `1024` |
+| `2k` | `1920` × `1088` (landscape) |
+| `4k` | `2048` × `2048` |
+
+These preset names belong to Hubu and Gongbu; BFL does not name these exact
+dimension pairs `1k`, `2k`, and `4k`. The mapping is deterministic and is not an
+automatic resolution-selection feature. Arbitrary dimensions, partial
+width/height overrides, and overrides that conflict with the selected preset
+are rejected during admission.
+
+The profile enforces BFL's documented minimum of `64` × `64`, requires each
+dimension to be a multiple of `16`, and caps output at the documented 4 MP
+maximum represented by `2048` × `2048`. See BFL's
+[official dimension guidance](https://help.bfl.ai/articles/8916739058-what-aspect-ratios-and-output-dimensions-are-supported).
+Each enabled FLUX profile must contain one operator-verified,
+selector-qualified price for every certified preset. Gongbu selects that rule,
+binds the exact dimensions, and freezes the preset, dimensions, and pricing
+snapshot before it resolves or claims Hubu authorization. Admission fails
+before persistence, `ProviderAttempt` creation, or provider network activity if
+the rule or dimension contract is missing or inconsistent.
+
+The adapter transmits only BFL's top-level integer `width` and `height` request
+fields documented by the
+[`flux-2-pro` API](https://docs.bfl.ai/api-reference/models/generate-or-edit-an-image-with-flux2-%5Bpro%5D).
+It never forwards Gongbu's generic `image_size` selector. The durable normalized
+input and pricing snapshot retain the selected preset and exact transmitted
+dimensions, so exact replay reconstructs the frozen request after catalog
+rotation or process restart instead of consulting the current catalog.
 
 ## Temporal ownership
 

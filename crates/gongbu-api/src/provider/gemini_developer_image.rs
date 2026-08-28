@@ -451,6 +451,7 @@ mod tests {
             input_tokens: None,
             max_output_tokens: None,
             image_size: None,
+            output_dimensions: None,
         }
     }
     fn adapter(
@@ -686,6 +687,7 @@ mod tests {
             input_tokens: None,
             max_output_tokens: None,
             image_size: image_size.clone(),
+            output_dimensions: None,
         };
         let snapshot = PricingCatalog::load(
             env::var("GONGBU_PRICING_CATALOG").expect("pricing catalog is required"),

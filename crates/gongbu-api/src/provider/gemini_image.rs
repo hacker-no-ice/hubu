@@ -623,6 +623,7 @@ mod tests {
         response: Arc<Mutex<Option<std::result::Result<TransportResponse, String>>>>,
         calls: Arc<Mutex<u32>>,
         referenced: Vec<u8>,
+        expected_image_size: Option<&'static str>,
     }
     impl GeminiTransport for FixtureTransport {
         fn generate(
@@ -631,9 +632,16 @@ mod tests {
             bearer: &[u8],
             _: Duration,
             _: &std::collections::BTreeMap<String, String>,
-            _: &Value,
+            body: &Value,
         ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
             assert_eq!(bearer, b"secret-canary");
+            if let Some(expected) = self.expected_image_size {
+                assert_eq!(
+                    body.pointer("/generationConfig/imageConfig/imageSize")
+                        .and_then(Value::as_str),
+                    Some(expected)
+                );
+            }
             *self.calls.lock().unwrap() += 1;
             self.response
                 .lock()
@@ -691,6 +699,7 @@ mod tests {
             input_tokens: None,
             max_output_tokens: None,
             image_size: None,
+            output_dimensions: None,
         }
     }
     fn adapter(
@@ -707,6 +716,7 @@ mod tests {
             })))),
             calls: calls.clone(),
             referenced: png(),
+            expected_image_size: None,
         };
         (
             GeminiImageAdapter::new(config(), "gemini-image-v1".into(), transport).unwrap(),
@@ -736,6 +746,36 @@ mod tests {
         );
         assert_eq!(outcome.usage.unwrap().images, Some(1));
         assert_eq!(outcome.artifacts[0].bytes, bytes);
+    }
+
+    #[test]
+    fn normalized_resolution_still_maps_to_gemini_image_size() {
+        let bytes = png();
+        let calls = Arc::new(Mutex::new(0));
+        let transport = FixtureTransport {
+            response: Arc::new(Mutex::new(Some(Ok(TransportResponse {
+                status: 200,
+                request_id: Some("request-1".into()),
+                operation_id: Some("operation-1".into()),
+                body: json!({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":STANDARD.encode(&bytes)}}]}}]}),
+            })))),
+            calls: calls.clone(),
+            referenced: vec![],
+            expected_image_size: Some("4K"),
+        };
+        let adapter =
+            GeminiImageAdapter::new(config(), "gemini-image-v1".into(), transport).unwrap();
+        let mut sized = request();
+        sized.image_size = Some("4k".into());
+        adapter
+            .invoke(
+                &sized,
+                &json!({"prompt":"draw a cat","image_size":"4k"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
 
     #[test]
@@ -800,6 +840,7 @@ mod tests {
                                 response: Arc::new(Mutex::new(Some(Err("timeout".into())))),
                                 calls: calls.clone(),
                                 referenced: Vec::new(),
+                                expected_image_size: None,
                             },
                         )
                         .unwrap(),
@@ -1013,6 +1054,7 @@ mod tests {
                 response: Arc::new(Mutex::new(None)),
                 calls: Arc::new(Mutex::new(0)),
                 referenced: Vec::new(),
+                expected_image_size: None,
             }),
             Err(ContractError::Provider { code }) if code == "config_invalid"
         ));
@@ -1026,6 +1068,7 @@ mod tests {
                 response: Arc::new(Mutex::new(None)),
                 calls: Arc::new(Mutex::new(0)),
                 referenced: Vec::new(),
+                expected_image_size: None,
             }),
             Err(ContractError::Provider { code }) if code == "config_invalid"
         ));
@@ -1038,6 +1081,7 @@ mod tests {
             response: Arc::new(Mutex::new(Some(Err("timeout".into())))),
             calls: calls.clone(),
             referenced: Vec::new(),
+            expected_image_size: None,
         };
         let adapter =
             GeminiImageAdapter::new(config(), "gemini-image-v1".into(), transport).unwrap();
@@ -1079,6 +1123,7 @@ mod tests {
             response: Arc::new(Mutex::new(Some(Err("pre_send".into())))),
             calls: calls.clone(),
             referenced: Vec::new(),
+            expected_image_size: None,
         };
         let adapter =
             GeminiImageAdapter::new(config(), "gemini-image-v1".into(), transport).unwrap();
@@ -1105,6 +1150,7 @@ mod tests {
             )))),
             calls: calls.clone(),
             referenced: Vec::new(),
+            expected_image_size: None,
         };
         let adapter =
             GeminiImageAdapter::new(config(), "gemini-image-v1".into(), transport).unwrap();
@@ -1296,6 +1342,7 @@ mod tests {
             input_tokens: None,
             max_output_tokens: None,
             image_size: image_size.clone(),
+            output_dimensions: None,
         };
         let snapshot = PricingCatalog::load(pricing_path)
             .unwrap()
