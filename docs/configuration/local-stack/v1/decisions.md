@@ -141,7 +141,13 @@ These amounts are related but not interchangeable:
 3. **Requested Hubu authorization** — the governed amount requested before provider transmission.
 4. **Budget hold** — Hubu reserves the authorized amount so concurrent work cannot spend it twice.
 5. **Profile maximum spend** — `maximum_spend_minor` prevents this Gongbu configuration from exceeding its explicit ceiling.
-6. **Final settlement** — the successful provider outcome is settled without exceeding the authorization. Indeterminate or ambiguous outcomes reconcile according to the executor contract rather than guessing that no spend occurred.
+6. **Exact provider cost** — Gongbu preserves the provider's integer amount,
+   decimal scale, currency, and the complete pricing snapshot frozen before
+   provider work.
+7. **Final settlement** — Hubu converts the final exact cost to cents with one
+   checked ceiling operation. A normal executor settlement cannot exceed the
+   authorization; an overrun or ambiguous outcome retains its evidence for
+   human reconciliation rather than guessing that no spend occurred.
 
 ```text
 exact catalog × request quantity
@@ -151,12 +157,28 @@ exact catalog × request quantity
               │ bounded by profile and Hubu policy/budget
               ▼
        authorization + budget hold
-              │ provider execution
+              │ provider execution + exact receipt
+              ▼
+ checked ceiling to budget cents
+              │
               ▼
         settlement or reconciliation
 ```
 
 `maximum_spend_minor` does not create a Hubu budget, and a sufficient Hubu budget does not waive the profile ceiling. Both checks must pass.
+
+Do not convert a provider decimal through floating point. For an exact amount
+`amount × 10^-scale` major currency units, USD budget consumption is
+`ceil(amount / 10^(scale - 2))` cents when `scale` is greater than 2, with
+checked multiplication for smaller scales. For example, USD 0.000001 consumes
+one cent. Gongbu preserves the original exact tuple even though Hubu accounts
+for the conservative cent amount.
+
+After the claim lease expires, a human may confirm a legitimate billed overrun.
+Hubu then records and consumes the full conservative charge, records the amount
+above the authorization, and releases none of the hold. This retrospective
+accounting may make the budget's remaining balance negative and exhausts it for
+later reservations.
 
 ## Converting provider prices
 

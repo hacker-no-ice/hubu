@@ -244,8 +244,7 @@ fn normalize_provider_success(
         usage: outcome
             .usage
             .ok_or_else(|| WorkflowActivityError::Ambiguous("invalid_provider_success".into()))?,
-        provider_amount_minor: outcome.provider_amount_minor,
-        provider_currency: outcome.provider_currency,
+        actual_vendor_cost: outcome.actual_vendor_cost,
         artifacts: outcome
             .artifacts
             .into_iter()
@@ -1526,8 +1525,7 @@ mod tests {
                         input_tokens: None,
                         output_tokens: None,
                     }),
-                    provider_amount_minor: None,
-                    provider_currency: None,
+                    actual_vendor_cost: None,
                     artifacts: vec![NormalizedArtifact {
                         media_type: "image/png".into(),
                         bytes: self.png.clone(),
@@ -1778,8 +1776,11 @@ mod tests {
 
         let invalid_success = AdapterOutcome {
             usage: Some(Default::default()),
-            provider_amount_minor: Some(10),
-            provider_currency: None,
+            actual_vendor_cost: Some(crate::provider_contract::ActualVendorCost {
+                amount: 10,
+                scale: 19,
+                currency: "USD".into(),
+            }),
             provider_request_id: Some("request-2".into()),
             provider_operation_id: Some("operation-2".into()),
             artifacts: vec![crate::provider_contract::NormalizedArtifact {

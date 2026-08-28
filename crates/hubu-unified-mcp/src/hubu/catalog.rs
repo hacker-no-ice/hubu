@@ -237,23 +237,29 @@ fn all_tool_definitions() -> Vec<Value> {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
+                        "actual_vendor_cost": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "amount": { "type": "integer", "minimum": 0 },
+                                "scale": { "type": "integer", "minimum": 0, "maximum": 18 },
+                                "currency": { "type": "string", "enum": ["usd"] }
+                            },
+                            "required": ["amount", "scale", "currency"]
+                        },
                         "actual_vendor_cost_cents": { "type": "integer", "minimum": 0 },
                         "provider_request_id": { "type": "string" },
                         "price_model_snapshot": {
                             "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                                "provider": { "type": "string" },
-                                "model": { "type": "string" },
-                                "unit_price_cents": { "type": "integer", "minimum": 0 },
-                                "pricing_unit": { "type": "string" },
-                                "currency": { "type": "string", "enum": ["usd"] }
-                            },
-                            "required": ["provider", "model", "unit_price_cents", "pricing_unit", "currency"]
+                            "description": "The complete immutable pricing snapshot captured before provider work."
                         },
                         "artifact_reference": { "type": "string" }
                     },
-                    "required": ["actual_vendor_cost_cents", "provider_request_id", "price_model_snapshot", "artifact_reference"]
+                    "required": ["provider_request_id", "price_model_snapshot", "artifact_reference"],
+                    "oneOf": [
+                        { "required": ["actual_vendor_cost"], "not": { "required": ["actual_vendor_cost_cents"] } },
+                        { "required": ["actual_vendor_cost_cents"], "not": { "required": ["actual_vendor_cost"] } }
+                    ]
                 }
             }), &["claim_id", "provider_reference", "evidence", "receipt"]),
         ),

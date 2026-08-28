@@ -700,7 +700,7 @@ fn refresh_budget_status(
     };
     match &budget.status {
         BudgetStatus::Active
-            if balance.remaining_amount_cents == 0 && balance.frozen_amount_cents == 0 =>
+            if balance.remaining_amount_cents <= 0 && balance.frozen_amount_cents == 0 =>
         {
             budget.status = BudgetStatus::Exhausted;
             budget.updated_at = now;

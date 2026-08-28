@@ -570,8 +570,9 @@ impl ProviderActivities for ScenarioProvider {
                 images: Some(1),
                 ..Default::default()
             },
-            provider_amount_minor: Some(100),
-            provider_currency: Some("USD".into()),
+            actual_vendor_cost: Some(
+                gongbu_api::provider_contract::ActualVendorCost::new(100, 2, "USD").unwrap(),
+            ),
             artifacts: vec![ProviderArtifact {
                 media_type: "image/png".into(),
                 bytes: STANDARD

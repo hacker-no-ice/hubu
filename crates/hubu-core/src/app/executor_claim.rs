@@ -311,8 +311,10 @@ impl ExecutorClaimService {
                 "decision_id": state.decision.id.to_string(),
                 "hold_id": state.budget_hold.id.to_string(),
                 "authorized_max_cents": receipt.authorized_max_cents,
-                "actual_vendor_cost_cents": receipt.receipt.actual_vendor_cost_cents,
+                "actual_vendor_cost": receipt.receipt.actual_vendor_cost,
+                "budget_charge_cents": receipt.budget_charge_cents,
                 "released_amount_cents": receipt.released_amount_cents,
+                "overrun_amount_cents": receipt.overrun_amount_cents,
                 "provider_request_id": receipt.receipt.provider_request_id,
                 "artifact_reference": receipt.receipt.artifact_reference,
                 "merchant": state.decision.request.merchant,
@@ -542,20 +544,24 @@ mod tests {
             condition::{Condition, Field, PolicyValue},
             model::{Effect, Policy, Rule},
         },
-        spend::{SpendExecutorPriceModelSnapshot, SpendExecutorSettlementReceipt},
+        spend::{SpendExecutorSettlementReceipt, SpendExecutorVendorCost},
     };
 
     fn settlement_receipt(actual_vendor_cost_cents: i64) -> SpendExecutorSettlementReceipt {
         SpendExecutorSettlementReceipt {
-            actual_vendor_cost_cents,
-            provider_request_id: "provider-request-123".to_string(),
-            price_model_snapshot: SpendExecutorPriceModelSnapshot {
-                provider: "example-image-provider".to_string(),
-                model: "image-model-v1".to_string(),
-                unit_price_cents: actual_vendor_cost_cents,
-                pricing_unit: "image".to_string(),
+            actual_vendor_cost: SpendExecutorVendorCost {
+                amount: actual_vendor_cost_cents,
+                scale: 2,
                 currency: Currency::Usd,
             },
+            provider_request_id: "provider-request-123".to_string(),
+            price_model_snapshot: serde_json::json!({
+                "provider": "example-image-provider",
+                "model": "image-model-v1",
+                "unit_price_cents": actual_vendor_cost_cents,
+                "pricing_unit": "image",
+                "currency": "usd",
+            }),
             artifact_reference: "artifact://hubu-logo.png".to_string(),
         }
     }

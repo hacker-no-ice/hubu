@@ -42,6 +42,33 @@ must not permit provider traffic. Live mode requires an exact target, complete
 pricing, a credential reference, a positive spend ceiling, and the literal
 live-spend acknowledgement.
 
+## Precise-cost database upgrade
+
+The HUB-33 upgrade runs when Gongbu opens its SQLite repository. It converts
+legacy v4.3 provider-attempt and receipt minor-unit amounts to exact integer
+amounts with decimal scale 2 and the already stored currency. Existing frozen
+execution pricing JSON, execution IDs, provider-attempt IDs, receipt IDs, and
+Hubu settlement IDs remain unchanged. A migrated legacy receipt records the
+same retry payload the old binary sent: `provider_request_id` is its receipt ID,
+and `price_model_snapshot` is the old reduced provider/model/estimated-price
+projection reconstructed from the frozen execution snapshot. New receipts keep
+the provider-reported reference and complete frozen snapshot. Reopening the
+database is idempotent and must not rewrite an already precise receipt.
+
+Hubu performs a separate migration in the Hubu database. Do not copy either
+database over the other, point one process at the other process's state, or
+expect one migration to repair both stores. Before upgrading, stop the stack
+and take independent cold backups of Hubu state and Gongbu state. An older
+binary that knows only the legacy columns must use its matching pre-upgrade
+backup; do not use an upgraded database as a rollback mechanism.
+
+The executor contract remains v4.3 and accepts the legacy cents receipt shape.
+New precise receipts carry exact amount, scale, currency, and the complete
+frozen pricing snapshot. If an older Hubu rejects that additive shape after a
+provider charge, Gongbu retains the receipt and enters reconciliation. Upgrade
+the installation before resolving the charge; never retry the provider or
+discard precision to force settlement.
+
 ## Temporal mode
 
 In `managed_local` mode, configure an absolute, version-pinned Temporal CLI.

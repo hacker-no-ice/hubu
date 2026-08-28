@@ -23,7 +23,8 @@ Gongbu owns:
 - provider credentials and calls;
 - durable execution and provider-attempt records;
 - Temporal workflows and activities;
-- cost calculation and settlement evidence;
+- exact integer cost calculation, frozen pricing snapshots, and settlement
+  evidence;
 - normalized artifacts; and
 - execution recovery.
 
@@ -50,8 +51,11 @@ For a new execution, Gongbu then:
    `gongbu-execution-{execution_id}` on the `gongbu-executions` task queue.
 6. Claims the Hubu authorization from the durable workflow.
 7. Creates a `ProviderAttempt` before irreversible provider transmission.
-8. Normalizes artifacts and calculates actual provider cost.
-9. Settles confirmed billable work or releases confirmed non-billable work.
+8. Normalizes artifacts and preserves exact provider cost, currency, decimal
+   scale, and the complete frozen pricing snapshot.
+9. Settles confirmed billable work, routes a cost above the authorized maximum
+   to reconciliation with its evidence intact, or releases confirmed
+   non-billable work.
 
 Resolving authorization never claims it. Preview APIs are optional UX and are
 never authority for admission or price. Gongbu recomputes from its active
@@ -92,6 +96,15 @@ release Hubu's hold merely because a response was lost. Finalization uses the
 persisted execution agent and provider receipt and remains idempotent under
 repeated delivery.
 
+The same rule applies when an exact vendor charge rounds conservatively above
+the authorization. Gongbu persists the exact integer amount, scale, currency,
+provider identifiers, and full frozen pricing snapshot before finalization.
+Hubu's normal-settlement rejection leaves the hold claimed; Gongbu retains the
+exact provider-attempt cost, frozen snapshot, and evidence and routes the
+execution to reconciliation instead of repeating provider work or discarding
+the legitimate bill. Hubu permits the human billed resolution after the claim
+lease expires.
+
 ## Execution timing
 
 Execution responses include an additive, agent-safe `timing` projection. Gongbu
@@ -121,6 +134,13 @@ target binds:
 Admission fails closed when target selection is unknown or ambiguous, price or
 scope differs from Hubu authorization, a required credential is unavailable,
 or the live-spend gate is incomplete.
+
+Pricing and provider amounts never pass through floating point. Gongbu keeps
+the exact rational catalog calculation and any exact provider-reported decimal
+as checked integers. Hubu converts the final exact cost to budget cents once by
+ceiling, so any positive fractional-cent charge consumes at least one cent.
+Each operation keeps its own receipt and conversion; two independent provider
+settlements are never pooled before rounding.
 
 Provider credentials belong to Gongbu's runtime identity. They are never
 accepted in execution requests, stored in repository records, included in
@@ -178,3 +198,14 @@ live-provider test modes, use the [sandbox](operations/gongbu-sandbox.md) and
 [live provider testing](operations/live-provider-testing.md) guides.
 
 The implementation lives in [`crates/gongbu-api`](../crates/gongbu-api).
+
+On repository open, Gongbu independently migrates legacy v4.3 minor-unit
+attempt and receipt amounts to exact amount with scale 2 and their stored
+currency. For an in-flight legacy receipt, it also reconstructs the exact v4.3
+wire evidence: the receipt ID remains the provider-request reference and the
+reduced price/model projection is derived from the unchanged frozen execution
+snapshot. New receipts instead persist the provider-reported reference and the
+complete snapshot. This keeps a lost-response retry immutable and idempotent.
+Hubu performs its corresponding migration only in the Hubu database; neither
+process opens or migrates the other's state. See
+[persistence migration and v4 compatibility](spend-executor-contract.md#persistence-migration-and-v4-compatibility).

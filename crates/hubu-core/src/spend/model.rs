@@ -7,7 +7,8 @@ use hubu_common::ids::{
     UserId,
 };
 use hubu_common::money::Currency;
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::policy::model::Evaluation;
@@ -327,13 +328,125 @@ pub struct SpendExecutorPriceModelSnapshot {
     pub currency: Currency,
 }
 
+pub const MAX_VENDOR_COST_DECIMAL_SCALE: u32 = 18;
+
+/// Exact provider cost expressed as `amount * 10^-scale` major currency units.
+///
+/// Budget accounting is in cents. Conversion therefore rounds toward positive
+/// infinity so Hubu never understates externally billed consumption.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct SpendExecutorVendorCost {
+    pub amount: i64,
+    pub scale: u32,
+    #[serde(deserialize_with = "deserialize_executor_currency")]
+    pub currency: Currency,
+}
+
+fn deserialize_executor_currency<'de, D>(deserializer: D) -> Result<Currency, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let currency = String::deserialize(deserializer)?;
+    if currency.eq_ignore_ascii_case("usd") {
+        Ok(Currency::Usd)
+    } else {
+        Err(D::Error::custom(format!(
+            "unsupported actual vendor cost currency `{currency}`"
+        )))
+    }
+}
+
+impl SpendExecutorVendorCost {
+    pub fn conservative_budget_charge_cents(&self) -> Result<i64, &'static str> {
+        if self.amount < 0 {
+            return Err("actual vendor cost cannot be negative");
+        }
+        if self.scale > MAX_VENDOR_COST_DECIMAL_SCALE {
+            return Err("actual vendor cost scale cannot exceed 18");
+        }
+
+        if self.scale <= 2 {
+            let multiplier = 10_i64
+                .checked_pow(2 - self.scale)
+                .ok_or("actual vendor cost cannot be represented in budget cents")?;
+            return self
+                .amount
+                .checked_mul(multiplier)
+                .ok_or("actual vendor cost cannot be represented in budget cents");
+        }
+
+        let divisor = 10_i64
+            .checked_pow(self.scale - 2)
+            .ok_or("actual vendor cost cannot be represented in budget cents")?;
+        let quotient = self.amount / divisor;
+        if self.amount % divisor == 0 {
+            Ok(quotient)
+        } else {
+            quotient
+                .checked_add(1)
+                .ok_or("actual vendor cost cannot be represented in budget cents")
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SpendExecutorSettlementReceipt {
-    pub actual_vendor_cost_cents: i64,
+    pub actual_vendor_cost: SpendExecutorVendorCost,
     pub provider_request_id: String,
-    pub price_model_snapshot: SpendExecutorPriceModelSnapshot,
+    pub price_model_snapshot: Value,
     pub artifact_reference: String,
+}
+
+impl<'de> Deserialize<'de> for SpendExecutorSettlementReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PreciseReceipt {
+            actual_vendor_cost: SpendExecutorVendorCost,
+            provider_request_id: String,
+            price_model_snapshot: Value,
+            artifact_reference: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyV43Receipt {
+            actual_vendor_cost_cents: i64,
+            provider_request_id: String,
+            price_model_snapshot: Value,
+            artifact_reference: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CompatibleReceipt {
+            Precise(PreciseReceipt),
+            LegacyV43(LegacyV43Receipt),
+        }
+
+        Ok(match CompatibleReceipt::deserialize(deserializer)? {
+            CompatibleReceipt::Precise(receipt) => Self {
+                actual_vendor_cost: receipt.actual_vendor_cost,
+                provider_request_id: receipt.provider_request_id,
+                price_model_snapshot: receipt.price_model_snapshot,
+                artifact_reference: receipt.artifact_reference,
+            },
+            CompatibleReceipt::LegacyV43(receipt) => Self {
+                actual_vendor_cost: SpendExecutorVendorCost {
+                    amount: receipt.actual_vendor_cost_cents,
+                    scale: 2,
+                    currency: Currency::Usd,
+                },
+                provider_request_id: receipt.provider_request_id,
+                price_model_snapshot: receipt.price_model_snapshot,
+                artifact_reference: receipt.artifact_reference,
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,10 +454,109 @@ pub struct PersistedSpendExecutorSettlementReceipt {
     pub claim_id: SpendExecutorClaimId,
     pub settlement_id: PaymentId,
     pub authorized_max_cents: i64,
+    pub budget_charge_cents: i64,
     pub released_amount_cents: i64,
+    pub overrun_amount_cents: i64,
     pub currency: Currency,
     pub receipt: SpendExecutorSettlementReceipt,
     pub created_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod executor_receipt_precision_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn conservative_budget_conversion_covers_fractional_cent_boundaries() {
+        let cost = |amount, scale| SpendExecutorVendorCost {
+            amount,
+            scale,
+            currency: Currency::Usd,
+        };
+
+        assert_eq!(cost(1, 3).conservative_budget_charge_cents(), Ok(1));
+        assert_eq!(cost(10, 3).conservative_budget_charge_cents(), Ok(1));
+        assert_eq!(cost(11, 3).conservative_budget_charge_cents(), Ok(2));
+        assert_eq!(
+            cost(25_000, 3).conservative_budget_charge_cents(),
+            Ok(2_500)
+        );
+        assert_eq!(
+            cost(25_001, 3).conservative_budget_charge_cents(),
+            Ok(2_501)
+        );
+        assert!(cost(1, 19).conservative_budget_charge_cents().is_err());
+        assert!(cost(i64::MAX, 0)
+            .conservative_budget_charge_cents()
+            .is_err());
+    }
+
+    #[test]
+    fn legacy_v43_receipt_maps_cents_to_exact_scale_two() {
+        let legacy = json!({
+            "actual_vendor_cost_cents": 17,
+            "provider_request_id": "provider-request-17",
+            "price_model_snapshot": {
+                "provider": "provider",
+                "model": "model",
+                "currency": "usd",
+                "nested": { "frozen": true }
+            },
+            "artifact_reference": "artifact://17"
+        });
+        let receipt: SpendExecutorSettlementReceipt = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(
+            receipt.actual_vendor_cost,
+            SpendExecutorVendorCost {
+                amount: 17,
+                scale: 2,
+                currency: Currency::Usd,
+            }
+        );
+        assert_eq!(receipt.price_model_snapshot["nested"]["frozen"], true);
+        let serialized = serde_json::to_value(receipt).unwrap();
+        assert_eq!(serialized["actual_vendor_cost"]["amount"], 17);
+        assert!(serialized.get("actual_vendor_cost_cents").is_none());
+    }
+
+    #[test]
+    fn precise_receipt_rejects_mixed_legacy_and_exact_cost_fields() {
+        let mixed = json!({
+            "actual_vendor_cost": { "amount": 17, "scale": 3, "currency": "usd" },
+            "actual_vendor_cost_cents": 2,
+            "provider_request_id": "provider-request-17",
+            "price_model_snapshot": {
+                "provider": "provider",
+                "model": "model",
+                "currency": "usd"
+            },
+            "artifact_reference": "artifact://17"
+        });
+        assert!(serde_json::from_value::<SpendExecutorSettlementReceipt>(mixed).is_err());
+    }
+
+    #[test]
+    fn precise_receipt_accepts_uppercase_iso_currency_and_serializes_canonically() {
+        let exact = json!({
+            "actual_vendor_cost": { "amount": 17, "scale": 3, "currency": "USD" },
+            "provider_request_id": "provider-request-17",
+            "price_model_snapshot": {
+                "provider": "provider",
+                "model": "model",
+                "currency": "USD"
+            },
+            "artifact_reference": "artifact://17"
+        });
+        let receipt: SpendExecutorSettlementReceipt = serde_json::from_value(exact).unwrap();
+        assert_eq!(receipt.actual_vendor_cost.currency, Currency::Usd);
+        assert_eq!(
+            serde_json::to_value(receipt).unwrap()["actual_vendor_cost"]["currency"],
+            "usd"
+        );
+    }
 }
 
 #[derive(Debug, Clone)]

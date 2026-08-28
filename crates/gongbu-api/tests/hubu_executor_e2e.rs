@@ -763,8 +763,10 @@ impl ProviderActivities for DeterministicProvider {
                 images: Some(1),
                 ..Default::default()
             },
-            provider_amount_minor: Some(ACTUAL_MINOR),
-            provider_currency: Some("USD".into()),
+            actual_vendor_cost: Some(
+                gongbu_api::provider_contract::ActualVendorCost::new(ACTUAL_MINOR, 2, "USD")
+                    .unwrap(),
+            ),
             artifacts: vec![ProviderArtifact {
                 media_type: "image/png".into(),
                 bytes: png,

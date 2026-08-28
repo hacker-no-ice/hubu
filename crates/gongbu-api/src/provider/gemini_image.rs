@@ -385,8 +385,7 @@ impl<T: GeminiTransport> GeminiImageAdapter<T> {
                     .and_then(|v| v.get("candidatesTokenCount"))
                     .and_then(Value::as_i64),
             }),
-            provider_amount_minor: None,
-            provider_currency: None,
+            actual_vendor_cost: None,
             provider_request_id: request_id,
             provider_operation_id: operation_id,
             artifacts,
