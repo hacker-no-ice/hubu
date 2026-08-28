@@ -22,8 +22,16 @@ test("server-renders the Hubu documentation home", async () => {
   const html = await response.text();
   assert.match(html, /Governed spend/);
   assert.match(html, /Experimental and local-first/);
+  assert.match(html, /Hubu governs AI-agent spend/);
+  assert.match(html, /Gongbu executes only Hubu-authorized provider work/);
+  assert.match(html, /The ecosystem they form is the product/);
+  assert.match(html, /Initialize a profile/);
+  assert.match(html, /hubu stack select --profile/);
   assert.match(html, /hubu stack start/);
-  assert.match(html, /MANAGED LIFECYCLE/);
+  assert.match(html, /Connect your favorite agent harness/);
+  assert.match(html, /authorize → execute → settle, release, or reconcile/);
+  assert.doesNotMatch(html, /Hubu gives humans|v4\.2|One command from profile to running|MANAGED LIFECYCLE/);
+  assert.doesNotMatch(html, /authorize → execute → submit/);
   assert.equal(html.match(/src="\/brand\/hubu-wordmark\.png"/g)?.length, 2);
   assert.match(html, /alt="Hubu"/);
   assert.match(html, /aria-label="Hubu documentation home"/);
