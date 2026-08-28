@@ -1238,7 +1238,7 @@ mod tests {
                 })
                 .expect("budget should create");
             governance
-                .save_budget_with_balance(&budget.budget, &budget.balance)
+                .save_budget_with_balance(&budget.budget, &budget.version, &budget.balance)
                 .expect("budget should persist");
 
             let payment_manager = PaymentManager::new(

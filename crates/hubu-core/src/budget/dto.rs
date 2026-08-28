@@ -3,7 +3,7 @@ use hubu_common::ids::{AgentId, BudgetId, SpendDecisionId};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
 
-use crate::budget::model::{Budget, BudgetBalance, BudgetHold};
+use crate::budget::model::{Budget, BudgetBalance, BudgetHold, BudgetVersion};
 
 #[derive(Debug, Clone)]
 pub struct CreateSingleBudgetRequest {
@@ -16,6 +16,7 @@ pub struct CreateSingleBudgetRequest {
 #[derive(Debug, Clone)]
 pub struct CreateSingleBudgetResponse {
     pub budget: Budget,
+    pub version: BudgetVersion,
     pub balance: BudgetBalance,
 }
 
@@ -77,5 +78,6 @@ pub struct ExpireBudgetHoldResponse {
 #[derive(Debug, Clone)]
 pub struct BudgetWithBalance {
     pub budget: Budget,
+    pub version: BudgetVersion,
     pub balance: BudgetBalance,
 }

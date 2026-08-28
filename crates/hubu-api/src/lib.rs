@@ -45,8 +45,8 @@ use hubu_core::{
     },
     budget::{
         BudgetHold, BudgetHoldStatus, BudgetManager, BudgetRecurrence, BudgetStatus,
-        BudgetWithBalance, CreateBudgetSeriesRequest, CreateSingleBudgetRequest,
-        ReserveBudgetResponse,
+        BudgetVersionProvenance, BudgetWithBalance, CreateBudgetSeriesRequest,
+        CreateSingleBudgetRequest, ReserveBudgetResponse,
     },
     persistence::{
         BudgetRepository, PolicyAssignmentScope, PolicyRepository, SpendRepository,
@@ -263,12 +263,16 @@ impl ServerState {
         let budgets = BudgetManager::from_records(
             governance.load_budgets().context("load budgets")?,
             governance
+                .load_budget_versions()
+                .context("load budget versions")?,
+            governance
                 .load_budget_balances()
                 .context("load budget balances")?,
             governance
                 .load_budget_holds()
                 .context("load budget holds")?,
-        );
+        )
+        .context("hydrate budget manager")?;
         let spending_targets = SpendingTargetManager::from_records(
             governance
                 .load_spending_targets()
@@ -3079,17 +3083,20 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
         .budgets
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .create_single_budget(CreateSingleBudgetRequest {
-            agent_id: agent_id.clone(),
-            amount_limit_cents: request.amount_cents,
-            currency: Currency::Usd,
-            period,
-        })?;
+        .create_single_budget_with_provenance(
+            CreateSingleBudgetRequest {
+                agent_id: agent_id.clone(),
+                amount_limit_cents: request.amount_cents,
+                currency: Currency::Usd,
+                period,
+            },
+            BudgetVersionProvenance::new(user.user_id.to_string(), "hubu-api:create-budget"),
+        )?;
     state
         .governance
         .lock()
         .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .save_budget_with_balance(&response.budget, &response.balance)?;
+        .save_budget_with_balance(&response.budget, &response.version, &response.balance)?;
 
     log_event(
         "info",
@@ -3098,7 +3105,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
             "budget_id": response.budget.id.to_string(),
             "user_id": user.user_id.to_string(),
             "agent_id": agent_id.to_string(),
-            "amount_cents": response.budget.amount_limit_cents,
+            "amount_cents": response.version.amount_limit_cents,
             "currency": response.budget.currency.to_string(),
             "starting_at": response.budget.period.starting_at.to_rfc3339(),
             "ending_before": response.budget.period.ending_before.map(|value| value.to_rfc3339()),
@@ -3106,6 +3113,7 @@ fn create_budget(body: String, state: &ServerState) -> Result<CreateBudgetHttpRe
     );
     let budget = BudgetWithBalance {
         budget: response.budget,
+        version: response.version,
         balance: response.balance,
     };
     let spending_target_warnings = spending_target_warnings_for_periods(
@@ -3139,21 +3147,28 @@ fn create_budget_series(
         .budgets
         .lock()
         .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .create_budget_series(CreateBudgetSeriesRequest {
-            agent_id: agent_id.clone(),
-            amount_limit_cents: request.amount_cents,
-            currency: Currency::Usd,
-            starting_at,
-            recurrence,
-            period_count: request.period_count,
-        })?;
+        .create_budget_series_with_provenance(
+            CreateBudgetSeriesRequest {
+                agent_id: agent_id.clone(),
+                amount_limit_cents: request.amount_cents,
+                currency: Currency::Usd,
+                starting_at,
+                recurrence,
+                period_count: request.period_count,
+            },
+            BudgetVersionProvenance::new(user.user_id.to_string(), "hubu-api:create-budget-series"),
+        )?;
     {
         let mut governance = state
             .governance
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
         for budget in &response.budgets {
-            governance.save_budget_with_balance(&budget.budget, &budget.balance)?;
+            governance.save_budget_with_balance(
+                &budget.budget,
+                &budget.version,
+                &budget.balance,
+            )?;
         }
     }
 
@@ -3349,7 +3364,7 @@ fn revoke_budget(body: String, state: &ServerState) -> Result<RevokeBudgetHttpRe
         .governance
         .lock()
         .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .save_budget_with_balance(&revoked.budget, &revoked.balance)?;
+        .save_budget_with_balance(&revoked.budget, &revoked.version, &revoked.balance)?;
 
     Ok(RevokeBudgetHttpResponse {
         budget: budget_response(revoked, state)?,
@@ -3396,16 +3411,20 @@ fn replace_budget(body: String, state: &ServerState) -> Result<ReplaceBudgetHttp
             .lock()
             .map_err(|_| anyhow!("budget manager lock poisoned"))?;
         let revoked = budgets.revoke_budget(&budget_id)?;
-        let created = budgets.create_single_budget(CreateSingleBudgetRequest {
-            agent_id: original.budget.agent_id,
-            amount_limit_cents: request.amount_cents,
-            currency: original.budget.currency,
-            period: replacement_period,
-        })?;
+        let created = budgets.create_single_budget_with_provenance(
+            CreateSingleBudgetRequest {
+                agent_id: original.budget.agent_id,
+                amount_limit_cents: request.amount_cents,
+                currency: original.budget.currency,
+                period: replacement_period,
+            },
+            BudgetVersionProvenance::new(user.user_id.to_string(), "hubu-api:replace-budget"),
+        )?;
         (
             revoked,
             BudgetWithBalance {
                 budget: created.budget,
+                version: created.version,
                 balance: created.balance,
             },
         )
@@ -3415,8 +3434,8 @@ fn replace_budget(body: String, state: &ServerState) -> Result<ReplaceBudgetHttp
             .governance
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        governance.save_budget_with_balance(&revoked.budget, &revoked.balance)?;
-        governance.save_budget_with_balance(&created.budget, &created.balance)?;
+        governance.save_budget_with_balance(&revoked.budget, &revoked.version, &revoked.balance)?;
+        governance.save_budget_with_balance(&created.budget, &created.version, &created.balance)?;
     }
 
     let spending_target_warnings = spending_target_warnings_for_periods(
@@ -5285,7 +5304,7 @@ fn budget_response(budget: BudgetWithBalance, state: &ServerState) -> Result<Bud
     Ok(BudgetHttpResponse {
         budget_id: public_budget_id(&budget.budget.id),
         agent_id: registration_agent_pub_id(&budget.budget.agent_id, state)?,
-        amount_limit_cents: budget.budget.amount_limit_cents,
+        amount_limit_cents: budget.version.amount_limit_cents,
         currency: budget.budget.currency.to_string(),
         starting_at: budget.budget.period.starting_at.to_rfc3339(),
         ending_before: budget
@@ -5393,9 +5412,9 @@ fn max_concurrent_allocated_amount(budgets: &[BudgetWithBalance], target: &Spend
         if ending_before.is_some_and(|ending_before| ending_before <= starting_at) {
             continue;
         }
-        *changes.entry(starting_at).or_default() += budget.budget.amount_limit_cents;
+        *changes.entry(starting_at).or_default() += budget.version.amount_limit_cents;
         if let Some(ending_before) = ending_before {
-            *changes.entry(ending_before).or_default() -= budget.budget.amount_limit_cents;
+            *changes.entry(ending_before).or_default() -= budget.version.amount_limit_cents;
         }
     }
 
@@ -6834,6 +6853,23 @@ lease_profiles:
         assert_eq!(replaced.budget.status, "active");
         assert_eq!(replaced.budget.amount_limit_cents, 20_000);
         assert_eq!(replaced.budget.remaining_amount_cents, 20_000);
+        let versions = state
+            .governance
+            .lock()
+            .unwrap()
+            .load_budget_versions()
+            .unwrap();
+        assert_eq!(versions.len(), 2);
+        assert!(versions
+            .iter()
+            .all(|version| version.revision == 1 && version.predecessor_version_id.is_none()));
+        assert!(versions
+            .iter()
+            .any(|version| version.source == "hubu-api:create-budget"));
+        assert!(versions
+            .iter()
+            .any(|version| version.source == "hubu-api:replace-budget"));
+        assert!(versions.iter().all(|version| !version.actor.is_empty()));
         std::fs::remove_file(path).ok();
     }
 

@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Months, Utc};
-use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId, SpendExecutorClaimId};
+use hubu_common::ids::{
+    AgentId, BudgetHoldId, BudgetId, BudgetVersionId, SpendDecisionId, SpendExecutorClaimId,
+};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
 use serde_json::json;
@@ -12,11 +14,40 @@ use crate::budget::dto::{
     ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
 };
 use crate::budget::error::BudgetManagerError;
-use crate::budget::model::{Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetStatus};
+use crate::budget::model::{
+    Budget, BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetStatus, BudgetVersion,
+};
 use crate::telemetry::log_event;
 
+#[derive(Debug, Clone)]
+pub struct BudgetVersionProvenance {
+    pub actor: String,
+    pub source: String,
+    pub reason: Option<String>,
+}
+
+impl BudgetVersionProvenance {
+    pub fn new(actor: impl Into<String>, source: impl Into<String>) -> Self {
+        Self {
+            actor: actor.into(),
+            source: source.into(),
+            reason: None,
+        }
+    }
+}
+
+impl Default for BudgetVersionProvenance {
+    fn default() -> Self {
+        Self::new("system:compatibility", "budget_manager")
+    }
+}
+
+#[derive(Debug)]
 pub struct BudgetManager {
     budgets: HashMap<BudgetId, Budget>,
+    budget_versions: HashMap<BudgetVersionId, BudgetVersion>,
+    budget_version_id_by_revision: HashMap<(BudgetId, u64), BudgetVersionId>,
+    successor_version_id_by_predecessor: HashMap<BudgetVersionId, BudgetVersionId>,
     budget_balances: HashMap<BudgetId, BudgetBalance>,
     budget_holds: HashMap<BudgetHoldId, BudgetHold>,
     hold_id_by_spend_decision: HashMap<SpendDecisionId, BudgetHoldId>,
@@ -28,6 +59,9 @@ impl BudgetManager {
     pub fn new() -> Self {
         Self {
             budgets: HashMap::new(),
+            budget_versions: HashMap::new(),
+            budget_version_id_by_revision: HashMap::new(),
+            successor_version_id_by_predecessor: HashMap::new(),
             budget_balances: HashMap::new(),
             budget_holds: HashMap::new(),
             hold_id_by_spend_decision: HashMap::new(),
@@ -37,26 +71,233 @@ impl BudgetManager {
 
     pub fn from_records(
         budgets: Vec<Budget>,
+        versions: Vec<BudgetVersion>,
         balances: Vec<BudgetBalance>,
         holds: Vec<BudgetHold>,
-    ) -> Self {
+    ) -> Result<Self, BudgetManagerError> {
         let mut manager = Self::new();
+        for version in versions {
+            if version.amount_limit_cents <= 0
+                || version.revision == 0
+                || version.actor.trim().is_empty()
+                || version.source.trim().is_empty()
+                || version.request_fingerprint.trim().is_empty()
+            {
+                return Err(invalid_persisted_budget_state(format!(
+                    "budget version {} has invalid immutable metadata",
+                    version.id
+                )));
+            }
+            if manager
+                .budget_versions
+                .insert(version.id.clone(), version)
+                .is_some()
+            {
+                return Err(invalid_persisted_budget_state(
+                    "duplicate budget version id",
+                ));
+            }
+        }
         for budget in budgets {
+            let current_version = manager
+                .budget_versions
+                .get(&budget.current_version_id)
+                .ok_or_else(|| {
+                    invalid_persisted_budget_state(format!(
+                        "budget {} has no current version",
+                        budget.id
+                    ))
+                })?;
+            if current_version.budget_id != budget.id {
+                return Err(invalid_persisted_budget_state(format!(
+                    "budget {} points at a version owned by another budget",
+                    budget.id
+                )));
+            }
+            if manager.budgets.contains_key(&budget.id) {
+                return Err(invalid_persisted_budget_state("duplicate budget id"));
+            }
             manager.index_budget(&budget);
             manager.budgets.insert(budget.id.clone(), budget);
         }
+
+        let mut revisions = HashSet::new();
+        let mut predecessors = HashSet::new();
+        let mut highest_revision_by_budget = HashMap::<BudgetId, u64>::new();
+        for version in manager.budget_versions.values() {
+            if !manager.budgets.contains_key(&version.budget_id) {
+                return Err(invalid_persisted_budget_state(format!(
+                    "budget version {} has no logical budget",
+                    version.id
+                )));
+            }
+            if !revisions.insert((version.budget_id.clone(), version.revision)) {
+                return Err(invalid_persisted_budget_state(format!(
+                    "budget {} has duplicate revision {}",
+                    version.budget_id, version.revision
+                )));
+            }
+            manager.budget_version_id_by_revision.insert(
+                (version.budget_id.clone(), version.revision),
+                version.id.clone(),
+            );
+            match (&version.predecessor_version_id, version.revision) {
+                (None, 1) => {}
+                (Some(predecessor_id), revision) if revision > 1 => {
+                    let predecessor =
+                        manager.budget_versions.get(predecessor_id).ok_or_else(|| {
+                            invalid_persisted_budget_state(format!(
+                                "budget version {} has no predecessor",
+                                version.id
+                            ))
+                        })?;
+                    if predecessor.budget_id != version.budget_id
+                        || predecessor.revision.checked_add(1) != Some(version.revision)
+                    {
+                        return Err(invalid_persisted_budget_state(format!(
+                            "budget version {} has an invalid predecessor chain",
+                            version.id
+                        )));
+                    }
+                    if !predecessors.insert((version.budget_id.clone(), predecessor_id.clone())) {
+                        return Err(invalid_persisted_budget_state(format!(
+                            "budget version {} has multiple successors",
+                            predecessor_id
+                        )));
+                    }
+                    manager
+                        .successor_version_id_by_predecessor
+                        .insert(predecessor_id.clone(), version.id.clone());
+                }
+                _ => {
+                    return Err(invalid_persisted_budget_state(format!(
+                        "budget version {} has an invalid root revision",
+                        version.id
+                    )));
+                }
+            }
+            highest_revision_by_budget
+                .entry(version.budget_id.clone())
+                .and_modify(|revision| *revision = (*revision).max(version.revision))
+                .or_insert(version.revision);
+        }
+
+        for budget in manager.budgets.values() {
+            let current = &manager.budget_versions[&budget.current_version_id];
+            if highest_revision_by_budget.get(&budget.id) != Some(&current.revision) {
+                return Err(invalid_persisted_budget_state(format!(
+                    "budget {} does not point at its latest version",
+                    budget.id
+                )));
+            }
+        }
+
         for balance in balances {
-            manager
+            let budget = manager.budgets.get(&balance.budget_id).ok_or_else(|| {
+                invalid_persisted_budget_state(format!(
+                    "balance references unknown budget {}",
+                    balance.budget_id
+                ))
+            })?;
+            if balance.consumed_amount_cents < 0 || balance.frozen_amount_cents < 0 {
+                return Err(invalid_persisted_budget_state(format!(
+                    "budget {} has a negative consumed or frozen balance",
+                    balance.budget_id
+                )));
+            }
+            let amount_limit_cents =
+                manager.budget_versions[&budget.current_version_id].amount_limit_cents;
+            let derived_remaining = amount_limit_cents
+                .checked_sub(balance.consumed_amount_cents)
+                .and_then(|value| value.checked_sub(balance.frozen_amount_cents))
+                .ok_or_else(|| {
+                    invalid_persisted_budget_state(format!(
+                        "budget {} balance exceeds the representable range",
+                        balance.budget_id
+                    ))
+                })?;
+            if balance.remaining_amount_cents != derived_remaining {
+                return Err(invalid_persisted_budget_state(format!(
+                    "budget {} remaining balance does not derive from its current version",
+                    balance.budget_id
+                )));
+            }
+            if manager
                 .budget_balances
-                .insert(balance.budget_id.clone(), balance);
+                .insert(balance.budget_id.clone(), balance)
+                .is_some()
+            {
+                return Err(invalid_persisted_budget_state(
+                    "duplicate logical budget balance",
+                ));
+            }
         }
+        for budget_id in manager.budgets.keys() {
+            if !manager.budget_balances.contains_key(budget_id) {
+                return Err(invalid_persisted_budget_state(format!(
+                    "budget {budget_id} has no logical balance"
+                )));
+            }
+        }
+        let mut frozen_by_budget = HashMap::<BudgetId, i64>::new();
         for hold in holds {
-            manager
+            let version = manager
+                .budget_versions
+                .get(&hold.budget_version_id)
+                .ok_or_else(|| {
+                    invalid_persisted_budget_state(format!(
+                        "hold {} references an unknown budget version",
+                        hold.id
+                    ))
+                })?;
+            let budget = manager.budgets.get(&hold.budget_id);
+            if version.budget_id != hold.budget_id
+                || !manager.budget_balances.contains_key(&hold.budget_id)
+                || budget.is_none_or(|budget| budget.currency != hold.currency)
+                || hold.amount_cents <= 0
+            {
+                return Err(invalid_persisted_budget_state(format!(
+                    "hold {} has mismatched logical budget attribution",
+                    hold.id
+                )));
+            }
+            if manager
                 .hold_id_by_spend_decision
-                .insert(hold.spend_decision_id.clone(), hold.id.clone());
-            manager.budget_holds.insert(hold.id.clone(), hold);
+                .insert(hold.spend_decision_id.clone(), hold.id.clone())
+                .is_some()
+            {
+                return Err(invalid_persisted_budget_state(
+                    "multiple holds reference one spend decision",
+                ));
+            }
+            if matches!(
+                &hold.status,
+                BudgetHoldStatus::Frozen | BudgetHoldStatus::Claimed
+            ) {
+                let frozen_amount = frozen_by_budget.entry(hold.budget_id.clone()).or_default();
+                *frozen_amount = frozen_amount
+                    .checked_add(hold.amount_cents)
+                    .ok_or_else(|| {
+                        invalid_persisted_budget_state(format!(
+                            "budget {} frozen holds exceed the representable range",
+                            hold.budget_id
+                        ))
+                    })?;
+            }
+            if manager.budget_holds.insert(hold.id.clone(), hold).is_some() {
+                return Err(invalid_persisted_budget_state("duplicate budget hold id"));
+            }
         }
-        manager
+        for (budget_id, balance) in &manager.budget_balances {
+            if frozen_by_budget.get(budget_id).copied().unwrap_or_default()
+                != balance.frozen_amount_cents
+            {
+                return Err(invalid_persisted_budget_state(format!(
+                    "budget {budget_id} frozen balance does not match its active holds"
+                )));
+            }
+        }
+        Ok(manager)
     }
 
     pub fn apply_persisted_finalization(&mut self, hold: BudgetHold, balance: BudgetBalance) {
@@ -74,15 +315,29 @@ impl BudgetManager {
     /// An agent may only have one budget for a currency at any point in time.
     /// Creation rejects periods that overlap an existing budget with the same
     /// agent and currency.
+    #[cfg(test)]
     pub fn create_single_budget(
         &mut self,
         request: CreateSingleBudgetRequest,
+    ) -> Result<CreateSingleBudgetResponse, BudgetManagerError> {
+        self.create_single_budget_with_provenance(request, BudgetVersionProvenance::default())
+    }
+
+    /// Create one logical budget, its immutable revision 1, and logical balance.
+    ///
+    /// Production callers must provide authenticated actor and source
+    /// provenance for the version audit record.
+    pub fn create_single_budget_with_provenance(
+        &mut self,
+        request: CreateSingleBudgetRequest,
+        provenance: BudgetVersionProvenance,
     ) -> Result<CreateSingleBudgetResponse, BudgetManagerError> {
         self.create_budget_for_period(
             request.agent_id,
             request.amount_limit_cents,
             request.currency,
             request.period,
+            &provenance,
         )
     }
 
@@ -92,9 +347,20 @@ impl BudgetManager {
     /// half-open boundaries, so the end of one period is the start of the next.
     /// The series is rejected if any generated period overlaps an existing
     /// budget for the same agent and currency.
+    #[cfg(test)]
     pub fn create_budget_series(
         &mut self,
         request: CreateBudgetSeriesRequest,
+    ) -> Result<CreateBudgetSeriesResponse, BudgetManagerError> {
+        self.create_budget_series_with_provenance(request, BudgetVersionProvenance::default())
+    }
+
+    /// Create a finite recurring series with an independently versioned logical
+    /// budget and balance for each period.
+    pub fn create_budget_series_with_provenance(
+        &mut self,
+        request: CreateBudgetSeriesRequest,
+        provenance: BudgetVersionProvenance,
     ) -> Result<CreateBudgetSeriesResponse, BudgetManagerError> {
         if request.period_count == 0 {
             log_event(
@@ -146,6 +412,7 @@ impl BudgetManager {
                 request.amount_limit_cents,
                 request.currency,
                 period,
+                &provenance,
             )?;
             budgets.push(budget_with_balance);
         }
@@ -193,6 +460,10 @@ impl BudgetManager {
             log_budget_reservation_rejected(&request, "unknown_budget");
             BudgetManagerError::UnknownBudget
         })?;
+        let version = self
+            .budget_versions
+            .get(&budget.current_version_id)
+            .ok_or(BudgetManagerError::UnknownBudget)?;
 
         if !matches!(budget.status, BudgetStatus::Active) {
             log_budget_reservation_rejected(&request, "budget_not_active");
@@ -229,6 +500,7 @@ impl BudgetManager {
         let hold = BudgetHold {
             id: BudgetHoldId::new(),
             budget_id: request.budget_id,
+            budget_version_id: version.id.clone(),
             spend_decision_id: request.spend_decision_id,
             amount_cents: request.amount_cents,
             currency: request.currency,
@@ -248,6 +520,7 @@ impl BudgetManager {
             "budget_reserved",
             json!({
                 "budget_id": hold.budget_id.to_string(),
+                "budget_version_id": hold.budget_version_id.to_string(),
                 "hold_id": hold.id.to_string(),
                 "spend_decision_id": hold.spend_decision_id.to_string(),
                 "amount_cents": hold.amount_cents,
@@ -489,7 +762,12 @@ impl BudgetManager {
     }
 
     pub fn get_budget_by_id(&self, budget_id: &BudgetId) -> Option<BudgetWithBalance> {
-        budget_with_balance(&self.budgets, &self.budget_balances, budget_id)
+        budget_with_balance(
+            &self.budgets,
+            &self.budget_versions,
+            &self.budget_balances,
+            budget_id,
+        )
     }
 
     pub fn get_budgets_by_agent_id(&self, agent_id: &AgentId) -> Vec<BudgetWithBalance> {
@@ -541,6 +819,11 @@ impl BudgetManager {
 
         Ok(BudgetWithBalance {
             budget: budget.clone(),
+            version: self
+                .budget_versions
+                .get(&budget.current_version_id)
+                .cloned()
+                .ok_or(BudgetManagerError::UnknownBudget)?,
             balance: balance.clone(),
         })
     }
@@ -551,6 +834,7 @@ impl BudgetManager {
         amount_limit_cents: i64,
         currency: Currency,
         period: TimePeriod,
+        provenance: &BudgetVersionProvenance,
     ) -> Result<CreateSingleBudgetResponse, BudgetManagerError> {
         if self.has_overlapping_budget(&agent_id, currency, &period) {
             log_event(
@@ -568,7 +852,7 @@ impl BudgetManager {
         }
 
         let budget_with_balance =
-            build_budget_for_period(agent_id, amount_limit_cents, currency, period)?;
+            build_budget_for_period(agent_id, amount_limit_cents, currency, period, provenance)?;
         self.insert_budget(&budget_with_balance);
 
         log_event(
@@ -577,7 +861,8 @@ impl BudgetManager {
             json!({
                 "budget_id": budget_with_balance.budget.id.to_string(),
                 "agent_id": budget_with_balance.budget.agent_id.to_string(),
-                "amount_limit_cents": budget_with_balance.budget.amount_limit_cents,
+                "budget_version_id": budget_with_balance.version.id.to_string(),
+                "amount_limit_cents": budget_with_balance.version.amount_limit_cents,
                 "currency": budget_with_balance.budget.currency.to_string(),
                 "starting_at": budget_with_balance.budget.period.starting_at.to_rfc3339(),
                 "ending_before": budget_with_balance.budget.period.ending_before.map(|value| value.to_rfc3339()),
@@ -585,6 +870,7 @@ impl BudgetManager {
         );
         Ok(CreateSingleBudgetResponse {
             budget: budget_with_balance.budget,
+            version: budget_with_balance.version,
             balance: budget_with_balance.balance,
         })
     }
@@ -593,6 +879,20 @@ impl BudgetManager {
         let budget = &budget_with_balance.budget;
 
         self.index_budget(budget);
+        self.budget_versions.insert(
+            budget_with_balance.version.id.clone(),
+            budget_with_balance.version.clone(),
+        );
+        self.budget_version_id_by_revision.insert(
+            (budget.id.clone(), budget_with_balance.version.revision),
+            budget_with_balance.version.id.clone(),
+        );
+        if let Some(predecessor_id) = &budget_with_balance.version.predecessor_version_id {
+            self.successor_version_id_by_predecessor.insert(
+                predecessor_id.clone(),
+                budget_with_balance.version.id.clone(),
+            );
+        }
         self.budget_balances
             .insert(budget.id.clone(), budget_with_balance.balance.clone());
         self.budgets.insert(budget.id.clone(), budget.clone());
@@ -602,7 +902,12 @@ impl BudgetManager {
         budget_ids
             .iter()
             .filter_map(|budget_id| {
-                budget_with_balance(&self.budgets, &self.budget_balances, budget_id)
+                budget_with_balance(
+                    &self.budgets,
+                    &self.budget_versions,
+                    &self.budget_balances,
+                    budget_id,
+                )
             })
             .collect()
     }
@@ -660,31 +965,44 @@ fn build_budget_for_period(
     amount_limit_cents: i64,
     currency: Currency,
     period: TimePeriod,
+    provenance: &BudgetVersionProvenance,
 ) -> Result<BudgetWithBalance, BudgetManagerError> {
-    let budget = Budget::new(
-        BudgetId::new(),
-        agent_id,
+    if provenance.actor.trim().is_empty() || provenance.source.trim().is_empty() {
+        return Err(BudgetManagerError::MissingBudgetVersionProvenance);
+    }
+    let budget = Budget::new(BudgetId::new(), agent_id, currency, period);
+    let version = BudgetVersion::initial(
+        &budget,
         amount_limit_cents,
-        currency,
-        period,
+        provenance.actor.clone(),
+        provenance.source.clone(),
+        provenance.reason.clone(),
     )?;
     let balance = BudgetBalance {
         budget_id: budget.id.clone(),
         consumed_amount_cents: 0,
         frozen_amount_cents: 0,
-        remaining_amount_cents: budget.amount_limit_cents,
+        remaining_amount_cents: version.amount_limit_cents,
     };
 
-    Ok(BudgetWithBalance { budget, balance })
+    Ok(BudgetWithBalance {
+        budget,
+        version,
+        balance,
+    })
 }
 
 fn budget_with_balance(
     budgets: &HashMap<BudgetId, Budget>,
+    budget_versions: &HashMap<BudgetVersionId, BudgetVersion>,
     budget_balances: &HashMap<BudgetId, BudgetBalance>,
     budget_id: &BudgetId,
 ) -> Option<BudgetWithBalance> {
+    let budget = budgets.get(budget_id)?.clone();
+    let version = budget_versions.get(&budget.current_version_id)?.clone();
     Some(BudgetWithBalance {
-        budget: budgets.get(budget_id)?.clone(),
+        budget,
+        version,
         balance: budget_balances.get(budget_id)?.clone(),
     })
 }
@@ -736,6 +1054,10 @@ impl Default for BudgetManager {
     }
 }
 
+fn invalid_persisted_budget_state(message: impl Into<String>) -> BudgetManagerError {
+    BudgetManagerError::InvalidPersistedState(message.into())
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -785,6 +1107,7 @@ mod tests {
 
         BudgetWithBalance {
             budget: response.budget,
+            version: response.version,
             balance: response.balance,
         }
     }
@@ -795,11 +1118,94 @@ mod tests {
 
         let created = create_agent_budget(&mut manager, 10_000);
 
+        assert_eq!(created.budget.current_version_id, created.version.id);
+        assert_eq!(created.version.budget_id, created.budget.id);
+        assert_eq!(created.version.revision, 1);
+        assert!(created.version.predecessor_version_id.is_none());
+        assert_eq!(created.version.amount_limit_cents, 10_000);
+        assert!(!created.version.actor.is_empty());
+        assert!(!created.version.source.is_empty());
+        assert!(created.version.request_fingerprint.starts_with("sha256:"));
         assert_eq!(created.balance.budget_id, created.budget.id);
         assert_eq!(created.balance.consumed_amount_cents, 0);
         assert_eq!(created.balance.frozen_amount_cents, 0);
         assert_eq!(created.balance.remaining_amount_cents, 10_000);
         assert!(manager.get_budget_by_id(&created.budget.id).is_some());
+    }
+
+    #[test]
+    fn hydration_selects_latest_version_and_attributes_new_hold_to_it() {
+        let mut original_manager = BudgetManager::new();
+        let created = create_agent_budget(&mut original_manager, 10_000);
+        let second_version = BudgetVersion {
+            id: BudgetVersionId::new(),
+            budget_id: created.budget.id.clone(),
+            revision: 2,
+            predecessor_version_id: Some(created.version.id.clone()),
+            amount_limit_cents: 20_000,
+            effective_at: Utc::now(),
+            actor: "test:budget-owner".to_string(),
+            source: "manager-hydration-test".to_string(),
+            reason: Some("test current-version selection".to_string()),
+            request_fingerprint: "sha256:test-revision-2".to_string(),
+            created_at: Utc::now(),
+        };
+        let mut logical_budget = created.budget;
+        logical_budget.current_version_id = second_version.id.clone();
+        let balance = BudgetBalance {
+            budget_id: logical_budget.id.clone(),
+            consumed_amount_cents: 0,
+            frozen_amount_cents: 0,
+            remaining_amount_cents: 20_000,
+        };
+
+        let mut hydrated = BudgetManager::from_records(
+            vec![logical_budget.clone()],
+            vec![created.version, second_version.clone()],
+            vec![balance],
+            vec![],
+        )
+        .expect("version chain should hydrate");
+        let resolved = hydrated
+            .get_budget_by_id(&logical_budget.id)
+            .expect("logical budget should resolve");
+        assert_eq!(resolved.version.id, second_version.id);
+
+        let reservation = hydrated
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: logical_budget.id,
+                spend_decision_id: SpendDecisionId::new(),
+                amount_cents: 15_000,
+                currency: Currency::Usd,
+                expires_at: Utc::now() + Duration::minutes(5),
+            })
+            .expect("current version limit should authorize the hold");
+        assert_eq!(reservation.hold.budget_version_id, second_version.id);
+    }
+
+    #[test]
+    fn hydration_rejects_balance_that_does_not_derive_from_current_version() {
+        let mut manager = BudgetManager::new();
+        let created = create_agent_budget(&mut manager, 10_000);
+        let invalid_balance = BudgetBalance {
+            budget_id: created.budget.id.clone(),
+            consumed_amount_cents: 1_000,
+            frozen_amount_cents: 0,
+            remaining_amount_cents: 10_000,
+        };
+
+        let error = BudgetManager::from_records(
+            vec![created.budget],
+            vec![created.version],
+            vec![invalid_balance],
+            vec![],
+        )
+        .expect_err("cached remaining must be exhaustively validated");
+
+        assert!(matches!(
+            error,
+            BudgetManagerError::InvalidPersistedState(_)
+        ));
     }
 
     #[test]
@@ -1036,6 +1442,7 @@ mod tests {
             .expect("budget should be reserved");
 
         assert!(matches!(response.hold.status, BudgetHoldStatus::Frozen));
+        assert_eq!(response.hold.budget_version_id, created.version.id);
         assert_eq!(response.balance.frozen_amount_cents, 3_000);
         assert_eq!(response.balance.remaining_amount_cents, 7_000);
         assert_eq!(response.balance.consumed_amount_cents, 0);

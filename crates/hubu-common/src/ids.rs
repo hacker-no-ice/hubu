@@ -115,6 +115,15 @@ impl BudgetId {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct BudgetVersionId(Uuid);
+
+impl BudgetVersionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct SpendingTargetId(Uuid);
 
 impl SpendingTargetId {
@@ -175,6 +184,7 @@ default_uuid_id!(
     LedgerTransactionId,
     LedgerEntryId,
     BudgetId,
+    BudgetVersionId,
     SpendingTargetId,
     PolicyId,
     UserId,
@@ -199,6 +209,7 @@ public_uuid_suffix!(
     AgentAccountId,
     AgentSessionId,
     BudgetId,
+    BudgetVersionId,
     SpendingTargetId,
     PolicyId,
     UserId,
@@ -234,6 +245,7 @@ display_uuid_id!(
     AgentAccountId,
     AgentSessionId,
     BudgetId,
+    BudgetVersionId,
     SpendingTargetId,
     PolicyId,
     SpendDecisionId,
@@ -267,6 +279,7 @@ parse_uuid_id!(
     AgentAccountId,
     AgentSessionId,
     BudgetId,
+    BudgetVersionId,
     SpendingTargetId,
     PolicyId,
     SpendDecisionId,

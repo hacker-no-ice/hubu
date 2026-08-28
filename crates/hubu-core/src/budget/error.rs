@@ -49,6 +49,12 @@ pub enum BudgetManagerError {
 
     #[error("budget period overlaps an existing budget for the same agent and currency")]
     OverlappingBudgetPeriod,
+
+    #[error("invalid persisted budget state: {0}")]
+    InvalidPersistedState(String),
+
+    #[error("budget version actor and source provenance are required")]
+    MissingBudgetVersionProvenance,
 }
 
 impl From<BudgetError> for BudgetManagerError {
