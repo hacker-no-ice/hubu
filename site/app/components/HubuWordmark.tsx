@@ -1,4 +1,4 @@
-/* eslint-disable @next/next/no-img-element -- This small static brand asset is served directly by the Sites worker. */
+/* eslint-disable @next/next/no-img-element -- This static vector brand asset is served directly by the site worker. */
 
 type HubuWordmarkProps = {
   className: string;
@@ -9,7 +9,7 @@ export function HubuWordmark({ className, decorative = false }: HubuWordmarkProp
   return (
     <img
       className={`hubu-wordmark ${className}`}
-      src="/brand/hubu-wordmark.png"
+      src="/brand/hubu-wordmark.svg"
       width="1168"
       height="376"
       alt={decorative ? "" : "Hubu"}
