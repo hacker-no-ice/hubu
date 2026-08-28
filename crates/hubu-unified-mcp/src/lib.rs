@@ -839,17 +839,16 @@ impl Server {
         else {
             return error_response(id, -32000, "Hubu returned an invalid approval result");
         };
-        if self.operation_registry_available() {
-            if self
+        if self.operation_registry_available()
+            && self
                 .synchronize_approval_status(response_approval_request_id, status)
                 .is_err()
-            {
-                return error_response(
-                    id,
-                    -32000,
-                    "approval status could not be synchronized safely",
-                );
-            }
+        {
+            return error_response(
+                id,
+                -32000,
+                "approval status could not be synchronized safely",
+            );
         }
         response
     }
