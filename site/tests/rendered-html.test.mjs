@@ -32,13 +32,21 @@ test("server-renders the Hubu documentation home", async () => {
   assert.match(html, /authorize → execute → settle, release, or reconcile/);
   assert.doesNotMatch(html, /Hubu gives humans|v4\.2|One command from profile to running|MANAGED LIFECYCLE/);
   assert.doesNotMatch(html, /authorize → execute → submit/);
-  assert.equal(html.match(/src="\/brand\/hubu-wordmark\.png"/g)?.length, 2);
+  assert.equal(html.match(/src="\/brand\/hubu-wordmark\.svg"/g)?.length, 2);
   assert.match(html, /alt="Hubu"/);
   assert.match(html, /aria-label="Hubu documentation home"/);
   assert.match(html, /og-wordmark\.png/);
   assert.match(html, /https:\/\/hubustack\.dev\/og-wordmark\.png/);
   assert.doesNotMatch(html, /not on main yet/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
+});
+
+test("publishes the scalable Hubu wordmark", async () => {
+  const svg = await readFile(new URL("../public/brand/hubu-wordmark.svg", import.meta.url), "utf8");
+  assert.match(svg, /viewBox="269 286 1168 376"/);
+  assert.match(svg, /linearGradient id="hubu-gradient"/);
+  assert.match(svg, /#9697ff/);
+  assert.match(svg, /#71d7e8/);
 });
 
 test("reports the exact source revision for production verification", async () => {
@@ -115,7 +123,7 @@ test("renders the command-focused local stack quick start", async () => {
   assert.doesNotMatch(html, /Component ownership|Clean-environment acceptance canary|Runtime and recovery boundaries/);
   assert.doesNotMatch(html, /not on main yet/i);
   assert.match(html, /On this page/);
-  assert.match(html, /src="\/brand\/hubu-wordmark\.png"/);
+  assert.match(html, /src="\/brand\/hubu-wordmark\.svg"/);
   assert.match(html, /aria-label="Hubu documentation home"/);
 });
 

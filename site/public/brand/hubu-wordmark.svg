@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="269 286 1168 376">
+  <defs>
+    <linearGradient id="hubu-gradient" x1="269" y1="0" x2="1437" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9697ff" />
+      <stop offset="1" stop-color="#71d7e8" />
+    </linearGradient>
+  </defs>
+  <g fill="url(#hubu-gradient)">
+    <path d="M278 325h76v107h178V325h76v303h-76V502H354v76l-76 61V325Z" />
+    <path d="M638 427h58v131l18 18h96l18-18V427h59v147l-54 55H690l-52-55V427Z" />
+    <path fill-rule="evenodd" d="M909 309l58 56v63h139l52 52v96l-52 53H909V309Zm58 171v96h121l12-19v-65l-12-12H967Z" />
+    <path d="M1179 427h59v131l18 18h96l18-18V427h58v147l-53 55h-143l-53-55V427Z" />
+  </g>
+</svg>
