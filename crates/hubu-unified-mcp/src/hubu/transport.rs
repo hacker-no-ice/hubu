@@ -6,22 +6,63 @@ use serde_json::Value;
 use super::response::{redact_backend_message, ForwardError};
 use super::routing::{HubuHttpRequestV1, HubuRequestCapabilityV1};
 
+const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
+const APPROVAL_CAPABILITY_HEADER: &str = "X-Hubu-Approval-Capability";
 const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
 const RECONCILIATION_CAPABILITY_HEADER: &str = "X-Hubu-Reconciliation-Capability";
 
 #[derive(Clone, Debug)]
 pub struct RoutingConfig {
     pub(super) trusted_client_approval: bool,
+    pub(super) trusted_spend_approval: bool,
+    approval_capability: Option<Secret>,
+    pub(crate) approval_capability_file: String,
     reconciliation_capability: Option<Secret>,
     pub(crate) reconciliation_capability_file: String,
 }
 
 impl RoutingConfig {
     pub fn new(trusted_client_approval: bool, reconciliation_capability: Option<String>) -> Self {
+        Self::new_with_spend_approval(
+            trusted_client_approval,
+            false,
+            None,
+            reconciliation_capability,
+        )
+    }
+
+    pub fn new_with_spend_approval(
+        trusted_client_approval: bool,
+        trusted_spend_approval: bool,
+        approval_capability: Option<String>,
+        reconciliation_capability: Option<String>,
+    ) -> Self {
         Self {
             trusted_client_approval,
+            trusted_spend_approval,
+            approval_capability: approval_capability.map(Secret),
+            approval_capability_file: DEFAULT_APPROVAL_TOKEN_FILE.to_string(),
             reconciliation_capability: reconciliation_capability.map(Secret),
             reconciliation_capability_file: DEFAULT_RECONCILIATION_TOKEN_FILE.to_string(),
+        }
+    }
+
+    fn approval_capability(&self) -> Result<Secret, ForwardError> {
+        if let Some(capability) = &self.approval_capability {
+            if capability.expose().trim().is_empty() {
+                return Err(ForwardError::InvalidApprovalCapability);
+            }
+            return Ok(capability.clone());
+        }
+        match fs::read_to_string(&self.approval_capability_file) {
+            Ok(contents) if contents.trim().is_empty() => {
+                Err(ForwardError::InvalidApprovalCapability)
+            }
+            Ok(contents) => Ok(Secret(contents.trim().to_string())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(ForwardError::MissingApprovalCapability)
+            }
+            Err(_) => Err(ForwardError::InvalidApprovalCapability),
         }
     }
 
@@ -74,9 +115,15 @@ impl BackendClient {
         if let Some(body) = request.body {
             builder = builder.json(&body);
         }
+        let mut used_approval_capability = None;
         let mut used_reconciliation_capability = None;
         match request.capability {
             HubuRequestCapabilityV1::None => {}
+            HubuRequestCapabilityV1::Approval => {
+                let capability = routing.approval_capability()?;
+                builder = builder.header(APPROVAL_CAPABILITY_HEADER, capability.expose());
+                used_approval_capability = Some(capability);
+            }
             HubuRequestCapabilityV1::Reconciliation => {
                 let capability = routing.reconciliation_capability()?;
                 builder = builder.header(RECONCILIATION_CAPABILITY_HEADER, capability.expose());
@@ -109,6 +156,8 @@ impl BackendClient {
             let message = redact_backend_message(
                 message,
                 &self.bearer_token,
+                routing.approval_capability.as_ref(),
+                used_approval_capability.as_ref(),
                 routing.reconciliation_capability.as_ref(),
                 used_reconciliation_capability.as_ref(),
             );
@@ -145,6 +194,8 @@ fn is_approved_http_route(method: &str, path: &str) -> bool {
             | ("GET", "/user/spending-target")
             | ("POST", "/spend")
             | ("POST", "/spend/authorize")
+            | ("GET", "/spend/approval")
+            | ("POST", "/spend/approval/resolve")
             | ("GET", "/agents")
             | ("GET", "/budgets")
             | ("GET", "/ledger")

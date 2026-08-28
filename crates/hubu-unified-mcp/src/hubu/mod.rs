@@ -42,6 +42,107 @@ pub(super) fn call_governed_authorization(
     )
 }
 
+/// Dispatch a previously registered spend operation without allocating, marking, or
+/// persisting registry state. The caller must atomically complete the resume plan.
+pub(crate) fn dispatch_resolved_spend(
+    server: &Server,
+    tool_name: &str,
+    arguments: Value,
+    operation: &crate::operation_registry::OperationResolution,
+) -> anyhow::Result<Value> {
+    if !matches!(tool_name, "hubu_authorize_spend" | "hubu_submit_spend") {
+        anyhow::bail!("unsupported resumed Hubu spend route");
+    }
+    validate_model_spend_arguments(&arguments)?;
+    let snapshot = server.snapshot();
+    if let Err(rejection) = tool_availability(tool_name, BackendOwner::Hubu, &snapshot) {
+        anyhow::bail!(
+            "resumed Hubu spend route is unavailable: {}",
+            rejection.reason_code()
+        );
+    }
+    let client = server
+        .backends
+        .hubu
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("resumed Hubu spend route is unavailable"))?;
+    let params = json!({
+        "name": tool_name,
+        "arguments": arguments,
+    });
+    match route_tool_call_v1(
+        params,
+        server.hubu_routing.trusted_client_approval,
+        server.hubu_routing.trusted_spend_approval,
+        Some(operation.clone()),
+        |request| client.execute_hubu(request, &server.hubu_routing),
+    ) {
+        Ok(result) => {
+            let response = result
+                .get("structuredContent")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            Ok(public_spend_result(
+                response,
+                &operation.operation_handle,
+                operation.operation_key.as_deref(),
+            ))
+        }
+        Err(error) => {
+            if matches!(
+                error.downcast_ref::<ForwardError>(),
+                Some(ForwardError::Unavailable)
+            ) {
+                server.mark_hubu_unavailable();
+            }
+            let ambiguous = matches!(
+                error.downcast_ref::<ForwardError>(),
+                Some(ForwardError::AmbiguousTransport | ForwardError::InvalidResponse)
+            );
+            Err(anyhow::anyhow!(resume_failure_message(
+                &error.to_string(),
+                operation,
+                ambiguous,
+            )))
+        }
+    }
+}
+
+fn resume_failure_message(
+    message: &str,
+    operation: &crate::operation_registry::OperationResolution,
+    ambiguous: bool,
+) -> String {
+    let message = operation.operation_key.as_deref().map_or_else(
+        || message.to_string(),
+        |operation_key| message.replace(operation_key, "<private operation redacted>"),
+    );
+    if ambiguous {
+        format!(
+            "{message}. Operation handle: {}. Retry hubu_resume_operation with this same public handle; do not submit a replacement operation",
+            operation.operation_handle
+        )
+    } else {
+        message
+    }
+}
+
+pub(crate) fn call_resumed_spend(
+    server: &Server,
+    id: Value,
+    plan: &crate::operation_registry::ResumeOperationPlan,
+) -> Value {
+    match dispatch_resolved_spend(
+        server,
+        plan.hubu_tool_name(),
+        plan.hubu_arguments.clone(),
+        &plan.operation,
+    ) {
+        Ok(result) => success_response(id, tool_result_v1(result)),
+        Err(error) => error_response(id, -32000, &error.to_string()),
+    }
+}
+
 fn call_tool_with_operation_identity(
     server: &Server,
     id: Value,
@@ -109,6 +210,7 @@ fn call_tool_with_operation_identity(
     match route_tool_call_v1(
         params,
         server.hubu_routing.trusted_client_approval,
+        server.hubu_routing.trusted_spend_approval,
         operation.clone(),
         |request| client.execute_hubu(request, &server.hubu_routing),
     ) {

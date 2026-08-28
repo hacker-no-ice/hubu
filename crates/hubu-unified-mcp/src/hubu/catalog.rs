@@ -198,6 +198,21 @@ fn all_tool_definitions() -> Vec<Value> {
             }), &["account_id", "amount_cents", "reason"]),
         ),
         read_tool(
+            "hubu_get_spend_approval",
+            "Get the durable pending, approved, or denied state and immutable human review payload for one spend approval request.",
+            json_schema_required(json!({
+                "approval_request_id": { "type": "string" }
+            }), &["approval_request_id"]),
+        ),
+        approval_resolution_tool(
+            "hubu_resolve_spend_approval",
+            "Resolve a pending spend approval after the human explicitly chooses approve or deny in chat. The native client prompt confirms or cancels this formed resolver call; cancelling does not submit a denial.",
+            json_schema_required(json!({
+                "approval_request_id": { "type": "string" },
+                "decision": { "type": "string", "enum": ["approve", "deny"] }
+            }), &["approval_request_id", "decision"]),
+        ),
+        read_tool(
             "hubu_list_agents",
             "List registered agents for the active Hubu user.",
             json_schema(json!({})),
@@ -307,6 +322,7 @@ fn json_schema_required(properties: Value, required: &[&str]) -> Value {
 struct ToolAnnotations {
     read_only: bool,
     destructive: bool,
+    idempotent: bool,
     human_approval: &'static str,
     client_approval_mode: &'static str,
     runtime_approval: &'static str,
@@ -320,6 +336,7 @@ fn read_tool(name: &str, description: &str, input_schema: Value) -> Value {
         ToolAnnotations {
             read_only: true,
             destructive: false,
+            idempotent: false,
             human_approval: "none",
             client_approval_mode: "auto",
             runtime_approval: "none",
@@ -335,6 +352,7 @@ fn write_tool(name: &str, description: &str, input_schema: Value) -> Value {
         ToolAnnotations {
             read_only: false,
             destructive: false,
+            idempotent: false,
             human_approval: "conditional",
             client_approval_mode: "auto",
             runtime_approval: "hubu_policy_needs_approval",
@@ -350,6 +368,23 @@ fn approval_tool(name: &str, description: &str, input_schema: Value) -> Value {
         ToolAnnotations {
             read_only: false,
             destructive: true,
+            idempotent: false,
+            human_approval: "required",
+            client_approval_mode: "prompt_before_call",
+            runtime_approval: "client_human_approval_required",
+        },
+    )
+}
+
+fn approval_resolution_tool(name: &str, description: &str, input_schema: Value) -> Value {
+    tool(
+        name,
+        description,
+        input_schema,
+        ToolAnnotations {
+            read_only: false,
+            destructive: true,
+            idempotent: true,
             human_approval: "required",
             client_approval_mode: "prompt_before_call",
             runtime_approval: "client_human_approval_required",
@@ -365,7 +400,7 @@ fn tool(name: &str, description: &str, input_schema: Value, annotations: ToolAnn
         "annotations": {
             "readOnlyHint": annotations.read_only,
             "destructiveHint": annotations.destructive,
-            "idempotentHint": false,
+            "idempotentHint": annotations.idempotent,
             "openWorldHint": true,
             "x_hubu_human_approval": annotations.human_approval,
             "x_hubu_client_approval_mode": annotations.client_approval_mode,
@@ -391,7 +426,7 @@ pub(super) fn approval_profile() -> Value {
     };
     json!({
         "protocol_version": HUBU_APPROVAL_PROFILE_VERSION,
-        "summary": "Configure agent harnesses to auto-call Hubu read and spend tools, prompt before setup/admin tools, and rely on Hubu policy for needs_approval spend outcomes.",
+        "summary": "Configure agent harnesses to auto-call Hubu read and spend tools, prompt before protected human actions, and rely on Hubu policy for needs_approval spend outcomes.",
         "client_policy": {
             "auto_approve_tools": names_matching("auto", None),
             "prompt_before_call_tools": names_matching("prompt_before_call", None),
@@ -400,7 +435,7 @@ pub(super) fn approval_profile() -> Value {
         "response_contract": {
             "needs_approval_field": "requires_human_approval",
             "needs_approval_meaning": "Hubu policy required human review and no payment was executed.",
-            "agent_action": "Stop the spend workflow and surface approval_reason plus the structured response to the human."
+            "agent_action": "Show approval.review to the human, wait for an explicit approve or deny answer in chat, then call hubu_resolve_spend_approval with approval_request_id and that decision. The native client prompt confirms or cancels the formed call; cancelling does not submit a denial."
         },
         "annotation_fields": {
             "client_pre_call": "x_hubu_client_approval_mode",

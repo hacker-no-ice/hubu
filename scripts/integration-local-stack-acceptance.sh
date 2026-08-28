@@ -52,9 +52,19 @@ for tool in jq curl python3 sqlite3; do
 done
 
 cd "${root_dir}"
-cargo build --locked -p hubu-cli --bin hubu --features local-fixture-canary
-cargo build --locked --bin hubu-server --bin hubu-unified-mcp
-cargo build --locked -p gongbu-api --bin gongbu-server --features local-fixture-canary
+acceptance_version="0.2.0"
+acceptance_commit="9393939393939393939393939393939393939393"
+HUBU_PRODUCT_VERSION="${acceptance_version}" \
+HUBU_SOURCE_COMMIT="${acceptance_commit}" \
+  cargo build --locked -p hubu-cli --bin hubu --features local-fixture-canary
+HUBU_PRODUCT_VERSION="${acceptance_version}" \
+HUBU_SOURCE_COMMIT="${acceptance_commit}" \
+  cargo build --locked --bin hubu-server --bin hubu-unified-mcp
+HUBU_PRODUCT_VERSION="${acceptance_version}" \
+HUBU_SOURCE_COMMIT="${acceptance_commit}" \
+GONGBU_PRODUCT_VERSION="${acceptance_version}" \
+GONGBU_SOURCE_COMMIT="${acceptance_commit}" \
+  cargo build --locked -p gongbu-api --bin gongbu-server --features local-fixture-canary
 
 hubu_bin="${root_dir}/target/debug/hubu"
 real_hubu_server_bin="${root_dir}/target/debug/hubu-server"
@@ -128,7 +138,7 @@ cat >"${profile}/providers.toml" <<'EOF'
 schema_version = 1
 mode = "live"
 catalog_version = "hub-114-fixture-v2"
-maximum_spend_minor = 1
+maximum_spend_minor = 2
 live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
 
 [[targets]]
@@ -255,6 +265,13 @@ hubu_approval="$(jq -r '.approval_token_file' "${client_handoff}")"
 hubu_reconciliation="$(jq -r '.reconciliation_token_file' "${client_handoff}")"
 gongbu_caller="$(jq -r '.gongbu_token_file' "${client_handoff}")"
 gongbu_hubu="${managed_credential_root}/gongbu/hubu-executor"
+codex_config="${workspace}/codex-config.toml"
+"${hubu_bin}" init codex \
+  --stack-profile "${profile}" \
+  --config "${codex_config}" >/dev/null
+grep -F "HUBU_APPROVAL_TOKEN_FILE = \"${hubu_approval}\"" "${codex_config}" >/dev/null || fail "Codex config omitted the approval capability file"
+grep -F 'HUBU_MCP_TRUST_SPEND_APPROVAL = "1"' "${codex_config}" >/dev/null || fail "Codex config omitted the narrow spend-approval gate"
+grep -A1 -F '[mcp_servers.hubu.tools.hubu_resolve_spend_approval]' "${codex_config}" | grep -F 'approval_mode = "prompt"' >/dev/null || fail "Codex config did not prompt for spend approval resolution"
 for directory in "${managed_credential_root}" "${managed_credential_root}/hubu" "${managed_credential_root}/gongbu"; do
   [[ "$(file_mode "${directory}")" == "700" ]] || fail "managed credential directory permissions are not private"
 done
@@ -303,15 +320,20 @@ human_output="$(hubu register human --username hub-140-owner --display-name 'HUB
 [[ -n "$(field "${human_output}" user_id)" ]] || fail "could not register the post-start owner"
 agent_a_output="$(hubu register agent --name hub-140-agent-a --version v1)"
 agent_b_output="$(hubu register agent --name hub-140-agent-b --version v1)"
+approval_agent_output="$(hubu register agent --name hub-164-approval-agent --version v1)"
 agent_a_id="$(field "${agent_a_output}" agent_id)"
 agent_a_account_id="$(field "${agent_a_output}" account_id)"
 agent_b_id="$(field "${agent_b_output}" agent_id)"
 agent_b_account_id="$(field "${agent_b_output}" account_id)"
+approval_agent_id="$(field "${approval_agent_output}" agent_id)"
+approval_agent_account_id="$(field "${approval_agent_output}" account_id)"
 [[ -n "${agent_a_id}" && -n "${agent_a_account_id}" ]] || fail "could not register Agent A"
 [[ -n "${agent_b_id}" && -n "${agent_b_account_id}" ]] || fail "could not register Agent B"
+[[ -n "${approval_agent_id}" && -n "${approval_agent_account_id}" ]] || fail "could not register the approval agent"
 [[ "${agent_a_id}" != "${agent_b_id}" ]] || fail "two registrations resolved to one agent"
 hubu budget create --agent-id "${agent_a_id}" --amount 1 >/dev/null
 hubu budget create --agent-id "${agent_b_id}" --amount 1 >/dev/null
+hubu budget create --agent-id "${approval_agent_id}" --amount 1 >/dev/null
 
 policy="${workspace}/fixture-policy.yaml"
 cat >"${policy}" <<'EOF'
@@ -327,8 +349,332 @@ rules:
       field: provider
       value:
         string: provider:local:fixture
+  - id: review_local_fixture
+    effect: needs_approval
+    reason: deterministic local-stack human approval fixture
+    when:
+      op: eq
+      field: amount
+      value:
+        money_cents: 2
 EOF
 hubu policy add --path "${policy}" >/dev/null
+
+python3 - \
+  "${mcp_bin}" \
+  "${hubu_bin}" \
+  "${hubu_endpoint}" \
+  "${gongbu_endpoint}" \
+  "${hubu_auth}" \
+  "${hubu_approval}" \
+  "${hubu_reconciliation}" \
+  "${gongbu_caller}" \
+  "${workspace}/approval-operations.sqlite3" \
+  "${workspace}/gongbu.sqlite3" \
+  "${approval_agent_account_id}" \
+  "${workspace}/approval-mcp.stderr" <<'PY'
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+
+(
+    mcp_bin,
+    hubu_bin,
+    hubu_endpoint,
+    gongbu_endpoint,
+    hubu_auth,
+    hubu_approval,
+    hubu_reconciliation,
+    gongbu_caller,
+    operation_state_path,
+    gongbu_database,
+    account_id,
+    stderr_path,
+) = sys.argv[1:]
+
+
+def fail(message):
+    raise AssertionError(message)
+
+
+def execution_count():
+    with sqlite3.connect(gongbu_database) as connection:
+        return connection.execute("SELECT COUNT(*) FROM executions").fetchone()[0]
+
+
+environment = os.environ.copy()
+for name in (
+    "HUBU_UNIFIED_HUBU_BEARER_TOKEN",
+    "HUBU_UNIFIED_GONGBU_BEARER_TOKEN",
+    "HUBU_APPROVAL_TOKEN",
+    "HUBU_RECONCILIATION_TOKEN",
+):
+    environment.pop(name, None)
+environment.update(
+    {
+        "HUBU_UNIFIED_HUBU_ENDPOINT": hubu_endpoint,
+        "HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE": hubu_auth,
+        "HUBU_UNIFIED_GONGBU_ENDPOINT": gongbu_endpoint,
+        "HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE": gongbu_caller,
+        "HUBU_APPROVAL_TOKEN_FILE": hubu_approval,
+        "HUBU_RECONCILIATION_TOKEN_FILE": hubu_reconciliation,
+        "HUBU_UNIFIED_OPERATION_STATE_PATH": operation_state_path,
+        "HUBU_MCP_TRUST_SPEND_APPROVAL": "1",
+        "HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS": "50",
+        "HUBU_UNIFIED_OPERATION_TICK_MS": "10",
+        "HUBU_UNIFIED_GOVERNED_EXECUTION_WAIT_MS": "2000",
+    }
+)
+
+stderr_file = open(stderr_path, "w", encoding="utf-8")
+process = None
+next_id = 1
+
+
+def request(method, params=None):
+    global next_id
+    request_id = next_id
+    next_id += 1
+    message = {"jsonrpc": "2.0", "id": request_id, "method": method}
+    if params is not None:
+        message["params"] = params
+    process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+    process.stdin.flush()
+    while True:
+        line = process.stdout.readline()
+        if not line:
+            fail(f"unified MCP exited before replying to {method}")
+        response = json.loads(line)
+        if response.get("id") != request_id:
+            if response.get("method") == "notifications/tools/list_changed":
+                continue
+            fail(f"unexpected MCP message while waiting for {method}: {response}")
+        if "error" in response:
+            fail(f"{method} failed: {response['error']}")
+        return response["result"]
+
+
+def notify(method):
+    process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method}) + "\n")
+    process.stdin.flush()
+
+
+def start_process():
+    global process, next_id
+    if process is not None:
+        fail("unified MCP was already running")
+    process = subprocess.Popen(
+        [mcp_bin],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=stderr_file,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+    )
+    next_id = 1
+    request("initialize")
+    notify("notifications/initialized")
+    request("ping")
+
+
+def stop_process():
+    global process
+    if process is None:
+        return
+    running = process
+    if running.stdin and not running.stdin.closed:
+        running.stdin.close()
+    try:
+        running.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        running.terminate()
+        running.wait(timeout=10)
+    process = None
+    if running.returncode != 0:
+        stderr_file.flush()
+        with open(stderr_path, "r", encoding="utf-8") as captured:
+            fail(f"unified MCP exited with {running.returncode}: {captured.read()}")
+
+
+def call(name, arguments, call_id=None):
+    params = {"name": name, "arguments": arguments}
+    if call_id is not None:
+        params["_meta"] = {"callId": call_id}
+    result = request("tools/call", params)
+    if result.get("isError"):
+        fail(f"{name} returned an application error: {result}")
+    structured = result.get("structuredContent")
+    if not isinstance(structured, dict):
+        fail(f"{name} omitted structuredContent: {result}")
+    return structured
+
+
+def governed_arguments(label):
+    return {
+        "authorization": {
+            "account_id": account_id,
+            "amount_cents": 2,
+            "reason": f"local stack approval acceptance {label}",
+            "execution_scope": {
+                "schema_version": 1,
+                "provider": "provider:local:fixture",
+                "executor": "executor:gongbu:image",
+                "capability": "capability:image:generate",
+                "billing_merchant": "merchant:local",
+            },
+            "lease_profile": "default",
+        },
+        "execution": {
+            "schema_version": 2,
+            "input": {
+                "prompt": f"approval acceptance canary {label}",
+                "image_count": 1,
+                "image_size": "2k",
+            },
+            "input_schema_version": 1,
+            "workload_type": "default",
+            "provider": "example",
+            "adapter": "fixture",
+            "model": "image-v1",
+        },
+    }
+
+
+def pending_operation(label):
+    before = execution_count()
+    pending = call(
+        "hubu_submit_governed_execution",
+        governed_arguments(label),
+        f"local-stack-approval-{label}",
+    )
+    if pending.get("outcome") != "approval_required":
+        fail(f"{label} did not require approval: {pending}")
+    if pending.get("state") != "approval_required":
+        fail(f"{label} did not persist approval_required: {pending}")
+    approval = pending.get("authorization", {}).get("approval", {})
+    approval_request_id = approval.get("approval_request_id")
+    operation_handle = pending.get("operation_handle")
+    if not approval_request_id or not operation_handle:
+        fail(f"{label} omitted approval identity or public handle: {pending}")
+    if execution_count() != before:
+        fail(f"{label} contacted Gongbu before human approval")
+    review = call(
+        "hubu_get_spend_approval",
+        {"approval_request_id": approval_request_id},
+    )
+    if review.get("status") != "pending":
+        fail(f"{label} approval review was not pending: {review}")
+    if "operation_key" in json.dumps(review):
+        fail(f"{label} approval review exposed a private operation key")
+    return before, approval_request_id, operation_handle
+
+
+try:
+    start_process()
+
+    expected_tools = {
+        "hubu_get_spend_approval",
+        "hubu_resolve_spend_approval",
+        "hubu_resume_operation",
+    }
+    tools = request("tools/list").get("tools", [])
+    tool_names = {tool.get("name") for tool in tools}
+    if len(tool_names) != 38 or not expected_tools.issubset(tool_names):
+        fail(f"unexpected unified MCP tool catalog: {len(tool_names)} tools")
+
+    denied_before, denied_approval_id, denied_handle = pending_operation("deny")
+    denied = call(
+        "hubu_resolve_spend_approval",
+        {"approval_request_id": denied_approval_id, "decision": "deny"},
+    )
+    if denied.get("decision") != "deny":
+        fail(f"unified MCP denial was not recorded: {denied}")
+    denied_status = call(
+        "hubu_operation_status", {"operation_handle": denied_handle}
+    )
+    if denied_status.get("state") != "failed" or not denied_status.get("terminal"):
+        fail(f"denied operation was not terminal: {denied_status}")
+    if denied_status.get("result", {}).get("code") != "approval_denied":
+        fail(f"denied operation had the wrong result code: {denied_status}")
+    if execution_count() != denied_before:
+        fail("denial started Gongbu or provider work")
+
+    approved_before, approved_approval_id, approved_handle = pending_operation("approve")
+    cli_environment = os.environ.copy()
+    for name in ("HUBU_AUTH_TOKEN", "HUBU_APPROVAL_TOKEN"):
+        cli_environment.pop(name, None)
+    cli_environment.update(
+        {
+            "HUBU_URL": hubu_endpoint,
+            "HUBU_AUTH_TOKEN_FILE": hubu_auth,
+            "HUBU_APPROVAL_TOKEN_FILE": hubu_approval,
+        }
+    )
+    approved = subprocess.run(
+        [
+            hubu_bin,
+            "spend",
+            "approval",
+            "approve",
+            "--approval-request-id",
+            approved_approval_id,
+        ],
+        env=cli_environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if approved.returncode != 0:
+        fail(f"CLI approval failed: {approved.stderr}{approved.stdout}")
+
+    stop_process()
+    start_process()
+    synchronized = call(
+        "hubu_operation_status", {"operation_handle": approved_handle}
+    )
+    if synchronized.get("state") != "resume_required":
+        fail(f"external approval did not synchronize: {synchronized}")
+    if synchronized.get("result", {}).get("code") != "approval_resolved_resume_required":
+        fail(f"external approval had the wrong resume result code: {synchronized}")
+    if execution_count() != approved_before:
+        fail("approval or status synchronization started provider work")
+
+    resumed = call("hubu_resume_operation", {"operation_handle": approved_handle})
+    if resumed.get("state") not in {
+        "accepted",
+        "queued",
+        "dispatching",
+        "reconciling",
+        "succeeded",
+    }:
+        fail(f"approved operation did not resume: {resumed}")
+    terminal = resumed
+    for _ in range(300):
+        if terminal.get("state") == "succeeded":
+            break
+        time.sleep(0.05)
+        terminal = call(
+            "hubu_operation_status", {"operation_handle": approved_handle}
+        )
+    if terminal.get("state") != "succeeded":
+        fail(f"resumed operation did not succeed: {terminal}")
+    if execution_count() != approved_before + 1:
+        fail("public-handle resume did not create exactly one Gongbu execution")
+
+    replay = call("hubu_resume_operation", {"operation_handle": approved_handle})
+    if replay.get("state") != "succeeded":
+        fail(f"idempotent resume did not return terminal state: {replay}")
+    if execution_count() != approved_before + 1:
+        fail("repeated public-handle resume created another Gongbu execution")
+finally:
+    stop_process()
+    stderr_file.close()
+PY
 
 authorize_agent() {
   local label="$1"
@@ -449,6 +795,7 @@ budgets="$(curl --fail --silent \
   "${hubu_endpoint}/budgets")"
 jq -e --arg agent "${agent_a_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 1 and .frozen_amount_cents == 0 and .remaining_amount_cents == 99' <<<"${budgets}" >/dev/null || fail "Agent A budget did not settle independently"
 jq -e --arg agent "${agent_b_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 1 and .frozen_amount_cents == 0 and .remaining_amount_cents == 99' <<<"${budgets}" >/dev/null || fail "Agent B budget did not settle independently"
+jq -e --arg agent "${approval_agent_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 2 and .frozen_amount_cents == 0 and .remaining_amount_cents == 98' <<<"${budgets}" >/dev/null || fail "approval resume did not settle exactly one 2k provider execution"
 
 agent_a_artifact_record="$(retrieve_artifact "${agent_a_execution_id}" "${workspace}/agent-a.png")"
 agent_b_artifact_record="$(retrieve_artifact "${agent_b_execution_id}" "${workspace}/agent-b.png")"
@@ -522,4 +869,4 @@ stack_lifecycle stop >/dev/null
 stack_started=0
 [[ ! -e "${profile}/runtime/launcher-state.json" ]] || fail "graceful stop left launcher ownership state"
 
-echo "Local-stack acceptance passed: one final Hubu per start, managed credential bootstrap and recovery, principal-neutral two-agent execution, restart persistence, and graceful shutdown"
+echo "Local-stack acceptance passed: managed credential bootstrap and recovery, cross-surface approval synchronization, provider-free denial, idempotent public-handle resume, principal-neutral execution, restart persistence, and graceful shutdown"

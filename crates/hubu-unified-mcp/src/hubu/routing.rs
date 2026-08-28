@@ -16,11 +16,13 @@ pub(crate) fn denied_retry_guidance() -> Value {
 #[derive(Debug, Clone, Copy)]
 struct McpConfig {
     protected_tools_enabled: bool,
+    spend_approval_tools_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HubuRequestCapabilityV1 {
     None,
+    Approval,
     Reconciliation,
 }
 
@@ -36,6 +38,8 @@ pub(super) struct HubuHttpRequestV1 {
 enum HubuResponseTransformV1 {
     Plain,
     SpendApprovalHint,
+    PrivateOperationIdentity,
+    SpendApprovalResolution,
 }
 
 enum PreparedHubuCallV1 {
@@ -84,6 +88,7 @@ fn post_request_with(
 pub(super) fn route_tool_call_v1(
     params: Value,
     protected_tools_enabled: bool,
+    spend_approval_tools_enabled: bool,
     operation: Option<OperationResolution>,
     execute: impl FnOnce(HubuHttpRequestV1) -> Result<Value>,
 ) -> Result<Value> {
@@ -105,6 +110,7 @@ pub(super) fn route_tool_call_v1(
 
     let config = McpConfig {
         protected_tools_enabled,
+        spend_approval_tools_enabled,
     };
     let prepared = match name {
         "hubu_health" => get_request("/health"),
@@ -199,6 +205,36 @@ pub(super) fn route_tool_call_v1(
                 HubuResponseTransformV1::SpendApprovalHint,
             )
         }
+        "hubu_get_spend_approval" => {
+            let approval_request_id = spend_approval_request_id(&arguments, name, 1)?;
+            PreparedHubuCallV1::Http(
+                HubuHttpRequestV1 {
+                    method: "GET",
+                    path: format!("/spend/approval?approval_request_id={approval_request_id}"),
+                    body: None,
+                    capability: HubuRequestCapabilityV1::None,
+                },
+                HubuResponseTransformV1::PrivateOperationIdentity,
+            )
+        }
+        "hubu_resolve_spend_approval" => {
+            require_trusted_spend_approval(config, name)?;
+            let approval_request_id = spend_approval_request_id(&arguments, name, 2)?;
+            let decision = arguments
+                .get("decision")
+                .and_then(Value::as_str)
+                .filter(|decision| matches!(*decision, "approve" | "deny"))
+                .ok_or_else(|| anyhow!("{name} requires decision approve or deny"))?;
+            post_request_with(
+                "/spend/approval/resolve",
+                json!({
+                    "approval_request_id": approval_request_id,
+                    "decision": decision,
+                }),
+                HubuRequestCapabilityV1::Approval,
+                HubuResponseTransformV1::SpendApprovalResolution,
+            )
+        }
         "hubu_list_agents" => get_request("/agents"),
         "hubu_list_budgets" => {
             if arguments
@@ -251,6 +287,15 @@ pub(super) fn route_tool_call_v1(
                 HubuResponseTransformV1::Plain => response,
                 HubuResponseTransformV1::SpendApprovalHint => {
                     spend_response_with_approval_hint(response)
+                }
+                HubuResponseTransformV1::PrivateOperationIdentity => {
+                    redact_private_operation_identity(response, None)
+                }
+                HubuResponseTransformV1::SpendApprovalResolution => {
+                    redact_authorization_continuation(redact_private_operation_identity(
+                        spend_response_with_approval_hint(response),
+                        None,
+                    ))
                 }
             }
         }
@@ -315,7 +360,7 @@ pub(crate) fn public_spend_result(
     operation_handle: &str,
     private_operation_key: Option<&str>,
 ) -> Value {
-    remove_private_operation_identity(&mut response, private_operation_key);
+    response = redact_private_operation_identity(response, private_operation_key);
     if let Some(object) = response.as_object_mut() {
         let denied = object.get("decision").and_then(Value::as_str) == Some("deny");
         object.insert(
@@ -346,26 +391,159 @@ pub(crate) fn public_spend_result(
     response
 }
 
-fn remove_private_operation_identity(value: &mut Value, private_operation_key: Option<&str>) {
+pub(crate) fn redact_private_operation_identity(
+    mut value: Value,
+    private_operation_key: Option<&str>,
+) -> Value {
+    let mut private_operation_keys = Vec::new();
+    collect_private_operation_keys(&value, &mut private_operation_keys);
+    if let Some(operation_key) = private_operation_key.filter(|value| !value.is_empty()) {
+        private_operation_keys.push(operation_key.to_string());
+    }
+    private_operation_keys
+        .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    private_operation_keys.dedup();
+    remove_private_operation_identity(&mut value, &private_operation_keys);
+    value
+}
+
+fn redact_authorization_continuation(mut value: Value) -> Value {
+    let mut private_continuations = Vec::new();
+    collect_authorization_continuations(&value, &mut private_continuations);
+    private_continuations
+        .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    private_continuations.dedup();
+    remove_authorization_continuations(&mut value, &private_continuations);
+    value
+}
+
+fn collect_authorization_continuations(value: &Value, private_continuations: &mut Vec<String>) {
     match value {
         Value::Array(values) => {
             for value in values {
-                remove_private_operation_identity(value, private_operation_key);
+                collect_authorization_continuations(value, private_continuations);
+            }
+        }
+        Value::Object(object) => {
+            for field in ["auth_token_id", "spend_auth_token_id"] {
+                if let Some(continuation) = object.get(field).and_then(Value::as_str) {
+                    if !continuation.is_empty() {
+                        private_continuations.push(continuation.to_string());
+                    }
+                }
+            }
+            for value in object.values() {
+                collect_authorization_continuations(value, private_continuations);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remove_authorization_continuations(value: &mut Value, private_continuations: &[String]) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                remove_authorization_continuations(value, private_continuations);
+            }
+        }
+        Value::Object(object) => {
+            object.remove("auth_token_id");
+            object.remove("spend_auth_token_id");
+            for value in object.values_mut() {
+                remove_authorization_continuations(value, private_continuations);
+            }
+        }
+        Value::String(text) => {
+            *text = redact_authorization_continuation_text(text, private_continuations);
+        }
+        _ => {}
+    }
+}
+
+fn redact_authorization_continuation_text(text: &str, private_continuations: &[String]) -> String {
+    let mut redacted = String::with_capacity(text.len());
+    let mut offset = 0;
+    while offset < text.len() {
+        if let Some(continuation) = private_continuations
+            .iter()
+            .find(|continuation| text[offset..].starts_with(continuation.as_str()))
+        {
+            redacted.push_str("<private authorization redacted>");
+            offset += continuation.len();
+        } else {
+            let character = text[offset..]
+                .chars()
+                .next()
+                .expect("offset should remain on a character boundary");
+            redacted.push(character);
+            offset += character.len_utf8();
+        }
+    }
+    redacted
+}
+
+fn collect_private_operation_keys(value: &Value, private_operation_keys: &mut Vec<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_private_operation_keys(value, private_operation_keys);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(operation_key) = object.get("operation_key").and_then(Value::as_str) {
+                if !operation_key.is_empty() {
+                    private_operation_keys.push(operation_key.to_string());
+                }
+            }
+            for value in object.values() {
+                collect_private_operation_keys(value, private_operation_keys);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remove_private_operation_identity(value: &mut Value, private_operation_keys: &[String]) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                remove_private_operation_identity(value, private_operation_keys);
             }
         }
         Value::Object(object) => {
             object.remove("operation_key");
             for value in object.values_mut() {
-                remove_private_operation_identity(value, private_operation_key);
+                remove_private_operation_identity(value, private_operation_keys);
             }
         }
         Value::String(text) => {
-            if let Some(operation_key) = private_operation_key {
-                *text = text.replace(operation_key, "<private operation redacted>");
-            }
+            *text = redact_private_operation_key_text(text, private_operation_keys);
         }
         _ => {}
     }
+}
+
+fn redact_private_operation_key_text(text: &str, private_operation_keys: &[String]) -> String {
+    let mut redacted = String::with_capacity(text.len());
+    let mut offset = 0;
+    while offset < text.len() {
+        if let Some(operation_key) = private_operation_keys
+            .iter()
+            .find(|operation_key| text[offset..].starts_with(operation_key.as_str()))
+        {
+            redacted.push_str("<private operation redacted>");
+            offset += operation_key.len();
+        } else {
+            let character = text[offset..]
+                .chars()
+                .next()
+                .expect("offset should remain on a character boundary");
+            redacted.push(character);
+            offset += character.len_utf8();
+        }
+    }
+    redacted
 }
 
 fn policy_inspection_path(action: &str, arguments: &Value) -> Result<String> {
@@ -389,6 +567,42 @@ fn require_trusted_client_approval(config: McpConfig, tool_name: &str) -> Result
             "{tool_name} requires a trusted MCP client approval gate; set HUBU_MCP_TRUST_CLIENT_APPROVAL=1 only when the MCP client prompts a human before invoking destructive tools"
         ))
     }
+}
+
+fn require_trusted_spend_approval(config: McpConfig, tool_name: &str) -> Result<()> {
+    if config.protected_tools_enabled || config.spend_approval_tools_enabled {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "{tool_name} requires a trusted spend-approval client gate; set HUBU_MCP_TRUST_SPEND_APPROVAL=1 only when the MCP client prompts a human to confirm the already chosen approve or deny decision"
+        ))
+    }
+}
+
+fn spend_approval_request_id(
+    arguments: &Value,
+    tool_name: &str,
+    expected_fields: usize,
+) -> Result<String> {
+    let arguments = arguments
+        .as_object()
+        .ok_or_else(|| anyhow!("{tool_name} arguments must be an object"))?;
+    if arguments.len() != expected_fields {
+        bail!("{tool_name} accepts only its documented approval fields");
+    }
+    let approval_request_id = arguments
+        .get("approval_request_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{tool_name} requires approval_request_id"))?;
+    if approval_request_id.is_empty()
+        || approval_request_id.len() > 255
+        || !approval_request_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+        })
+    {
+        bail!("{tool_name} requires approval_request_id to be a safe identifier");
+    }
+    Ok(approval_request_id.to_string())
 }
 
 pub(crate) fn spend_response_with_approval_hint(mut response: Value) -> Value {

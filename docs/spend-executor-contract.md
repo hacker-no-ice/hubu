@@ -351,7 +351,10 @@ guidance.
    maximum and returns the normal authorization token; it never invokes the
    provider. Denial is terminal for that immutable request. Repeating the same
    resolution or exact authorization request returns the stored result, while
-   a conflicting resolution is rejected.
+   a conflicting resolution is rejected. The unified MCP router synchronizes a
+   decision made through either MCP or the CLI into its public-handle status;
+   approved governed work starts only when `hubu_resume_operation` separately
+   resumes the stored immutable intent.
 
    `operation_key`, `task_id`, and `reason` are independent. The first is the
    trusted financial/idempotency identity, the second is an optional trusted

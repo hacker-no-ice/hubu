@@ -146,6 +146,14 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
+            name: "hubu_get_spend_approval",
+            owner: hubu,
+            method: "GET",
+            path: "/spend/approval?approval_request_id=approval-107",
+            arguments: json!({"approval_request_id":"approval-107"}),
+            meta: None,
+        },
+        GoldenCase {
             name: "hubu_health",
             owner: hubu,
             method: "GET",
@@ -258,6 +266,14 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
+            name: "hubu_resolve_spend_approval",
+            owner: hubu,
+            method: "POST",
+            path: "/spend/approval/resolve",
+            arguments: json!({"approval_request_id":"approval-107","decision":"approve"}),
+            meta: None,
+        },
+        GoldenCase {
             name: "hubu_revoke_budget",
             owner: hubu,
             method: "POST",
@@ -324,8 +340,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        32,
-        "golden matrix must contain exactly 32 cases"
+        34,
+        "golden matrix must contain exactly 34 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -338,8 +354,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        32,
-        "routing fixture must map 32 tools"
+        34,
+        "routing fixture must map 34 tools"
     );
     assert_eq!(
         expected.len(),
@@ -355,7 +371,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Hubu)
             .count(),
-        28
+        30
     );
     assert_eq!(
         cases
@@ -414,6 +430,35 @@ fn success_body(case: &GoldenCase) -> Value {
             "decision":"allow",
             "decision_id":format!("decision-{}", case.name),
             "auth_token_id":"fixture-no-spend-token"
+        }),
+        "hubu_get_spend_approval" => json!({
+            "approval_request_id":"approval-107",
+            "status":"pending",
+            "review":{
+                "operation_key":"fixture-private-approval-operation",
+                "account_id":"account-107",
+                "agent_id":"agent-107",
+                "amount_cents":0,
+                "currency":"USD",
+                "merchant":null,
+                "execution_scope":null,
+                "lease_profile":"single_use",
+                "reason":"no-spend parity fixture",
+                "policy_summary":"human review",
+                "policy_reasons":["fixture"]
+            }
+        }),
+        "hubu_resolve_spend_approval" => json!({
+            "operation_key":"fixture-private-approval-operation",
+            "decision":"allow",
+            "decision_id":"approval-107",
+            "approval":{
+                "approval_request_id":"approval-107",
+                "status":"approved",
+                "review":{"operation_key":"fixture-private-approval-operation"}
+            },
+            "auth_token_id":"fixture-private-approval-token",
+            "authorization_expires_at":"2099-01-01T00:00:00Z"
         }),
         "hubu_submit_spend" => json!({
             "fixture":"HUB-125",

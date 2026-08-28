@@ -393,6 +393,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         mcp_server: &mcp_server,
         hubu_endpoint,
         hubu_token_file: &token_file,
+        approval_token_file: &approval_token_file,
         reconciliation_token_file: &reconciliation_token_file,
         operation_state_path: &operation_state_path,
         gongbu: gongbu_endpoint.as_deref().zip(gongbu_token_file.as_deref()),
@@ -434,10 +435,15 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     println!(
         "  spend_tools: Codex pre-approves Hubu spend tool calls; Hubu still returns needs_approval without payment when policy requires review"
     );
+    println!(
+        "  spend_approval: enabled with a native Codex confirmation after the human chooses approve or deny in chat"
+    );
     if trust_client_approval {
-        println!("  approval_tools: enabled because --trust-client-approval was set");
+        println!("  setup_admin_tools: enabled because --trust-client-approval was set");
     } else {
-        println!("  approval_tools: disabled; use the CLI for setup, policy, and budget changes");
+        println!(
+            "  setup_admin_tools: disabled; use the CLI for setup, policy, and budget changes"
+        );
     }
     Ok(())
 }

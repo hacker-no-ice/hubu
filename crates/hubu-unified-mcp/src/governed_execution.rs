@@ -6,6 +6,7 @@
 
 use std::{thread, time::Duration};
 
+use anyhow::{anyhow, bail};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -37,6 +38,36 @@ struct GovernedExecutionInput {
 
 fn default_inline_artifact_bytes() -> u64 {
     MAX_INLINE_ARTIFACT_BYTES
+}
+
+pub(crate) fn resume_authorization_arguments(request: &Value) -> anyhow::Result<Value> {
+    Ok(validated_stored_input(request)?.authorization)
+}
+
+pub(crate) fn resume_execution_arguments(
+    request: &Value,
+    auth_token_id: &str,
+) -> anyhow::Result<Value> {
+    let input = validated_stored_input(request)?;
+    let arguments = gongbu::governed_execution_arguments(&input.execution, auth_token_id)
+        .map_err(|_| anyhow!("stored governed execution intent is invalid"))?;
+    operation_registry::validate_gongbu_request_size(&arguments)?;
+    Ok(arguments)
+}
+
+fn validated_stored_input(request: &Value) -> anyhow::Result<GovernedExecutionInput> {
+    operation_registry::validate_durable_request_size(request)?;
+    let input = serde_json::from_value::<GovernedExecutionInput>(request.clone())
+        .map_err(|_| anyhow!("stored governed execution intent is invalid"))?;
+    if !(1..=MAX_INLINE_ARTIFACT_BYTES).contains(&input.max_inline_artifact_bytes) {
+        bail!("stored governed execution intent is invalid");
+    }
+    let maximum_length_token = "v".repeat(255);
+    let validation_arguments =
+        gongbu::governed_execution_arguments(&input.execution, &maximum_length_token)
+            .map_err(|_| anyhow!("stored governed execution intent is invalid"))?;
+    operation_registry::validate_gongbu_request_size(&validation_arguments)?;
+    Ok(input)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -828,7 +859,7 @@ fn composite_result(
     })
 }
 
-fn authorization_projection(authorization: &Value) -> Value {
+pub(crate) fn authorization_projection(authorization: &Value) -> Value {
     let private_values = ["auth_token_id", "spend_auth_token_id", "operation_key"]
         .into_iter()
         .filter_map(|field| authorization.get(field).and_then(Value::as_str))

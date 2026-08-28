@@ -78,9 +78,11 @@ The [policy engine](policy-engine.md) returns one of three effects:
 - `needs_approval`: persist a pending decision and wait for explicit human
   resolution.
 
-Human approval operates on the immutable review snapshot. Approval resumes the
-same operation; denial ends it. Repeating the same resolution is idempotent,
-while a conflicting resolution is rejected.
+Human approval operates on the immutable review snapshot. Approval makes the
+same operation eligible for continuation but does not itself invoke payment or
+provider work; the unified MCP flow resumes it separately by public operation
+handle. Denial ends it. Repeating the same resolution is idempotent, while a
+conflicting resolution is rejected.
 
 ## Budgets and spending targets
 

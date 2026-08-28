@@ -1965,7 +1965,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "resolve": "the owner-authenticated client submits approve or deny with the distinct human approval capability; approval reserves budget but never invokes a provider",
             "capability_header": APPROVAL_CAPABILITY_HEADER,
             "retry": "replay the exact authorization request or read approval status to recover the durable result",
-            "mcp": "hubu_resolve_spend_approval is protected by the trusted client human-approval gate"
+            "mcp": "hubu_resolve_spend_approval is protected by the narrow spend-approval client gate"
         },
         "claim_request": {
             "required": [

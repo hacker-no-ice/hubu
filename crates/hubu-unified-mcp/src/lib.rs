@@ -9,6 +9,7 @@
 mod gongbu;
 mod governed_execution;
 mod hubu;
+mod resume_operation;
 
 use std::{
     env, fmt,
@@ -45,7 +46,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.3";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 2;
+pub const ROUTING_REVISION: u32 = 3;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -58,6 +59,9 @@ const OPERATION_TICK_ENV: &str = "HUBU_UNIFIED_OPERATION_TICK_MS";
 const GOVERNED_EXECUTION_WAIT_ENV: &str = "HUBU_UNIFIED_GOVERNED_EXECUTION_WAIT_MS";
 const OPERATION_STATE_PATH_ENV: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
+const TRUST_SPEND_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_SPEND_APPROVAL";
+const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
+const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -86,6 +90,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_create_recurring_budget", BackendOwner::Hubu),
     ("hubu_export_policy", BackendOwner::Hubu),
     ("hubu_get_executor_claim", BackendOwner::Hubu),
+    ("hubu_get_spend_approval", BackendOwner::Hubu),
     ("hubu_health", BackendOwner::Hubu),
     ("hubu_list_agents", BackendOwner::Hubu),
     ("hubu_list_budgets", BackendOwner::Hubu),
@@ -106,6 +111,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_register_human", BackendOwner::Hubu),
     ("hubu_registration_guidance", BackendOwner::Hubu),
     ("hubu_replace_budget", BackendOwner::Hubu),
+    ("hubu_resolve_spend_approval", BackendOwner::Hubu),
     ("hubu_revoke_budget", BackendOwner::Hubu),
     ("hubu_revoke_spending_target", BackendOwner::Hubu),
     ("hubu_set_spending_target", BackendOwner::Hubu),
@@ -231,10 +237,14 @@ impl Config {
         let operation_state_path = lookup(OPERATION_STATE_PATH_ENV)
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from);
-        let mut hubu_routing = HubuRoutingConfig::new(
+        let mut hubu_routing = HubuRoutingConfig::new_with_spend_approval(
             lookup(TRUST_CLIENT_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
+            lookup(TRUST_SPEND_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
+            lookup(APPROVAL_TOKEN_ENV),
             lookup(RECONCILIATION_TOKEN_ENV),
         );
+        hubu_routing.approval_capability_file =
+            lookup(APPROVAL_TOKEN_FILE_ENV).unwrap_or_else(|| "hubu.approval-token".to_string());
         hubu_routing.reconciliation_capability_file = lookup(RECONCILIATION_TOKEN_FILE_ENV)
             .unwrap_or_else(|| "hubu.reconciliation-token".to_string());
         Ok(Self {
@@ -694,6 +704,9 @@ impl Server {
         if call.name == "hubu_operation_status" {
             return self.call_operation_status(id, &call.arguments);
         }
+        if call.name == resume_operation::TOOL_NAME {
+            return resume_operation::call_tool(self, id, call);
+        }
         if call.name == governed_execution::TOOL_NAME {
             let started = Instant::now();
             let deadline = started + self.governed_execution_wait;
@@ -726,7 +739,7 @@ impl Server {
             return self.call_gongbu_tool(id, client, call);
         }
         self.refresh_hubu_capability_if_stale();
-        hubu::call_tool(self, id, call)
+        self.call_hubu_tool_and_sync_approval(id, call)
     }
 
     #[cfg(test)]
@@ -759,6 +772,9 @@ impl Server {
         if call.name == "hubu_operation_status" {
             return self.call_operation_status(id, &call.arguments);
         }
+        if call.name == resume_operation::TOOL_NAME {
+            return resume_operation::call_tool(self, id, call);
+        }
         if call.name == governed_execution::TOOL_NAME {
             let started = Instant::now();
             let deadline = started + self.governed_execution_wait;
@@ -782,7 +798,60 @@ impl Server {
                 .expect("available Gongbu route has a configured client");
             return self.call_gongbu_tool(id, client, call);
         }
-        hubu::call_tool(self, id, call)
+        self.call_hubu_tool_and_sync_approval(id, call)
+    }
+
+    fn call_hubu_tool_and_sync_approval(&self, id: Value, call: ToolCall) -> Value {
+        let approval_request_id = matches!(
+            call.name.as_str(),
+            "hubu_get_spend_approval" | "hubu_resolve_spend_approval"
+        )
+        .then(|| {
+            call.arguments
+                .get("approval_request_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .flatten();
+        let response = hubu::call_tool(self, id.clone(), call);
+        let Some(approval_request_id) = approval_request_id else {
+            return response;
+        };
+        if response.get("error").is_some() {
+            return response;
+        }
+        let Some(structured) = response.pointer("/result/structuredContent") else {
+            return error_response(id, -32000, "Hubu returned an invalid approval result");
+        };
+        let approval = structured.get("approval").unwrap_or(structured);
+        let Some(response_approval_request_id) =
+            approval.get("approval_request_id").and_then(Value::as_str)
+        else {
+            return error_response(id, -32000, "Hubu returned an invalid approval result");
+        };
+        if !same_approval_request_id(&approval_request_id, response_approval_request_id) {
+            return error_response(id, -32000, "Hubu returned a conflicting approval identity");
+        }
+        let Some(status) = approval
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| matches!(*status, "pending" | "approved" | "denied"))
+        else {
+            return error_response(id, -32000, "Hubu returned an invalid approval result");
+        };
+        if self.operation_registry_available() {
+            if self
+                .synchronize_approval_status(response_approval_request_id, status)
+                .is_err()
+            {
+                return error_response(
+                    id,
+                    -32000,
+                    "approval status could not be synchronized safely",
+                );
+            }
+        }
+        response
     }
 
     fn list_tools(&self) -> Vec<Value> {
@@ -803,6 +872,9 @@ impl Server {
         let mut tools = vec![capability_tool()];
         if self.operation_registry_available() {
             tools.push(gongbu::operation_status_definition());
+            if tool_availability("hubu_authorize_spend", BackendOwner::Hubu, &snapshot).is_ok() {
+                tools.push(resume_operation::tool_definition());
+            }
             if governed_execution::backend_availability(&snapshot).is_ok() {
                 tools.push(governed_execution::tool_definition());
             }
@@ -862,6 +934,7 @@ impl Server {
                             | "hubu_submit_spend"
                             | "gongbu_create_execution"
                             | governed_execution::TOOL_NAME
+                            | resume_operation::TOOL_NAME
                     )
                 ) {
                     tool["available"] = json!(false);
@@ -984,6 +1057,87 @@ impl Server {
             .durable_operation_status(operation_handle)
     }
 
+    fn approval_sync_target_for_handle(
+        &self,
+        operation_handle: &str,
+    ) -> anyhow::Result<Option<operation_registry::ApprovalSyncTarget>> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("approval synchronization requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .approval_sync_target_for_handle(operation_handle)
+    }
+
+    fn synchronize_approval_status(
+        &self,
+        approval_request_id: &str,
+        status: &str,
+    ) -> anyhow::Result<Option<operation_registry::DurableOperationStatus>> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("approval synchronization requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .synchronize_approval_status(approval_request_id, status)
+    }
+
+    fn prepare_resume(
+        &self,
+        operation_handle: &str,
+    ) -> anyhow::Result<operation_registry::ResumePreparation> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("operation resume requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prepare_resume(operation_handle)
+    }
+
+    fn complete_resume(
+        &self,
+        plan: &operation_registry::ResumeOperationPlan,
+        hubu_result: &Value,
+    ) -> anyhow::Result<operation_registry::ResumeCompletion> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("operation resume requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .complete_resume(plan, hubu_result)
+    }
+
+    fn synchronize_pending_approval_for_handle(&self, operation_handle: &str) {
+        if !self
+            .durable_operation_status(operation_handle)
+            .is_ok_and(|status| status.state == "approval_required")
+        {
+            return;
+        }
+        let Ok(Some(target)) = self.approval_sync_target_for_handle(operation_handle) else {
+            return;
+        };
+        self.refresh_hubu_capability_if_stale();
+        let _ = self.call_hubu_tool_and_sync_approval(
+            Value::Null,
+            ToolCall {
+                name: "hubu_get_spend_approval".into(),
+                arguments: json!({
+                    "approval_request_id": target.approval_request_id
+                }),
+                meta: None,
+            },
+        );
+    }
+
     fn fail_pre_execution_operation(
         &self,
         operation_handle: &str,
@@ -1010,6 +1164,7 @@ impl Server {
         else {
             return error_response(id, -32602, "Invalid params");
         };
+        self.synchronize_pending_approval_for_handle(operation_handle);
         match self.durable_operation_status(operation_handle) {
             Ok(status) => success_response(id, operation_status_result(&status)),
             Err(_) => error_response(
@@ -1238,7 +1393,7 @@ impl Server {
 fn operation_status_result(status: &operation_registry::DurableOperationStatus) -> Value {
     let denied = matches!(
         status.result_code.as_deref(),
-        Some("authorization_denied" | "spend_denied")
+        Some("approval_denied" | "authorization_denied" | "spend_denied")
     );
     let guidance = if denied {
         hubu::DENIED_OPERATION_GUIDANCE
@@ -1248,7 +1403,10 @@ fn operation_status_result(status: &operation_registry::DurableOperationStatus) 
                 "Submit this authorization continuation once with gongbu_create_execution."
             }
             "approval_required" => {
-                "Human approval is required. Do not submit a replacement; resolve the existing approval and redeliver the exact original harness call."
+                "Human approval is required. Inspect and resolve the existing approval; do not submit a replacement operation."
+            }
+            "resume_required" => {
+                "Human approval is recorded. Resume this exact operation once with hubu_resume_operation and its existing operation_handle; do not submit a replacement."
             }
             "awaiting_hubu_result" => {
                 "The Hubu result is not established. Do not submit a replacement; redeliver the exact original harness call with the same identity."
@@ -1294,6 +1452,16 @@ fn operation_result_projection(code: Option<&str>) -> Option<Value> {
             json!({"code": code})
         }
     })
+}
+
+fn same_approval_request_id(requested: &str, returned: &str) -> bool {
+    match (
+        uuid::Uuid::parse_str(requested),
+        uuid::Uuid::parse_str(returned),
+    ) {
+        (Ok(requested), Ok(returned)) => requested == returned,
+        _ => requested == returned,
+    }
 }
 
 fn report_unavailable(report: &capability::BackendReport) -> bool {
@@ -1808,8 +1976,8 @@ mod tests {
         let serialized = capability.to_string();
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
-        assert_eq!(capability["routing_revision"], 2);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 35);
+        assert_eq!(capability["routing_revision"], ROUTING_REVISION);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 38);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

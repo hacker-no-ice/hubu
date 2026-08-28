@@ -9,6 +9,7 @@ pub(crate) struct UnifiedConfig<'a> {
     pub mcp_server: &'a Path,
     pub hubu_endpoint: &'a str,
     pub hubu_token_file: &'a Path,
+    pub approval_token_file: &'a Path,
     pub reconciliation_token_file: &'a Path,
     pub operation_state_path: &'a Path,
     pub gongbu: Option<(&'a str, &'a Path)>,
@@ -42,11 +43,14 @@ pub(crate) fn unified_block(config: UnifiedConfig<'_>) -> String {
          [mcp_servers.hubu.env]\n\
          HUBU_UNIFIED_HUBU_ENDPOINT = \"{}\"\n\
          HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = \"{}\"\n\
+         HUBU_APPROVAL_TOKEN_FILE = \"{}\"\n\
+         HUBU_MCP_TRUST_SPEND_APPROVAL = \"1\"\n\
          HUBU_RECONCILIATION_TOKEN_FILE = \"{}\"\n\
          HUBU_UNIFIED_OPERATION_STATE_PATH = \"{}\"\n",
         toml_string(&config.mcp_server.display().to_string()),
         toml_string(config.hubu_endpoint),
         toml_string(&config.hubu_token_file.display().to_string()),
+        toml_string(&config.approval_token_file.display().to_string()),
         toml_string(&config.reconciliation_token_file.display().to_string()),
         toml_string(&config.operation_state_path.display().to_string()),
     );
@@ -72,7 +76,9 @@ fn finish_block(block: &mut String, trust_client_approval: bool) {
          [mcp_servers.hubu.tools.hubu_submit_governed_execution]\n\
          approval_mode = \"approve\"\n\n\
          [mcp_servers.hubu.tools.hubu_submit_spend]\n\
-         approval_mode = \"approve\"\n",
+         approval_mode = \"approve\"\n\n\
+         [mcp_servers.hubu.tools.hubu_resolve_spend_approval]\n\
+         approval_mode = \"prompt\"\n",
     );
     let _ = writeln!(block, "{MANAGED_END}");
 }
@@ -189,6 +195,7 @@ mod tests {
             mcp_server: Path::new("/tmp/hubu \"dev\"/hubu-unified-mcp"),
             hubu_endpoint: "http://127.0.0.1:8787",
             hubu_token_file: Path::new("/tmp/hubu\\token"),
+            approval_token_file: Path::new("/tmp/hubu\\approval-token"),
             reconciliation_token_file: Path::new("/tmp/hubu\\reconciliation-token"),
             operation_state_path: Path::new("/tmp/hubu\\unified-operations.sqlite3"),
             gongbu: Some(("http://127.0.0.1:8788", Path::new("/tmp/gongbu-token"))),
@@ -198,12 +205,23 @@ mod tests {
         assert!(!block.contains("[mcp_servers.gongbu]"));
         assert!(block.contains("command = \"/tmp/hubu \\\"dev\\\"/hubu-unified-mcp\""));
         assert!(block.contains("HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = \"/tmp/hubu\\\\token\""));
+        assert!(block.contains("HUBU_APPROVAL_TOKEN_FILE = \"/tmp/hubu\\\\approval-token\""));
+        assert!(block.contains("HUBU_MCP_TRUST_SPEND_APPROVAL = \"1\""));
         assert!(block.contains("HUBU_UNIFIED_GONGBU_ENDPOINT"));
         assert!(block.contains(
             "HUBU_UNIFIED_OPERATION_STATE_PATH = \"/tmp/hubu\\\\unified-operations.sqlite3\""
         ));
         assert!(block.contains(
+            "[mcp_servers.hubu.tools.hubu_authorize_spend]\napproval_mode = \"approve\""
+        ));
+        assert!(block.contains(
             "[mcp_servers.hubu.tools.hubu_submit_governed_execution]\napproval_mode = \"approve\""
         ));
+        assert!(block
+            .contains("[mcp_servers.hubu.tools.hubu_submit_spend]\napproval_mode = \"approve\""));
+        assert!(block.contains(
+            "[mcp_servers.hubu.tools.hubu_resolve_spend_approval]\napproval_mode = \"prompt\""
+        ));
+        toml::from_str::<toml::Value>(&block).unwrap();
     }
 }
