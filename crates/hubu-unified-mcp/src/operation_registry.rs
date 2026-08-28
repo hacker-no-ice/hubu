@@ -178,6 +178,28 @@ pub(crate) enum ResumeOrigin {
     GovernedExecution,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalPaymentReceipt {
+    Succeeded,
+    Failed,
+}
+
+impl TerminalPaymentReceipt {
+    fn operation_state(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn result_code(self) -> &'static str {
+        match self {
+            Self::Succeeded => "spend_succeeded",
+            Self::Failed => "spend_failed",
+        }
+    }
+}
+
 impl ResumeOrigin {
     pub(crate) fn normalized_tool_name(self) -> &'static str {
         match self {
@@ -856,7 +878,11 @@ impl OperationRegistry {
         if persisted.5.as_deref() != Some("approved")
             || persisted.6.as_deref() != Some("needs_approval")
         {
-            if status.state != "failed" && matches!(persisted.6.as_deref(), Some("allow" | "deny"))
+            let replayable_failed_submit = persisted.0 == "hubu_submit_spend"
+                && persisted.6.as_deref() == Some("allow")
+                && status.result_code.as_deref() == Some("spend_failed");
+            if (status.state != "failed" || replayable_failed_submit)
+                && matches!(persisted.6.as_deref(), Some("allow" | "deny"))
             {
                 if let Some(result_json) = persisted.7.as_deref() {
                     let authoritative_result = serde_json::from_str(result_json)
@@ -919,13 +945,18 @@ impl OperationRegistry {
         if incoming_result_json.len() > MAX_RESULT_BYTES {
             bail!("resumed normalized operation result is too large to persist safely");
         }
-        let incoming_decision = result
+        let reported_decision = result
             .get("decision")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("resumed Hubu result is missing decision"))?;
-        if !matches!(incoming_decision, "allow" | "deny" | "needs_approval") {
+        if !matches!(reported_decision, "allow" | "deny" | "needs_approval") {
             bail!("resumed Hubu result has an unsupported decision");
         }
+        let terminal_submit_payment = if plan.origin == ResumeOrigin::SubmitSpend {
+            terminal_payment_receipt(result)
+        } else {
+            None
+        };
         let incoming_decision_id = optional_string(result, "decision_id")?;
         let mut continuation_invalid = false;
         let auth_token_id = match optional_string(result, "auth_token_id") {
@@ -951,11 +982,11 @@ impl OperationRegistry {
         }
         let incoming_auth_token_id = auth_token_id.or(spend_auth_token_id);
         let governed_allow =
-            plan.origin == ResumeOrigin::GovernedExecution && incoming_decision == "allow";
+            plan.origin == ResumeOrigin::GovernedExecution && reported_decision == "allow";
         let authorization_allow = matches!(
             plan.origin,
             ResumeOrigin::AuthorizeSpend | ResumeOrigin::GovernedExecution
-        ) && incoming_decision == "allow";
+        ) && reported_decision == "allow";
         if governed_allow
             && incoming_auth_token_id
                 .as_deref()
@@ -1029,8 +1060,8 @@ impl OperationRegistry {
             .query_row(
                 "SELECT tool_name, operation_key, task_id, request_hash,
                         normalized_request_json, approval_request_id, approval_status,
-                        decision, result_json, operation_state, gongbu_request_hash,
-                        gongbu_execution_id
+                        decision, result_json, operation_state, operation_result_code,
+                        gongbu_request_hash, gongbu_execution_id
                  FROM harness_operations WHERE operation_handle = ?1",
                 [&plan.operation.operation_handle],
                 |row| {
@@ -1047,6 +1078,7 @@ impl OperationRegistry {
                         row.get::<_, Option<String>>(9)?,
                         row.get::<_, Option<String>>(10)?,
                         row.get::<_, Option<String>>(11)?,
+                        row.get::<_, Option<String>>(12)?,
                     ))
                 },
             )
@@ -1074,11 +1106,19 @@ impl OperationRegistry {
             }
         }
 
+        let may_supersede_expired_submit = origin == ResumeOrigin::SubmitSpend
+            && terminal_submit_payment.is_some()
+            && existing.6.as_deref() == Some("approved")
+            && existing.9.as_deref() == Some("failed")
+            && existing.10.as_deref() == Some("authorization_expired_before_resume")
+            && existing.12.is_none();
         let existing_is_complete = matches!(existing.7.as_deref(), Some("allow" | "deny"))
             && !(origin == ResumeOrigin::GovernedExecution
                 && existing.7.as_deref() == Some("allow")
                 && existing.9.is_none());
-        if existing_is_complete || existing.9.as_deref().is_some_and(is_durable_terminal_state) {
+        if (existing_is_complete || existing.9.as_deref().is_some_and(is_durable_terminal_state))
+            && !may_supersede_expired_submit
+        {
             let authoritative_result = existing
                 .8
                 .as_deref()
@@ -1100,6 +1140,38 @@ impl OperationRegistry {
             existing.6.as_deref(),
             existing.7.as_deref().and_then(approval_status_for_decision),
         )?;
+        let mut incoming_decision = reported_decision;
+        let mut completed_submit_payment = None;
+        if origin == ResumeOrigin::SubmitSpend {
+            match (reported_decision, terminal_submit_payment) {
+                ("deny", Some(_)) => {
+                    bail!("resumed Hubu spend result conflicts with its terminal payment receipt")
+                }
+                ("allow", None) => {
+                    bail!("resumed Hubu spend allow is missing a valid terminal payment receipt")
+                }
+                ("allow" | "needs_approval", Some(receipt)) => {
+                    if existing.6.as_deref() != Some("approved") {
+                        bail!("resumed Hubu spend payment is missing durable approval")
+                    }
+                    incoming_decision = "allow";
+                    completed_submit_payment = Some(receipt);
+                    let object = authoritative_result
+                        .as_object_mut()
+                        .expect("a validated resumed Hubu result is an object");
+                    object.insert("decision".into(), Value::String("allow".into()));
+                    object.insert("requires_human_approval".into(), Value::Bool(false));
+                    object.remove("approval_reason");
+                    object.remove("retry_guidance");
+                    incoming_result_json = serde_json::to_string(&authoritative_result)?;
+                    if incoming_result_json.len() > MAX_RESULT_BYTES {
+                        bail!("resumed normalized operation result is too large to persist safely");
+                    }
+                }
+                ("needs_approval" | "deny", None) => {}
+                _ => unreachable!("resumed Hubu decision was validated above"),
+            }
+        }
         let has_approval = established_approval.is_some()
             || existing.5.is_some()
             || incoming_approval_request_id.is_some();
@@ -1132,7 +1204,7 @@ impl OperationRegistry {
                 crate::governed_execution::resume_execution_arguments(&request, auth_token_id)?;
             let request_hash = canonical_request_hash("gongbu_create_execution", &arguments)?;
             if existing
-                .10
+                .11
                 .as_deref()
                 .is_some_and(|stored| stored != request_hash)
             {
@@ -1144,6 +1216,7 @@ impl OperationRegistry {
 
         let clear_normalized_request = incoming_decision == "deny"
             || (incoming_decision == "allow" && origin != ResumeOrigin::GovernedExecution)
+            || completed_submit_payment.is_some()
             || gongbu_request_json.is_some()
             || continuation_invalid
             || authorization_expired;
@@ -1166,12 +1239,14 @@ impl OperationRegistry {
                      ELSE COALESCE(gongbu_request_json, ?11)
                  END,
                  operation_state = CASE
+                     WHEN ?15 IS NOT NULL THEN ?15
                      WHEN ?14 THEN 'failed'
                      WHEN ?13 THEN 'failed'
                      WHEN ?11 IS NULL THEN operation_state
                      ELSE COALESCE(operation_state, 'accepted')
                  END,
                  operation_result_code = CASE
+                     WHEN ?16 IS NOT NULL THEN ?16
                      WHEN ?14 THEN 'authorization_expired_before_resume'
                      WHEN ?13 THEN 'authorization_continuation_unavailable'
                      ELSE operation_result_code
@@ -1188,7 +1263,8 @@ impl OperationRegistry {
                      ELSE COALESCE(gongbu_create_started_at, CURRENT_TIMESTAMP)
                  END,
                  operation_updated_at = CASE
-                     WHEN ?11 IS NULL AND NOT ?13 AND NOT ?14 THEN operation_updated_at
+                     WHEN ?11 IS NULL AND NOT ?13 AND NOT ?14 AND ?15 IS NULL
+                         THEN operation_updated_at
                      ELSE CURRENT_TIMESTAMP
                  END
              WHERE operation_handle = ?1
@@ -1208,6 +1284,8 @@ impl OperationRegistry {
                 OPERATION_DEADLINE_HOURS,
                 continuation_invalid,
                 authorization_expired,
+                completed_submit_payment.map(TerminalPaymentReceipt::operation_state),
+                completed_submit_payment.map(TerminalPaymentReceipt::result_code),
             ],
         )?;
         if changed != 1 {
@@ -2170,6 +2248,22 @@ fn optional_string(value: &Value, field: &str) -> Result<Option<String>> {
         .transpose()
 }
 
+fn terminal_payment_receipt(value: &Value) -> Option<TerminalPaymentReceipt> {
+    let payment = value.get("payment").and_then(Value::as_object)?;
+    if payment
+        .get("payment_id")
+        .and_then(Value::as_str)
+        .is_none_or(|payment_id| validate_identifier("payment_id", payment_id, 255).is_err())
+    {
+        return None;
+    }
+    match payment.get("status").and_then(Value::as_str) {
+        Some("succeeded") => Some(TerminalPaymentReceipt::Succeeded),
+        Some("failed") => Some(TerminalPaymentReceipt::Failed),
+        _ => None,
+    }
+}
+
 fn validate_schema(connection: &Connection) -> Result<()> {
     connection
         .prepare("SELECT singleton, installation_id, created_at FROM installation_identity LIMIT 0")
@@ -3034,7 +3128,11 @@ mod tests {
                 json!({
                     "decision":"allow",
                     "auth_token_id":"direct-submit-token",
-                    "payment":{"status":"succeeded"}
+                    "requires_human_approval":false,
+                    "payment":{
+                        "payment_id":"payment-complete-submit",
+                        "status":"succeeded"
+                    }
                 }),
             ),
         ] {
@@ -3068,6 +3166,517 @@ mod tests {
             assert_eq!(authoritative_result, result);
             assert_eq!(status.state, expected_state);
         }
+    }
+
+    #[test]
+    fn successful_submit_resume_canonicalizes_legacy_approval_decision() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let operation = pending_approval(
+            &mut registry,
+            "legacy-approved-submit",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-legacy-approved-submit",
+        );
+        registry
+            .synchronize_approval_status("approval-legacy-approved-submit", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved submit should produce a resume plan");
+        };
+        let completion = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"needs_approval",
+                    "requires_human_approval":true,
+                    "approval_reason":"payment did not execute",
+                    "retry_guidance":{
+                        "action":"replay_exactly",
+                        "message":"replay after approval"
+                    },
+                    "payment":{
+                        "payment_id":"payment-legacy-approved-submit",
+                        "status":"succeeded"
+                    }
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(completion.status.state, "succeeded");
+        assert_eq!(
+            completion.status.result_code.as_deref(),
+            Some("spend_succeeded")
+        );
+        assert_eq!(completion.authoritative_result["decision"], "allow");
+        assert_eq!(
+            completion.authoritative_result["requires_human_approval"],
+            false
+        );
+        assert!(completion
+            .authoritative_result
+            .get("approval_reason")
+            .is_none());
+        assert!(completion
+            .authoritative_result
+            .get("retry_guidance")
+            .is_none());
+
+        let stored: (String, bool, String, String, String) = registry
+            .connection
+            .query_row(
+                "SELECT decision, normalized_request_json IS NULL, result_json,
+                        operation_state, operation_result_code
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, "allow");
+        assert!(stored.1);
+        let stored_result: Value = serde_json::from_str(&stored.2).unwrap();
+        assert_eq!(stored_result, completion.authoritative_result);
+        assert_eq!(stored.3, "succeeded");
+        assert_eq!(stored.4, "spend_succeeded");
+
+        let ResumePreparation::Replay {
+            origin,
+            authoritative_result,
+            status,
+        } = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("completed submit should replay without backend access");
+        };
+        assert_eq!(origin, ResumeOrigin::SubmitSpend);
+        assert_eq!(authoritative_result, completion.authoritative_result);
+        assert_eq!(status.state, "succeeded");
+    }
+
+    #[test]
+    fn failed_submit_resume_canonicalizes_legacy_approval_decision_and_replays() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let operation = pending_approval(
+            &mut registry,
+            "legacy-failed-submit",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-legacy-failed-submit",
+        );
+        registry
+            .synchronize_approval_status("approval-legacy-failed-submit", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved submit should produce a resume plan");
+        };
+        let completion = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"needs_approval",
+                    "requires_human_approval":true,
+                    "approval_reason":"payment outcome needs review",
+                    "retry_guidance":{
+                        "action":"replay_exactly",
+                        "message":"replay after approval"
+                    },
+                    "payment":{
+                        "payment_id":"payment-legacy-failed-submit",
+                        "status":"failed",
+                        "failure_reason":"rail declined"
+                    }
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(completion.status.state, "failed");
+        assert_eq!(
+            completion.status.result_code.as_deref(),
+            Some("spend_failed")
+        );
+        assert_eq!(completion.authoritative_result["decision"], "allow");
+        assert_eq!(
+            completion.authoritative_result["requires_human_approval"],
+            false
+        );
+        assert!(completion
+            .authoritative_result
+            .get("approval_reason")
+            .is_none());
+        assert!(completion
+            .authoritative_result
+            .get("retry_guidance")
+            .is_none());
+
+        let stored: (String, bool, String, String, String) = registry
+            .connection
+            .query_row(
+                "SELECT decision, normalized_request_json IS NULL, result_json,
+                        operation_state, operation_result_code
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, "allow");
+        assert!(stored.1);
+        let stored_result: Value = serde_json::from_str(&stored.2).unwrap();
+        assert_eq!(stored_result, completion.authoritative_result);
+        assert_eq!(stored.3, "failed");
+        assert_eq!(stored.4, "spend_failed");
+
+        let ResumePreparation::Replay {
+            origin,
+            authoritative_result,
+            status,
+        } = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("failed submit receipt should replay without backend access");
+        };
+        assert_eq!(origin, ResumeOrigin::SubmitSpend);
+        assert_eq!(authoritative_result, completion.authoritative_result);
+        assert_eq!(status.state, "failed");
+        assert_eq!(status.result_code.as_deref(), Some("spend_failed"));
+    }
+
+    #[test]
+    fn late_terminal_submit_receipt_supersedes_only_pre_execution_expiry() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let operation = pending_approval(
+            &mut registry,
+            "late-success-after-expiry",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-late-success-after-expiry",
+        );
+        registry
+            .synchronize_approval_status("approval-late-success-after-expiry", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved submit should produce a resume plan");
+        };
+
+        let expired = registry
+            .fail_pre_execution_operation(
+                &operation.operation_handle,
+                "authorization_expired_before_resume",
+            )
+            .unwrap();
+        assert_eq!(expired.state, "failed");
+        assert_eq!(
+            expired.result_code.as_deref(),
+            Some("authorization_expired_before_resume")
+        );
+
+        let completion = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"needs_approval",
+                    "requires_human_approval":true,
+                    "retry_guidance":{
+                        "action":"create_new_operation",
+                        "message":"stale expiry guidance"
+                    },
+                    "payment":{
+                        "payment_id":"payment-late-success-after-expiry",
+                        "status":"succeeded"
+                    }
+                }),
+            )
+            .unwrap();
+        assert_eq!(completion.status.state, "succeeded");
+        assert_eq!(
+            completion.status.result_code.as_deref(),
+            Some("spend_succeeded")
+        );
+        assert_eq!(completion.authoritative_result["decision"], "allow");
+        assert_eq!(
+            completion.authoritative_result["requires_human_approval"],
+            false
+        );
+        assert!(completion
+            .authoritative_result
+            .get("retry_guidance")
+            .is_none());
+
+        let stored: (Option<String>, String, String, String) = registry
+            .connection
+            .query_row(
+                "SELECT normalized_request_json, operation_state,
+                        operation_result_code, result_json
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert!(stored.0.is_none());
+        assert_eq!(stored.1, "succeeded");
+        assert_eq!(stored.2, "spend_succeeded");
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored.3).unwrap(),
+            completion.authoritative_result
+        );
+
+        let ResumePreparation::Replay {
+            origin,
+            authoritative_result,
+            status,
+        } = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("late terminal receipt should become the durable replay result");
+        };
+        assert_eq!(origin, ResumeOrigin::SubmitSpend);
+        assert_eq!(authoritative_result, completion.authoritative_result);
+        assert_eq!(status.state, "succeeded");
+        assert_eq!(status.result_code.as_deref(), Some("spend_succeeded"));
+    }
+
+    #[test]
+    fn submit_resume_rejects_allow_without_valid_terminal_payment_receipt() {
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        for (suffix, payment) in [
+            ("malformed", json!("not-an-object")),
+            (
+                "nonterminal",
+                json!({"payment_id":"payment-pending","status":"pending"}),
+            ),
+            ("missing-id", json!({"status":"succeeded"})),
+            ("empty-id", json!({"payment_id":"","status":"failed"})),
+        ] {
+            let mut registry = OperationRegistry::open_in_memory().unwrap();
+            let approval_id = format!("approval-invalid-submit-{suffix}");
+            let operation = pending_approval(
+                &mut registry,
+                &format!("invalid-submit-{suffix}"),
+                "hubu_submit_spend",
+                &arguments,
+                &approval_id,
+            );
+            registry
+                .synchronize_approval_status(&approval_id, "approved")
+                .unwrap();
+            let ResumePreparation::Dispatch(plan) = registry
+                .prepare_resume(&operation.operation_handle)
+                .unwrap()
+            else {
+                panic!("approved submit should produce a resume plan");
+            };
+
+            let error = registry
+                .complete_resume(
+                    &plan,
+                    &json!({
+                        "decision":"allow",
+                        "payment":payment
+                    }),
+                )
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("missing a valid terminal payment receipt"));
+            let status = registry
+                .durable_operation_status(&operation.operation_handle)
+                .unwrap();
+            assert_eq!(status.state, "resume_required");
+            let stored: (String, bool) = registry
+                .connection
+                .query_row(
+                    "SELECT decision, normalized_request_json IS NOT NULL
+                     FROM harness_operations WHERE operation_handle = ?1",
+                    [&operation.operation_handle],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(stored, ("needs_approval".into(), true));
+        }
+    }
+
+    #[test]
+    fn submit_resume_requires_approved_status_and_a_consistent_terminal_decision() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let operation = pending_approval(
+            &mut registry,
+            "submit-success-guards",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-submit-success-guards",
+        );
+        let plan = ResumeOperationPlan {
+            origin: ResumeOrigin::SubmitSpend,
+            operation: operation.clone(),
+            hubu_arguments: arguments,
+        };
+        let payment = json!({
+            "payment_id":"payment-submit-success-guards",
+            "status":"succeeded"
+        });
+
+        let unapproved = registry
+            .complete_resume(
+                &plan,
+                &json!({"decision":"needs_approval","payment":payment}),
+            )
+            .unwrap_err();
+        assert!(unapproved
+            .to_string()
+            .contains("payment is missing durable approval"));
+        assert_eq!(
+            registry
+                .durable_operation_status(&operation.operation_handle)
+                .unwrap()
+                .state,
+            "approval_required"
+        );
+
+        registry
+            .synchronize_approval_status("approval-submit-success-guards", "approved")
+            .unwrap();
+        let inconsistent = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"deny",
+                    "payment":{
+                        "payment_id":"payment-submit-success-guards",
+                        "status":"succeeded"
+                    }
+                }),
+            )
+            .unwrap_err();
+        assert!(inconsistent
+            .to_string()
+            .contains("conflicts with its terminal payment receipt"));
+        let inconsistent_failure = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"deny",
+                    "payment":{
+                        "payment_id":"payment-submit-failure-guards",
+                        "status":"failed"
+                    }
+                }),
+            )
+            .unwrap_err();
+        assert!(inconsistent_failure
+            .to_string()
+            .contains("conflicts with its terminal payment receipt"));
+        assert_eq!(
+            registry
+                .durable_operation_status(&operation.operation_handle)
+                .unwrap()
+                .state,
+            "resume_required"
+        );
+    }
+
+    #[test]
+    fn submit_resume_does_not_canonicalize_pending_or_denied_without_payment() {
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+
+        let mut pending_registry = OperationRegistry::open_in_memory().unwrap();
+        let pending = pending_approval(
+            &mut pending_registry,
+            "still-pending-submit",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-still-pending-submit",
+        );
+        pending_registry
+            .synchronize_approval_status("approval-still-pending-submit", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(pending_plan) = pending_registry
+            .prepare_resume(&pending.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved submit should produce a resume plan");
+        };
+        let completion = pending_registry
+            .complete_resume(
+                &pending_plan,
+                &json!({"decision":"needs_approval","payment":null}),
+            )
+            .unwrap();
+        assert_eq!(
+            completion.authoritative_result["decision"],
+            "needs_approval"
+        );
+        assert_eq!(completion.status.state, "resume_required");
+        let intent_retained: bool = pending_registry
+            .connection
+            .query_row(
+                "SELECT normalized_request_json IS NOT NULL
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&pending.operation_handle],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(intent_retained);
+
+        let mut denied_registry = OperationRegistry::open_in_memory().unwrap();
+        let denied = pending_approval(
+            &mut denied_registry,
+            "denied-submit-result",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-denied-submit-result",
+        );
+        denied_registry
+            .synchronize_approval_status("approval-denied-submit-result", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(denied_plan) = denied_registry
+            .prepare_resume(&denied.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved submit should produce a resume plan");
+        };
+        assert!(denied_registry
+            .complete_resume(&denied_plan, &json!({"decision":"deny","payment":null}))
+            .unwrap_err()
+            .to_string()
+            .contains("approval status conflicts"));
+        assert_eq!(
+            denied_registry
+                .durable_operation_status(&denied.operation_handle)
+                .unwrap()
+                .state,
+            "resume_required"
+        );
     }
 
     #[test]

@@ -3541,11 +3541,7 @@ fn authorized_spend_response(authorization: AuthorizedSpend) -> SpendHttpRespons
         account_id: authorization.account_pub_id,
         agent_id: authorization.agent_pub_id,
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
-        decision: if approval.is_some() {
-            "allow".to_string()
-        } else {
-            effect_name(authorization.approval.evaluation.evaluation.decision).to_string()
-        },
+        decision: public_decision_for_approved_spend(&authorization.approval).to_string(),
         reasons: authorization.approval.evaluation.evaluation.reasons.clone(),
         scope_inputs: authorization.scope_inputs,
         policy_decision,
@@ -3563,6 +3559,13 @@ fn authorized_spend_response(authorization: AuthorizedSpend) -> SpendHttpRespons
         idempotent_replay: authorization.approval.evaluation.idempotent_replay,
         retry_guidance: authorization.approval.evaluation.retry_guidance.clone(),
         attempt_history: authorization.approval.evaluation.attempt_history.clone(),
+    }
+}
+
+fn public_decision_for_approved_spend(approval: &ApprovedSpendAuthorization) -> &'static str {
+    match approval.evaluation.evaluation.decision {
+        Effect::NeedsApproval => "allow",
+        decision => effect_name(decision),
     }
 }
 
@@ -3887,7 +3890,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
         account_id: authorization.account_pub_id,
         agent_id: authorization.agent_pub_id,
         decision_id: authorization.approval.evaluation.decision_id.to_string(),
-        decision: effect_name(authorization.approval.evaluation.evaluation.decision).to_string(),
+        decision: public_decision_for_approved_spend(&authorization.approval).to_string(),
         reasons: authorization.approval.evaluation.evaluation.reasons.clone(),
         scope_inputs: authorization.scope_inputs,
         policy_decision,
@@ -9024,6 +9027,159 @@ rules: []
     }
 
     #[test]
+    fn approved_submit_replay_returns_allow_and_settles_once() {
+        let (path, state, agent, pending) = setup_pending_approval_with_lease_config(
+            "approval-submit-resume",
+            LeaseConfig::default(),
+            "/spend",
+        );
+        assert_eq!(pending.body["decision"], "needs_approval");
+        assert_eq!(pending.body["approval"]["status"], "pending");
+        assert!(pending.body["payment"].is_null());
+        assert!(list_ledger(&state)
+            .expect("pending spend should leave the ledger readable")
+            .transactions
+            .is_empty());
+
+        let approval_request_id = pending.body["approval"]["approval_request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let approved = route(
+            approval_json_request(json!({
+                "approval_request_id": approval_request_id,
+                "decision": "approve",
+            })),
+            &state,
+        );
+        assert_eq!(approved.status, 200);
+        assert_eq!(approved.body["decision"], "allow");
+        assert_eq!(approved.body["approval"]["status"], "approved");
+
+        let request = json!({
+            "operation_key": "approval-submit-resume-operation",
+            "account_id": agent.account_id,
+            "amount_cents": 600,
+            "reason": "requires human approval",
+            "merchant": "Acme Cafe",
+        });
+        let resumed = route(
+            authenticated_json_request("/spend", request.clone()),
+            &state,
+        );
+        assert_eq!(resumed.status, 200);
+        assert_eq!(resumed.body["decision"], "allow");
+        assert_eq!(resumed.body["approval"]["status"], "approved");
+        assert_eq!(resumed.body["payment"]["status"], "succeeded");
+        assert_eq!(resumed.body["idempotent_replay"], true);
+        assert!(resumed.body["approval"]["review"]["policy_summary"]
+            .as_str()
+            .expect("approved replay should retain its policy summary")
+            .contains("needs_approval"));
+        let payment_id = resumed.body["payment"]["payment_id"].clone();
+
+        let replay = route(authenticated_json_request("/spend", request), &state);
+        assert_eq!(replay.status, 200);
+        assert_eq!(replay.body["decision"], "allow");
+        assert_eq!(replay.body["approval"]["status"], "approved");
+        assert_eq!(replay.body["payment"]["status"], "succeeded");
+        assert_eq!(replay.body["payment"]["payment_id"], payment_id);
+        assert_eq!(replay.body["idempotent_replay"], true);
+
+        let ledger = list_ledger(&state).expect("settled spend should list its ledger entry");
+        assert_eq!(ledger.transactions.len(), 1);
+        let payment_attempts = state
+            .payment_attempts
+            .lock()
+            .expect("payment attempt store lock should not be poisoned")
+            .list_payment_attempts()
+            .expect("payment attempts should list");
+        assert_eq!(payment_attempts.len(), 1);
+        assert_eq!(payment_attempts[0].status, PaymentStatus::Succeeded);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn approved_submit_replay_returns_stable_failed_payment_once() {
+        let (path, state, agent, pending) = setup_pending_approval_with_lease_config_and_merchant(
+            "approval-submit-failed",
+            LeaseConfig::default(),
+            "/spend",
+            "fail",
+        );
+        assert_eq!(pending.body["decision"], "needs_approval");
+        assert_eq!(pending.body["approval"]["status"], "pending");
+        assert!(pending.body["payment"].is_null());
+
+        let approval_request_id = pending.body["approval"]["approval_request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let approved = route(
+            approval_json_request(json!({
+                "approval_request_id": approval_request_id,
+                "decision": "approve",
+            })),
+            &state,
+        );
+        assert_eq!(approved.status, 200);
+        assert_eq!(approved.body["decision"], "allow");
+        assert_eq!(approved.body["approval"]["status"], "approved");
+
+        let request = json!({
+            "operation_key": "approval-submit-failed-operation",
+            "account_id": agent.account_id,
+            "amount_cents": 600,
+            "reason": "requires human approval",
+            "merchant": "fail",
+        });
+        let resumed = route(
+            authenticated_json_request("/spend", request.clone()),
+            &state,
+        );
+        assert_eq!(resumed.status, 200);
+        assert_eq!(resumed.body["decision"], "allow");
+        assert_eq!(resumed.body["approval"]["status"], "approved");
+        assert_eq!(resumed.body["payment"]["status"], "failed");
+        assert_eq!(
+            resumed.body["payment"]["failure_reason"],
+            "mock rail declined merchant"
+        );
+        assert!(resumed.body["payment"]["ledger_transaction_id"].is_null());
+        assert_eq!(resumed.body["budget_hold"]["status"], "released");
+        assert_eq!(resumed.body["idempotent_replay"], true);
+        let payment_id = resumed.body["payment"]["payment_id"].clone();
+
+        let replay = route(authenticated_json_request("/spend", request), &state);
+        assert_eq!(replay.status, 200);
+        assert_eq!(replay.body["decision"], "allow");
+        assert_eq!(replay.body["approval"]["status"], "approved");
+        assert_eq!(replay.body["payment"]["status"], "failed");
+        assert_eq!(replay.body["payment"]["payment_id"], payment_id);
+        assert_eq!(
+            replay.body["payment"]["failure_reason"],
+            "mock rail declined merchant"
+        );
+        assert!(replay.body["payment"]["ledger_transaction_id"].is_null());
+        assert_eq!(replay.body["budget_hold"]["status"], "released");
+        assert_eq!(replay.body["idempotent_replay"], true);
+
+        assert!(list_ledger(&state)
+            .expect("failed payment should leave the ledger readable")
+            .transactions
+            .is_empty());
+        let payment_attempts = state
+            .payment_attempts
+            .lock()
+            .expect("payment attempt store lock should not be poisoned")
+            .list_payment_attempts()
+            .expect("payment attempts should list");
+        assert_eq!(payment_attempts.len(), 1);
+        assert_eq!(payment_attempts[0].status, PaymentStatus::Failed);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn expired_approved_submit_replay_returns_machine_readable_terminal_error() {
         let lease_config = LeaseConfig {
             authorization_ttl_seconds: 1,
@@ -9504,6 +9660,25 @@ rules: []
         RegisterAgentHttpResponse,
         HttpResponse,
     ) {
+        setup_pending_approval_with_lease_config_and_merchant(
+            test_name,
+            lease_config,
+            spend_path,
+            "Acme Cafe",
+        )
+    }
+
+    fn setup_pending_approval_with_lease_config_and_merchant(
+        test_name: &str,
+        lease_config: LeaseConfig,
+        spend_path: &str,
+        merchant: &str,
+    ) -> (
+        std::path::PathBuf,
+        ServerState,
+        RegisterAgentHttpResponse,
+        HttpResponse,
+    ) {
         let path =
             std::env::temp_dir().join(format!("hubu-api-{test_name}-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path_and_lease_config(&path, lease_config)
@@ -9544,7 +9719,7 @@ rules: []
                     "account_id": agent.account_id,
                     "amount_cents": 600,
                     "reason": "requires human approval",
-                    "merchant": "Acme Cafe",
+                    "merchant": merchant,
                 }),
             ),
             &state,
