@@ -4,6 +4,15 @@ use serde_json::{json, Value};
 use super::catalog::approval_profile;
 use crate::operation_registry::OperationResolution;
 
+pub(crate) const DENIED_OPERATION_GUIDANCE: &str = "This denied operation is terminal. Exact redelivery only recovers the same denial. Submit corrected work as a new tool call so the harness creates a new logical operation.";
+
+pub(crate) fn denied_retry_guidance() -> Value {
+    json!({
+        "action": "create_new_operation",
+        "message": DENIED_OPERATION_GUIDANCE,
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct McpConfig {
     protected_tools_enabled: bool,
@@ -308,17 +317,30 @@ pub(crate) fn public_spend_result(
 ) -> Value {
     remove_private_operation_identity(&mut response, private_operation_key);
     if let Some(object) = response.as_object_mut() {
+        let denied = object.get("decision").and_then(Value::as_str) == Some("deny");
         object.insert(
             "operation_handle".to_string(),
             Value::String(operation_handle.to_string()),
         );
+        if denied {
+            object.insert("retry_guidance".to_string(), denied_retry_guidance());
+        }
         object.insert(
             "agent_guidance".to_string(),
-            json!({
-                "on_ambiguous_result": "redeliver_exact_call",
-                "replacement_call": "do_not_submit",
-                "message": "If the client-visible result is ambiguous, redeliver this exact harness call with the same call identity; do not submit a replacement spend call."
-            }),
+            if denied {
+                json!({
+                    "on_ambiguous_result": "redeliver_exact_call",
+                    "on_denied_result": "create_new_operation",
+                    "replacement_call": "create_new_operation",
+                    "message": DENIED_OPERATION_GUIDANCE,
+                })
+            } else {
+                json!({
+                    "on_ambiguous_result": "redeliver_exact_call",
+                    "replacement_call": "do_not_submit",
+                    "message": "If the client-visible result is ambiguous, redeliver this exact harness call with the same call identity; do not submit a replacement spend call."
+                })
+            },
         );
     }
     response

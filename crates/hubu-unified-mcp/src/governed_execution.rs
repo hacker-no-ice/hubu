@@ -67,7 +67,7 @@ pub(super) fn backend_availability(
 pub(super) fn tool_definition() -> Value {
     json!({
         "name": TOOL_NAME,
-        "description": "Submit one governed execution request. Hubu evaluates policy first. If allowed, Gongbu executes and returns the result. If human approval is required, no provider work starts and the request remains resumable by exact redelivery after approval.",
+        "description": "Submit one governed execution request. Hubu evaluates policy first. If allowed, Gongbu executes and returns the result. If human approval is required, no provider work starts and the request remains resumable by exact redelivery after approval. A definitive denial is terminal; corrected work must be submitted as a new tool call.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,
@@ -852,6 +852,9 @@ fn authorization_projection(authorization: &Value) -> Value {
             projection.insert(field.into(), value);
         }
     }
+    if projection.get("decision").and_then(Value::as_str) == Some("deny") {
+        projection.insert("retry_guidance".into(), hubu::denied_retry_guidance());
+    }
     Value::Object(projection)
 }
 
@@ -911,7 +914,8 @@ fn outcome_guidance(outcome: &str) -> &'static str {
         "succeeded" => {
             "Execution is terminal and succeeded. Artifact delivery warnings may be resumed without rerunning the provider."
         }
-        "denied" | "failed" => {
+        "denied" => hubu::DENIED_OPERATION_GUIDANCE,
+        "failed" => {
             "This governed operation is terminal. Do not submit a replacement for this operation."
         }
         _ => "Observe the existing operation_handle; do not submit a replacement.",
@@ -991,6 +995,11 @@ mod tests {
                     "rule":"deny-provider",
                     "auth_token_id":"private-continuation",
                     "operation_key":"private-operation"
+                },
+                "retry_guidance":{
+                    "action":"reuse_operation_key",
+                    "operation_key":"private-operation",
+                    "message":"reuse this operation key with corrected scope"
                 }
             }),
             Vec::new(),
@@ -1008,6 +1017,16 @@ mod tests {
         assert!(!serialized.contains("private-operation"));
         assert_eq!(result["structuredContent"]["outcome"], "denied");
         assert_eq!(result["structuredContent"]["terminal"], true);
+        assert_eq!(
+            result["structuredContent"]["authorization"]["retry_guidance"]["action"],
+            "create_new_operation"
+        );
+        assert!(result["structuredContent"]["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("new logical operation"));
+        assert!(!serialized.contains("reuse_operation_key"));
+        assert!(!serialized.contains("reuse this operation key"));
         assert_eq!(
             result["structuredContent"]["authorization"]["reasons"],
             json!(["merchant_not_allowed: <private authorization redacted>"])
@@ -1819,7 +1838,12 @@ mod tests {
                             "decision":"deny",
                             "decision_id":"decision-denied",
                             "reasons":["policy_limit_exceeded"],
-                            "policy_decision":{"rule":"daily-limit"}
+                            "policy_decision":{"rule":"daily-limit"},
+                            "retry_guidance":{
+                                "action":"reuse_operation_key",
+                                "operation_key":body["operation_key"],
+                                "message":"reuse this operation key with corrected scope"
+                            }
                         }))
                         .unwrap(),
                     )
@@ -1988,6 +2012,15 @@ mod tests {
         let denied = &responses[2];
         assert_eq!(denied["result"]["structuredContent"]["outcome"], "denied");
         assert_eq!(denied["result"]["structuredContent"]["terminal"], true);
+        assert_eq!(
+            denied["result"]["structuredContent"]["authorization"]["retry_guidance"]["action"],
+            "create_new_operation"
+        );
+        assert!(denied["result"]["structuredContent"]["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("new logical operation"));
+        assert!(!denied.to_string().contains("reuse_operation_key"));
         assert_eq!(
             denied["result"]["structuredContent"]["authorization"]["reasons"],
             json!(["policy_limit_exceeded"])

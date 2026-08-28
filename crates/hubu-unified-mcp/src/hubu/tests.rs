@@ -695,6 +695,102 @@ fn public_spend_results_preserve_policy_semantics_and_remove_private_identity_re
 }
 
 #[test]
+fn denied_public_spend_result_requires_a_new_logical_operation() {
+    let response = public_spend_result(
+        spend_response_with_approval_hint(json!({
+            "decision": "deny",
+            "operation_key": "private-denied-operation",
+            "retry_guidance": {
+                "action": "reuse_operation_key",
+                "operation_key": "private-denied-operation",
+                "message": "this attempt was denied; reuse this operation key with corrected scope"
+            }
+        })),
+        "hubu:public-operation:v1:test",
+        Some("private-denied-operation"),
+    );
+
+    assert_eq!(response["retry_guidance"]["action"], "create_new_operation");
+    assert_eq!(
+        response["agent_guidance"]["on_denied_result"],
+        "create_new_operation"
+    );
+    assert_eq!(
+        response["agent_guidance"]["replacement_call"],
+        "create_new_operation"
+    );
+    let serialized = response.to_string();
+    assert!(!serialized.contains("private-denied-operation"));
+    assert!(!serialized.contains("reuse_operation_key"));
+    assert!(!serialized.contains("reuse this operation key"));
+    assert!(serialized.contains("new logical operation"));
+}
+
+#[test]
+fn denied_spend_redelivery_recovers_terminal_result_without_backend_reuse_guidance() {
+    let (endpoint, request, handle) = one_shot_http_server(
+        200,
+        r#"{"decision":"deny","decision_id":"decision-denied","operation_key":"backend-private","retry_guidance":{"action":"reuse_operation_key","operation_key":"backend-private","message":"reuse this operation key with corrected scope"}}"#,
+    );
+    let server = server_with_backends(&endpoint, None, false, None);
+    let arguments = json!({
+        "account_id":"account-1",
+        "amount_cents":25,
+        "reason":"denied"
+    });
+    let meta = Some(json!({"callId":"denied-call-148"}));
+    let first = tool_call(
+        &server,
+        "hubu_authorize_spend",
+        arguments.clone(),
+        meta.clone(),
+    );
+    request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+
+    let replay = tool_call(
+        &server,
+        "hubu_authorize_spend",
+        arguments.clone(),
+        meta.clone(),
+    );
+    assert_eq!(replay["result"], first["result"]);
+    assert_eq!(
+        replay["result"]["structuredContent"]["retry_guidance"]["action"],
+        "create_new_operation"
+    );
+
+    let operation_handle = replay["result"]["structuredContent"]["operation_handle"]
+        .as_str()
+        .unwrap();
+    let status = tool_call(
+        &server,
+        "hubu_operation_status",
+        json!({"operation_handle":operation_handle}),
+        None,
+    );
+    assert_eq!(status["result"]["structuredContent"]["terminal"], true);
+    assert_eq!(
+        status["result"]["structuredContent"]["retry_guidance"]["action"],
+        "create_new_operation"
+    );
+
+    let collision = tool_call(
+        &server,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-1","amount_cents":20,"reason":"corrected"}),
+        meta,
+    );
+    assert!(collision["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("refusing backend access"));
+    let serialized = json!([first, replay, status, collision]).to_string();
+    assert!(!serialized.contains("backend-private"));
+    assert!(!serialized.contains("reuse_operation_key"));
+}
+
+#[test]
 fn spend_identity_collision_fails_before_a_second_backend_request() {
     let (endpoint, request, handle) = one_shot_http_server(200, r#"{"decision":"allow"}"#);
     let server = server_with_backends(&endpoint, None, false, None);
