@@ -186,6 +186,16 @@ input and pricing snapshot retain the selected preset and exact transmitted
 dimensions, so exact replay reconstructs the frozen request after catalog
 rotation or process restart instead of consulting the current catalog.
 
+For pre-HUB-168 schema-v2 executions whose snapshot predates the additive
+`output_dimensions` field, recovery is limited to the same pinned FLUX target
+and a supported frozen selector. Gongbu derives the certified pair on a cloned
+request only when the persisted input selects that same preset and either omits
+both explicit dimensions or already contains the exact pair. Partial,
+conflicting, arbitrary, or unsupported legacy evidence still fails before
+claim, `ProviderAttempt` creation, credential resolution, or provider activity;
+the durable legacy record is not rewritten and the current catalog is not
+consulted.
+
 ## Temporal ownership
 
 `gongbu-server` always owns its Temporal worker. It supports two service modes:

@@ -662,6 +662,22 @@ pub(crate) fn bind_output_dimensions(input: &mut Value) -> Result<OutputDimensio
     Ok(expected)
 }
 
+/// Reconstruct the certified dimensions for a pre-HUB-168 frozen request.
+///
+/// Legacy schema-v2 snapshots do not contain `output_dimensions`, so recovery
+/// uses their frozen selector and a cloned persisted input. Any explicit
+/// dimensions still have to be complete and exactly match the certified
+/// mapping; the caller never rewrites the durable legacy evidence.
+pub(crate) fn bind_legacy_output_dimensions(
+    frozen_preset: &str,
+    input: &mut Value,
+) -> Result<OutputDimensions> {
+    if input.get("image_size").and_then(Value::as_str) != Some(frozen_preset) {
+        return Err(provider_error("invalid_request"));
+    }
+    bind_output_dimensions(input)
+}
+
 fn supplied_dimension(
     options: &serde_json::Map<String, Value>,
     field: &str,
@@ -1232,6 +1248,55 @@ mod tests {
             json!({"prompt":"cat","image_size":"4k","options":{"width":2064,"height":2048}}),
         ] {
             assert!(bind_output_dimensions(&mut input).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_recovery_derives_only_the_certified_mapping() {
+        for (preset, width, height) in [("1k", 1024, 1024), ("2k", 1920, 1088), ("4k", 2048, 2048)]
+        {
+            for mut input in [
+                json!({"prompt":"cat","image_size":preset}),
+                json!({"prompt":"cat","image_size":preset,"options":{"width":width,"height":height}}),
+            ] {
+                assert_eq!(
+                    bind_legacy_output_dimensions(preset, &mut input).unwrap(),
+                    OutputDimensions { width, height }
+                );
+                assert_eq!(input["options"]["width"], width);
+                assert_eq!(input["options"]["height"], height);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_recovery_rejects_selector_and_dimension_tampering() {
+        for (frozen_preset, mut input) in [
+            ("1k", json!({"prompt":"cat"})),
+            ("1k", json!({"prompt":"cat","image_size":"2k"})),
+            ("preview", json!({"prompt":"cat","image_size":"preview"})),
+            (
+                "1k",
+                json!({"prompt":"cat","image_size":"1k","options":{"width":1024}}),
+            ),
+            (
+                "1k",
+                json!({"prompt":"cat","image_size":"1k","options":{"height":1024}}),
+            ),
+            (
+                "1k",
+                json!({"prompt":"cat","image_size":"1k","options":{"width":1024,"height":1008}}),
+            ),
+            (
+                "1k",
+                json!({"prompt":"cat","image_size":"1k","options":{"width":2048,"height":2048}}),
+            ),
+            (
+                "4k",
+                json!({"prompt":"cat","image_size":"4k","options":{"width":2064,"height":2048}}),
+            ),
+        ] {
+            assert!(bind_legacy_output_dimensions(frozen_preset, &mut input).is_err());
         }
     }
 
