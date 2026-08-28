@@ -1,6 +1,6 @@
 {
   "contract_version": "hubu-gongbu-mcp-v1",
-  "routing_revision": 2,
+  "routing_revision": 3,
   "tools": [
     { "name": "gongbu_create_execution", "owner": "gongbu" },
     { "name": "gongbu_get_artifact", "owner": "gongbu" },
@@ -14,6 +14,7 @@
     { "name": "hubu_create_recurring_budget", "owner": "hubu" },
     { "name": "hubu_export_policy", "owner": "hubu" },
     { "name": "hubu_get_executor_claim", "owner": "hubu" },
+    { "name": "hubu_get_spend_approval", "owner": "hubu" },
     { "name": "hubu_health", "owner": "hubu" },
     { "name": "hubu_list_agents", "owner": "hubu" },
     { "name": "hubu_list_budgets", "owner": "hubu" },
@@ -29,6 +30,8 @@
     { "name": "hubu_register_human", "owner": "hubu" },
     { "name": "hubu_registration_guidance", "owner": "hubu" },
     { "name": "hubu_replace_budget", "owner": "hubu" },
+    { "name": "hubu_resolve_spend_approval", "owner": "hubu" },
+    { "name": "hubu_resume_operation", "owner": "router" },
     { "name": "hubu_revoke_budget", "owner": "hubu" },
     { "name": "hubu_revoke_spending_target", "owner": "hubu" },
     { "name": "hubu_set_spending_target", "owner": "hubu" },

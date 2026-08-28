@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -16,7 +16,8 @@ const MAX_PLATFORM_BYTES: usize = 64;
 const MAX_HARNESS_ID_BYTES: usize = 512;
 const MAX_TASK_ID_BYTES: usize = 512;
 const MAX_TOOL_NAME_BYTES: usize = 128;
-const SCHEMA_VERSION: i64 = 4;
+const PREVIOUS_SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const APPLICATION_ID: i64 = 0x4855_424f;
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
@@ -170,6 +171,90 @@ pub(crate) struct OperationResolution {
     pub(crate) recorded_result: Option<Value>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResumeOrigin {
+    AuthorizeSpend,
+    SubmitSpend,
+    GovernedExecution,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalPaymentReceipt {
+    Succeeded,
+    Failed,
+}
+
+impl TerminalPaymentReceipt {
+    fn operation_state(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn result_code(self) -> &'static str {
+        match self {
+            Self::Succeeded => "spend_succeeded",
+            Self::Failed => "spend_failed",
+        }
+    }
+}
+
+impl ResumeOrigin {
+    pub(crate) fn normalized_tool_name(self) -> &'static str {
+        match self {
+            Self::AuthorizeSpend => "hubu_authorize_spend",
+            Self::SubmitSpend => "hubu_submit_spend",
+            Self::GovernedExecution => crate::governed_execution::TOOL_NAME,
+        }
+    }
+
+    pub(crate) fn hubu_tool_name(self) -> &'static str {
+        match self {
+            Self::AuthorizeSpend | Self::GovernedExecution => "hubu_authorize_spend",
+            Self::SubmitSpend => "hubu_submit_spend",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResumeOperationPlan {
+    pub(crate) origin: ResumeOrigin,
+    pub(crate) operation: OperationResolution,
+    pub(crate) hubu_arguments: Value,
+}
+
+impl ResumeOperationPlan {
+    pub(crate) fn hubu_tool_name(&self) -> &'static str {
+        self.origin.hubu_tool_name()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ResumePreparation {
+    Dispatch(ResumeOperationPlan),
+    Replay {
+        origin: ResumeOrigin,
+        authoritative_result: Value,
+        status: DurableOperationStatus,
+    },
+    Status(DurableOperationStatus),
+    IntentUnavailable(DurableOperationStatus),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResumeCompletion {
+    pub(crate) authoritative_result: Value,
+    pub(crate) status: DurableOperationStatus,
+    pub(crate) wake_operation_worker: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ApprovalSyncTarget {
+    pub(crate) operation_handle: String,
+    pub(crate) approval_request_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GongbuContinuation {
     pub(crate) operation_key: String,
@@ -216,6 +301,7 @@ pub(crate) struct ClaimedDurableOperation {
 #[derive(Debug)]
 struct PersistedOperation {
     request_hash: String,
+    normalized_request_json: Option<String>,
     tool_name: String,
     operation_key: Option<String>,
     operation_handle: String,
@@ -225,6 +311,7 @@ struct PersistedOperation {
     task_id: Option<String>,
     decision: Option<String>,
     result_json: Option<String>,
+    operation_state: Option<String>,
 }
 
 pub(crate) struct OperationRegistry {
@@ -291,6 +378,8 @@ impl OperationRegistry {
         )?;
         if application_id == 0 && version == 0 && user_table_count == 0 {
             create_schema(&connection)?;
+        } else if application_id == APPLICATION_ID && version == PREVIOUS_SCHEMA_VERSION {
+            migrate_v4_to_v5(&mut connection)?;
         } else if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
             bail!("unified MCP operation registry identity or schema version is unsupported; refusing to modify the configured database");
         }
@@ -340,15 +429,17 @@ impl OperationRegistry {
         if !arguments.is_object() {
             bail!("Hubu spend tool arguments must be an object");
         }
+        validate_durable_request_size(arguments)?;
         let request_hash = canonical_request_hash(tool_name, arguments)?;
+        let normalized_request_json = serde_json::to_string(&canonicalize(arguments))?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
-                "SELECT request_hash, tool_name, operation_key, operation_handle, codex_call_id,
+                "SELECT request_hash, normalized_request_json, tool_name, operation_key, operation_handle, codex_call_id,
                         claude_tool_use_id, hubu_invocation_id, task_id, decision,
-                        result_json
+                        result_json, operation_state
                  FROM harness_operations
                  WHERE platform = ?1 AND installation_id = ?2 AND harness_call_id = ?3",
                 params![
@@ -359,15 +450,17 @@ impl OperationRegistry {
                 |row| {
                     Ok(PersistedOperation {
                         request_hash: row.get(0)?,
-                        tool_name: row.get(1)?,
-                        operation_key: row.get(2)?,
-                        operation_handle: row.get(3)?,
-                        codex_call_id: row.get(4)?,
-                        claude_tool_use_id: row.get(5)?,
-                        hubu_invocation_id: row.get(6)?,
-                        task_id: row.get(7)?,
-                        decision: row.get(8)?,
-                        result_json: row.get(9)?,
+                        normalized_request_json: row.get(1)?,
+                        tool_name: row.get(2)?,
+                        operation_key: row.get(3)?,
+                        operation_handle: row.get(4)?,
+                        codex_call_id: row.get(5)?,
+                        claude_tool_use_id: row.get(6)?,
+                        hubu_invocation_id: row.get(7)?,
+                        task_id: row.get(8)?,
+                        decision: row.get(9)?,
+                        result_json: row.get(10)?,
+                        operation_state: row.get(11)?,
                     })
                 },
             )
@@ -382,18 +475,46 @@ impl OperationRegistry {
             {
                 bail!("trusted harness call identity was already used for a different operation; refusing backend access");
             }
-            transaction.commit()?;
-            let recorded_result = if matches!(existing.decision.as_deref(), Some("allow" | "deny"))
+            if existing
+                .normalized_request_json
+                .as_deref()
+                .is_some_and(|persisted| persisted != normalized_request_json)
             {
-                existing
-                    .result_json
+                bail!("stored normalized operation intent conflicts with its canonical request hash; refusing backend access");
+            }
+            // A v4 in-flight or pending row may safely recover its canonical
+            // intent only from exact harness redelivery. Terminal/direct and
+            // already-bound governed rows intentionally discarded that intent;
+            // replay must not repersist it after its lifecycle purpose ended.
+            if existing.normalized_request_json.is_none()
+                && !matches!(existing.decision.as_deref(), Some("allow" | "deny"))
+                && !existing
+                    .operation_state
                     .as_deref()
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .context("decode recorded normalized operation result")?
-            } else {
-                None
-            };
+                    .is_some_and(is_durable_terminal_state)
+            {
+                let changed = transaction.execute(
+                    "UPDATE harness_operations
+                     SET normalized_request_json = ?2
+                     WHERE operation_handle = ?1 AND normalized_request_json IS NULL",
+                    params![existing.operation_handle, normalized_request_json],
+                )?;
+                if changed != 1 {
+                    bail!("normalized operation intent could not be recovered");
+                }
+            }
+            transaction.commit()?;
+            // Once Hubu has durably returned needs_approval, the original
+            // submission path becomes replay-only. Approval may advance that
+            // immutable operation only through prepare_resume/complete_resume;
+            // exact original-call redelivery must never obtain a continuation
+            // and bypass the public-handle boundary.
+            let recorded_result = existing
+                .result_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .context("decode recorded normalized operation result")?;
             return Ok(OperationResolution {
                 operation_key: existing.operation_key,
                 operation_handle: existing.operation_handle,
@@ -410,16 +531,18 @@ impl OperationRegistry {
         let operation_handle = format!("hubu:public-operation:v1:{}", Uuid::new_v4().simple());
         transaction.execute(
             "INSERT INTO harness_operations (
-                 platform, installation_id, harness_call_id, request_hash, tool_name, operation_key,
+                 platform, installation_id, harness_call_id, request_hash, normalized_request_json,
+                 tool_name, operation_key,
                  operation_handle,
                  codex_call_id, claude_tool_use_id, hubu_invocation_id,
                  controlled_installation_id, task_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 identity.platform,
                 self.installation_id,
                 identity.harness_call_id,
                 request_hash,
+                normalized_request_json,
                 tool_name,
                 operation_key,
                 operation_handle,
@@ -446,9 +569,9 @@ impl OperationRegistry {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (operation_key, decision, result_json) = transaction
+        let (operation_key, decision, result_json, operation_state) = transaction
             .query_row(
-                "SELECT operation_key, decision, result_json
+                "SELECT operation_key, decision, result_json, operation_state
                  FROM harness_operations WHERE operation_handle = ?1",
                 [operation_handle],
                 |row| {
@@ -456,21 +579,24 @@ impl OperationRegistry {
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| anyhow!("normalized operation cannot be dispatched"))?;
-        if matches!(decision.as_deref(), Some("allow" | "deny")) {
-            let result = result_json
-                .as_deref()
-                .ok_or_else(|| anyhow!("terminal normalized operation is missing replay state"))
-                .and_then(|value| {
-                    serde_json::from_str(value)
-                        .context("decode recorded normalized operation result")
-                })?;
+        if let Some(result_json) = result_json.as_deref() {
+            let result = serde_json::from_str(result_json)
+                .context("decode recorded normalized operation result")?;
             transaction.commit()?;
             return Ok(Some(result));
+        }
+        if decision.is_some()
+            || operation_state
+                .as_deref()
+                .is_some_and(is_durable_terminal_state)
+        {
+            bail!("recorded normalized operation is missing replay state");
         }
         if operation_key.is_none() {
             bail!("normalized operation cannot be dispatched");
@@ -503,9 +629,17 @@ impl OperationRegistry {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (private_operation_key, existing_decision, existing_result) = transaction
+        let (
+            private_operation_key,
+            existing_decision,
+            existing_result,
+            existing_approval_request_id,
+            existing_approval_status,
+            tool_name,
+        ) = transaction
             .query_row(
-                "SELECT operation_key, decision, result_json
+                "SELECT operation_key, decision, result_json, approval_request_id,
+                        approval_status, tool_name
                  FROM harness_operations WHERE operation_handle = ?1",
                 [operation_handle],
                 |row| {
@@ -513,6 +647,9 @@ impl OperationRegistry {
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
@@ -531,10 +668,10 @@ impl OperationRegistry {
         if !matches!(decision, "allow" | "deny" | "needs_approval") {
             bail!("Hubu spend authorization result has an unsupported decision");
         }
-        if matches!(existing_decision.as_deref(), Some("allow" | "deny")) {
+        if existing_decision.is_some() {
             let existing_result = existing_result
                 .as_deref()
-                .ok_or_else(|| anyhow!("terminal normalized operation is missing replay state"))
+                .ok_or_else(|| anyhow!("recorded normalized operation is missing replay state"))
                 .and_then(|value| {
                     serde_json::from_str(value)
                         .context("decode recorded normalized operation result")
@@ -555,15 +692,43 @@ impl OperationRegistry {
                     .ok_or_else(|| anyhow!("approval_request_id must be a string"))
             })
             .transpose()?;
+        if let Some(approval_request_id) = approval_request_id.as_deref() {
+            validate_identifier("approval_request_id", approval_request_id, 255)?;
+        }
+        if existing_approval_request_id
+            .as_deref()
+            .zip(approval_request_id.as_deref())
+            .is_some_and(|(existing, incoming)| existing != incoming)
+        {
+            bail!("Hubu spend authorization result conflicts with its approval request");
+        }
+        let has_approval = approval_request_id.is_some()
+            || existing_approval_request_id.is_some()
+            || existing_approval_status.is_some();
+        let candidate_approval_status = has_approval.then_some(match decision {
+            "needs_approval" => "pending",
+            "allow" => "approved",
+            "deny" => "denied",
+            _ => unreachable!("decision was validated above"),
+        });
+        let approval_status = monotonic_approval_status(
+            existing_approval_status.as_deref(),
+            candidate_approval_status,
+        )?;
         let authorization_expires_at = optional_string(result, "authorization_expires_at")?;
+        let clear_normalized_request = decision == "deny"
+            || (decision == "allow" && tool_name != crate::governed_execution::TOOL_NAME);
         let changed = transaction.execute(
             "UPDATE harness_operations
              SET decision = ?2,
                  decision_id = ?3,
                  auth_token_id = ?4,
-                 approval_request_id = ?5,
-                 authorization_expires_at = ?6,
-                 result_json = ?7,
+                 approval_request_id = COALESCE(?5, approval_request_id),
+                 approval_status = COALESCE(?6, approval_status),
+                 approval_synced_at = CASE WHEN ?6 IS NULL THEN approval_synced_at ELSE CURRENT_TIMESTAMP END,
+                 authorization_expires_at = ?7,
+                 result_json = ?8,
+                 normalized_request_json = CASE WHEN ?9 THEN NULL ELSE normalized_request_json END,
                  result_recorded_at = CURRENT_TIMESTAMP
              WHERE operation_handle = ?1",
             params![
@@ -572,8 +737,10 @@ impl OperationRegistry {
                 decision_id,
                 auth_token_id,
                 approval_request_id,
+                approval_status,
                 authorization_expires_at,
                 result_json,
+                clear_normalized_request,
             ],
         )?;
         if changed != 1 {
@@ -581,6 +748,560 @@ impl OperationRegistry {
         }
         transaction.commit()?;
         Ok(result.clone())
+    }
+
+    pub(crate) fn approval_sync_target_for_handle(
+        &self,
+        operation_handle: &str,
+    ) -> Result<Option<ApprovalSyncTarget>> {
+        validate_public_operation_handle(operation_handle)?;
+        self.connection
+            .query_row(
+                "SELECT operation_handle, approval_request_id
+                 FROM harness_operations
+                 WHERE operation_handle = ?1 AND approval_request_id IS NOT NULL",
+                [operation_handle],
+                |row| {
+                    Ok(ApprovalSyncTarget {
+                        operation_handle: row.get(0)?,
+                        approval_request_id: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    fn approval_sync_target_for_request(
+        &self,
+        approval_request_id: &str,
+    ) -> Result<Option<ApprovalSyncTarget>> {
+        validate_identifier("approval_request_id", approval_request_id, 255)?;
+        self.connection
+            .query_row(
+                "SELECT operation_handle, approval_request_id
+                 FROM harness_operations WHERE approval_request_id = ?1",
+                [approval_request_id],
+                |row| {
+                    Ok(ApprovalSyncTarget {
+                        operation_handle: row.get(0)?,
+                        approval_request_id: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn synchronize_approval_status(
+        &mut self,
+        approval_request_id: &str,
+        status: &str,
+    ) -> Result<Option<DurableOperationStatus>> {
+        validate_identifier("approval_request_id", approval_request_id, 255)?;
+        validate_approval_status(status)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = transaction
+            .query_row(
+                "SELECT operation_handle, approval_status, decision
+                 FROM harness_operations WHERE approval_request_id = ?1",
+                [approval_request_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((operation_handle, existing_status, decision)) = existing else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let decision_status = match decision.as_deref() {
+            Some("needs_approval") => Some("pending"),
+            Some("allow") => Some("approved"),
+            Some("deny") => Some("denied"),
+            None => None,
+            Some(_) => bail!("normalized operation has an unsupported authorization decision"),
+        };
+        let established = monotonic_approval_status(existing_status.as_deref(), decision_status)?;
+        let synchronized = monotonic_approval_status(established.as_deref(), Some(status))?
+            .ok_or_else(|| anyhow!("approval status could not be synchronized"))?;
+        let changed = transaction.execute(
+            "UPDATE harness_operations
+             SET approval_status = ?2,
+                 approval_synced_at = CURRENT_TIMESTAMP,
+                 normalized_request_json = CASE
+                     WHEN ?2 = 'denied' THEN NULL
+                     ELSE normalized_request_json
+                 END
+             WHERE operation_handle = ?1 AND approval_request_id = ?3",
+            params![operation_handle, synchronized, approval_request_id],
+        )?;
+        if changed != 1 {
+            bail!("approval status has no matching normalized operation");
+        }
+        transaction.commit()?;
+        Ok(Some(self.durable_operation_status(&operation_handle)?))
+    }
+
+    pub(crate) fn prepare_resume(&mut self, operation_handle: &str) -> Result<ResumePreparation> {
+        validate_public_operation_handle(operation_handle)?;
+        let persisted = self
+            .connection
+            .query_row(
+                "SELECT tool_name, operation_key, task_id, request_hash,
+                        normalized_request_json, approval_status, decision, result_json
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [operation_handle],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("public operation handle is unknown"))?;
+        let status = self.durable_operation_status(operation_handle)?;
+        if persisted.5.as_deref() != Some("approved")
+            || persisted.6.as_deref() != Some("needs_approval")
+        {
+            let replayable_failed_submit = persisted.0 == "hubu_submit_spend"
+                && persisted.6.as_deref() == Some("allow")
+                && status.result_code.as_deref() == Some("spend_failed");
+            if (status.state != "failed" || replayable_failed_submit)
+                && matches!(persisted.6.as_deref(), Some("allow" | "deny"))
+            {
+                if let Some(result_json) = persisted.7.as_deref() {
+                    let authoritative_result = serde_json::from_str(result_json)
+                        .context("decode completed operation resume result")?;
+                    return Ok(ResumePreparation::Replay {
+                        origin: resume_origin(&persisted.0)?,
+                        authoritative_result,
+                        status,
+                    });
+                }
+            }
+            return Ok(ResumePreparation::Status(status));
+        }
+        if status.terminal() {
+            return Ok(ResumePreparation::Status(status));
+        }
+        let Some(request_json) = persisted.4.as_deref() else {
+            let failed =
+                self.fail_pre_execution_operation(operation_handle, "resume_intent_unavailable")?;
+            return Ok(ResumePreparation::IntentUnavailable(failed));
+        };
+        let request: Value = serde_json::from_str(request_json)
+            .context("decode stored normalized operation intent")?;
+        validate_durable_request_size(&request)?;
+        if canonical_request_hash(&persisted.0, &request)? != persisted.3 {
+            bail!("stored normalized operation intent conflicts with its canonical request hash");
+        }
+        let origin = resume_origin(&persisted.0)?;
+        let hubu_arguments = match origin {
+            ResumeOrigin::AuthorizeSpend | ResumeOrigin::SubmitSpend => request,
+            ResumeOrigin::GovernedExecution => {
+                crate::governed_execution::resume_authorization_arguments(&request)?
+            }
+        };
+        let operation_key = persisted
+            .1
+            .ok_or_else(|| anyhow!("normalized operation is missing private operation identity"))?;
+        Ok(ResumePreparation::Dispatch(ResumeOperationPlan {
+            origin,
+            operation: OperationResolution {
+                operation_key: Some(operation_key),
+                operation_handle: operation_handle.to_owned(),
+                task_id: persisted.2,
+                recorded_result: None,
+            },
+            hubu_arguments,
+        }))
+    }
+
+    pub(crate) fn complete_resume(
+        &mut self,
+        plan: &ResumeOperationPlan,
+        result: &Value,
+    ) -> Result<ResumeCompletion> {
+        if contains_protected_identity(result) {
+            bail!("resumed normalized operation result contains protected backend identity");
+        }
+        let mut authoritative_result = result.clone();
+        let mut incoming_result_json = serde_json::to_string(&authoritative_result)?;
+        if incoming_result_json.len() > MAX_RESULT_BYTES {
+            bail!("resumed normalized operation result is too large to persist safely");
+        }
+        let reported_decision = result
+            .get("decision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("resumed Hubu result is missing decision"))?;
+        if !matches!(reported_decision, "allow" | "deny" | "needs_approval") {
+            bail!("resumed Hubu result has an unsupported decision");
+        }
+        let terminal_submit_payment = if plan.origin == ResumeOrigin::SubmitSpend {
+            terminal_payment_receipt(result)
+        } else {
+            None
+        };
+        let incoming_decision_id = optional_string(result, "decision_id")?;
+        let mut continuation_invalid = false;
+        let auth_token_id = match optional_string(result, "auth_token_id") {
+            Ok(value) => value,
+            Err(_) => {
+                continuation_invalid = true;
+                None
+            }
+        };
+        let spend_auth_token_id = match optional_string(result, "spend_auth_token_id") {
+            Ok(value) => value,
+            Err(_) => {
+                continuation_invalid = true;
+                None
+            }
+        };
+        if auth_token_id
+            .as_deref()
+            .zip(spend_auth_token_id.as_deref())
+            .is_some_and(|(left, right)| left != right)
+        {
+            continuation_invalid = true;
+        }
+        let incoming_auth_token_id = auth_token_id.or(spend_auth_token_id);
+        let governed_allow =
+            plan.origin == ResumeOrigin::GovernedExecution && reported_decision == "allow";
+        let authorization_allow = matches!(
+            plan.origin,
+            ResumeOrigin::AuthorizeSpend | ResumeOrigin::GovernedExecution
+        ) && reported_decision == "allow";
+        if governed_allow
+            && incoming_auth_token_id
+                .as_deref()
+                .is_none_or(|auth_token_id| {
+                    validate_identifier("auth_token_id", auth_token_id, 255).is_err()
+                })
+        {
+            continuation_invalid = true;
+        }
+        if continuation_invalid && !governed_allow {
+            bail!("resumed Hubu result has an invalid authorization continuation");
+        }
+        let incoming_approval_request_id = result
+            .get("approval")
+            .and_then(|approval| approval.get("approval_request_id"))
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow!("approval_request_id must be a string"))
+            })
+            .transpose()?;
+        if let Some(approval_request_id) = incoming_approval_request_id.as_deref() {
+            validate_identifier("approval_request_id", approval_request_id, 255)?;
+        }
+        let incoming_authorization_expires_at =
+            optional_string(result, "authorization_expires_at")?;
+        let parsed_authorization_expiry = incoming_authorization_expires_at
+            .as_deref()
+            .and_then(|expires_at| DateTime::parse_from_rfc3339(expires_at).ok())
+            .map(|expires_at| expires_at.with_timezone(&Utc));
+        if governed_allow
+            && incoming_authorization_expires_at.is_some()
+            && parsed_authorization_expiry.is_none()
+        {
+            continuation_invalid = true;
+        }
+        let authorization_expired = authorization_allow
+            && !continuation_invalid
+            && parsed_authorization_expiry.is_some_and(|expires_at| expires_at <= Utc::now());
+        if authorization_expired {
+            let object = authoritative_result
+                .as_object_mut()
+                .expect("a validated resumed Hubu result is an object");
+            object.remove("auth_token_id");
+            object.remove("spend_auth_token_id");
+            object.insert("requires_human_approval".into(), Value::Bool(false));
+            object.insert(
+                "retry_guidance".into(),
+                json!({
+                    "action": "create_new_operation",
+                    "message": "The prior approved authorization expired before resume. Create a new logical operation; the expired operation cannot be resumed."
+                }),
+            );
+            incoming_result_json = serde_json::to_string(&authoritative_result)?;
+            if incoming_result_json.len() > MAX_RESULT_BYTES {
+                bail!("resumed normalized operation result is too large to persist safely");
+            }
+        }
+        let persisted_auth_token_id = if authorization_expired {
+            None
+        } else {
+            incoming_auth_token_id.clone()
+        };
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = transaction
+            .query_row(
+                "SELECT tool_name, operation_key, task_id, request_hash,
+                        normalized_request_json, approval_request_id, approval_status,
+                        decision, result_json, operation_state, operation_result_code,
+                        gongbu_request_hash, gongbu_execution_id
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&plan.operation.operation_handle],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("resumed operation has no matching normalized operation"))?;
+        let origin = resume_origin(&existing.0)?;
+        if origin != plan.origin
+            || plan.origin.normalized_tool_name() != existing.0
+            || existing.1 != plan.operation.operation_key
+            || existing.2 != plan.operation.task_id
+        {
+            bail!("resume plan conflicts with its normalized operation identity");
+        }
+        if existing
+            .5
+            .as_deref()
+            .zip(incoming_approval_request_id.as_deref())
+            .is_some_and(|(stored, incoming)| stored != incoming)
+        {
+            bail!("resumed Hubu result conflicts with its approval request");
+        }
+        if let Some(operation_key) = existing.1.as_deref() {
+            if incoming_result_json.contains(operation_key) {
+                bail!("resumed normalized operation result contains private backend identity");
+            }
+        }
+
+        let may_supersede_expired_submit = origin == ResumeOrigin::SubmitSpend
+            && terminal_submit_payment.is_some()
+            && existing.6.as_deref() == Some("approved")
+            && existing.9.as_deref() == Some("failed")
+            && existing.10.as_deref() == Some("authorization_expired_before_resume")
+            && existing.12.is_none();
+        let existing_is_complete = matches!(existing.7.as_deref(), Some("allow" | "deny"))
+            && !(origin == ResumeOrigin::GovernedExecution
+                && existing.7.as_deref() == Some("allow")
+                && existing.9.is_none());
+        if (existing_is_complete || existing.9.as_deref().is_some_and(is_durable_terminal_state))
+            && !may_supersede_expired_submit
+        {
+            let authoritative_result = existing
+                .8
+                .as_deref()
+                .ok_or_else(|| anyhow!("terminal normalized operation is missing replay state"))
+                .and_then(|value| {
+                    serde_json::from_str(value)
+                        .context("decode terminal normalized operation resume result")
+                })?;
+            transaction.commit()?;
+            let status = self.durable_operation_status(&plan.operation.operation_handle)?;
+            return Ok(ResumeCompletion {
+                authoritative_result,
+                status,
+                wake_operation_worker: false,
+            });
+        }
+
+        let established_approval = monotonic_approval_status(
+            existing.6.as_deref(),
+            existing.7.as_deref().and_then(approval_status_for_decision),
+        )?;
+        let mut incoming_decision = reported_decision;
+        let mut completed_submit_payment = None;
+        if origin == ResumeOrigin::SubmitSpend {
+            match (reported_decision, terminal_submit_payment) {
+                ("deny", Some(_)) => {
+                    bail!("resumed Hubu spend result conflicts with its terminal payment receipt")
+                }
+                ("allow", None) => {
+                    bail!("resumed Hubu spend allow is missing a valid terminal payment receipt")
+                }
+                ("allow" | "needs_approval", Some(receipt)) => {
+                    if existing.6.as_deref() != Some("approved") {
+                        bail!("resumed Hubu spend payment is missing durable approval")
+                    }
+                    incoming_decision = "allow";
+                    completed_submit_payment = Some(receipt);
+                    let object = authoritative_result
+                        .as_object_mut()
+                        .expect("a validated resumed Hubu result is an object");
+                    object.insert("decision".into(), Value::String("allow".into()));
+                    object.insert("requires_human_approval".into(), Value::Bool(false));
+                    object.remove("approval_reason");
+                    object.remove("retry_guidance");
+                    incoming_result_json = serde_json::to_string(&authoritative_result)?;
+                    if incoming_result_json.len() > MAX_RESULT_BYTES {
+                        bail!("resumed normalized operation result is too large to persist safely");
+                    }
+                }
+                ("needs_approval" | "deny", None) => {}
+                _ => unreachable!("resumed Hubu decision was validated above"),
+            }
+        }
+        let has_approval = established_approval.is_some()
+            || existing.5.is_some()
+            || incoming_approval_request_id.is_some();
+        let incoming_approval = has_approval
+            .then(|| approval_status_for_decision(incoming_decision))
+            .flatten();
+        let approval_status =
+            monotonic_approval_status(established_approval.as_deref(), incoming_approval)?;
+
+        let mut gongbu_request_hash = None;
+        let mut gongbu_request_json = None;
+        if origin == ResumeOrigin::GovernedExecution
+            && incoming_decision == "allow"
+            && !continuation_invalid
+            && !authorization_expired
+        {
+            let auth_token_id = incoming_auth_token_id
+                .as_deref()
+                .expect("validated governed continuation is present");
+            let request_json = existing
+                .4
+                .as_deref()
+                .ok_or_else(|| anyhow!("resume_intent_unavailable"))?;
+            let request: Value = serde_json::from_str(request_json)
+                .context("decode stored governed operation resume intent")?;
+            if canonical_request_hash(&existing.0, &request)? != existing.3 {
+                bail!("stored governed operation resume intent conflicts with its canonical request hash");
+            }
+            let arguments =
+                crate::governed_execution::resume_execution_arguments(&request, auth_token_id)?;
+            let request_hash = canonical_request_hash("gongbu_create_execution", &arguments)?;
+            if existing
+                .11
+                .as_deref()
+                .is_some_and(|stored| stored != request_hash)
+            {
+                bail!("resumed governed execution conflicts with its bound execution intent");
+            }
+            gongbu_request_hash = Some(request_hash);
+            gongbu_request_json = Some(serde_json::to_string(&canonicalize(&arguments))?);
+        }
+
+        let clear_normalized_request = incoming_decision == "deny"
+            || (incoming_decision == "allow" && origin != ResumeOrigin::GovernedExecution)
+            || completed_submit_payment.is_some()
+            || gongbu_request_json.is_some()
+            || continuation_invalid
+            || authorization_expired;
+        let changed = transaction.execute(
+            "UPDATE harness_operations
+             SET decision = ?2,
+                 decision_id = ?3,
+                 auth_token_id = ?4,
+                 approval_request_id = COALESCE(?5, approval_request_id),
+                 approval_status = COALESCE(?6, approval_status),
+                 approval_synced_at = CASE WHEN ?6 IS NULL THEN approval_synced_at ELSE CURRENT_TIMESTAMP END,
+                 authorization_expires_at = ?7,
+                 result_json = ?8,
+                 result_recorded_at = CURRENT_TIMESTAMP,
+                 normalized_request_json = CASE WHEN ?9 THEN NULL ELSE normalized_request_json END,
+                 gongbu_request_hash = COALESCE(gongbu_request_hash, ?10),
+                 gongbu_request_json = CASE
+                     WHEN operation_state IN ('succeeded','failed') OR gongbu_execution_id IS NOT NULL
+                         THEN gongbu_request_json
+                     ELSE COALESCE(gongbu_request_json, ?11)
+                 END,
+                 operation_state = CASE
+                     WHEN ?15 IS NOT NULL THEN ?15
+                     WHEN ?14 THEN 'failed'
+                     WHEN ?13 THEN 'failed'
+                     WHEN ?11 IS NULL THEN operation_state
+                     ELSE COALESCE(operation_state, 'accepted')
+                 END,
+                 operation_result_code = CASE
+                     WHEN ?16 IS NOT NULL THEN ?16
+                     WHEN ?14 THEN 'authorization_expired_before_resume'
+                     WHEN ?13 THEN 'authorization_continuation_unavailable'
+                     ELSE operation_result_code
+                 END,
+                 operation_deadline_at = CASE
+                     WHEN ?11 IS NULL THEN operation_deadline_at
+                     ELSE COALESCE(
+                         operation_deadline_at,
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ?12 || ' hours')
+                     )
+                 END,
+                 gongbu_create_started_at = CASE
+                     WHEN ?11 IS NULL THEN gongbu_create_started_at
+                     ELSE COALESCE(gongbu_create_started_at, CURRENT_TIMESTAMP)
+                 END,
+                 operation_updated_at = CASE
+                     WHEN ?11 IS NULL AND NOT ?13 AND NOT ?14 AND ?15 IS NULL
+                         THEN operation_updated_at
+                     ELSE CURRENT_TIMESTAMP
+                 END
+             WHERE operation_handle = ?1
+               AND (gongbu_request_hash IS NULL OR gongbu_request_hash = ?10)",
+            params![
+                plan.operation.operation_handle,
+                incoming_decision,
+                incoming_decision_id,
+                persisted_auth_token_id,
+                incoming_approval_request_id,
+                approval_status,
+                incoming_authorization_expires_at,
+                incoming_result_json,
+                clear_normalized_request,
+                gongbu_request_hash,
+                gongbu_request_json,
+                OPERATION_DEADLINE_HOURS,
+                continuation_invalid,
+                authorization_expired,
+                completed_submit_payment.map(TerminalPaymentReceipt::operation_state),
+                completed_submit_payment.map(TerminalPaymentReceipt::result_code),
+            ],
+        )?;
+        if changed != 1 {
+            bail!("resumed operation conflicts with its durable normalized state");
+        }
+        transaction.commit()?;
+        let status = self.durable_operation_status(&plan.operation.operation_handle)?;
+        Ok(ResumeCompletion {
+            authoritative_result,
+            wake_operation_worker: origin == ResumeOrigin::GovernedExecution
+                && incoming_decision == "allow"
+                && !continuation_invalid
+                && !authorization_expired
+                && !status.terminal(),
+            status,
+        })
     }
 
     pub(crate) fn resolve_gongbu_continuation(
@@ -651,7 +1372,8 @@ impl OperationRegistry {
                      strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ?4 || ' hours')
                  ),
                  operation_updated_at = CURRENT_TIMESTAMP,
-                 gongbu_create_started_at = COALESCE(gongbu_create_started_at, CURRENT_TIMESTAMP)
+                 gongbu_create_started_at = COALESCE(gongbu_create_started_at, CURRENT_TIMESTAMP),
+                 normalized_request_json = NULL
              WHERE operation_handle = ?1
                AND (gongbu_request_hash IS NULL OR gongbu_request_hash = ?2)",
             params![
@@ -682,9 +1404,10 @@ impl OperationRegistry {
             .query_row(
                 "SELECT operation_handle, operation_state, gongbu_execution_id,
                         operation_result_code, tool_name, decision, auth_token_id,
-                        authorization_expires_at,
-                        COALESCE(operation_updated_at, result_recorded_at,
-                                 dispatch_started_at, created_at)
+                        authorization_expires_at, approval_status,
+                        normalized_request_json IS NOT NULL,
+                        COALESCE(operation_updated_at, approval_synced_at,
+                                 result_recorded_at, dispatch_started_at, created_at)
                  FROM harness_operations WHERE operation_handle = ?1",
                 [operation_handle],
                 |row| {
@@ -697,7 +1420,9 @@ impl OperationRegistry {
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
-                        row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, bool>(9)?,
+                        row.get::<_, String>(10)?,
                     ))
                 },
             )
@@ -709,6 +1434,8 @@ impl OperationRegistry {
                 &persisted.4,
                 persisted.5.as_deref(),
                 authorization_is_live(persisted.6.as_deref(), persisted.7.as_deref()),
+                persisted.8.as_deref(),
+                persisted.9,
             )?,
         };
         Ok(DurableOperationStatus {
@@ -716,7 +1443,7 @@ impl OperationRegistry {
             state,
             execution_id: persisted.2,
             result_code,
-            updated_at: persisted.8,
+            updated_at: persisted.10,
         })
     }
 
@@ -730,7 +1457,8 @@ impl OperationRegistry {
         self.connection.execute(
             "UPDATE harness_operations
              SET operation_state = 'failed', operation_result_code = ?2,
-                 gongbu_request_json = NULL, next_operation_attempt_at = NULL,
+                 normalized_request_json = NULL, gongbu_request_json = NULL,
+                 next_operation_attempt_at = NULL,
                  operation_updated_at = CURRENT_TIMESTAMP
              WHERE operation_handle = ?1
                AND gongbu_execution_id IS NULL
@@ -1220,6 +1948,32 @@ fn contains_protected_identity(value: &Value) -> bool {
     }
 }
 
+fn migrate_v4_to_v5(connection: &mut Connection) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin unified MCP operation registry v4 to v5 migration")?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE harness_operations ADD COLUMN normalized_request_json TEXT
+                 CHECK(normalized_request_json IS NULL OR
+                       (json_valid(normalized_request_json) AND length(normalized_request_json) <= 1048576));
+             ALTER TABLE harness_operations ADD COLUMN approval_status TEXT
+                 CHECK(approval_status IS NULL OR approval_status IN ('pending','approved','denied'));
+             ALTER TABLE harness_operations ADD COLUMN approval_synced_at TEXT;
+             UPDATE harness_operations
+                SET approval_status = 'pending',
+                    approval_synced_at = COALESCE(result_recorded_at, created_at)
+              WHERE decision = 'needs_approval' AND approval_request_id IS NOT NULL;
+             CREATE UNIQUE INDEX harness_operation_approval_request
+                 ON harness_operations(approval_request_id)
+                 WHERE approval_request_id IS NOT NULL;",
+        )
+        .context("migrate unified MCP operation registry approval continuation schema")?;
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    transaction.commit()?;
+    Ok(())
+}
+
 fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(&format!(
         "BEGIN IMMEDIATE;
@@ -1233,6 +1987,7 @@ fn create_schema(connection: &Connection) -> Result<()> {
              installation_id TEXT NOT NULL CHECK(length(installation_id) BETWEEN 1 AND 128),
              harness_call_id TEXT NOT NULL CHECK(length(harness_call_id) BETWEEN 1 AND 512),
              request_hash TEXT NOT NULL CHECK(length(request_hash) = 71),
+             normalized_request_json TEXT CHECK(normalized_request_json IS NULL OR (json_valid(normalized_request_json) AND length(normalized_request_json) <= 1048576)),
              tool_name TEXT NOT NULL CHECK(length(tool_name) BETWEEN 1 AND 128),
              operation_key TEXT UNIQUE CHECK(operation_key IS NULL OR length(operation_key) BETWEEN 1 AND 160),
              operation_handle TEXT NOT NULL UNIQUE CHECK(length(operation_handle) BETWEEN 1 AND 160),
@@ -1245,6 +2000,8 @@ fn create_schema(connection: &Connection) -> Result<()> {
              decision_id TEXT,
              auth_token_id TEXT,
              approval_request_id TEXT,
+             approval_status TEXT CHECK(approval_status IS NULL OR approval_status IN ('pending','approved','denied')),
+             approval_synced_at TEXT,
              authorization_expires_at TEXT,
              result_json TEXT,
              dispatch_started_at TEXT,
@@ -1272,6 +2029,8 @@ fn create_schema(connection: &Connection) -> Result<()> {
          );
          CREATE UNIQUE INDEX harness_operation_auth_token
              ON harness_operations(auth_token_id) WHERE auth_token_id IS NOT NULL;
+         CREATE UNIQUE INDEX harness_operation_approval_request
+             ON harness_operations(approval_request_id) WHERE approval_request_id IS NOT NULL;
          CREATE INDEX harness_operation_due
              ON harness_operations(operation_state, next_operation_attempt_at, worker_lease_expires_at);
          PRAGMA application_id = {APPLICATION_ID};
@@ -1319,6 +2078,64 @@ fn validate_result_code(code: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_approval_status(status: &str) -> Result<()> {
+    if matches!(status, "pending" | "approved" | "denied") {
+        Ok(())
+    } else {
+        bail!("Hubu returned an unsupported approval status")
+    }
+}
+
+fn approval_status_for_decision(decision: &str) -> Option<&'static str> {
+    match decision {
+        "needs_approval" => Some("pending"),
+        "allow" => Some("approved"),
+        "deny" => Some("denied"),
+        _ => None,
+    }
+}
+
+fn is_durable_terminal_state(state: &str) -> bool {
+    matches!(state, "succeeded" | "failed")
+}
+
+fn monotonic_approval_status(
+    existing: Option<&str>,
+    incoming: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(existing) = existing {
+        validate_approval_status(existing)?;
+    }
+    if let Some(incoming) = incoming {
+        validate_approval_status(incoming)?;
+    }
+    match (existing, incoming) {
+        (None, None) => Ok(None),
+        (Some(existing), None) => Ok(Some(existing.to_owned())),
+        (None, Some(incoming)) => Ok(Some(incoming.to_owned())),
+        (Some(existing), Some(incoming)) if existing == incoming => Ok(Some(existing.to_owned())),
+        (Some("pending"), Some(incoming @ ("approved" | "denied"))) => {
+            Ok(Some(incoming.to_owned()))
+        }
+        (Some(existing @ ("approved" | "denied")), Some("pending")) => {
+            Ok(Some(existing.to_owned()))
+        }
+        (Some("approved"), Some("denied")) | (Some("denied"), Some("approved")) => {
+            bail!("approval status conflicts with its durable terminal resolution")
+        }
+        _ => bail!("approval status transition is unsupported"),
+    }
+}
+
+fn resume_origin(tool_name: &str) -> Result<ResumeOrigin> {
+    match tool_name {
+        "hubu_authorize_spend" => Ok(ResumeOrigin::AuthorizeSpend),
+        "hubu_submit_spend" => Ok(ResumeOrigin::SubmitSpend),
+        crate::governed_execution::TOOL_NAME => Ok(ResumeOrigin::GovernedExecution),
+        _ => bail!("normalized operation does not support approval resume"),
+    }
+}
+
 fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -1337,27 +2154,60 @@ fn pre_execution_projection(
     tool_name: &str,
     decision: Option<&str>,
     has_authorization: bool,
+    approval_status: Option<&str>,
+    has_resume_intent: bool,
 ) -> Result<(String, Option<String>)> {
-    let projection = match (tool_name, decision, has_authorization) {
-        ("hubu_authorize_spend" | "hubu_submit_governed_execution", Some("allow"), true) => {
+    let projection = match (
+        tool_name,
+        decision,
+        has_authorization,
+        approval_status,
+        has_resume_intent,
+    ) {
+        ("hubu_authorize_spend" | "hubu_submit_governed_execution", Some("allow"), true, _, _) => {
             ("authorized", None)
         }
-        ("hubu_authorize_spend" | "hubu_submit_governed_execution", Some("allow"), false) => {
+        ("hubu_authorize_spend" | "hubu_submit_governed_execution", Some("allow"), false, _, _) => {
             ("failed", Some("authorization_continuation_unavailable"))
         }
-        ("hubu_authorize_spend" | "hubu_submit_governed_execution", Some("deny"), _) => {
+        ("hubu_authorize_spend" | "hubu_submit_governed_execution", Some("deny"), _, _, _) => {
             ("failed", Some("authorization_denied"))
         }
-        ("hubu_submit_spend", Some("allow"), _) => ("succeeded", Some("spend_succeeded")),
-        ("hubu_submit_spend", Some("deny"), _) => ("failed", Some("spend_denied")),
+        ("hubu_submit_spend", Some("allow"), _, _, _) => ("succeeded", Some("spend_succeeded")),
+        ("hubu_submit_spend", Some("deny"), _, _, _) => ("failed", Some("spend_denied")),
         (
             "hubu_authorize_spend" | "hubu_submit_spend" | "hubu_submit_governed_execution",
             Some("needs_approval"),
+            _,
+            Some("approved"),
+            true,
+        ) => ("resume_required", Some("approval_resolved_resume_required")),
+        (
+            "hubu_authorize_spend" | "hubu_submit_spend" | "hubu_submit_governed_execution",
+            Some("needs_approval"),
+            _,
+            Some("approved"),
+            false,
+        ) => ("resume_required", Some("resume_intent_unavailable")),
+        (
+            "hubu_authorize_spend" | "hubu_submit_spend" | "hubu_submit_governed_execution",
+            Some("needs_approval"),
+            _,
+            Some("denied"),
+            _,
+        ) => ("failed", Some("approval_denied")),
+        (
+            "hubu_authorize_spend" | "hubu_submit_spend" | "hubu_submit_governed_execution",
+            Some("needs_approval"),
+            _,
+            None | Some("pending"),
             _,
         ) => ("approval_required", Some("human_approval_required")),
         (
             "hubu_authorize_spend" | "hubu_submit_spend" | "hubu_submit_governed_execution",
             None,
+            _,
+            _,
             _,
         ) => ("awaiting_hubu_result", None),
         _ => bail!("normalized operation has an unsupported pre-execution state"),
@@ -1398,17 +2248,35 @@ fn optional_string(value: &Value, field: &str) -> Result<Option<String>> {
         .transpose()
 }
 
+fn terminal_payment_receipt(value: &Value) -> Option<TerminalPaymentReceipt> {
+    let payment = value.get("payment").and_then(Value::as_object)?;
+    if payment
+        .get("payment_id")
+        .and_then(Value::as_str)
+        .is_none_or(|payment_id| validate_identifier("payment_id", payment_id, 255).is_err())
+    {
+        return None;
+    }
+    match payment.get("status").and_then(Value::as_str) {
+        Some("succeeded") => Some(TerminalPaymentReceipt::Succeeded),
+        Some("failed") => Some(TerminalPaymentReceipt::Failed),
+        _ => None,
+    }
+}
+
 fn validate_schema(connection: &Connection) -> Result<()> {
     connection
         .prepare("SELECT singleton, installation_id, created_at FROM installation_identity LIMIT 0")
         .context("validate unified MCP operation registry installation schema")?;
     connection
         .prepare(
-            "SELECT platform, installation_id, harness_call_id, request_hash, tool_name, operation_key,
+            "SELECT platform, installation_id, harness_call_id, request_hash,
+                    normalized_request_json, tool_name, operation_key,
                     operation_handle,
                     codex_call_id, claude_tool_use_id, hubu_invocation_id,
                     controlled_installation_id, task_id, decision, decision_id,
-                    auth_token_id, approval_request_id, authorization_expires_at,
+                    auth_token_id, approval_request_id, approval_status, approval_synced_at,
+                    authorization_expires_at,
                     result_json, dispatch_started_at, result_recorded_at,
                     gongbu_request_hash, gongbu_request_json, gongbu_execution_id, gongbu_status,
                     gongbu_outcome, gongbu_create_started_at,
@@ -1472,6 +2340,53 @@ mod tests {
             "adapter": "fixture",
             "model": "fixture-v1"
         })
+    }
+
+    fn governed_arguments() -> Value {
+        json!({
+            "authorization": {
+                "account_id": "account-1",
+                "amount_cents": 100,
+                "reason": "generate one image"
+            },
+            "execution": {
+                "schema_version": 2,
+                "input": {"prompt": "durable prompt", "image_count": 1},
+                "input_schema_version": 1,
+                "workload_type": "image_generation",
+                "provider": "fixture",
+                "adapter": "fixture",
+                "model": "fixture-v1"
+            },
+            "max_inline_artifact_bytes": 1024
+        })
+    }
+
+    fn pending_approval(
+        registry: &mut OperationRegistry,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &Value,
+        approval_request_id: &str,
+    ) -> OperationResolution {
+        let operation = registry
+            .resolve_or_allocate(&codex(call_id), tool_name, arguments)
+            .unwrap();
+        registry
+            .record_authorization_result(
+                &operation.operation_handle,
+                &json!({
+                    "decision": "needs_approval",
+                    "decision_id": approval_request_id,
+                    "approval": {
+                        "approval_request_id": approval_request_id,
+                        "status": "pending"
+                    },
+                    "operation_handle": operation.operation_handle
+                }),
+            )
+            .unwrap();
+        operation
     }
 
     fn authorize_for_execution(
@@ -1756,6 +2671,1012 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown or expired"));
+    }
+
+    #[test]
+    fn approval_sync_is_correlated_monotonic_and_projects_resume_required() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let operation = pending_approval(
+            &mut registry,
+            "approval-sync",
+            "hubu_authorize_spend",
+            &arguments,
+            "approval-sync-1",
+        );
+        assert_eq!(
+            registry
+                .approval_sync_target_for_handle(&operation.operation_handle)
+                .unwrap(),
+            Some(ApprovalSyncTarget {
+                operation_handle: operation.operation_handle.clone(),
+                approval_request_id: "approval-sync-1".into(),
+            })
+        );
+        assert_eq!(
+            registry
+                .approval_sync_target_for_request("approval-sync-1")
+                .unwrap()
+                .unwrap()
+                .operation_handle,
+            operation.operation_handle
+        );
+
+        let approved = registry
+            .synchronize_approval_status("approval-sync-1", "approved")
+            .unwrap()
+            .unwrap();
+        assert_eq!(approved.state, "resume_required");
+        assert_eq!(
+            approved.result_code.as_deref(),
+            Some("approval_resolved_resume_required")
+        );
+        let stale_pending = registry
+            .synchronize_approval_status("approval-sync-1", "pending")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale_pending.state, "resume_required");
+        assert!(registry
+            .synchronize_approval_status("approval-sync-1", "denied")
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts"));
+    }
+
+    #[test]
+    fn original_redelivery_cannot_advance_a_recorded_human_approval() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let request = governed_arguments();
+        let operation = pending_approval(
+            &mut registry,
+            "sticky-human-approval",
+            crate::governed_execution::TOOL_NAME,
+            &request,
+            "approval-sticky-human",
+        );
+        registry
+            .synchronize_approval_status("approval-sticky-human", "approved")
+            .unwrap();
+
+        let replay = registry
+            .resolve_or_allocate(
+                &codex("sticky-human-approval"),
+                crate::governed_execution::TOOL_NAME,
+                &request,
+            )
+            .unwrap();
+        assert_eq!(replay.operation_handle, operation.operation_handle);
+        assert_eq!(
+            replay
+                .recorded_result
+                .as_ref()
+                .and_then(|result| result.get("decision"))
+                .and_then(Value::as_str),
+            Some("needs_approval")
+        );
+        assert_eq!(
+            registry
+                .mark_dispatch_started(&operation.operation_handle)
+                .unwrap()
+                .and_then(|result| result.get("decision").cloned()),
+            Some(json!("needs_approval"))
+        );
+
+        // A late duplicate response from the original submission path is also
+        // replay-only. Only complete_resume may advance the approved row.
+        let late_allow = registry
+            .record_authorization_result(
+                &operation.operation_handle,
+                &json!({
+                    "decision":"allow",
+                    "auth_token_id":"must-not-bind",
+                    "authorization_expires_at":"2099-01-01T00:00:00Z"
+                }),
+            )
+            .unwrap();
+        assert_eq!(late_allow["decision"], "needs_approval");
+        let status = registry
+            .durable_operation_status(&operation.operation_handle)
+            .unwrap();
+        assert_eq!(status.state, "resume_required");
+        assert_eq!(
+            status.result_code.as_deref(),
+            Some("approval_resolved_resume_required")
+        );
+    }
+
+    #[test]
+    fn prepare_resume_rebuilds_each_origin_from_only_canonical_persisted_intent() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let direct_arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        for (call_id, tool_name, expected_origin, approval_id) in [
+            (
+                "resume-authorize",
+                "hubu_authorize_spend",
+                ResumeOrigin::AuthorizeSpend,
+                "approval-authorize",
+            ),
+            (
+                "resume-submit",
+                "hubu_submit_spend",
+                ResumeOrigin::SubmitSpend,
+                "approval-submit",
+            ),
+        ] {
+            let operation = pending_approval(
+                &mut registry,
+                call_id,
+                tool_name,
+                &direct_arguments,
+                approval_id,
+            );
+            registry
+                .synchronize_approval_status(approval_id, "approved")
+                .unwrap();
+            let ResumePreparation::Dispatch(plan) = registry
+                .prepare_resume(&operation.operation_handle)
+                .unwrap()
+            else {
+                panic!("approved operation should produce a resume plan");
+            };
+            assert_eq!(plan.origin, expected_origin);
+            assert_eq!(plan.hubu_tool_name(), tool_name);
+            assert_eq!(plan.hubu_arguments, canonicalize(&direct_arguments));
+            assert_eq!(plan.operation.operation_handle, operation.operation_handle);
+            assert_eq!(plan.operation.operation_key, operation.operation_key);
+        }
+
+        let governed = governed_arguments();
+        let operation = pending_approval(
+            &mut registry,
+            "resume-governed",
+            crate::governed_execution::TOOL_NAME,
+            &governed,
+            "approval-governed",
+        );
+        registry
+            .synchronize_approval_status("approval-governed", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved governed operation should produce a resume plan");
+        };
+        assert_eq!(plan.origin, ResumeOrigin::GovernedExecution);
+        assert_eq!(plan.hubu_tool_name(), "hubu_authorize_spend");
+        assert_eq!(plan.hubu_arguments, governed["authorization"]);
+    }
+
+    #[test]
+    fn complete_governed_resume_binds_once_and_only_then_wakes_worker() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let request = governed_arguments();
+        let operation = pending_approval(
+            &mut registry,
+            "complete-governed",
+            crate::governed_execution::TOOL_NAME,
+            &request,
+            "approval-complete-governed",
+        );
+        registry
+            .synchronize_approval_status("approval-complete-governed", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved governed operation should produce a resume plan");
+        };
+        let result = json!({
+            "decision":"allow",
+            "decision_id":"approval-complete-governed",
+            "auth_token_id":"resume-token-1",
+            "authorization_expires_at":"2099-01-01T00:00:00Z",
+            "operation_handle":operation.operation_handle
+        });
+        let completion = registry.complete_resume(&plan, &result).unwrap();
+        assert_eq!(completion.authoritative_result, result);
+        assert_eq!(completion.status.state, "accepted");
+        assert!(completion.wake_operation_worker);
+
+        let stored: (Option<String>, Option<String>, Option<String>) = registry
+            .connection
+            .query_row(
+                "SELECT normalized_request_json, gongbu_request_hash, gongbu_request_json
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert!(stored.0.is_none());
+        assert!(stored.1.is_some());
+        let gongbu_request: Value = serde_json::from_str(stored.2.as_deref().unwrap()).unwrap();
+        assert_eq!(gongbu_request["spend_auth_token_id"], "resume-token-1");
+        let ResumePreparation::Replay {
+            origin,
+            authoritative_result,
+            status,
+        } = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("completed governed resume should replay without backend access");
+        };
+        assert_eq!(origin, ResumeOrigin::GovernedExecution);
+        assert_eq!(authoritative_result, result);
+        assert_eq!(status.state, "accepted");
+
+        let replay = registry.complete_resume(&plan, &result).unwrap();
+        assert_eq!(replay.status.state, "accepted");
+        assert!(!replay.wake_operation_worker);
+        assert_eq!(registry.promote_accepted_operations().unwrap(), 1);
+        assert!(registry.claim_due_operation().unwrap().is_some());
+        assert!(registry.claim_due_operation().unwrap().is_none());
+    }
+
+    #[test]
+    fn expired_governed_resume_is_terminal_without_binding_execution() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let request = governed_arguments();
+        let operation = pending_approval(
+            &mut registry,
+            "expired-governed-resume",
+            crate::governed_execution::TOOL_NAME,
+            &request,
+            "approval-expired-governed",
+        );
+        registry
+            .synchronize_approval_status("approval-expired-governed", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved governed operation should produce a resume plan");
+        };
+
+        let completion = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"allow",
+                    "decision_id":"approval-expired-governed",
+                    "auth_token_id":"expired-resume-token",
+                    "authorization_expires_at":"2000-01-01T00:00:00Z",
+                    "operation_handle":operation.operation_handle
+                }),
+            )
+            .unwrap();
+        assert_eq!(completion.status.state, "failed");
+        assert_eq!(
+            completion.status.result_code.as_deref(),
+            Some("authorization_expired_before_resume")
+        );
+        assert!(!completion.wake_operation_worker);
+        let stored: (Option<String>, Option<String>, Option<String>) = registry
+            .connection
+            .query_row(
+                "SELECT normalized_request_json, gongbu_request_hash, gongbu_request_json
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (None, None, None));
+        assert!(matches!(
+            registry
+                .prepare_resume(&operation.operation_handle)
+                .unwrap(),
+            ResumePreparation::Status(_)
+        ));
+    }
+
+    #[test]
+    fn expired_authorize_resume_clears_the_continuation_and_is_replacement_safe() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let request = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let operation = pending_approval(
+            &mut registry,
+            "expired-authorize-resume",
+            "hubu_authorize_spend",
+            &request,
+            "approval-expired-authorize",
+        );
+        registry
+            .synchronize_approval_status("approval-expired-authorize", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved authorization should produce a resume plan");
+        };
+        assert_eq!(plan.origin, ResumeOrigin::AuthorizeSpend);
+
+        let completion = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"allow",
+                    "decision_id":"approval-expired-authorize",
+                    "auth_token_id":"expired-direct-token",
+                    "authorization_expires_at":"2000-01-01T00:00:00Z",
+                    "retry_guidance":{
+                        "action":"replay_exactly",
+                        "message":"replay the expired authorization"
+                    },
+                    "operation_handle":operation.operation_handle
+                }),
+            )
+            .unwrap();
+        assert_eq!(completion.status.state, "failed");
+        assert_eq!(
+            completion.status.result_code.as_deref(),
+            Some("authorization_expired_before_resume")
+        );
+        assert!(!completion.wake_operation_worker);
+        assert!(completion
+            .authoritative_result
+            .get("auth_token_id")
+            .is_none());
+        assert_eq!(
+            completion.authoritative_result["retry_guidance"]["action"],
+            "create_new_operation"
+        );
+
+        let stored: (Option<String>, Option<String>, String) = registry
+            .connection
+            .query_row(
+                "SELECT normalized_request_json, auth_token_id, result_json
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert!(stored.0.is_none());
+        assert!(stored.1.is_none());
+        let stored_result: Value = serde_json::from_str(&stored.2).unwrap();
+        assert!(stored_result.get("auth_token_id").is_none());
+        assert_eq!(
+            stored_result["retry_guidance"]["action"],
+            "create_new_operation"
+        );
+        assert!(matches!(
+            registry
+                .prepare_resume(&operation.operation_handle)
+                .unwrap(),
+            ResumePreparation::Status(status)
+                if status.terminal()
+                    && status.result_code.as_deref()
+                        == Some("authorization_expired_before_resume")
+        ));
+    }
+
+    #[test]
+    fn malformed_governed_resume_is_terminal_without_waking_worker() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let request = governed_arguments();
+        let operation = pending_approval(
+            &mut registry,
+            "malformed-governed-resume",
+            crate::governed_execution::TOOL_NAME,
+            &request,
+            "approval-malformed-governed",
+        );
+        registry
+            .synchronize_approval_status("approval-malformed-governed", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved governed operation should produce a resume plan");
+        };
+        let malformed = json!({
+            "decision":"allow",
+            "decision_id":"approval-malformed-governed",
+            "authorization_expires_at":"2099-01-01T00:00:00Z"
+        });
+
+        let completion = registry.complete_resume(&plan, &malformed).unwrap();
+        assert_eq!(completion.status.state, "failed");
+        assert_eq!(
+            completion.status.result_code.as_deref(),
+            Some("authorization_continuation_unavailable")
+        );
+        assert!(!completion.wake_operation_worker);
+        let stored: (Option<String>, Option<String>) = registry
+            .connection
+            .query_row(
+                "SELECT normalized_request_json, gongbu_request_json
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (None, None));
+        assert!(matches!(
+            registry
+                .prepare_resume(&operation.operation_handle)
+                .unwrap(),
+            ResumePreparation::Status(_)
+        ));
+    }
+
+    #[test]
+    fn direct_resume_only_becomes_terminal_after_exact_route_result() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        for (call_id, tool_name, approval_id, expected_state, result) in [
+            (
+                "complete-authorize",
+                "hubu_authorize_spend",
+                "approval-complete-authorize",
+                "authorized",
+                json!({
+                    "decision":"allow",
+                    "auth_token_id":"direct-authorization-token",
+                    "authorization_expires_at":"2099-01-01T00:00:00Z"
+                }),
+            ),
+            (
+                "complete-submit",
+                "hubu_submit_spend",
+                "approval-complete-submit",
+                "succeeded",
+                json!({
+                    "decision":"allow",
+                    "auth_token_id":"direct-submit-token",
+                    "requires_human_approval":false,
+                    "payment":{
+                        "payment_id":"payment-complete-submit",
+                        "status":"succeeded"
+                    }
+                }),
+            ),
+        ] {
+            let operation =
+                pending_approval(&mut registry, call_id, tool_name, &arguments, approval_id);
+            let synced = registry
+                .synchronize_approval_status(approval_id, "approved")
+                .unwrap()
+                .unwrap();
+            assert_eq!(synced.state, "resume_required");
+            let ResumePreparation::Dispatch(plan) = registry
+                .prepare_resume(&operation.operation_handle)
+                .unwrap()
+            else {
+                panic!("approved direct operation should produce a resume plan");
+            };
+            let completion = registry.complete_resume(&plan, &result).unwrap();
+            assert_eq!(completion.status.state, expected_state);
+            assert!(!completion.wake_operation_worker);
+            let ResumePreparation::Replay {
+                origin,
+                authoritative_result,
+                status,
+            } = registry
+                .prepare_resume(&operation.operation_handle)
+                .unwrap()
+            else {
+                panic!("completed direct resume should replay without backend access");
+            };
+            assert_eq!(origin.hubu_tool_name(), tool_name);
+            assert_eq!(authoritative_result, result);
+            assert_eq!(status.state, expected_state);
+        }
+    }
+
+    #[test]
+    fn successful_submit_resume_canonicalizes_legacy_approval_decision() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let operation = pending_approval(
+            &mut registry,
+            "legacy-approved-submit",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-legacy-approved-submit",
+        );
+        registry
+            .synchronize_approval_status("approval-legacy-approved-submit", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved submit should produce a resume plan");
+        };
+        let completion = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"needs_approval",
+                    "requires_human_approval":true,
+                    "approval_reason":"payment did not execute",
+                    "retry_guidance":{
+                        "action":"replay_exactly",
+                        "message":"replay after approval"
+                    },
+                    "payment":{
+                        "payment_id":"payment-legacy-approved-submit",
+                        "status":"succeeded"
+                    }
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(completion.status.state, "succeeded");
+        assert_eq!(
+            completion.status.result_code.as_deref(),
+            Some("spend_succeeded")
+        );
+        assert_eq!(completion.authoritative_result["decision"], "allow");
+        assert_eq!(
+            completion.authoritative_result["requires_human_approval"],
+            false
+        );
+        assert!(completion
+            .authoritative_result
+            .get("approval_reason")
+            .is_none());
+        assert!(completion
+            .authoritative_result
+            .get("retry_guidance")
+            .is_none());
+
+        let stored: (String, bool, String, String, String) = registry
+            .connection
+            .query_row(
+                "SELECT decision, normalized_request_json IS NULL, result_json,
+                        operation_state, operation_result_code
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, "allow");
+        assert!(stored.1);
+        let stored_result: Value = serde_json::from_str(&stored.2).unwrap();
+        assert_eq!(stored_result, completion.authoritative_result);
+        assert_eq!(stored.3, "succeeded");
+        assert_eq!(stored.4, "spend_succeeded");
+
+        let ResumePreparation::Replay {
+            origin,
+            authoritative_result,
+            status,
+        } = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("completed submit should replay without backend access");
+        };
+        assert_eq!(origin, ResumeOrigin::SubmitSpend);
+        assert_eq!(authoritative_result, completion.authoritative_result);
+        assert_eq!(status.state, "succeeded");
+    }
+
+    #[test]
+    fn failed_submit_resume_canonicalizes_legacy_approval_decision_and_replays() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let operation = pending_approval(
+            &mut registry,
+            "legacy-failed-submit",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-legacy-failed-submit",
+        );
+        registry
+            .synchronize_approval_status("approval-legacy-failed-submit", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved submit should produce a resume plan");
+        };
+        let completion = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"needs_approval",
+                    "requires_human_approval":true,
+                    "approval_reason":"payment outcome needs review",
+                    "retry_guidance":{
+                        "action":"replay_exactly",
+                        "message":"replay after approval"
+                    },
+                    "payment":{
+                        "payment_id":"payment-legacy-failed-submit",
+                        "status":"failed",
+                        "failure_reason":"rail declined"
+                    }
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(completion.status.state, "failed");
+        assert_eq!(
+            completion.status.result_code.as_deref(),
+            Some("spend_failed")
+        );
+        assert_eq!(completion.authoritative_result["decision"], "allow");
+        assert_eq!(
+            completion.authoritative_result["requires_human_approval"],
+            false
+        );
+        assert!(completion
+            .authoritative_result
+            .get("approval_reason")
+            .is_none());
+        assert!(completion
+            .authoritative_result
+            .get("retry_guidance")
+            .is_none());
+
+        let stored: (String, bool, String, String, String) = registry
+            .connection
+            .query_row(
+                "SELECT decision, normalized_request_json IS NULL, result_json,
+                        operation_state, operation_result_code
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, "allow");
+        assert!(stored.1);
+        let stored_result: Value = serde_json::from_str(&stored.2).unwrap();
+        assert_eq!(stored_result, completion.authoritative_result);
+        assert_eq!(stored.3, "failed");
+        assert_eq!(stored.4, "spend_failed");
+
+        let ResumePreparation::Replay {
+            origin,
+            authoritative_result,
+            status,
+        } = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("failed submit receipt should replay without backend access");
+        };
+        assert_eq!(origin, ResumeOrigin::SubmitSpend);
+        assert_eq!(authoritative_result, completion.authoritative_result);
+        assert_eq!(status.state, "failed");
+        assert_eq!(status.result_code.as_deref(), Some("spend_failed"));
+    }
+
+    #[test]
+    fn late_terminal_submit_receipt_supersedes_only_pre_execution_expiry() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let operation = pending_approval(
+            &mut registry,
+            "late-success-after-expiry",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-late-success-after-expiry",
+        );
+        registry
+            .synchronize_approval_status("approval-late-success-after-expiry", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved submit should produce a resume plan");
+        };
+
+        let expired = registry
+            .fail_pre_execution_operation(
+                &operation.operation_handle,
+                "authorization_expired_before_resume",
+            )
+            .unwrap();
+        assert_eq!(expired.state, "failed");
+        assert_eq!(
+            expired.result_code.as_deref(),
+            Some("authorization_expired_before_resume")
+        );
+
+        let completion = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"needs_approval",
+                    "requires_human_approval":true,
+                    "retry_guidance":{
+                        "action":"create_new_operation",
+                        "message":"stale expiry guidance"
+                    },
+                    "payment":{
+                        "payment_id":"payment-late-success-after-expiry",
+                        "status":"succeeded"
+                    }
+                }),
+            )
+            .unwrap();
+        assert_eq!(completion.status.state, "succeeded");
+        assert_eq!(
+            completion.status.result_code.as_deref(),
+            Some("spend_succeeded")
+        );
+        assert_eq!(completion.authoritative_result["decision"], "allow");
+        assert_eq!(
+            completion.authoritative_result["requires_human_approval"],
+            false
+        );
+        assert!(completion
+            .authoritative_result
+            .get("retry_guidance")
+            .is_none());
+
+        let stored: (Option<String>, String, String, String) = registry
+            .connection
+            .query_row(
+                "SELECT normalized_request_json, operation_state,
+                        operation_result_code, result_json
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert!(stored.0.is_none());
+        assert_eq!(stored.1, "succeeded");
+        assert_eq!(stored.2, "spend_succeeded");
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored.3).unwrap(),
+            completion.authoritative_result
+        );
+
+        let ResumePreparation::Replay {
+            origin,
+            authoritative_result,
+            status,
+        } = registry
+            .prepare_resume(&operation.operation_handle)
+            .unwrap()
+        else {
+            panic!("late terminal receipt should become the durable replay result");
+        };
+        assert_eq!(origin, ResumeOrigin::SubmitSpend);
+        assert_eq!(authoritative_result, completion.authoritative_result);
+        assert_eq!(status.state, "succeeded");
+        assert_eq!(status.result_code.as_deref(), Some("spend_succeeded"));
+    }
+
+    #[test]
+    fn submit_resume_rejects_allow_without_valid_terminal_payment_receipt() {
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        for (suffix, payment) in [
+            ("malformed", json!("not-an-object")),
+            (
+                "nonterminal",
+                json!({"payment_id":"payment-pending","status":"pending"}),
+            ),
+            ("missing-id", json!({"status":"succeeded"})),
+            ("empty-id", json!({"payment_id":"","status":"failed"})),
+        ] {
+            let mut registry = OperationRegistry::open_in_memory().unwrap();
+            let approval_id = format!("approval-invalid-submit-{suffix}");
+            let operation = pending_approval(
+                &mut registry,
+                &format!("invalid-submit-{suffix}"),
+                "hubu_submit_spend",
+                &arguments,
+                &approval_id,
+            );
+            registry
+                .synchronize_approval_status(&approval_id, "approved")
+                .unwrap();
+            let ResumePreparation::Dispatch(plan) = registry
+                .prepare_resume(&operation.operation_handle)
+                .unwrap()
+            else {
+                panic!("approved submit should produce a resume plan");
+            };
+
+            let error = registry
+                .complete_resume(
+                    &plan,
+                    &json!({
+                        "decision":"allow",
+                        "payment":payment
+                    }),
+                )
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("missing a valid terminal payment receipt"));
+            let status = registry
+                .durable_operation_status(&operation.operation_handle)
+                .unwrap();
+            assert_eq!(status.state, "resume_required");
+            let stored: (String, bool) = registry
+                .connection
+                .query_row(
+                    "SELECT decision, normalized_request_json IS NOT NULL
+                     FROM harness_operations WHERE operation_handle = ?1",
+                    [&operation.operation_handle],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(stored, ("needs_approval".into(), true));
+        }
+    }
+
+    #[test]
+    fn submit_resume_requires_approved_status_and_a_consistent_terminal_decision() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let operation = pending_approval(
+            &mut registry,
+            "submit-success-guards",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-submit-success-guards",
+        );
+        let plan = ResumeOperationPlan {
+            origin: ResumeOrigin::SubmitSpend,
+            operation: operation.clone(),
+            hubu_arguments: arguments,
+        };
+        let payment = json!({
+            "payment_id":"payment-submit-success-guards",
+            "status":"succeeded"
+        });
+
+        let unapproved = registry
+            .complete_resume(
+                &plan,
+                &json!({"decision":"needs_approval","payment":payment}),
+            )
+            .unwrap_err();
+        assert!(unapproved
+            .to_string()
+            .contains("payment is missing durable approval"));
+        assert_eq!(
+            registry
+                .durable_operation_status(&operation.operation_handle)
+                .unwrap()
+                .state,
+            "approval_required"
+        );
+
+        registry
+            .synchronize_approval_status("approval-submit-success-guards", "approved")
+            .unwrap();
+        let inconsistent = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"deny",
+                    "payment":{
+                        "payment_id":"payment-submit-success-guards",
+                        "status":"succeeded"
+                    }
+                }),
+            )
+            .unwrap_err();
+        assert!(inconsistent
+            .to_string()
+            .contains("conflicts with its terminal payment receipt"));
+        let inconsistent_failure = registry
+            .complete_resume(
+                &plan,
+                &json!({
+                    "decision":"deny",
+                    "payment":{
+                        "payment_id":"payment-submit-failure-guards",
+                        "status":"failed"
+                    }
+                }),
+            )
+            .unwrap_err();
+        assert!(inconsistent_failure
+            .to_string()
+            .contains("conflicts with its terminal payment receipt"));
+        assert_eq!(
+            registry
+                .durable_operation_status(&operation.operation_handle)
+                .unwrap()
+                .state,
+            "resume_required"
+        );
+    }
+
+    #[test]
+    fn submit_resume_does_not_canonicalize_pending_or_denied_without_payment() {
+        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+
+        let mut pending_registry = OperationRegistry::open_in_memory().unwrap();
+        let pending = pending_approval(
+            &mut pending_registry,
+            "still-pending-submit",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-still-pending-submit",
+        );
+        pending_registry
+            .synchronize_approval_status("approval-still-pending-submit", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(pending_plan) = pending_registry
+            .prepare_resume(&pending.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved submit should produce a resume plan");
+        };
+        let completion = pending_registry
+            .complete_resume(
+                &pending_plan,
+                &json!({"decision":"needs_approval","payment":null}),
+            )
+            .unwrap();
+        assert_eq!(
+            completion.authoritative_result["decision"],
+            "needs_approval"
+        );
+        assert_eq!(completion.status.state, "resume_required");
+        let intent_retained: bool = pending_registry
+            .connection
+            .query_row(
+                "SELECT normalized_request_json IS NOT NULL
+                 FROM harness_operations WHERE operation_handle = ?1",
+                [&pending.operation_handle],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(intent_retained);
+
+        let mut denied_registry = OperationRegistry::open_in_memory().unwrap();
+        let denied = pending_approval(
+            &mut denied_registry,
+            "denied-submit-result",
+            "hubu_submit_spend",
+            &arguments,
+            "approval-denied-submit-result",
+        );
+        denied_registry
+            .synchronize_approval_status("approval-denied-submit-result", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(denied_plan) = denied_registry
+            .prepare_resume(&denied.operation_handle)
+            .unwrap()
+        else {
+            panic!("approved submit should produce a resume plan");
+        };
+        assert!(denied_registry
+            .complete_resume(&denied_plan, &json!({"decision":"deny","payment":null}))
+            .unwrap_err()
+            .to_string()
+            .contains("approval status conflicts"));
+        assert_eq!(
+            denied_registry
+                .durable_operation_status(&denied.operation_handle)
+                .unwrap()
+                .state,
+            "resume_required"
+        );
     }
 
     #[test]
@@ -2129,17 +4050,31 @@ mod tests {
             )
             .unwrap();
         assert!(recovered_pending.operation_key.is_some());
-        assert!(recovered_pending.recorded_result.is_none());
+        assert_eq!(
+            recovered_pending
+                .recorded_result
+                .as_ref()
+                .and_then(|result| result.get("decision")),
+            Some(&json!("needs_approval"))
+        );
+
+        registry
+            .synchronize_approval_status("approval-1", "approved")
+            .unwrap();
+        let ResumePreparation::Dispatch(plan) =
+            registry.prepare_resume(&pending.operation_handle).unwrap()
+        else {
+            panic!("approved operation should resume only by public handle");
+        };
 
         let terminal = json!({
             "decision":"allow",
             "decision_id":"decision-1",
             "auth_token_id":"authorization-1",
+            "authorization_expires_at":"2099-01-01T00:00:00Z",
             "operation_handle":pending.operation_handle
         });
-        registry
-            .record_authorization_result(&pending.operation_handle, &terminal)
-            .unwrap();
+        registry.complete_resume(&plan, &terminal).unwrap();
         let recovered_terminal = registry
             .resolve_or_allocate(
                 &codex("lifecycle"),
@@ -2169,9 +4104,19 @@ mod tests {
                 pending.operation_key,
                 Some("decision-1".into()),
                 Some("authorization-1".into()),
-                None
+                Some("approval-1".into())
             )
         );
+        let normalized_request: Option<String> = registry
+            .connection
+            .query_row(
+                "SELECT normalized_request_json FROM harness_operations
+                 WHERE operation_handle = ?1",
+                [&pending.operation_handle],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(normalized_request.is_none());
     }
 
     #[test]
@@ -2402,7 +4347,116 @@ mod tests {
     }
 
     #[test]
-    fn v1_registry_is_rejected_for_the_v4_only_fresh_profile_contract() {
+    fn v4_registry_migrates_forward_and_missing_resume_intent_fails_terminally() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("operations-v4.sqlite3");
+        let arguments = governed_arguments();
+        let mut registry = OperationRegistry::open(&path).unwrap();
+        let pending = pending_approval(
+            &mut registry,
+            "migration-v4-pending",
+            crate::governed_execution::TOOL_NAME,
+            &arguments,
+            "approval-migration-v4",
+        );
+        let recoverable = pending_approval(
+            &mut registry,
+            "migration-v4-exact-redelivery",
+            crate::governed_execution::TOOL_NAME,
+            &arguments,
+            "approval-migration-v4-recoverable",
+        );
+        drop(registry);
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DROP INDEX harness_operation_approval_request;
+                 ALTER TABLE harness_operations DROP COLUMN normalized_request_json;
+                 ALTER TABLE harness_operations DROP COLUMN approval_status;
+                 ALTER TABLE harness_operations DROP COLUMN approval_synced_at;
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut migrated = OperationRegistry::open(&path).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        drop(connection);
+        let recovered_before_resume = migrated
+            .resolve_or_allocate(
+                &codex("migration-v4-exact-redelivery"),
+                crate::governed_execution::TOOL_NAME,
+                &arguments,
+            )
+            .unwrap();
+        assert_eq!(
+            recovered_before_resume.operation_handle,
+            recoverable.operation_handle
+        );
+        migrated
+            .synchronize_approval_status("approval-migration-v4-recoverable", "approved")
+            .unwrap();
+        assert!(matches!(
+            migrated
+                .prepare_resume(&recoverable.operation_handle)
+                .unwrap(),
+            ResumePreparation::Dispatch(_)
+        ));
+
+        let approved = migrated
+            .synchronize_approval_status("approval-migration-v4", "approved")
+            .unwrap()
+            .unwrap();
+        assert_eq!(approved.state, "resume_required");
+        assert_eq!(
+            approved.result_code.as_deref(),
+            Some("resume_intent_unavailable")
+        );
+        let ResumePreparation::IntentUnavailable(failed) =
+            migrated.prepare_resume(&pending.operation_handle).unwrap()
+        else {
+            panic!("legacy approval without intent must fail deterministically");
+        };
+        assert_eq!(failed.state, "failed");
+        assert_eq!(
+            failed.result_code.as_deref(),
+            Some("resume_intent_unavailable")
+        );
+        assert!(failed.terminal());
+
+        let recovered = migrated
+            .resolve_or_allocate(
+                &codex("migration-v4-pending"),
+                crate::governed_execution::TOOL_NAME,
+                &arguments,
+            )
+            .unwrap();
+        assert_eq!(recovered.operation_handle, pending.operation_handle);
+        assert!(matches!(
+            migrated.prepare_resume(&pending.operation_handle).unwrap(),
+            ResumePreparation::Status(status) if status.state == "failed"
+        ));
+        let normalized_request: Option<String> = migrated
+            .connection
+            .query_row(
+                "SELECT normalized_request_json FROM harness_operations
+                 WHERE operation_handle = ?1",
+                [&pending.operation_handle],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(normalized_request.is_none());
+    }
+
+    #[test]
+    fn v1_registry_is_rejected_for_the_v5_forward_migration_contract() {
         let root = tempdir().unwrap();
         let path = root.path().join("operations.sqlite3");
         let connection = Connection::open(&path).unwrap();

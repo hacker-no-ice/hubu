@@ -6,8 +6,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::{
-    diagnostics::tool_availability, governed_execution, DOMAIN_TOOLS, ROUTING_REVISION,
-    UNIFIED_CONTRACT_VERSION,
+    diagnostics::tool_availability, governed_execution, resume_operation, DOMAIN_TOOLS,
+    ROUTING_REVISION, UNIFIED_CONTRACT_VERSION,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -88,6 +88,14 @@ pub(super) fn capabilities_value(snapshot: &CapabilitySnapshot) -> Value {
         "available": governed_availability.is_ok(),
         "reason_code": governed_availability.err().map(|(_, rejection)| rejection.reason_code())
     }));
+    tools.push(json!({
+        "name": resume_operation::TOOL_NAME,
+        "owner": "router",
+        "available": tool_availability("hubu_authorize_spend", crate::BackendOwner::Hubu, snapshot).is_ok(),
+        "reason_code": tool_availability("hubu_authorize_spend", crate::BackendOwner::Hubu, snapshot)
+            .err()
+            .map(|rejection| rejection.reason_code())
+    }));
     tools.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
 
     json!({
@@ -159,7 +167,7 @@ mod tests {
             let capability = capabilities_value(&snapshot(hubu, gongbu));
             assert_eq!(capability["backends"]["hubu"]["state"], json!(hubu));
             assert_eq!(capability["backends"]["gongbu"]["state"], json!(gongbu));
-            assert_eq!(capability["tools"].as_array().unwrap().len(), 34);
+            assert_eq!(capability["tools"].as_array().unwrap().len(), 37);
             let names = capability["tools"]
                 .as_array()
                 .unwrap()

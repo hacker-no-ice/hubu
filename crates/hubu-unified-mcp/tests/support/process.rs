@@ -15,6 +15,7 @@ use std::{
 use super::BackendStub;
 
 const RECONCILIATION_TOKEN: &str = "hub107-reconciliation-capability";
+const APPROVAL_TOKEN: &str = "hub107-approval-capability";
 
 pub struct McpProcess {
     _state: Option<tempfile::TempDir>,
@@ -56,6 +57,8 @@ impl McpProcess {
             .env_remove("HUBU_UNIFIED_HUBU_BEARER_TOKEN")
             .env_remove("HUBU_UNIFIED_GONGBU_ENDPOINT")
             .env_remove("HUBU_UNIFIED_GONGBU_BEARER_TOKEN")
+            .env_remove("HUBU_APPROVAL_TOKEN")
+            .env_remove("HUBU_APPROVAL_TOKEN_FILE")
             .env("HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS", "1000")
             .env("HUBU_UNIFIED_OPERATION_TICK_MS", "10")
             .env("HUBU_UNIFIED_OPERATION_STATE_PATH", operation_state_path)
@@ -74,6 +77,8 @@ impl McpProcess {
         }
         command
             .env("HUBU_MCP_TRUST_CLIENT_APPROVAL", "1")
+            .env("HUBU_MCP_TRUST_SPEND_APPROVAL", "1")
+            .env("HUBU_APPROVAL_TOKEN", APPROVAL_TOKEN)
             .env("HUBU_RECONCILIATION_TOKEN", RECONCILIATION_TOKEN);
         Self::spawn(command, state, operation_state_path.to_path_buf())
     }

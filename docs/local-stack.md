@@ -138,7 +138,10 @@ hubu init codex --stack-profile "$profile"
 
 Restart Codex so it launches the unified MCP process with the new handoff. See
 [Unified MCP setup](unified-mcp.md#setup) for discovery and compatibility
-details.
+details. When a governed request needs review, say `approve` or `deny` in the
+chat only after checking the immutable review. Codex then presents its native
+MCP prompt for the resolver. Canceling that prompt leaves the Hubu decision
+pending; it does not record a denial.
 
 ## Routine operations
 
@@ -192,8 +195,9 @@ hubu stack status
 ```
 
 If the rendered plan reports `hubu-unified-mcp-client-config` as affected,
-rerun `hubu init codex --stack-profile "$profile"` after the stack is ready and
-restart Codex.
+rerun
+`hubu init codex --stack-profile "$profile"` after the
+stack is ready and restart Codex.
 
 The [active-profile change guide](https://hubustack.dev/configuration/local-stack/v1/decisions#changing-an-active-profile)
 explains staging, credential-reference changes, and rollback requirements.

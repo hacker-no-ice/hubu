@@ -25,13 +25,16 @@ forwards one backend credential to the other, copies artifact bytes into Hubu,
 or exposes provider credentials.
 
 Most tool calls are validated against their public schema and forwarded to
-exactly one owner. The one intentional orchestration exception is
-`hubu_submit_governed_execution`: the router authorizes through Hubu, binds the
-allowed continuation to the existing durable Gongbu worker, observes that
-operation for a bounded time, and may deliver its artifacts in the same MCP
-response. This composes service calls and adapter state transitions; it does
-not merge backend state, credentials, provider work, artifacts, processes, or
-failure domains.
+exactly one owner. `hubu_submit_governed_execution` is the intentional
+cross-backend orchestration operation: the router authorizes through Hubu,
+binds one immutable execution intent to the existing durable Gongbu worker
+after authorization, observes that operation for a bounded time, and may
+deliver its artifacts in the same MCP response. `hubu_resume_operation` is a
+router-owned recovery operation: it replays stored Hubu intent for primitive
+spend and additionally binds stored Gongbu execution intent only for governed
+work. These operations compose service calls and adapter state transitions;
+they do not merge backend state, credentials, provider work, artifacts,
+processes, or failure domains.
 
 ## Tool catalog
 
@@ -40,13 +43,17 @@ The router exposes two local read-only tools:
 - `hubu_unified_capabilities`
 - `hubu_operation_status`
 
-It also exposes one router-owned composite tool:
+It also exposes two router-owned workflow tools:
 
 - `hubu_submit_governed_execution`
+- `hubu_resume_operation`
 
 The composite is the preferred ordinary path when an agent has both spend
-authorization intent and an execution request. The primitive Hubu and Gongbu
-tools remain available for recovery, diagnostics, and backward compatibility.
+authorization intent and an execution request. `hubu_resume_operation` resumes
+an approved pending normalized operation—primitive spend or composite—by its
+public handle without requiring the original harness call identity. The
+primitive Hubu and Gongbu tools remain available for recovery, diagnostics,
+and backward compatibility.
 
 Hubu-owned tools cover health, registration, policies, budgets, spending
 targets, spend authorization and submission, ledger reads, executor claims,
@@ -61,6 +68,7 @@ hubu_create_budget
 hubu_create_recurring_budget
 hubu_export_policy
 hubu_get_executor_claim
+hubu_get_spend_approval
 hubu_health
 hubu_list_agents
 hubu_list_budgets
@@ -75,6 +83,7 @@ hubu_register_agent
 hubu_register_human
 hubu_registration_guidance
 hubu_replace_budget
+hubu_resolve_spend_approval
 hubu_revoke_budget
 hubu_revoke_spending_target
 hubu_set_spending_target
@@ -124,6 +133,16 @@ trusted harness identity and a newly allocated private operation key.
   handle, adapter/execution status when available, server-observed timing, and
   eligible inline artifacts when terminal execution and delivery fit its total
   internal budget.
+- `hubu_get_spend_approval` reads the owner-scoped immutable review and durable
+  `pending`, `approved`, or `denied` status without using approval authority.
+- `hubu_resolve_spend_approval` submits exactly one explicit human `approve` or
+  `deny` decision behind the client prompt and the separate Hubu approval
+  capability. It never starts Gongbu execution or provider work.
+- `hubu_resume_operation` accepts only a public operation handle. After an
+  approval, it replays the stored immutable Hubu intent. Primitive operations
+  return their original authorization or spend outcome; a governed operation
+  binds its stored execution intent and wakes the existing worker idempotently.
+  It cannot change the approved scope or create a second logical operation.
 - `gongbu_get_artifact` returns safe metadata followed by PNG or JPEG content.
 - Gongbu application errors remain `isError: true` with their sanitized error
   object.
@@ -136,8 +155,8 @@ executes through the existing durable worker and the router returns the result
 when it can. If Hubu requires human approval, no provider work starts and the
 request remains resumable. The tool does not assert that approval has already
 happened and it never treats an agent tool argument as human approval. Human
-resolution stays outside this composite in an existing or external protected
-path; this interface neither implements nor waits on that resolver.
+resolution is a separate protected MCP or CLI action; the composite never waits
+for that decision and resolution itself never starts provider work.
 
 The input combines the existing authorization fields with the existing Gongbu
 execution intent. Trusted harness identity remains in MCP `_meta`, outside the
@@ -172,13 +191,16 @@ model-authored arguments:
 }
 ```
 
-The router normalizes that complete request once. It performs the existing
-Hubu authorization mutation and, only after `allow`, binds the execution intent
-to the same private operation and wakes the existing durable operation worker.
-There is no second execution state machine and no router retry of a provider
-mutation. Exact redelivery with the same trusted harness identity recovers the
-same authorization, Gongbu execution, and provider attempt; changed arguments
-under that identity fail before backend access.
+The router normalizes that complete request once and durably stores its bounded,
+validated intent before authorization dispatch. It performs the existing Hubu
+authorization mutation and, only after `allow`, binds the execution intent to
+the same private operation and wakes the existing durable operation worker. A
+pending review retains that immutable intent so `hubu_resume_operation` can use
+the public handle after approval. There is no second execution state machine
+and no router retry of a provider mutation. Exact redelivery with the same
+trusted harness identity and public-handle resume both recover the same
+authorization, Gongbu execution, and provider attempt; neither permits changed
+arguments.
 
 The composite outcome is one of:
 
@@ -186,9 +208,57 @@ The composite outcome is one of:
 | --- | --- |
 | `succeeded` | Gongbu reached successful terminal execution during the internal budget; the response includes timing and eligible artifacts when delivery fits. Budget exhaustion after terminal success remains `succeeded` with an artifact-delivery warning. |
 | `denied` | Hubu denied authorization. This operation is terminal and no Gongbu or provider work starts. Exact redelivery only recovers the same denial; corrected work is submitted as a new tool call and logical operation. |
-| `approval_required` | Hubu persisted a pending human decision. The composite returns immediately with its public handle; no Gongbu or provider work starts. After an existing or external protected path resolves it, only exact redelivery of this composite call resumes the same operation. |
+| `approval_required` | Hubu persisted a pending human decision. The composite returns immediately with its public handle; no Gongbu or provider work starts. Approval makes that same immutable operation eligible for explicit public-handle resume; denial makes it terminal. |
 | `in_progress` | The bounded wait ended before terminal execution. The durable worker continues the same operation and the public handle can be observed with `hubu_operation_status`. |
 | `failed` | The existing adapter or Gongbu execution reached a terminal failure. This outcome does not make a replacement safe; observe the existing handle and recovery guidance. |
+
+### Human review, resolution, and resume
+
+The approval tools have deliberately separate jobs:
+
+- `hubu_get_spend_approval` accepts only `approval_request_id`. It is an
+  owner-scoped read and returns the immutable review plus its durable status.
+- `hubu_resolve_spend_approval` accepts only `approval_request_id` and
+  `decision`, whose value is `approve` or `deny`. It requires both the normal
+  Hubu bearer and the distinct approval capability. Repeating the same decision
+  is idempotent; a conflicting decision is rejected. Its public result withholds
+  any authorization continuation so resolution cannot bypass the separate
+  public-handle resume boundary.
+- `hubu_resume_operation` accepts only `operation_handle`. It is not an approval
+  operation. It synchronizes the decision if necessary, requires an approved
+  immutable operation, and replays only the stored Hubu intent. Primitive
+  operations recover their original authorization or spend outcome; governed
+  operations bind the stored execution intent and wake the existing durable
+  worker. Repeating it observes or resumes that same operation rather than
+  creating another Gongbu execution or provider attempt.
+
+In Codex, the human first says `approve` or `deny` in the chat after reviewing
+the structured request. Codex then forms a
+`hubu_resolve_spend_approval` call, and the native MCP tool prompt asks for a
+second confirmation before the resolver is invoked. Canceling or rejecting
+that native prompt does not call Hubu: the durable decision remains `pending`.
+It is not recorded as a Hubu denial. A denial exists only after an explicit
+`decision: "deny"` call reaches Hubu successfully.
+
+Neither reading nor resolving an approval starts Gongbu execution, payment, or
+provider work. An approval reserves the original immutable maximum and moves
+the public operation to `resume_required`; provider work can begin only after
+the separate resume call. Once the original call records `needs_approval`, its
+redelivery is permanently replay-only: even a concurrent or later response
+cannot advance it to execution. A denial is terminal and resume fails closed
+without contacting Gongbu. The CLI remains a supported external decision
+surface, and the next status or resume call synchronizes that authoritative
+Hubu decision into the router registry. Because the router stores the validated
+intent before authorization dispatch, the public handle still resumes that
+exact intent after the stdio MCP process restarts; callers do not need to
+reconstruct its private key or original arguments.
+
+If the approved authorization lease expires before resume, the router records
+terminal `authorization_expired_before_resume`, starts no Gongbu or provider
+work, and directs the caller to create a new logical operation. Hubu exposes a
+machine-readable expiry code for the submit-spend replay path; unrelated or
+ambiguous backend failures remain nonterminal and continue to require a retry
+with the same public handle.
 
 The composite handler uses a 45-second default end-to-end response target. Its
 clock starts before the forced capability refresh, so capability checks,
@@ -328,15 +398,27 @@ later operator evidence can still settle or release the financial state.
 
 The same status tool safely projects handles before Gongbu acknowledgement:
 `awaiting_hubu_result` requires exact redelivery of the original harness call,
-`approval_required` requires resolving the existing human approval, an allowed
-authorization is `authorized`, and a synchronous `hubu_submit_spend` result is
-already terminal. Denied or malformed allowed authorizations are terminal
-failures rather than executable continuations. For `authorization_denied` and
-`spend_denied`, status repeats `create_new_operation` guidance. Its
+`approval_required` means the authoritative decision is still pending,
+`resume_required` means it was approved and the stored intent is ready for
+`hubu_resume_operation`, an allowed primitive authorization is `authorized`,
+and a synchronous `hubu_submit_spend` result is already terminal. A read of a
+pending operation refreshes its approval status from Hubu, so an approval or
+denial submitted through the CLI or another owner-authorized surface is not
+left stale in local MCP state. The refresh never calls Gongbu or starts provider
+work. Denied or malformed allowed authorizations are terminal failures rather
+than executable continuations. For `authorization_denied`, `approval_denied`,
+and `spend_denied`, status repeats `create_new_operation` guidance. Its
 `replacement_safe: false` describes the existing public handle: the handle and
 call identity cannot be repurposed, while corrected work may be submitted as a
 distinct logical operation. Other terminal failures retain no-replacement
 guidance because provider or financial side effects may be unresolved.
+
+The approval branch around the ordinary adapter lifecycle is:
+
+```text
+approval_required --approve--> resume_required --resume--> accepted -> queued
+                 \--deny-----------------------------------> failed
+```
 
 Primitive pass-through routes do not add a success envelope, rename fields,
 translate currency units, expose filesystem locations, or convert an
@@ -348,7 +430,7 @@ documented outcome envelope without changing either backend's wire contract.
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 35 tool names with owner and
+state and compatible version metadata, and all 38 tool names with owner and
 availability.
 
 The version-1 compatibility boundary requires:
@@ -356,7 +438,7 @@ The version-1 compatibility boundary requires:
 | Surface | Required value |
 | --- | --- |
 | Unified contract | `hubu-gongbu-mcp-v1` |
-| Routing revision | `2` |
+| Routing revision | `3` |
 | MCP protocol | `2024-11-05` |
 | Hubu and Gongbu executor contract | `hubu-spend-executor-v4.3` |
 | Gongbu API schema | `2` |
@@ -382,10 +464,14 @@ Backend states determine the callable catalog:
 Partial availability is intentional. One unhealthy backend does not hide the
 capability tool or compatible tools owned by the other backend.
 `gongbu_create_execution` also depends on Hubu availability because it consumes
-a Hubu authorization. `hubu_submit_governed_execution` additionally requires a
-healthy operation registry and safe Hubu and Gongbu admission boundaries. It
-is hidden when any of those prerequisites is unavailable; compatible primitive
-reads remain independently available.
+a Hubu authorization. `hubu_submit_governed_execution` requires a healthy
+operation registry plus safe Hubu and Gongbu admission boundaries.
+`hubu_resume_operation` requires the registry and Hubu; it remains discoverable
+when Gongbu is unavailable so approved primitive authorization or spend can be
+recovered. A governed handle that still needs its first Gongbu dispatch cannot
+advance until Gongbu admission is healthy, while a completed operation replays
+its stored sanitized result without either backend. Compatible primitive reads,
+including approval lookup, remain independently available.
 
 After the client completes the initialized lifecycle, the router emits one
 payload-free `notifications/tools/list_changed` when the effective catalog
@@ -430,7 +516,7 @@ Install the CLI, Hubu server, Gongbu server, and unified MCP binary from one
 release. The preferred Codex setup is:
 
 ```sh
-hubu init codex --trust-client-approval
+hubu init codex
 ```
 
 For a rendered local stack profile:
@@ -443,8 +529,10 @@ With `--stack-profile`, the command consumes the verified handoff from an
 already running stack and writes the managed MCP entry; managed startup has
 already created the required capabilities. The non-stack setup form may create
 or reuse its manual local defaults. Both forms render Hubu's approval profile
-into client tool settings. Restart Codex after changing the generated
-configuration.
+into client tool settings. The resolver is rendered with
+`approval_mode = "prompt"`; spend submission and public-handle resume retain
+their non-interactive client policy because Hubu's durable decision remains the
+authority. Restart Codex after changing the generated configuration.
 
 The lifecycle is:
 
@@ -467,6 +555,10 @@ Manual MCP clients configure these inputs for the router:
 - `HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
   `HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`
 - the corresponding Gongbu endpoint and installation-scoped caller token
+- `HUBU_APPROVAL_TOKEN` or `HUBU_APPROVAL_TOKEN_FILE` when protected approval
+  resolution is enabled
+- `HUBU_MCP_TRUST_SPEND_APPROVAL=1` only when the client shows a human prompt
+  that confirms the already chosen approve-or-deny resolver call
 - `HUBU_RECONCILIATION_TOKEN` or its file form when reconciliation is enabled
 
 Endpoint and credential values are never returned by capability discovery.
@@ -481,21 +573,31 @@ The MCP catalog distinguishes reads, spend submission, and protected human
 actions through tool annotations and the `hubu_client_approval_profile` result.
 
 Registration, policy mutation, spending-target changes, budget mutation, and
-claim reconciliation require a client-enforced human prompt. Protected tools
-remain disabled unless the process is started with
-`HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. Approval is never accepted as a model-owned
-tool argument.
+claim reconciliation require a client-enforced human prompt. Those broad
+administrative tools remain disabled unless the process is started with
+`HUBU_MCP_TRUST_CLIENT_APPROVAL=1`.
+
+Spend approval resolution uses the narrower
+`HUBU_MCP_TRUST_SPEND_APPROVAL=1` gate. `hubu init codex` always renders that
+gate together with the per-tool native prompt, without enabling the broader
+administrative surface. The broad gate also satisfies the resolver gate when
+an operator deliberately enables it. Approval authority is loaded from the
+separate local capability and is never accepted as a model-owned tool argument.
 
 Spend submission, authorization, and composite governed execution do not
 receive a generic pre-call prompt. Hubu evaluates policy and may return
 `requires_human_approval: true`; the composite projects that state as
 `approval_required` and returns immediately. In that case no payment, Gongbu
 execution, or provider work has occurred. The client shows the returned
-immutable review and resolves the pending decision through the protected
-approval path outside the composite. The composite does not implement a human
-approval resolver and never holds its MCP call open while a human decides.
-After external resolution, only exact redelivery of the composite call with the
-same trusted harness identity resumes the canonical operation.
+immutable review. After the human says approve or deny, the client forms the
+protected `hubu_resolve_spend_approval` call and shows its native MCP prompt.
+The composite never holds its MCP call open while the human decides. A canceled
+prompt submits no decision and leaves the request pending; it must not be
+reported as a Hubu denial. A successful resolution changes only Hubu and the
+router's durable approval projection. It never invokes Gongbu or a provider.
+After approval through MCP or an external owner-authorized surface,
+`hubu_operation_status` synchronizes the decision and
+`hubu_resume_operation` continues the same immutable intent by public handle.
 
 Reconciliation requires a separate server-side capability in addition to the
 MCP prompt. An executor with only the normal Hubu bearer credential cannot
@@ -542,7 +644,9 @@ and agent-facing errors. Trusted `task_id` remains visible as non-authoritative
 business correlation for compatibility, audit context, and human review. The
 router returns the public operation handle and persists the sanitized replay
 payload separately from the bounded continuation columns `decision_id`,
-`auth_token_id`, and `approval_request_id`.
+`auth_token_id`, `approval_request_id`, and durable approval status. For a
+governed request it also persists the bounded canonical intent needed for
+public-handle continuation; that intent is never returned by status.
 
 Before forwarding a spend mutation, the registry durably marks dispatch. A
 terminal `allow` or `deny` result is stored before it is returned and exact
@@ -550,13 +654,16 @@ redelivery reads that result without another backend mutation. Terminal state is
 monotonic, so a delayed pending response cannot overwrite it. The registry
 retains the private key for internal continuation verification, claim
 idempotency, settlement, and recovery, but never returns it. A
-`needs_approval` result or ambiguous dispatch likewise retains it so an exact
-redelivery can recover Hubu's durable state. Expired authorization token IDs are
-removed opportunistically only before Gongbu create dispatch begins. Once
-dispatch starts, the identifier is retained so an ambiguous response can
-recover Gongbu's locally persisted execution after restart. The public handle
-cannot retrieve or replay an operation: recovery requires the original
-normalized harness call identity or its authorized continuation flow.
+`needs_approval` result or ambiguous dispatch likewise retains it and the
+validated canonical intent. Owner-scoped approval reads synchronize an
+externally submitted `approved` or `denied` decision without trusting local
+client state. Expired authorization token IDs are removed opportunistically
+only before Gongbu create dispatch begins. Once dispatch starts, the identifier
+is retained so an ambiguous response can recover Gongbu's locally persisted
+execution after restart. The public handle does not grant backend authority,
+but `hubu_resume_operation` may use it inside the configured router to select
+exactly the stored immutable intent; callers cannot retrieve that intent or
+replace it with new arguments.
 
 For a denial, the router replaces any backend-oriented
 `reuse_operation_key` guidance before persisting or returning the sanitized
@@ -569,11 +676,14 @@ access.
 For `hubu_submit_governed_execution`, the normalized canonical request covers
 both nested objects and the composite tool name. The first invocation routes
 the authorization portion through the existing Hubu path. `deny` and
-`needs_approval` stop before execution admission. `allow` binds the execution
+`needs_approval` stop before execution admission. Pending approval retains the
+canonical request but does not bind or wake the Gongbu worker. `allow`, whether
+returned initially or recovered by `hubu_resume_operation`, binds the execution
 portion to that same operation using the existing continuation rules, then the
-existing worker performs create replay and observation. The bounded MCP waiter
-reads adapter state; it is not a second worker and does not take ownership of
-Gongbu execution, provider calls, artifacts, or financial recovery.
+existing worker performs create replay and observation. Denial clears the
+pending intent. The bounded MCP waiter reads adapter state; it is not a second
+worker and does not take ownership of Gongbu execution, provider calls,
+artifacts, or financial recovery.
 
 `gongbu_create_execution` accepts only the opaque `spend_auth_token_id` plus
 execution intent. Before acknowledging, the router requires that identifier to
@@ -631,13 +741,16 @@ scheduling, provider work, and financial recovery. For a managed stack, the
 router's client references come from the verified post-start handoff; it does
 not participate in service credential bootstrap.
 
-Registry schema v4 intentionally does not upgrade v1, v2, or v3 state. Earlier
-schemas cannot prove the complete replay payload and lifecycle needed by the
-submit-once contract; v2 terminal authorization rows also erased private
-operation identity. Such a profile fails the registry capability closed and
-must start with fresh adapter state. This is an intentional pre-live breaking
-change. Backend reads remain available while registry-dependent tools are
-hidden.
+Registry schema v5 performs one explicit forward migration from v4, preserving
+existing public handles and approval state while adding durable request intent.
+A migrated v4 pending row has no reconstructable intent. Before handle resume,
+an exact original-call redelivery can backfill the matching canonical request.
+Otherwise the first handle-resume attempt records terminal
+`resume_intent_unavailable`; later calls cannot resurrect or replace that
+intent. Schemas v1, v2, and v3 still fail closed because they cannot prove the complete replay
+payload and lifecycle needed by the submit-once contract; v2 terminal
+authorization rows also erased private operation identity. Backend reads remain
+available while registry-dependent tools are hidden.
 
 The v1 normalizer fails closed when more than one primary identity source is
 present in the same call. It does not apply metadata precedence or correlate
@@ -648,8 +761,10 @@ Registry availability is independent of both backend capabilities. Missing or
 broken registry state does not stop unified MCP startup and does not hide Hubu
 reads, `gongbu_get_execution`, or artifact tools. It hides new Hubu billable
 tools, local `hubu_operation_status`, `gongbu_create_execution`, and
-`hubu_submit_governed_execution` from discovery and rejects direct
-registry-dependent calls before backend access. The capability snapshot reports
+`hubu_submit_governed_execution`, and `hubu_resume_operation` from discovery and
+rejects direct registry-dependent calls before backend access. Approval lookup
+and resolution remain Hubu-owned operations; without matching router state they
+cannot offer public-handle continuation. The capability snapshot reports
 `operation_registry.state`, its stable reason code, and
 `billable_operations_available` for diagnosis.
 

@@ -78,9 +78,11 @@ The [policy engine](policy-engine.md) returns one of three effects:
 - `needs_approval`: persist a pending decision and wait for explicit human
   resolution.
 
-Human approval operates on the immutable review snapshot. Approval resumes the
-same operation; denial ends it. Repeating the same resolution is idempotent,
-while a conflicting resolution is rejected.
+Human approval operates on the immutable review snapshot. Approval makes the
+same operation eligible for continuation but does not itself invoke payment or
+provider work; the unified MCP flow resumes it separately by public operation
+handle. Denial ends it. Repeating the same resolution is idempotent, while a
+conflicting resolution is rejected.
 
 ## Budgets and spending targets
 
@@ -130,6 +132,10 @@ Hubu exposes two related paths:
 
 An authorization token points to the immutable spend decision and expires. It
 can be claimed only by the executor and scope authorized by that decision.
+For unified-MCP human approvals, the explicit public-handle resume must happen
+before that lease expires. An expired pre-resume authorization is terminal for
+that operation and requires a new logical operation; it never starts provider
+work.
 Detailed external-executor rules are defined by the
 [spend executor contract](spend-executor-contract.md).
 

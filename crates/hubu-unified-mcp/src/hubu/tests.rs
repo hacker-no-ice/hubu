@@ -33,6 +33,24 @@ fn server_with_backends(
     trusted_client_approval: bool,
     reconciliation_capability: Option<&str>,
 ) -> Server {
+    server_with_spend_approval(
+        hubu_endpoint,
+        gongbu_endpoint,
+        trusted_client_approval,
+        false,
+        None,
+        reconciliation_capability,
+    )
+}
+
+fn server_with_spend_approval(
+    hubu_endpoint: &str,
+    gongbu_endpoint: Option<&str>,
+    trusted_client_approval: bool,
+    trusted_spend_approval: bool,
+    approval_capability: Option<&str>,
+    reconciliation_capability: Option<&str>,
+) -> Server {
     let config = Config {
         hubu: Some(
             BackendConfig::new(BackendOwner::Hubu, hubu_endpoint, "hubu-token-canary").unwrap(),
@@ -40,8 +58,10 @@ fn server_with_backends(
         gongbu: gongbu_endpoint.map(|endpoint| {
             BackendConfig::new(BackendOwner::Gongbu, endpoint, "gongbu-token-canary").unwrap()
         }),
-        hubu_routing: HubuRoutingConfig::new(
+        hubu_routing: HubuRoutingConfig::new_with_spend_approval(
             trusted_client_approval,
+            trusted_spend_approval,
+            approval_capability.map(str::to_string),
             reconciliation_capability.map(str::to_string),
         ),
         ..Config::default()
@@ -173,16 +193,41 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
     let actual = server.list_tools_for_snapshot();
     assert_eq!(actual[0], capability_tool());
     assert_eq!(actual[1], gongbu::operation_status_definition());
+    assert_eq!(actual[2], crate::resume_operation::tool_definition());
 
     let expected = super::catalog::tool_definitions();
-    assert_eq!(&actual[2..], expected.as_slice());
-    assert_eq!(expected.len(), 28);
-    assert!(!actual.iter().any(|tool| {
-        matches!(
-            tool["name"].as_str(),
-            Some("hubu_get_spend_approval" | "hubu_resolve_spend_approval")
-        )
-    }));
+    assert_eq!(&actual[3..], expected.as_slice());
+    assert_eq!(expected.len(), 30);
+    let get = actual
+        .iter()
+        .find(|tool| tool["name"] == "hubu_get_spend_approval")
+        .unwrap();
+    assert_eq!(
+        get["inputSchema"]["required"],
+        json!(["approval_request_id"])
+    );
+    assert_eq!(get["inputSchema"]["additionalProperties"], false);
+    assert_eq!(get["annotations"]["readOnlyHint"], true);
+    assert_eq!(get["annotations"]["x_hubu_client_approval_mode"], "auto");
+    let resolve = actual
+        .iter()
+        .find(|tool| tool["name"] == "hubu_resolve_spend_approval")
+        .unwrap();
+    assert_eq!(
+        resolve["inputSchema"]["required"],
+        json!(["approval_request_id", "decision"])
+    );
+    assert_eq!(
+        resolve["inputSchema"]["properties"]["decision"]["enum"],
+        json!(["approve", "deny"])
+    );
+    assert_eq!(resolve["inputSchema"]["additionalProperties"], false);
+    assert_eq!(resolve["annotations"]["destructiveHint"], true);
+    assert_eq!(resolve["annotations"]["idempotentHint"], true);
+    assert_eq!(
+        resolve["annotations"]["x_hubu_client_approval_mode"],
+        "prompt_before_call"
+    );
     assert!(!actual.iter().any(|tool| tool["name"]
         .as_str()
         .is_some_and(|name| name.starts_with("gongbu_"))));
@@ -217,7 +262,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 35);
+    assert_eq!(tools.len(), 38);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -235,13 +280,16 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 33);
+    assert_eq!(degraded.len(), 36);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
     assert!(degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_get_execution"));
+    assert!(degraded
+        .iter()
+        .any(|tool| tool["name"] == crate::resume_operation::TOOL_NAME));
 
     {
         let mut snapshot = server
@@ -273,9 +321,14 @@ fn unified_approval_profile_contains_only_callable_continuations() {
 
     let response = tool_call(&server, "hubu_client_approval_profile", json!({}), None);
     let profile = &response["result"]["structuredContent"];
-    let serialized = profile.to_string();
-    assert!(!serialized.contains("hubu_get_spend_approval"));
-    assert!(!serialized.contains("hubu_resolve_spend_approval"));
+    assert!(profile["client_policy"]["auto_approve_tools"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("hubu_get_spend_approval")));
+    assert!(profile["client_policy"]["prompt_before_call_tools"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("hubu_resolve_spend_approval")));
     assert!(profile["client_policy"]["auto_approve_tools"]
         .as_array()
         .unwrap()
@@ -286,7 +339,7 @@ fn unified_approval_profile_contains_only_callable_continuations() {
         .contains(&json!(crate::governed_execution::TOOL_NAME)));
     assert_eq!(
         profile["response_contract"]["agent_action"],
-        "Stop the spend workflow and surface approval_reason plus the structured response to the human."
+        "Show approval.review to the human, wait for an explicit approve or deny answer in chat, then call hubu_resolve_spend_approval with approval_request_id and that decision. The native client prompt confirms or cancels the formed call; cancelling does not submit a denial."
     );
     assert_eq!(
         response["result"]["content"][0]["text"],
@@ -312,10 +365,6 @@ fn unified_approval_profile_contains_only_callable_continuations() {
             );
         }
     }
-    assert!(!profile["response_contract"]["agent_action"]
-        .as_str()
-        .unwrap()
-        .contains("hubu_"));
     assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
 }
 
@@ -323,6 +372,7 @@ fn unified_approval_profile_contains_only_callable_continuations() {
 fn approved_hubu_routes_prepare_exact_static_requests() {
     let empty = json!({});
     let spend = json!({"account_id":"account-1","amount_cents":25,"reason":"test"});
+    let approval_request_id = "11111111-1111-4111-8111-111111111111";
     let reconciliation = json!({
         "claim_id":"claim-1",
         "provider_reference":"provider-1",
@@ -470,6 +520,20 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::None,
         ),
         (
+            "hubu_get_spend_approval",
+            json!({"approval_request_id":approval_request_id}),
+            "GET",
+            "/spend/approval?approval_request_id=11111111-1111-4111-8111-111111111111",
+            HubuRequestCapabilityV1::None,
+        ),
+        (
+            "hubu_resolve_spend_approval",
+            json!({"approval_request_id":approval_request_id,"decision":"approve"}),
+            "POST",
+            "/spend/approval/resolve",
+            HubuRequestCapabilityV1::Approval,
+        ),
+        (
             "hubu_list_agents",
             empty.clone(),
             "GET",
@@ -519,7 +583,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::Reconciliation,
         ),
     ];
-    assert_eq!(cases.len(), 27);
+    assert_eq!(cases.len(), 29);
     for (name, arguments, method, path, capability) in cases {
         let params = json!({
             "name": name,
@@ -528,7 +592,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
         let mut captured = None;
         let operation =
             matches!(name, "hubu_submit_spend" | "hubu_authorize_spend").then(resolved_operation);
-        let result = route_tool_call_v1(params, true, operation, |request| {
+        let result = route_tool_call_v1(params, true, true, operation, |request| {
             captured = Some(request);
             Ok(json!({"status":"ok"}))
         })
@@ -548,6 +612,15 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             );
             assert_eq!(request.body.as_ref().unwrap()["task_id"], "linear:HUB-124");
         }
+        if name == "hubu_resolve_spend_approval" {
+            assert_eq!(
+                request.body.as_ref().unwrap(),
+                &json!({
+                    "approval_request_id": approval_request_id,
+                    "decision": "approve"
+                })
+            );
+        }
         if name == "hubu_apply_policy" {
             assert_eq!(request.body.as_ref().unwrap()["source"], "mcp");
         }
@@ -557,6 +630,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
     let mut called = false;
     let local = route_tool_call_v1(
         json!({"name":"hubu_client_approval_profile","arguments":{}}),
+        true,
         true,
         None,
         |_| {
@@ -606,6 +680,7 @@ fn approved_query_variants_match_owned_routing_contract() {
         route_tool_call_v1(
             json!({"name":name,"arguments":arguments}),
             false,
+            false,
             None,
             |request| {
                 captured = Some(request);
@@ -621,6 +696,7 @@ fn approved_query_variants_match_owned_routing_contract() {
             "name":"hubu_show_policy",
             "arguments":{"policy_id":"policy-1","agent_id":"agent-1"}
         }),
+        false,
         false,
         None,
         |_| unreachable!(),
@@ -646,6 +722,7 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
             "arguments":arguments.clone(),
             "_meta":meta.clone()
         }),
+        false,
         false,
         Some(resolved_operation()),
         |_| Ok(json!({"decision":"needs_approval","payment":null})),
@@ -685,6 +762,295 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
 }
 
 #[test]
+fn resolved_spend_dispatch_uses_supplied_identity_without_registry_persistence() {
+    let (endpoint, request, handle) = one_shot_http_server(
+        200,
+        r#"{"decision":"allow","operation_key":"hubu:operation:v1:test:fixed","message":"completed hubu:operation:v1:test:fixed"}"#,
+    );
+    let server = server_with_backends(&endpoint, None, false, None);
+    let operation = resolved_operation();
+
+    let response = super::dispatch_resolved_spend(
+        &server,
+        "hubu_authorize_spend",
+        json!({"account_id":"account-1","amount_cents":25,"reason":"resume"}),
+        &operation,
+    )
+    .unwrap();
+    let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+
+    let body: Value = serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["operation_key"], "hubu:operation:v1:test:fixed");
+    assert_eq!(body["task_id"], "linear:HUB-124");
+    assert_eq!(response["operation_handle"], operation.operation_handle);
+    assert_eq!(response["decision"], "allow");
+    assert!(!response
+        .to_string()
+        .contains("hubu:operation:v1:test:fixed"));
+    assert!(server
+        .durable_operation_status("hubu:public-operation:v1:fixed")
+        .is_err());
+}
+
+#[test]
+fn resumed_spend_expiry_requires_the_machine_readable_backend_code() {
+    for (body, expected_expired) in [
+        (
+            r#"{"error":"spend authorization rejected payment request: spend auth token is expired","error_code":"spend_auth_token_expired","retry_guidance":null}"#,
+            true,
+        ),
+        (
+            r#"{"error":"spend authorization rejected payment request: spend auth token is expired","retry_guidance":null}"#,
+            false,
+        ),
+        (
+            r#"{"error":"some other application rejection","error_code":"some_other_code"}"#,
+            false,
+        ),
+    ] {
+        let (endpoint, request, handle) = one_shot_http_server(400, body);
+        let server = server_with_backends(&endpoint, None, false, None);
+        let error = super::dispatch_resolved_spend(
+            &server,
+            "hubu_submit_spend",
+            json!({"account_id":"account-1","amount_cents":25,"reason":"resume"}),
+            &resolved_operation(),
+        )
+        .unwrap_err();
+        request.recv_timeout(Duration::from_secs(2)).unwrap();
+        handle.join().unwrap();
+        assert_eq!(super::is_expired_resume_failure(&error), expected_expired);
+    }
+}
+
+#[test]
+fn spend_approval_read_is_automatic_and_redacts_private_operation_identity() {
+    let approval_request_id = "11111111-1111-4111-8111-111111111111";
+    let (endpoint, request, handle) = one_shot_http_server(
+        200,
+        r#"{"approval_request_id":"11111111-1111-4111-8111-111111111111","status":"pending","review":{"operation_key":"private-root","reason":"review private-root","details":[{"operation_key":"private-nested","message":"do not expose private-nested"}]}}"#,
+    );
+    let server = server_with_spend_approval(
+        &endpoint,
+        None,
+        false,
+        false,
+        Some("unused-approval-capability"),
+        None,
+    );
+
+    let response = tool_call(
+        &server,
+        "hubu_get_spend_approval",
+        json!({"approval_request_id":approval_request_id}),
+        None,
+    );
+    let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+
+    assert!(raw.starts_with(
+        "GET /spend/approval?approval_request_id=11111111-1111-4111-8111-111111111111 HTTP/1.1"
+    ));
+    assert!(raw.contains("authorization: Bearer hubu-token-canary"));
+    assert!(!raw.contains("x-hubu-approval-capability"));
+    assert!(!raw.contains("unused-approval-capability"));
+    assert_eq!(
+        response["result"]["structuredContent"]["approval_request_id"],
+        approval_request_id
+    );
+    assert_eq!(response["result"]["structuredContent"]["status"], "pending");
+    let serialized = response.to_string();
+    assert!(!serialized.contains("operation_key"));
+    assert!(!serialized.contains("private-root"));
+    assert!(!serialized.contains("private-nested"));
+    assert!(serialized.contains("<private operation redacted>"));
+}
+
+#[test]
+fn spend_approval_response_identity_conflicts_fail_closed() {
+    let (endpoint, request, handle) = one_shot_http_server(
+        200,
+        r#"{"approval_request_id":"99999999-9999-4999-8999-999999999999","status":"pending","review":{}}"#,
+    );
+    let server = server_with_spend_approval(
+        &endpoint,
+        None,
+        false,
+        false,
+        Some("unused-approval-capability"),
+        None,
+    );
+
+    let response = tool_call(
+        &server,
+        "hubu_get_spend_approval",
+        json!({"approval_request_id":"88888888-8888-4888-8888-888888888888"}),
+        None,
+    );
+    request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+
+    assert_eq!(response["error"]["code"], -32000);
+    assert_eq!(
+        response["error"]["message"],
+        "Hubu returned a conflicting approval identity"
+    );
+    assert!(!response.to_string().contains("99999999"));
+}
+
+#[test]
+fn spend_approval_resolution_uses_only_its_narrow_gate_and_capability() {
+    let approval_request_id = "22222222-2222-4222-8222-222222222222";
+    let (hubu_endpoint, request, handle) = one_shot_http_server(
+        200,
+        r#"{"decision":"allow","operation_key":"private-root","auth_token_id":"private-continuation","approval":{"approval_request_id":"22222222-2222-4222-8222-222222222222","status":"approved","review":{"operation_key":"private-nested","reason":"approved private-root"}},"message":"private-nested private-continuation"}"#,
+    );
+    let gongbu_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    gongbu_listener.set_nonblocking(true).unwrap();
+    let gongbu_endpoint = format!("http://{}", gongbu_listener.local_addr().unwrap());
+    let server = server_with_spend_approval(
+        &hubu_endpoint,
+        Some(&gongbu_endpoint),
+        false,
+        true,
+        Some("approval-capability-canary"),
+        Some("reconciliation-capability-canary"),
+    );
+
+    let response = tool_call(
+        &server,
+        "hubu_resolve_spend_approval",
+        json!({"approval_request_id":approval_request_id,"decision":"approve"}),
+        None,
+    );
+    let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+
+    assert!(raw.starts_with("POST /spend/approval/resolve HTTP/1.1"));
+    assert!(raw.contains("authorization: Bearer hubu-token-canary"));
+    assert!(raw.contains("x-hubu-approval-capability: approval-capability-canary"));
+    assert!(!raw.contains("x-hubu-reconciliation-capability"));
+    assert!(!raw.contains("reconciliation-capability-canary"));
+    assert!(!raw.contains("gongbu-token-canary"));
+    let body: Value = serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(
+        body,
+        json!({"approval_request_id":approval_request_id,"decision":"approve"})
+    );
+    assert_eq!(response["result"]["structuredContent"]["decision"], "allow");
+    assert_eq!(
+        response["result"]["structuredContent"]["requires_human_approval"],
+        false
+    );
+    let serialized = response.to_string();
+    assert!(!serialized.contains("operation_key"));
+    assert!(!serialized.contains("private-root"));
+    assert!(!serialized.contains("private-nested"));
+    assert!(!serialized.contains("private-continuation"));
+    assert!(!serialized.contains("auth_token_id"));
+    assert!(serialized.contains("<private authorization redacted>"));
+    assert!(
+        matches!(gongbu_listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+    );
+}
+
+#[test]
+fn broad_client_trust_remains_compatible_with_spend_approval_resolution() {
+    let mut captured = None;
+    let response = route_tool_call_v1(
+        json!({
+            "name":"hubu_resolve_spend_approval",
+            "arguments":{
+                "approval_request_id":"33333333-3333-4333-8333-333333333333",
+                "decision":"deny"
+            }
+        }),
+        true,
+        false,
+        None,
+        |request| {
+            captured = Some(request);
+            Ok(json!({"decision":"deny"}))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        captured.unwrap().capability,
+        HubuRequestCapabilityV1::Approval
+    );
+    assert_eq!(response["structuredContent"]["decision"], "deny");
+    assert_eq!(
+        response["structuredContent"]["requires_human_approval"],
+        false
+    );
+}
+
+#[test]
+fn spend_approval_arguments_are_strict_and_fail_before_network() {
+    let cases = [
+        (
+            json!({"approval_request_id":"bad&approval"}),
+            "approval_request_id to be a safe identifier",
+        ),
+        (
+            json!({
+                "approval_request_id":"44444444-4444-4444-8444-444444444444",
+                "extra":true
+            }),
+            "accepts only its documented approval fields",
+        ),
+    ];
+    for (arguments, expected) in cases {
+        let error = route_tool_call_v1(
+            json!({"name":"hubu_get_spend_approval","arguments":arguments}),
+            false,
+            false,
+            None,
+            |_| panic!("invalid approval read must not reach the backend"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(expected));
+    }
+
+    for (arguments, expected) in [
+        (
+            json!({
+                "approval_request_id":"bad?approval",
+                "decision":"approve"
+            }),
+            "approval_request_id to be a safe identifier",
+        ),
+        (
+            json!({
+                "approval_request_id":"55555555-5555-4555-8555-555555555555",
+                "decision":"maybe"
+            }),
+            "decision approve or deny",
+        ),
+        (
+            json!({
+                "approval_request_id":"55555555-5555-4555-8555-555555555555",
+                "decision":"approve",
+                "operation_key":"model-authored"
+            }),
+            "accepts only its documented approval fields",
+        ),
+    ] {
+        let error = route_tool_call_v1(
+            json!({"name":"hubu_resolve_spend_approval","arguments":arguments}),
+            false,
+            true,
+            None,
+            |_| panic!("invalid approval resolution must not reach the backend"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(expected));
+    }
+}
+
+#[test]
 fn public_spend_results_preserve_policy_semantics_and_remove_private_identity_recursively() {
     for (decision, requires_human_approval) in
         [("allow", false), ("deny", false), ("needs_approval", true)]
@@ -695,7 +1061,7 @@ fn public_spend_results_preserve_policy_semantics_and_remove_private_identity_re
                 "operation_key": "private-root",
                 "task_id": "trusted-task",
                 "reason": "backend mentioned private-root",
-                "retry_guidance": {"operation_key":"private-nested"},
+                "retry_guidance": {"operation_key":"private"},
                 "approval": {"review":{"operation_key":"private-review"}}
             })),
             "hubu:public-operation:v1:test",
@@ -710,6 +1076,10 @@ fn public_spend_results_preserve_policy_semantics_and_remove_private_identity_re
         let serialized = response.to_string();
         assert!(!serialized.contains("operation_key"));
         assert!(!serialized.contains("private-"));
+        assert_eq!(
+            response["reason"],
+            "backend mentioned <private operation redacted>"
+        );
         assert_eq!(response["task_id"], "trusted-task");
     }
 }
@@ -973,6 +1343,65 @@ fn reconciliation_without_distinct_capability_fails_before_network() {
 }
 
 #[test]
+fn spend_approval_resolution_loads_its_capability_from_file() {
+    let (endpoint, request, handle) = one_shot_http_server(
+        200,
+        r#"{"decision":"deny","approval":{"approval_request_id":"66666666-6666-4666-8666-666666666666","status":"denied"}}"#,
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let capability_path = directory.path().join("approval-token");
+    std::fs::write(&capability_path, "file-approval-capability\n").unwrap();
+    let mut server = server_with_spend_approval(&endpoint, None, false, true, None, None);
+    server.hubu_routing.approval_capability_file = capability_path.display().to_string();
+
+    let response = tool_call(
+        &server,
+        "hubu_resolve_spend_approval",
+        json!({
+            "approval_request_id":"66666666-6666-4666-8666-666666666666",
+            "decision":"deny"
+        }),
+        None,
+    );
+    let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+
+    assert!(response.get("error").is_none());
+    assert!(raw.contains("x-hubu-approval-capability: file-approval-capability"));
+    assert!(!raw.contains("x-hubu-reconciliation-capability"));
+}
+
+#[test]
+fn spend_approval_resolution_without_capability_fails_before_network() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let mut server = server_with_spend_approval(&endpoint, None, false, true, None, None);
+    server.hubu_routing.approval_capability_file = format!(
+        "/private/tmp/hubu-164-missing-approval-token-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap()
+    );
+
+    let response = tool_call(
+        &server,
+        "hubu_resolve_spend_approval",
+        json!({
+            "approval_request_id":"77777777-7777-4777-8777-777777777777",
+            "decision":"approve"
+        }),
+        None,
+    );
+
+    assert_eq!(response["error"]["code"], -32000);
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("human spend approval requires"));
+    assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+}
+
+#[test]
 fn protected_and_unapproved_hubu_tools_fail_before_network() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -985,14 +1414,22 @@ fn protected_and_unapproved_hubu_tools_fail_before_network() {
         .as_str()
         .unwrap()
         .contains("trusted MCP client approval gate"));
-    for name in [
-        "hubu_get_spend_approval",
+    let approval = tool_call(
+        &server,
         "hubu_resolve_spend_approval",
-        "hubu_not_a_tool",
-    ] {
-        let rejected = tool_call(&server, name, json!({}), None);
-        assert_eq!(rejected["error"]["code"], -32602, "{name}");
-    }
+        json!({
+            "approval_request_id":"88888888-8888-4888-8888-888888888888",
+            "decision":"approve"
+        }),
+        None,
+    );
+    assert_eq!(approval["error"]["code"], -32000);
+    assert!(approval["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("trusted spend-approval client gate"));
+    let unknown = tool_call(&server, "hubu_not_a_tool", json!({}), None);
+    assert_eq!(unknown["error"]["code"], -32602);
     assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
 }
 
@@ -1043,6 +1480,42 @@ fn forwarded_application_errors_preserve_hubu_contract_without_secrets() {
     );
     let serialized = response.to_string();
     assert!(!serialized.contains("hubu-token-canary"));
+    assert!(!serialized.contains(&endpoint));
+}
+
+#[test]
+fn approval_application_errors_cannot_echo_any_configured_secret() {
+    let (endpoint, _request, handle) = one_shot_http_server(
+        403,
+        r#"{"error":"bearer hubu-token-canary approval approval-capability-canary"}"#,
+    );
+    let server = server_with_spend_approval(
+        &endpoint,
+        None,
+        false,
+        true,
+        Some("approval-capability-canary"),
+        None,
+    );
+    let response = tool_call(
+        &server,
+        "hubu_resolve_spend_approval",
+        json!({
+            "approval_request_id":"99999999-9999-4999-8999-999999999999",
+            "decision":"deny"
+        }),
+        None,
+    );
+    handle.join().unwrap();
+
+    assert_eq!(response["error"]["code"], -32000);
+    assert_eq!(
+        response["error"]["message"],
+        "Hubu server returned HTTP 403: bearer <redacted> approval <redacted>"
+    );
+    let serialized = response.to_string();
+    assert!(!serialized.contains("hubu-token-canary"));
+    assert!(!serialized.contains("approval-capability-canary"));
     assert!(!serialized.contains(&endpoint));
 }
 
