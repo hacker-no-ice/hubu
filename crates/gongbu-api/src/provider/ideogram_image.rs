@@ -540,6 +540,7 @@ mod tests {
         response: Arc<Mutex<Option<std::result::Result<TransportResponse, String>>>>,
         calls: Arc<Mutex<u32>>,
         artifact: std::result::Result<Vec<u8>, String>,
+        expected_body: Value,
     }
     impl IdeogramTransport for FixtureTransport {
         fn generate(
@@ -555,7 +556,7 @@ mod tests {
                 "https://api.ideogram.ai/v1/ideogram-v3/generate"
             );
             assert_eq!(key, b"secret-canary");
-            assert_eq!(body, &json!({"prompt":"cat"}));
+            assert_eq!(body, &self.expected_body);
             *self.calls.lock().unwrap() += 1;
             self.response
                 .lock()
@@ -618,6 +619,7 @@ mod tests {
             input_tokens: None,
             max_output_tokens: None,
             image_size: None,
+            output_dimensions: None,
         }
     }
     fn adapter(
@@ -635,6 +637,7 @@ mod tests {
             })))),
             calls: calls.clone(),
             artifact,
+            expected_body: json!({"prompt":"cat"}),
         };
         (
             IdeogramImageAdapter::new(config(), "ideogram-v3".into(), transport).unwrap(),
@@ -723,6 +726,34 @@ mod tests {
         assert_eq!(outcome.usage.unwrap().images, Some(1));
         assert_eq!(outcome.actual_vendor_cost, None);
         assert_eq!(outcome.artifacts[0].bytes, png());
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn normalized_resolution_still_maps_to_ideogram_image_size() {
+        let calls = Arc::new(Mutex::new(0));
+        let transport = FixtureTransport {
+            response: Arc::new(Mutex::new(Some(Ok(TransportResponse {
+                status: 200,
+                request_id: Some("request-1".into()),
+                operation_id: Some("generation-1".into()),
+                body: json!({"data":[{"url":"https://ideogram.ai/image.png"}]}),
+            })))),
+            calls: calls.clone(),
+            artifact: Ok(png()),
+            expected_body: json!({"prompt":"cat","image_size":"2k"}),
+        };
+        let adapter = IdeogramImageAdapter::new(config(), "ideogram-v3".into(), transport).unwrap();
+        let mut sized = request();
+        sized.image_size = Some("2k".into());
+        adapter
+            .invoke(
+                &sized,
+                &json!({"prompt":"cat","image_size":"2k"}),
+                &secret_for_test("secret-canary"),
+                None,
+            )
+            .unwrap();
         assert_eq!(*calls.lock().unwrap(), 1);
     }
 
@@ -856,6 +887,7 @@ mod tests {
             response: Arc::new(Mutex::new(Some(Err("timeout".into())))),
             calls: calls.clone(),
             artifact: Ok(png()),
+            expected_body: json!({"prompt":"cat"}),
         };
         let timeout_adapter =
             IdeogramImageAdapter::new(config(), "ideogram-v3".into(), transport).unwrap();

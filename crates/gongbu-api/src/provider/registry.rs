@@ -2,7 +2,10 @@
 
 use super::{
     contract::{ContractError, PricingCatalog, ProviderAdapter},
-    flux2_api::{Flux2ApiAdapter, ADAPTER_ID as FLUX_ADAPTER_ID, PROVIDER_ID as FLUX_PROVIDER_ID},
+    flux2_api::{
+        Flux2ApiAdapter, ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID,
+        PROVIDER_ID as FLUX_PROVIDER_ID, SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
+    },
     gemini_developer_image::{
         GeminiDeveloperImageAdapter, ADAPTER_ID as GEMINI_DEVELOPER_ADAPTER_ID,
         PROVIDER_ID as GEMINI_DEVELOPER_PROVIDER_ID,
@@ -201,6 +204,15 @@ impl ValidatedProviderCatalog {
             if !pricing.supports_target(&target.target_key()) {
                 return Err(RegistryError::MissingPricing(canonical));
             }
+            if target.provider == FLUX_PROVIDER_ID
+                && target.adapter == FLUX_ADAPTER_ID
+                && target.model == FLUX_MODEL_ID
+                && !FLUX_SUPPORTED_PRESETS
+                    .iter()
+                    .all(|preset| pricing.supports_image_size(&target.target_key(), preset))
+            {
+                return Err(RegistryError::MissingPricing(canonical));
+            }
             let adapter = factory(target)
                 .map_err(|_| RegistryError::BindingFailed(target.target_key().canonical_name()))?;
             if adapter.adapter_id() != target.adapter {
@@ -380,7 +392,19 @@ mod tests {
                 {"provider_config_version":"f-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://flux.example","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["flux.example"]}}}
             ]
         })).unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f","provider":"flux","model":"flux-2-pro","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]}]}"#).unwrap();
+        let incomplete_pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2-incomplete","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":2,"rate_denominator":1}]}]}"#).unwrap();
+        assert_eq!(
+            ValidatedProviderCatalog::bind(
+                targets.clone(),
+                incomplete_pricing,
+                &ProviderRegistry::production(&ArtifactLimits::default()),
+            )
+            .err(),
+            Some(RegistryError::MissingPricing(
+                "image_generation/flux/flux2_api/flux-2-pro".into()
+            ))
+        );
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":2,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":4,"rate_denominator":1}]}]}"#).unwrap();
         let catalog = ValidatedProviderCatalog::bind(
             targets,
             pricing,

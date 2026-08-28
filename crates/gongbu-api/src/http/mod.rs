@@ -11,7 +11,8 @@ use crate::{
         HubuAuthorizationSnapshot, HubuTokenReference, Repository,
     },
     provider::{
-        contract::{ContractError, NormalizedRequest, PricingSnapshot},
+        contract::{ContractError, NormalizedRequest, OutputDimensions, PricingSnapshot},
+        flux2_api,
         registry::ValidatedProviderCatalog,
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, TargetKey},
@@ -400,12 +401,17 @@ impl Api {
     ) -> Result<HttpResponse, ApiError> {
         validate_create(&request)?;
         let spend_auth_token_id = request.spend_auth_token_id.clone();
-        let normalized_input = canonicalize(&request.input);
-        match self
+        let submitted_input = canonicalize(&request.input);
+        let existing = match self
             .repository
             .get_execution_by_spend_auth_token(&spend_auth_token_id)
         {
-            Ok(existing) if immutable_request_matches(&existing, &request, &normalized_input) => {
+            Ok(existing) => Some(existing),
+            Err(PersistenceError::NotFound) => None,
+            Err(error) => return Err(map_persistence(error)),
+        };
+        if let Some(existing) = existing.as_ref() {
+            if immutable_request_matches(existing, &request, &submitted_input) {
                 if existing.status == "pending" {
                     self.scheduler
                         .schedule(&existing.execution_id)
@@ -413,12 +419,29 @@ impl Api {
                 }
                 return Ok(json_response(
                     200,
-                    &execution_response(&self.repository, existing, response_schema_version)?,
+                    &execution_response(
+                        &self.repository,
+                        existing.clone(),
+                        response_schema_version,
+                    )?,
                 ));
             }
-            Ok(_) => return Err(ApiError::conflict()),
-            Err(PersistenceError::NotFound) => {}
-            Err(error) => return Err(map_persistence(error)),
+        }
+        let (normalized_input, output_dimensions) =
+            normalize_provider_input(&request, submitted_input)?;
+        if let Some(existing) = existing {
+            if !immutable_request_matches(&existing, &request, &normalized_input) {
+                return Err(ApiError::conflict());
+            }
+            if existing.status == "pending" {
+                self.scheduler
+                    .schedule(&existing.execution_id)
+                    .map_err(|_| ApiError::internal())?;
+            }
+            return Ok(json_response(
+                200,
+                &execution_response(&self.repository, existing, response_schema_version)?,
+            ));
         }
         let target_key = TargetKey::new(
             &request.workload_type,
@@ -451,6 +474,7 @@ impl Api {
                 .get("image_size")
                 .and_then(|value| value.as_str())
                 .map(str::to_owned),
+            output_dimensions,
         };
         let pricing_snapshot = self
             .providers
@@ -676,6 +700,21 @@ impl Api {
             body: retrieved.bytes,
         })
     }
+}
+
+fn normalize_provider_input(
+    request: &CreateExecutionRequest,
+    mut input: Value,
+) -> Result<(Value, Option<OutputDimensions>), ApiError> {
+    let output_dimensions = if request.provider == flux2_api::PROVIDER_ID
+        && request.adapter == flux2_api::ADAPTER_ID
+        && request.model == flux2_api::MODEL_ID
+    {
+        Some(flux2_api::bind_output_dimensions(&mut input).map_err(|_| ApiError::validation())?)
+    } else {
+        None
+    };
+    Ok((canonicalize(&input), output_dimensions))
 }
 
 fn input_quantity(input: &Value, field: &str) -> Result<Option<i64>, ApiError> {
@@ -1185,6 +1224,9 @@ mod tests {
             } else if spend_auth_token_id.starts_with("hold-amount-mismatch") {
                 response.budget_hold.amount_cents += 1;
             }
+            if spend_auth_token_id.starts_with("flux-") {
+                response.execution_scope = for_target("flux", "flux2_api");
+            }
             Ok(response)
         }
     }
@@ -1251,6 +1293,83 @@ mod tests {
             resolver,
             _root: root,
         }
+    }
+
+    fn flux_catalog(catalog_version: &str) -> ValidatedProviderCatalog {
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version":2,
+            "provider_configs":[{
+                "provider_config_version":"flux-v1",
+                "workload_type":"image_generation",
+                "provider":"flux",
+                "adapter":"flux2_api",
+                "model":"flux-2-pro",
+                "secret_service":"gongbu.flux",
+                "secret_account":"test",
+                "active":true,
+                "execution_enabled":true,
+                "settings":{"type":"flux2_api","config":{
+                    "endpoint":"https://api.bfl.ai",
+                    "api_version":"v1",
+                    "timeout_ms":1000,
+                    "poll_interval_ms":10,
+                    "approved_artifact_hosts":["cdn.bfl.ai"]
+                }}
+            }]
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            serde_json::to_string(&json!({
+                "schema_version":2,
+                "catalog_version":catalog_version,
+                "rules":[
+                    {"rule_id":format!("flux-1k-{catalog_version}"),"provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1}]},
+                    {"rule_id":format!("flux-2k-{catalog_version}"),"provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1}]},
+                    {"rule_id":format!("flux-4k-{catalog_version}"),"provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1}]}
+                ]
+            }))
+            .unwrap()
+            .as_bytes(),
+        )
+        .unwrap();
+        ValidatedProviderCatalog::bind(
+            targets,
+            pricing,
+            &ProviderRegistry::production(&ArtifactLimits::default()),
+        )
+        .unwrap()
+    }
+
+    fn flux_request(operation_key: &str, preset: Option<&str>, options: Option<Value>) -> Value {
+        let mut input = json!({"prompt":"cat","image_count":1});
+        if let Some(preset) = preset {
+            input["image_size"] = json!(preset);
+        }
+        if let Some(options) = options {
+            input["options"] = options;
+        }
+        json!({
+            "schema_version":2,
+            "spend_auth_token_id":operation_key,
+            "input":input,
+            "input_schema_version":1,
+            "workload_type":"image_generation",
+            "provider":"flux",
+            "adapter":"flux2_api",
+            "model":"flux-2-pro"
+        })
+    }
+
+    fn flux_api(fixture: &Fixture, catalog_version: &str) -> Api {
+        Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            flux_catalog(catalog_version),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        )
     }
 
     #[test]
@@ -2035,6 +2154,152 @@ mod tests {
             .get_execution_by_spend_auth_token(token)
             .is_err());
         assert!(fixture.scheduler.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn flux_admission_freezes_every_certified_preset_before_authorization() {
+        let fixture = fixture();
+        let api = flux_api(&fixture, "flux-prices-v1");
+        for (preset, width, height) in [("1k", 1024, 1024), ("2k", 1920, 1088), ("4k", 2048, 2048)]
+        {
+            let token = format!("flux-preset-{preset}");
+            let response = api.handle(
+                "POST",
+                "/v2/executions",
+                Some(&fixture.caller),
+                &serde_json::to_vec(&flux_request(&token, Some(preset), None)).unwrap(),
+            );
+            assert_eq!(response.status, 200, "{preset}");
+            let stored = fixture
+                .repository
+                .get_execution_by_spend_auth_token(&token)
+                .unwrap();
+            assert_eq!(stored.normalized_input["image_size"], preset);
+            assert_eq!(stored.normalized_input["options"]["width"], width);
+            assert_eq!(stored.normalized_input["options"]["height"], height);
+            let snapshot: PricingSnapshot =
+                serde_json::from_value(stored.pricing_snapshot).unwrap();
+            assert_eq!(
+                snapshot
+                    .selector
+                    .as_ref()
+                    .map(|selector| selector.image_size.as_str()),
+                Some(preset)
+            );
+            assert_eq!(
+                snapshot.output_dimensions,
+                Some(OutputDimensions { width, height })
+            );
+            assert_eq!(
+                snapshot.pricing_rule_id,
+                format!("flux-{preset}-flux-prices-v1")
+            );
+        }
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn flux_dimension_rejections_have_no_authorization_or_durable_side_effects() {
+        let fixture = fixture();
+        let api = flux_api(&fixture, "flux-prices-v1");
+        let cases = [
+            ("flux-missing-preset", None, None),
+            ("flux-unsupported-preset", Some("8k"), None),
+            ("flux-width-only", Some("1k"), Some(json!({"width":1024}))),
+            ("flux-height-only", Some("1k"), Some(json!({"height":1024}))),
+            (
+                "flux-conflicting-preset",
+                Some("1k"),
+                Some(json!({"width":2048,"height":2048})),
+            ),
+            (
+                "flux-arbitrary-dimensions",
+                Some("1k"),
+                Some(json!({"width":1024,"height":768})),
+            ),
+            (
+                "flux-invalid-multiple",
+                Some("1k"),
+                Some(json!({"width":1000,"height":1024})),
+            ),
+            (
+                "flux-pixel-overflow",
+                Some("4k"),
+                Some(json!({"width":2064,"height":2048})),
+            ),
+        ];
+        for (token, preset, options) in cases {
+            let response = api.handle(
+                "POST",
+                "/v2/executions",
+                Some(&fixture.caller),
+                &serde_json::to_vec(&flux_request(token, preset, options)).unwrap(),
+            );
+            assert_eq!(response.status, 400, "{token}");
+            assert!(fixture
+                .repository
+                .get_execution_by_spend_auth_token(token)
+                .is_err());
+        }
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn flux_replay_survives_repository_restart_and_catalog_rotation() {
+        let fixture = fixture();
+        let token = "flux-restart-replay";
+        let submitted = flux_request(token, Some("2k"), None);
+        let created = execution(&flux_api(&fixture, "flux-prices-v1").handle(
+            "POST",
+            "/v2/executions",
+            Some(&fixture.caller),
+            &serde_json::to_vec(&submitted).unwrap(),
+        ));
+        let before = fixture
+            .repository
+            .get_execution_by_spend_auth_token(token)
+            .unwrap();
+
+        let reopened = Repository::open(
+            fixture._root.path().join("gongbu.sqlite3"),
+            crate::redaction::Redactor::default(),
+        )
+        .unwrap();
+        let restarted_artifacts = ArtifactService::new(
+            reopened.clone(),
+            LocalFsStorage::new(fixture._root.path()),
+            ArtifactLimits::default(),
+        );
+        let restarted = Api::new_with_authorization_resolver(
+            reopened.clone(),
+            restarted_artifacts,
+            flux_catalog("flux-prices-v2"),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-06T00:00:00Z".into(),
+        );
+        let replay = restarted.handle(
+            "POST",
+            "/v2/executions",
+            Some(&fixture.caller),
+            &serde_json::to_vec(&submitted).unwrap(),
+        );
+        assert_eq!(replay.status, 200);
+        assert_eq!(execution(&replay).execution_id, created.execution_id);
+        let after = reopened.get_execution_by_spend_auth_token(token).unwrap();
+        assert_eq!(after.normalized_input, before.normalized_input);
+        assert_eq!(after.pricing_snapshot, before.pricing_snapshot);
+        assert_eq!(after.input_hash, before.input_hash);
+        assert_eq!(after.normalized_input["image_size"], "2k");
+        assert_eq!(after.normalized_input["options"]["width"], 1920);
+        assert_eq!(after.normalized_input["options"]["height"], 1088);
+        let snapshot: PricingSnapshot = serde_json::from_value(after.pricing_snapshot).unwrap();
+        assert_eq!(snapshot.catalog_version, "flux-prices-v1");
+        assert_eq!(snapshot.pricing_rule_id, "flux-2k-flux-prices-v1");
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -488,6 +488,7 @@ mod tests {
                 input_tokens: None,
                 max_output_tokens: None,
                 image_size: input["image_size"].as_str().map(str::to_owned),
+                output_dimensions: None,
             })
             .unwrap();
 

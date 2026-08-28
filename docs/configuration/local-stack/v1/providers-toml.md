@@ -225,6 +225,18 @@ A selector-qualified rule must contain exactly one `image` price component. Defi
 
 **Defined by the provider's billable resolution tier and the normalized request contract.** Allowed current values are `1k`, `2k`, and `4k` after normalization. Do not use pixel dimensions unless the provider contract maps them to one of these selectors.
 
+For the `flux2_api` adapter, the only supported target is BFL's non-preview `flux-2-pro` model from the [official FLUX.2 overview](https://docs.bfl.ai/flux_2/flux2_overview). Its intentionally small certified profile maps Gongbu's normalized selectors to exact BFL dimensions:
+
+| Gongbu selector | Exact BFL output |
+| --- | --- |
+| `1k` | `1024` × `1024` |
+| `2k` | `1920` × `1088` (landscape) |
+| `4k` | `2048` × `2048` |
+
+BFL does not name these dimension pairs `1k`, `2k`, and `4k`; they are Hubu/Gongbu preset aliases. Do not add arbitrary dimensions or automatic resolution selection. The adapter enforces BFL's [official constraints](https://help.bfl.ai/articles/8916739058-what-aspect-ratios-and-output-dimensions-are-supported): at least `64` × `64`, each dimension a multiple of `16`, and no more than the 4 MP ceiling represented by `2048` × `2048`.
+
+An enabled FLUX target must have one selector-qualified, operator-verified pricing rule for each of the three certified presets. A flat rule or partial profile is not enough. Gongbu chooses the matching rule and freezes its selector together with the exact dimensions before Hubu authorization resolution or claim. The provider request uses only the top-level integer `width` and `height` fields in BFL's [`flux-2-pro` request schema](https://docs.bfl.ai/api-reference/models/generate-or-edit-an-image-with-flux2-%5Bpro%5D); Gongbu's generic `image_size` selector is durable pricing and replay evidence and is never sent to BFL.
+
 ### `pricing_rules.components`
 
 Required non-empty array of price component tables. Each unit may appear at most once in a rule. Multi-component rules represent pricing such as one image charge plus input/output token charges.

@@ -8,8 +8,8 @@
 use super::{
     contract::{
         canonical_image_media_type, ActualVendorCost, AdapterCapabilities, AdapterOutcome,
-        ContractError, NormalizedArtifact, NormalizedRequest, NormalizedUsage, ProviderAdapter,
-        ProviderFailure, ProviderPhase, Result, RetryPolicy,
+        ContractError, NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutputDimensions,
+        ProviderAdapter, ProviderFailure, ProviderPhase, Result, RetryPolicy,
     },
     http_kernel::{
         provider_request_id, read_bounded, shared_client, validate_https_origin,
@@ -27,6 +27,11 @@ use std::{collections::BTreeMap, error::Error as StdError, fmt, io::Read, thread
 
 pub const PROVIDER_ID: &str = "flux";
 pub const ADAPTER_ID: &str = "flux2_api";
+pub const MODEL_ID: &str = "flux-2-pro";
+pub const MIN_DIMENSION: u32 = 64;
+pub const DIMENSION_MULTIPLE: u32 = 16;
+pub const MAX_OUTPUT_PIXELS: u64 = 2048 * 2048;
+pub const SUPPORTED_PRESETS: &[&str] = &["1k", "2k", "4k"];
 #[cfg(test)]
 const MAX_ARTIFACT_BYTES: usize = crate::artifact::DEFAULT_MAX_ENCODED_BYTES as usize;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -270,7 +275,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             // Header support is not evidence that the vendor enforces idempotency.
             vendor_enforced_idempotency: false,
         })?;
-        if model.trim().is_empty()
+        if model != MODEL_ID
             || config.timeout_ms == 0
             || config.poll_interval_ms == 0
             || config.max_retries != 0
@@ -322,18 +327,17 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             .map(str::trim)
             .filter(|p| !p.is_empty() && p.len() <= 32_000)
             .ok_or_else(|| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
-        let mut body = json!({"prompt": prompt});
-        if let Some(size) = &request.image_size {
-            body["image_size"] = json!(size);
-        }
+        let dimensions = request
+            .output_dimensions
+            .as_ref()
+            .ok_or_else(|| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
+        let mut body = json!({
+            "prompt": prompt,
+            "width": dimensions.width,
+            "height": dimensions.height,
+        });
         let options = input.get("options").and_then(Value::as_object);
-        for field in [
-            "width",
-            "height",
-            "seed",
-            "safety_tolerance",
-            "output_format",
-        ] {
+        for field in ["seed", "safety_tolerance", "output_format"] {
             if let Some(value) = options.and_then(|options| options.get(field)) {
                 body[field] = value.clone();
             }
@@ -576,9 +580,24 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
     fn validate_request(&self, request: &NormalizedRequest) -> Result<()> {
         request.validate()?;
         if request.provider != PROVIDER_ID
+            || request.model != MODEL_ID
             || request.model != self.model
             || request.image_count != Some(1)
         {
+            return Err(provider_error("invalid_request"));
+        }
+        let expected = profile_dimensions(
+            request
+                .image_size
+                .as_deref()
+                .ok_or_else(|| provider_error("invalid_request"))?,
+        )?;
+        let dimensions = request
+            .output_dimensions
+            .as_ref()
+            .ok_or_else(|| provider_error("invalid_request"))?;
+        validate_dimensions(dimensions)?;
+        if dimensions != &expected {
             return Err(provider_error("invalid_request"));
         }
         Ok(())
@@ -586,7 +605,7 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
     fn preflight_input(&self, request: &NormalizedRequest, input: &Value) -> Result<()> {
         self.validate_request(request)?;
         crate::provider_contract::validate_image_input(request, input)?;
-        validate_flux_options(input)
+        validate_flux_options(request, input)
     }
     fn invoke(
         &self,
@@ -609,9 +628,105 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
     }
 }
 
-fn validate_flux_options(input: &Value) -> Result<()> {
+pub(crate) fn bind_output_dimensions(input: &mut Value) -> Result<OutputDimensions> {
+    let preset = input
+        .get("image_size")
+        .and_then(Value::as_str)
+        .ok_or_else(|| provider_error("invalid_request"))?;
+    let expected = profile_dimensions(preset)?;
+    let input = input
+        .as_object_mut()
+        .ok_or_else(|| provider_error("invalid_request"))?;
+    let options = input.entry("options").or_insert_with(|| json!({}));
+    if options.is_null() {
+        *options = json!({});
+    }
+    let options = options
+        .as_object_mut()
+        .ok_or_else(|| provider_error("invalid_request"))?;
+    let supplied_width = supplied_dimension(options, "width")?;
+    let supplied_height = supplied_dimension(options, "height")?;
+    match (supplied_width, supplied_height) {
+        (None, None) => {}
+        (Some(width), Some(height)) => {
+            let supplied = OutputDimensions { width, height };
+            validate_dimensions(&supplied)?;
+            if supplied != expected {
+                return Err(provider_error("invalid_request"));
+            }
+        }
+        _ => return Err(provider_error("invalid_request")),
+    }
+    options.insert("width".into(), json!(expected.width));
+    options.insert("height".into(), json!(expected.height));
+    Ok(expected)
+}
+
+/// Reconstruct the certified dimensions for a pre-HUB-168 frozen request.
+///
+/// Legacy schema-v2 snapshots do not contain `output_dimensions`, so recovery
+/// uses their frozen selector and a cloned persisted input. Any explicit
+/// dimensions still have to be complete and exactly match the certified
+/// mapping; the caller never rewrites the durable legacy evidence.
+pub(crate) fn bind_legacy_output_dimensions(
+    frozen_preset: &str,
+    input: &mut Value,
+) -> Result<OutputDimensions> {
+    if input.get("image_size").and_then(Value::as_str) != Some(frozen_preset) {
+        return Err(provider_error("invalid_request"));
+    }
+    bind_output_dimensions(input)
+}
+
+fn supplied_dimension(
+    options: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<u32>> {
+    match options.get(field) {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| provider_error("invalid_request")),
+    }
+}
+
+pub(crate) fn profile_dimensions(preset: &str) -> Result<OutputDimensions> {
+    let dimensions = match preset {
+        "1k" => OutputDimensions {
+            width: 1024,
+            height: 1024,
+        },
+        "2k" => OutputDimensions {
+            width: 1920,
+            height: 1088,
+        },
+        "4k" => OutputDimensions {
+            width: 2048,
+            height: 2048,
+        },
+        _ => return Err(provider_error("invalid_request")),
+    };
+    validate_dimensions(&dimensions)?;
+    Ok(dimensions)
+}
+
+pub(crate) fn validate_dimensions(dimensions: &OutputDimensions) -> Result<()> {
+    if dimensions.width < MIN_DIMENSION
+        || dimensions.height < MIN_DIMENSION
+        || !dimensions.width.is_multiple_of(DIMENSION_MULTIPLE)
+        || !dimensions.height.is_multiple_of(DIMENSION_MULTIPLE)
+        || u64::from(dimensions.width) * u64::from(dimensions.height) > MAX_OUTPUT_PIXELS
+    {
+        return Err(provider_error("invalid_request"));
+    }
+    Ok(())
+}
+
+fn validate_flux_options(request: &NormalizedRequest, input: &Value) -> Result<()> {
     let Some(options) = input.get("options") else {
-        return Ok(());
+        return Err(provider_error("invalid_request"));
     };
     let options = options
         .as_object()
@@ -624,13 +739,15 @@ fn validate_flux_options(input: &Value) -> Result<()> {
     }) {
         return Err(provider_error("invalid_request"));
     }
-    for dimension in ["width", "height"] {
-        if options
-            .get(dimension)
-            .is_some_and(|value| !matches!(value.as_u64(), Some(64..=4096)))
-        {
-            return Err(provider_error("invalid_request"));
-        }
+    let dimensions = OutputDimensions {
+        width: supplied_dimension(options, "width")?
+            .ok_or_else(|| provider_error("invalid_request"))?,
+        height: supplied_dimension(options, "height")?
+            .ok_or_else(|| provider_error("invalid_request"))?,
+    };
+    validate_dimensions(&dimensions)?;
+    if request.output_dimensions.as_ref() != Some(&dimensions) {
+        return Err(provider_error("invalid_request"));
     }
     if options
         .get("seed")
@@ -781,6 +898,7 @@ mod tests {
             assert_eq!(credential, b"secret-canary");
             assert_eq!(idempotency, Some(("x-idempotency-key", "opaque-key")));
             assert_eq!(body["prompt"], "cat");
+            assert!(body.get("image_size").is_none());
             if let Some(expected) = &self.expected_options {
                 for field in [
                     "width",
@@ -845,14 +963,29 @@ mod tests {
         }
     }
     fn request() -> NormalizedRequest {
+        request_for("1k")
+    }
+    fn request_for(preset: &str) -> NormalizedRequest {
         NormalizedRequest {
             provider: PROVIDER_ID.into(),
-            model: "flux-2-pro".into(),
+            model: MODEL_ID.into(),
             image_count: Some(1),
             input_tokens: None,
             max_output_tokens: None,
-            image_size: None,
+            image_size: Some(preset.into()),
+            output_dimensions: Some(profile_dimensions(preset).unwrap()),
         }
+    }
+    fn input() -> Value {
+        input_for("1k")
+    }
+    fn input_for(preset: &str) -> Value {
+        let dimensions = profile_dimensions(preset).unwrap();
+        json!({
+            "prompt":"cat",
+            "image_size":preset,
+            "options":{"width":dimensions.width,"height":dimensions.height}
+        })
     }
     fn fixture(polls: Vec<Value>) -> (Flux2ApiAdapter<Fixture>, Arc<Mutex<u32>>) {
         let submit = Arc::new(Mutex::new(0));
@@ -933,7 +1066,7 @@ mod tests {
             }
             let result = adapter.invoke(
                 &conformance_request,
-                &json!({"prompt":"cat"}),
+                &input(),
                 &secret_for_test("secret-canary"),
                 (!matches!(case, Case::UnsafeRetry)).then_some("opaque-key"),
             );
@@ -964,7 +1097,7 @@ mod tests {
         let outcome = adapter
             .invoke(
                 &request(),
-                &json!({"prompt":"cat"}),
+                &input(),
                 &secret_for_test("secret-canary"),
                 Some("opaque-key"),
             )
@@ -987,7 +1120,7 @@ mod tests {
         let outcome = adapter
             .invoke(
                 &request(),
-                &json!({"prompt":"cat"}),
+                &input(),
                 &secret_for_test("secret-canary"),
                 Some("opaque-key"),
             )
@@ -1023,7 +1156,7 @@ mod tests {
             let outcome = adapter
                 .invoke(
                     &request(),
-                    &json!({"prompt":"cat"}),
+                    &input(),
                     &secret_for_test("secret-canary"),
                     Some("opaque-key"),
                 )
@@ -1056,11 +1189,176 @@ mod tests {
             assert_eq!(*submits.lock().unwrap(), 0);
         }
     }
+
     #[test]
-    fn maps_v1_options_and_rejects_terminal_submission_without_polling() {
+    fn certified_profile_is_literal_complete_and_within_bfl_constraints() {
+        let cases = [("1k", 1024, 1024), ("2k", 1920, 1088), ("4k", 2048, 2048)];
+        assert_eq!(SUPPORTED_PRESETS, cases.map(|(preset, _, _)| preset));
+        for (preset, width, height) in cases {
+            let expected = OutputDimensions { width, height };
+            assert_eq!(profile_dimensions(preset).unwrap(), expected);
+            validate_dimensions(&expected).unwrap();
+
+            let mut input = json!({"prompt":"cat","image_size":preset});
+            assert_eq!(bind_output_dimensions(&mut input).unwrap(), expected);
+            assert_eq!(input["options"]["width"], width);
+            assert_eq!(input["options"]["height"], height);
+        }
+        assert!(profile_dimensions("preview").is_err());
+    }
+
+    #[test]
+    fn dimension_constraints_reject_minimum_multiple_and_pixel_violations() {
+        for dimensions in [
+            OutputDimensions {
+                width: MIN_DIMENSION - 1,
+                height: MIN_DIMENSION,
+            },
+            OutputDimensions {
+                width: MIN_DIMENSION,
+                height: MIN_DIMENSION - 1,
+            },
+            OutputDimensions {
+                width: 1024,
+                height: 1000,
+            },
+            OutputDimensions {
+                width: 2064,
+                height: 2048,
+            },
+        ] {
+            assert!(validate_dimensions(&dimensions).is_err());
+        }
+        validate_dimensions(&OutputDimensions {
+            width: 2048,
+            height: 2048,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn binding_rejects_missing_partial_conflicting_and_arbitrary_dimensions() {
+        for mut input in [
+            json!({"prompt":"cat"}),
+            json!({"prompt":"cat","image_size":"preview"}),
+            json!({"prompt":"cat","image_size":"1k","options":{"width":1024}}),
+            json!({"prompt":"cat","image_size":"1k","options":{"height":1024}}),
+            json!({"prompt":"cat","image_size":"1k","options":{"width":1024,"height":1008}}),
+            json!({"prompt":"cat","image_size":"1k","options":{"width":2048,"height":2048}}),
+            json!({"prompt":"cat","image_size":"4k","options":{"width":2064,"height":2048}}),
+        ] {
+            assert!(bind_output_dimensions(&mut input).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_recovery_derives_only_the_certified_mapping() {
+        for (preset, width, height) in [("1k", 1024, 1024), ("2k", 1920, 1088), ("4k", 2048, 2048)]
+        {
+            for mut input in [
+                json!({"prompt":"cat","image_size":preset}),
+                json!({"prompt":"cat","image_size":preset,"options":{"width":width,"height":height}}),
+            ] {
+                assert_eq!(
+                    bind_legacy_output_dimensions(preset, &mut input).unwrap(),
+                    OutputDimensions { width, height }
+                );
+                assert_eq!(input["options"]["width"], width);
+                assert_eq!(input["options"]["height"], height);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_recovery_rejects_selector_and_dimension_tampering() {
+        for (frozen_preset, mut input) in [
+            ("1k", json!({"prompt":"cat"})),
+            ("1k", json!({"prompt":"cat","image_size":"2k"})),
+            ("preview", json!({"prompt":"cat","image_size":"preview"})),
+            (
+                "1k",
+                json!({"prompt":"cat","image_size":"1k","options":{"width":1024}}),
+            ),
+            (
+                "1k",
+                json!({"prompt":"cat","image_size":"1k","options":{"height":1024}}),
+            ),
+            (
+                "1k",
+                json!({"prompt":"cat","image_size":"1k","options":{"width":1024,"height":1008}}),
+            ),
+            (
+                "1k",
+                json!({"prompt":"cat","image_size":"1k","options":{"width":2048,"height":2048}}),
+            ),
+            (
+                "4k",
+                json!({"prompt":"cat","image_size":"4k","options":{"width":2064,"height":2048}}),
+            ),
+        ] {
+            assert!(bind_legacy_output_dimensions(frozen_preset, &mut input).is_err());
+        }
+    }
+
+    #[test]
+    fn every_certified_preset_transmits_exact_dimensions_only() {
+        for (preset, width, height) in [("1k", 1024, 1024), ("2k", 1920, 1088), ("4k", 2048, 2048)]
+        {
+            let submits = Arc::new(Mutex::new(0));
+            let adapter = Flux2ApiAdapter::new(
+                config(),
+                MODEL_ID.into(),
+                Fixture {
+                    submit: submits.clone(),
+                    polls: Arc::new(Mutex::new(vec![])),
+                    artifact: vec![],
+                    fail_submit: None,
+                    fail_poll: None,
+                    submit_body: Some(json!({"id":"op-rejected","status":"Rejected"})),
+                    expected_options: Some(json!({"width":width,"height":height})),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                adapter
+                    .invoke(
+                        &request_for(preset),
+                        &input_for(preset),
+                        &secret_for_test("secret-canary"),
+                        Some("opaque-key"),
+                    )
+                    .unwrap_err()
+                    .code,
+                "provider_rejected"
+            );
+            assert_eq!(*submits.lock().unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn adapter_pins_the_non_preview_model() {
+        let submit = Arc::new(Mutex::new(0));
+        assert!(Flux2ApiAdapter::new(
+            config(),
+            "flux-2-pro-preview".into(),
+            Fixture {
+                submit: submit.clone(),
+                polls: Arc::new(Mutex::new(vec![])),
+                artifact: vec![],
+                fail_submit: None,
+                fail_poll: None,
+                submit_body: None,
+                expected_options: None,
+            },
+        )
+        .is_err());
+        assert_eq!(*submit.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn transmits_frozen_dimensions_and_supported_options_without_image_size() {
         let submits = Arc::new(Mutex::new(0));
-        let options =
-            json!({"width":1024,"height":768,"seed":42,"safety_tolerance":2,"output_format":"png"});
+        let options = json!({"width":1024,"height":1024,"seed":42,"safety_tolerance":2,"output_format":"png"});
         let adapter = Flux2ApiAdapter::new(
             config(),
             "flux-2-pro".into(),
@@ -1078,7 +1376,7 @@ mod tests {
         let error = adapter
             .invoke(
                 &request(),
-                &json!({"prompt":"cat","options":options}),
+                &json!({"prompt":"cat","image_size":"1k","options":options}),
                 &secret_for_test("secret-canary"),
                 Some("opaque-key"),
             )
@@ -1091,20 +1389,24 @@ mod tests {
     #[test]
     fn invalid_options_are_rejected_before_submission() {
         for options in [
-            json!({"unknown":1}),
-            json!({"width":63}),
-            json!({"seed":-1}),
-            json!({"safety_tolerance":7}),
-            json!({"output_format":"gif"}),
+            json!({"width":1024,"height":1024,"unknown":1}),
+            json!({"width":63,"height":1024}),
+            json!({"width":1024}),
+            json!({"width":1024,"height":1024,"seed":-1}),
+            json!({"width":1024,"height":1024,"safety_tolerance":7}),
+            json!({"width":1024,"height":1024,"output_format":"gif"}),
         ] {
             let (adapter, submits) = fixture(Vec::new());
             assert!(adapter
-                .preflight_input(&request(), &json!({"prompt":"cat","options":options}))
+                .preflight_input(
+                    &request(),
+                    &json!({"prompt":"cat","image_size":"1k","options":options})
+                )
                 .is_err());
             assert!(adapter
                 .invoke(
                     &request(),
-                    &json!({"prompt":"cat","options":options}),
+                    &json!({"prompt":"cat","image_size":"1k","options":options}),
                     &secret_for_test("secret-canary"),
                     Some("opaque-key"),
                 )
@@ -1133,7 +1435,7 @@ mod tests {
             let error = adapter
                 .invoke(
                     &request(),
-                    &json!({"prompt":"cat"}),
+                    &input(),
                     &secret_for_test("secret-canary"),
                     Some("opaque-key"),
                 )
@@ -1162,7 +1464,7 @@ mod tests {
         let error = adapter
             .invoke(
                 &request(),
-                &json!({"prompt":"cat"}),
+                &input(),
                 &secret_for_test("secret-canary"),
                 Some("opaque-key"),
             )
@@ -1187,7 +1489,7 @@ mod tests {
         let error = adapter
             .invoke(
                 &request(),
-                &json!({"prompt":"cat"}),
+                &input(),
                 &secret_for_test("secret-canary"),
                 Some("opaque-key"),
             )
@@ -1203,7 +1505,7 @@ mod tests {
         let error = adapter
             .invoke(
                 &request(),
-                &json!({"prompt":"cat"}),
+                &input(),
                 &secret_for_test("secret-canary"),
                 Some("opaque-key"),
             )
@@ -1223,7 +1525,7 @@ mod tests {
                 adapter
                     .invoke(
                         &bad,
-                        &json!({"prompt":"cat"}),
+                        &input(),
                         &secret_for_test("secret-canary"),
                         Some("opaque-key")
                     )
@@ -1298,12 +1600,12 @@ mod tests {
         let outcome = adapter
             .invoke(
                 &request(),
-                &json!({"prompt":"cat"}),
+                &input(),
                 &secret_for_test("secret-canary"),
                 Some("opaque-key"),
             )
             .unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"fixture-v2","rules":[{"rule_id":"flux2-pro","provider":"flux","model":"flux-2-pro","currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"fixture-v2","rules":[{"rule_id":"flux2-pro-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]}]}"#).unwrap();
         let snapshot = pricing.snapshot(&request()).unwrap();
         assert_eq!(snapshot.estimated_amount_minor, 45);
         assert_eq!(
@@ -1324,7 +1626,7 @@ mod tests {
                 hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
                 authorized_minor: 45,
                 authorization_currency: "USD".into(),
-                normalized_input: json!({"prompt":"cat","image_count":1}),
+                normalized_input: input(),
                 input_hash: "hash".into(),
                 input_schema_version: 1,
                 target: "flux/flux-2-pro".into(),

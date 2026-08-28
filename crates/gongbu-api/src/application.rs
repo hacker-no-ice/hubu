@@ -16,6 +16,7 @@ use crate::{
             enforce_cost, vendor_idempotency_key, AdapterOutcome, NormalizedRequest,
             PricingSnapshot, PricingUnit, ProviderFailure, SpendDisposition,
         },
+        flux2_api,
         registry::ValidatedProviderCatalog,
     },
     secrets::{MacOsKeychain, SecretProvider},
@@ -36,7 +37,7 @@ use axum::{
     Router,
 };
 use futures::future::{select, Either};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     future::Future,
     net::SocketAddr,
@@ -79,6 +80,7 @@ impl GenericProviderActivities {
             &'a crate::provider_targets::ProviderConfigVersion,
             &'a crate::provider::registry::BoundAdapter,
             NormalizedRequest,
+            Value,
         ),
         WorkflowActivityError,
     > {
@@ -121,32 +123,53 @@ impl GenericProviderActivities {
             &execution.authorization_currency,
         )
         .map_err(|_| WorkflowActivityError::Proven("authorization_invalid".into()))?;
+        let image_size = snapshot
+            .selector
+            .as_ref()
+            .map(|selector| selector.image_size.clone());
+        let mut normalized_input = execution.normalized_input.clone();
+        let output_dimensions = match snapshot.output_dimensions.clone() {
+            Some(dimensions) => Some(dimensions),
+            None if target.provider == flux2_api::PROVIDER_ID
+                && target.adapter == flux2_api::ADAPTER_ID
+                && target.model == flux2_api::MODEL_ID =>
+            {
+                Some(
+                    flux2_api::bind_legacy_output_dimensions(
+                        image_size.as_deref().ok_or_else(|| {
+                            WorkflowActivityError::Proven("pricing_snapshot_invalid".into())
+                        })?,
+                        &mut normalized_input,
+                    )
+                    .map_err(map_contract_error)?,
+                )
+            }
+            None => None,
+        };
         let request = NormalizedRequest {
             provider: snapshot.provider.clone(),
             model: snapshot.model.clone(),
             image_count: snapshot.estimated_quantity(PricingUnit::Image),
             input_tokens: None,
             max_output_tokens: None,
-            image_size: snapshot
-                .selector
-                .as_ref()
-                .map(|selector| selector.image_size.clone()),
+            image_size,
+            output_dimensions,
         };
-        Ok((target, adapter, request))
+        Ok((target, adapter, request, normalized_input))
     }
 }
 
 impl ProviderActivities for GenericProviderActivities {
     fn preflight(&self, execution: &Execution) -> Result<(), WorkflowActivityError> {
-        let (target, adapter, request) = self.selected(execution)?;
+        let (target, adapter, request, normalized_input) = self.selected(execution)?;
         crate::provider_contract::validate_image_input_versioned(
             &request,
-            &execution.normalized_input,
+            &normalized_input,
             execution.input_schema_version,
         )
         .map_err(map_contract_error)?;
         adapter
-            .preflight_input(&request, &execution.normalized_input)
+            .preflight_input(&request, &normalized_input)
             .map_err(map_contract_error)?;
         self.secrets
             .resolve(
@@ -163,7 +186,7 @@ impl ProviderActivities for GenericProviderActivities {
         execution: &Execution,
         _attempt_id: &str,
     ) -> Result<ProviderSuccess, WorkflowActivityError> {
-        let (target, adapter, request) = self.selected(execution)?;
+        let (target, adapter, request, normalized_input) = self.selected(execution)?;
         let secret = self
             .secrets
             .resolve(
@@ -186,7 +209,7 @@ impl ProviderActivities for GenericProviderActivities {
         let outcome = adapter
             .invoke(
                 &request,
-                &execution.normalized_input,
+                &normalized_input,
                 &secret,
                 idempotency_key.as_deref(),
             )
@@ -1441,7 +1464,281 @@ mod tests {
     }
 
     #[test]
-    fn mixed_provider_dispatch_is_isolated_replay_safe_and_durable() {
+    fn flux_tampered_dimension_evidence_fails_before_claim_attempt_or_transport() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::{
+                contract::OutputDimensions,
+                flux2_api::{
+                    Flux2ApiAdapter, Flux2Transport, TransportResponse as FluxTransportResponse,
+                },
+            },
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use serde_json::{json, Value};
+        use std::{
+            collections::BTreeMap,
+            error::Error as StdError,
+            sync::atomic::{AtomicUsize, Ordering},
+            time::Duration,
+        };
+        use tempfile::tempdir;
+
+        struct Secrets;
+        impl SecretProvider for Secrets {
+            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                Ok(crate::secrets::secret_for_test("flux-fixture-secret"))
+            }
+        }
+        #[derive(Clone)]
+        struct Transport(Arc<AtomicUsize>);
+        impl Flux2Transport for Transport {
+            fn submit(
+                &self,
+                _: &reqwest::Url,
+                _: &[u8],
+                _: Duration,
+                _: &BTreeMap<String, String>,
+                _: Option<(&str, &str)>,
+                _: &Value,
+            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                unreachable!("invalid frozen dimensions must not reach FLUX submission")
+            }
+            fn poll(
+                &self,
+                _: &reqwest::Url,
+                _: &[u8],
+                _: Duration,
+                _: &BTreeMap<String, String>,
+            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                unreachable!("invalid frozen dimensions must not reach FLUX polling")
+            }
+            fn fetch_artifact(
+                &self,
+                _: &reqwest::Url,
+                _: Duration,
+                _: usize,
+            ) -> Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                unreachable!("invalid frozen dimensions must not fetch FLUX artifacts")
+            }
+        }
+        #[derive(Default)]
+        struct Hubu {
+            claims: AtomicUsize,
+        }
+        impl HubuActivities for Hubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                self.claims.fetch_add(1, Ordering::SeqCst);
+                Ok("claim".into())
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                _: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                unreachable!()
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+        }
+
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version":2,
+            "provider_configs":[{
+                "provider_config_version":"flux-v1",
+                "workload_type":"image_generation",
+                "provider":"flux",
+                "adapter":"flux2_api",
+                "model":"flux-2-pro",
+                "secret_service":"gongbu.flux",
+                "secret_account":"fixture",
+                "active":true,
+                "execution_enabled":true,
+                "settings":{"type":"flux2_api","config":{
+                    "endpoint":"https://api.bfl.ai",
+                    "api_version":"v1",
+                    "timeout_ms":1000,
+                    "poll_interval_ms":10,
+                    "approved_artifact_hosts":["cdn.bfl.ai"]
+                }}
+            }]
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"flux-v1","rules":[{"rule_id":"flux-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"flux-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"flux-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
+        let request = NormalizedRequest {
+            provider: "flux".into(),
+            model: "flux-2-pro".into(),
+            image_count: Some(1),
+            input_tokens: None,
+            max_output_tokens: None,
+            image_size: Some("1k".into()),
+            output_dimensions: Some(OutputDimensions {
+                width: 1024,
+                height: 1024,
+            }),
+        };
+        let snapshot = pricing.snapshot(&request).unwrap();
+        let target = targets
+            .resolve("image_generation", "flux", "flux2_api", "flux-2-pro")
+            .unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let params = |operation_key: &str, input: Value, snapshot: Value| CreateExecutionParams {
+            account_id: "account".into(),
+            operation_key: operation_key.into(),
+            hubu_authorization_id: format!("token-{operation_key}"),
+            hubu_claim_id: None,
+            hubu_token_reference: HubuTokenReference::new(format!("token-{operation_key}"))
+                .unwrap(),
+            authorized_minor: 45,
+            authorization_currency: "USD".into(),
+            normalized_input: input,
+            input_hash: format!("hash-{operation_key}"),
+            input_schema_version: 1,
+            target: target.target_key().canonical_name(),
+            config_version: "flux-v1".into(),
+            workload_type: "image_generation".into(),
+            provider: "flux".into(),
+            adapter: "flux2_api".into(),
+            model: "flux-2-pro".into(),
+            provider_config_version: "flux-v1".into(),
+            provider_config_digest: target.digest().into(),
+            pricing_snapshot: snapshot,
+            pricing_schema_version: 2,
+            execution_scope: None,
+            created_at: "now".into(),
+        };
+        let input_mismatch = repository
+            .create_execution(&params(
+                "flux-input-mismatch",
+                json!({"prompt":"cat","image_count":1,"image_size":"2k","options":{"width":1920,"height":1088}}),
+                serde_json::to_value(&snapshot).unwrap(),
+            ))
+            .unwrap();
+        let current_missing_dimensions = repository
+            .create_execution(&params(
+                "flux-current-missing-dimensions",
+                json!({"prompt":"cat","image_count":1,"image_size":"1k"}),
+                serde_json::to_value(&snapshot).unwrap(),
+            ))
+            .unwrap();
+        let mut selector_rule_mismatch = serde_json::to_value(&snapshot).unwrap();
+        selector_rule_mismatch["selector"]["image_size"] = json!("2k");
+        let selector_rule_mismatch = repository
+            .create_execution(&params(
+                "flux-selector-rule-mismatch",
+                json!({"prompt":"cat","image_count":1,"image_size":"2k","options":{"width":1024,"height":1024}}),
+                selector_rule_mismatch,
+            ))
+            .unwrap();
+        let mut legacy_snapshot = serde_json::to_value(&snapshot).unwrap();
+        legacy_snapshot
+            .as_object_mut()
+            .unwrap()
+            .remove("output_dimensions");
+        let legacy_conflict = repository
+            .create_execution(&params(
+                "flux-legacy-conflict",
+                json!({"prompt":"cat","image_count":1,"image_size":"1k","options":{"width":2048,"height":2048}}),
+                legacy_snapshot.clone(),
+            ))
+            .unwrap();
+        let legacy_partial = repository
+            .create_execution(&params(
+                "flux-legacy-partial",
+                json!({"prompt":"cat","image_count":1,"image_size":"1k","options":{"width":1024}}),
+                legacy_snapshot.clone(),
+            ))
+            .unwrap();
+        let legacy_invalid_multiple = repository
+            .create_execution(&params(
+                "flux-legacy-invalid-multiple",
+                json!({"prompt":"cat","image_count":1,"image_size":"1k","options":{"width":1024,"height":1000}}),
+                legacy_snapshot.clone(),
+            ))
+            .unwrap();
+        let legacy_selector_mismatch = repository
+            .create_execution(&params(
+                "flux-legacy-selector-mismatch",
+                json!({"prompt":"cat","image_count":1,"image_size":"2k"}),
+                legacy_snapshot.clone(),
+            ))
+            .unwrap();
+        let mut selectorless_legacy_snapshot = legacy_snapshot;
+        selectorless_legacy_snapshot
+            .as_object_mut()
+            .unwrap()
+            .remove("selector");
+        let legacy_missing_selector = repository
+            .create_execution(&params(
+                "flux-legacy-missing-selector",
+                json!({"prompt":"cat","image_count":1,"image_size":"1k"}),
+                selectorless_legacy_snapshot,
+            ))
+            .unwrap();
+
+        let transport_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::new();
+        let fixture_calls = transport_calls.clone();
+        registry.register("flux", "flux2_api", move |target| {
+            Ok(Arc::new(Flux2ApiAdapter::new(
+                target.flux2_api().cloned().unwrap(),
+                target.model.clone(),
+                Transport(fixture_calls.clone()),
+            )?))
+        });
+        let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
+        let root = tempdir().unwrap();
+        let hubu = Arc::new(Hubu::default());
+        let runner = PersistedExecutionRunner::new(
+            repository.clone(),
+            hubu.clone(),
+            Arc::new(GenericProviderActivities::new(providers, Arc::new(Secrets))),
+            Arc::new(ArtifactServiceActivities::new(
+                ArtifactService::new(
+                    repository.clone(),
+                    LocalFsStorage::new(root.path()),
+                    ArtifactLimits::default(),
+                ),
+                || "now".into(),
+            )),
+            || "now".into(),
+        );
+        for execution in [
+            input_mismatch,
+            current_missing_dimensions,
+            selector_rule_mismatch,
+            legacy_conflict,
+            legacy_partial,
+            legacy_invalid_multiple,
+            legacy_selector_mismatch,
+            legacy_missing_selector,
+        ] {
+            assert_eq!(
+                runner.run_execution(&execution.execution_id).unwrap(),
+                "failed"
+            );
+            assert!(repository
+                .get_provider_attempt_for_execution(&execution.execution_id)
+                .is_err());
+        }
+        assert_eq!(hubu.claims.load(Ordering::SeqCst), 0);
+        assert_eq!(transport_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn mixed_provider_dispatch_recovers_legacy_flux_dimensions_and_is_replay_safe() {
         use crate::{
             artifact::{ArtifactLimits, LocalFsStorage},
             execution::{CreateExecutionParams, HubuTokenReference},
@@ -1492,8 +1789,8 @@ mod tests {
             }
             fn invoke(
                 &self,
-                _: &NormalizedRequest,
-                _: &serde_json::Value,
+                request: &NormalizedRequest,
+                input: &serde_json::Value,
                 _: &ProviderSecret,
                 key: Option<&str>,
             ) -> Result<AdapterOutcome, ProviderFailure> {
@@ -1505,6 +1802,15 @@ mod tests {
                     .entry(self.id.into())
                     .or_default() += 1;
                 if self.id == "flux2_api" {
+                    assert_eq!(
+                        request.output_dimensions,
+                        Some(crate::provider_contract::OutputDimensions {
+                            width: 1024,
+                            height: 1024,
+                        })
+                    );
+                    assert_eq!(input["options"]["width"], 1024);
+                    assert_eq!(input["options"]["height"], 1024);
                     self.calls
                         .flux_keys
                         .lock()
@@ -1568,7 +1874,7 @@ mod tests {
                 {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://flux.example","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["flux.example"]}}}
             ]
         })).unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f","provider":"flux","model":"flux-2-pro","currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
             .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
@@ -1598,17 +1904,31 @@ mod tests {
             let target = targets
                 .resolve("image_generation", provider, adapter, model)
                 .unwrap();
+            let is_flux = provider == "flux";
             let request = NormalizedRequest {
                 provider: provider.into(),
                 model: model.into(),
                 image_count: Some(1),
                 input_tokens: None,
                 max_output_tokens: None,
-                image_size: None,
+                image_size: is_flux.then(|| "1k".into()),
+                output_dimensions: is_flux.then_some(crate::provider_contract::OutputDimensions {
+                    width: 1024,
+                    height: 1024,
+                }),
             };
             let snapshot = pricing
                 .snapshot_for_target(&target.target_key(), &request)
                 .unwrap();
+            let mut pricing_snapshot = serde_json::to_value(&snapshot).unwrap();
+            if is_flux {
+                // Pre-HUB-168 schema-v2 rows froze the selector and caller input,
+                // but did not yet copy exact dimensions into the pricing snapshot.
+                pricing_snapshot
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("output_dimensions");
+            }
             repository
                 .create_execution(&CreateExecutionParams {
                     account_id: "account".into(),
@@ -1619,7 +1939,11 @@ mod tests {
                         .unwrap(),
                     authorized_minor: amount,
                     authorization_currency: "USD".into(),
-                    normalized_input: json!({"prompt":"draw a cat","image_count":1}),
+                    normalized_input: if is_flux {
+                        json!({"prompt":"draw a cat","image_count":1,"image_size":"1k"})
+                    } else {
+                        json!({"prompt":"draw a cat","image_count":1})
+                    },
                     input_hash: format!("hash-{provider}"),
                     input_schema_version: 1,
                     target: target.target_key().canonical_name(),
@@ -1630,7 +1954,7 @@ mod tests {
                     model: model.into(),
                     provider_config_version: version.into(),
                     provider_config_digest: target.digest().into(),
-                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_snapshot,
                     pricing_schema_version: i64::from(snapshot.schema_version),
                     execution_scope: None,
                     created_at: "now".into(),
@@ -1731,6 +2055,15 @@ mod tests {
                 .settlement_minor,
             45
         );
+        let recovered_legacy_flux = repository.get_execution(&flux.execution_id).unwrap();
+        assert!(recovered_legacy_flux
+            .normalized_input
+            .get("options")
+            .is_none());
+        assert!(recovered_legacy_flux
+            .pricing_snapshot
+            .get("output_dimensions")
+            .is_none());
     }
 
     #[test]

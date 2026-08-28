@@ -467,6 +467,7 @@ impl PricingCatalog {
             catalog_digest: self.0.digest.clone(),
             pricing_rule_id: rule.rule_id.clone(),
             selector: rule.selector.clone(),
+            output_dimensions: request.output_dimensions.clone(),
             components: frozen,
             exact_estimate_numerator: exact.n.to_string(),
             exact_estimate_denominator: exact.d.to_string(),
@@ -494,6 +495,18 @@ impl PricingCatalog {
             .rules
             .iter()
             .any(|rule| rule.provider == target.provider && rule.model == target.model)
+    }
+
+    /// Whether this target has an exact, selector-qualified image pricing rule.
+    pub fn supports_image_size(&self, target: &TargetKey, image_size: &str) -> bool {
+        self.0.rules.iter().any(|rule| {
+            rule.provider == target.provider
+                && rule.model == target.model
+                && rule
+                    .selector
+                    .as_ref()
+                    .is_some_and(|selector| selector.image_size == image_size)
+        })
     }
 }
 
@@ -524,6 +537,15 @@ pub struct NormalizedRequest {
     pub max_output_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_dimensions: Option<OutputDimensions>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OutputDimensions {
+    pub width: u32,
+    pub height: u32,
 }
 
 impl NormalizedRequest {
@@ -543,6 +565,11 @@ impl NormalizedRequest {
             if normalize_image_size(size).map_err(|_| ContractError::IndeterminableCost)? != *size {
                 return Err(ContractError::IndeterminableCost);
             }
+        }
+        if self.output_dimensions.as_ref().is_some_and(|dimensions| {
+            self.image_size.is_none() || dimensions.width == 0 || dimensions.height == 0
+        }) {
+            return Err(ContractError::IndeterminableCost);
         }
         Ok(())
     }
@@ -619,6 +646,8 @@ pub struct PricingSnapshot {
     pub pricing_rule_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<PricingSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_dimensions: Option<OutputDimensions>,
     pub components: Vec<FrozenPriceComponent>,
     pub exact_estimate_numerator: String,
     pub exact_estimate_denominator: String,
@@ -766,6 +795,11 @@ impl PricingSnapshot {
         }
         if self.selector.as_ref().is_some_and(|selector| {
             normalize_image_size(&selector.image_size).ok().as_ref() != Some(&selector.image_size)
+        }) {
+            return Err(ContractError::IndeterminableCost);
+        }
+        if self.output_dimensions.as_ref().is_some_and(|dimensions| {
+            self.selector.is_none() || dimensions.width == 0 || dimensions.height == 0
         }) {
             return Err(ContractError::IndeterminableCost);
         }
@@ -1045,6 +1079,7 @@ mod tests {
             input_tokens: None,
             max_output_tokens: None,
             image_size: None,
+            output_dimensions: None,
         }
     }
     #[test]
@@ -1196,6 +1231,65 @@ mod tests {
     }
 
     #[test]
+    fn flux_preset_rule_and_exact_dimensions_round_trip_as_one_frozen_contract() {
+        let catalog = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"flux-v1","rules":[{"rule_id":"flux-1k","provider":"flux","model":"flux-2-pro","currency":"USD","selector":{"image_size":"1k"},"components":[{"unit":"image","rate_numerator_minor":10,"rate_denominator":1}]},{"rule_id":"flux-2k","provider":"flux","model":"flux-2-pro","currency":"USD","selector":{"image_size":"2k"},"components":[{"unit":"image","rate_numerator_minor":20,"rate_denominator":1}]},{"rule_id":"flux-4k","provider":"flux","model":"flux-2-pro","currency":"USD","selector":{"image_size":"4k"},"components":[{"unit":"image","rate_numerator_minor":40,"rate_denominator":1}]}]}"#).unwrap();
+        for (preset, width, height, rule_id, amount) in [
+            ("1k", 1024, 1024, "flux-1k", 10),
+            ("2k", 1920, 1088, "flux-2k", 20),
+            ("4k", 2048, 2048, "flux-4k", 40),
+        ] {
+            let request = NormalizedRequest {
+                provider: "flux".into(),
+                model: "flux-2-pro".into(),
+                image_count: Some(1),
+                input_tokens: None,
+                max_output_tokens: None,
+                image_size: Some(preset.into()),
+                output_dimensions: Some(OutputDimensions { width, height }),
+            };
+            let snapshot = catalog.snapshot(&request).unwrap();
+            assert_eq!(snapshot.pricing_rule_id, rule_id);
+            assert_eq!(snapshot.estimated_amount_minor, amount);
+            assert_eq!(
+                snapshot
+                    .selector
+                    .as_ref()
+                    .map(|selector| selector.image_size.as_str()),
+                Some(preset)
+            );
+            assert_eq!(
+                snapshot.output_dimensions,
+                Some(OutputDimensions { width, height })
+            );
+            let replayed_request: NormalizedRequest =
+                serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+            let replayed_snapshot: PricingSnapshot =
+                serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            assert_eq!(replayed_request, request);
+            assert_eq!(replayed_snapshot, snapshot);
+            replayed_snapshot.validate_integrity().unwrap();
+        }
+
+        let incomplete = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"flux-incomplete","rules":[{"rule_id":"flux-1k","provider":"flux","model":"flux-2-pro","currency":"USD","selector":{"image_size":"1k"},"components":[{"unit":"image","rate_numerator_minor":10,"rate_denominator":1}]}]}"#).unwrap();
+        let missing_rule = NormalizedRequest {
+            provider: "flux".into(),
+            model: "flux-2-pro".into(),
+            image_count: Some(1),
+            input_tokens: None,
+            max_output_tokens: None,
+            image_size: Some("2k".into()),
+            output_dimensions: Some(OutputDimensions {
+                width: 1920,
+                height: 1088,
+            }),
+        };
+        assert_eq!(
+            incomplete.snapshot(&missing_rule),
+            Err(ContractError::UnsupportedTarget)
+        );
+    }
+
+    #[test]
     fn pricing_v1_catalogs_and_snapshots_are_rejected() {
         let legacy_catalog = br#"{"schema_version":1,"catalog_version":"v1","rules":[{"rule_id":"image","provider":"vendor","model":"image-v1","currency":"USD","unit":"image","unit_amount_minor":125}]}"#;
         assert!(matches!(
@@ -1239,6 +1333,7 @@ mod tests {
             input_tokens: Some(2_500),
             max_output_tokens: Some(2_500),
             image_size: None,
+            output_dimensions: None,
         };
         let snapshot = catalog.snapshot(&request).unwrap();
         assert_eq!(snapshot.exact_estimate_numerator, "1");
@@ -1265,6 +1360,7 @@ mod tests {
             input_tokens: Some(1),
             max_output_tokens: Some(1),
             image_size: None,
+            output_dimensions: None,
         };
         let snapshot = catalog.snapshot(&request).unwrap();
         assert_eq!(snapshot.estimated_amount_minor, 1);
