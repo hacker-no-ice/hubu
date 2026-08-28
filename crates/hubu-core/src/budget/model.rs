@@ -115,6 +115,37 @@ pub fn initial_budget_request_fingerprint(
     format!("sha256:{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
+/// Canonical identity for one requested successor edge in a budget's version
+/// chain.
+///
+/// Generated version ids and timestamps are intentionally excluded so a retry
+/// after an ambiguous commit can recover the already-persisted successor. The
+/// tuple encoding is unambiguous for free-form provenance strings and is
+/// version-tagged so the canonical contract can evolve deliberately.
+pub fn budget_update_request_fingerprint(
+    budget_id: &BudgetId,
+    expected_revision: u64,
+    amount_limit_cents: i64,
+    actor: &str,
+    source: &str,
+    reason: Option<&str>,
+) -> String {
+    let actor = actor.trim();
+    let source = source.trim();
+    let reason = reason.map(str::trim).filter(|reason| !reason.is_empty());
+    let canonical = serde_json::to_vec(&(
+        "hubu-budget-limit-update-v1",
+        budget_id.to_string(),
+        expected_revision,
+        amount_limit_cents,
+        actor,
+        source,
+        reason,
+    ))
+    .expect("canonical budget update fields are always JSON serializable");
+    format!("sha256:{:x}", Sha256::digest(canonical))
+}
+
 /// Current lifecycle state of a budget.
 #[derive(Debug, Clone)]
 pub enum BudgetStatus {
@@ -226,4 +257,49 @@ pub enum BudgetHoldStatus {
     Released,
     /// Hold passed its expiration time before settlement.
     Expired,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_update_fingerprint_is_stable_and_normalizes_provenance() {
+        let budget_id: BudgetId = "00000000-0000-0000-0000-000000000001".parse().unwrap();
+        let canonical = budget_update_request_fingerprint(
+            &budget_id,
+            7,
+            12_345,
+            "actor:user-1",
+            "api",
+            Some("quarterly increase"),
+        );
+
+        assert_eq!(
+            canonical,
+            "sha256:f88ff1fcc9cdf4e030b21aadacfc5cc079588a29df32fc12f9263b93bb43602a"
+        );
+        assert_eq!(
+            canonical,
+            budget_update_request_fingerprint(
+                &budget_id,
+                7,
+                12_345,
+                "  actor:user-1  ",
+                " api ",
+                Some(" quarterly increase "),
+            )
+        );
+        assert_eq!(
+            budget_update_request_fingerprint(&budget_id, 7, 12_345, "actor:user-1", "api", None,),
+            budget_update_request_fingerprint(
+                &budget_id,
+                7,
+                12_345,
+                "actor:user-1",
+                "api",
+                Some("   "),
+            )
+        );
+    }
 }
