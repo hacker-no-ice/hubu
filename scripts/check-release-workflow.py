@@ -58,10 +58,35 @@ changelog = CHANGELOG.read_text(encoding="utf-8")
 release_doc = RELEASE_DOC.read_text(encoding="utf-8")
 workflow_lines = [line.strip() for line in workflow.splitlines()]
 
+source_lines = workflow.splitlines()
+on_lines = [index for index, line in enumerate(source_lines) if line == "on:"]
+if len(on_lines) != 1:
+    fail("release workflow must contain exactly one top-level on block")
+trigger_lines = []
+for line in source_lines[on_lines[0] + 1 :]:
+    if line and not line[0].isspace():
+        break
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    indentation = len(line) - len(line.lstrip())
+    if indentation == 2:
+        trigger_lines.append(stripped)
+if trigger_lines != ["workflow_dispatch:"]:
+    fail(
+        "release workflow must expose workflow_dispatch as its only trigger; "
+        f"found {trigger_lines!r}"
+    )
+if "Release workflow only accepts manual dispatch" not in workflow:
+    fail("release resolver must reject non-manual events")
+
 for binary in PRODUCTION_BINARIES:
     build_flag = f"--bin {binary}"
     if workflow_lines.count(build_flag) != 2:
-        fail(f"{build_flag!r} must appear in release checks and the canary fallback")
+        fail(
+            f"{build_flag!r} must appear in release checks and the manual "
+            "canary build path"
+        )
     if not re.search(rf"(?m)^  {re.escape(binary)}$", package_script):
         fail(f"packaging does not enumerate {binary}")
     if not re.search(rf"(?m)^  {re.escape(binary)}$", smoke_script):
@@ -267,7 +292,7 @@ if unpinned:
 print(
     "validated immutable release workflow: four production binaries, exactly two "
     "temporary pre-launch macOS targets, exact-tag source installation for "
-    "versioned releases, scheduled and explicit canaries, versioned candidates, "
+    "versioned releases, manually dispatched canaries, versioned candidates, "
     "source-version validation, synchronized release docs, shared build identity, "
     "bounded permissions, and pinned actions"
 )

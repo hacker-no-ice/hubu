@@ -1,9 +1,6 @@
 name: Release
 
 on:
-  schedule:
-    - cron: '0 10 * * *'
-      timezone: America/Los_Angeles
   workflow_dispatch:
     inputs:
       channel:
@@ -141,19 +138,8 @@ jobs:
             fi
             channel="${INPUT_CHANNEL}"
           else
-            git fetch origin main
-            source_commit="$(git rev-parse origin/main)"
-            git checkout --detach "${source_commit}"
-            short_commit="${source_commit:0:12}"
-            if ! base_version="$(resolve_base_version)"; then
-              echo "Release production packages must share one source package version" >&2
-              exit 1
-            fi
-            version="${base_version}-main.${short_commit}"
-            tag="main-${source_commit}"
-            channel=canary
-            prerelease=true
-
+            echo "Release workflow only accepts manual dispatch" >&2
+            exit 1
           fi
 
           if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
