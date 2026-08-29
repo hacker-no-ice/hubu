@@ -233,15 +233,65 @@ assert_contains "agent budget list" "${AGENT_BUDGET_LIST_OUTPUT}" "agent_id: ${A
 assert_contains "agent budget list" "${AGENT_BUDGET_LIST_OUTPUT}" "status: scheduled"
 SCHEDULED_BUDGET_ID="$(awk '/budget_id:/ { print $2; exit }' <<< "${AGENT_BUDGET_OUTPUT}")"
 [[ "${SCHEDULED_BUDGET_ID}" == bgt_* ]] || fail "could not parse scheduled public budget id"
-REPLACED_BUDGET_OUTPUT="$(hubu budget replace --budget-id "${ACTIVE_BUDGET_ID}" --amount 80)"
-assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" "Budget replaced"
-assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" "Revoked budget"
-assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" "Replacement budget"
-assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" 'limit: $80.00'
-REPLACEMENT_BUDGET_ID="$(awk '/budget_id:/ && seen { print $2; exit } /Replacement budget/ { seen=1 }' <<< "${REPLACED_BUDGET_OUTPUT}")"
-[[ "${REPLACEMENT_BUDGET_ID}" == bgt_* ]] || fail "could not parse replacement budget id"
-REVOKED_BUDGET_OUTPUT="$(hubu budget revoke --budget-id "${REPLACEMENT_BUDGET_ID}")"
+UPDATE_REASON="Raise the cumulative total cap"
+UPDATED_BUDGET_OUTPUT="$(hubu budget update --budget-id "${ACTIVE_BUDGET_ID}" --amount 80 --reason "${UPDATE_REASON}" --yes)"
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "Budget update applied"
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "budget_id: ${ACTIVE_BUDGET_ID}"
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "pinned_revision: 1  current_revision: 1"
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" 'current_total: $75.00  consumed: $20.00  frozen: $0.00'
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" 'proposed_total: $80.00  projected_remaining: $60.00'
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "reason: \"${UPDATE_REASON}\""
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "revision: 2"
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "predecessor_revision: 1"
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" 'limit: $80.00  consumed: $20.00  frozen: $0.00  remaining: $60.00'
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "current_revision: 2"
+assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "idempotent_replay: false"
+
+REPLAYED_BUDGET_OUTPUT="$(hubu budget update --budget-id "${ACTIVE_BUDGET_ID}" --amount 80 --expected-revision 1 --reason "${UPDATE_REASON}" --yes)"
+assert_contains "exact budget update replay" "${REPLAYED_BUDGET_OUTPUT}" "Budget update replayed"
+assert_contains "exact budget update replay" "${REPLAYED_BUDGET_OUTPUT}" "pinned_revision: 1  current_revision: 2"
+assert_contains "exact budget update replay" "${REPLAYED_BUDGET_OUTPUT}" "revision: 2"
+assert_contains "exact budget update replay" "${REPLAYED_BUDGET_OUTPUT}" "current_revision: 2"
+assert_contains "exact budget update replay" "${REPLAYED_BUDGET_OUTPUT}" "idempotent_replay: true"
+
+set +e
+STALE_CHANGED_OUTPUT="$(hubu budget update --budget-id "${ACTIVE_BUDGET_ID}" --amount 81 --expected-revision 1 --reason "${UPDATE_REASON}" --yes 2>&1)"
+STALE_CHANGED_STATUS=$?
+set -e
+[[ "${STALE_CHANGED_STATUS}" -ne 0 ]] || fail "changed stale budget update unexpectedly succeeded"
+assert_contains "changed stale budget update" "${STALE_CHANGED_OUTPUT}" "HTTP 409"
+assert_contains "changed stale budget update" "${STALE_CHANGED_OUTPUT}" "budget revision conflict"
+assert_not_contains "changed stale budget update" "${STALE_CHANGED_OUTPUT}" "retrying once"
+
+BUDGET_HISTORY_OUTPUT="$(hubu budget history --budget-id "${ACTIVE_BUDGET_ID}")"
+assert_contains "budget history" "${BUDGET_HISTORY_OUTPUT}" "Current logical budget"
+assert_contains "budget history" "${BUDGET_HISTORY_OUTPUT}" "budget_id: ${ACTIVE_BUDGET_ID}"
+assert_contains "budget history" "${BUDGET_HISTORY_OUTPUT}" 'limit: $80.00  consumed: $20.00  frozen: $0.00  remaining: $60.00'
+assert_contains "budget history" "${BUDGET_HISTORY_OUTPUT}" "current_revision: 2"
+assert_contains "budget history" "${BUDGET_HISTORY_OUTPUT}" "Immutable version history"
+assert_contains "budget history" "${BUDGET_HISTORY_OUTPUT}" "revision: 1"
+assert_contains "budget history" "${BUDGET_HISTORY_OUTPUT}" "revision: 2"
+assert_contains "budget history" "${BUDGET_HISTORY_OUTPUT}" "[current]"
+[[ "$(grep -c '^  revision:' <<< "${BUDGET_HISTORY_OUTPUT}")" -eq 2 ]] || fail "budget history did not contain exactly revisions 1 and 2"
+[[ "$(grep -c 'consumed:' <<< "${BUDGET_HISTORY_OUTPUT}")" -eq 1 ]] || fail "budget history repeated mutable balance on immutable versions"
+
+BUDGET_HELP_OUTPUT="$(hubu budget --help)"
+assert_not_contains "budget help" "${BUDGET_HELP_OUTPUT}" "budget replace"
+set +e
+RETIRED_COMMAND_OUTPUT="$(hubu budget replace --budget-id "${ACTIVE_BUDGET_ID}" --amount 80 2>&1)"
+RETIRED_COMMAND_STATUS=$?
+set -e
+[[ "${RETIRED_COMMAND_STATUS}" -ne 0 ]] || fail "retired budget replace command unexpectedly succeeded"
+assert_contains "retired budget command" "${RETIRED_COMMAND_OUTPUT}" 'unknown budget command `replace`'
+FLOW_AUTH_TOKEN="$(<"${ROOT_DIR}/hubu.auth-token")"
+RETIRED_ROUTE_RESPONSE="$(curl --silent --show-error --write-out $'\n%{http_code}' --request POST --header "Authorization: Bearer ${FLOW_AUTH_TOKEN}" --header 'Content-Type: application/json' --data '{"budget_id":"'"${ACTIVE_BUDGET_ID}"'","amount_cents":8000}' "${FLOW_URL}/budgets/replace")"
+RETIRED_ROUTE_STATUS="${RETIRED_ROUTE_RESPONSE##*$'\n'}"
+[[ "${RETIRED_ROUTE_STATUS}" != "200" ]] || fail "retired /budgets/replace route unexpectedly succeeded"
+assert_contains "retired budget route" "${RETIRED_ROUTE_RESPONSE}" "no route for POST /budgets/replace"
+
+REVOKED_BUDGET_OUTPUT="$(hubu budget revoke --budget-id "${ACTIVE_BUDGET_ID}")"
 assert_contains "budget revoke" "${REVOKED_BUDGET_OUTPUT}" "Budget revoked"
+assert_contains "budget revoke" "${REVOKED_BUDGET_OUTPUT}" "budget_id: ${ACTIVE_BUDGET_ID}"
 assert_contains "budget revoke" "${REVOKED_BUDGET_OUTPUT}" "status: revoked"
 ACTIVE_BUDGET_LIST_OUTPUT="$(hubu budget list)"
 assert_not_contains "active budget list" "${ACTIVE_BUDGET_LIST_OUTPUT}" "status: revoked"

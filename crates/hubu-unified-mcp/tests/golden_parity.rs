@@ -258,11 +258,24 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
-            name: "hubu_replace_budget",
+            name: "hubu_update_budget",
             owner: hubu,
             method: "POST",
-            path: "/budgets/replace",
-            arguments: json!({}),
+            path: "/budgets/bgt_0123456789ab/versions",
+            arguments: json!({
+                "budget_id":"bgt_0123456789ab",
+                "expected_revision":1,
+                "amount_limit_cents":5_000,
+                "reason":"golden total cap update"
+            }),
+            meta: None,
+        },
+        GoldenCase {
+            name: "hubu_budget_history",
+            owner: hubu,
+            method: "GET",
+            path: "/budgets/bgt_0123456789ab/versions",
+            arguments: json!({"budget_id":"bgt_0123456789ab"}),
             meta: None,
         },
         GoldenCase {
@@ -340,8 +353,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        34,
-        "golden matrix must contain exactly 34 cases"
+        35,
+        "golden matrix must contain exactly 35 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -354,8 +367,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        34,
-        "routing fixture must map 34 tools"
+        35,
+        "routing fixture must map 35 tools"
     );
     assert_eq!(
         expected.len(),
@@ -371,7 +384,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Hubu)
             .count(),
-        30
+        31
     );
     assert_eq!(
         cases
@@ -459,6 +472,81 @@ fn success_body(case: &GoldenCase) -> Value {
             },
             "auth_token_id":"fixture-private-approval-token",
             "authorization_expires_at":"2099-01-01T00:00:00Z"
+        }),
+        "hubu_update_budget" => json!({
+            "applied_version": {
+                "version_id": "bgv_0123456789ac",
+                "revision": 2,
+                "predecessor_version_id": "bgv_0123456789ab",
+                "predecessor_revision": 1,
+                "amount_limit_cents": 5_000,
+                "effective_at": "2026-08-28T00:00:00Z",
+                "actor": "usr_0123456789ab",
+                "source": "hubu-api:update-budget-limit",
+                "reason": "golden total cap update",
+                "request_fingerprint": "sha256:golden-budget-update",
+                "created_at": "2026-08-28T00:00:00Z"
+            },
+            "current_budget": {
+                "budget_id": "bgt_0123456789ab",
+                "agent_id": "agt_0123456789ab",
+                "current_version_id": "bgv_0123456789ac",
+                "current_revision": 2,
+                "amount_limit_cents": 5_000,
+                "currency": "USD",
+                "starting_at": "2026-08-01T00:00:00Z",
+                "ending_before": "2026-09-01T00:00:00Z",
+                "status": "active",
+                "consumed_amount_cents": 1_000,
+                "frozen_amount_cents": 500,
+                "remaining_amount_cents": 3_500
+            },
+            "idempotent_replay": false,
+            "spending_target_warnings": []
+        }),
+        "hubu_budget_history" => json!({
+            "current_budget": {
+                "budget_id": "bgt_0123456789ab",
+                "agent_id": "agt_0123456789ab",
+                "current_version_id": "bgv_0123456789ac",
+                "current_revision": 2,
+                "amount_limit_cents": 5_000,
+                "currency": "USD",
+                "starting_at": "2026-08-01T00:00:00Z",
+                "ending_before": "2026-09-01T00:00:00Z",
+                "status": "active",
+                "consumed_amount_cents": 1_000,
+                "frozen_amount_cents": 500,
+                "remaining_amount_cents": 3_500
+            },
+            "versions": [
+                {
+                    "version_id": "bgv_0123456789ab",
+                    "revision": 1,
+                    "predecessor_version_id": null,
+                    "predecessor_revision": null,
+                    "amount_limit_cents": 4_000,
+                    "effective_at": "2026-08-01T00:00:00Z",
+                    "actor": "usr_0123456789ab",
+                    "source": "hubu-api:create-budget",
+                    "reason": null,
+                    "request_fingerprint": "sha256:golden-budget-create",
+                    "created_at": "2026-08-01T00:00:00Z"
+                },
+                {
+                    "version_id": "bgv_0123456789ac",
+                    "revision": 2,
+                    "predecessor_version_id": "bgv_0123456789ab",
+                    "predecessor_revision": 1,
+                    "amount_limit_cents": 5_000,
+                    "effective_at": "2026-08-28T00:00:00Z",
+                    "actor": "usr_0123456789ab",
+                    "source": "hubu-api:update-budget-limit",
+                    "reason": "golden total cap update",
+                    "request_fingerprint": "sha256:golden-budget-update",
+                    "created_at": "2026-08-28T00:00:00Z"
+                }
+            ]
         }),
         "hubu_submit_spend" => json!({
             "fixture":"HUB-125",
@@ -587,6 +675,24 @@ fn all_mapped_tools_have_unified_owned_golden_routing_coverage() {
             "{} forwarded trusted MCP metadata",
             case.name
         );
+        if case.name == "hubu_update_budget" {
+            let body: Value = serde_json::from_str(
+                request
+                    .raw
+                    .split_once("\r\n\r\n")
+                    .expect("captured update request has a body")
+                    .1,
+            )
+            .expect("captured update body is JSON");
+            assert_eq!(
+                body,
+                json!({
+                    "amount_limit_cents": 5_000,
+                    "expected_revision": 1,
+                    "reason": "golden total cap update"
+                })
+            );
+        }
     }
 
     unified.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);

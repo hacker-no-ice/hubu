@@ -46,7 +46,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.3";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 3;
+pub const ROUTING_REVISION: u32 = 4;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -85,6 +85,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_add_policy", BackendOwner::Hubu),
     ("hubu_apply_policy", BackendOwner::Hubu),
     ("hubu_authorize_spend", BackendOwner::Hubu),
+    ("hubu_budget_history", BackendOwner::Hubu),
     ("hubu_client_approval_profile", BackendOwner::Hubu),
     ("hubu_create_budget", BackendOwner::Hubu),
     ("hubu_create_recurring_budget", BackendOwner::Hubu),
@@ -110,7 +111,6 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_register_agent", BackendOwner::Hubu),
     ("hubu_register_human", BackendOwner::Hubu),
     ("hubu_registration_guidance", BackendOwner::Hubu),
-    ("hubu_replace_budget", BackendOwner::Hubu),
     ("hubu_resolve_spend_approval", BackendOwner::Hubu),
     ("hubu_revoke_budget", BackendOwner::Hubu),
     ("hubu_revoke_spending_target", BackendOwner::Hubu),
@@ -118,6 +118,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_show_policy", BackendOwner::Hubu),
     ("hubu_show_spending_targets", BackendOwner::Hubu),
     ("hubu_submit_spend", BackendOwner::Hubu),
+    ("hubu_update_budget", BackendOwner::Hubu),
 ];
 
 pub fn product_version() -> &'static str {
@@ -2008,7 +2009,7 @@ mod tests {
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
         assert_eq!(capability["routing_revision"], ROUTING_REVISION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 38);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 39);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

@@ -3,8 +3,8 @@ use std::{fs, io};
 use crate::{BackendClient, BackendOwner, Secret};
 use serde_json::Value;
 
-use super::response::{redact_backend_message, ForwardError};
-use super::routing::{HubuHttpRequestV1, HubuRequestCapabilityV1};
+use super::response::{redact_backend_value, ForwardError};
+use super::routing::{validate_public_budget_id, HubuHttpRequestV1, HubuRequestCapabilityV1};
 
 const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
 const APPROVAL_CAPABILITY_HEADER: &str = "X-Hubu-Approval-Capability";
@@ -149,18 +149,19 @@ impl BackendClient {
             }
         })?;
         if !status.is_success() {
-            let message = body
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("request failed");
-            let message = redact_backend_message(
-                message,
+            let body = redact_backend_value(
+                body,
                 &self.bearer_token,
                 routing.approval_capability.as_ref(),
                 used_approval_capability.as_ref(),
                 routing.reconciliation_capability.as_ref(),
                 used_reconciliation_capability.as_ref(),
             );
+            let message = body
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("request failed")
+                .to_string();
             return Err(ForwardError::Application {
                 status: status.as_u16(),
                 message,
@@ -168,6 +169,8 @@ impl BackendClient {
                     .get("error_code")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                details: body.get("details").cloned(),
+                retry_guidance: body.get("retry_guidance").cloned(),
             }
             .into());
         }
@@ -175,37 +178,51 @@ impl BackendClient {
     }
 }
 
-fn is_approved_http_route(method: &str, path: &str) -> bool {
-    let path = path.split_once('?').map_or(path, |(path, _)| path);
-    matches!(
-        (method, path),
-        ("GET", "/health")
-            | ("GET", "/registration/guidance")
-            | ("GET", "/users")
-            | ("POST", "/init")
-            | ("POST", "/agents/register")
-            | ("POST", "/policies")
-            | ("GET", "/policies/show")
-            | ("GET", "/policies/export")
-            | ("GET", "/policies/history")
-            | ("GET", "/policies/diff")
-            | ("POST", "/budgets")
-            | ("POST", "/budgets/series")
-            | ("POST", "/budgets/revoke")
-            | ("POST", "/budgets/replace")
-            | ("POST", "/user/spending-target")
-            | ("POST", "/user/spending-target/revoke")
-            | ("GET", "/user/spending-target")
-            | ("POST", "/spend")
-            | ("POST", "/spend/authorize")
-            | ("GET", "/spend/approval")
-            | ("POST", "/spend/approval/resolve")
-            | ("GET", "/agents")
-            | ("GET", "/budgets")
-            | ("GET", "/ledger")
-            | ("GET", "/spend/executor/claim")
-            | ("GET", "/spend/executor/reconciliation")
-            | ("POST", "/spend/executor/settle")
-            | ("POST", "/spend/executor/release")
-    )
+pub(super) fn is_approved_http_route(method: &str, path: &str) -> bool {
+    let (path, has_query) = path
+        .split_once('?')
+        .map_or((path, false), |(path, _)| (path, true));
+    !has_query && matches!(method, "GET" | "POST") && is_budget_versions_route(path)
+        || matches!(
+            (method, path),
+            ("GET", "/health")
+                | ("GET", "/registration/guidance")
+                | ("GET", "/users")
+                | ("POST", "/init")
+                | ("POST", "/agents/register")
+                | ("POST", "/policies")
+                | ("GET", "/policies/show")
+                | ("GET", "/policies/export")
+                | ("GET", "/policies/history")
+                | ("GET", "/policies/diff")
+                | ("POST", "/budgets")
+                | ("POST", "/budgets/series")
+                | ("POST", "/budgets/revoke")
+                | ("POST", "/user/spending-target")
+                | ("POST", "/user/spending-target/revoke")
+                | ("GET", "/user/spending-target")
+                | ("POST", "/spend")
+                | ("POST", "/spend/authorize")
+                | ("GET", "/spend/approval")
+                | ("POST", "/spend/approval/resolve")
+                | ("GET", "/agents")
+                | ("GET", "/budgets")
+                | ("GET", "/ledger")
+                | ("GET", "/spend/executor/claim")
+                | ("GET", "/spend/executor/reconciliation")
+                | ("POST", "/spend/executor/settle")
+                | ("POST", "/spend/executor/release")
+        )
+}
+
+fn is_budget_versions_route(path: &str) -> bool {
+    let Some(remainder) = path.strip_prefix("/budgets/") else {
+        return false;
+    };
+    let Some(budget_id) = remainder.strip_suffix("/versions") else {
+        return false;
+    };
+    !budget_id.is_empty()
+        && !budget_id.contains('/')
+        && validate_public_budget_id(budget_id).is_ok()
 }

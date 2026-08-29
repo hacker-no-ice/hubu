@@ -577,13 +577,19 @@ try:
     start_process()
 
     expected_tools = {
+        "hubu_budget_history",
         "hubu_get_spend_approval",
         "hubu_resolve_spend_approval",
         "hubu_resume_operation",
+        "hubu_update_budget",
     }
     tools = request("tools/list").get("tools", [])
     tool_names = {tool.get("name") for tool in tools}
-    if len(tool_names) != 38 or not expected_tools.issubset(tool_names):
+    if (
+        len(tool_names) != 39
+        or not expected_tools.issubset(tool_names)
+        or "hubu_replace_budget" in tool_names
+    ):
         fail(f"unexpected unified MCP tool catalog: {len(tool_names)} tools")
 
     denied_before, denied_approval_id, denied_handle = pending_operation("deny")

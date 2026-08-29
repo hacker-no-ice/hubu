@@ -63,6 +63,7 @@ and reconciliation:
 hubu_add_policy
 hubu_apply_policy
 hubu_authorize_spend
+hubu_budget_history
 hubu_client_approval_profile
 hubu_create_budget
 hubu_create_recurring_budget
@@ -82,7 +83,6 @@ hubu_reconcile_vendor_did_not_bill_claim
 hubu_register_agent
 hubu_register_human
 hubu_registration_guidance
-hubu_replace_budget
 hubu_resolve_spend_approval
 hubu_revoke_budget
 hubu_revoke_spending_target
@@ -90,6 +90,7 @@ hubu_set_spending_target
 hubu_show_policy
 hubu_show_spending_targets
 hubu_submit_spend
+hubu_update_budget
 ```
 
 Gongbu-owned tools cover execution and artifacts:
@@ -146,6 +147,47 @@ trusted harness identity and a newly allocated private operation key.
 - `gongbu_get_artifact` returns safe metadata followed by PNG or JPEG content.
 - Gongbu application errors remain `isError: true` with their sanitized error
   object.
+- Only `hubu_update_budget` and `hubu_budget_history` translate typed Hubu
+  application rejections into MCP tool results with `isError: true`. Their text
+  and `structuredContent` contain the same sanitized `error`, `http_status`,
+  `error_code`, and optional `details` and `retry_guidance`. Other Hubu tools
+  retain their existing JSON-RPC application-error behavior.
+
+### Versioned budget tools
+
+`hubu_update_budget` is approval-gated and idempotent. Its strict input requires
+`budget_id`, `expected_revision >= 1`, and `amount_limit_cents >= 1`, with an
+optional `reason`. The amount is the budget's new cumulative total cap, not an
+increment. The router validates the public budget ID, places it only in
+`/budgets/{budget_id}/versions`, and forwards only the revision, amount, and
+optional reason in the POST body. `hubu_budget_history` is the read-only GET on
+the same safe dynamic path.
+
+An update success distinguishes the requested immutable `applied_version` from
+the authoritative `current_budget`. This matters when an exact historical
+retry recovers its original successor after the head has advanced.
+`idempotent_replay` labels that case. History returns the current logical
+snapshot once and then immutable versions in ascending revision order.
+
+Typed rejections use HTTP 400 for invalid amount or revision, 404 for unknown
+or not-owned budgets, 409 for revision conflict, revocation, or expiry, and 422
+when the total would fall below committed usage. Numeric conflict and floor
+values remain in `details`. Generic HTTP 500 responses expose no storage or
+invariant detail. Every configured Hubu bearer or capability string is removed
+recursively from the error, details, retry guidance, and rendered text.
+
+The stable public codes are:
+
+- `budget_update_invalid_amount` (400) and
+  `budget_update_invalid_revision` (400) identify boundary validation failures.
+- `budget_not_found` (404) deliberately covers both unknown and not-owned IDs.
+- `budget_revision_conflict` (409) includes expected and current revisions;
+  refresh and review history before creating a new intent.
+- `budget_revoked` (409) and `budget_expired` (409) reject lifecycle-invalid
+  updates.
+- `budget_limit_below_committed` (422) includes requested and committed cents.
+- `budget_update_storage_error` (500) is generic. After an ambiguous outcome,
+  retry only with the same budget ID, expected revision, amount, and reason.
 
 ## Composite governed execution
 
@@ -421,16 +463,18 @@ approval_required --approve--> resume_required --resume--> accepted -> queued
 ```
 
 Primitive pass-through routes do not add a success envelope, rename fields,
-translate currency units, expose filesystem locations, or convert an
-application error into a successful payload. The explicit composite uses its
-documented outcome envelope without changing either backend's wire contract.
+translate currency units, or expose filesystem locations. Versioned budget
+tools make the narrow documented exception of returning typed application
+rejections as `isError: true` MCP tool results; other Hubu application errors
+remain JSON-RPC errors. The explicit composite uses its documented outcome
+envelope without changing either backend's wire contract.
 
 ## Discovery and compatibility
 
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 38 tool names with owner and
+state and compatible version metadata, and all 39 tool names with owner and
 availability.
 
 The version-1 compatibility boundary requires:
@@ -438,7 +482,7 @@ The version-1 compatibility boundary requires:
 | Surface | Required value |
 | --- | --- |
 | Unified contract | `hubu-gongbu-mcp-v1` |
-| Routing revision | `3` |
+| Routing revision | `4` |
 | MCP protocol | `2024-11-05` |
 | Hubu and Gongbu executor contract | `hubu-spend-executor-v4.3` |
 | Gongbu API schema | `2` |

@@ -96,6 +96,33 @@ change provenance. Consumed and frozen usage belong to the logical budget;
 remaining is checked against the current-version limit. Every hold records both
 the logical budget ID and the version that authorized it.
 
+Every current-budget HTTP projection includes the stable public `budget_id`,
+the public `current_version_id`, and `current_revision`. Limit changes append a
+version through `POST /budgets/{budget_id}/versions` with
+`amount_limit_cents`, `expected_revision`, and optional `reason`; the amount is
+the new cumulative total cap, not an added allowance. The immutable agent,
+currency, period, consumed amount, and frozen amount do not reset. The append
+atomically advances the version pointer and recalculates remaining as the new
+limit minus consumed and frozen usage.
+
+The expected revision pins one logical intent. An exact retry of the same
+revision, amount, actor, source, and reason returns its previously applied
+successor even if the current head later advances; the response therefore
+reports `applied_version` separately from the authoritative `current_budget`
+and marks `idempotent_replay`. A changed request against a stale predecessor is
+a conflict. `GET /budgets/{budget_id}/versions` returns the current logical
+snapshot once and immutable versions in ascending revision order; version rows
+contain provenance but do not repeat mutable balance or lifecycle state.
+
+The update boundary reconciles expired holds at one captured request instant
+before reading or mutating the budget. It rejects invalid input, unknown or
+not-owned IDs, revision conflicts, revoked or expired heads, and limits below
+committed consumed-plus-frozen usage with typed public errors. Storage and
+invariant failures use one generic error without internal detail. The CLI
+always reads and prints the current snapshot before confirmation, pins that
+reviewed revision unless the caller supplies one, and retries an ambiguous POST
+once with the exact same body without refreshing or rebasing the intent.
+
 SQLite persists only the budget's administrative state: `active` or `revoked`.
 Hubu derives availability from one captured instant and the current balance,
 using this precedence:
