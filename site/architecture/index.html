@@ -91,7 +91,7 @@
             <div class="boundary-marker"><span>HTTP</span><b>executor contract</b><span>v4.2</span></div>
             <button class="ownership-card gongbu-card" type="button" data-component="gongbu">
               <span>GONGBU OWNS</span>
-              <div><b>Credentials</b><b>Temporal</b><b>Providers</b><b>Retries</b><b>Artifacts</b></div>
+              <div><b>Credentials</b><b>Temporal</b><b>Providers</b><b>Recovery</b><b>Artifacts</b></div>
               <small>Gongbu database + artifact root</small>
             </button>
           </div>
@@ -137,7 +137,7 @@
 
       <section class="principles">
         <article><span>01</span><h2>Govern synchronously.</h2><p>Policy and budget decisions happen before external work starts, with canonical scope and retry-safe identity.</p></article>
-        <article><span>02</span><h2>Execute separately.</h2><p>Provider credentials, workflows, artifacts, and retries stay inside Gongbu’s execution failure domain.</p></article>
+        <article><span>02</span><h2>Execute separately.</h2><p>Provider credentials, submit-once workflows, operation checkpoints, artifacts, and recovery stay inside Gongbu’s execution failure domain.</p></article>
         <article><span>03</span><h2>Reconcile explicitly.</h2><p>Receipts and settlement evidence tie execution back to authorizations without copying provider state into Hubu.</p></article>
       </section>
     </main>

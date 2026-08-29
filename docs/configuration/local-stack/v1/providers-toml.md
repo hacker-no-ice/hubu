@@ -170,11 +170,20 @@ Required for every non-fixture adapter. **Defined by the provider.** Use the exa
 
 ### `targets.settings.config.timeout_ms`
 
-Required invocation budget in milliseconds for every non-fixture adapter. The accepted range is `1..=270000` (up to 270 seconds). It covers the complete adapter operation described by its schema, which may include submission, polling, and artifact retrieval.
+Required invocation budget in milliseconds for every non-fixture adapter. The
+accepted range is `1..=270000` (up to 270 seconds). It covers the complete
+adapter operation described by its schema, which may include submission,
+polling, and artifact retrieval. For asynchronous FLUX work, Gongbu checkpoints
+one absolute deadline after submit; activity recovery and worker restart resume
+the same operation under that deadline and never create a fresh timeout budget.
 
 ### `targets.settings.config.max_retries`
 
-Optional unsigned integer; defaults to `0`. The only currently accepted value is `0` for every non-fixture adapter; Gongbu rejects nonzero values during provider-profile validation. Provider-level retries are not enabled even when an adapter exposes an idempotency header.
+Optional unsigned integer; defaults to `0`. The only currently accepted value is `0`
+for every non-fixture adapter; Gongbu rejects nonzero values during
+provider-profile validation. Provider generation retries are not enabled even
+when an adapter exposes an idempotency header. Read-only polling of one durably
+checkpointed asynchronous operation is recovery, not a generation retry.
 
 ### `targets.settings.config.headers`
 
@@ -203,7 +212,10 @@ artifact hosts never receive the BFL `x-key` credential.
 
 ### `targets.settings.config.poll_interval_ms`
 
-Optional for `flux2_api`; defaults to `500`. It is the delay between provider operation-status polls and remains bounded by the overall `timeout_ms`.
+Optional for `flux2_api`; defaults to `500`. It is the delay between GET status
+polls for one durably checkpointed provider operation and remains bounded by
+the original overall `timeout_ms`. It never authorizes another generation
+submission.
 
 ### `targets.settings.config.idempotency_header`
 
