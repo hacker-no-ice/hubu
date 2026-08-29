@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::budget::{
-    budget_update_request_fingerprint, initial_budget_request_fingerprint, Budget, BudgetBalance,
-    BudgetHold, BudgetHoldStatus, BudgetStatus, BudgetVersion, BudgetWithBalance,
+    budget_update_request_fingerprint, initial_budget_request_fingerprint, Budget,
+    BudgetAdministrativeState, BudgetAvailability, BudgetBalance, BudgetHold, BudgetHoldStatus,
+    BudgetVersion, BudgetWithBalance,
 };
 use crate::policy::Policy;
 use crate::spend::{
@@ -517,7 +518,6 @@ impl SqliteGovernanceRepository {
             "executor claim hold attribution differs from persisted state",
         )?;
         upsert_balance(&sqlite_tx, balance)?;
-        refresh_persisted_budget_status(&sqlite_tx, &hold.budget_id.to_string(), hold.updated_at)?;
         sqlite_tx.commit()?;
         Ok(())
     }
@@ -572,7 +572,6 @@ impl SqliteGovernanceRepository {
             ],
         )?;
         upsert_balance(&sqlite_tx, balance)?;
-        refresh_persisted_budget_status(&sqlite_tx, &hold.budget_id.to_string(), hold.updated_at)?;
         sqlite_tx.execute(
             "INSERT INTO spend_authorization_outcomes
              (agent_id, operation_key, revision, spend_decision_id, decision,
@@ -1030,11 +1029,6 @@ impl SqliteGovernanceRepository {
             balance_rows,
             &format!("executor claim budget balance changed during {transition_name}"),
         )?;
-        refresh_persisted_budget_status(
-            &sqlite_tx,
-            &hold.budget_id.to_string(),
-            finalization_started_at,
-        )?;
 
         claim.finalized_at = Some(finalization_started_at);
         if let ExecutorFinalizationAuthority::Reconciliation {
@@ -1259,7 +1253,8 @@ impl SqliteGovernanceRepository {
                 currency TEXT NOT NULL,
                 starting_at TEXT NOT NULL,
                 ending_before TEXT,
-                status TEXT NOT NULL,
+                administrative_state TEXT NOT NULL
+                    CHECK(administrative_state IN ('active', 'revoked')),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -1390,6 +1385,7 @@ impl SqliteGovernanceRepository {
         self.migrate_user_caps_to_spending_targets()?;
         self.migrate_executor_claim_budget_holds()?;
         self.migrate_versioned_budgets()?;
+        self.migrate_budget_administrative_state()?;
         // A legacy budget-table rebuild replaces the holds table and its
         // indexes, so restore executor-claim uniqueness on the new table.
         self.migrate_executor_claim_budget_holds()?;
@@ -1720,7 +1716,8 @@ impl SqliteGovernanceRepository {
                      currency TEXT NOT NULL,
                      starting_at TEXT NOT NULL,
                      ending_before TEXT,
-                     status TEXT NOT NULL,
+                     administrative_state TEXT NOT NULL
+                         CHECK(administrative_state IN ('active', 'revoked')),
                      created_at TEXT NOT NULL,
                      updated_at TEXT NOT NULL
                  );
@@ -1852,11 +1849,20 @@ impl SqliteGovernanceRepository {
                     parsed_currency,
                     &period,
                 );
+                let administrative_state = match status.as_str() {
+                    "active" | "exhausted" | "expired" => "active",
+                    "revoked" => "revoked",
+                    other => {
+                        return Err(StorageError::InvalidData(format!(
+                            "cannot migrate unknown budget status `{other}` for budget {id}"
+                        )));
+                    }
+                };
                 let version_id = BudgetVersionId::new().to_string();
                 transaction.execute(
                     "INSERT INTO budgets_v2
                      (id, scope_type, scope_id, currency, starting_at, ending_before,
-                      status, created_at, updated_at)
+                      administrative_state, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         id,
@@ -1865,7 +1871,7 @@ impl SqliteGovernanceRepository {
                         currency,
                         starting_at,
                         ending_before,
-                        status,
+                        administrative_state,
                         created_at,
                         updated_at,
                     ],
@@ -1891,6 +1897,12 @@ impl SqliteGovernanceRepository {
                     params![id, version_id],
                 )?;
             }
+
+            reject_overlapping_non_revoked_budgets(
+                &transaction,
+                "budgets_v2",
+                "administrative_state",
+            )?;
 
             transaction.execute(
                 "INSERT INTO budget_balances_v2
@@ -2018,6 +2030,80 @@ impl SqliteGovernanceRepository {
                 "versioned budget migration produced a foreign-key violation".to_string(),
             ));
         }
+        Ok(())
+    }
+
+    fn migrate_budget_administrative_state(&mut self) -> Result<(), StorageError> {
+        let has_administrative_state =
+            table_has_column(&self.conn, "budgets", "administrative_state")?;
+        let has_legacy_status = table_has_column(&self.conn, "budgets", "status")?;
+        if has_administrative_state == has_legacy_status {
+            return Err(StorageError::InvalidData(
+                "budgets must have exactly one administrative-state column".to_string(),
+            ));
+        }
+
+        let transaction = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if has_legacy_status {
+            let unknown: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT id, status FROM budgets
+                     WHERE status NOT IN ('active', 'exhausted', 'expired', 'revoked')
+                     ORDER BY id LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((budget_id, status)) = unknown {
+                return Err(StorageError::InvalidData(format!(
+                    "cannot migrate unknown budget status `{status}` for budget {budget_id}"
+                )));
+            }
+            transaction.execute(
+                "UPDATE budgets
+                 SET status = CASE WHEN status = 'revoked' THEN 'revoked' ELSE 'active' END",
+                [],
+            )?;
+            transaction.execute_batch(
+                "ALTER TABLE budgets RENAME COLUMN status TO administrative_state;",
+            )?;
+        } else {
+            let unknown: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT id, administrative_state FROM budgets
+                     WHERE administrative_state NOT IN ('active', 'revoked')
+                     ORDER BY id LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((budget_id, state)) = unknown {
+                return Err(StorageError::InvalidData(format!(
+                    "unknown budget administrative state `{state}` for budget {budget_id}"
+                )));
+            }
+        }
+
+        reject_overlapping_non_revoked_budgets(&transaction, "budgets", "administrative_state")?;
+        transaction.execute_batch(
+            "DROP TRIGGER IF EXISTS budgets_administrative_state_insert_guard;
+             DROP TRIGGER IF EXISTS budgets_administrative_state_update_guard;
+             CREATE TRIGGER budgets_administrative_state_insert_guard
+             BEFORE INSERT ON budgets
+             WHEN NEW.administrative_state NOT IN ('active', 'revoked')
+             BEGIN
+                 SELECT RAISE(ABORT, 'invalid budget administrative state');
+             END;
+             CREATE TRIGGER budgets_administrative_state_update_guard
+             BEFORE UPDATE OF administrative_state ON budgets
+             WHEN NEW.administrative_state NOT IN ('active', 'revoked')
+             BEGIN
+                 SELECT RAISE(ABORT, 'invalid budget administrative state');
+             END;",
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -3018,6 +3104,85 @@ fn table_has_column(
     Ok(false)
 }
 
+fn reject_overlapping_non_revoked_budgets(
+    conn: &Connection,
+    table: &str,
+    administrative_state_column: &str,
+) -> Result<(), StorageError> {
+    if !matches!(
+        (table, administrative_state_column),
+        ("budgets", "administrative_state") | ("budgets_v2", "administrative_state")
+    ) {
+        return Err(StorageError::InvalidData(
+            "invalid internal budget overlap migration target".to_string(),
+        ));
+    }
+    let sql = format!(
+        "SELECT id, scope_type, scope_id, currency, starting_at, ending_before
+         FROM {table}
+         WHERE {administrative_state_column} != 'revoked'
+         ORDER BY id"
+    );
+    let rows = {
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (index, left) in rows.iter().enumerate() {
+        if left.1 != "agent" {
+            return Err(StorageError::InvalidData(format!(
+                "budget {} has unsupported scope `{}`",
+                left.0, left.1
+            )));
+        }
+        let left_period = TimePeriod::new(
+            parse_timestamp(&left.4)?,
+            parse_optional_timestamp(left.5.clone())?,
+        )
+        .map_err(|_| {
+            StorageError::InvalidData(format!("budget {} has an invalid period", left.0))
+        })?;
+        for right in rows.iter().skip(index + 1) {
+            if left.2 != right.2 || left.3 != right.3 {
+                continue;
+            }
+            let right_period = TimePeriod::new(
+                parse_timestamp(&right.4)?,
+                parse_optional_timestamp(right.5.clone())?,
+            )
+            .map_err(|_| {
+                StorageError::InvalidData(format!("budget {} has an invalid period", right.0))
+            })?;
+            if budget_periods_overlap(&left_period, &right_period) {
+                return Err(StorageError::InvalidData(format!(
+                    "non-revoked budgets {} and {} overlap for one agent and currency",
+                    left.0, right.0
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn budget_periods_overlap(left: &TimePeriod, right: &TimePeriod) -> bool {
+    let left_starts_before_right_ends = right
+        .ending_before
+        .is_none_or(|right_end| left.starting_at < right_end);
+    let right_starts_before_left_ends = left
+        .ending_before
+        .is_none_or(|left_end| right.starting_at < left_end);
+    left_starts_before_right_ends && right_starts_before_left_ends
+}
+
 impl SpendRepository for SqliteGovernanceRepository {
     fn admit_spend_attempt(
         &mut self,
@@ -3444,7 +3609,6 @@ impl BudgetRepository for SqliteGovernanceRepository {
                  WHERE budget_id = ?1",
                 params![budget_id, amount_cents, now.to_rfc3339()],
             )?;
-            refresh_persisted_budget_status(&sqlite_tx, &budget_id, now)?;
         }
 
         sqlite_tx.commit()?;
@@ -3467,10 +3631,10 @@ impl BudgetRepository for SqliteGovernanceRepository {
         let budget_rows = sqlite_tx.execute(
             "INSERT INTO budgets
              (id, scope_type, scope_id, currency, starting_at, ending_before,
-              status, created_at, updated_at)
+              administrative_state, created_at, updated_at)
              VALUES (?1, 'agent', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
-                status = excluded.status,
+                administrative_state = excluded.administrative_state,
                 updated_at = excluded.updated_at
              WHERE budgets.scope_type = excluded.scope_type
                AND budgets.scope_id = excluded.scope_id
@@ -3487,7 +3651,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
                     .period
                     .ending_before
                     .map(|timestamp| timestamp.to_rfc3339()),
-                budget_status(&budget.status),
+                budget_administrative_state(budget.administrative_state),
                 budget.created_at.to_rfc3339(),
                 budget.updated_at.to_rfc3339(),
             ],
@@ -3604,7 +3768,6 @@ impl BudgetRepository for SqliteGovernanceRepository {
             ],
         )?;
         upsert_balance(&sqlite_tx, balance)?;
-        refresh_persisted_budget_status(&sqlite_tx, &hold.budget_id.to_string(), hold.updated_at)?;
         sqlite_tx.commit()?;
         Ok(())
     }
@@ -3635,7 +3798,6 @@ impl BudgetRepository for SqliteGovernanceRepository {
             "budget hold attribution differs from persisted state",
         )?;
         upsert_balance(&sqlite_tx, balance)?;
-        refresh_persisted_budget_status(&sqlite_tx, &hold.budget_id.to_string(), hold.updated_at)?;
         sqlite_tx.commit()?;
         Ok(())
     }
@@ -3644,7 +3806,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
         let mut stmt = self.conn.prepare(
             "SELECT budget.id, budget.scope_type, budget.scope_id, budget.currency,
                     budget.starting_at, budget.ending_before, current.version_id,
-                    budget.status, budget.created_at, budget.updated_at
+                    budget.administrative_state, budget.created_at, budget.updated_at
              FROM budgets AS budget
              LEFT JOIN budget_current_versions AS current ON current.budget_id = budget.id
              ORDER BY budget.created_at ASC",
@@ -3662,7 +3824,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
                     format!("logical budget {id} has no current-version pointer"),
                 )))
             })?;
-            let status: String = row.get(7)?;
+            let administrative_state: String = row.get(7)?;
             let created_at: String = row.get(8)?;
             let updated_at: String = row.get(9)?;
             Ok(Budget {
@@ -3675,7 +3837,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
                     parse_optional_timestamp(ending_before)?,
                 )
                 .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                status: parse_budget_status(&status)?,
+                administrative_state: parse_budget_administrative_state(&administrative_state)?,
                 created_at: parse_timestamp(&created_at)?,
                 updated_at: parse_timestamp(&updated_at)?,
             })
@@ -3822,18 +3984,20 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
                 current_revision: current.version.revision,
             });
         }
-        match current.budget.status {
-            BudgetStatus::Revoked => return Err(AppendBudgetVersionError::BudgetRevoked),
-            BudgetStatus::Expired => return Err(AppendBudgetVersionError::BudgetExpired),
-            BudgetStatus::Active | BudgetStatus::Exhausted => {}
+        let availability = current
+            .availability_at(request.effective_at)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if availability == BudgetAvailability::Revoked {
+            return Err(AppendBudgetVersionError::BudgetRevoked);
         }
-        if current
-            .budget
-            .period
-            .ending_before
-            .is_some_and(|ending_before| ending_before <= request.effective_at)
-        {
+        if availability == BudgetAvailability::Expired {
             return Err(AppendBudgetVersionError::BudgetExpired);
+        }
+        if !availability.allows_limit_update() {
+            return Err(StorageError::InvalidData(format!(
+                "budget availability `{availability}` has no update contract"
+            ))
+            .into());
         }
         validate_balance_for_limit(&current.balance, current.version.amount_limit_cents)?;
         let frozen_hold_amount_cents: i64 = transaction.query_row(
@@ -3945,29 +4109,25 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
             "budget balance changed during serialized version append",
         )?;
 
+        let previous_updated_at = current.budget.updated_at;
         let mut budget = current.budget;
-        let previous_status = budget_status(&budget.status);
+        let administrative_state = budget_administrative_state(budget.administrative_state);
         budget.current_version_id = version.id.clone();
-        budget.status = if balance.remaining_amount_cents == 0 {
-            BudgetStatus::Exhausted
-        } else {
-            BudgetStatus::Active
-        };
         budget.updated_at = request.effective_at;
         let budget_rows = transaction.execute(
             "UPDATE budgets
-             SET status = ?1, updated_at = ?2
-             WHERE id = ?3 AND status = ?4",
+             SET updated_at = ?1
+             WHERE id = ?2 AND administrative_state = ?3 AND updated_at = ?4",
             params![
-                budget_status(&budget.status),
                 budget.updated_at.to_rfc3339(),
                 budget.id.to_string(),
-                previous_status,
+                administrative_state,
+                previous_updated_at.to_rfc3339(),
             ],
         )?;
         require_one_updated_row(
             budget_rows,
-            "logical budget status changed during serialized version append",
+            "logical budget administrative state changed during serialized version append",
         )?;
         transaction.commit()?;
 
@@ -4468,7 +4628,7 @@ fn load_current_budget_snapshot(
 ) -> Result<Option<BudgetWithBalance>, StorageError> {
     conn.query_row(
         "SELECT budget.id, budget.scope_type, budget.scope_id, budget.currency,
-                budget.starting_at, budget.ending_before, budget.status,
+                budget.starting_at, budget.ending_before, budget.administrative_state,
                 budget.created_at, budget.updated_at,
                 version.id, version.budget_id, version.revision,
                 version.predecessor_version_id, version.amount_limit_cents,
@@ -4490,7 +4650,7 @@ fn load_current_budget_snapshot(
             let currency: String = row.get(3)?;
             let starting_at: String = row.get(4)?;
             let ending_before: Option<String> = row.get(5)?;
-            let status: String = row.get(6)?;
+            let administrative_state: String = row.get(6)?;
             let budget_created_at: String = row.get(7)?;
             let budget_updated_at: String = row.get(8)?;
             let version_id: String = row.get(9)?;
@@ -4517,7 +4677,7 @@ fn load_current_budget_snapshot(
                     parse_optional_timestamp(ending_before)?,
                 )
                 .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                status: parse_budget_status(&status)?,
+                administrative_state: parse_budget_administrative_state(&administrative_state)?,
                 created_at: parse_timestamp(&budget_created_at)?,
                 updated_at: parse_timestamp(&budget_updated_at)?,
             };
@@ -4784,47 +4944,8 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), Stor
     Ok(())
 }
 
-fn refresh_persisted_budget_status(
-    conn: &Connection,
-    budget_id: &str,
-    now: DateTime<Utc>,
-) -> Result<(), rusqlite::Error> {
-    let now = now.to_rfc3339();
-    conn.execute(
-        "UPDATE budgets
-         SET status = 'exhausted', updated_at = ?2
-         WHERE id = ?1
-           AND status = 'active'
-           AND EXISTS (
-             SELECT 1 FROM budget_balances
-             WHERE budget_id = ?1
-               AND remaining_amount_cents <= 0
-               AND frozen_amount_cents = 0
-           )",
-        params![budget_id, now],
-    )?;
-    conn.execute(
-        "UPDATE budgets
-         SET status = 'active', updated_at = ?2
-         WHERE id = ?1
-           AND status = 'exhausted'
-           AND EXISTS (
-             SELECT 1 FROM budget_balances
-             WHERE budget_id = ?1
-               AND remaining_amount_cents > 0
-           )",
-        params![budget_id, now],
-    )?;
-    Ok(())
-}
-
-fn budget_status(status: &BudgetStatus) -> &'static str {
-    match status {
-        BudgetStatus::Active => "active",
-        BudgetStatus::Exhausted => "exhausted",
-        BudgetStatus::Expired => "expired",
-        BudgetStatus::Revoked => "revoked",
-    }
+fn budget_administrative_state(state: BudgetAdministrativeState) -> &'static str {
+    state.as_str()
 }
 
 fn budget_hold_status(status: &BudgetHoldStatus) -> &'static str {
@@ -4880,13 +5001,15 @@ fn parse_budget_agent_id(scope_type: &str, scope_id: &str) -> Result<AgentId, ru
     }
 }
 
-fn parse_budget_status(value: &str) -> Result<BudgetStatus, rusqlite::Error> {
+fn parse_budget_administrative_state(
+    value: &str,
+) -> Result<BudgetAdministrativeState, rusqlite::Error> {
     match value {
-        "active" => Ok(BudgetStatus::Active),
-        "exhausted" => Ok(BudgetStatus::Exhausted),
-        "expired" => Ok(BudgetStatus::Expired),
-        "revoked" => Ok(BudgetStatus::Revoked),
-        _ => Err(rusqlite::Error::InvalidQuery),
+        "active" => Ok(BudgetAdministrativeState::Active),
+        "revoked" => Ok(BudgetAdministrativeState::Revoked),
+        other => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            StorageError::InvalidData(format!("unknown budget administrative state `{other}`")),
+        ))),
     }
 }
 
@@ -5041,6 +5164,127 @@ mod tests {
             source: Some("test:budget-update".to_string()),
             reason: Some("adjust total allocation".to_string()),
         }
+    }
+
+    fn persisted_budget_administrative_row(
+        repo: &SqliteGovernanceRepository,
+        budget_id: &BudgetId,
+    ) -> (String, String) {
+        repo.conn
+            .query_row(
+                "SELECT administrative_state, updated_at FROM budgets WHERE id = ?1",
+                params![budget_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    fn create_legacy_versioned_budget_tables(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE budgets (
+                 id TEXT PRIMARY KEY,
+                 scope_type TEXT NOT NULL,
+                 scope_id TEXT NOT NULL,
+                 currency TEXT NOT NULL,
+                 starting_at TEXT NOT NULL,
+                 ending_before TEXT,
+                 status TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE TABLE budget_versions (
+                 id TEXT PRIMARY KEY,
+                 budget_id TEXT NOT NULL,
+                 revision INTEGER NOT NULL,
+                 predecessor_version_id TEXT,
+                 amount_limit_cents INTEGER NOT NULL,
+                 effective_at TEXT NOT NULL,
+                 actor TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 reason TEXT,
+                 request_fingerprint TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
+             CREATE TABLE budget_current_versions (
+                 budget_id TEXT PRIMARY KEY,
+                 version_id TEXT NOT NULL UNIQUE
+             );
+             CREATE TABLE budget_balances (
+                 budget_id TEXT PRIMARY KEY,
+                 consumed_amount_cents INTEGER NOT NULL,
+                 frozen_amount_cents INTEGER NOT NULL,
+                 remaining_amount_cents INTEGER NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE TABLE budget_holds (
+                 id TEXT PRIMARY KEY,
+                 budget_id TEXT NOT NULL,
+                 budget_version_id TEXT NOT NULL,
+                 spend_decision_id TEXT NOT NULL,
+                 amount_cents INTEGER NOT NULL,
+                 currency TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 executor_claim_id TEXT,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 expires_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    }
+
+    fn insert_legacy_versioned_budget(
+        conn: &Connection,
+        budget_id: &BudgetId,
+        agent_id: &AgentId,
+        status: &str,
+        starting_at: DateTime<Utc>,
+        ending_before: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    ) -> BudgetVersionId {
+        let version_id = BudgetVersionId::new();
+        conn.execute(
+            "INSERT INTO budgets
+             (id, scope_type, scope_id, currency, starting_at, ending_before,
+              status, created_at, updated_at)
+             VALUES (?1, 'agent', ?2, 'usd', ?3, ?4, ?5, ?3, ?6)",
+            params![
+                budget_id.to_string(),
+                agent_id.to_string(),
+                starting_at.to_rfc3339(),
+                ending_before.to_rfc3339(),
+                status,
+                updated_at.to_rfc3339(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO budget_versions
+             (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+              effective_at, actor, source, reason, request_fingerprint, created_at)
+             VALUES (?1, ?2, 1, NULL, 10000, ?3, 'legacy:actor', 'legacy:test',
+                     NULL, 'sha256:legacy', ?3)",
+            params![
+                version_id.to_string(),
+                budget_id.to_string(),
+                starting_at.to_rfc3339(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO budget_current_versions (budget_id, version_id) VALUES (?1, ?2)",
+            params![budget_id.to_string(), version_id.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO budget_balances
+             (budget_id, consumed_amount_cents, frozen_amount_cents,
+              remaining_amount_cents, updated_at)
+             VALUES (?1, 0, 0, 10000, ?2)",
+            params![budget_id.to_string(), updated_at.to_rfc3339()],
+        )
+        .unwrap();
+        version_id
     }
 
     fn settlement_receipt(actual_vendor_cost_cents: i64) -> SpendExecutorSettlementReceipt {
@@ -5737,10 +5981,11 @@ mod tests {
     fn executor_settlement_is_atomic_and_idempotent() {
         let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
         let settlement_started_at = Utc::now();
-        let (claim, _, _) = persist_claimed_executor_spend(
+        let (claim, _, hold) = persist_claimed_executor_spend(
             &mut repo,
             settlement_started_at + Duration::minutes(15),
         );
+        let administrative_before = persisted_budget_administrative_row(&repo, &hold.budget_id);
         let first_settlement_id = PaymentId::new();
 
         let wrong_operation_error = repo
@@ -5789,6 +6034,10 @@ mod tests {
         assert_eq!(receipt.released_amount_cents, 500);
         assert_eq!(receipt.overrun_amount_cents, 0);
         assert_eq!(
+            persisted_budget_administrative_row(&repo, &hold.budget_id),
+            administrative_before
+        );
+        assert_eq!(
             load_executor_settlement_receipt_by_claim_id(&repo.conn, &claim.id)
                 .unwrap()
                 .expect("receipt should be durable"),
@@ -5809,6 +6058,10 @@ mod tests {
         assert_eq!(replay.claim.settlement_id, Some(first_settlement_id));
         assert_eq!(replay.balance.consumed_amount_cents, 2_000);
         assert_eq!(replay.balance.frozen_amount_cents, 0);
+        assert_eq!(
+            persisted_budget_administrative_row(&repo, &hold.budget_id),
+            administrative_before
+        );
 
         let changed_receipt_error = repo
             .settle_executor_claim_transactionally(
@@ -6166,6 +6419,7 @@ mod tests {
         let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
         let now = Utc::now();
         let (claim, _, hold) = persist_claimed_executor_spend(&mut repo, now);
+        let administrative_before = persisted_budget_administrative_row(&repo, &hold.budget_id);
 
         let reconciled = repo
             .reconcile_executor_claim_as_billed_transactionally(
@@ -6185,13 +6439,36 @@ mod tests {
         assert_eq!(reconciled.balance.consumed_amount_cents, 10_001);
         assert_eq!(reconciled.balance.remaining_amount_cents, -1);
         assert_eq!(reconciled.balance.frozen_amount_cents, 0);
+        assert_eq!(
+            persisted_budget_administrative_row(&repo, &hold.budget_id),
+            administrative_before
+        );
         let budget = repo
             .load_budgets()
             .unwrap()
             .into_iter()
             .find(|budget| budget.id == hold.budget_id)
             .unwrap();
-        assert!(matches!(budget.status, BudgetStatus::Exhausted));
+        assert_eq!(
+            budget.administrative_state,
+            BudgetAdministrativeState::Active
+        );
+        let version = repo
+            .load_budget_versions()
+            .unwrap()
+            .into_iter()
+            .find(|version| version.id == budget.current_version_id)
+            .unwrap();
+        assert_eq!(
+            BudgetWithBalance {
+                budget,
+                version,
+                balance: reconciled.balance,
+            }
+            .availability_at(now)
+            .unwrap(),
+            BudgetAvailability::Exhausted
+        );
     }
 
     #[test]
@@ -6343,10 +6620,11 @@ mod tests {
     fn executor_release_is_atomic_idempotent_and_blocks_settlement() {
         let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
         let finalization_started_at = Utc::now();
-        let (claim, _, _) = persist_claimed_executor_spend(
+        let (claim, _, hold) = persist_claimed_executor_spend(
             &mut repo,
             finalization_started_at + Duration::minutes(15),
         );
+        let administrative_before = persisted_budget_administrative_row(&repo, &hold.budget_id);
 
         let released = repo
             .release_executor_claim_transactionally(
@@ -6365,6 +6643,10 @@ mod tests {
         assert!(matches!(released.hold.status, BudgetHoldStatus::Released));
         assert_eq!(released.balance.frozen_amount_cents, 0);
         assert_eq!(released.balance.remaining_amount_cents, 10_000);
+        assert_eq!(
+            persisted_budget_administrative_row(&repo, &hold.budget_id),
+            administrative_before
+        );
 
         let replay = repo
             .release_executor_claim_transactionally(
@@ -6376,6 +6658,10 @@ mod tests {
             .unwrap();
         assert!(replay.idempotent_replay);
         assert_eq!(replay.balance.remaining_amount_cents, 10_000);
+        assert_eq!(
+            persisted_budget_administrative_row(&repo, &hold.budget_id),
+            administrative_before
+        );
 
         let settle_error = repo
             .settle_executor_claim_transactionally(
@@ -7218,10 +7504,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(at_floor.current.balance.remaining_amount_cents, 0);
-        assert!(matches!(
-            at_floor.current.budget.status,
-            BudgetStatus::Exhausted
-        ));
+        assert_eq!(
+            at_floor.current.availability_at(Utc::now()).unwrap(),
+            BudgetAvailability::Exhausted
+        );
 
         let increased = BudgetUpdateService
             .update_limit(
@@ -7232,10 +7518,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(increased.current.balance.remaining_amount_cents, 1_000);
-        assert!(matches!(
-            increased.current.budget.status,
-            BudgetStatus::Active
-        ));
+        assert_eq!(
+            increased.current.availability_at(Utc::now()).unwrap(),
+            BudgetAvailability::Active
+        );
 
         let settled = manager.settle_budget(&first_frozen.hold.id).unwrap();
         repo.update_budget_hold(&settled.hold, &settled.balance)
@@ -7322,11 +7608,11 @@ mod tests {
         let mut expired_repo = SqliteGovernanceRepository::in_memory().unwrap();
         let mut expired_manager = BudgetManager::new();
         let expired = create_persisted_budget(&mut expired_repo, &mut expired_manager, 10_000);
-        let after_period = expired.budget.period.ending_before.unwrap() + Duration::seconds(1);
+        let at_period_end = expired.budget.period.ending_before.unwrap();
         let expired_error = BudgetUpdateService
             .update_limit(
                 budget_update_request(expired.budget.id, 1, 12_000),
-                after_period,
+                at_period_end,
                 &mut expired_manager,
                 &mut expired_repo,
             )
@@ -7335,6 +7621,127 @@ mod tests {
             expired_error,
             crate::app::BudgetUpdateServiceError::Append(AppendBudgetVersionError::BudgetExpired)
         ));
+    }
+
+    #[test]
+    fn scheduled_budget_update_is_allowed_and_remains_scheduled() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let mut manager = BudgetManager::new();
+        let now = Utc::now();
+        let created = manager
+            .create_single_budget_with_provenance(
+                CreateSingleBudgetRequest {
+                    agent_id: agent_id(),
+                    amount_limit_cents: 10_000,
+                    currency: Currency::Usd,
+                    period: TimePeriod::new(
+                        now + Duration::hours(1),
+                        Some(now + Duration::hours(2)),
+                    )
+                    .unwrap(),
+                },
+                BudgetVersionProvenance::new(user_id().to_string(), "test:scheduled-update"),
+            )
+            .unwrap();
+        repo.save_budget_with_balance(&created.budget, &created.version, &created.balance)
+            .unwrap();
+
+        let updated = BudgetUpdateService
+            .update_limit(
+                budget_update_request(created.budget.id, 1, 12_000),
+                now,
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap();
+        assert_eq!(updated.predecessor_revision, 1);
+        assert_eq!(
+            updated.current.availability_at(now).unwrap(),
+            BudgetAvailability::Scheduled
+        );
+        assert_eq!(
+            updated.current.budget.administrative_state,
+            BudgetAdministrativeState::Active
+        );
+    }
+
+    #[test]
+    fn exact_budget_update_replay_precedes_expiry_and_revocation() {
+        let now = Utc::now();
+        let mut expired_repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let mut expired_manager = BudgetManager::new();
+        let expiring = expired_manager
+            .create_single_budget_with_provenance(
+                CreateSingleBudgetRequest {
+                    agent_id: agent_id(),
+                    amount_limit_cents: 10_000,
+                    currency: Currency::Usd,
+                    period: TimePeriod::new(now, Some(now + Duration::minutes(1))).unwrap(),
+                },
+                BudgetVersionProvenance::new(user_id().to_string(), "test:expiring-update"),
+            )
+            .unwrap();
+        expired_repo
+            .save_budget_with_balance(&expiring.budget, &expiring.version, &expiring.balance)
+            .unwrap();
+        let request = budget_update_request(expiring.budget.id.clone(), 1, 12_000);
+        let applied = BudgetUpdateService
+            .update_limit(
+                request.clone(),
+                now,
+                &mut expired_manager,
+                &mut expired_repo,
+            )
+            .unwrap();
+        let after_end = now + Duration::minutes(1);
+        let expired_replay = BudgetUpdateService
+            .update_limit(request, after_end, &mut expired_manager, &mut expired_repo)
+            .unwrap();
+        assert!(expired_replay.idempotent_replay);
+        assert_eq!(
+            expired_replay.applied_version.id,
+            applied.applied_version.id
+        );
+        assert_eq!(
+            expired_replay.current.availability_at(after_end).unwrap(),
+            BudgetAvailability::Expired
+        );
+
+        let mut revoked_repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let mut revoked_manager = BudgetManager::new();
+        let revoking = create_persisted_budget(&mut revoked_repo, &mut revoked_manager, 10_000);
+        let request = budget_update_request(revoking.budget.id.clone(), 1, 12_000);
+        let applied = BudgetUpdateService
+            .update_limit(
+                request.clone(),
+                now,
+                &mut revoked_manager,
+                &mut revoked_repo,
+            )
+            .unwrap();
+        let revoked = revoked_manager
+            .revoke_budget_at(&revoking.budget.id, now + Duration::seconds(1))
+            .unwrap();
+        revoked_repo
+            .save_budget_with_balance(&revoked.budget, &revoked.version, &revoked.balance)
+            .unwrap();
+        let revoked_replay = BudgetUpdateService
+            .update_limit(
+                request,
+                now + Duration::seconds(2),
+                &mut revoked_manager,
+                &mut revoked_repo,
+            )
+            .unwrap();
+        assert!(revoked_replay.idempotent_replay);
+        assert_eq!(
+            revoked_replay.applied_version.id,
+            applied.applied_version.id
+        );
+        assert_eq!(
+            revoked_replay.current.availability_at(now).unwrap(),
+            BudgetAvailability::Revoked
+        );
     }
 
     #[test]
@@ -7510,17 +7917,20 @@ mod tests {
             let manager_snapshot = manager.get_budget_by_id(&created.budget.id).unwrap();
             assert_eq!(manager_snapshot.version.id, created.version.id);
             assert_eq!(manager_snapshot.version.amount_limit_cents, 10_000);
-            assert!(matches!(
-                manager_snapshot.budget.status,
-                BudgetStatus::Active
-            ));
+            assert_eq!(
+                manager_snapshot.budget.administrative_state,
+                BudgetAdministrativeState::Active
+            );
             assert_eq!(manager_snapshot.balance.consumed_amount_cents, 0);
             assert_eq!(manager_snapshot.balance.frozen_amount_cents, 0);
             assert_eq!(manager_snapshot.balance.remaining_amount_cents, 10_000);
             assert_eq!(repo.load_budget_versions().unwrap().len(), 1);
             let persisted_budget = &repo.load_budgets().unwrap()[0];
             assert_eq!(persisted_budget.current_version_id, created.version.id);
-            assert!(matches!(persisted_budget.status, BudgetStatus::Active));
+            assert_eq!(
+                persisted_budget.administrative_state,
+                BudgetAdministrativeState::Active
+            );
             assert_eq!(persisted_budget.updated_at, created.budget.updated_at);
             let persisted_balance = &repo.load_budget_balances().unwrap()[0];
             assert_eq!(persisted_balance.consumed_amount_cents, 0);
@@ -7584,7 +7994,12 @@ mod tests {
 
         repo.save_budget_with_balance(&budget, &budget_version, &initial_balance)
             .unwrap();
+        let administrative_before = persisted_budget_administrative_row(&repo, &budget.id);
         repo.save_budget_hold(&hold, &reserved_balance).unwrap();
+        assert_eq!(
+            persisted_budget_administrative_row(&repo, &budget.id),
+            administrative_before
+        );
         repo.expire_overdue_budget_holds(Utc::now()).unwrap();
 
         let reloaded_hold = repo.load_budget_holds().unwrap().pop().unwrap();
@@ -7592,6 +8007,10 @@ mod tests {
         assert!(matches!(reloaded_hold.status, BudgetHoldStatus::Expired));
         assert_eq!(reloaded_balance.frozen_amount_cents, 0);
         assert_eq!(reloaded_balance.remaining_amount_cents, 10_000);
+        assert_eq!(
+            persisted_budget_administrative_row(&repo, &budget.id),
+            administrative_before
+        );
     }
 
     #[test]
@@ -7656,6 +8075,178 @@ mod tests {
         assert_eq!(reloaded_balance.remaining_amount_cents, 7_500);
         assert_eq!(reloaded_hold.budget_version_id, created.version.id);
         assert!(matches!(reloaded_hold.status, BudgetHoldStatus::Settled));
+    }
+
+    #[test]
+    fn restart_preserves_effective_availability_without_budget_row_reconciliation() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-budget-availability-restart-{}.sqlite",
+            BudgetId::new()
+        ));
+        let now = Utc::now();
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let decision = spend_decision();
+        repo.save_spend_decision(&decision).unwrap();
+        let mut manager = BudgetManager::new();
+        let created = manager
+            .create_single_budget_with_provenance(
+                CreateSingleBudgetRequest {
+                    agent_id: agent_id(),
+                    amount_limit_cents: 1_000,
+                    currency: Currency::Usd,
+                    period: TimePeriod::new(
+                        now - Duration::hours(1),
+                        Some(now + Duration::hours(1)),
+                    )
+                    .unwrap(),
+                },
+                BudgetVersionProvenance::new(user_id().to_string(), "test:restart-lifecycle"),
+            )
+            .unwrap();
+        repo.save_budget_with_balance(&created.budget, &created.version, &created.balance)
+            .unwrap();
+        let reserved = manager
+            .reserve_budget_at(
+                ReserveBudgetRequest {
+                    budget_id: created.budget.id.clone(),
+                    spend_decision_id: decision.id,
+                    amount_cents: 1_000,
+                    currency: Currency::Usd,
+                    expires_at: now + Duration::minutes(30),
+                },
+                now,
+            )
+            .unwrap();
+        repo.save_budget_hold(&reserved.hold, &reserved.balance)
+            .unwrap();
+        let before = manager
+            .get_evaluated_budget_by_id(&created.budget.id, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.availability, BudgetAvailability::Exhausted);
+        let persisted_before: (String, String) = repo
+            .conn
+            .query_row(
+                "SELECT administrative_state, updated_at FROM budgets WHERE id = ?1",
+                params![created.budget.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(repo);
+
+        let reopened = SqliteGovernanceRepository::open(&path).unwrap();
+        let persisted_after: (String, String) = reopened
+            .conn
+            .query_row(
+                "SELECT administrative_state, updated_at FROM budgets WHERE id = ?1",
+                params![created.budget.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(persisted_after, persisted_before);
+        let restarted = BudgetManager::from_records(
+            reopened.load_budgets().unwrap(),
+            reopened.load_budget_versions().unwrap(),
+            reopened.load_budget_balances().unwrap(),
+            reopened.load_budget_holds().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            restarted
+                .get_evaluated_budget_by_id(&created.budget.id, now)
+                .unwrap()
+                .unwrap()
+                .availability,
+            before.availability
+        );
+        drop(reopened);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn revoked_budget_hold_finalizes_after_restart_without_admin_row_mutation() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-revoked-hold-finalization-restart-{}.sqlite",
+            BudgetId::new()
+        ));
+        let now = Utc::now();
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let decision = spend_decision();
+        repo.save_spend_decision(&decision).unwrap();
+        let mut manager = BudgetManager::new();
+        let created = manager
+            .create_single_budget_with_provenance(
+                CreateSingleBudgetRequest {
+                    agent_id: agent_id(),
+                    amount_limit_cents: 1_000,
+                    currency: Currency::Usd,
+                    period: TimePeriod::new(
+                        now - Duration::hours(1),
+                        Some(now + Duration::hours(1)),
+                    )
+                    .unwrap(),
+                },
+                BudgetVersionProvenance::new(
+                    user_id().to_string(),
+                    "test:revoked-restart-finalization",
+                ),
+            )
+            .unwrap();
+        repo.save_budget_with_balance(&created.budget, &created.version, &created.balance)
+            .unwrap();
+        let reserved = manager
+            .reserve_budget_at(
+                ReserveBudgetRequest {
+                    budget_id: created.budget.id.clone(),
+                    spend_decision_id: decision.id,
+                    amount_cents: 400,
+                    currency: Currency::Usd,
+                    expires_at: now + Duration::hours(1),
+                },
+                now,
+            )
+            .unwrap();
+        repo.save_budget_hold(&reserved.hold, &reserved.balance)
+            .unwrap();
+        let revoked = manager
+            .revoke_budget_at(&created.budget.id, now + Duration::seconds(1))
+            .unwrap();
+        repo.save_budget_with_balance(&revoked.budget, &revoked.version, &revoked.balance)
+            .unwrap();
+        let administrative_before = persisted_budget_administrative_row(&repo, &created.budget.id);
+        let hold_id = reserved.hold.id;
+        drop(repo);
+
+        let mut reopened = SqliteGovernanceRepository::open(&path).unwrap();
+        let mut restarted = BudgetManager::from_records(
+            reopened.load_budgets().unwrap(),
+            reopened.load_budget_versions().unwrap(),
+            reopened.load_budget_balances().unwrap(),
+            reopened.load_budget_holds().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            restarted
+                .get_evaluated_budget_by_id(&created.budget.id, now + Duration::seconds(2),)
+                .unwrap()
+                .unwrap()
+                .availability,
+            BudgetAvailability::Revoked
+        );
+        let settled = restarted
+            .settle_budget(&hold_id)
+            .expect("a pre-revocation hold must settle after restart");
+        reopened
+            .update_budget_hold(&settled.hold, &settled.balance)
+            .unwrap();
+        assert_eq!(settled.balance.consumed_amount_cents, 400);
+        assert_eq!(settled.balance.frozen_amount_cents, 0);
+        assert_eq!(
+            persisted_budget_administrative_row(&reopened, &created.budget.id),
+            administrative_before
+        );
+        drop(reopened);
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
@@ -7796,6 +8387,202 @@ mod tests {
         assert_eq!(targets[0].id, target.id);
         assert_eq!(targets[0].target_amount_cents, 25_000);
         assert!(repo.load_budgets().unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrates_legacy_budget_lifecycle_to_administrative_state_idempotently() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-budget-admin-migration-{}.sqlite",
+            BudgetId::new()
+        ));
+        let start = Utc::now() - Duration::days(10);
+        let updated_at = start + Duration::hours(6);
+        let mut expected = Vec::new();
+        let exhausted_budget_id = BudgetId::new();
+        let mut exhausted_version_id = None;
+        {
+            let conn = Connection::open(&path).unwrap();
+            create_legacy_versioned_budget_tables(&conn);
+            for (index, status) in ["active", "exhausted", "expired", "revoked"]
+                .into_iter()
+                .enumerate()
+            {
+                let budget_id = if status == "exhausted" {
+                    exhausted_budget_id.clone()
+                } else {
+                    BudgetId::new()
+                };
+                let period_start = start + Duration::days(index as i64 * 2);
+                let version_id = insert_legacy_versioned_budget(
+                    &conn,
+                    &budget_id,
+                    &AgentId::new(),
+                    status,
+                    period_start,
+                    period_start + Duration::days(1),
+                    updated_at,
+                );
+                if status == "exhausted" {
+                    exhausted_version_id = Some(version_id);
+                }
+                expected.push((
+                    budget_id,
+                    if status == "revoked" {
+                        BudgetAdministrativeState::Revoked
+                    } else {
+                        BudgetAdministrativeState::Active
+                    },
+                ));
+            }
+            conn.execute(
+                "UPDATE budget_balances
+                 SET frozen_amount_cents = 500, remaining_amount_cents = 9500
+                 WHERE budget_id = ?1",
+                params![exhausted_budget_id.to_string()],
+            )
+            .unwrap();
+            let exhausted_version_id = exhausted_version_id.as_ref().unwrap();
+            conn.execute(
+                "INSERT INTO budget_holds
+                 (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
+                  currency, status, executor_claim_id, created_at, updated_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, 500, 'usd', 'frozen', NULL, ?5, ?5, ?6)",
+                params![
+                    BudgetHoldId::new().to_string(),
+                    exhausted_budget_id.to_string(),
+                    exhausted_version_id.to_string(),
+                    SpendDecisionId::new().to_string(),
+                    updated_at.to_rfc3339(),
+                    (updated_at + Duration::days(30)).to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let exhausted_version_id = exhausted_version_id.unwrap();
+        let budgets = repo.load_budgets().unwrap();
+        assert_eq!(budgets.len(), 4);
+        for (budget_id, administrative_state) in &expected {
+            let budget = budgets
+                .iter()
+                .find(|budget| &budget.id == budget_id)
+                .unwrap();
+            assert_eq!(budget.administrative_state, *administrative_state);
+            assert_eq!(budget.updated_at, updated_at);
+        }
+        assert_eq!(repo.load_budget_versions().unwrap().len(), 4);
+        assert_eq!(repo.load_budget_balances().unwrap().len(), 4);
+        let holds = repo.load_budget_holds().unwrap();
+        assert_eq!(holds.len(), 1);
+        assert_eq!(holds[0].budget_id, exhausted_budget_id);
+        assert_eq!(holds[0].budget_version_id, exhausted_version_id);
+        assert!(table_has_column(&repo.conn, "budgets", "administrative_state").unwrap());
+        assert!(!table_has_column(&repo.conn, "budgets", "status").unwrap());
+        assert!(repo
+            .conn
+            .execute(
+                "UPDATE budgets SET administrative_state = 'expired' WHERE id = ?1",
+                params![exhausted_budget_id.to_string()],
+            )
+            .is_err());
+        assert!(repo
+            .conn
+            .execute(
+                "INSERT INTO budgets
+                 (id, scope_type, scope_id, currency, starting_at, ending_before,
+                  administrative_state, created_at, updated_at)
+                 VALUES (?1, 'agent', ?2, 'usd', ?3, ?4, 'exhausted', ?3, ?3)",
+                params![
+                    BudgetId::new().to_string(),
+                    AgentId::new().to_string(),
+                    start.to_rfc3339(),
+                    (start + Duration::days(1)).to_rfc3339(),
+                ],
+            )
+            .is_err());
+        drop(repo);
+
+        let reopened = SqliteGovernanceRepository::open(&path).unwrap();
+        assert_eq!(reopened.load_budgets().unwrap().len(), 4);
+        assert_eq!(reopened.load_budget_versions().unwrap().len(), 4);
+        assert_eq!(reopened.load_budget_holds().unwrap().len(), 1);
+        drop(reopened);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn budget_lifecycle_migration_rejects_unknown_state() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-budget-admin-unknown-{}.sqlite",
+            BudgetId::new()
+        ));
+        let budget_id = BudgetId::new();
+        {
+            let conn = Connection::open(&path).unwrap();
+            create_legacy_versioned_budget_tables(&conn);
+            let start = Utc::now();
+            insert_legacy_versioned_budget(
+                &conn,
+                &budget_id,
+                &AgentId::new(),
+                "paused",
+                start,
+                start + Duration::days(1),
+                start,
+            );
+        }
+
+        let error = match SqliteGovernanceRepository::open(&path) {
+            Ok(_) => panic!("unknown legacy lifecycle must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unknown budget status `paused`"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn budget_lifecycle_migration_rejects_overlapping_non_revoked_budgets() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-budget-admin-overlap-{}.sqlite",
+            BudgetId::new()
+        ));
+        let first_id = BudgetId::new();
+        let second_id = BudgetId::new();
+        {
+            let conn = Connection::open(&path).unwrap();
+            create_legacy_versioned_budget_tables(&conn);
+            let start = Utc::now();
+            let agent_id = AgentId::new();
+            insert_legacy_versioned_budget(
+                &conn,
+                &first_id,
+                &agent_id,
+                "exhausted",
+                start,
+                start + Duration::days(2),
+                start,
+            );
+            insert_legacy_versioned_budget(
+                &conn,
+                &second_id,
+                &agent_id,
+                "active",
+                start + Duration::days(1),
+                start + Duration::days(3),
+                start,
+            );
+        }
+
+        let error = match SqliteGovernanceRepository::open(&path) {
+            Ok(_) => panic!("legacy exhausted overlap must fail closed"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains(&first_id.to_string()));
+        assert!(message.contains(&second_id.to_string()));
+        assert!(message.contains("overlap"));
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

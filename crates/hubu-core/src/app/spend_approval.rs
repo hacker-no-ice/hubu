@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use hubu_common::{
     execution_scope::ExecutionScope,
     ids::{AgentAccountId, AgentId, BudgetId, SpendAuthTokenId, SpendDecisionId},
@@ -14,9 +14,8 @@ use serde_json::json;
 
 use crate::{
     budget::{
-        BudgetBalance, BudgetHold, BudgetManager, BudgetManagerError, BudgetStatus,
-        BudgetWithBalance, ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse,
-        SettleBudgetResponse,
+        BudgetBalance, BudgetHold, BudgetManager, BudgetManagerError, ReleaseBudgetResponse,
+        ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
     },
     persistence::{BudgetRepository, SpendAttemptAdmission, SpendRepository},
     policy::model::{Effect, Policy},
@@ -207,6 +206,28 @@ impl SpendApprovalService {
         spend_manager: &mut SpendManager,
         budget_manager: &mut BudgetManager,
         governance: &mut G,
+    ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
+    where
+        G: SpendRepository + BudgetRepository,
+    {
+        self.authorize_at(
+            request,
+            policy,
+            spend_manager,
+            budget_manager,
+            governance,
+            Utc::now(),
+        )
+    }
+
+    pub fn authorize_at<G>(
+        &self,
+        request: AuthorizeSpendRequest,
+        policy: &Policy,
+        spend_manager: &mut SpendManager,
+        budget_manager: &mut BudgetManager,
+        governance: &mut G,
+        now: DateTime<Utc>,
     ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
     where
         G: SpendRepository + BudgetRepository,
@@ -503,7 +524,7 @@ impl SpendApprovalService {
             .auth_token
             .clone()
             .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
-        let budget_id = match active_budget_id_for_spend(budget_manager, &request.agent_id) {
+        let budget_id = match active_budget_id_for_spend(budget_manager, &request.agent_id, now) {
             Ok(budget_id) => budget_id,
             Err(SpendApprovalError::MissingActiveBudget) => {
                 spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
@@ -531,13 +552,16 @@ impl SpendApprovalService {
             Err(error) => return Err(error),
         };
 
-        let budget_reservation = match budget_manager.reserve_budget(ReserveBudgetRequest {
-            budget_id: budget_id.clone(),
-            spend_decision_id: evaluation.decision_id.clone(),
-            amount_cents: request.amount_cents,
-            currency: request.currency,
-            expires_at: token.expires_at,
-        }) {
+        let budget_reservation = match budget_manager.reserve_budget_at(
+            ReserveBudgetRequest {
+                budget_id: budget_id.clone(),
+                spend_decision_id: evaluation.decision_id.clone(),
+                amount_cents: request.amount_cents,
+                currency: request.currency,
+                expires_at: token.expires_at,
+            },
+            now,
+        ) {
             Ok(reservation) => reservation,
             Err(BudgetManagerError::InsufficientRemainingBudget) => {
                 spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
@@ -655,6 +679,31 @@ impl SpendApprovalService {
     where
         G: SpendRepository + BudgetRepository,
     {
+        self.resolve_human_approval_at(
+            user,
+            approval_request_id,
+            decision,
+            spend_manager,
+            budget_manager,
+            governance,
+            Utc::now(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_human_approval_at<G>(
+        &self,
+        user: UserContext,
+        approval_request_id: &SpendDecisionId,
+        decision: HumanApprovalDecision,
+        spend_manager: &mut SpendManager,
+        budget_manager: &mut BudgetManager,
+        governance: &mut G,
+        now: DateTime<Utc>,
+    ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
+    where
+        G: SpendRepository + BudgetRepository,
+    {
         let decision_record = spend_manager
             .decision_record(approval_request_id)
             .ok_or(SpendApprovalError::UnknownApprovalRequest)?;
@@ -690,19 +739,21 @@ impl SpendApprovalService {
                 })
             }
             (SpendAuthorizationDecision::Allowed, HumanApprovalDecision::Approve)
-            | (SpendAuthorizationDecision::Denied, HumanApprovalDecision::Deny) => self.authorize(
-                request,
-                &Policy {
-                    id: decision_record.evaluation.policy_id.clone(),
-                    version: decision_record.evaluation.policy_version.clone(),
-                    owner_user_id: decision_record.owner_user_id,
-                    rules: Vec::new(),
-                    default_effect: decision_record.evaluation.decision,
-                },
-                spend_manager,
-                budget_manager,
-                governance,
-            ),
+            | (SpendAuthorizationDecision::Denied, HumanApprovalDecision::Deny) => self
+                .authorize_at(
+                    request,
+                    &Policy {
+                        id: decision_record.evaluation.policy_id.clone(),
+                        version: decision_record.evaluation.policy_version.clone(),
+                        owner_user_id: decision_record.owner_user_id,
+                        rules: Vec::new(),
+                        default_effect: decision_record.evaluation.decision,
+                    },
+                    spend_manager,
+                    budget_manager,
+                    governance,
+                    now,
+                ),
             (SpendAuthorizationDecision::PendingApproval, HumanApprovalDecision::Deny) => {
                 let reasons = vec!["human denied the immutable spend request".to_string()];
                 governance.record_spend_attempt_outcome(
@@ -739,15 +790,21 @@ impl SpendApprovalService {
                 let token_record = spend_manager
                     .auth_token_record(&token.id)
                     .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
-                let budget_id =
-                    active_budget_id_for_spend(budget_manager, &decision_record.request.agent_id)?;
-                let budget_reservation = match budget_manager.reserve_budget(ReserveBudgetRequest {
-                    budget_id,
-                    spend_decision_id: approval_request_id.clone(),
-                    amount_cents: decision_record.request.amount_cents,
-                    currency: decision_record.request.currency,
-                    expires_at: token.expires_at,
-                }) {
+                let budget_id = active_budget_id_for_spend(
+                    budget_manager,
+                    &decision_record.request.agent_id,
+                    now,
+                )?;
+                let budget_reservation = match budget_manager.reserve_budget_at(
+                    ReserveBudgetRequest {
+                        budget_id,
+                        spend_decision_id: approval_request_id.clone(),
+                        amount_cents: decision_record.request.amount_cents,
+                        currency: decision_record.request.currency,
+                        expires_at: token.expires_at,
+                    },
+                    now,
+                ) {
                     Ok(reservation) => reservation,
                     Err(error) => {
                         spend_manager.discard_auth_token_for_decision(approval_request_id);
@@ -1063,18 +1120,11 @@ fn release_authorized_hold(
 fn active_budget_id_for_spend(
     budget_manager: &BudgetManager,
     agent_id: &AgentId,
+    now: DateTime<Utc>,
 ) -> Result<BudgetId, SpendApprovalError> {
-    let now = Utc::now();
     budget_manager
-        .get_budgets_by_agent_id(agent_id)
-        .into_iter()
-        .find(|budget| is_active_usd_budget(budget) && budget.budget.period.contains(now))
-        .map(|budget| budget.budget.id)
+        .available_budget_id_for_agent_at(agent_id, Currency::Usd, now)?
         .ok_or(SpendApprovalError::MissingActiveBudget)
-}
-
-fn is_active_usd_budget(budget: &BudgetWithBalance) -> bool {
-    budget.budget.currency == Currency::Usd && matches!(budget.budget.status, BudgetStatus::Active)
 }
 
 fn payment_status_name(status: PaymentStatus) -> &'static str {

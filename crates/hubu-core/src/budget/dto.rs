@@ -3,7 +3,10 @@ use hubu_common::ids::{AgentId, BudgetId, SpendDecisionId};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
 
-use crate::budget::model::{Budget, BudgetBalance, BudgetHold, BudgetVersion};
+use crate::budget::model::{
+    evaluate_budget_availability, Budget, BudgetAvailability, BudgetBalance, BudgetEvaluationError,
+    BudgetHold, BudgetVersion,
+};
 
 #[derive(Debug, Clone)]
 pub struct CreateSingleBudgetRequest {
@@ -80,4 +83,31 @@ pub struct BudgetWithBalance {
     pub budget: Budget,
     pub version: BudgetVersion,
     pub balance: BudgetBalance,
+}
+
+impl BudgetWithBalance {
+    pub fn availability_at(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<BudgetAvailability, BudgetEvaluationError> {
+        evaluate_budget_availability(&self.budget, &self.version, &self.balance, now)
+    }
+
+    pub fn evaluate_at(self, now: DateTime<Utc>) -> Result<EvaluatedBudget, BudgetEvaluationError> {
+        let availability = self.availability_at(now)?;
+        Ok(EvaluatedBudget {
+            current: self,
+            availability,
+            evaluated_at: now,
+        })
+    }
+}
+
+/// A durable current snapshot paired with its lifecycle result at exactly one
+/// injected instant.
+#[derive(Debug, Clone)]
+pub struct EvaluatedBudget {
+    pub current: BudgetWithBalance,
+    pub availability: BudgetAvailability,
+    pub evaluated_at: DateTime<Utc>,
 }

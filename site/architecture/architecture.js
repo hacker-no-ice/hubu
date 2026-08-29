@@ -206,9 +206,9 @@ const components = {
   budgets: {
     kind: "MONEY LIFECYCLE",
     title: "Reserve, then finalize",
-    copy: "Budgets make authorization financially meaningful. Hubu freezes the maximum before execution, then atomically settles actual cost, releases unused capacity, or preserves uncertainty for reconciliation.",
+    copy: "Budgets make authorization financially meaningful. Hubu derives availability from administrative state, time, and balance, freezes the maximum before execution, then atomically settles actual cost, releases unused capacity, or preserves uncertainty for reconciliation.",
     diagram: [
-      ["Active budget", "owner + window"],
+      ["Evaluated budget", "admin + time + balance"],
       ["Frozen hold", "authorized maximum"],
       ["Executor claim", "exclusive work"],
       ["Provider outcome", "billing evidence"],
@@ -216,8 +216,8 @@ const components = {
       ["Double-entry ledger", "balanced finality"],
     ],
     responsibilities: [
-      "Prevent overlapping active budget windows for one agent and currency.",
-      "Reserve capacity atomically after policy allows the request.",
+      "Prevent overlapping non-revoked budget windows for one agent and currency.",
+      "Reserve capacity atomically only when the evaluated budget is active.",
       "Never release a hold merely because provider billing is ambiguous.",
       "Record successful money movement as immutable balanced entries.",
     ],
