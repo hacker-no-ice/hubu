@@ -16,11 +16,12 @@ use crate::{
 
 use super::{
     catalog::tool_definitions,
-    response::{api_error, ApiErrorContext},
+    response::{api_error, ApiErrorContext, ProviderCatalogResponse},
     transport::{call_tool, fetch_durable_execution_observation},
 };
 
 const EXECUTION: &str = r#"{"schema_version":2,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":"backend echoed op-1","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
+const PROVIDER_CATALOG: &str = r#"{"schema_version":1,"profiles":[{"contract":"hubu.flux-2-pro.text-to-image/v1","pricing_version":"bfl-flux-2-pro-usd-2026-08-28-v1","pricing_reviewed_on":"2026-08-28","target":{"workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro"},"capability":{"image_count":1,"output_formats":["png","jpeg"],"presets":[{"name":"1k","width":1024,"height":1024,"currency":"USD","rate_numerator_minor":3,"rate_denominator":1},{"name":"2k","width":1920,"height":1088,"currency":"USD","rate_numerator_minor":45,"rate_denominator":10},{"name":"4k","width":2048,"height":2048,"currency":"USD","rate_numerator_minor":75,"rate_denominator":10}]},"policies":{"generation_retries":0,"fallback":false,"poll":"bfl-async-status-poll-500ms-v1","artifact_delivery":"bfl-delivery-single-region-label-v1","recovery":"hubu-durable-async-resume-v1"},"readiness":{"configured":true,"credential_reference_present":true,"production_validated":true,"live_qualified":false,"live_qualification":"not_performed"}}]}"#;
 
 fn mock_server(
     responses: Vec<(&'static str, &'static str, &'static str)>,
@@ -96,6 +97,98 @@ fn catalog_matches_owned_gongbu_v2_contract() {
     ))
     .unwrap();
     assert_eq!(tool_definitions(), expected);
+}
+
+#[test]
+fn provider_catalog_routes_read_only_and_returns_only_the_validated_contract() {
+    let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", PROVIDER_CATALOG)]);
+    let result = call_tool(
+        &client(&endpoint, "gongbu-catalog-secret"),
+        "gongbu_get_provider_catalog",
+        json!({}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], false);
+    let projected: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(projected["schema_version"], 1);
+    assert_eq!(projected["profiles"][0]["target"]["provider"], "flux");
+    assert_eq!(
+        projected["profiles"][0]["capability"]["presets"][1],
+        json!({
+            "name": "2k",
+            "width": 1920,
+            "height": 1088,
+            "currency": "USD",
+            "rate_numerator_minor": 45,
+            "rate_denominator": 10
+        })
+    );
+    assert_eq!(
+        projected["profiles"][0]["readiness"]["live_qualified"],
+        false
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let request = requests[0].to_ascii_lowercase();
+    assert!(request.starts_with("get /v1/provider-catalog "));
+    assert!(request.contains("authorization: bearer gongbu-catalog-secret"));
+    assert!(!request.contains("api.bfl.ai"));
+}
+
+#[test]
+fn provider_catalog_rejects_arguments_and_unsanitized_responses() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let result = call_tool(
+        &client(&endpoint, "secret"),
+        "gongbu_get_provider_catalog",
+        json!({"credential_reference":"private"}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], true);
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+
+    let unsanitized = r#"{"schema_version":1,"profiles":[],"credential":"secret-canary"}"#;
+    let (endpoint, _) = mock_server(vec![("200 OK", "application/json", unsanitized)]);
+    let result = call_tool(
+        &client(&endpoint, "secret"),
+        "gongbu_get_provider_catalog",
+        json!({}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], true);
+    assert!(result.to_string().contains("invalid_response"));
+    assert!(!result.to_string().contains("secret-canary"));
+}
+
+#[test]
+fn provider_catalog_rejects_contract_pricing_policy_and_readiness_drift() {
+    let exact: Value = serde_json::from_str(PROVIDER_CATALOG).unwrap();
+    for (pointer, changed) in [
+        ("/profiles/0/target/model", json!("flux-2-pro-preview")),
+        (
+            "/profiles/0/capability/presets/1/rate_numerator_minor",
+            json!(46),
+        ),
+        (
+            "/profiles/0/policies/poll",
+            json!("operator-selected-poll-policy"),
+        ),
+        ("/profiles/0/readiness/live_qualified", json!(true)),
+    ] {
+        let mut mutated = exact.clone();
+        *mutated.pointer_mut(pointer).unwrap() = changed;
+        let response: ProviderCatalogResponse = serde_json::from_value(mutated).unwrap();
+        assert_eq!(response.validate().unwrap_err().code(), "invalid_response");
+    }
 }
 
 #[test]

@@ -384,6 +384,131 @@ fn scrub_private_projection(value: &mut Value, private_operation_key: &str) {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct ProviderCatalogResponse {
+    schema_version: u32,
+    profiles: Vec<ProviderCatalogProfile>,
+}
+
+impl ProviderCatalogResponse {
+    pub(super) fn validate(&self) -> Result<(), ToolError> {
+        if self.schema_version != 1 || self.profiles.len() > 1 {
+            return Err(ToolError::invalid_response());
+        }
+        self.profiles.iter().try_for_each(validate_provider_profile)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderCatalogProfile {
+    contract: String,
+    pricing_version: String,
+    pricing_reviewed_on: String,
+    target: ProviderCatalogTarget,
+    capability: ProviderCatalogCapability,
+    policies: ProviderCatalogPolicies,
+    readiness: ProviderCatalogReadiness,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderCatalogTarget {
+    workload_type: String,
+    provider: String,
+    adapter: String,
+    model: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderCatalogCapability {
+    image_count: u32,
+    output_formats: Vec<String>,
+    presets: Vec<ProviderCatalogPreset>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderCatalogPreset {
+    name: String,
+    width: u32,
+    height: u32,
+    currency: String,
+    rate_numerator_minor: i64,
+    rate_denominator: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderCatalogPolicies {
+    generation_retries: u32,
+    fallback: bool,
+    poll: String,
+    artifact_delivery: String,
+    recovery: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderCatalogReadiness {
+    configured: bool,
+    credential_reference_present: bool,
+    production_validated: bool,
+    live_qualified: bool,
+    live_qualification: String,
+}
+
+fn validate_provider_profile(profile: &ProviderCatalogProfile) -> Result<(), ToolError> {
+    let exact_target = profile.target.workload_type == "image_generation"
+        && profile.target.provider == "flux"
+        && profile.target.adapter == "flux2_api"
+        && profile.target.model == "flux-2-pro";
+    let exact_capability = profile.capability.image_count == 1
+        && profile.capability.output_formats == ["png", "jpeg"]
+        && exact_provider_presets(&profile.capability.presets);
+    let exact_policies = profile.policies.generation_retries == 0
+        && !profile.policies.fallback
+        && profile.policies.poll == "bfl-async-status-poll-500ms-v1"
+        && profile.policies.artifact_delivery == "bfl-delivery-single-region-label-v1"
+        && profile.policies.recovery == "hubu-durable-async-resume-v1";
+    let exact_readiness = profile.readiness.configured
+        && profile.readiness.production_validated
+        && !profile.readiness.live_qualified
+        && profile.readiness.live_qualification == "not_performed";
+    if profile.contract != "hubu.flux-2-pro.text-to-image/v1"
+        || profile.pricing_version != "bfl-flux-2-pro-usd-2026-08-28-v1"
+        || profile.pricing_reviewed_on != "2026-08-28"
+        || !exact_target
+        || !exact_capability
+        || !exact_policies
+        || !exact_readiness
+    {
+        return Err(ToolError::invalid_response());
+    }
+    Ok(())
+}
+
+fn exact_provider_presets(presets: &[ProviderCatalogPreset]) -> bool {
+    let expected = [
+        ("1k", 1024, 1024, 3, 1),
+        ("2k", 1920, 1088, 45, 10),
+        ("4k", 2048, 2048, 75, 10),
+    ];
+    presets.len() == expected.len()
+        && presets.iter().zip(expected).all(
+            |(preset, (name, width, height, numerator, denominator))| {
+                preset.name == name
+                    && preset.width == width
+                    && preset.height == height
+                    && preset.currency == "USD"
+                    && preset.rate_numerator_minor == numerator
+                    && preset.rate_denominator == denominator
+            },
+        )
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Money {
     amount_minor: i64,
     currency: String,

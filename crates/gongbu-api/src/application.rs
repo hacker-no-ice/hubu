@@ -1862,9 +1862,14 @@ mod tests {
         };
         use tempfile::tempdir;
 
-        struct Secrets;
+        #[derive(Default)]
+        struct Secrets(Mutex<Vec<(String, String)>>);
         impl SecretProvider for Secrets {
-            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+            fn resolve(&self, reference: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                self.0.lock().unwrap().push((
+                    reference.service().to_owned(),
+                    reference.account().to_owned(),
+                ));
                 Ok(crate::secrets::secret_for_test("mixed-provider-secret"))
             }
         }
@@ -1971,9 +1976,9 @@ mod tests {
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 2,
             "provider_configs": [
-                {"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://google.example","api_version":"v1","project":"project","location":"us","timeout_ms":1000}}},
-                {"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}},
-                {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["delivery.us.bfl.ai"]}}}
+                {"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"gemini","active":true,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://google.example","api_version":"v1","project":"project","location":"us","timeout_ms":1000}}},
+                {"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"ideogram","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}},
+                {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"flux","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["delivery.us.bfl.ai"]}}}
             ]
         })).unwrap();
         let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
@@ -2079,12 +2084,13 @@ mod tests {
             ArtifactLimits::default(),
         );
         let hubu = Arc::new(Hubu::default());
+        let secrets = Arc::new(Secrets::default());
         let runner = provider_execution_runner(
             repository.clone(),
             hubu.clone(),
             artifacts.clone(),
             providers,
-            Arc::new(Secrets),
+            secrets.clone(),
             || "now".into(),
         );
 
@@ -2125,6 +2131,22 @@ mod tests {
             &[Some(expected_key)]
         );
         assert_eq!(hubu.0.load(Ordering::SeqCst), 2);
+        let resolved = secrets.0.lock().unwrap();
+        for expected in [
+            ("gongbu.google", "gemini"),
+            ("gongbu.ideogram", "ideogram"),
+            ("gongbu.flux", "flux"),
+        ] {
+            assert_eq!(
+                resolved
+                    .iter()
+                    .filter(|reference| { reference.0 == expected.0 && reference.1 == expected.1 })
+                    .count(),
+                2
+            );
+        }
+        assert_eq!(resolved.len(), 6);
+        drop(resolved);
         assert_eq!(
             artifacts
                 .list_for_account(&gemini.execution_id, "account")
@@ -2143,6 +2165,28 @@ mod tests {
             .list_for_account(&ideogram.execution_id, "account")
             .unwrap()
             .is_empty());
+        let gemini_attempt = repository
+            .get_provider_attempt_for_execution(&gemini.execution_id)
+            .unwrap();
+        let flux_attempt = repository
+            .get_provider_attempt_for_execution(&flux.execution_id)
+            .unwrap();
+        assert_eq!(gemini_attempt.provider, "google");
+        assert_eq!(flux_attempt.provider, "flux");
+        assert_ne!(
+            gemini_attempt.provider_attempt_id,
+            flux_attempt.provider_attempt_id
+        );
+        assert_ne!(
+            repository
+                .get_execution(&gemini.execution_id)
+                .unwrap()
+                .provider_config_digest,
+            repository
+                .get_execution(&flux.execution_id)
+                .unwrap()
+                .provider_config_digest
+        );
         assert_eq!(
             repository
                 .get_receipt_for_execution(&gemini.execution_id)

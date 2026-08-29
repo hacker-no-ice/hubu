@@ -46,7 +46,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.3";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 4;
+pub const ROUTING_REVISION: u32 = 5;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -81,6 +81,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("gongbu_create_execution", BackendOwner::Gongbu),
     ("gongbu_get_artifact", BackendOwner::Gongbu),
     ("gongbu_get_execution", BackendOwner::Gongbu),
+    ("gongbu_get_provider_catalog", BackendOwner::Gongbu),
     ("gongbu_list_artifacts", BackendOwner::Gongbu),
     ("hubu_add_policy", BackendOwner::Hubu),
     ("hubu_apply_policy", BackendOwner::Hubu),
@@ -2009,7 +2010,7 @@ mod tests {
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
         assert_eq!(capability["routing_revision"], ROUTING_REVISION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 39);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 40);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

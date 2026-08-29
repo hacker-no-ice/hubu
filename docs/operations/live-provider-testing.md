@@ -11,6 +11,13 @@ The preferred end-to-end path is the guarded
 [Gongbu sandbox](gongbu-sandbox.md). The ignored adapter tests below are useful
 for focused provider integration checks.
 
+The managed `hubu.flux-2-pro.text-to-image/v1` contract is configured through
+the [managed FLUX.2 profile runbook](managed-flux-profile.md). Its catalog,
+doctor, render, and production-validation paths make no BFL call and report
+`live_qualified = false` / `not_performed`. HUB-171 does not add a live BFL
+test; ordinary demos and CI stay fixture-only and non-billable. A future live
+qualification must remain explicitly operator-triggered and spend-capped.
+
 ## Credential handling
 
 Gongbu reads provider credentials from the logged-in operator's macOS Keychain.

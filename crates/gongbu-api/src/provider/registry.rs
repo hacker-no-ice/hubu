@@ -17,6 +17,7 @@ use super::{
         IdeogramImageAdapter, ADAPTER_ID as IDEOGRAM_ADAPTER_ID,
         PROVIDER_ID as IDEOGRAM_PROVIDER_ID,
     },
+    supported_profiles::{self, CatalogProfile},
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
 };
 use crate::artifact::ArtifactLimits;
@@ -46,6 +47,8 @@ pub enum RegistryError {
     NotBound(String),
     #[error("provider target is unavailable")]
     TargetUnavailable,
+    #[error("supported provider profile is invalid: {0}")]
+    InvalidSupportedProfile(String),
 }
 
 #[derive(Clone, Default)]
@@ -176,6 +179,7 @@ pub struct ValidatedProviderCatalog {
     targets: ProviderTargetConfig,
     pricing: PricingCatalog,
     adapters: BTreeMap<(TargetKey, String), BoundAdapter>,
+    supported_profiles: Vec<CatalogProfile>,
 }
 
 impl ValidatedProviderCatalog {
@@ -184,6 +188,7 @@ impl ValidatedProviderCatalog {
             targets: ProviderTargetConfig::disabled(),
             pricing: PricingCatalog::disabled(),
             adapters: BTreeMap::new(),
+            supported_profiles: Vec::new(),
         }
     }
 
@@ -225,10 +230,13 @@ impl ValidatedProviderCatalog {
                 adapter,
             );
         }
+        let supported_profiles = supported_profiles::validate_and_project(&targets, &pricing)
+            .map_err(|error| RegistryError::InvalidSupportedProfile(error.to_string()))?;
         Ok(Self {
             targets,
             pricing,
             adapters,
+            supported_profiles,
         })
     }
 
@@ -238,6 +246,16 @@ impl ValidatedProviderCatalog {
 
     pub fn pricing(&self) -> &PricingCatalog {
         &self.pricing
+    }
+
+    pub fn supported_profiles(&self) -> &[CatalogProfile] {
+        &self.supported_profiles
+    }
+
+    pub(crate) fn mark_credential_references_present(&mut self) {
+        for profile in &mut self.supported_profiles {
+            profile.readiness.credential_reference_present = true;
+        }
     }
 
     pub fn resolve_active(&self, key: &TargetKey) -> Result<&ProviderConfigVersion, RegistryError> {

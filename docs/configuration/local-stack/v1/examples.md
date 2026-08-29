@@ -93,7 +93,52 @@ path, port, version, and explicit reference is valid. Before first start it
 reports the derived managed credentials as pending managed work. Provider
 readiness is reported separately as disabled.
 
-## Representative live-provider profile
+## Supported managed FLUX.2 profile
+
+This is the ready-to-render provider shape for
+`hubu.flux-2-pro.text-to-image/v1`. Use the complete managed `stack.toml` from
+the disabled example. The operator supplies only the non-secret Keychain
+coordinates and explicit spend choices; the target, policies, dimensions, and
+pricing come from the frozen contract.
+
+### `credentials.toml`
+
+Create and store the key yourself with macOS Keychain Access. Never put the key
+in this file, a terminal, environment variable, command, log, SQLite database,
+or documentation.
+
+```toml
+schema_version = 1
+
+[opaque.bfl_flux2_pro]
+service = "operator-owned BFL Keychain service"
+account = "operator-owned BFL Keychain account"
+```
+
+### `providers.toml`
+
+```toml
+schema_version = 1
+mode = "live"
+
+# Example only: replace with the positive USD-cent ceiling you reviewed.
+maximum_spend_minor = 8
+live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
+
+[[supported_profiles]]
+contract = "hubu.flux-2-pro.text-to-image/v1"
+credential = "bfl_flux2_pro"
+```
+
+The profile-only catalog derives
+`bfl-flux-2-pro-usd-2026-08-28-v1`; do not copy the target or its three pricing
+rules into raw tables. Run `hubu stack catalog --json`, doctor, and render to
+review exact target, resolutions, rational USD rates, and independent readiness
+facts without contacting BFL. `live_qualified` remains false with
+`not_performed` in this release. Follow the
+[managed FLUX.2 profile and recovery runbook](../../../operations/managed-flux-profile.md).
+
+## Representative generic live-provider profile
 
 This example is deliberately **not provider-ready**: `provider.example`, the model, version labels, Keychain coordinates, and illustrative one-cent price must be replaced with authoritative values. It demonstrates the complete schema without claiming current provider configuration or pricing.
 

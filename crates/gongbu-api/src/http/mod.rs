@@ -177,6 +177,12 @@ pub struct ArtifactResponse {
     pub created_at: String,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProviderCatalogResponse {
+    pub schema_version: u32,
+    pub profiles: Vec<crate::provider::supported_profiles::CatalogProfile>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ErrorResponse {
     pub schema_version: u32,
@@ -360,6 +366,7 @@ impl Api {
                     ("GET", ["v1", "artifacts", artifact_id]) => {
                         self.get_artifact(caller, artifact_id)
                     }
+                    ("GET", ["v1", "provider-catalog"]) => self.provider_catalog(caller),
                     _ => Err(ApiError::not_found()),
                 }
             });
@@ -369,6 +376,16 @@ impl Api {
             SCHEMA_VERSION
         };
         result.unwrap_or_else(|error| error.response(response_schema_version))
+    }
+
+    fn provider_catalog(&self, _caller: &AuthenticatedCaller) -> Result<HttpResponse, ApiError> {
+        Ok(json_response(
+            200,
+            &ProviderCatalogResponse {
+                schema_version: 1,
+                profiles: self.providers.supported_profiles().to_vec(),
+            },
+        ))
     }
 
     fn create_v1(
@@ -1340,6 +1357,49 @@ mod tests {
         .unwrap()
     }
 
+    fn supported_flux_catalog() -> ValidatedProviderCatalog {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../../contracts/provider-profiles-v1.json"
+        ))
+        .unwrap();
+        let profile = &document["profiles"][0];
+        let mut target = profile["target"].clone();
+        target["secret_service"] = json!("gongbu.bfl");
+        target["secret_account"] = json!("operator");
+        let policies = &profile["policies"];
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 3,
+            "supported_profiles": [{
+                "contract": profile["contract"],
+                "pricing_version": profile["pricing_version"],
+                "poll_policy": policies["poll"],
+                "artifact_delivery_policy": policies["artifact_delivery"],
+                "recovery_policy": policies["recovery"],
+                "generation_retries": policies["generation_retries"],
+                "fallback": policies["fallback"]
+            }],
+            "provider_configs": [target]
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": profile["pricing_version"],
+                "rules": profile["pricing_rules"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut catalog = ValidatedProviderCatalog::bind(
+            targets,
+            pricing,
+            &ProviderRegistry::production(&ArtifactLimits::default()),
+        )
+        .unwrap();
+        catalog.mark_credential_references_present();
+        catalog
+    }
+
     fn flux_request(operation_key: &str, preset: Option<&str>, options: Option<Value>) -> Value {
         let mut input = json!({"prompt":"cat","image_count":1});
         if let Some(preset) = preset {
@@ -1395,6 +1455,53 @@ mod tests {
             .repository
             .get_execution_by_operation("account-a", "over-ceiling")
             .is_err());
+    }
+
+    #[test]
+    fn supported_provider_catalog_is_authenticated_sanitized_and_non_live() {
+        let fixture = fixture();
+        let api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            supported_flux_catalog(),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-28T20:00:00Z".into(),
+        );
+        assert_eq!(
+            api.handle("GET", "/v1/provider-catalog", None, b"").status,
+            401
+        );
+        let response = api.handle("GET", "/v1/provider-catalog", Some(&fixture.caller), b"");
+        assert_eq!(response.status, 200);
+        let value: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(
+            value["profiles"][0]["target"],
+            json!({
+                "workload_type":"image_generation","provider":"flux",
+                "adapter":"flux2_api","model":"flux-2-pro"
+            })
+        );
+        assert_eq!(
+            value["profiles"][0]["capability"]["presets"][1]["width"],
+            1920
+        );
+        assert_eq!(
+            value["profiles"][0]["readiness"],
+            json!({
+                "configured":true,"credential_reference_present":true,
+                "production_validated":true,"live_qualified":false,
+                "live_qualification":"not_performed"
+            })
+        );
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(!serialized.contains("secret_service"));
+        assert!(!serialized.contains("secret_account"));
+        assert!(!serialized.contains("gongbu.bfl"));
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
     }
 
     fn request(operation_key: &str) -> Value {
@@ -2624,8 +2731,9 @@ mod tests {
         let body: Value = serde_json::from_slice(&listed.body).unwrap();
         assert_eq!(listed.status, 200);
         assert_eq!(body["artifacts"][0]["artifact_id"], artifact.artifact_id);
-        assert!(body.to_string().find("storage_key").is_none());
-        assert!(body.to_string().find("local_fs").is_none());
+        let serialized = body.to_string();
+        assert!(!serialized.contains("storage_key"));
+        assert!(!serialized.contains("local_fs"));
 
         let downloaded = fixture.api.handle(
             "GET",

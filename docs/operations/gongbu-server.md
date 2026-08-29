@@ -125,6 +125,15 @@ These GET endpoints expose safe status and compatibility metadata only. All
 execution and artifact endpoints require the caller capability. A 503 from
 `/readyz` means new admission is closed.
 
+An authenticated `GET /v1/provider-catalog` returns the sanitized schema-v1
+supported-profile projection. For the managed FLUX profile it includes the
+exact target, model, presets, rational USD pricing, policy versions, and the
+separate configured, credential-reference-present, production-validated, and
+live-qualified facts. It never exposes Keychain coordinates or values and does
+not call BFL. `credential_reference_present` becomes true only after server
+startup resolved the configured item; `live_qualified` remains false with
+`not_performed` in this release.
+
 The same installation caller can access a known execution and its artifacts
 regardless of which of the owner's agents Hubu attributed it to. This is not an
 owner-wide browsing API—clients must already know the execution or artifact

@@ -93,14 +93,23 @@ hubu_submit_spend
 hubu_update_budget
 ```
 
-Gongbu-owned tools cover execution and artifacts:
+Gongbu-owned tools cover the supported-provider catalog, execution, and
+artifacts:
 
 ```text
 gongbu_create_execution
 gongbu_get_execution
+gongbu_get_provider_catalog
 gongbu_list_artifacts
 gongbu_get_artifact
 ```
+
+`gongbu_get_provider_catalog` has strict empty input and forwards only to
+Gongbu's authenticated `GET /v1/provider-catalog`. Its sanitized schema-v1
+result exposes exact supported target/model, resolutions, currency, rational
+pricing, policy versions, and independent readiness facts. It does not expose
+credential coordinates or values, call BFL, or convert
+`live_qualified = false` into a readiness claim.
 
 The static ownership table is authoritative; prefix inference is not a routing
 rule. Unknown names fail closed until a routing revision assigns them. Exact
@@ -474,15 +483,16 @@ envelope without changing either backend's wire contract.
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 39 tool names with owner and
-availability.
+state and compatible version metadata, and all 39 other tool names with owner
+and availability. Together with `hubu_unified_capabilities`, the stdio surface
+exposes 40 tools, 36 of which route to a backend.
 
 The version-1 compatibility boundary requires:
 
 | Surface | Required value |
 | --- | --- |
 | Unified contract | `hubu-gongbu-mcp-v1` |
-| Routing revision | `4` |
+| Routing revision | `5` |
 | MCP protocol | `2024-11-05` |
 | Hubu and Gongbu executor contract | `hubu-spend-executor-v4.3` |
 | Gongbu API schema | `2` |

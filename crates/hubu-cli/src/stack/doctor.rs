@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const REPORT_SCHEMA_VERSION: u32 = 1;
+const REPORT_SCHEMA_VERSION: u32 = 2;
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const OPERATION_REGISTRY_APPLICATION_ID: i64 = 0x4855_424f;
 const OPERATION_REGISTRY_SCHEMA_VERSION: i64 = 1;
@@ -33,7 +33,7 @@ pub(super) enum ProviderReadiness {
     Unknown,
     Disabled,
     FixtureOnly,
-    LiveReady,
+    Configured,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -83,6 +83,7 @@ pub(super) struct DoctorReport {
     schema_version: u32,
     pub(super) classification: ProfileClassification,
     pub(super) provider_readiness: ProviderReadiness,
+    pub(super) provider_profiles: Vec<ProviderProfileCatalogEntry>,
     checks: Vec<DoctorCheck>,
 }
 
@@ -161,6 +162,7 @@ fn inspect_profile_with(
         schema_version: REPORT_SCHEMA_VERSION,
         classification: ProfileClassification::Invalid,
         provider_readiness: ProviderReadiness::Unknown,
+        provider_profiles: Vec::new(),
         checks: Vec::new(),
     };
 
@@ -182,6 +184,12 @@ fn inspect_profile_with(
         return report;
     };
     report.provider_readiness = provider_readiness(&providers);
+    report.provider_profiles = provider_profile_catalog_entries(&providers, false);
+    for profile in &mut report.provider_profiles {
+        if !credentials.opaque.contains_key(&profile.credential_alias) {
+            profile.readiness.credential_reference_present = Some(false);
+        }
+    }
 
     let schemas = [
         ("stack", "stack.toml:schema_version", stack.schema_version),
@@ -249,7 +257,9 @@ fn inspect_profile_with(
     ));
 
     let mut source_constraints_valid = true;
-    if validate_provider_source(&providers).is_err() {
+    if validate_provider_source(&providers).is_err()
+        || validate_provider_credential_isolation(&providers, &credentials).is_err()
+    {
         source_constraints_valid = false;
         report.checks.push(check(
             CheckLayer::Renderability,
@@ -259,6 +269,10 @@ fn inspect_profile_with(
             Some("providers.toml".into()),
             "provider mode, spend gates, and supplied provider fields are contradictory",
         ));
+    } else {
+        for profile in &mut report.provider_profiles {
+            profile.readiness.configured = true;
+        }
     }
     let fixture_only = providers.targets.iter().any(|target| {
         target
@@ -289,12 +303,6 @@ fn inspect_profile_with(
             Some("providers.toml:targets".into()),
             "the feature-gated local acceptance canary explicitly selected a fixture adapter",
         ));
-    }
-    if source_constraints_valid
-        && providers.mode == Some(ProviderMode::Live)
-        && stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed)
-    {
-        report.provider_readiness = ProviderReadiness::LiveReady;
     }
     if validate_topology(&stack).is_err() {
         source_constraints_valid = false;
@@ -611,7 +619,13 @@ fn inspect_profile_with(
             ));
             continue;
         };
-        match opaque_probe(reference) {
+        let reference_present = opaque_probe(reference);
+        for profile in &mut report.provider_profiles {
+            if profile.credential_alias == key {
+                profile.readiness.credential_reference_present = reference_present;
+            }
+        }
+        match reference_present {
             Some(true) => report.checks.push(check(
                 CheckLayer::Renderability,
                 CheckStatus::Pass,
@@ -701,6 +715,12 @@ fn inspect_profile_with(
     let gongbu_managed =
         stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed);
     if gongbu_managed {
+        if providers.mode == Some(ProviderMode::Live) {
+            report.provider_readiness = ProviderReadiness::Configured;
+            for profile in &mut report.provider_profiles {
+                profile.readiness.production_validated = true;
+            }
+        }
         report.checks.push(check(
             CheckLayer::Renderability,
             CheckStatus::Pass,
@@ -1506,6 +1526,12 @@ fn required_opaque_keys(
                     .iter()
                     .filter_map(|target| target.credential.clone()),
             );
+            keys.extend(
+                providers
+                    .supported_profiles
+                    .iter()
+                    .filter_map(|profile| profile.credential.clone()),
+            );
         }
     }
     keys
@@ -1867,7 +1893,7 @@ fn provider_display(style: crate::terminal::TerminalStyle, value: ProviderReadin
     match value {
         ProviderReadiness::Unknown | ProviderReadiness::Disabled => style.muted(name),
         ProviderReadiness::FixtureOnly => style.warning(name),
-        ProviderReadiness::LiveReady => style.success(name),
+        ProviderReadiness::Configured => style.success(name),
     }
 }
 
@@ -1904,7 +1930,7 @@ fn provider_name(value: ProviderReadiness) -> &'static str {
         ProviderReadiness::Unknown => "unknown",
         ProviderReadiness::Disabled => "disabled",
         ProviderReadiness::FixtureOnly => "fixture_only",
-        ProviderReadiness::LiveReady => "live_ready",
+        ProviderReadiness::Configured => "configured",
     }
 }
 
@@ -1942,6 +1968,7 @@ mod tests {
             schema_version: REPORT_SCHEMA_VERSION,
             classification: ProfileClassification::Incomplete,
             provider_readiness: ProviderReadiness::FixtureOnly,
+            provider_profiles: Vec::new(),
             checks: vec![
                 check(
                     CheckLayer::SourceSyntax,
@@ -1977,6 +2004,14 @@ mod tests {
                 ),
             ],
         }
+    }
+
+    #[test]
+    fn report_schema_versions_the_supported_profile_readiness_contract() {
+        let value = serde_json::to_value(presentation_report()).unwrap();
+        assert_eq!(value["schema_version"], REPORT_SCHEMA_VERSION);
+        assert_eq!(value["schema_version"], 2);
+        assert!(value.get("provider_profiles").is_some());
     }
 
     #[test]
@@ -2414,6 +2449,139 @@ account = "gongbu-caller"
             provider_readiness(&providers),
             ProviderReadiness::FixtureOnly
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supported_profile_readiness_keeps_configuration_reference_and_live_qualification_separate() {
+        let root = tempdir().unwrap();
+        let (profile, renderer) = write_complete_managed_profile(root.path());
+        let mut credentials = fs::read_to_string(profile.join("credentials.toml")).unwrap();
+        credentials.push_str(
+            "\n[opaque.bfl_flux2_pro]\nservice = \"operator.bfl\"\naccount = \"flux\"\n\n[opaque.gemini]\nservice = \"operator.google\"\naccount = \"gemini\"\n",
+        );
+        fs::write(profile.join("credentials.toml"), credentials).unwrap();
+        fs::write(
+            profile.join("providers.toml"),
+            format!(
+                r#"schema_version = 1
+mode = "live"
+catalog_version = "operator-mixed-2026-08-28-v1"
+maximum_spend_minor = 25
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+[[supported_profiles]]
+contract = "hubu.flux-2-pro.text-to-image/v1"
+credential = "bfl_flux2_pro"
+
+[[targets]]
+provider_config_version = "gemini-v1"
+workload_type = "image_generation"
+provider = "google"
+adapter = "gemini_developer_image"
+model = "gemini-image-v1"
+credential = "gemini"
+active = true
+execution_enabled = true
+[targets.settings]
+type = "gemini_developer_image"
+[targets.settings.config]
+endpoint = "https://generativelanguage.googleapis.com"
+api_version = "v1beta"
+timeout_ms = 30000
+max_retries = 0
+headers = {{}}
+
+[[pricing_rules]]
+rule_id = "gemini-v1"
+provider = "google"
+model = "gemini-image-v1"
+currency = "USD"
+components = [{{ unit = "image", rate_numerator_minor = 4, rate_denominator = 1 }}]
+"#
+            ),
+        )
+        .unwrap();
+
+        let present = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+        assert_eq!(present.classification, ProfileClassification::ReadyToRender);
+        assert_eq!(present.provider_readiness, ProviderReadiness::Unknown);
+        assert_eq!(present.provider_profiles.len(), 1);
+        let readiness = &present.provider_profiles[0].readiness;
+        assert!(readiness.configured);
+        assert_eq!(readiness.credential_reference_present, Some(true));
+        assert!(!readiness.production_validated);
+        assert!(!readiness.live_qualified);
+        assert_eq!(readiness.live_qualification, "not_performed");
+
+        render_profile_with_renderer(&profile, &renderer).unwrap();
+        let validated = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+        assert_eq!(validated.provider_readiness, ProviderReadiness::Configured);
+        assert!(validated.provider_profiles[0].readiness.configured);
+        assert!(
+            validated.provider_profiles[0]
+                .readiness
+                .production_validated
+        );
+        assert_eq!(
+            validated.provider_profiles[0]
+                .readiness
+                .credential_reference_present,
+            Some(true)
+        );
+        assert!(!validated.provider_profiles[0].readiness.live_qualified);
+
+        let absent = inspect_profile_with(&profile, opaque_unavailable, Some(&renderer));
+        assert_eq!(
+            absent.provider_profiles[0]
+                .readiness
+                .credential_reference_present,
+            Some(false)
+        );
+        assert!(!absent.provider_profiles[0].readiness.live_qualified);
+        assert!(absent.checks.iter().all(|check| {
+            !check.message.contains("api.bfl.ai") && !check.message.contains("provider call")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_supported_profile_reference_is_incomplete_before_render() {
+        let root = tempdir().unwrap();
+        let (profile, renderer) = write_complete_managed_profile(root.path());
+        fs::write(
+            profile.join("providers.toml"),
+            format!(
+                r#"schema_version = 1
+mode = "live"
+maximum_spend_minor = 25
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+[[supported_profiles]]
+contract = "hubu.flux-2-pro.text-to-image/v1"
+credential = "bfl_flux2_pro"
+"#
+            ),
+        )
+        .unwrap();
+
+        let report = inspect_profile_with(&profile, opaque_available, Some(&renderer));
+        assert_eq!(report.classification, ProfileClassification::Incomplete);
+        assert_eq!(report.provider_profiles.len(), 1);
+        assert_eq!(
+            report.provider_profiles[0]
+                .readiness
+                .credential_reference_present,
+            Some(false)
+        );
+        assert!(!report.provider_profiles[0].readiness.live_qualified);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "required_decision_missing"
+                && check.field.as_deref() == Some("credentials.toml:opaque.bfl_flux2_pro")
+        }));
+        let error = render_profile_with_renderer(&profile, &renderer)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("credentials.toml:opaque.bfl_flux2_pro"));
+        assert!(!profile.join("generated/active-manifest.json").exists());
     }
 
     #[cfg(unix)]
