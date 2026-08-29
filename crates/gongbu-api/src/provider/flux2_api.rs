@@ -8,8 +8,9 @@
 use super::{
     contract::{
         canonical_image_media_type, ActualVendorCost, AdapterCapabilities, AdapterOutcome,
-        ContractError, NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutputDimensions,
-        ProviderAdapter, ProviderFailure, ProviderPhase, Result, RetryPolicy,
+        AdapterSubmission, AsyncProviderOperation, ContractError, NormalizedArtifact,
+        NormalizedRequest, NormalizedUsage, OutputDimensions, ProviderAdapter, ProviderFailure,
+        ProviderPhase, Result, RetryPolicy,
     },
     http_kernel::{
         provider_request_id, read_bounded, shared_client, url_has_explicit_port,
@@ -321,13 +322,11 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         })
     }
 
-    fn invoke_inner(
+    fn submission_body(
         &self,
         request: &NormalizedRequest,
         input: &Value,
-        secret: &ProviderSecret,
-        idempotency_key: Option<&str>,
-    ) -> Result<AdapterOutcome, ProviderFailure> {
+    ) -> Result<Value, ProviderFailure> {
         self.preflight_input(request, input)
             .map_err(|_| ProviderFailure::release("invalid_request", ProviderPhase::PreSend))?;
         let prompt = input
@@ -351,6 +350,17 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 body[field] = value.clone();
             }
         }
+        Ok(body)
+    }
+
+    fn submit_once_inner(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+        idempotency_key: Option<&str>,
+    ) -> Result<AdapterSubmission, ProviderFailure> {
+        let body = self.submission_body(request, input)?;
         let deadline =
             InvocationDeadline::from_timeout(Duration::from_millis(self.config.timeout_ms))
                 .map_err(|_| ProviderFailure::release("config_invalid", ProviderPhase::PreSend))?;
@@ -373,7 +383,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 &body,
             )
             .map_err(|error| classify_transport(error, secret, true, None, None))?;
-        let mut request_id = safe_evidence(response.request_id, secret)
+        let request_id = safe_evidence(response.request_id, secret)
             .or_else(|| safe_string_at(&response.body, &["request_id", "requestId"], secret));
         if (400..500).contains(&response.status) {
             return Err(classify_http_status(
@@ -397,8 +407,8 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             &["id", "operation_id", "operationId"],
             secret,
         );
-        let mut current = response.body;
-        let mut state = classify_result_state(&current, true).map_err(|_| {
+        let current = response.body;
+        let state = classify_result_state(&current, true).map_err(|_| {
             with_evidence(
                 "malformed_response",
                 request_id.clone(),
@@ -408,20 +418,89 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         if let Some(failure) = state.failure(request_id.clone(), operation_id.clone()) {
             return Err(failure);
         }
-        if state != BflResultState::Ready {
-            let operation_id = operation_id
-                .clone()
-                .ok_or_else(|| with_evidence("malformed_response", request_id.clone(), None))?;
-            let poll_url = poll_url(&current).map_err(|error| {
-                let code = match error {
-                    ContractError::Provider { code } => code,
-                    _ => "provider_contract_failure".into(),
-                };
-                ProviderFailure::reconcile(code, ProviderPhase::Processing)
-                    .with_evidence(request_id.clone(), Some(operation_id.clone()))
+        if state == BflResultState::Ready {
+            return self
+                .complete_ready(current, request_id, operation_id, secret, deadline)
+                .map(AdapterSubmission::Complete);
+        }
+
+        let operation_id = operation_id
+            .ok_or_else(|| with_evidence("malformed_response", request_id.clone(), None))?;
+        let polling_host =
+            polling_checkpoint_host(&current, &operation_id, &self.config.api_version).map_err(
+                |error| {
+                    let code = match error {
+                        ContractError::Provider { code } => code,
+                        _ => "provider_contract_failure".into(),
+                    };
+                    ProviderFailure::reconcile(code, ProviderPhase::Processing)
+                        .with_evidence(request_id.clone(), Some(operation_id.clone()))
+                },
+            )?;
+        let operation = AsyncProviderOperation {
+            provider_request_id: request_id,
+            provider_operation_id: operation_id,
+            polling_host,
+            deadline_unix_ms: deadline.unix_millis(),
+        };
+        operation.validate().map_err(|_| {
+            with_evidence(
+                "invalid_provider_operation",
+                operation.provider_request_id.clone(),
+                Some(operation.provider_operation_id.clone()),
+            )
+        })?;
+        Ok(AdapterSubmission::Pending(operation))
+    }
+
+    fn poll_existing_inner(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+        operation: &AsyncProviderOperation,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        let evidence = || {
+            (
+                operation.provider_request_id.clone(),
+                Some(operation.provider_operation_id.clone()),
+            )
+        };
+        self.preflight_input(request, input).map_err(|_| {
+            let (request_id, operation_id) = evidence();
+            with_evidence("invalid_request", request_id, operation_id)
+        })?;
+        operation.validate().map_err(|_| {
+            let (request_id, operation_id) = evidence();
+            with_evidence("invalid_provider_operation", request_id, operation_id)
+        })?;
+        let deadline =
+            InvocationDeadline::from_unix_millis(operation.deadline_unix_ms).map_err(|_| {
+                let (request_id, operation_id) = evidence();
+                with_evidence("timeout_unknown_outcome", request_id, operation_id)
             })?;
-            loop {
-                let wait = Duration::from_millis(self.config.poll_interval_ms).min(
+        let poll_url = operation_poll_url(&self.config, operation).map_err(|_| {
+            let (request_id, operation_id) = evidence();
+            with_evidence("invalid_provider_operation", request_id, operation_id)
+        })?;
+        let operation_id = operation.provider_operation_id.clone();
+        let mut request_id = operation.provider_request_id.clone();
+        loop {
+            let wait = Duration::from_millis(self.config.poll_interval_ms).min(
+                deadline.remaining().map_err(|_| {
+                    with_evidence(
+                        "timeout_unknown_outcome",
+                        request_id.clone(),
+                        Some(operation_id.clone()),
+                    )
+                })?,
+            );
+            thread::sleep(wait);
+            let response = self
+                .transport
+                .poll(
+                    &poll_url,
+                    secret.expose(),
                     deadline.remaining().map_err(|_| {
                         with_evidence(
                             "timeout_unknown_outcome",
@@ -429,75 +508,76 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                             Some(operation_id.clone()),
                         )
                     })?,
-                );
-                thread::sleep(wait);
-                let response = self
-                    .transport
-                    .poll(
-                        &poll_url,
-                        secret.expose(),
-                        deadline.remaining().map_err(|_| {
-                            with_evidence(
-                                "timeout_unknown_outcome",
-                                request_id.clone(),
-                                Some(operation_id.clone()),
-                            )
-                        })?,
-                        &self.config.headers,
-                    )
-                    .map_err(|error| {
-                        classify_transport(
-                            error,
-                            secret,
-                            false,
-                            request_id.clone(),
-                            Some(operation_id.clone()),
-                        )
-                    })?;
-                let poll_request_id = safe_evidence(response.request_id, secret).or_else(|| {
-                    safe_string_at(&response.body, &["request_id", "requestId"], secret)
-                });
-                if request_id.is_none() {
-                    request_id = poll_request_id;
-                }
-                if (400..500).contains(&response.status) {
-                    return Err(classify_http_status(
-                        response.status,
-                        ProviderPhase::Processing,
-                        true,
-                        request_id,
-                        Some(operation_id),
-                    ));
-                }
-                if !(200..300).contains(&response.status) {
-                    return Err(reconcile_with_evidence(
-                        "provider_failure",
-                        ProviderPhase::Processing,
-                        request_id,
-                        Some(operation_id),
-                    ));
-                }
-                current = response.body;
-                state = classify_result_state(&current, false).map_err(|_| {
-                    with_evidence(
-                        "malformed_response",
+                    &self.config.headers,
+                )
+                .map_err(|error| {
+                    classify_transport(
+                        error,
+                        secret,
+                        false,
                         request_id.clone(),
                         Some(operation_id.clone()),
                     )
                 })?;
-                match state {
-                    BflResultState::Ready => break,
-                    BflResultState::Pending => {}
-                    _ => {
-                        return Err(state
-                            .failure(request_id.clone(), Some(operation_id.clone()))
-                            .expect("terminal BFL state has a failure"));
-                    }
+            let poll_request_id = safe_evidence(response.request_id, secret)
+                .or_else(|| safe_string_at(&response.body, &["request_id", "requestId"], secret));
+            if request_id.is_none() {
+                request_id = poll_request_id;
+            }
+            if (400..500).contains(&response.status) {
+                return Err(classify_http_status(
+                    response.status,
+                    ProviderPhase::Processing,
+                    true,
+                    request_id,
+                    Some(operation_id),
+                ));
+            }
+            if !(200..300).contains(&response.status) {
+                return Err(reconcile_with_evidence(
+                    "provider_failure",
+                    ProviderPhase::Processing,
+                    request_id,
+                    Some(operation_id),
+                ));
+            }
+            let current = response.body;
+            validate_poll_operation_identity(&current, &operation_id, request_id.clone(), secret)?;
+            let state = classify_result_state(&current, false).map_err(|_| {
+                with_evidence(
+                    "malformed_response",
+                    request_id.clone(),
+                    Some(operation_id.clone()),
+                )
+            })?;
+            match state {
+                BflResultState::Ready => {
+                    return self.complete_ready(
+                        current,
+                        request_id,
+                        Some(operation_id),
+                        secret,
+                        deadline,
+                    );
+                }
+                BflResultState::Pending => {}
+                _ => {
+                    return Err(state
+                        .failure(request_id.clone(), Some(operation_id.clone()))
+                        .expect("terminal BFL state has a failure"));
                 }
             }
         }
-        let operation_id = operation_id
-            .or_else(|| safe_string_at(&current, &["id", "operation_id", "operationId"], secret));
+    }
+
+    fn complete_ready(
+        &self,
+        current: Value,
+        request_id: Option<String>,
+        operation_id: Option<String>,
+        secret: &ProviderSecret,
+        deadline: InvocationDeadline,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
         let raw_artifact_url = artifact_url(&current).ok_or_else(|| {
             with_evidence(
                 if current.get("result").is_some() {
@@ -622,13 +702,34 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome, ProviderFailure> {
+        match self.submit(request, input, secret, vendor_idempotency_key)? {
+            AdapterSubmission::Complete(outcome) => Ok(outcome),
+            AdapterSubmission::Pending(operation) => self.poll(request, input, secret, &operation),
+        }
+    }
+    fn submit(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+    ) -> Result<AdapterSubmission, ProviderFailure> {
         if vendor_idempotency_key.is_some() != self.config.idempotency_header.is_some() {
             return Err(ProviderFailure::release(
                 "idempotency_policy_mismatch",
                 ProviderPhase::PreSend,
             ));
         }
-        self.invoke_inner(request, input, secret, vendor_idempotency_key)
+        self.submit_once_inner(request, input, secret, vendor_idempotency_key)
+    }
+    fn poll(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+        operation: &AsyncProviderOperation,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        self.poll_existing_inner(request, input, secret, operation)
     }
     fn redact_error(&self, error: &(dyn StdError + 'static)) -> ContractError {
         let _ = Redactor::default().error_chain(error);
@@ -804,6 +905,37 @@ fn poll_url(body: &Value) -> Result<Url> {
     Ok(url)
 }
 
+fn polling_checkpoint_host(body: &Value, operation_id: &str, api_version: &str) -> Result<String> {
+    let url = poll_url(body)?;
+    let expected_path = format!("/{}/get_result", api_version.trim_matches('/'));
+    let query = url.query_pairs().collect::<Vec<_>>();
+    if url.path() != expected_path
+        || query.len() != 1
+        || query[0].0 != "id"
+        || query[0].1 != operation_id
+    {
+        return Err(provider_error("malformed_response"));
+    }
+    url.host_str()
+        .map(str::to_owned)
+        .ok_or_else(|| provider_error("polling_origin_rejected"))
+}
+
+fn operation_poll_url(config: &Flux2ApiConfig, operation: &AsyncProviderOperation) -> Result<Url> {
+    if !valid_bfl_api_host(Some(&operation.polling_host)) {
+        return Err(provider_error("polling_origin_rejected"));
+    }
+    let mut url = Url::parse(&format!("https://{}/", operation.polling_host))
+        .map_err(|_| provider_error("invalid_provider_operation"))?;
+    url.set_path(&format!(
+        "{}/get_result",
+        config.api_version.trim_matches('/')
+    ));
+    url.query_pairs_mut()
+        .append_pair("id", &operation.provider_operation_id);
+    Ok(url)
+}
+
 fn string_at(body: &Value, names: &[&str]) -> Option<String> {
     names
         .iter()
@@ -826,6 +958,30 @@ fn safe_evidence(value: Option<String>, secret: &ProviderSecret) -> Option<Strin
                     .windows(secret.expose().len())
                     .any(|window| window == secret.expose()))
     })
+}
+fn validate_poll_operation_identity(
+    body: &Value,
+    expected_operation_id: &str,
+    request_id: Option<String>,
+    secret: &ProviderSecret,
+) -> Result<(), ProviderFailure> {
+    for name in ["id", "operation_id", "operationId"] {
+        let Some(value) = body.get(name) else {
+            continue;
+        };
+        let returned_operation_id = value
+            .as_str()
+            .map(str::to_owned)
+            .and_then(|value| safe_evidence(Some(value), secret));
+        if returned_operation_id.as_deref() != Some(expected_operation_id) {
+            return Err(with_evidence(
+                "provider_operation_identity_mismatch",
+                request_id,
+                Some(expected_operation_id.to_owned()),
+            ));
+        }
+    }
+    Ok(())
 }
 fn status(body: &Value) -> Option<String> {
     body.get("status")
@@ -1674,6 +1830,259 @@ mod tests {
             assert_eq!(safe_evidence(Some(unsafe_value.into()), &secret), None);
         }
         assert_eq!(safe_evidence(Some("a".repeat(256)), &secret), None);
+    }
+
+    #[test]
+    fn staged_submit_returns_only_safe_resumable_operation_evidence() {
+        let (adapter, traffic) = security_fixture(
+            202,
+            json!({
+                "id":"op-1",
+                "request_id":"body-request-id",
+                "polling_url":"https://api.us.bfl.ai/v1/get_result?id=op-1",
+                "status":"Pending",
+                "debug":{
+                    "raw":"raw-body-canary secret-canary",
+                    "signed_url":"https://delivery.us.bfl.ai/out.png?signature=signed-url-canary"
+                }
+            }),
+            Vec::new(),
+        );
+        let now_unix_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+
+        let submission = adapter
+            .submit(
+                &request(),
+                &input(),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap();
+        let AdapterSubmission::Pending(operation) = submission else {
+            panic!("asynchronous submit must return a resumable operation");
+        };
+        let after_submit_unix_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+
+        assert_eq!(operation.provider_request_id.as_deref(), Some("req-1"));
+        assert_eq!(operation.provider_operation_id, "op-1");
+        assert_eq!(operation.polling_host, "api.us.bfl.ai");
+        assert!(operation.deadline_unix_ms > now_unix_ms);
+        assert!(operation.deadline_unix_ms <= after_submit_unix_ms + 1_000);
+        assert_eq!(traffic.submissions.lock().unwrap().len(), 1);
+        assert!(traffic.polls.lock().unwrap().is_empty());
+
+        let durable = serde_json::to_string(&operation).unwrap();
+        for forbidden in [
+            "secret-canary",
+            "raw-body-canary",
+            "signed-url-canary",
+            "polling_url",
+            "delivery.us.bfl.ai",
+            "https://",
+        ] {
+            assert!(!durable.contains(forbidden), "leaked {forbidden}");
+        }
+    }
+
+    #[test]
+    fn staged_resume_polls_and_fetches_without_a_second_submission() {
+        let (adapter, traffic) = security_fixture(
+            202,
+            json!({
+                "id":"op-1",
+                "polling_url":"https://api.us.bfl.ai/v1/get_result?id=op-1",
+                "status":"Pending"
+            }),
+            vec![(
+                200,
+                json!({
+                    "id":"op-1",
+                    "status":"Ready",
+                    "result":{"sample":"https://delivery.us.bfl.ai/out.png?signature=short-lived"}
+                }),
+            )],
+        );
+        let secret = secret_for_test("secret-canary");
+        let AdapterSubmission::Pending(operation) = adapter
+            .submit(&request(), &input(), &secret, Some("opaque-key"))
+            .unwrap()
+        else {
+            panic!("expected an asynchronous operation");
+        };
+        let persisted: AsyncProviderOperation =
+            serde_json::from_slice(&serde_json::to_vec(&operation).unwrap()).unwrap();
+        let submissions_before_resume = traffic.submissions.lock().unwrap().len();
+
+        let outcome = adapter
+            .poll(&request(), &input(), &secret, &persisted)
+            .unwrap();
+
+        assert_eq!(submissions_before_resume, 1);
+        assert_eq!(traffic.submissions.lock().unwrap().len(), 1);
+        assert_eq!(traffic.polls.lock().unwrap().len(), 1);
+        assert_eq!(traffic.artifacts.lock().unwrap().len(), 1);
+        assert_eq!(outcome.provider_operation_id.as_deref(), Some("op-1"));
+    }
+
+    #[test]
+    fn resumed_poll_rejects_a_mismatched_operation_before_artifact_fetch() {
+        let (adapter, traffic) = security_fixture(
+            202,
+            json!({
+                "id":"op-1",
+                "polling_url":"https://api.bfl.ai/v1/get_result?id=op-1",
+                "status":"Pending"
+            }),
+            vec![(
+                200,
+                json!({
+                    "id":"different-operation",
+                    "status":"Ready",
+                    "result":{"sample":"https://delivery.us.bfl.ai/out.png"}
+                }),
+            )],
+        );
+        let secret = secret_for_test("secret-canary");
+        let AdapterSubmission::Pending(operation) = adapter
+            .submit(&request(), &input(), &secret, Some("opaque-key"))
+            .unwrap()
+        else {
+            panic!("expected an asynchronous operation");
+        };
+
+        let error = adapter
+            .poll(&request(), &input(), &secret, &operation)
+            .unwrap_err();
+
+        assert_eq!(error.code, "provider_operation_identity_mismatch");
+        assert_eq!(error.phase, ProviderPhase::Processing);
+        assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
+        assert_eq!(error.evidence.request_id.as_deref(), Some("req-1"));
+        assert_eq!(error.evidence.operation_id.as_deref(), Some("op-1"));
+        assert_eq!(traffic.submissions.lock().unwrap().len(), 1);
+        assert_eq!(traffic.polls.lock().unwrap().len(), 1);
+        assert!(traffic.artifacts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_or_mismatched_polling_routes_reconcile_without_polling() {
+        for polling_url in [
+            "https://api.bfl.ai/v1/jobs?id=op-1",
+            "https://api.bfl.ai/v1/get_result",
+            "https://api.bfl.ai/v1/get_result?id=other-op",
+            "https://api.bfl.ai/v1/get_result?id=op-1&token=unsafe",
+            "https://api.bfl.ai/v1/get_result?id=op-1&id=op-1",
+        ] {
+            let (adapter, traffic) = security_fixture(
+                202,
+                json!({"id":"op-1","polling_url":polling_url,"status":"Pending"}),
+                Vec::new(),
+            );
+            let error = adapter
+                .submit(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap_err();
+
+            assert_eq!(error.code, "malformed_response", "{polling_url}");
+            assert_eq!(error.phase, ProviderPhase::Processing, "{polling_url}");
+            assert_eq!(
+                error.spend_disposition,
+                SpendDisposition::Reconcile,
+                "{polling_url}"
+            );
+            assert_eq!(error.evidence.operation_id.as_deref(), Some("op-1"));
+            assert!(traffic.polls.lock().unwrap().is_empty(), "{polling_url}");
+            assert!(
+                traffic.artifacts.lock().unwrap().is_empty(),
+                "{polling_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn expired_resumed_operation_times_out_without_polling_or_fetching() {
+        let (adapter, traffic) =
+            security_fixture(202, json!({"id":"unused","status":"Pending"}), Vec::new());
+        let expired_unix_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            - 1;
+        let operation = AsyncProviderOperation {
+            provider_request_id: Some("req-1".into()),
+            provider_operation_id: "op-1".into(),
+            polling_host: "api.us.bfl.ai".into(),
+            deadline_unix_ms: expired_unix_ms,
+        };
+
+        let error = adapter
+            .poll(
+                &request(),
+                &input(),
+                &secret_for_test("secret-canary"),
+                &operation,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, "timeout_unknown_outcome");
+        assert_eq!(error.phase, ProviderPhase::Processing);
+        assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
+        assert!(traffic.submissions.lock().unwrap().is_empty());
+        assert!(traffic.polls.lock().unwrap().is_empty());
+        assert!(traffic.artifacts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn direct_invoke_remains_synchronous_with_exactly_one_submission() {
+        let (adapter, traffic) = security_fixture(
+            202,
+            json!({
+                "id":"op-1",
+                "polling_url":"https://api.bfl.ai/v1/get_result?id=op-1",
+                "status":"Pending"
+            }),
+            vec![(
+                200,
+                json!({
+                    "id":"op-1",
+                    "status":"Ready",
+                    "result":{"sample":"https://delivery.us.bfl.ai/out.png"}
+                }),
+            )],
+        );
+
+        let outcome = adapter
+            .invoke(
+                &request(),
+                &input(),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap();
+
+        assert_eq!(traffic.submissions.lock().unwrap().len(), 1);
+        assert_eq!(traffic.polls.lock().unwrap().len(), 1);
+        assert_eq!(traffic.artifacts.lock().unwrap().len(), 1);
+        assert_eq!(outcome.provider_operation_id.as_deref(), Some("op-1"));
     }
 
     #[test]

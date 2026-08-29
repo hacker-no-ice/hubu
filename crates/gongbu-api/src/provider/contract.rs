@@ -953,6 +953,64 @@ pub struct AdapterOutcome {
     pub provider_operation_id: Option<String>,
     pub artifacts: Vec<NormalizedArtifact>,
 }
+
+/// Safe, resumable state for a provider operation that was accepted but did
+/// not complete in the submission response. This is deliberately an allowlist:
+/// raw provider bodies, credentials, signed URLs, and artifact storage paths
+/// have no representation here.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AsyncProviderOperation {
+    pub provider_request_id: Option<String>,
+    pub provider_operation_id: String,
+    /// Validated hostname only. The adapter reconstructs the documented poll
+    /// endpoint from this host, its frozen API version, and the operation ID.
+    pub polling_host: String,
+    /// Absolute Unix epoch deadline shared by submission, polling, and artifact
+    /// download. Resuming an operation never resets this budget.
+    pub deadline_unix_ms: i64,
+}
+
+impl AsyncProviderOperation {
+    pub fn validate(&self) -> Result<()> {
+        fn safe_evidence(value: &str) -> bool {
+            !value.is_empty()
+                && value.len() <= 255
+                && value.trim() == value
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+        }
+
+        if !safe_evidence(&self.provider_operation_id)
+            || self
+                .provider_request_id
+                .as_deref()
+                .is_some_and(|value| !safe_evidence(value))
+            || self.polling_host.is_empty()
+            || self.polling_host.len() > 253
+            || self.polling_host.bytes().any(|byte| {
+                !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.'))
+            })
+            || self.polling_host.starts_with(['-', '.'])
+            || self.polling_host.ends_with(['-', '.'])
+            || self.polling_host.contains("..")
+            || self.deadline_unix_ms <= 0
+        {
+            return Err(ContractError::Provider {
+                code: "invalid_provider_operation".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterSubmission {
+    Complete(AdapterOutcome),
+    Pending(AsyncProviderOperation),
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct NormalizedArtifact {
     pub media_type: String,
@@ -1024,6 +1082,35 @@ pub trait ProviderAdapter: Send + Sync {
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome, ProviderFailure>;
+    /// Submit provider work once. Synchronous adapters retain their existing
+    /// behavior through this default implementation.
+    fn submit(
+        &self,
+        request: &NormalizedRequest,
+        normalized_input: &serde_json::Value,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+    ) -> Result<AdapterSubmission, ProviderFailure> {
+        self.invoke(request, normalized_input, secret, vendor_idempotency_key)
+            .map(AdapterSubmission::Complete)
+    }
+    /// Poll a previously checkpointed asynchronous operation. The default is
+    /// fail-closed because synchronous adapters never create such checkpoints.
+    fn poll(
+        &self,
+        _request: &NormalizedRequest,
+        _normalized_input: &serde_json::Value,
+        _secret: &ProviderSecret,
+        operation: &AsyncProviderOperation,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        Err(
+            ProviderFailure::reconcile("provider_resume_unsupported", ProviderPhase::Processing)
+                .with_evidence(
+                    operation.provider_request_id.clone(),
+                    Some(operation.provider_operation_id.clone()),
+                ),
+        )
+    }
     fn redact_error(&self, _error: &(dyn std::error::Error + 'static)) -> ContractError {
         ContractError::Provider {
             code: "provider_failure".into(),
