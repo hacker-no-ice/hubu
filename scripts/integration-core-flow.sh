@@ -164,6 +164,8 @@ assert_contains "budget create" "${BUDGET_OUTPUT}" 'remaining: $75.00'
 assert_contains "budget create" "${BUDGET_OUTPUT}" "Spending target warning (advisory)"
 assert_contains "budget create" "${BUDGET_OUTPUT}" "target_id: ${TARGET_ID}"
 assert_contains "budget create" "${BUDGET_OUTPUT}" 'exceeded by: $25.00'
+ACTIVE_BUDGET_ID="$(awk '/budget_id:/ { print $2; exit }' <<< "${BUDGET_OUTPUT}")"
+[[ "${ACTIVE_BUDGET_ID}" == bgt_* ]] || fail "could not parse active public budget id"
 
 ALLOW_OUTPUT="$(hubu spend --operation-key integration-allow --account-id "${ACCOUNT_ID}" --amount 20 --reason "Purchase API credits")"
 assert_contains "allowed spend" "${ALLOW_OUTPUT}" "decision: allow"
@@ -228,13 +230,14 @@ assert_contains "agent budget create" "${AGENT_BUDGET_OUTPUT}" "agent_id: ${AGEN
 assert_contains "agent budget create" "${AGENT_BUDGET_OUTPUT}" 'limit: $5.00'
 AGENT_BUDGET_LIST_OUTPUT="$(hubu budget list)"
 assert_contains "agent budget list" "${AGENT_BUDGET_LIST_OUTPUT}" "agent_id: ${AGENT_ID}"
-AGENT_BUDGET_ID="$(awk '/budget_id:/ { print $2; exit }' <<< "${AGENT_BUDGET_OUTPUT}")"
-[[ "${AGENT_BUDGET_ID}" == bgt_* ]] || fail "could not parse public budget id"
-REPLACED_BUDGET_OUTPUT="$(hubu budget replace --budget-id "${AGENT_BUDGET_ID}" --amount 8)"
+assert_contains "agent budget list" "${AGENT_BUDGET_LIST_OUTPUT}" "status: scheduled"
+SCHEDULED_BUDGET_ID="$(awk '/budget_id:/ { print $2; exit }' <<< "${AGENT_BUDGET_OUTPUT}")"
+[[ "${SCHEDULED_BUDGET_ID}" == bgt_* ]] || fail "could not parse scheduled public budget id"
+REPLACED_BUDGET_OUTPUT="$(hubu budget replace --budget-id "${ACTIVE_BUDGET_ID}" --amount 80)"
 assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" "Budget replaced"
 assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" "Revoked budget"
 assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" "Replacement budget"
-assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" 'limit: $8.00'
+assert_contains "budget replace" "${REPLACED_BUDGET_OUTPUT}" 'limit: $80.00'
 REPLACEMENT_BUDGET_ID="$(awk '/budget_id:/ && seen { print $2; exit } /Replacement budget/ { seen=1 }' <<< "${REPLACED_BUDGET_OUTPUT}")"
 [[ "${REPLACEMENT_BUDGET_ID}" == bgt_* ]] || fail "could not parse replacement budget id"
 REVOKED_BUDGET_OUTPUT="$(hubu budget revoke --budget-id "${REPLACEMENT_BUDGET_ID}")"
