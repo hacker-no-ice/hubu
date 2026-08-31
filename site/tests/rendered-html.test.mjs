@@ -133,7 +133,7 @@ test("publishes the versioned local-stack configuration reference at stable publ
   const landingHtml = await landing.text();
   assert.match(landingHtml, /Local stack configuration reference/);
   assert.match(landingHtml, /Value-source labels/);
-  assert.match(landingHtml, /provider-disabled example/i);
+  assert.match(landingHtml, /stack init --mode sandbox/i);
   assert.match(landingHtml, /href="\/configuration\/local-stack\/v1\/stack-toml"/);
 
   const providers = await render("/configuration/local-stack/v1/providers-toml");

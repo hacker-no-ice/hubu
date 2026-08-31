@@ -28,19 +28,33 @@ If the profile will use managed-local Temporal, install the version-pinned
 Temporal CLI described in the
 [Temporal decision guide](https://hubustack.dev/configuration/local-stack/v1/decisions#managed-local-versus-external-temporal).
 
-## Initialize and select a profile
+## Choose an outcome and initialize
+
+Initialization asks for an outcome instead of exposing the complete topology
+up front:
+
+| Mode | Outcome |
+| --- | --- |
+| `sandbox` | Run the complete Hubu, Gongbu, and Temporal stack with real internal communication and a deterministic, non-billable fixture at the external provider edge. This is the default. |
+| `local-stack` | Run the complete ecosystem with one or more operator-approved real provider targets. Agents select among approved targets at runtime. |
+| `hubu-only` | Run registration, policy, authorization, and budget governance without Gongbu, Temporal, or provider execution. |
 
 Choose an absolute profile path, initialize it, and select it for later stack
 commands:
 
 ```sh
 profile=/absolute/path/to/profile
-hubu stack init --profile "$profile"
+hubu stack init --mode sandbox --install-temporal --profile "$profile"
 hubu stack select --profile "$profile"
 ```
 
 Initialization creates starter files without overwriting existing files or
 starting services:
+
+On macOS, `--install-temporal` invokes the official Homebrew package only when
+the Temporal CLI is absent. Initialization then discovers its absolute path
+and parses its exact CLI version into the profile; the operator never has to
+transcribe either value. Omit the flag to manage the dependency independently.
 
 ```text
 PROFILE_ROOT/
@@ -54,9 +68,10 @@ PROFILE_ROOT/
       .gitignore
 ```
 
-The three TOML files are the editable sources. A provider-disabled managed
-profile normally leaves `credentials.toml` at its generated schema-only
-content. Do not edit `generated/` or `state/`.
+The three TOML files remain normal, editable operator-owned sources. Sandbox
+and Hubu-only profiles need no provider credential. Local-stack mode requires
+at least one approved real target and its opaque credential reference. Do not
+edit `generated/` or `state/`.
 
 ## Complete and validate the profile
 
@@ -67,10 +82,10 @@ choice is unclear:
 | --- | --- | --- |
 | `stack.toml` | Binaries, managed or external services, Temporal, and local paths | [`stack.toml`](https://hubustack.dev/configuration/local-stack/v1/stack-toml) |
 | `credentials.toml` | Provider references or advanced external-service overrides | [`credentials.toml`](https://hubustack.dev/configuration/local-stack/v1/credentials-toml) |
-| `providers.toml` | Disabled or live mode, supported profiles or raw targets, pricing, and spend ceiling | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
+| `providers.toml` | Disabled, sandbox, or live mode; supported profiles or raw targets, pricing, and live spend gate where applicable | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
 
-For a first local evaluation, start with the
-[provider-disabled example](https://hubustack.dev/configuration/local-stack/v1/examples#provider-disabled-local-profile).
+For a first local evaluation, use sandbox mode. It exercises the governed
+execution path without contacting an external provider or incurring cost.
 Never put bearer tokens, provider API keys, or other raw secrets in the TOML
 files. Live provider execution can incur charges.
 

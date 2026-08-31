@@ -16,7 +16,7 @@ use crate::{
     },
     redaction::Redactor,
     secrets::{
-        MacOsKeychain, ManagedStackSecrets, SecretProvider, SecretReference,
+        MacOsKeychain, ManagedStackSecrets, SandboxFixtureSecrets, SecretProvider, SecretReference,
         MANAGED_CREDENTIAL_DIR_ENV,
     },
     temporal::TemporalWorkerConfig,
@@ -154,6 +154,7 @@ pub struct ProvidersConfig {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderMode {
     Disabled,
+    Sandbox,
     #[default]
     Live,
 }
@@ -351,6 +352,25 @@ impl ProvidersConfig {
                     ));
                 }
             }
+            ProviderMode::Sandbox => {
+                let targets = self
+                    .target_catalog_path
+                    .as_deref()
+                    .ok_or_else(|| invalid("sandbox provider target_catalog_path is required"))?;
+                let pricing = self
+                    .pricing_catalog_path
+                    .as_deref()
+                    .ok_or_else(|| invalid("sandbox provider pricing_catalog_path is required"))?;
+                validate_file_path(targets, "target_catalog_path")?;
+                validate_file_path(pricing, "pricing_catalog_path")?;
+                if self.maximum_spend_minor.is_none_or(|value| value <= 0)
+                    || self.live_spend_acknowledgement.is_some()
+                {
+                    return Err(invalid(
+                        "sandbox provider mode requires an internal spend ceiling and forbids live-spend acknowledgement",
+                    ));
+                }
+            }
             ProviderMode::Live => {
                 let targets = self
                     .target_catalog_path
@@ -510,7 +530,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     normalize_paths(&mut config)?;
 
     let bootstrap_secrets = startup_bootstrap_secret_provider()?;
-    let provider_secrets = startup_provider_secret_provider()?;
+    let provider_secrets = startup_provider_secret_provider(config.providers.mode)?;
     let caller_secret = bootstrap_secrets
         .resolve(
             &config
@@ -749,10 +769,21 @@ fn startup_bootstrap_secret_provider() -> Result<Arc<dyn SecretProvider>, Server
             .map(|provider| Arc::new(provider) as Arc<dyn SecretProvider>)
             .map_err(|_| invalid("managed stack credential directory is unavailable"));
     }
-    startup_provider_secret_provider()
+    #[cfg(feature = "local-fixture-canary")]
+    if std::env::var("GONGBU_LOCAL_FIXTURE_CANARY").as_deref() == Ok("1") {
+        return crate::secrets::LocalFixtureSecrets::from_environment()
+            .map(|provider| Arc::new(provider) as Arc<dyn SecretProvider>)
+            .map_err(|_| invalid("local fixture credential directory is unavailable"));
+    }
+    Ok(Arc::new(MacOsKeychain))
 }
 
-fn startup_provider_secret_provider() -> Result<Arc<dyn SecretProvider>, ServerError> {
+fn startup_provider_secret_provider(
+    mode: ProviderMode,
+) -> Result<Arc<dyn SecretProvider>, ServerError> {
+    if mode == ProviderMode::Sandbox {
+        return Ok(Arc::new(SandboxFixtureSecrets));
+    }
     #[cfg(feature = "local-fixture-canary")]
     if std::env::var("GONGBU_LOCAL_FIXTURE_CANARY").as_deref() == Ok("1") {
         return crate::secrets::LocalFixtureSecrets::from_environment()
@@ -781,13 +812,21 @@ fn validated_provider_catalog(
     let targets = ProviderTargetConfig::from_path(targets_path)
         .map_err(|error| invalid(format!("provider target catalog: {error}")))?;
     validate_provider_credential_separation(config, &targets)?;
-    reject_fixture_targets(&targets)?;
+    if config.providers.mode == ProviderMode::Sandbox {
+        validate_sandbox_fixture_targets(&targets)?;
+    } else {
+        reject_fixture_targets(&targets)?;
+    }
     let pricing = PricingCatalog::load(pricing_path)
         .map_err(|error| invalid(format!("pricing catalog: {error}")))?;
     ValidatedProviderCatalog::bind(
         targets,
         pricing,
-        &ProviderRegistry::production(&config.artifacts.limits()),
+        &if config.providers.mode == ProviderMode::Sandbox {
+            ProviderRegistry::sandbox()
+        } else {
+            ProviderRegistry::production(&config.artifacts.limits())
+        },
     )
     .map_err(|error| invalid(format!("provider catalog binding: {error}")))
 }
@@ -814,6 +853,25 @@ fn validate_provider_credential_separation(
     Ok(())
 }
 
+fn validate_sandbox_fixture_targets(targets: &ProviderTargetConfig) -> Result<(), ServerError> {
+    let revisions = targets.revisions().collect::<Vec<_>>();
+    if revisions.len() == 1
+        && revisions.iter().all(|target| {
+            target.provider == "sandbox"
+                && target.adapter == "fixture"
+                && target.model == "deterministic-image-v1"
+                && target.is_active()
+                && target.is_execution_enabled()
+        })
+    {
+        Ok(())
+    } else {
+        Err(invalid(
+            "sandbox provider mode accepts only the built-in deterministic fixture target",
+        ))
+    }
+}
+
 fn validate_managed_temporal_cli(config: &TemporalConfig) -> Result<(), ServerError> {
     let TemporalConfig::ManagedLocal {
         binary_path,
@@ -835,7 +893,12 @@ fn validate_managed_temporal_cli(config: &TemporalConfig) -> Result<(), ServerEr
         .unwrap_or_default()
         .split_whitespace();
     let reported_cli_version = match (fields.next(), fields.next(), fields.next()) {
-        (Some("temporal"), Some("version"), Some(value)) => value,
+        (Some(product), Some(label), Some(value))
+            if product.eq_ignore_ascii_case("temporal")
+                && label.eq_ignore_ascii_case("version") =>
+        {
+            value
+        }
         _ => {
             return Err(invalid(
                 "managed Temporal CLI version output has an unsupported format",
@@ -1044,7 +1107,7 @@ mod tests {
         fs::write(&prices, "{}").unwrap();
         fs::write(
             &binary,
-            "#!/bin/sh\necho 'temporal version 1.0.0 (Server 9.9.9, UI 8.8.8)'\n",
+            "#!/bin/sh\necho 'Temporal Version v1.0.0 (Server 9.9.9, UI 8.8.8)'\n",
         )
         .unwrap();
         #[cfg(unix)]
@@ -1182,6 +1245,64 @@ mod tests {
         assert!(!root.path().join("artifacts").exists());
 
         value.providers.maximum_spend_minor = Some(1);
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn sandbox_mode_accepts_only_the_builtin_fixture_without_live_acknowledgement() {
+        let root = tempdir().unwrap();
+        let targets = root.path().join("targets.json");
+        let prices = root.path().join("prices.json");
+        let mut value = config(root.path());
+        fs::write(
+            &targets,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "provider_configs": [{
+                    "provider_config_version": "hubu-sandbox-fixture-v1",
+                    "workload_type": "image_generation",
+                    "provider": "sandbox",
+                    "adapter": "fixture",
+                    "model": "deterministic-image-v1",
+                    "secret_service": "hubu.sandbox.fixture",
+                    "secret_account": "deterministic-provider",
+                    "active": true,
+                    "execution_enabled": true,
+                    "settings": {"type": "fixture"}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &prices,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "catalog_version": "hubu-sandbox-v1",
+                "rules": [{
+                    "rule_id": "sandbox-image-1k",
+                    "provider": "sandbox",
+                    "model": "deterministic-image-v1",
+                    "currency": "USD",
+                    "selector": {"image_size": "1k"},
+                    "components": [{"unit": "image", "rate_numerator_minor": 1, "rate_denominator": 1}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        value.providers = ProvidersConfig {
+            mode: ProviderMode::Sandbox,
+            target_catalog_path: Some(targets),
+            pricing_catalog_path: Some(prices),
+            maximum_spend_minor: Some(1_000_000),
+            live_spend_acknowledgement: None,
+        };
+        value.validate().unwrap();
+        validated_provider_catalog(&value).unwrap();
+
+        value.providers.live_spend_acknowledgement = Some(LIVE_SPEND_ACKNOWLEDGEMENT.into());
         assert!(value.validate().is_err());
     }
 

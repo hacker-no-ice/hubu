@@ -77,6 +77,22 @@ pub trait SecretProvider: Send + Sync {
     fn resolve(&self, reference: &SecretReference) -> Result<ProviderSecret>;
 }
 
+/// Credential-free provider boundary used only by the explicit server sandbox mode.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SandboxFixtureSecrets;
+
+impl SecretProvider for SandboxFixtureSecrets {
+    fn resolve(&self, reference: &SecretReference) -> Result<ProviderSecret> {
+        if reference.service() == "hubu.sandbox.fixture"
+            && reference.account() == "deterministic-provider"
+        {
+            ProviderSecret::new(b"sandbox-fixture".to_vec())
+        } else {
+            Err(SecretError::Unavailable)
+        }
+    }
+}
+
 /// Resolve exactly the reference attached to the already-selected operator target.
 pub fn resolve_selected(
     provider: &dyn SecretProvider,

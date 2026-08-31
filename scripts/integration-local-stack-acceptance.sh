@@ -95,7 +95,7 @@ exec $(quote "${real_hubu_server_bin}") "\$@"
 EOF
 chmod 700 "${hubu_server_bin}"
 
-init_output="$("${hubu_bin}" stack init --profile "${profile}")"
+init_output="$("${hubu_bin}" stack init --mode local-stack --profile "${profile}")"
 "${hubu_bin}" stack select --profile "${profile}" >/dev/null
 profile_canonical="$(cd "${profile}" && pwd -P)"
 managed_credential_root="${profile_canonical}/state/credentials"
@@ -111,11 +111,13 @@ fi
 [[ -z "$(find "${managed_credential_root}" -type f ! -name .gitignore -print -quit)" ]] || fail "init created credential material"
 
 doctor_output="$("${hubu_bin}" stack doctor --profile "${profile}" 2>&1 || true)"
-grep -F 'stack.toml:hubu.ownership' <<<"${doctor_output}" >/dev/null
+if grep -F 'stack.toml:hubu.ownership' <<<"${doctor_output}" >/dev/null; then
+  fail "outcome-oriented init left Hubu ownership unresolved"
+fi
 if grep -F 'credentials.toml:files.hubu_auth' <<<"${doctor_output}" >/dev/null; then
   fail "managed Hubu capability paths were presented as user input"
 fi
-grep -F 'providers.toml:mode' <<<"${doctor_output}" >/dev/null
+grep -F 'providers.toml:targets' <<<"${doctor_output}" >/dev/null
 
 cat >"${profile}/credentials.toml" <<EOF
 schema_version = 1
@@ -579,6 +581,7 @@ try:
     expected_tools = {
         "hubu_budget_history",
         "gongbu_get_provider_catalog",
+        "gongbu_list_execution_targets",
         "hubu_get_spend_approval",
         "hubu_resolve_spend_approval",
         "hubu_resume_operation",
@@ -587,7 +590,7 @@ try:
     tools = request("tools/list").get("tools", [])
     tool_names = {tool.get("name") for tool in tools}
     if (
-        len(tool_names) != 40
+        len(tool_names) != 41
         or not expected_tools.issubset(tool_names)
         or "hubu_replace_budget" in tool_names
     ):
@@ -825,7 +828,7 @@ budgets="$(curl --fail --silent \
   "${hubu_endpoint}/budgets")"
 jq -e --arg agent "${agent_a_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 1 and .frozen_amount_cents == 0 and .remaining_amount_cents == 99' <<<"${budgets}" >/dev/null || fail "Agent A budget did not settle independently"
 jq -e --arg agent "${agent_b_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 1 and .frozen_amount_cents == 0 and .remaining_amount_cents == 99' <<<"${budgets}" >/dev/null || fail "Agent B budget did not settle independently"
-jq -e --arg agent "${approval_agent_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 1 and .frozen_amount_cents == 0 and .remaining_amount_cents == 99' <<<"${budgets}" >/dev/null || fail "approval resume did not settle the fixture provider's exact one-cent vendor cost"
+jq -e --arg agent "${approval_agent_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 1 and .frozen_amount_cents == 0 and .remaining_amount_cents == 99' <<<"${budgets}" >/dev/null || fail "approval resume did not settle the fixture's authoritative one-cent provider cost"
 
 agent_a_artifact_record="$(retrieve_artifact "${agent_a_execution_id}" "${workspace}/agent-a.png")"
 agent_b_artifact_record="$(retrieve_artifact "${agent_b_execution_id}" "${workspace}/agent-b.png")"

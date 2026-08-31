@@ -10,6 +10,7 @@ use std::{
     net::SocketAddr,
     path::{Component, Path, PathBuf},
     process::Command,
+    str::FromStr,
 };
 use uuid::Uuid;
 
@@ -61,6 +62,8 @@ struct ProfileListEntry {
 struct StackSource {
     schema_version: u32,
     #[serde(default)]
+    mode: StackMode,
+    #[serde(default)]
     allow_development_builds: bool,
     binaries: Option<BinarySource>,
     // Accepted only for source schema v1 compatibility; remove when that
@@ -72,6 +75,44 @@ struct StackSource {
     temporal: Option<TemporalSource>,
     #[serde(default)]
     runtime: RuntimePolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum StackMode {
+    Sandbox,
+    #[default]
+    LocalStack,
+    HubuOnly,
+}
+
+impl StackMode {
+    fn includes_gongbu(self) -> bool {
+        !matches!(self, Self::HubuOnly)
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Sandbox => "sandbox",
+            Self::LocalStack => "local-stack",
+            Self::HubuOnly => "hubu-only",
+        }
+    }
+}
+
+impl FromStr for StackMode {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "sandbox" => Ok(Self::Sandbox),
+            "local-stack" => Ok(Self::LocalStack),
+            "hubu-only" => Ok(Self::HubuOnly),
+            _ => bail!(
+                "unsupported stack mode `{value}`; expected sandbox, local-stack, or hubu-only"
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -203,7 +244,7 @@ struct ResolvedCredentialPaths {
     hubu_auth: PathBuf,
     hubu_approval: PathBuf,
     hubu_reconciliation: PathBuf,
-    gongbu_caller: PathBuf,
+    gongbu_caller: Option<PathBuf>,
     gongbu_secret_dir: PathBuf,
     managed_gongbu_handoff: bool,
 }
@@ -300,24 +341,29 @@ fn resolve_credential_paths(
         &hubu_root.join("reconciliation"),
         "credentials.toml:files.hubu_reconciliation",
     )?;
-    let gongbu_caller = resolve_credential_path(
-        files.and_then(|value| value.gongbu_caller.as_deref()),
-        gongbu_handoff_managed,
-        &gongbu_root.join("caller"),
-        "credentials.toml:files.gongbu_caller",
-    )?;
+    let gongbu_caller = stack
+        .mode
+        .includes_gongbu()
+        .then(|| {
+            resolve_credential_path(
+                files.and_then(|value| value.gongbu_caller.as_deref()),
+                gongbu_handoff_managed,
+                &gongbu_root.join("caller"),
+                "credentials.toml:files.gongbu_caller",
+            )
+        })
+        .transpose()?;
     let gongbu_secret_dir = resolve_existing_prefix(&gongbu_root)?;
     let gongbu_hubu = resolve_existing_prefix(&gongbu_root.join("hubu-executor"))?;
-    if gongbu_handoff_managed && gongbu_caller != gongbu_secret_dir.join("caller") {
+    let managed_gongbu_caller = gongbu_secret_dir.join("caller");
+    if gongbu_handoff_managed && gongbu_caller.as_deref() != Some(managed_gongbu_caller.as_path()) {
         bail!("managed Gongbu caller file overrides require explicit opaque bootstrap references");
     }
-    let paths = [
-        &hubu_auth,
-        &hubu_approval,
-        &hubu_reconciliation,
-        &gongbu_caller,
-        &gongbu_hubu,
-    ];
+    let mut paths = vec![&hubu_auth, &hubu_approval, &hubu_reconciliation];
+    if let Some(path) = gongbu_caller.as_ref() {
+        paths.push(path);
+        paths.push(&gongbu_hubu);
+    }
     for (index, path) in paths.iter().enumerate() {
         for prior in &paths[..index] {
             if paths_resolve_to_same_resource(path, prior)? {
@@ -361,6 +407,7 @@ fn resolve_credential_path(
 #[serde(rename_all = "snake_case")]
 enum ProviderMode {
     Disabled,
+    Sandbox,
     Live,
 }
 
@@ -637,8 +684,10 @@ pub(crate) struct CodexHandoff {
     pub approval_token_file: PathBuf,
     pub reconciliation_token_file: PathBuf,
     pub operation_state_path: PathBuf,
-    pub gongbu_endpoint: String,
-    pub gongbu_token_file: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gongbu_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gongbu_token_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -800,18 +849,24 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         print_init_help();
         return Ok(());
     }
+    let install_temporal = take_flag(&mut args, "--install-temporal");
+    let mode = take_option_value(&mut args, "--mode")?
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(StackMode::Sandbox);
     let profile = take_profile(&mut args, hubu_home)?;
     ensure_no_args(args)?;
+    prepare_temporal_dependency(mode, install_temporal)?;
     let style = crate::terminal::stdout();
     create_secure_dir(&profile)?;
     create_secure_dir(&profile.join("generated"))?;
     let credential_ignore_created = ensure_managed_credential_ignore(&profile)?;
 
     let files = [
-        ("README.md", readme_template()),
-        ("stack.toml", stack_template(&profile)?),
+        ("README.md", readme_template(mode)),
+        ("stack.toml", stack_template(&profile, mode)?),
         ("credentials.toml", credentials_template()),
-        ("providers.toml", providers_template()),
+        ("providers.toml", providers_template(mode)),
     ];
     for (name, contents) in files {
         let path = profile.join(name);
@@ -849,6 +904,7 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         style.label("profile"),
         style.accent(profile.display())
     );
+    println!("{}: {}", style.label("mode"), style.accent(mode.id()));
     let input_files = files_needing_input(&profile);
     if input_files.is_empty() {
         println!("{}: {}", style.label("input needed"), style.success("none"));
@@ -859,14 +915,48 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         }
     }
     println!(
-        "{}: edit the annotated files, then run {}",
+        "{}: {}",
         style.label("next"),
-        style.command(format!(
-            "`hubu stack doctor --profile {}`",
-            profile.display()
-        ))
+        style.command(format!("hubu stack doctor --profile {}", profile.display()))
     );
     Ok(())
+}
+
+fn prepare_temporal_dependency(mode: StackMode, install: bool) -> Result<()> {
+    if !install {
+        return Ok(());
+    }
+    if !mode.includes_gongbu() {
+        bail!("--install-temporal does not apply to hubu-only mode");
+    }
+    if discover_binary("temporal").is_some() {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let brew = discover_binary("brew").ok_or_else(|| {
+            anyhow!(
+                "--install-temporal requires Homebrew on macOS; install Temporal CLI from https://docs.temporal.io/cli/setup-cli"
+            )
+        })?;
+        let status = Command::new(brew)
+            .args(["install", "temporal"])
+            .status()
+            .context("run the official Temporal Homebrew installation")?;
+        if !status.success() {
+            bail!("Homebrew failed to install the Temporal CLI");
+        }
+        if discover_binary("temporal").is_none() {
+            bail!("Temporal CLI was installed but is not discoverable on PATH");
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        bail!(
+            "--install-temporal is currently supported only on macOS; install Temporal CLI from https://docs.temporal.io/cli/setup-cli"
+        )
+    }
 }
 
 fn select_profile(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
@@ -1312,6 +1402,7 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
     }
     validate_provider_source(&providers)?;
     validate_provider_credential_isolation(&providers, &credentials)?;
+    validate_stack_mode(&stack, &providers)?;
     validate_topology(&stack)?;
     let credential_paths = resolve_credential_paths(profile, &stack, &credentials)?;
     validate_credential_resource_separation(profile, &stack, &credential_paths)?;
@@ -1397,7 +1488,7 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
                 &credential_paths.hubu_auth,
                 &credential_paths.hubu_approval,
                 &credential_paths.hubu_reconciliation,
-                &credential_paths.gongbu_caller,
+                credential_paths.gongbu_caller.as_deref(),
                 &source_digests,
                 &generation_id,
                 &relative_generation,
@@ -1472,7 +1563,7 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
                 &credential_paths.hubu_auth,
                 &credential_paths.hubu_approval,
                 &credential_paths.hubu_reconciliation,
-                &credential_paths.gongbu_caller,
+                credential_paths.gongbu_caller.as_deref(),
                 &source_digests,
                 &generation_id,
                 &relative_generation,
@@ -1516,7 +1607,7 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
         &credential_paths.hubu_auth,
         &credential_paths.hubu_approval,
         &credential_paths.hubu_reconciliation,
-        &credential_paths.gongbu_caller,
+        credential_paths.gongbu_caller.as_deref(),
         &source_digests,
         &generation_id,
         &relative_generation,
@@ -1578,16 +1669,15 @@ fn render_generation(
     hubu_auth: &Path,
     hubu_approval: &Path,
     hubu_reconciliation: &Path,
-    gongbu_caller_file: &Path,
+    gongbu_caller_file: Option<&Path>,
     source_digests: &BTreeMap<String, String>,
     generation_id: &str,
     relative_generation: &Path,
     previous_active: Option<&ActiveManifest>,
 ) -> Result<ActiveManifest> {
     let hubu = stack.hubu.as_ref().expect("checked");
-    let gongbu = stack.gongbu.as_ref().expect("checked");
     let hubu_endpoint = hubu.endpoint.as_ref().expect("checked");
-    let gongbu_endpoint = gongbu.endpoint.as_ref().expect("checked");
+    let gongbu = stack.gongbu.as_ref();
     let mut generated_files = BTreeMap::<String, String>::new();
 
     if hubu.ownership == Some(Ownership::Managed) {
@@ -1615,7 +1705,7 @@ fn render_generation(
     }
 
     let provider_mode = providers.mode.expect("checked");
-    if provider_mode == ProviderMode::Live {
+    if matches!(provider_mode, ProviderMode::Sandbox | ProviderMode::Live) {
         let targets = render_targets(providers, credentials)?;
         let pricing = render_pricing_catalog(providers)?;
         write_generated_json(
@@ -1632,7 +1722,8 @@ fn render_generation(
         )?;
     }
 
-    if gongbu.ownership == Some(Ownership::Managed) {
+    if gongbu.and_then(|value| value.ownership) == Some(Ownership::Managed) {
+        let gongbu = gongbu.expect("checked");
         let gongbu_server = gongbu_server.expect("selected managed binary");
         let (gongbu_hubu, gongbu_caller) = gongbu_bootstrap_references(stack, credentials)?;
         let temporal = render_temporal(stack.temporal.as_ref().expect("checked"))?;
@@ -1702,8 +1793,8 @@ fn render_generation(
         approval_token_file: hubu_approval.to_path_buf(),
         reconciliation_token_file: hubu_reconciliation.to_path_buf(),
         operation_state_path,
-        gongbu_endpoint: gongbu_endpoint.clone(),
-        gongbu_token_file: gongbu_caller_file.to_path_buf(),
+        gongbu_endpoint: gongbu.and_then(|value| value.endpoint.clone()),
+        gongbu_token_file: gongbu_caller_file.map(Path::to_path_buf),
     };
     write_generated_json(
         generation,
@@ -1719,7 +1810,8 @@ fn render_generation(
                 .generated_file_digests
                 .contains_key("hubu-launch.json")
         });
-    let gongbu_lifecycle_relevant = gongbu.ownership == Some(Ownership::Managed)
+    let gongbu_lifecycle_relevant = gongbu.and_then(|value| value.ownership)
+        == Some(Ownership::Managed)
         || previous_active.is_some_and(|manifest| {
             manifest
                 .generated_file_digests
@@ -1783,7 +1875,7 @@ fn rederive_generation(
     hubu_auth: &Path,
     hubu_approval: &Path,
     hubu_reconciliation: &Path,
-    gongbu_caller_file: &Path,
+    gongbu_caller_file: Option<&Path>,
     source_digests: &BTreeMap<String, String>,
     generation_id: &str,
     relative_generation: &Path,
@@ -2071,18 +2163,24 @@ fn render_provider_config(
             bail!("disabled provider mode requires a Gongbu binary with server config schema version 2")
         }
         (ProviderMode::Disabled, _) => Ok(json!({"mode": "disabled"})),
-        (ProviderMode::Live, 1) => Ok(json!({
+        (ProviderMode::Sandbox, 1) | (ProviderMode::Live, 1) => Ok(json!({
             "target_catalog_path": generation.join("provider-targets.json"),
             "pricing_catalog_path": generation.join("pricing-catalog.json"),
-            "maximum_spend_minor": providers.maximum_spend_minor.expect("checked"),
-            "live_spend_acknowledgement": providers.live_spend_acknowledgement.as_ref().expect("checked"),
+            "maximum_spend_minor": providers.maximum_spend_minor.unwrap_or(1_000_000),
+            "live_spend_acknowledgement": providers.live_spend_acknowledgement.as_deref().unwrap_or(LIVE_SPEND_ACKNOWLEDGEMENT),
+        })),
+        (ProviderMode::Sandbox, _) => Ok(json!({
+            "mode": "sandbox",
+            "target_catalog_path": generation.join("provider-targets.json"),
+            "pricing_catalog_path": generation.join("pricing-catalog.json"),
+            "maximum_spend_minor": 1_000_000,
         })),
         (ProviderMode::Live, _) => Ok(json!({
             "mode": "live",
             "target_catalog_path": generation.join("provider-targets.json"),
             "pricing_catalog_path": generation.join("pricing-catalog.json"),
-            "maximum_spend_minor": providers.maximum_spend_minor.expect("checked"),
-            "live_spend_acknowledgement": providers.live_spend_acknowledgement.as_ref().expect("checked"),
+            "maximum_spend_minor": providers.maximum_spend_minor.unwrap_or(1_000_000),
+            "live_spend_acknowledgement": providers.live_spend_acknowledgement.as_deref().unwrap_or(LIVE_SPEND_ACKNOWLEDGEMENT),
         })),
     }
 }
@@ -2158,7 +2256,10 @@ fn expected_generated_files(stack: &StackSource, providers: &ProvidersSource) ->
     if stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
         files.push("hubu-launch.json");
     }
-    if providers.mode == Some(ProviderMode::Live) {
+    if matches!(
+        providers.mode,
+        Some(ProviderMode::Sandbox | ProviderMode::Live)
+    ) {
         files.extend(["provider-targets.json", "pricing-catalog.json"]);
     }
     if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
@@ -2173,12 +2274,21 @@ fn render_targets(providers: &ProvidersSource, credentials: &CredentialsSource) 
         .targets
         .iter()
         .map(|target| {
-            let credential = target.credential.as_ref().expect("checked");
-            let secret = credentials.opaque.get(credential).ok_or_else(|| {
-                anyhow!(
-                    "providers.toml target references unknown credentials.toml opaque key `{credential}`"
-                )
-            })?;
+            let fixture = target.adapter.as_deref() == Some("fixture");
+            let secret = if fixture && target.credential.is_none() {
+                OpaqueReference {
+                    service: Some("hubu.sandbox.fixture".into()),
+                    account: Some("deterministic-provider".into()),
+                }
+            } else {
+                let credential = target.credential.as_ref().expect("checked");
+                credentials.opaque.get(credential).cloned().ok_or_else(|| {
+                    anyhow!(
+                        "providers.toml target references unknown credentials.toml opaque key `{}`",
+                        credential
+                    )
+                })?
+            };
             Ok(json!({
                 "provider_config_version": target.provider_config_version.as_ref().expect("checked"),
                 "workload_type": target.workload_type.as_ref().expect("checked"),
@@ -2270,6 +2380,17 @@ fn validate_provider_source(source: &ProvidersSource) -> Result<()> {
                 || !source.pricing_rules.is_empty()
             {
                 bail!("providers.toml disabled mode must omit catalogs, targets, prices, and live-spend fields");
+            }
+        }
+        ProviderMode::Sandbox => {
+            if source.maximum_spend_minor.is_some()
+                || source.live_spend_acknowledgement.is_some()
+                || source.targets.is_empty()
+                || source.targets.iter().any(|target| {
+                    target.adapter.as_deref() != Some("fixture") || target.credential.is_some()
+                })
+            {
+                bail!("providers.toml sandbox mode requires credential-free fixture targets and forbids live-spend fields");
             }
         }
         ProviderMode::Live => {
@@ -2408,14 +2529,33 @@ fn validate_provider_credential_isolation(
     Ok(())
 }
 
+fn validate_stack_mode(stack: &StackSource, providers: &ProvidersSource) -> Result<()> {
+    match stack.mode {
+        StackMode::Sandbox
+            if stack.gongbu.as_ref().and_then(|value| value.ownership)
+                != Some(Ownership::Managed) =>
+        {
+            bail!("sandbox stack mode requires managed Gongbu ownership")
+        }
+        StackMode::Sandbox if providers.mode != Some(ProviderMode::Sandbox) => {
+            bail!("sandbox stack mode requires providers.toml sandbox mode")
+        }
+        StackMode::HubuOnly if providers.mode != Some(ProviderMode::Disabled) => {
+            bail!("hubu-only stack mode requires providers.toml disabled mode")
+        }
+        StackMode::LocalStack if providers.mode == Some(ProviderMode::Sandbox) => {
+            bail!("local-stack mode cannot use sandbox provider mode")
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_topology(stack: &StackSource) -> Result<()> {
     let hubu = stack.hubu.as_ref().expect("checked");
-    let gongbu = stack.gongbu.as_ref().expect("checked");
     validate_loopback_endpoint(hubu.endpoint.as_deref().expect("checked"), "hubu.endpoint")?;
-    validate_loopback_endpoint(
-        gongbu.endpoint.as_deref().expect("checked"),
-        "gongbu.endpoint",
-    )?;
+    if stack.mode == StackMode::HubuOnly && (stack.gongbu.is_some() || stack.temporal.is_some()) {
+        bail!("hubu-only mode must omit Gongbu and Temporal configuration");
+    }
     if hubu.ownership == Some(Ownership::Managed) {
         validate_endpoint_matches_listen(
             hubu.endpoint.as_deref().expect("checked"),
@@ -2423,7 +2563,14 @@ fn validate_topology(stack: &StackSource) -> Result<()> {
             "hubu",
         )?;
     }
-    if gongbu.ownership == Some(Ownership::Managed) {
+    if let Some(gongbu) = stack.gongbu.as_ref() {
+        validate_loopback_endpoint(
+            gongbu.endpoint.as_deref().expect("checked"),
+            "gongbu.endpoint",
+        )?;
+    }
+    if stack.gongbu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed) {
+        let gongbu = stack.gongbu.as_ref().expect("checked");
         validate_endpoint_matches_listen(
             gongbu.endpoint.as_deref().expect("checked"),
             gongbu.listen.expect("checked"),
@@ -2649,12 +2796,14 @@ fn validate_credential_resource_separation(
             paths.hubu_reconciliation.as_path(),
             ManagedResourceKind::File,
         ),
-        (
-            "Gongbu caller credential",
-            paths.gongbu_caller.as_path(),
-            ManagedResourceKind::File,
-        ),
     ];
+    if let Some(gongbu_caller) = paths.gongbu_caller.as_deref() {
+        credential_resources.push((
+            "Gongbu caller credential",
+            gongbu_caller,
+            ManagedResourceKind::File,
+        ));
+    }
     let has_managed_credentials = stack.hubu.as_ref().and_then(|value| value.ownership)
         == Some(Ownership::Managed)
         || paths.managed_gongbu_handoff;
@@ -2911,7 +3060,9 @@ fn missing_fields(
         missing.push("stack.toml:binaries".into());
     }
     check_service_missing(stack.hubu.as_ref(), "hubu", &mut missing);
-    check_gongbu_missing(stack.gongbu.as_ref(), &mut missing);
+    if stack.mode.includes_gongbu() {
+        check_gongbu_missing(stack.gongbu.as_ref(), &mut missing);
+    }
     if stack.gongbu.as_ref().and_then(|v| v.ownership) == Some(Ownership::Managed) {
         check_temporal_missing(stack.temporal.as_ref(), &mut missing);
     }
@@ -2969,7 +3120,7 @@ fn missing_fields(
     match providers.mode {
         None => missing.push("providers.toml:mode".into()),
         Some(ProviderMode::Disabled) => {}
-        Some(ProviderMode::Live) => {
+        Some(mode @ (ProviderMode::Sandbox | ProviderMode::Live)) => {
             if providers
                 .catalog_version
                 .as_deref()
@@ -2980,10 +3131,10 @@ fn missing_fields(
             {
                 missing.push("providers.toml:catalog_version".into());
             }
-            if providers.maximum_spend_minor.is_none() {
+            if mode == ProviderMode::Live && providers.maximum_spend_minor.is_none() {
                 missing.push("providers.toml:maximum_spend_minor".into());
             }
-            if providers.live_spend_acknowledgement.is_none() {
+            if mode == ProviderMode::Live && providers.live_spend_acknowledgement.is_none() {
                 missing.push("providers.toml:live_spend_acknowledgement".into());
             }
             if providers.targets.is_empty() && providers.supported_profiles.is_empty() {
@@ -3017,11 +3168,15 @@ fn missing_fields(
                     (target.provider.as_ref(), "provider"),
                     (target.adapter.as_ref(), "adapter"),
                     (target.model.as_ref(), "model"),
-                    (target.credential.as_ref(), "credential"),
                 ] {
                     if value.is_none_or(|value| value.is_empty()) {
                         missing.push(format!("providers.toml:targets[{index}].{field}"));
                     }
+                }
+                if mode == ProviderMode::Live
+                    && target.credential.as_deref().is_none_or(str::is_empty)
+                {
+                    missing.push(format!("providers.toml:targets[{index}].credential"));
                 }
                 if target.active.is_none() {
                     missing.push(format!("providers.toml:targets[{index}].active"));
@@ -3590,6 +3745,13 @@ fn take_option_value(args: &mut Vec<String>, name: &str) -> Result<Option<String
     Ok(Some(args.remove(index)))
 }
 
+fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
+    args.iter()
+        .position(|argument| argument == name)
+        .map(|index| args.remove(index))
+        .is_some()
+}
+
 fn default_stack_home(hubu_home: &Path) -> PathBuf {
     let implicit_hubu_home = env::var_os("HOME")
         .map(PathBuf::from)
@@ -3651,12 +3813,80 @@ fn discover_binary(name: &str) -> Option<PathBuf> {
         .and_then(|path| fs::canonicalize(path).ok())
 }
 
-fn stack_template(profile: &Path) -> Result<String> {
+fn temporal_lines() -> String {
+    let Some(path) = discover_binary("temporal") else {
+        return "# binary_path = \"/absolute/path/to/temporal\"\n# expected_cli_version = \"<exact installed version>\"".into();
+    };
+    let version = Command::new(&path)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|output| parse_temporal_cli_version(&output));
+    match version {
+        Some(version) => format!(
+            "binary_path = {}\nexpected_cli_version = {}",
+            quote(path.display().to_string()),
+            quote(version)
+        ),
+        None => format!(
+            "binary_path = {}\n# expected_cli_version = \"<exact installed version>\"",
+            quote(path.display().to_string())
+        ),
+    }
+}
+
+fn parse_temporal_cli_version(output: &str) -> Option<String> {
+    let mut fields = output.lines().next()?.split_whitespace();
+    match (fields.next(), fields.next(), fields.next()) {
+        (Some(product), Some(label), Some(version))
+            if product.eq_ignore_ascii_case("temporal")
+                && label.eq_ignore_ascii_case("version") =>
+        {
+            Some(version.trim_start_matches('v').to_owned())
+        }
+        _ => None,
+    }
+}
+
+fn stack_template(profile: &Path, mode: StackMode) -> Result<String> {
     let state = profile.join("state");
+    let gongbu = if mode.includes_gongbu() {
+        format!(
+            r#"
+[gongbu]
+ownership = "managed"
+endpoint = "http://127.0.0.1:8788"
+listen = "127.0.0.1:8788"
+database_path = {}
+artifact_root = {}
+log_file = {}
+
+[temporal]
+mode = "managed_local"
+{}
+data_path = {}
+rpc_port = 7233
+ui_port = 8233
+namespace = "default"
+task_queue = "gongbu-local-executions"
+ui_url = "http://127.0.0.1:8233"
+"#,
+            quote(state.join("gongbu/gongbu.sqlite3").display().to_string()),
+            quote(state.join("gongbu/artifacts").display().to_string()),
+            quote(state.join("gongbu/gongbu.jsonl").display().to_string()),
+            temporal_lines(),
+            quote(state.join("temporal").display().to_string()),
+        )
+    } else {
+        String::new()
+    };
     Ok(format!(
-        r#"# Hubu local stack source. Comments identify choices that still need input.
+        r#"# Hubu outcome-oriented stack source.
 # Reference: https://hubustack.dev/configuration/local-stack/v1/stack-toml
 schema_version = 1
+mode = "{}"
 # Set true only when every selected binary is an unstamped local development build.
 allow_development_builds = false
 
@@ -3667,33 +3897,12 @@ allow_development_builds = false
 {}
 
 [hubu]
-# ownership = "managed" # or "external"
+ownership = "managed"
 endpoint = "http://127.0.0.1:8787"
 listen = "127.0.0.1:8787"
 database_path = {}
 log_file = {}
-
-[gongbu]
-# ownership = "managed" # or "external"
-endpoint = "http://127.0.0.1:8788"
-listen = "127.0.0.1:8788"
-database_path = {}
-artifact_root = {}
-log_file = {}
-
-[temporal]
-# mode = "managed_local" # or "external"
-# For managed_local, fill binary_path and expected_cli_version.
-# binary_path = "/absolute/path/to/temporal"
-# expected_cli_version = "<exact installed version>"
-data_path = {}
-rpc_port = 7233
-ui_port = 8233
-# For external mode, fill address instead of the managed-local fields.
-# address = "http://127.0.0.1:7233"
-namespace = "default"
-task_queue = "gongbu-local-executions"
-ui_url = "http://127.0.0.1:8233"
+{}
 
 [runtime]
 hubu_startup_policy = "wait"
@@ -3710,16 +3919,18 @@ max_height = 16384
 log_level = "info"
 log_format = "text"
 "#,
+        mode.id(),
         binary_line("hubu", "hubu"),
         binary_line("hubu_server", "hubu-server"),
-        binary_line("gongbu_server", "gongbu-server"),
+        if mode.includes_gongbu() {
+            binary_line("gongbu_server", "gongbu-server")
+        } else {
+            "# gongbu_server is intentionally omitted in hubu-only mode".into()
+        },
         binary_line("hubu_unified_mcp", "hubu-unified-mcp"),
         quote(state.join("hubu/hubu.sqlite3").display().to_string()),
         quote(state.join("hubu/hubu.jsonl").display().to_string()),
-        quote(state.join("gongbu/gongbu.sqlite3").display().to_string()),
-        quote(state.join("gongbu/artifacts").display().to_string()),
-        quote(state.join("gongbu/gongbu.jsonl").display().to_string()),
-        quote(state.join("temporal").display().to_string()),
+        gongbu,
     ))
 }
 
@@ -3761,16 +3972,53 @@ schema_version = 1
     .into()
 }
 
-fn providers_template() -> String {
-    r#"# Provider and pricing choices are intentionally omitted by initialization.
+fn providers_template(mode: StackMode) -> String {
+    if mode == StackMode::Sandbox {
+        return r#"# Sandbox uses synthetic prices and a deterministic fixture provider.
+# No external provider request or real charge can occur.
+# Reference: https://hubustack.dev/configuration/local-stack/v1/providers-toml
+schema_version = 1
+mode = "sandbox"
+catalog_version = "hubu-sandbox-v1"
+
+[[targets]]
+provider_config_version = "hubu-sandbox-fixture-v1"
+workload_type = "image_generation"
+provider = "sandbox"
+adapter = "fixture"
+model = "deterministic-image-v1"
+active = true
+execution_enabled = true
+settings = { type = "fixture" }
+
+[[pricing_rules]]
+rule_id = "sandbox-image-1k"
+provider = "sandbox"
+model = "deterministic-image-v1"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 1, rate_denominator = 1 }]
+"#
+        .into();
+    }
+    if mode == StackMode::HubuOnly {
+        return r#"# Hubu-only mode has no Gongbu provider execution plane.
+schema_version = 1
+mode = "disabled"
+"#
+        .into();
+    }
+    r#"# Approve at least one real provider target for local-stack mode.
 # Reference: https://hubustack.dev/configuration/local-stack/v1/providers-toml
 schema_version = 1
 
-# Choose exactly one mode. Disabled is the no-spend local dependency profile.
-# mode = "disabled"
-# mode = "live"
+mode = "live"
 
+# Local-stack mode accepts one or more approved real provider targets. Repeat
+# target and pricing blocks for every approved provider/model combination;
+# agents discover and select among them at runtime.
 # Live mode additionally requires an explicit spend ceiling and acknowledgement.
+# catalog_version = "<operator-owned immutable catalog version>"
 # Set maximum_spend_minor to a positive operator-approved minor-unit ceiling.
 # live_spend_acknowledgement = "<exact acknowledgement required by Gongbu>"
 
@@ -3817,8 +4065,16 @@ schema_version = 1
     .into()
 }
 
-fn readme_template() -> String {
-    r#"# Hubu local stack profile
+fn readme_template(mode: StackMode) -> String {
+    let outcome = match mode {
+        StackMode::Sandbox => "The sandbox runs the complete local ecosystem while replacing only the external provider edge with a deterministic, non-billable fixture.",
+        StackMode::LocalStack => "The local stack runs the complete ecosystem with one or more operator-approved real provider targets.",
+        StackMode::HubuOnly => "The Hubu-only stack runs registration, policy, authorization, and budget governance without Gongbu, Temporal, or provider execution.",
+    };
+    format!(
+        r#"# Hubu {} profile
+
+{}
 
 This directory is operator-owned. `hubu stack init` never overwrites these
 files and never starts a service.
@@ -3831,13 +4087,13 @@ files and never starts a service.
   spend ceiling, and the explicit live-spend gate.
 - `generated/`: validated implementation output; do not edit it.
 
-Start with every uncommented example that matches your topology, fill the
-commented fields you choose, and leave unrelated examples commented. Then run
+Review any fields marked as needing input. Then run
 `hubu stack select --profile /absolute/path/to/this/profile`, followed by
 `hubu stack doctor`. When the profile is `ready_to_render`, run
 `hubu stack start`. Start runs doctor and render as needed, starts the final
 managed Hubu so it can create its private
-capabilities, completes Gongbu's internal handoff, and then starts Gongbu. It
+capabilities and, when this mode includes Gongbu, completes Gongbu's internal
+handoff before starting Gongbu. It
 leaves external services and the client-owned unified MCP process untouched.
 Use `hubu stack status` and `hubu stack logs` for the combined operator view.
 An explicit `--profile` temporarily overrides the selection without changing
@@ -3862,19 +4118,21 @@ Quick start:
 https://hubustack.dev/docs/local-stack
 Public configuration reference:
 https://hubustack.dev/configuration/local-stack/v1/
-"#
-    .into()
+"#,
+        mode.id(),
+        outcome
+    )
 }
 
 fn print_help() {
     println!(
-        "Manage local Hubu stack profiles\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack select --profile ABSOLUTE_DIR\n  hubu stack profiles [--json]\n  hubu stack catalog [--profile ABSOLUTE_DIR] [--json]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack activate --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack rollback --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack generations [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]\n\nProfile precedence:\n  explicit --profile, selected profile, platform default"
+        "Manage local Hubu stack profiles\n\nUsage:\n  hubu stack init [--mode sandbox|local-stack|hubu-only] [--install-temporal] [--profile ABSOLUTE_DIR]\n  hubu stack select --profile ABSOLUTE_DIR\n  hubu stack profiles [--json]\n  hubu stack catalog [--profile ABSOLUTE_DIR] [--json]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack activate --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack rollback --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack generations [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]\n\nProfile precedence:\n  explicit --profile, selected profile, platform default"
     );
 }
 
 fn print_init_help() {
     println!(
-        "Create annotated local stack starter files without overwriting input or starting services\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]"
+        "Create an outcome-oriented stack profile without overwriting input or starting services\n\nUsage:\n  hubu stack init [--mode sandbox|local-stack|hubu-only] [--install-temporal] [--profile ABSOLUTE_DIR]\n\nModes:\n  sandbox     Complete ecosystem with a deterministic, non-billable provider fixture (default)\n  local-stack Complete ecosystem with one or more operator-approved real provider targets\n  hubu-only   Hubu governance without Gongbu, Temporal, or provider execution\n\nDependency assistance:\n  --install-temporal  On macOS, use Homebrew's official Temporal package when the CLI is missing, then discover and pin its path and exact version"
     );
 }
 
@@ -3964,18 +4222,28 @@ mod tests {
     }
 
     #[test]
-    fn init_is_annotated_incomplete_and_byte_preserving() {
+    fn local_stack_init_is_reviewable_and_byte_preserving() {
         let root = tempdir().unwrap();
         let profile = root.path().join("profile");
         init(
-            vec!["--profile".into(), profile.display().to_string()],
+            vec![
+                "--mode".into(),
+                "local-stack".into(),
+                "--profile".into(),
+                profile.display().to_string(),
+            ],
             root.path(),
         )
         .unwrap();
         let stack_before = fs::read(profile.join("stack.toml")).unwrap();
         fs::write(profile.join("stack.toml"), b"operator-owned\n").unwrap();
         init(
-            vec!["--profile".into(), profile.display().to_string()],
+            vec![
+                "--mode".into(),
+                "local-stack".into(),
+                "--profile".into(),
+                profile.display().to_string(),
+            ],
             root.path(),
         )
         .unwrap();
@@ -4026,6 +4294,80 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn outcome_modes_generate_only_their_required_topology() {
+        let root = tempdir().unwrap();
+        for (mode, has_gongbu, provider_mode) in [
+            ("sandbox", true, "sandbox"),
+            ("local-stack", true, "live"),
+            ("hubu-only", false, "disabled"),
+        ] {
+            let profile = root.path().join(mode);
+            init(
+                vec![
+                    "--mode".into(),
+                    mode.into(),
+                    "--profile".into(),
+                    profile.display().to_string(),
+                ],
+                root.path(),
+            )
+            .unwrap();
+            let stack = fs::read_to_string(profile.join("stack.toml")).unwrap();
+            let providers = fs::read_to_string(profile.join("providers.toml")).unwrap();
+            assert!(stack.contains(&format!("mode = \"{mode}\"")));
+            assert_eq!(stack.contains("[gongbu]"), has_gongbu);
+            assert_eq!(stack.contains("[temporal]"), has_gongbu);
+            assert!(providers.contains(&format!("mode = \"{provider_mode}\"")));
+            if mode == "sandbox" {
+                let mut stack_source: StackSource = toml::from_str(&stack).unwrap();
+                stack_source.gongbu.as_mut().unwrap().ownership = Some(Ownership::External);
+                let mut providers_source: ProvidersSource = toml::from_str(&providers).unwrap();
+                assert!(validate_stack_mode(&stack_source, &providers_source).is_err());
+                providers_source.targets[0].credential = Some("custom-reference".into());
+                assert!(validate_provider_source(&providers_source).is_err());
+            }
+        }
+        let invalid = root.path().join("invalid");
+        assert!(init(
+            vec![
+                "--mode".into(),
+                "unknown".into(),
+                "--profile".into(),
+                invalid.display().to_string(),
+            ],
+            root.path(),
+        )
+        .is_err());
+        assert!(!invalid.exists());
+        let incompatible = root.path().join("incompatible");
+        assert!(init(
+            vec![
+                "--mode".into(),
+                "hubu-only".into(),
+                "--install-temporal".into(),
+                "--profile".into(),
+                incompatible.display().to_string(),
+            ],
+            root.path(),
+        )
+        .is_err());
+        assert!(!incompatible.exists());
+    }
+
+    #[test]
+    fn temporal_discovery_extracts_the_exact_cli_version() {
+        assert_eq!(
+            parse_temporal_cli_version("temporal version 1.4.1 (Server 1.28.1, UI 2.40.1)\n"),
+            Some("1.4.1".into())
+        );
+        assert_eq!(
+            parse_temporal_cli_version("Temporal Version v1.5.0\n"),
+            Some("1.5.0".into())
+        );
+        assert_eq!(parse_temporal_cli_version("1.4.1\n"), None);
     }
 
     #[test]
@@ -4242,15 +4584,20 @@ mod tests {
         let root = tempdir().unwrap();
         let profile = root.path().join("profile");
         init(
-            vec!["--profile".into(), profile.display().to_string()],
+            vec![
+                "--mode".into(),
+                "local-stack".into(),
+                "--profile".into(),
+                profile.display().to_string(),
+            ],
             root.path(),
         )
         .unwrap();
         let error = render_profile(&profile).unwrap_err().to_string();
-        assert!(error.contains("stack.toml:hubu.ownership"));
-        assert!(error.contains("stack.toml:gongbu.ownership"));
+        assert!(!error.contains("stack.toml:hubu.ownership"));
+        assert!(!error.contains("stack.toml:gongbu.ownership"));
         assert!(!error.contains("credentials.toml:files.hubu_auth"));
-        assert!(error.contains("providers.toml:mode"));
+        assert!(error.contains("providers.toml:targets"));
         assert!(!error.contains("identity"));
         assert!(!profile.join("generated/active-manifest.json").exists());
     }
@@ -4309,11 +4656,11 @@ ownership = "external"
         );
         assert_eq!(
             paths.gongbu_caller,
-            canonical_profile.join("state/credentials/gongbu/caller")
+            Some(canonical_profile.join("state/credentials/gongbu/caller"))
         );
         assert!(paths.managed_gongbu_handoff);
         assert!(!paths.hubu_auth.exists());
-        assert!(!paths.gongbu_caller.exists());
+        assert!(!paths.gongbu_caller.as_ref().unwrap().exists());
 
         let missing_override = profile.join("operator-auth");
         let credentials_with_missing_override: CredentialsSource = toml::from_str(&format!(
@@ -4934,6 +5281,149 @@ gongbu_caller = {}
                 .collect::<Vec<_>>(),
             ["client-handoff.json"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hubu_only_renders_a_first_class_handoff_without_gongbu_or_temporal() {
+        let root = tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let binaries = root.path().join("bin");
+        fs::create_dir(&profile).unwrap();
+        fs::create_dir(&binaries).unwrap();
+        for name in ["hubu", "hubu-server", "hubu-unified-mcp"] {
+            write_fake_binary(&binaries.join(name), false);
+        }
+        fs::write(
+            profile.join("stack.toml"),
+            format!(
+                r#"schema_version = 1
+mode = "hubu-only"
+allow_development_builds = true
+[binaries]
+hubu = {}
+hubu_server = {}
+hubu_unified_mcp = {}
+[hubu]
+ownership = "managed"
+endpoint = "http://127.0.0.1:42001"
+listen = "127.0.0.1:42001"
+database_path = {}
+"#,
+                quote(binaries.join("hubu").display().to_string()),
+                quote(binaries.join("hubu-server").display().to_string()),
+                quote(binaries.join("hubu-unified-mcp").display().to_string()),
+                quote(profile.join("state/hubu.sqlite3").display().to_string()),
+            ),
+        )
+        .unwrap();
+        fs::write(profile.join("credentials.toml"), "schema_version = 1\n").unwrap();
+        fs::write(
+            profile.join("providers.toml"),
+            "schema_version = 1\nmode = \"disabled\"\n",
+        )
+        .unwrap();
+
+        render_profile_with_renderer(&profile, &binaries.join("hubu")).unwrap();
+        let manifest: ActiveManifest =
+            read_json(&profile.join("generated/active-manifest.json")).unwrap();
+        assert_eq!(
+            manifest
+                .generated_file_digests
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["client-handoff.json", "hubu-launch.json"]
+        );
+        let generation = active_generation_path(&profile.join("generated"), &manifest).unwrap();
+        let handoff: CodexHandoff = read_json(&generation.join("client-handoff.json")).unwrap();
+        assert!(handoff.gongbu_endpoint.is_none());
+        assert!(handoff.gongbu_token_file.is_none());
+        assert!(!generation.join("gongbu-server.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_renders_fixture_execution_without_live_credentials_or_spend_input() {
+        let root = tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let binaries = root.path().join("bin");
+        fs::create_dir(&profile).unwrap();
+        fs::create_dir(&binaries).unwrap();
+        for name in ["hubu", "hubu-server", "hubu-unified-mcp", "temporal"] {
+            write_fake_binary(&binaries.join(name), false);
+        }
+        write_fake_gongbu_v3_binary(&binaries.join("gongbu-server"), false);
+        fs::write(
+            profile.join("stack.toml"),
+            format!(
+                r#"schema_version = 1
+mode = "sandbox"
+allow_development_builds = true
+[binaries]
+hubu = {}
+hubu_server = {}
+gongbu_server = {}
+hubu_unified_mcp = {}
+[hubu]
+ownership = "managed"
+endpoint = "http://127.0.0.1:42001"
+listen = "127.0.0.1:42001"
+database_path = {}
+[gongbu]
+ownership = "managed"
+endpoint = "http://127.0.0.1:42002"
+listen = "127.0.0.1:42002"
+database_path = {}
+artifact_root = {}
+[temporal]
+mode = "managed_local"
+binary_path = {}
+expected_cli_version = "1.0.0"
+data_path = {}
+rpc_port = 42003
+ui_port = 42004
+namespace = "default"
+task_queue = "gongbu-local-executions"
+"#,
+                quote(binaries.join("hubu").display().to_string()),
+                quote(binaries.join("hubu-server").display().to_string()),
+                quote(binaries.join("gongbu-server").display().to_string()),
+                quote(binaries.join("hubu-unified-mcp").display().to_string()),
+                quote(profile.join("state/hubu.sqlite3").display().to_string()),
+                quote(profile.join("state/gongbu.sqlite3").display().to_string()),
+                quote(profile.join("state/artifacts").display().to_string()),
+                quote(binaries.join("temporal").display().to_string()),
+                quote(profile.join("state/temporal").display().to_string()),
+            ),
+        )
+        .unwrap();
+        fs::write(profile.join("credentials.toml"), "schema_version = 1\n").unwrap();
+        fs::write(
+            profile.join("providers.toml"),
+            providers_template(StackMode::Sandbox),
+        )
+        .unwrap();
+
+        render_profile_with_renderer(&profile, &binaries.join("hubu")).unwrap();
+        let manifest: ActiveManifest =
+            read_json(&profile.join("generated/active-manifest.json")).unwrap();
+        let generation = active_generation_path(&profile.join("generated"), &manifest).unwrap();
+        let targets: Value = read_json(&generation.join("provider-targets.json")).unwrap();
+        assert_eq!(
+            targets["provider_configs"][0]["settings"]["type"],
+            "fixture"
+        );
+        assert_eq!(
+            targets["provider_configs"][0]["secret_service"],
+            "hubu.sandbox.fixture"
+        );
+        let gongbu: Value = read_json(&generation.join("gongbu-server.json")).unwrap();
+        assert_eq!(gongbu["providers"]["mode"], "sandbox");
+        assert_eq!(gongbu["providers"]["maximum_spend_minor"], 1_000_000);
+        assert!(gongbu["providers"]
+            .get("live_spend_acknowledgement")
+            .is_none());
     }
 
     #[cfg(unix)]

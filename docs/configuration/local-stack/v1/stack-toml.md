@@ -22,6 +22,24 @@ Selects the operator-owned source schema. All three source files must use a supp
 schema_version = 1
 ```
 
+### `mode`
+
+| Attribute | Value |
+| --- | --- |
+| Required | No for existing schema-v1 files; generated profiles always include it |
+| Supplied by | Chosen as the initialization outcome |
+| Allowed values | `sandbox`, `local-stack`, `hubu-only` |
+| Default when omitted | `local-stack` for backward compatibility |
+
+The mode selects the smallest coherent topology for the operator's outcome.
+Sandbox and local-stack modes include Hubu, Gongbu, and Temporal. Hubu-only
+mode intentionally omits Gongbu, Temporal, provider execution, and artifact
+storage. It is not represented as an unavailable external Gongbu endpoint.
+
+```toml
+mode = "sandbox"
+```
+
 ### `allow_development_builds`
 
 | Attribute | Value |
@@ -60,7 +78,9 @@ Required when `hubu.ownership = "managed"`; omit it for external Hubu. It identi
 
 ### `binaries.gongbu_server`
 
-Required when `gongbu.ownership = "managed"`; omit it for external Gongbu. Gongbu remains a separate process and owns its provider execution, worker, database, and artifacts.
+Required when `gongbu.ownership = "managed"`; omit it for external Gongbu and
+in Hubu-only mode. Gongbu remains a separate process and owns its provider
+execution, worker, database, and artifacts.
 
 ### `binaries.hubu_unified_mcp`
 
@@ -127,6 +147,10 @@ Optional absolute path for managed Hubu structured logs. Use a file distinct fro
 
 ## `[gongbu]`
 
+The complete section is required in sandbox and local-stack modes. Omit it in
+Hubu-only mode; doctor, lifecycle status, and unified MCP then treat Gongbu as
+intentionally absent rather than unhealthy.
+
 ### `gongbu.ownership`
 
 | Attribute | Value |
@@ -159,6 +183,9 @@ Required for managed Gongbu. This safe absolute directory stores Gongbu-owned ex
 Optional absolute path for managed Gongbu structured logs. Keep it separate from all managed databases and directories.
 
 ## `[temporal]`
+
+Required only when Gongbu is present. Hubu-only mode omits the entire section
+and never installs, starts, probes, or reports Temporal.
 
 The Temporal section is required when Gongbu is managed. It is not a second worker configuration: Gongbu always owns and starts its worker.
 

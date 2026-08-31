@@ -2,11 +2,17 @@
 
 Schema version 1 is the operator-owned configuration contract for the local Hubu stack. This reference explains what every field means, where its value comes from, and what must happen after it changes.
 
-> **Start safely:** use the [provider-disabled example](examples.md#provider-disabled-local-profile) for a first installation. Disabled mode omits provider targets, prices, spend ceilings, and the live-spend acknowledgement. It cannot perform live provider work.
+> **Start safely:** `hubu stack init --mode sandbox` creates the complete local ecosystem with real internal governance and execution communication while replacing only the external provider edge with a deterministic, non-billable fixture.
 
 ## The three source files
 
-`hubu stack init` creates three TOML files. They are the source of truth; generated runtime JSON is not an editing surface.
+`hubu stack init` creates three TOML files for one selected outcome. They are the source of truth; generated runtime JSON is not an editing surface.
+
+| Stack mode | Components and outcome |
+| --- | --- |
+| `sandbox` | Managed Hubu, Gongbu, and Temporal with fixture-only external provider behavior. |
+| `local-stack` | Managed Hubu, Gongbu, and Temporal with one or more operator-approved live targets. |
+| `hubu-only` | Managed Hubu governance; Gongbu, Temporal, providers, and artifacts are intentionally absent. |
 
 | File | Controls | Typical value sources | Detailed reference |
 | --- | --- | --- | --- |
@@ -35,7 +41,7 @@ Each field reference identifies who supplies the value:
 The supported first-run flow is:
 
 ```text
-stack init → operator edit → stack doctor → stack start
+stack init --mode MODE → review remaining operator decisions → stack doctor → stack start
 ```
 
 `stack start` runs doctor and render when needed, then starts missing managed components in dependency order. It never starts the client-owned `hubu-unified-mcp` process.
@@ -70,13 +76,10 @@ Keep Hubu and Gongbu separate even though the profile coordinates them. They ret
 
 ### First local evaluation
 
-1. Read the [provider-disabled example](examples.md#provider-disabled-local-profile).
-2. Use the [`stack.toml` reference](stack-toml.md) for topology and runtime boundaries.
-3. Leave managed service credential fields omitted; use the
-   [`credentials.toml` reference](credentials-toml.md) only for provider
-   references or external-service overrides.
-4. Set only `schema_version = 1` and `mode = "disabled"` in `providers.toml`.
-5. Run doctor and follow the reported field paths.
+1. Run `hubu stack init --mode sandbox --install-temporal` on macOS, or install Temporal independently before initialization.
+2. Hubu discovers installed stack binaries and the Temporal CLI, including its exact version.
+3. Run doctor and follow only the remaining dependency diagnostics.
+4. Start the profile; no provider credential, network request, or live-spend acknowledgement is involved.
 
 ### Live provider preparation
 

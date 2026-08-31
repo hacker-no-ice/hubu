@@ -70,11 +70,17 @@ Never convert a file or opaque mechanism by copying secret bytes into TOML. The
 renderer checks reference shape and ownership contracts but does not read
 secret values.
 
-## Disabled versus live provider mode
+## Disabled, sandbox, and live provider modes
 
 Choose `disabled` for installation, topology validation, documentation exploration, or any environment that must not perform provider work.
 
 Disabled mode must omit all live-only fields. Commented examples are not active TOML, but keeping speculative future values out of the initial profile reduces confusion and accidental activation risk.
+
+Choose `sandbox` through `hubu stack init --mode sandbox` for a complete local
+ecosystem with real Hubu/Gongbu/Temporal communication and the built-in
+deterministic provider fixture. The renderer owns its fixture catalog and
+internal ceiling; sandbox rejects provider credentials and the live-spend
+acknowledgement.
 
 Choose `live` only after:
 
