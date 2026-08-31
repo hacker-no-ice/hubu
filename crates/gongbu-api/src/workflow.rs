@@ -1003,12 +1003,18 @@ mod tests {
     fn execution(repo: &Repository, key: &str) -> Execution {
         execution_with_quantity(repo, key, 1)
     }
+
+    fn bfl_cost(raw_credits: &str) -> ActualVendorCost {
+        crate::provider::flux2_api::bfl_credit_cost_to_usd(raw_credits).unwrap()
+    }
+
     fn execution_with_quantity(repo: &Repository, key: &str, quantity: i64) -> Execution {
         repo.create_execution(&CreateExecutionParams { account_id:"account".into(),operation_key:key.into(),hubu_authorization_id:"token-ref".into(),hubu_claim_id:None,hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(),authorized_minor:500,authorization_currency:"USD".into(),normalized_input:json!({"prompt":"cat"}),input_hash:"hash".into(),input_schema_version:1,target:"example/image-v1".into(),config_version:"cfg-1".into(),workload_type:"image_generation".into(),provider:"example".into(),adapter:"fixture".into(),model:"image-v1".into(),provider_config_version:"pcv-1".into(),provider_config_digest:format!("sha256:{}","a".repeat(64)),pricing_snapshot:json!({"schema_version":2,"provider":"example","model":"image-v1","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1,"quantity":quantity}],"exact_estimate_numerator":(100 * quantity).to_string(),"exact_estimate_denominator":"1","estimated_amount_minor":100 * quantity,"currency":"USD"}),pricing_schema_version:2,execution_scope:None,created_at:"2026-08-05T00:00:00Z".into() }).unwrap()
     }
     struct Hubu {
         claims: Cell<u32>,
         settles: Cell<u32>,
+        settle_amounts: RefCell<Vec<i64>>,
         releases: Cell<u32>,
         panic_on_settle: Cell<bool>,
         panic_on_release: Cell<bool>,
@@ -1021,6 +1027,7 @@ mod tests {
             Self {
                 claims: Cell::new(0),
                 settles: Cell::new(0),
+                settle_amounts: RefCell::new(Vec::new()),
                 releases: Cell::new(0),
                 panic_on_settle: Cell::new(false),
                 panic_on_release: Cell::new(false),
@@ -1049,8 +1056,9 @@ mod tests {
                 Ok(())
             }
         }
-        fn settle(&self, _: &Execution, _: &str, _: i64) -> Result<String, ActivityError> {
+        fn settle(&self, _: &Execution, _: &str, amount: i64) -> Result<String, ActivityError> {
             self.settles.set(self.settles.get() + 1);
+            self.settle_amounts.borrow_mut().push(amount);
             assert!(
                 !self.panic_on_settle.replace(false),
                 "simulated worker loss"
@@ -1076,6 +1084,7 @@ mod tests {
         empty_artifacts: Cell<bool>,
         image_usage: Cell<i64>,
         artifact_count: Cell<usize>,
+        actual_vendor_cost: RefCell<ActualVendorCost>,
     }
     impl Default for Provider {
         fn default() -> Self {
@@ -1085,6 +1094,7 @@ mod tests {
                 empty_artifacts: Cell::new(false),
                 image_usage: Cell::new(1),
                 artifact_count: Cell::new(1),
+                actual_vendor_cost: RefCell::new(ActualVendorCost::new(100, 2, "USD").unwrap()),
             }
         }
     }
@@ -1092,19 +1102,23 @@ mod tests {
         fn preflight(&self, _: &Execution) -> Result<(), ActivityError> {
             Ok(())
         }
-        fn invoke(&self, _: &Execution, _: &str) -> Result<ProviderSuccess, ActivityError> {
+        fn invoke(
+            &self,
+            _: &Execution,
+            attempt_id: &str,
+        ) -> Result<ProviderSuccess, ActivityError> {
             self.calls.set(self.calls.get() + 1);
             if let Some(e) = self.error.borrow_mut().take() {
                 Err(e)
             } else {
                 Ok(ProviderSuccess {
-                    request_id: Some("provider-1".into()),
+                    request_id: Some(format!("provider-{attempt_id}")),
                     operation_id: None,
                     usage: NormalizedUsage {
                         images: Some(self.image_usage.get()),
                         ..Default::default()
                     },
-                    actual_vendor_cost: Some(ActualVendorCost::new(100, 2, "USD").unwrap()),
+                    actual_vendor_cost: Some(self.actual_vendor_cost.borrow().clone()),
                     artifacts: if self.empty_artifacts.get() {
                         vec![]
                     } else {
@@ -1142,13 +1156,13 @@ mod tests {
             {
                 self.repo
                     .create_artifact(&CreateArtifactParams {
-                        artifact_id: "artifact-1".into(),
+                        artifact_id: format!("artifact-{a}"),
                         execution_id: e.execution_id.clone(),
                         provider_attempt_id: Some(a.into()),
                         kind: "image".into(),
                         storage_backend: "local_fs".into(),
                         media_type: "image/png".into(),
-                        storage_key: format!("executions/{}/artifact-1.png", e.execution_id),
+                        storage_key: format!("executions/{}/artifact-{a}.png", e.execution_id),
                         size_bytes: 1,
                         sha256: "a".repeat(64),
                         metadata: json!({}),
@@ -1210,6 +1224,80 @@ mod tests {
             ),
             (1, 1, 1, 1)
         );
+    }
+
+    #[test]
+    fn bfl_credit_cost_settles_once_and_overage_replays_in_reconciliation() {
+        let repo = Repository::in_memory().unwrap();
+        let hubu = Hubu::default();
+        let provider = Provider::default();
+
+        provider.actual_vendor_cost.replace(bfl_cost("1.0001"));
+        let normal = execution(&repo, "bfl-credit-normal");
+        let normal_artifacts = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let normal_workflow = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &hubu,
+            provider: &provider,
+            artifacts: &normal_artifacts,
+        };
+        assert_eq!(
+            normal_workflow
+                .run(&normal.execution_id, "normal")
+                .unwrap()
+                .status,
+            "succeeded"
+        );
+        let receipt = repo
+            .get_receipt_for_execution(&normal.execution_id)
+            .unwrap();
+        assert_eq!(receipt.actual_vendor_cost, bfl_cost("1.0001"));
+        assert_eq!(receipt.settlement_minor, 2);
+        normal_workflow
+            .run(&normal.execution_id, "normal-replay")
+            .unwrap();
+        assert_eq!(hubu.settle_amounts.borrow().as_slice(), &[2]);
+        assert_eq!(provider.calls.get(), 1);
+
+        provider.actual_vendor_cost.replace(bfl_cost("100.0001"));
+        let overage = execution(&repo, "bfl-credit-overage");
+        let overage_artifacts = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let overage_workflow = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &hubu,
+            provider: &provider,
+            artifacts: &overage_artifacts,
+        };
+        assert_eq!(
+            overage_workflow
+                .run(&overage.execution_id, "overage")
+                .unwrap()
+                .status,
+            "reconciliation_required"
+        );
+        assert_eq!(
+            repo.get_provider_attempt_for_execution(&overage.execution_id)
+                .unwrap()
+                .actual_vendor_cost,
+            Some(bfl_cost("100.0001"))
+        );
+        assert_eq!(
+            repo.get_reconciliation(&overage.execution_id)
+                .unwrap()
+                .evidence["actual_vendor_cost"],
+            json!({"amount":1000001,"scale":6,"currency":"USD"})
+        );
+        overage_workflow
+            .run(&overage.execution_id, "overage-replay")
+            .unwrap();
+        assert_eq!(hubu.settle_amounts.borrow().as_slice(), &[2]);
+        assert_eq!(provider.calls.get(), 2);
     }
 
     #[test]
@@ -1478,6 +1566,7 @@ mod tests {
         let database = directory.path().join("execution.sqlite3");
         let hubu = Hubu::default();
         let provider = Provider::default();
+        provider.actual_vendor_cost.replace(bfl_cost("1.0001"));
         let execution_id;
         {
             let repository = Repository::open(&database, Redactor::default()).unwrap();
@@ -1507,6 +1596,13 @@ mod tests {
         }
 
         let repository = Repository::open(&database, Redactor::default()).unwrap();
+        assert_eq!(
+            repository
+                .get_provider_attempt_for_execution(&execution_id)
+                .unwrap()
+                .actual_vendor_cost,
+            Some(bfl_cost("1.0001"))
+        );
         let artifacts = Artifacts {
             repo: &repository,
             calls: Cell::new(0),
@@ -1540,6 +1636,12 @@ mod tests {
             "succeeded"
         );
         assert_eq!(hubu.settles.get(), 1);
+        let receipt = repository.get_receipt_for_execution(&execution_id).unwrap();
+        assert_eq!(receipt.actual_vendor_cost, bfl_cost("1.0001"));
+        assert_eq!(receipt.settlement_minor, 2);
+        workflow.run(&execution_id, "terminal-replay").unwrap();
+        assert_eq!(provider.calls.get(), 1);
+        assert_eq!(hubu.settle_amounts.borrow().as_slice(), &[2]);
     }
     #[test]
     fn supplied_claim_is_adopted_without_claiming_again() {
@@ -1718,11 +1820,12 @@ mod tests {
     }
 
     #[test]
-    fn lost_hubu_finalization_response_converges_with_same_receipt() {
+    fn bfl_credit_cost_reconciled_completion_reuses_same_receipt_amount() {
         let repo = Repository::in_memory().unwrap();
         let e = execution(&repo, "recover-settle");
         let h = Hubu::default();
         let p = Provider::default();
+        p.actual_vendor_cost.replace(bfl_cost("1.0001"));
         let a = Artifacts {
             repo: &repo,
             calls: Cell::new(0),
@@ -1741,10 +1844,10 @@ mod tests {
             w.run(&e.execution_id, "restart").unwrap().status,
             "reconciliation_required"
         );
-        let receipt_id = repo
-            .get_receipt_for_execution(&e.execution_id)
-            .unwrap()
-            .receipt_id;
+        let interrupted_receipt = repo.get_receipt_for_execution(&e.execution_id).unwrap();
+        let receipt_id = interrupted_receipt.receipt_id.clone();
+        assert_eq!(interrupted_receipt.actual_vendor_cost, bfl_cost("1.0001"));
+        assert_eq!(interrupted_receipt.settlement_minor, 2);
         let done = w.recover(&e.execution_id, "timer", None).unwrap();
         assert_eq!(done.status, "succeeded");
         assert_eq!(h.settles.get(), 2);
@@ -1755,6 +1858,7 @@ mod tests {
             receipt_id
         );
         assert_eq!(p.calls.get(), 1);
+        assert_eq!(h.settle_amounts.borrow().as_slice(), &[2, 2]);
     }
 
     #[test]
