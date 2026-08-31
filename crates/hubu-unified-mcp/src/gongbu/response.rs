@@ -3,6 +3,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 use super::AdmissionDiagnostic;
 
@@ -101,6 +102,7 @@ impl ToolError {
                 .to_string(),
             }],
             is_error: true,
+            structured_content: None,
         }
     }
 
@@ -201,6 +203,11 @@ fn allowlisted_validation_diagnostic(
         {
             Some(AdmissionDiagnostic::TargetNotSelectable)
         }
+        "target_not_selectable"
+            if exactly_matches(AdmissionDiagnostic::TargetIdNotSelectable.fields()) =>
+        {
+            Some(AdmissionDiagnostic::TargetIdNotSelectable)
+        }
         "pricing_selector_not_matched"
             if exactly_matches(AdmissionDiagnostic::PricingSelectorNotMatched.fields()) =>
         {
@@ -216,7 +223,67 @@ pub(super) fn text_result(value: &impl Serialize) -> ToolResult {
             text: serde_json::to_string(value).expect("response serializes"),
         }],
         is_error: false,
+        structured_content: None,
     }
+}
+
+pub(super) fn execution_target_catalog_result(
+    response: ExecutionTargetCatalogResponse,
+) -> Result<ToolResult, ToolError> {
+    let mut ids = BTreeSet::new();
+    let valid = response.schema_version == EXECUTION_V2_SCHEMA_VERSION
+        && response.targets.iter().all(|target| {
+            valid_target_id(&target.target_id)
+                && ids.insert(target.target_id.clone())
+                && !target.workload_type.is_empty()
+                && !target.provider.is_empty()
+                && !target.model.is_empty()
+                && target.execution_scope.validate()
+                && target
+                    .image_sizes
+                    .iter()
+                    .all(|size| matches!(size.as_str(), "1k" | "2k" | "4k"))
+                && target.image_sizes.windows(2).all(|pair| pair[0] < pair[1])
+                && !target.pricing.is_empty()
+                && target.pricing.iter().all(|price| {
+                    !price.rule_id.is_empty()
+                        && price.currency.len() == 3
+                        && price.currency.bytes().all(|byte| byte.is_ascii_uppercase())
+                        && price.selector.as_ref().is_none_or(|selector| {
+                            target.image_sizes.contains(&selector.image_size)
+                        })
+                        && !price.components.is_empty()
+                        && price.components.iter().all(|component| {
+                            matches!(
+                                component.unit.as_str(),
+                                "image" | "input_token" | "output_token"
+                            ) && component.rate_numerator_minor >= 0
+                                && component.rate_denominator > 0
+                        })
+                })
+        });
+    if !valid {
+        return Err(ToolError::invalid_response());
+    }
+    let structured = serde_json::to_value(&response).map_err(|_| ToolError::invalid_response())?;
+    Ok(ToolResult {
+        content: vec![Content::Text {
+            text: serde_json::to_string(&response).map_err(|_| ToolError::invalid_response())?,
+        }],
+        is_error: false,
+        structured_content: Some(structured),
+    })
+}
+
+fn valid_target_id(value: &str) -> bool {
+    value
+        .strip_prefix("gongbu:target:v1:")
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
 }
 
 pub(super) fn execution_result(
@@ -319,6 +386,7 @@ pub(super) fn artifact_result(
             },
         ],
         is_error: false,
+        structured_content: None,
     }
 }
 
@@ -610,6 +678,73 @@ pub(super) struct ArtifactListResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExecutionTargetCatalogResponse {
+    schema_version: u32,
+    targets: Vec<ExecutionTargetResponse>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionTargetResponse {
+    target_id: String,
+    workload_type: String,
+    provider: String,
+    model: String,
+    execution_scope: ExecutionTargetScope,
+    image_sizes: Vec<String>,
+    pricing: Vec<ExecutionTargetPricing>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionTargetScope {
+    schema_version: u32,
+    provider: String,
+    executor: String,
+    capability: String,
+    billing_merchant: String,
+}
+
+impl ExecutionTargetScope {
+    fn validate(&self) -> bool {
+        self.schema_version == 1
+            && [
+                &self.provider,
+                &self.executor,
+                &self.capability,
+                &self.billing_merchant,
+            ]
+            .iter()
+            .all(|identity| !identity.is_empty())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionTargetPricing {
+    rule_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selector: Option<ExecutionTargetPricingSelector>,
+    currency: String,
+    components: Vec<ExecutionTargetPriceComponent>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionTargetPricingSelector {
+    image_size: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionTargetPriceComponent {
+    unit: String,
+    rate_numerator_minor: i64,
+    rate_denominator: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct ArtifactResponse {
     artifact_id: String,
     execution_id: String,
@@ -627,6 +762,8 @@ pub(super) struct ToolResult {
     content: Vec<Content>,
     #[serde(rename = "isError")]
     is_error: bool,
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
+    structured_content: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]

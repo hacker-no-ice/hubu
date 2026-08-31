@@ -4,6 +4,7 @@ use serde_json::Value;
 use super::response::ToolError;
 
 pub(super) enum PreparedCall {
+    ListExecutionTargets,
     Create(CreateExecutionRequest),
     GetProviderCatalog,
     GetExecution(String),
@@ -13,6 +14,11 @@ pub(super) enum PreparedCall {
 
 pub(super) fn prepare(name: &str, arguments: Value) -> Result<PreparedCall, ToolError> {
     match name {
+        "gongbu_list_execution_targets" => {
+            let input: EmptyInput = parse(arguments)?;
+            let _ = input;
+            Ok(PreparedCall::ListExecutionTargets)
+        }
         "gongbu_create_execution" => {
             reject_protected_overrides(&arguments)?;
             let request: CreateExecutionRequest = parse(arguments)?;
@@ -132,31 +138,57 @@ pub(super) struct CreateExecutionRequest {
     spend_auth_token_id: String,
     input: Value,
     input_schema_version: i64,
-    workload_type: String,
-    provider: String,
-    adapter: String,
-    model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workload_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 impl CreateExecutionRequest {
     fn validate(&self) -> Result<(), ToolError> {
+        let raw_tuple = [
+            self.workload_type.as_deref(),
+            self.provider.as_deref(),
+            self.adapter.as_deref(),
+            self.model.as_deref(),
+        ];
+        let target_id_selection = self.target_id.as_deref().is_some_and(valid_target_id)
+            && raw_tuple.iter().all(|value| value.is_none());
+        let tuple_selection = self.target_id.is_none()
+            && raw_tuple
+                .iter()
+                .all(|value| value.is_some_and(|value| !value.is_empty()));
         if self.schema_version != 2
             || !self.input.is_object()
             || self.input_schema_version < 1
-            || [
-                self.workload_type.as_str(),
-                self.provider.as_str(),
-                self.adapter.as_str(),
-                self.model.as_str(),
-            ]
-            .into_iter()
-            .any(str::is_empty)
+            || !(target_id_selection || tuple_selection)
         {
             return Err(ToolError::invalid());
         }
         Ok(())
     }
 }
+
+fn valid_target_id(value: &str) -> bool {
+    value
+        .strip_prefix("gongbu:target:v1:")
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyInput {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

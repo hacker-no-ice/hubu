@@ -83,6 +83,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("gongbu_get_execution", BackendOwner::Gongbu),
     ("gongbu_get_provider_catalog", BackendOwner::Gongbu),
     ("gongbu_list_artifacts", BackendOwner::Gongbu),
+    ("gongbu_list_execution_targets", BackendOwner::Gongbu),
     ("hubu_add_policy", BackendOwner::Hubu),
     ("hubu_apply_policy", BackendOwner::Hubu),
     ("hubu_authorize_spend", BackendOwner::Hubu),

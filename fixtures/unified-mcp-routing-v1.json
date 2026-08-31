@@ -7,6 +7,7 @@
     { "name": "gongbu_get_execution", "owner": "gongbu" },
     { "name": "gongbu_get_provider_catalog", "owner": "gongbu" },
     { "name": "gongbu_list_artifacts", "owner": "gongbu" },
+    { "name": "gongbu_list_execution_targets", "owner": "gongbu" },
     { "name": "hubu_add_policy", "owner": "hubu" },
     { "name": "hubu_apply_policy", "owner": "hubu" },
     { "name": "hubu_authorize_spend", "owner": "hubu" },

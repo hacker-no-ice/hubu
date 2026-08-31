@@ -1,6 +1,6 @@
 # `providers.toml` reference
 
-`providers.toml` is the explicit boundary between a no-provider local profile and chargeable live-provider execution. It selects immutable provider target revisions, freezes operator-verified pricing, sets a spend ceiling, and records the exact live-spend acknowledgement.
+`providers.toml` is the explicit boundary between a no-provider local profile and chargeable live-provider execution. It defines the operator-approved set of provider targets, selects each target's active immutable revision, freezes operator-verified pricing, sets a spend ceiling, and records the exact live-spend acknowledgement. It does not choose one provider or image size for every request: agents discover active targets at runtime and select among only this approved set.
 
 > **Potential charges:** setting `mode = "live"` does not by itself perform work, but it prepares Gongbu to send requests to configured providers after the reviewed generation is active. Verify every provider value and price against current authoritative provider documentation.
 
@@ -168,6 +168,13 @@ For `[opaque.provider_image]`, use `credential = "provider_image"`. Gongbu resol
 Required boolean. `true` makes this the active revision for its target key. Gongbu rejects more than one active revision for the same workload/provider/adapter/model key.
 
 Use `false` to retain an immutable historical revision without selecting it for new work.
+
+Every active, execution-enabled target with a complete adapter and pricing
+profile appears in the sanitized runtime catalog exposed through unified MCP.
+The catalog assigns an opaque `target_id` that remains stable when the operator
+rotates the target's credential, endpoint, or configuration revision. Agents
+select that ID and one of its advertised runtime image-size options; they never
+receive the target's credential reference or adapter transport settings.
 
 ### `targets.execution_enabled`
 
