@@ -24,6 +24,17 @@ Future release template
 
 ## Unreleased
 
+- Replaced forward-looking budget replacement with versioned updates on one
+  stable logical budget. Current budget responses now include public current
+  version identity and revision; update/history APIs and CLI commands preserve
+  cumulative consumed and frozen usage, expose immutable provenance, support
+  exact historical replay, and reject changed stale intent with typed errors.
+- Advanced unified MCP routing to revision 4, replacing
+  `hubu_replace_budget` with approval-gated idempotent `hubu_update_budget` and
+  adding read-only `hubu_budget_history`. These two tools validate safe dynamic
+  budget paths and return recursively redacted typed application errors as MCP
+  tool results. The retired `/budgets/replace` route and `hubu budget replace`
+  command are no longer available.
 - Made release publication operator-triggered only. The daily canary schedule
   is removed while manual canary, candidate, and stable dispatches retain their
   immutable source, tag, and asset validation.

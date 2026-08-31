@@ -87,17 +87,19 @@ const components = {
   mcp: {
     kind: "AGENT SURFACE",
     title: "Route without merging",
-    copy: "hubu-unified-mcp is a thin stdio adapter over separate Hubu and Gongbu HTTP clients. Its static ownership table routes each tool to one backend and fails closed on unknown names or incompatible versions.",
+    copy: "hubu-unified-mcp routing revision 4 is a thin stdio adapter over separate Hubu and Gongbu HTTP clients. Its static ownership table routes each tool to one backend and fails closed on unknown names or incompatible versions.",
     diagram: [
       ["Agent harness", "stdio client"],
       ["Capability probe", "compatibility"],
-      ["Static router", "named owner"],
+      ["Static router", "39 named tools"],
       ["Hubu client", "Hubu credential"],
       ["Gongbu client", "Gongbu credential"],
     ],
     responsibilities: [
       "Probe Hubu and Gongbu independently for compatibility.",
       "Publish one sanitized, availability-aware tool catalog.",
+      "Route the 31 Hubu tools, including safe dynamic budget update and history paths, without merging backend ownership.",
+      "Return recursively redacted typed budget rejections as MCP tool errors while preserving existing behavior for other Hubu tools.",
       "Never forward one backend credential to the other.",
       "Preserve backend result and error semantics.",
     ],
@@ -149,6 +151,7 @@ const components = {
       "Keep public health and guidance separate from protected routes.",
       "Require distinct human capabilities for approval and reconciliation mutations.",
       "Delegate spend approval and executor-claim transitions to core application services.",
+      "Parse strict public budget-version paths, expose public current-version identity, and keep update errors typed without leaking storage detail.",
       "Return structured, redacted diagnostics without leaking credentials.",
     ],
     links: [
@@ -205,10 +208,11 @@ const components = {
   },
   budgets: {
     kind: "MONEY LIFECYCLE",
-    title: "Reserve, then finalize",
-    copy: "Budgets make authorization financially meaningful. Hubu derives availability from administrative state, time, and balance, freezes the maximum before execution, then atomically settles actual cost, releases unused capacity, or preserves uncertainty for reconciliation.",
+    title: "Version, reserve, then finalize",
+    copy: "Budgets are stable logical allocations with immutable total-limit versions. Hubu derives availability from administrative state, time, and one cumulative balance, freezes the maximum before execution, then atomically settles actual cost, releases unused capacity, or preserves uncertainty for reconciliation.",
     diagram: [
-      ["Evaluated budget", "admin + time + balance"],
+      ["Logical budget", "stable bgt_ identity"],
+      ["Version head", "immutable bgv_ history"],
       ["Frozen hold", "authorized maximum"],
       ["Executor claim", "exclusive work"],
       ["Provider outcome", "billing evidence"],
@@ -217,6 +221,8 @@ const components = {
     ],
     responsibilities: [
       "Prevent overlapping non-revoked budget windows for one agent and currency.",
+      "Append total-cap changes with compare-and-set revision checks while preserving consumed and frozen usage.",
+      "Return the current snapshot once and immutable provenance in ascending history order.",
       "Reserve capacity atomically only when the evaluated budget is active.",
       "Never release a hold merely because provider billing is ambiguous.",
       "Record successful money movement as immutable balanced entries.",

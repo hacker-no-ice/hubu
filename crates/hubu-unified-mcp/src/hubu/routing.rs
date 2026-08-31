@@ -59,7 +59,7 @@ fn get_request(path: impl Into<String>) -> PreparedHubuCallV1 {
     )
 }
 
-fn post_request(path: &'static str, body: Value) -> PreparedHubuCallV1 {
+fn post_request(path: impl Into<String>, body: Value) -> PreparedHubuCallV1 {
     post_request_with(
         path,
         body,
@@ -69,7 +69,7 @@ fn post_request(path: &'static str, body: Value) -> PreparedHubuCallV1 {
 }
 
 fn post_request_with(
-    path: &'static str,
+    path: impl Into<String>,
     body: Value,
     capability: HubuRequestCapabilityV1,
     transform: HubuResponseTransformV1,
@@ -77,7 +77,7 @@ fn post_request_with(
     PreparedHubuCallV1::Http(
         HubuHttpRequestV1 {
             method: "POST",
-            path: path.to_string(),
+            path: path.into(),
             body: Some(body),
             capability,
         },
@@ -164,10 +164,12 @@ pub(super) fn route_tool_call_v1(
             require_trusted_client_approval(config, name)?;
             post_request("/budgets/revoke", arguments)
         }
-        "hubu_replace_budget" => {
+        "hubu_update_budget" => {
             require_trusted_client_approval(config, name)?;
-            post_request("/budgets/replace", arguments)
+            let (path, body) = budget_update_request(arguments)?;
+            post_request(path, body)
         }
+        "hubu_budget_history" => get_request(budget_history_path(&arguments)?),
         "hubu_set_spending_target" => {
             require_trusted_client_approval(config, name)?;
             post_request("/user/spending-target", arguments)
@@ -605,6 +607,95 @@ fn spend_approval_request_id(
     Ok(approval_request_id.to_string())
 }
 
+fn budget_update_request(arguments: Value) -> Result<(String, Value)> {
+    let arguments = arguments
+        .as_object()
+        .ok_or_else(|| anyhow!("hubu_update_budget arguments must be an object"))?;
+    if arguments.len() < 3
+        || arguments.len() > 4
+        || arguments.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "budget_id" | "expected_revision" | "amount_limit_cents" | "reason"
+            )
+        })
+    {
+        bail!("hubu_update_budget accepts only budget_id, expected_revision, amount_limit_cents, and optional reason");
+    }
+    let budget_id = public_budget_id_argument(arguments, "hubu_update_budget")?;
+    let expected_revision = arguments
+        .get("expected_revision")
+        .and_then(Value::as_u64)
+        .filter(|revision| *revision >= 1)
+        .ok_or_else(|| anyhow!("hubu_update_budget requires expected_revision >= 1"))?;
+    let amount_limit_cents = arguments
+        .get("amount_limit_cents")
+        .and_then(Value::as_i64)
+        .filter(|amount| *amount >= 1)
+        .ok_or_else(|| anyhow!("hubu_update_budget requires amount_limit_cents >= 1"))?;
+    let reason = arguments
+        .get("reason")
+        .map(|reason| {
+            reason
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("hubu_update_budget reason must be a string"))
+        })
+        .transpose()?;
+    let mut body = json!({
+        "amount_limit_cents": amount_limit_cents,
+        "expected_revision": expected_revision,
+    });
+    if let Some(reason) = reason {
+        body["reason"] = json!(reason);
+    }
+    Ok((budget_versions_path(&budget_id)?, body))
+}
+
+fn budget_history_path(arguments: &Value) -> Result<String> {
+    let arguments = arguments
+        .as_object()
+        .ok_or_else(|| anyhow!("hubu_budget_history arguments must be an object"))?;
+    if arguments.len() != 1 || !arguments.contains_key("budget_id") {
+        bail!("hubu_budget_history accepts only budget_id");
+    }
+    let budget_id = public_budget_id_argument(arguments, "hubu_budget_history")?;
+    budget_versions_path(&budget_id)
+}
+
+fn public_budget_id_argument(
+    arguments: &serde_json::Map<String, Value>,
+    tool_name: &str,
+) -> Result<String> {
+    let budget_id = arguments
+        .get("budget_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{tool_name} requires budget_id"))?;
+    validate_public_budget_id(budget_id)
+        .map_err(|_| anyhow!("{tool_name} requires budget_id to be a safe public identifier"))?;
+    Ok(budget_id.to_string())
+}
+
+pub(super) fn validate_public_budget_id(budget_id: &str) -> Result<()> {
+    let Some(suffix) = budget_id.strip_prefix("bgt_") else {
+        bail!("budget id must use the public form");
+    };
+    const PUBLIC_SUFFIX_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
+    if suffix.len() != 12
+        || !suffix
+            .chars()
+            .all(|character| PUBLIC_SUFFIX_ALPHABET.contains(character))
+    {
+        bail!("budget id is not a safe public identifier");
+    }
+    Ok(())
+}
+
+fn budget_versions_path(budget_id: &str) -> Result<String> {
+    validate_public_budget_id(budget_id)?;
+    Ok(format!("/budgets/{budget_id}/versions"))
+}
+
 pub(crate) fn spend_response_with_approval_hint(mut response: Value) -> Value {
     let requires_human_approval = response
         .get("decision")
@@ -638,5 +729,19 @@ pub(super) fn tool_result_v1(value: Value) -> Value {
             }
         ],
         "structuredContent": value
+    })
+}
+
+pub(super) fn tool_error_result_v1(value: Value) -> Value {
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": serde_json::to_string_pretty(&value)
+                    .expect("tool error response should serialize")
+            }
+        ],
+        "structuredContent": value,
+        "isError": true
     })
 }

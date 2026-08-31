@@ -1,3 +1,4 @@
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::Secret;
@@ -10,7 +11,10 @@ pub(super) fn redact_backend_message(
     configured_reconciliation: Option<&Secret>,
     used_reconciliation: Option<&Secret>,
 ) -> String {
-    let mut redacted = message.replace(bearer_token.expose(), "<redacted>");
+    let mut redacted = message.to_string();
+    if !bearer_token.expose().is_empty() {
+        redacted = redacted.replace(bearer_token.expose(), "<redacted>");
+    }
     for secret in [
         configured_approval,
         used_approval,
@@ -25,6 +29,82 @@ pub(super) fn redact_backend_message(
         }
     }
     redacted
+}
+
+pub(super) fn redact_backend_value(
+    mut value: Value,
+    bearer_token: &Secret,
+    configured_approval: Option<&Secret>,
+    used_approval: Option<&Secret>,
+    configured_reconciliation: Option<&Secret>,
+    used_reconciliation: Option<&Secret>,
+) -> Value {
+    redact_value_strings(
+        &mut value,
+        bearer_token,
+        configured_approval,
+        used_approval,
+        configured_reconciliation,
+        used_reconciliation,
+    );
+    value
+}
+
+fn redact_value_strings(
+    value: &mut Value,
+    bearer_token: &Secret,
+    configured_approval: Option<&Secret>,
+    used_approval: Option<&Secret>,
+    configured_reconciliation: Option<&Secret>,
+    used_reconciliation: Option<&Secret>,
+) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                redact_value_strings(
+                    value,
+                    bearer_token,
+                    configured_approval,
+                    used_approval,
+                    configured_reconciliation,
+                    used_reconciliation,
+                );
+            }
+        }
+        Value::Object(object) => {
+            let entries = std::mem::take(object);
+            for (key, mut child) in entries {
+                let key = redact_backend_message(
+                    &key,
+                    bearer_token,
+                    configured_approval,
+                    used_approval,
+                    configured_reconciliation,
+                    used_reconciliation,
+                );
+                redact_value_strings(
+                    &mut child,
+                    bearer_token,
+                    configured_approval,
+                    used_approval,
+                    configured_reconciliation,
+                    used_reconciliation,
+                );
+                object.entry(key).or_insert(child);
+            }
+        }
+        Value::String(message) => {
+            *message = redact_backend_message(
+                message,
+                bearer_token,
+                configured_approval,
+                used_approval,
+                configured_reconciliation,
+                used_reconciliation,
+            );
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Error)]
@@ -52,5 +132,7 @@ pub(super) enum ForwardError {
         status: u16,
         message: String,
         error_code: Option<String>,
+        details: Option<Value>,
+        retry_guidance: Option<Value>,
     },
 }

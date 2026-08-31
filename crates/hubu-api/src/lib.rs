@@ -23,8 +23,8 @@ use hubu_common::{
         EXECUTION_SCOPE_SCHEMA_VERSION,
     },
     ids::{
-        AgentId, AgentSessionId, BudgetId, SpendAuthTokenId, SpendDecisionId, SpendExecutorClaimId,
-        SpendingTargetId, UserId,
+        AgentId, AgentSessionId, BudgetId, BudgetVersionId, SpendAuthTokenId, SpendDecisionId,
+        SpendExecutorClaimId, SpendingTargetId, UserId,
     },
     models::account::{AccountStatus, AgentAccount},
     models::identity::{
@@ -36,21 +36,22 @@ use hubu_common::{
 };
 use hubu_core::{
     app::{
-        ApprovedSpendAuthorization, AuthorizeSpendRequest, BudgetHoldUpdate,
-        ClaimExecutorSpendRequest, ExecutorClaimReconciliationOutcome, ExecutorClaimService,
-        ExecutorClaimState, FailedPaymentHoldPolicy, FinalizeExecutorClaimRequest,
-        HumanApprovalDecision, ReconcileExecutorClaimRequest, RejectedSpendAuthorization,
-        SettleExecutorClaimRequest, SpendApprovalError, SpendApprovalService,
-        SpendAuthorizationOutcome, SpendPaymentSpec,
+        ApprovedSpendAuthorization, AuthorizeSpendRequest, BudgetHoldUpdate, BudgetUpdateService,
+        BudgetUpdateServiceError, ClaimExecutorSpendRequest, ExecutorClaimReconciliationOutcome,
+        ExecutorClaimService, ExecutorClaimState, FailedPaymentHoldPolicy,
+        FinalizeExecutorClaimRequest, HumanApprovalDecision, ReconcileExecutorClaimRequest,
+        RejectedSpendAuthorization, SettleExecutorClaimRequest, SpendApprovalError,
+        SpendApprovalService, SpendAuthorizationOutcome, SpendPaymentSpec,
+        UpdateBudgetLimitRequest,
     },
     budget::{
-        BudgetAdministrativeState, BudgetAvailability, BudgetHold, BudgetHoldStatus, BudgetManager,
-        BudgetRecurrence, BudgetVersionProvenance, BudgetWithBalance, CreateBudgetSeriesRequest,
+        BudgetAdministrativeState, BudgetHold, BudgetHoldStatus, BudgetManager, BudgetRecurrence,
+        BudgetVersion, BudgetVersionProvenance, BudgetWithBalance, CreateBudgetSeriesRequest,
         CreateSingleBudgetRequest, EvaluatedBudget, ReserveBudgetResponse,
     },
     persistence::{
-        BudgetRepository, PolicyAssignmentScope, PolicyRepository, SpendRepository,
-        SpendingTargetRepository, SqliteGovernanceRepository,
+        AppendBudgetVersionError, BudgetRepository, PolicyAssignmentScope, PolicyRepository,
+        SpendRepository, SpendingTargetRepository, SqliteGovernanceRepository,
     },
     policy::{
         condition::{Condition, Field, PolicyValue},
@@ -91,6 +92,7 @@ const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
 const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
 const APPROVAL_CAPABILITY_HEADER: &str = "x-hubu-approval-capability";
 const SPEND_AUTH_TOKEN_EXPIRED_ERROR_CODE: &str = "spend_auth_token_expired";
+const BUDGET_UPDATE_SOURCE: &str = "hubu-api:update-budget-limit";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
@@ -1051,9 +1053,11 @@ struct BudgetIdHttpRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct ReplaceBudgetHttpRequest {
-    budget_id: String,
-    amount_cents: i64,
+#[serde(deny_unknown_fields)]
+struct UpdateBudgetLimitHttpRequest {
+    amount_limit_cents: i64,
+    expected_revision: i64,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1094,10 +1098,17 @@ struct RevokeBudgetHttpResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct ReplaceBudgetHttpResponse {
-    revoked_budget: BudgetHttpResponse,
-    budget: BudgetHttpResponse,
+struct UpdateBudgetLimitHttpResponse {
+    applied_version: BudgetVersionHttpResponse,
+    current_budget: BudgetHttpResponse,
+    idempotent_replay: bool,
     spending_target_warnings: Vec<SpendingTargetWarningHttpResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct BudgetVersionHistoryHttpResponse {
+    current_budget: BudgetHttpResponse,
+    versions: Vec<BudgetVersionHttpResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1124,6 +1135,8 @@ struct RevokeSpendingTargetHttpResponse {
 struct BudgetHttpResponse {
     budget_id: String,
     agent_id: String,
+    current_version_id: String,
+    current_revision: u64,
     amount_limit_cents: i64,
     currency: String,
     starting_at: String,
@@ -1132,6 +1145,37 @@ struct BudgetHttpResponse {
     consumed_amount_cents: i64,
     frozen_amount_cents: i64,
     remaining_amount_cents: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct BudgetVersionHttpResponse {
+    version_id: String,
+    revision: u64,
+    predecessor_version_id: Option<String>,
+    predecessor_revision: Option<u64>,
+    amount_limit_cents: i64,
+    effective_at: String,
+    actor: String,
+    source: String,
+    reason: Option<String>,
+    request_fingerprint: String,
+    created_at: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum BudgetVersionHttpError {
+    #[error("budget update amount must be positive")]
+    InvalidAmount,
+    #[error("budget update expected_revision must be at least 1")]
+    InvalidRevision,
+    #[error("budget not found")]
+    NotFound,
+    #[error(transparent)]
+    Update(#[from] BudgetUpdateServiceError),
+    #[error("budget version history failed: {0}")]
+    ReadInternal(#[source] anyhow::Error),
+    #[error("budget update failed: {0}")]
+    UpdateInternal(#[source] anyhow::Error),
 }
 
 #[derive(Debug, Serialize)]
@@ -1663,6 +1707,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         .get(APPROVAL_CAPABILITY_HEADER)
         .map(String::as_str);
     let request_now = Utc::now();
+    let budget_versions_public_id = budget_versions_public_id(&request.path).map(str::to_string);
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
         ("GET", "/version") => serde_json::to_value(build_info()).map_err(Into::into),
@@ -1694,9 +1739,25 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             create_budget_series_at(request.body, state, request_now).map(to_json)
         }
         ("POST", "/budgets/revoke") => revoke_budget(request.body, state).map(to_json),
-        ("POST", "/budgets/replace") => {
-            replace_budget_at(request.body, state, request_now).map(to_json)
-        }
+        ("POST", _) if budget_versions_public_id.is_some() => update_budget_limit_at(
+            budget_versions_public_id
+                .as_deref()
+                .expect("guard requires a parsed budget id"),
+            request.body,
+            state,
+            request_now,
+        )
+        .map(to_json)
+        .map_err(anyhow::Error::new),
+        ("GET", _) if budget_versions_public_id.is_some() => budget_version_history_at(
+            budget_versions_public_id
+                .as_deref()
+                .expect("guard requires a parsed budget id"),
+            state,
+            request_now,
+        )
+        .map(to_json)
+        .map_err(anyhow::Error::new),
         ("GET", "/budgets") => {
             list_budgets_at(state, query_flag(&request, "all"), request_now).map(to_json)
         }
@@ -1753,6 +1814,9 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
                     "error": error.to_string(),
                 }),
             );
+            if let Some(response) = budget_version_error_response(&error) {
+                return response;
+            }
             let message = error.to_string();
             let (status, retry_guidance) = spend_retry_error_response(&error);
             let mut body = json!({ "error": message, "retry_guidance": retry_guidance });
@@ -1762,6 +1826,156 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             HttpResponse { status, body }
         }
     }
+}
+
+fn budget_versions_public_id(path: &str) -> Option<&str> {
+    let remainder = path.strip_prefix("/budgets/")?;
+    let (budget_public_id, suffix) = remainder.split_once('/')?;
+    (!budget_public_id.is_empty() && suffix == "versions").then_some(budget_public_id)
+}
+
+fn is_valid_public_budget_id(budget_public_id: &str) -> bool {
+    let Some(suffix) = budget_public_id.strip_prefix("bgt_") else {
+        return false;
+    };
+    const PUBLIC_SUFFIX_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
+    suffix.len() == 12
+        && suffix
+            .chars()
+            .all(|character| PUBLIC_SUFFIX_ALPHABET.contains(character))
+}
+
+fn budget_version_error_response(error: &anyhow::Error) -> Option<HttpResponse> {
+    let error = error.downcast_ref::<BudgetVersionHttpError>()?;
+    let response = match error {
+        BudgetVersionHttpError::InvalidAmount => budget_error_response(
+            400,
+            "budget update amount must be positive",
+            "budget_update_invalid_amount",
+            None,
+            None,
+        ),
+        BudgetVersionHttpError::InvalidRevision => budget_error_response(
+            400,
+            "budget update expected_revision must be at least 1",
+            "budget_update_invalid_revision",
+            None,
+            None,
+        ),
+        BudgetVersionHttpError::NotFound => {
+            budget_error_response(404, "budget not found", "budget_not_found", None, None)
+        }
+        BudgetVersionHttpError::Update(BudgetUpdateServiceError::Append(error)) => match error {
+            AppendBudgetVersionError::AmountLimitMustBePositive => budget_error_response(
+                400,
+                "budget update amount must be positive",
+                "budget_update_invalid_amount",
+                None,
+                None,
+            ),
+            AppendBudgetVersionError::ExpectedRevisionMustBePositive => budget_error_response(
+                400,
+                "budget update expected_revision must be at least 1",
+                "budget_update_invalid_revision",
+                None,
+                None,
+            ),
+            AppendBudgetVersionError::UnknownBudget => {
+                budget_error_response(404, "budget not found", "budget_not_found", None, None)
+            }
+            AppendBudgetVersionError::RevisionConflict {
+                expected_revision,
+                current_revision,
+            } => budget_error_response(
+                409,
+                "budget revision conflict",
+                "budget_revision_conflict",
+                Some(json!({
+                    "expected_revision": expected_revision,
+                    "current_revision": current_revision,
+                })),
+                Some(json!({
+                    "action": "refresh_budget_history",
+                    "message": "fetch and review the current budget version history before issuing a new update intent"
+                })),
+            ),
+            AppendBudgetVersionError::BudgetRevoked => budget_error_response(
+                409,
+                "revoked budget cannot be updated",
+                "budget_revoked",
+                None,
+                None,
+            ),
+            AppendBudgetVersionError::BudgetExpired => budget_error_response(
+                409,
+                "expired budget cannot be updated",
+                "budget_expired",
+                None,
+                None,
+            ),
+            AppendBudgetVersionError::LimitBelowCommitted {
+                requested_amount_cents,
+                committed_amount_cents,
+            } => budget_error_response(
+                422,
+                "budget limit is below committed usage",
+                "budget_limit_below_committed",
+                Some(json!({
+                    "requested_amount_cents": requested_amount_cents,
+                    "committed_amount_cents": committed_amount_cents,
+                })),
+                Some(json!({
+                    "action": "increase_limit_to_committed_usage",
+                    "message": "choose a total budget limit at least as large as committed usage"
+                })),
+            ),
+            AppendBudgetVersionError::MissingActor
+            | AppendBudgetVersionError::MissingSource
+            | AppendBudgetVersionError::Storage(_) => budget_update_storage_error_response(),
+        },
+        BudgetVersionHttpError::ReadInternal(_) => budget_error_response(
+            500,
+            "budget version history could not be loaded",
+            "budget_update_storage_error",
+            None,
+            None,
+        ),
+        BudgetVersionHttpError::UpdateInternal(_) => budget_update_storage_error_response(),
+    };
+    Some(response)
+}
+
+fn budget_update_storage_error_response() -> HttpResponse {
+    budget_error_response(
+        500,
+        "budget update could not be completed",
+        "budget_update_storage_error",
+        None,
+        Some(json!({
+            "action": "retry_exactly",
+            "message": "retry with the same budget_id, expected_revision, amount_limit_cents, and reason after an ambiguous outcome"
+        })),
+    )
+}
+
+fn budget_error_response(
+    status: u16,
+    message: &str,
+    error_code: &str,
+    details: Option<Value>,
+    retry_guidance: Option<Value>,
+) -> HttpResponse {
+    let mut body = json!({
+        "error": message,
+        "error_code": error_code,
+    });
+    if let Some(details) = details {
+        body["details"] = details;
+    }
+    if let Some(retry_guidance) = retry_guidance {
+        body["retry_guidance"] = retry_guidance;
+    }
+    HttpResponse { status, body }
 }
 
 fn spend_http_error_code(error: &anyhow::Error) -> Option<&'static str> {
@@ -3091,7 +3305,8 @@ fn create_budget_at(
         return Err(anyhow!("budget amount must be positive"));
     }
 
-    let user = authenticated_user_context(state)?;
+    let authenticated_user = authenticated_user(state)?;
+    let user = UserContext::new(authenticated_user.id.clone());
     let agent_id = required_budget_agent_id(request.agent_id.as_deref(), &user, state)?;
     let period = TimePeriod::new(
         parse_optional_datetime(request.starting_at)?.unwrap_or(now),
@@ -3109,7 +3324,7 @@ fn create_budget_at(
                 currency: Currency::Usd,
                 period,
             },
-            BudgetVersionProvenance::new(user.user_id.to_string(), "hubu-api:create-budget"),
+            BudgetVersionProvenance::new(authenticated_user.pub_id, "hubu-api:create-budget"),
         )?;
     state
         .governance
@@ -3157,7 +3372,8 @@ fn create_budget_series_at(
         return Err(anyhow!("budget amount must be positive"));
     }
 
-    let user = authenticated_user_context(state)?;
+    let authenticated_user = authenticated_user(state)?;
+    let user = UserContext::new(authenticated_user.id.clone());
     let agent_id = required_budget_agent_id(request.agent_id.as_deref(), &user, state)?;
     let starting_at = parse_optional_datetime(request.starting_at)?.unwrap_or(now);
     let recurrence = budget_recurrence(request.recurrence);
@@ -3176,7 +3392,10 @@ fn create_budget_series_at(
                 recurrence,
                 period_count: request.period_count,
             },
-            BudgetVersionProvenance::new(user.user_id.to_string(), "hubu-api:create-budget-series"),
+            BudgetVersionProvenance::new(
+                authenticated_user.pub_id,
+                "hubu-api:create-budget-series",
+            ),
         )?;
     {
         let mut governance = state
@@ -3357,11 +3576,19 @@ fn resolve_budget_id_for_user(
     user: &UserContext,
     state: &ServerState,
 ) -> Result<BudgetId> {
-    budgets_for_user(user, state)?
+    budget_id_for_user(budget_pub_id, user, state)?
+        .ok_or_else(|| anyhow!("unknown budget id {budget_pub_id}"))
+}
+
+fn budget_id_for_user(
+    budget_pub_id: &str,
+    user: &UserContext,
+    state: &ServerState,
+) -> Result<Option<BudgetId>> {
+    Ok(budgets_for_user(user, state)?
         .into_iter()
         .find(|budget| public_budget_id(&budget.budget.id) == budget_pub_id)
-        .map(|budget| budget.budget.id)
-        .ok_or_else(|| anyhow!("unknown budget id {budget_pub_id}"))
+        .map(|budget| budget.budget.id))
 }
 
 fn resolve_spending_target_id(
@@ -3403,92 +3630,130 @@ fn revoke_budget(body: String, state: &ServerState) -> Result<RevokeBudgetHttpRe
     })
 }
 
-#[cfg(test)]
-fn replace_budget(body: String, state: &ServerState) -> Result<ReplaceBudgetHttpResponse> {
-    replace_budget_at(body, state, Utc::now())
-}
-
-fn replace_budget_at(
+fn update_budget_limit_at(
+    budget_pub_id: &str,
     body: String,
     state: &ServerState,
     now: DateTime<Utc>,
-) -> Result<ReplaceBudgetHttpResponse> {
-    let request: ReplaceBudgetHttpRequest = serde_json::from_str(&body)?;
-    if request.amount_cents <= 0 {
-        return Err(anyhow!("budget amount must be positive"));
+) -> std::result::Result<UpdateBudgetLimitHttpResponse, BudgetVersionHttpError> {
+    if !is_valid_public_budget_id(budget_pub_id) {
+        return Err(BudgetVersionHttpError::NotFound);
     }
-
-    let user = authenticated_user_context(state)?;
-    let budget_id = resolve_budget_id_for_user(&request.budget_id, &user, state)?;
-    let original = state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .get_budget_by_id(&budget_id)
-        .ok_or_else(|| anyhow!("unknown budget id {}", request.budget_id))?;
-
-    if original.availability_at(now)? != BudgetAvailability::Active {
-        return Err(anyhow!("budget {} is not active", request.budget_id));
+    let request = parse_update_budget_limit_request(&body)?;
+    if request.amount_limit_cents <= 0 {
+        return Err(BudgetVersionHttpError::InvalidAmount);
     }
-    if original.balance.frozen_amount_cents > 0 {
-        return Err(anyhow!("budget {} has frozen holds", request.budget_id));
-    }
+    let expected_revision = u64::try_from(request.expected_revision)
+        .ok()
+        .filter(|revision| *revision > 0)
+        .ok_or(BudgetVersionHttpError::InvalidRevision)?;
 
-    let ending_before = original.budget.period.ending_before;
-    if ending_before.is_some_and(|ending_before| ending_before <= now) {
-        return Err(anyhow!(
-            "budget {} has no remaining period",
-            request.budget_id
-        ));
-    }
-    let replacement_starting_at = original.budget.period.starting_at.max(now);
-    let replacement_period = TimePeriod::new(replacement_starting_at, ending_before)
-        .map_err(|error| anyhow!("invalid replacement budget period: {error:?}"))?;
+    let authenticated_user =
+        authenticated_user(state).map_err(BudgetVersionHttpError::UpdateInternal)?;
+    let user = UserContext::new(authenticated_user.id.clone());
+    reconcile_expired_budget_holds_at(state, now)
+        .map_err(BudgetVersionHttpError::UpdateInternal)?;
+    let budget_id = budget_id_for_user(budget_pub_id, &user, state)
+        .map_err(BudgetVersionHttpError::UpdateInternal)?
+        .ok_or(BudgetVersionHttpError::NotFound)?;
 
-    let (revoked, created) = {
-        let mut budgets = state
-            .budgets
-            .lock()
-            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-        let revoked = budgets.revoke_budget_at(&budget_id, now)?;
-        let created = budgets.create_single_budget_with_provenance(
-            CreateSingleBudgetRequest {
-                agent_id: original.budget.agent_id,
-                amount_limit_cents: request.amount_cents,
-                currency: original.budget.currency,
-                period: replacement_period,
+    let result = {
+        let mut budgets = state.budgets.lock().map_err(|_| {
+            BudgetVersionHttpError::UpdateInternal(anyhow!("budget manager lock poisoned"))
+        })?;
+        let mut governance = state.governance.lock().map_err(|_| {
+            BudgetVersionHttpError::UpdateInternal(anyhow!("governance store lock poisoned"))
+        })?;
+        BudgetUpdateService.update_limit(
+            UpdateBudgetLimitRequest {
+                budget_id,
+                expected_revision,
+                amount_limit_cents: request.amount_limit_cents,
+                actor: authenticated_user.pub_id,
+                source: Some(BUDGET_UPDATE_SOURCE.to_string()),
+                reason: request.reason,
             },
-            BudgetVersionProvenance::new(user.user_id.to_string(), "hubu-api:replace-budget"),
-        )?;
-        (
-            revoked,
-            BudgetWithBalance {
-                budget: created.budget,
-                version: created.version,
-                balance: created.balance,
-            },
-        )
+            now,
+            &mut budgets,
+            &mut *governance,
+        )?
     };
-    {
-        let mut governance = state
-            .governance
-            .lock()
-            .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        governance.save_budget_with_balance(&revoked.budget, &revoked.version, &revoked.balance)?;
-        governance.save_budget_with_balance(&created.budget, &created.version, &created.balance)?;
-    }
 
     let spending_target_warnings = spending_target_warnings_for_periods(
         &user,
-        std::slice::from_ref(&created.budget.period),
-        created.budget.currency,
+        std::slice::from_ref(&result.current.budget.period),
+        result.current.budget.currency,
         state,
-    )?;
-    Ok(ReplaceBudgetHttpResponse {
-        revoked_budget: budget_response_at(revoked, state, now)?,
-        budget: budget_response_at(created, state, now)?,
+    )
+    .map_err(BudgetVersionHttpError::UpdateInternal)?;
+    let applied_version =
+        budget_version_http_response(result.applied_version, Some(result.predecessor_revision));
+    let current_budget = budget_response_at(result.current, state, now)
+        .map_err(BudgetVersionHttpError::UpdateInternal)?;
+    Ok(UpdateBudgetLimitHttpResponse {
+        applied_version,
+        current_budget,
+        idempotent_replay: result.idempotent_replay,
         spending_target_warnings,
     })
+}
+
+fn budget_version_history_at(
+    budget_pub_id: &str,
+    state: &ServerState,
+    now: DateTime<Utc>,
+) -> std::result::Result<BudgetVersionHistoryHttpResponse, BudgetVersionHttpError> {
+    if !is_valid_public_budget_id(budget_pub_id) {
+        return Err(BudgetVersionHttpError::NotFound);
+    }
+    let user = authenticated_user_context(state).map_err(BudgetVersionHttpError::ReadInternal)?;
+    reconcile_expired_budget_holds_at(state, now).map_err(BudgetVersionHttpError::ReadInternal)?;
+    let budget_id = budget_id_for_user(budget_pub_id, &user, state)
+        .map_err(BudgetVersionHttpError::ReadInternal)?
+        .ok_or(BudgetVersionHttpError::NotFound)?;
+
+    let (current, versions) = {
+        let budgets = state.budgets.lock().map_err(|_| {
+            BudgetVersionHttpError::ReadInternal(anyhow!("budget manager lock poisoned"))
+        })?;
+        let current = budgets
+            .get_budget_by_id(&budget_id)
+            .ok_or(BudgetVersionHttpError::NotFound)?;
+        let versions = budgets.get_budget_versions_by_budget_id(&budget_id);
+        (current, versions)
+    };
+
+    Ok(BudgetVersionHistoryHttpResponse {
+        current_budget: budget_response_at(current, state, now)
+            .map_err(BudgetVersionHttpError::ReadInternal)?,
+        versions: versions
+            .into_iter()
+            .map(|version| {
+                let predecessor_revision = version
+                    .predecessor_version_id
+                    .as_ref()
+                    .and_then(|_| version.revision.checked_sub(1));
+                budget_version_http_response(version, predecessor_revision)
+            })
+            .collect(),
+    })
+}
+
+fn parse_update_budget_limit_request(
+    body: &str,
+) -> std::result::Result<UpdateBudgetLimitHttpRequest, BudgetVersionHttpError> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|_| BudgetVersionHttpError::InvalidAmount)?;
+    let object = value
+        .as_object()
+        .ok_or(BudgetVersionHttpError::InvalidAmount)?;
+    if !object.get("expected_revision").is_some_and(Value::is_i64) {
+        return Err(BudgetVersionHttpError::InvalidRevision);
+    }
+    if !object.get("amount_limit_cents").is_some_and(Value::is_i64) {
+        return Err(BudgetVersionHttpError::InvalidAmount);
+    }
+    serde_json::from_value(value).map_err(|_| BudgetVersionHttpError::InvalidAmount)
 }
 
 #[cfg(test)]
@@ -5203,22 +5468,16 @@ fn reconcile_expired_budget_holds(state: &ServerState) -> Result<()> {
 }
 
 fn reconcile_expired_budget_holds_at(state: &ServerState, now: DateTime<Utc>) -> Result<()> {
-    let expired = state
+    let mut budgets = state
         .budgets
         .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .expire_overdue_budget_holds(now)?;
-    if expired.is_empty() {
-        return Ok(());
-    }
-
+        .map_err(|_| anyhow!("budget manager lock poisoned"))?;
     let mut governance = state
         .governance
         .lock()
         .map_err(|_| anyhow!("governance store lock poisoned"))?;
-    for response in expired {
-        governance.update_budget_hold(&response.hold, &response.balance)?;
-    }
+    governance.expire_overdue_budget_holds(now)?;
+    budgets.expire_overdue_budget_holds(now)?;
     Ok(())
 }
 
@@ -5385,6 +5644,8 @@ fn evaluated_budget_response(
     Ok(BudgetHttpResponse {
         budget_id: public_budget_id(&current.budget.id),
         agent_id: registration_agent_pub_id(&current.budget.agent_id, state)?,
+        current_version_id: public_budget_version_id(&current.version.id),
+        current_revision: current.version.revision,
         amount_limit_cents: current.version.amount_limit_cents,
         currency: current.budget.currency.to_string(),
         starting_at: current.budget.period.starting_at.to_rfc3339(),
@@ -5398,6 +5659,39 @@ fn evaluated_budget_response(
         frozen_amount_cents: current.balance.frozen_amount_cents,
         remaining_amount_cents: current.balance.remaining_amount_cents,
     })
+}
+
+fn budget_version_http_response(
+    version: BudgetVersion,
+    predecessor_revision: Option<u64>,
+) -> BudgetVersionHttpResponse {
+    debug_assert_eq!(
+        version.predecessor_version_id.is_some(),
+        predecessor_revision.is_some()
+    );
+    BudgetVersionHttpResponse {
+        version_id: public_budget_version_id(&version.id),
+        revision: version.revision,
+        predecessor_version_id: version
+            .predecessor_version_id
+            .as_ref()
+            .map(public_budget_version_id),
+        predecessor_revision,
+        amount_limit_cents: version.amount_limit_cents,
+        effective_at: version.effective_at.to_rfc3339(),
+        actor: public_budget_version_actor(version.actor),
+        source: version.source,
+        reason: version.reason,
+        request_fingerprint: version.request_fingerprint,
+        created_at: version.created_at.to_rfc3339(),
+    }
+}
+
+fn public_budget_version_actor(actor: String) -> String {
+    actor
+        .parse::<UserId>()
+        .map(|user_id| format!("usr_{}", user_id.public_suffix()))
+        .unwrap_or(actor)
 }
 
 fn spending_target_response(
@@ -5458,7 +5752,7 @@ fn spending_target_warnings_for_periods(
                 allocated_amount_cents,
                 exceeded_by_cents,
                 message: format!(
-                    "agent budget allocations exceed the advisory spending target by {exceeded_by_cents} cents; budget creation was not blocked"
+                    "agent budget allocations exceed the advisory spending target by {exceeded_by_cents} cents; the budget change was not blocked"
                 ),
             })
         })
@@ -5526,6 +5820,10 @@ fn spending_target_status_name(target: &SpendingTarget) -> &'static str {
 
 fn public_budget_id(budget_id: &BudgetId) -> String {
     format!("bgt_{}", budget_id.public_suffix())
+}
+
+fn public_budget_version_id(version_id: &BudgetVersionId) -> String {
+    format!("bgv_{}", version_id.public_suffix())
 }
 
 fn public_spending_target_id(target_id: &SpendingTargetId) -> String {
@@ -5785,6 +6083,9 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
         200 => "OK",
         401 => "Unauthorized",
         404 => "Not Found",
+        409 => "Conflict",
+        422 => "Unprocessable Content",
+        500 => "Internal Server Error",
         _ => "Bad Request",
     };
     write!(
@@ -6946,9 +7247,9 @@ lease_profiles:
     }
 
     #[test]
-    fn budget_replace_revokes_old_budget_and_creates_forward_allowance() {
+    fn budget_version_routes_preserve_logical_identity_and_historical_replay() {
         let path =
-            std::env::temp_dir().join(format!("hubu-api-budget-replace-{}.sqlite", UserId::new()));
+            std::env::temp_dir().join(format!("hubu-api-budget-versions-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
         init(
             json!({
@@ -6961,7 +7262,7 @@ lease_profiles:
         .expect("init should create an explicit user");
         let agent = register_agent(
             json!({
-                "name": "budget-replace-agent",
+                "name": "budget-version-agent",
                 "version": "v1",
             })
             .to_string(),
@@ -6978,43 +7279,532 @@ lease_profiles:
             &state,
         )
         .expect("budget should be created");
-        let original_budget_id = budget.budget.budget_id.clone();
+        let budget_id = budget.budget.budget_id.clone();
+        assert!(budget.budget.current_version_id.starts_with("bgv_"));
+        assert_eq!(budget.budget.current_revision, 1);
+        let versions_path = format!("/budgets/{budget_id}/versions");
+        let first_request = json!({
+            "amount_limit_cents": 20_000,
+            "expected_revision": 1,
+            "reason": "increase the total cap",
+        });
 
-        let replaced = replace_budget(
+        let first = route(
+            authenticated_json_request(&versions_path, first_request.clone()),
+            &state,
+        );
+        assert_eq!(first.status, 200);
+        assert_eq!(first.body["applied_version"]["revision"], 2);
+        assert_eq!(first.body["applied_version"]["predecessor_revision"], 1);
+        assert!(first.body["applied_version"]["version_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("bgv_"));
+        assert!(first.body["applied_version"]["predecessor_version_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("bgv_"));
+        assert_eq!(first.body["current_budget"]["budget_id"], budget_id);
+        assert_eq!(first.body["current_budget"]["current_revision"], 2);
+        assert_eq!(first.body["current_budget"]["amount_limit_cents"], 20_000);
+        assert_eq!(
+            first.body["current_budget"]["remaining_amount_cents"],
+            20_000
+        );
+        assert_eq!(first.body["idempotent_replay"], false);
+        let first_version_id = first.body["applied_version"]["version_id"].clone();
+
+        let replay = route(
+            authenticated_json_request(&versions_path, first_request.clone()),
+            &state,
+        );
+        assert_eq!(replay.status, 200);
+        assert_eq!(replay.body["idempotent_replay"], true);
+        assert_eq!(
+            replay.body["applied_version"]["version_id"],
+            first_version_id
+        );
+
+        let second = route(
+            authenticated_json_request(
+                &versions_path,
+                json!({
+                    "amount_limit_cents": 25_000,
+                    "expected_revision": 2,
+                    "reason": "second total cap",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(second.status, 200);
+        assert_eq!(second.body["current_budget"]["current_revision"], 3);
+
+        let historical_replay = route(
+            authenticated_json_request(&versions_path, first_request),
+            &state,
+        );
+        assert_eq!(historical_replay.status, 200);
+        assert_eq!(historical_replay.body["idempotent_replay"], true);
+        assert_eq!(
+            historical_replay.body["applied_version"]["version_id"],
+            first_version_id
+        );
+        assert_eq!(historical_replay.body["applied_version"]["revision"], 2);
+        assert_eq!(
+            historical_replay.body["current_budget"]["current_revision"],
+            3
+        );
+        assert_eq!(
+            historical_replay.body["current_budget"]["amount_limit_cents"],
+            25_000
+        );
+
+        let history = route(authenticated_get_request(&versions_path), &state);
+        assert_eq!(history.status, 200);
+        assert_eq!(history.body["current_budget"]["budget_id"], budget_id);
+        let versions = history.body["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 3);
+        assert_eq!(versions[0]["revision"], 1);
+        assert!(versions[0]["predecessor_revision"].is_null());
+        assert_eq!(versions[1]["revision"], 2);
+        assert_eq!(versions[2]["revision"], 3);
+        assert_eq!(versions[1]["source"], BUDGET_UPDATE_SOURCE);
+        assert_eq!(versions[1]["reason"], "increase the total cap");
+        assert!(versions.iter().all(|version| version["actor"]
+            .as_str()
+            .is_some_and(|actor| actor.starts_with("usr_"))));
+        assert!(versions
+            .iter()
+            .all(|version| version.get("remaining_amount_cents").is_none()));
+
+        let legacy = route(
+            authenticated_json_request(
+                "/budgets/replace",
+                json!({
+                    "budget_id": budget.budget.budget_id,
+                    "amount_cents": 30_000,
+                }),
+            ),
+            &state,
+        );
+        assert_ne!(legacy.status, 200);
+        assert!(legacy.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("no route for POST /budgets/replace"));
+
+        let persisted_budgets = state.governance.lock().unwrap().load_budgets().unwrap();
+        assert_eq!(persisted_budgets.len(), 1);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn budget_history_projects_legacy_internal_user_actors_after_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-budget-legacy-actor-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
             json!({
-                "budget_id": original_budget_id.clone(),
-                "amount_cents": 20_000,
+                "display_name": "Legacy Budget Owner",
+                "email": "legacy-budget-owner@example.com",
             })
             .to_string(),
             &state,
         )
-        .expect("budget should replace");
-
-        assert_eq!(replaced.revoked_budget.budget_id, original_budget_id);
-        assert_eq!(replaced.revoked_budget.status, "revoked");
-        assert!(replaced.budget.budget_id.starts_with("bgt_"));
-        assert_ne!(replaced.budget.budget_id, original_budget_id);
-        assert_eq!(replaced.budget.status, "active");
-        assert_eq!(replaced.budget.amount_limit_cents, 20_000);
-        assert_eq!(replaced.budget.remaining_amount_cents, 20_000);
-        let versions = state
+        .unwrap();
+        let agent = register_agent(
+            json!({"name": "legacy-budget-actor-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let user = authenticated_user_context(&state).unwrap();
+        let expected_actor = format!("usr_{}", user.user_id.public_suffix());
+        let agent_id = resolve_agent_id_for_user(&agent.agent_id, &user, &state).unwrap();
+        let now = Utc::now();
+        let created = state
+            .budgets
+            .lock()
+            .unwrap()
+            .create_single_budget_with_provenance(
+                CreateSingleBudgetRequest {
+                    agent_id,
+                    amount_limit_cents: 10_000,
+                    currency: Currency::Usd,
+                    period: TimePeriod::new(now - Duration::hours(1), None).unwrap(),
+                },
+                BudgetVersionProvenance::new(user.user_id.to_string(), "hubu-api:create-budget"),
+            )
+            .unwrap();
+        state
             .governance
             .lock()
             .unwrap()
-            .load_budget_versions()
+            .save_budget_with_balance(&created.budget, &created.version, &created.balance)
             .unwrap();
-        assert_eq!(versions.len(), 2);
-        assert!(versions
-            .iter()
-            .all(|version| version.revision == 1 && version.predecessor_version_id.is_none()));
-        assert!(versions
-            .iter()
-            .any(|version| version.source == "hubu-api:create-budget"));
-        assert!(versions
-            .iter()
-            .any(|version| version.source == "hubu-api:replace-budget"));
-        assert!(versions.iter().all(|version| !version.actor.is_empty()));
+        let budget_id = public_budget_id(&created.budget.id);
+        let raw_actor = user.user_id.to_string();
+        drop(state);
+
+        let reloaded =
+            ServerState::new_with_db_path(&path).expect("persisted state should reload cleanly");
+        let history = route(
+            authenticated_get_request(&format!("/budgets/{budget_id}/versions")),
+            &reloaded,
+        );
+        assert_eq!(history.status, 200);
+        assert_eq!(history.body["versions"][0]["actor"], expected_actor);
+        assert!(!history.body.to_string().contains(&raw_actor));
+
+        drop(reloaded);
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn budget_version_routes_return_typed_revoked_and_expired_errors() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-budget-version-lifecycle-errors-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "display_name": "Budget Lifecycle Owner",
+                "email": "budget-lifecycle-owner@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        let revoked_agent = register_agent(
+            json!({"name": "revoked-budget-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let expired_agent = register_agent(
+            json!({"name": "expired-budget-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+
+        let revoked = create_budget(
+            json!({"agent_id": revoked_agent.agent_id, "amount_cents": 10_000}).to_string(),
+            &state,
+        )
+        .unwrap();
+        revoke_budget(
+            json!({"budget_id": revoked.budget.budget_id.clone()}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let revoked_response = route(
+            authenticated_json_request(
+                &format!("/budgets/{}/versions", revoked.budget.budget_id),
+                json!({"amount_limit_cents": 12_000, "expected_revision": 1}),
+            ),
+            &state,
+        );
+        assert_eq!(revoked_response.status, 409);
+        assert_eq!(revoked_response.body["error_code"], "budget_revoked");
+
+        let expired = create_budget_at(
+            json!({
+                "agent_id": expired_agent.agent_id,
+                "amount_cents": 10_000,
+                "starting_at": "2000-01-01T00:00:00Z",
+                "ending_before": "2000-01-02T00:00:00Z",
+            })
+            .to_string(),
+            &state,
+            "2000-01-01T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        let expired_response = route(
+            authenticated_json_request(
+                &format!("/budgets/{}/versions", expired.budget.budget_id),
+                json!({"amount_limit_cents": 12_000, "expected_revision": 1}),
+            ),
+            &state,
+        );
+        assert_eq!(expired_response.status, 409);
+        assert_eq!(expired_response.body["error_code"], "budget_expired");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn budget_update_reconciles_expired_frozen_usage_before_floor_validation() {
+        let lease_config = LeaseConfig {
+            authorization_ttl_seconds: 1,
+            ..LeaseConfig::default()
+        };
+        let (path, state, _agent, authorization) = setup_executor_authorization_with_lease_config(
+            "budget-update-expired-hold-floor",
+            lease_config,
+        );
+        let expiration: DateTime<Utc> = authorization
+            .authorization_expires_at
+            .as_deref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let budget_id = authorization
+            .budget_hold
+            .as_ref()
+            .unwrap()
+            .budget_id
+            .clone();
+
+        let updated = update_budget_limit_at(
+            &budget_id,
+            json!({
+                "amount_limit_cents": 1,
+                "expected_revision": 1,
+                "reason": "expired hold no longer commits capacity",
+            })
+            .to_string(),
+            &state,
+            expiration + Duration::nanoseconds(1),
+        )
+        .expect("expired frozen usage should be reconciled before the floor check");
+        assert_eq!(updated.current_budget.current_revision, 2);
+        assert_eq!(updated.current_budget.frozen_amount_cents, 0);
+        assert_eq!(updated.current_budget.remaining_amount_cents, 1);
+        let persisted_holds = state
+            .governance
+            .lock()
+            .unwrap()
+            .load_budget_holds()
+            .unwrap();
+        assert_eq!(persisted_holds.len(), 1);
+        assert!(matches!(
+            persisted_holds[0].status,
+            BudgetHoldStatus::Expired
+        ));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn budget_version_route_returns_typed_conflict_floor_and_ownership_errors() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-budget-version-errors-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({
+                "username": "budget-owner",
+                "display_name": "Budget Owner",
+                "email": "budget-owner@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name": "budget-error-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(json!({"daily_limit_cents": 20_000}).to_string(), &state).unwrap();
+        let budget = create_budget(
+            json!({"agent_id": agent.agent_id, "amount_cents": 10_000}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let versions_path = format!("/budgets/{}/versions", budget.budget.budget_id);
+        spend(
+            json!({
+                "operation_key": "budget-floor-spend",
+                "account_id": agent.account_id,
+                "amount_cents": 4_000,
+                "reason": "committed usage",
+                "merchant": "Acme Cafe",
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+
+        let invalid_amount = route(
+            authenticated_json_request(
+                &versions_path,
+                json!({"amount_limit_cents": 0, "expected_revision": 1}),
+            ),
+            &state,
+        );
+        assert_eq!(invalid_amount.status, 400);
+        assert_eq!(
+            invalid_amount.body["error_code"],
+            "budget_update_invalid_amount"
+        );
+
+        let invalid_revision = route(
+            authenticated_json_request(
+                &versions_path,
+                json!({"amount_limit_cents": 12_000, "expected_revision": -1}),
+            ),
+            &state,
+        );
+        assert_eq!(invalid_revision.status, 400);
+        assert_eq!(
+            invalid_revision.body["error_code"],
+            "budget_update_invalid_revision"
+        );
+
+        let invalid_shape = route(
+            authenticated_json_request(
+                &versions_path,
+                json!({
+                    "amount_limit_cents": 12_000,
+                    "expected_revision": 1,
+                    "unexpected": true,
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(invalid_shape.status, 400);
+        assert_eq!(
+            invalid_shape.body["error_code"],
+            "budget_update_invalid_amount"
+        );
+
+        let below_floor = route(
+            authenticated_json_request(
+                &versions_path,
+                json!({"amount_limit_cents": 3_999, "expected_revision": 1}),
+            ),
+            &state,
+        );
+        assert_eq!(below_floor.status, 422);
+        assert_eq!(
+            below_floor.body["error_code"],
+            "budget_limit_below_committed"
+        );
+        assert_eq!(below_floor.body["details"]["requested_amount_cents"], 3_999);
+        assert_eq!(below_floor.body["details"]["committed_amount_cents"], 4_000);
+
+        let updated = route(
+            authenticated_json_request(
+                &versions_path,
+                json!({"amount_limit_cents": 12_000, "expected_revision": 1}),
+            ),
+            &state,
+        );
+        assert_eq!(updated.status, 200);
+        assert_eq!(
+            updated.body["current_budget"]["consumed_amount_cents"],
+            4_000
+        );
+        assert_eq!(
+            updated.body["current_budget"]["remaining_amount_cents"],
+            8_000
+        );
+
+        let conflict = route(
+            authenticated_json_request(
+                &versions_path,
+                json!({
+                    "amount_limit_cents": 13_000,
+                    "expected_revision": 1,
+                    "reason": "different stale intent",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(conflict.status, 409);
+        assert_eq!(conflict.body["error_code"], "budget_revision_conflict");
+        assert_eq!(conflict.body["details"]["expected_revision"], 1);
+        assert_eq!(conflict.body["details"]["current_revision"], 2);
+        assert_eq!(
+            conflict.body["retry_guidance"]["action"],
+            "refresh_budget_history"
+        );
+
+        init(
+            json!({
+                "username": "other-owner",
+                "display_name": "Other Owner",
+                "email": "other-owner@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        let not_owned = route(authenticated_get_request(&versions_path), &state);
+        let unknown = route(
+            authenticated_get_request("/budgets/bgt_000000000000/versions"),
+            &state,
+        );
+        let malformed = route(
+            authenticated_get_request("/budgets/bgt_............/versions"),
+            &state,
+        );
+        assert_eq!(not_owned.status, 404);
+        assert_eq!(not_owned.body, unknown.body);
+        assert_eq!(malformed.status, 404);
+        assert_eq!(malformed.body, unknown.body);
+        assert_eq!(not_owned.body["error_code"], "budget_not_found");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn budget_version_error_mapping_is_typed_and_redacts_storage_failures() {
+        use hubu_core::storage::StorageError;
+
+        let typed = anyhow::Error::new(BudgetVersionHttpError::Update(
+            BudgetUpdateServiceError::Append(AppendBudgetVersionError::BudgetRevoked),
+        ));
+        let response = budget_version_error_response(&typed).unwrap();
+        assert_eq!(response.status, 409);
+        assert_eq!(response.body["error_code"], "budget_revoked");
+
+        let lookalike = anyhow!("revoked budget cannot be updated");
+        assert!(budget_version_error_response(&lookalike).is_none());
+
+        let storage = anyhow::Error::new(BudgetVersionHttpError::Update(
+            BudgetUpdateServiceError::Append(AppendBudgetVersionError::Storage(
+                StorageError::InvalidData("secret database detail".to_string()),
+            )),
+        ));
+        let response = budget_version_error_response(&storage).unwrap();
+        assert_eq!(response.status, 500);
+        assert_eq!(response.body["error_code"], "budget_update_storage_error");
+        assert!(!response.body.to_string().contains("secret database detail"));
+        assert_eq!(response.body["retry_guidance"]["action"], "retry_exactly");
+    }
+
+    #[test]
+    fn budget_version_path_parser_accepts_only_the_exact_dynamic_shape() {
+        assert_eq!(
+            budget_versions_public_id("/budgets/bgt_0123456789ab/versions"),
+            Some("bgt_0123456789ab")
+        );
+        for invalid in [
+            "/budgets//versions",
+            "/budgets/bgt_0123456789ab/versions/",
+            "/budgets/bgt_0123456789ab/versions/extra",
+            "/budgets/replace",
+            "/budgets/series",
+            "/budgets",
+        ] {
+            assert_eq!(budget_versions_public_id(invalid), None, "{invalid}");
+        }
+        for valid in ["bgt_0123456789ab", "bgt_abcdefghjkmn"] {
+            assert!(is_valid_public_budget_id(valid), "{valid}");
+        }
+        for invalid in [
+            "bgt_0123456789AB",
+            "bgt_0123456789ai",
+            "bgt_0123456789ab%2fextra",
+            "bgt_../../secret",
+            "0123456789ab",
+        ] {
+            assert!(!is_valid_public_budget_id(invalid), "{invalid}");
+        }
     }
 
     #[test]

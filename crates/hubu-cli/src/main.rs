@@ -3,7 +3,7 @@ use std::{
     env,
     fmt::Write as _,
     fs,
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     net::{Shutdown, TcpStream},
     path::{Path, PathBuf},
     process::Command,
@@ -65,6 +65,36 @@ struct ClientTarget {
     base_url: String,
     credentials: CredentialSources,
 }
+
+#[derive(Debug)]
+struct HttpApplicationError {
+    status: u16,
+    body: Value,
+}
+
+impl std::fmt::Display for HttpApplicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = self
+            .body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("request failed");
+        write!(formatter, "server returned HTTP {}", self.status)?;
+        if let Some(error_code) = self.body.get("error_code").and_then(Value::as_str) {
+            write!(formatter, " ({error_code})")?;
+        }
+        write!(formatter, ": {message}")?;
+        if let Some(details) = self.body.get("details") {
+            write!(formatter, "; details={details}")?;
+        }
+        if let Some(retry_guidance) = self.body.get("retry_guidance") {
+            write!(formatter, "; retry_guidance={retry_guidance}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for HttpApplicationError {}
 
 #[derive(Debug)]
 enum CredentialSources {
@@ -1544,7 +1574,8 @@ fn budget(base_url: &CliContext, args: Vec<String>) -> Result<()> {
         "create" => budget_create(base_url, args),
         "create-recurring" => budget_create_recurring(base_url, args),
         "list" => budget_list(base_url, args),
-        "replace" => budget_replace(base_url, args),
+        "update" => budget_update(base_url, args),
+        "history" => budget_history(base_url, args),
         "revoke" => budget_revoke(base_url, args),
         "-h" | "--help" | "help" => {
             print_budget_help();
@@ -1677,38 +1708,179 @@ fn budget_revoke(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn budget_replace(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
+fn budget_update(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
-        print_budget_replace_help();
+        print_budget_update_help();
         return Ok(());
     }
 
     let budget_id = take_required(&mut args, "--budget-id")?;
+    validate_public_budget_id(&budget_id)?;
     let amount = take_required(&mut args, "--amount")?;
+    let amount_limit_cents = amount_to_cents(&amount)?;
+    if amount_limit_cents <= 0 {
+        bail!("budget total limit must be greater than zero");
+    }
+    let expected_revision = take_value(&mut args, "--expected-revision")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .with_context(|| "--expected-revision must be a positive integer")
+        })
+        .transpose()?;
+    if expected_revision == Some(0) {
+        bail!("--expected-revision must be at least 1");
+    }
+    let reason = take_value(&mut args, "--reason");
+    let confirmed = take_flag(&mut args, "--yes");
     ensure_no_args(args)?;
-    let response = post_json(
-        base_url,
-        "/budgets/replace",
-        json!({
-            "budget_id": budget_id,
-            "amount_cents": amount_to_cents(&amount)?,
-        }),
-    )?;
 
-    println!("{}", terminal::stdout().success("Budget replaced"));
-    println!("{}", terminal::stdout().heading("Revoked budget"));
-    print_budget(
+    let path = budget_versions_path(&budget_id)?;
+    let history = get_json(base_url, &path)?;
+    let current = history
+        .get("current_budget")
+        .ok_or_else(|| anyhow!("server response missing `current_budget`"))?;
+    if string_at(current, "budget_id")? != budget_id {
+        bail!("server returned a different logical budget than requested");
+    }
+    let current_revision = u64_at(current, "current_revision")?;
+    let pinned_revision = expected_revision.unwrap_or(current_revision);
+    let current_total = i64_at(current, "amount_limit_cents")?;
+    let consumed = i64_at(current, "consumed_amount_cents")?;
+    let frozen = i64_at(current, "frozen_amount_cents")?;
+    let projected_remaining = amount_limit_cents
+        .checked_sub(consumed)
+        .and_then(|remaining| remaining.checked_sub(frozen))
+        .ok_or_else(|| anyhow!("projected remaining amount exceeds the supported range"))?;
+
+    print_budget_update_review(
+        &budget_id,
+        pinned_revision,
+        current_revision,
+        current_total,
+        consumed,
+        frozen,
+        amount_limit_cents,
+        projected_remaining,
+        reason.as_deref(),
+    );
+
+    if pinned_revision == current_revision {
+        let status = string_at(current, "status")?;
+        if status == "revoked" {
+            bail!("current budget is revoked and cannot be updated");
+        }
+        if status == "expired" {
+            bail!("current budget is expired and cannot be updated");
+        }
+        if projected_remaining < 0 {
+            let committed = consumed
+                .checked_add(frozen)
+                .ok_or_else(|| anyhow!("committed budget usage exceeds the supported range"))?;
+            bail!(
+                "proposed total {} is below committed usage {}",
+                format_cents(amount_limit_cents, "$"),
+                format_cents(committed, "$")
+            );
+        }
+    }
+
+    if !confirmed {
+        confirm_budget_update()?;
+    }
+
+    let mut body = json!({
+        "amount_limit_cents": amount_limit_cents,
+        "expected_revision": pinned_revision,
+    });
+    if let Some(reason) = &reason {
+        body["reason"] = json!(reason);
+    }
+    let response = post_budget_update_with_retry(base_url, &path, &budget_id, &body)?;
+    let replay = response
+        .get("idempotent_replay")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("server response missing `idempotent_replay`"))?;
+
+    let outcome = if replay {
+        "Budget update replayed"
+    } else {
+        "Budget update applied"
+    };
+    println!("{}", terminal::stdout().success(outcome));
+    println!(
+        "{}",
+        terminal::stdout().heading("Applied immutable version")
+    );
+    print_budget_version(
         response
-            .get("revoked_budget")
-            .ok_or_else(|| anyhow!("server response missing `revoked_budget`"))?,
+            .get("applied_version")
+            .ok_or_else(|| anyhow!("server response missing `applied_version`"))?,
+        None,
     )?;
-    println!("{}", terminal::stdout().heading("Replacement budget"));
+    println!("  idempotent_replay: {replay}");
+    println!(
+        "{}",
+        terminal::stdout().heading("Authoritative current budget")
+    );
     print_budget(
         response
-            .get("budget")
-            .ok_or_else(|| anyhow!("server response missing `budget`"))?,
+            .get("current_budget")
+            .ok_or_else(|| anyhow!("server response missing `current_budget`"))?,
     )?;
     print_spending_target_warnings(&response)?;
+    Ok(())
+}
+
+fn budget_history(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_budget_history_help();
+        return Ok(());
+    }
+
+    let budget_id = take_required(&mut args, "--budget-id")?;
+    validate_public_budget_id(&budget_id)?;
+    ensure_no_args(args)?;
+    let response = get_json(base_url, &budget_versions_path(&budget_id)?)?;
+    let current = response
+        .get("current_budget")
+        .ok_or_else(|| anyhow!("server response missing `current_budget`"))?;
+    if string_at(current, "budget_id")? != budget_id {
+        bail!("server returned a different logical budget than requested");
+    }
+    let current_version_id = string_at(current, "current_version_id")?;
+    let current_revision = u64_at(current, "current_revision")?;
+
+    println!("{}", terminal::stdout().heading("Current logical budget"));
+    print_budget(current)?;
+    println!(
+        "{}",
+        terminal::stdout().heading("Immutable version history")
+    );
+    let versions = response
+        .get("versions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `versions`"))?;
+    if versions.is_empty() {
+        bail!("server returned an empty budget version history");
+    }
+    let mut previous_revision = 0;
+    let mut current_markers = 0;
+    for version in versions {
+        let revision = u64_at(version, "revision")?;
+        if revision <= previous_revision {
+            bail!("server returned budget versions outside ascending revision order");
+        }
+        previous_revision = revision;
+        let marker = (string_at(version, "version_id")? == current_version_id).then(|| {
+            current_markers += 1;
+            "current"
+        });
+        print_budget_version(version, marker)?;
+    }
+    if previous_revision != current_revision || current_markers != 1 {
+        bail!("server returned a budget history that does not contain exactly one current head");
+    }
     Ok(())
 }
 
@@ -2429,6 +2601,11 @@ fn print_budget(budget: &Value) -> Result<()> {
         money_at(budget, "frozen_amount_cents")?,
         money_at(budget, "remaining_amount_cents")?
     );
+    println!(
+        "    current_version_id: {}  current_revision: {}",
+        string_at(budget, "current_version_id")?,
+        u64_at(budget, "current_revision")?
+    );
     let starting_at = local_timestamp(string_at(budget, "starting_at")?);
     let ending_before = budget
         .get("ending_before")
@@ -2436,6 +2613,97 @@ fn print_budget(budget: &Value) -> Result<()> {
         .map(local_timestamp)
         .unwrap_or_else(|| "open-ended".to_string());
     println!("    period: {starting_at} -> {ending_before}");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_budget_update_review(
+    budget_id: &str,
+    pinned_revision: u64,
+    current_revision: u64,
+    current_total: i64,
+    consumed: i64,
+    frozen: i64,
+    proposed_total: i64,
+    projected_remaining: i64,
+    reason: Option<&str>,
+) {
+    println!("{}", terminal::stdout().heading("Budget update review"));
+    println!("  budget_id: {budget_id}");
+    println!("  pinned_revision: {pinned_revision}  current_revision: {current_revision}");
+    println!(
+        "  current_total: {}  consumed: {}  frozen: {}",
+        format_cents(current_total, "$"),
+        format_cents(consumed, "$"),
+        format_cents(frozen, "$")
+    );
+    println!(
+        "  proposed_total: {}  projected_remaining: {}",
+        format_cents(proposed_total, "$"),
+        format_cents(projected_remaining, "$")
+    );
+    println!(
+        "  reason: {}",
+        reason
+            .map(terminal_safe_text)
+            .unwrap_or_else(|| "(omitted)".to_string())
+    );
+}
+
+fn confirm_budget_update() -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!("budget update requires interactive confirmation; rerun with --yes in noninteractive environments");
+    }
+    print!("Apply this budget update? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut response = String::new();
+    std::io::stdin().read_line(&mut response)?;
+    if matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        bail!("budget update cancelled")
+    }
+}
+
+fn print_budget_version(version: &Value, marker: Option<&str>) -> Result<()> {
+    let revision = u64_at(version, "revision")?;
+    let version_id = string_at(version, "version_id")?;
+    let marker = marker
+        .map(|value| format!("  [{value}]"))
+        .unwrap_or_default();
+    println!("  revision: {revision}  version_id: {version_id}{marker}");
+    let predecessor_revision = version
+        .get("predecessor_revision")
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let predecessor_version_id = version
+        .get("predecessor_version_id")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    println!(
+        "    predecessor_revision: {predecessor_revision}  predecessor_version_id: {predecessor_version_id}"
+    );
+    println!(
+        "    total_limit: {}  effective_at: {}  created_at: {}",
+        money_at(version, "amount_limit_cents")?,
+        local_timestamp(string_at(version, "effective_at")?),
+        local_timestamp(string_at(version, "created_at")?)
+    );
+    println!(
+        "    actor: {}  source: {}  reason: {}",
+        string_at(version, "actor")?,
+        string_at(version, "source")?,
+        version
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(terminal_safe_text)
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!(
+        "    request_fingerprint: {}",
+        string_at(version, "request_fingerprint")?
+    );
     Ok(())
 }
 
@@ -2552,11 +2820,7 @@ fn request_json(
         .with_context(|| format!("parse server response body `{response_body}`"))?;
 
     if !(200..300).contains(&status) {
-        let message = json
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("request failed");
-        bail!("server returned HTTP {status}: {message}");
+        return Err(HttpApplicationError { status, body: json }.into());
     }
 
     Ok(json)
@@ -2568,6 +2832,155 @@ fn get_json(client: &CliContext, path: &str) -> Result<Value> {
 
 fn post_json(client: &CliContext, path: &str, body: Value) -> Result<Value> {
     request_json(client, "POST", path, Some(body), false, false)
+}
+
+fn post_budget_update_with_retry(
+    client: &CliContext,
+    path: &str,
+    budget_id: &str,
+    body: &Value,
+) -> Result<Value> {
+    let send = || {
+        let response = post_json(client, path, body.clone())?;
+        validate_budget_update_response(&response)?;
+        let applied = &response["applied_version"];
+        let requested_reason = body
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty());
+        let applied_reason = applied
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty());
+        if string_at(&response["current_budget"], "budget_id")? != budget_id
+            || applied.get("predecessor_revision").and_then(Value::as_u64)
+                != Some(u64_at(body, "expected_revision")?)
+            || i64_at(applied, "amount_limit_cents")? != i64_at(body, "amount_limit_cents")?
+            || applied_reason != requested_reason
+        {
+            bail!("server returned a budget update that does not match the pinned intent");
+        }
+        Ok(response)
+    };
+    match send() {
+        Ok(response) => Ok(response),
+        Err(error) if !is_ambiguous_budget_update_error(&error) => Err(error),
+        Err(first_error) => {
+            eprintln!(
+                "{}",
+                terminal::stderr().warning(
+                    "Budget update outcome was ambiguous; retrying once with the exact same intent."
+                )
+            );
+            match send() {
+                Ok(response) => Ok(response),
+                Err(error) if !is_ambiguous_budget_update_error(&error) => Err(error),
+                Err(second_error) => {
+                    let amount_limit_cents = i64_at(body, "amount_limit_cents")?;
+                    let expected_revision = u64_at(body, "expected_revision")?;
+                    let reason = body
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .map(|value| format!("{value:?}"))
+                        .unwrap_or_else(|| "<omitted>".to_string());
+                    bail!(
+                        "budget update outcome remains ambiguous after one exact retry: {second_error}. Retry manually without changing or omitting any field: budget_id={budget_id}, expected_revision={expected_revision}, amount_limit_cents={amount_limit_cents}, reason={reason}. First ambiguous error: {first_error}"
+                    )
+                }
+            }
+        }
+    }
+}
+
+fn is_ambiguous_budget_update_error(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<HttpApplicationError>() {
+        None => true,
+        Some(application) => {
+            application.status == 500
+                && application.body.get("error_code").and_then(Value::as_str)
+                    == Some("budget_update_storage_error")
+        }
+    }
+}
+
+fn validate_budget_update_response(response: &Value) -> Result<()> {
+    let applied = response
+        .get("applied_version")
+        .ok_or_else(|| anyhow!("server response missing `applied_version`"))?;
+    let _ = string_at(applied, "version_id")?;
+    let _ = u64_at(applied, "revision")?;
+    let _ = i64_at(applied, "amount_limit_cents")?;
+    let _ = string_at(applied, "effective_at")?;
+    let _ = string_at(applied, "actor")?;
+    let _ = string_at(applied, "source")?;
+    let _ = string_at(applied, "request_fingerprint")?;
+    let _ = string_at(applied, "created_at")?;
+    for optional_string in ["predecessor_version_id", "reason"] {
+        if applied
+            .get(optional_string)
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            bail!("server response field `{optional_string}` has the wrong type");
+        }
+    }
+    if applied
+        .get("predecessor_revision")
+        .is_none_or(|value| !value.is_null() && !value.is_u64())
+    {
+        bail!("server response field `predecessor_revision` has the wrong type");
+    }
+
+    let current = response
+        .get("current_budget")
+        .ok_or_else(|| anyhow!("server response missing `current_budget`"))?;
+    for field in [
+        "budget_id",
+        "agent_id",
+        "status",
+        "current_version_id",
+        "starting_at",
+    ] {
+        let _ = string_at(current, field)?;
+    }
+    for field in [
+        "amount_limit_cents",
+        "consumed_amount_cents",
+        "frozen_amount_cents",
+        "remaining_amount_cents",
+    ] {
+        let _ = i64_at(current, field)?;
+    }
+    let _ = u64_at(current, "current_revision")?;
+    if current
+        .get("ending_before")
+        .is_some_and(|value| !value.is_null() && !value.is_string())
+    {
+        bail!("server response field `ending_before` has the wrong type");
+    }
+    if !response
+        .get("idempotent_replay")
+        .is_some_and(Value::is_boolean)
+    {
+        bail!("server response missing `idempotent_replay`");
+    }
+    let warnings = response
+        .get("spending_target_warnings")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `spending_target_warnings`"))?;
+    for warning in warnings {
+        let _ = string_at(warning, "target_id")?;
+        let _ = string_at(warning, "message")?;
+        for field in [
+            "target_amount_cents",
+            "allocated_amount_cents",
+            "exceeded_by_cents",
+        ] {
+            let _ = i64_at(warning, field)?;
+        }
+    }
+    Ok(())
 }
 
 fn post_approval_json(client: &CliContext, path: &str, body: Value) -> Result<Value> {
@@ -2760,6 +3173,30 @@ fn parse_http_response(raw: &str) -> Result<(u16, &str)> {
     Ok((status, body))
 }
 
+fn validate_public_budget_id(budget_id: &str) -> Result<()> {
+    let Some(suffix) = budget_id.strip_prefix("bgt_") else {
+        bail!("budget id must use the public `bgt_` form");
+    };
+    const PUBLIC_SUFFIX_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
+    if suffix.len() != 12
+        || !suffix
+            .chars()
+            .all(|character| PUBLIC_SUFFIX_ALPHABET.contains(character))
+    {
+        bail!("budget id must be a safe public `bgt_` identifier");
+    }
+    Ok(())
+}
+
+fn budget_versions_path(budget_id: &str) -> Result<String> {
+    validate_public_budget_id(budget_id)?;
+    Ok(format!("/budgets/{budget_id}/versions"))
+}
+
+fn terminal_safe_text(value: &str) -> String {
+    serde_json::to_string(value).expect("JSON string serialization should not fail")
+}
+
 fn take_help(args: &mut Vec<String>) -> bool {
     take_flag(args, "-h") || take_flag(args, "--help") || take_flag(args, "help")
 }
@@ -2801,6 +3238,20 @@ fn string_at<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow!("server response missing `{key}`"))
 }
 
+fn i64_at(value: &Value, key: &str) -> Result<i64> {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("server response missing `{key}`"))
+}
+
+fn u64_at(value: &Value, key: &str) -> Result<u64> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("server response missing `{key}`"))
+}
+
 fn money_at(value: &Value, key: &str) -> Result<String> {
     let cents = value
         .get(key)
@@ -2832,7 +3283,7 @@ Commands:
   policy     Manage spending policies
   init       Generate starter files and configure clients
   agent      Read registered agents
-  budget     Create and list agent budgets
+  budget     Create, review, update, and list agent budgets
   spend      Test spend and reconcile uncertain executor claims
   ledger     Read ledger transactions
   health     Check the Hubu server
@@ -3131,19 +3582,21 @@ Examples:
 
 fn print_budget_help() {
     println!(
-        "Create and list agent budgets
+        "Create, review, update, and list agent budgets
 
 Usage:
   hubu budget create --amount AMOUNT --agent-id ID [--starting-at RFC3339] [--ending-before RFC3339]
   hubu budget create-recurring --amount AMOUNT --agent-id ID --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
   hubu budget revoke --budget-id ID
-  hubu budget replace --budget-id ID --amount AMOUNT
+  hubu budget update --budget-id ID --amount AMOUNT [--expected-revision N] [--reason TEXT] [--yes]
+  hubu budget history --budget-id ID
   hubu budget list [--all]
 
 Examples:
   hubu budget create --agent-id AGENT_ID --amount 25
   hubu budget create-recurring --agent-id AGENT_ID --amount 25 --recurrence monthly --period-count 3
-  hubu budget replace --budget-id BUDGET_ID --amount 50
+  hubu budget update --budget-id BUDGET_ID --amount 50 --reason \"Raise total cap\"
+  hubu budget history --budget-id BUDGET_ID
   hubu budget revoke --budget-id BUDGET_ID
   hubu budget list"
     );
@@ -3204,12 +3657,28 @@ Usage:
     );
 }
 
-fn print_budget_replace_help() {
+fn print_budget_update_help() {
     println!(
-        "Replace an active budget with a new forward-looking allowance
+        "Update the total cap of one stable logical budget
 
 Usage:
-  hubu budget replace --budget-id ID --amount AMOUNT"
+  hubu budget update --budget-id ID --amount AMOUNT [--expected-revision N] [--reason TEXT] [--yes]
+
+Options:
+  --expected-revision N  Pin the immutable predecessor revision; defaults to the reviewed current revision
+  --reason TEXT          Optional provenance recorded on the immutable successor
+  --yes                  Skip the prompt after printing the required review (needed for noninteractive use)
+
+The amount is the new total budget cap, not an added allowance. Hubu preserves consumed and frozen usage. After confirmation the CLI never refreshes or rebases the pinned intent. Create a new budget to change the agent, currency, or period."
+    );
+}
+
+fn print_budget_history_help() {
+    println!(
+        "Show one logical budget and its immutable version history
+
+Usage:
+  hubu budget history --budget-id ID"
     );
 }
 
@@ -3515,6 +3984,335 @@ mod tests {
     fn decimal_major_unit_amounts_distinguish_five_from_five_cents() {
         assert_eq!(amount_to_cents("5").unwrap(), 500);
         assert_eq!(amount_to_cents("0.05").unwrap(), 5);
+    }
+
+    #[test]
+    fn budget_version_paths_require_exact_safe_public_ids() {
+        assert_eq!(
+            budget_versions_path("bgt_0123456789ab").unwrap(),
+            "/budgets/bgt_0123456789ab/versions"
+        );
+        for unsafe_id in [
+            "0123456789ab",
+            "bgt_short",
+            "bgt_0123456789ai",
+            "bgt_0123456789a/versions",
+            "bgt_0123456789AB",
+        ] {
+            assert!(budget_versions_path(unsafe_id).is_err(), "{unsafe_id}");
+        }
+    }
+
+    #[test]
+    fn retired_budget_replace_command_is_rejected_before_network_access() {
+        let client = CliContext::new(
+            Some("http://127.0.0.1:1".to_string()),
+            std::env::temp_dir().join("hubu-cli-retired-budget-replace-test-home"),
+        );
+        let error = budget(
+            &client,
+            vec![
+                "replace".to_string(),
+                "--budget-id".to_string(),
+                "bgt_0123456789ab".to_string(),
+                "--amount".to_string(),
+                "10".to_string(),
+            ],
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unknown budget command `replace`"));
+    }
+
+    #[test]
+    fn budget_reason_rendering_escapes_terminal_control_characters() {
+        let rendered = terminal_safe_text("raise\n  proposed_total: $999.00\r\u{1b}[31m");
+        assert!(rendered.contains("\\n"));
+        assert!(rendered.contains("\\r"));
+        assert!(rendered.contains("\\u001b"));
+        assert!(!rendered.contains('\n'));
+        assert!(!rendered.contains('\r'));
+        assert!(!rendered.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn explicit_historical_revision_is_submitted_without_local_head_rejection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let responses = [
+                json!({
+                    "current_budget": sample_budget("revoked", 3, 1_000, 900, 100),
+                    "versions": []
+                }),
+                json!({
+                    "applied_version": sample_budget_version(2, 1, 500),
+                    "current_budget": sample_budget("revoked", 3, 1_000, 900, 100),
+                    "idempotent_replay": true,
+                    "spending_target_warnings": []
+                }),
+            ];
+            let mut captured = Vec::new();
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut raw = String::new();
+                stream.read_to_string(&mut raw).unwrap();
+                let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+                let request_line = head.lines().next().unwrap().to_string();
+                let body: Option<Value> =
+                    (!body.is_empty()).then(|| serde_json::from_str(body).unwrap());
+                captured.push((request_line, body));
+                let response_body = response.to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                )
+                .unwrap();
+            }
+            captured
+        });
+        let client = CliContext::new(
+            Some(format!("http://{address}")),
+            std::env::temp_dir().join("hubu-cli-budget-update-test-home"),
+        );
+
+        budget_update(
+            &client,
+            [
+                "--budget-id",
+                "bgt_0123456789ab",
+                "--amount",
+                "5",
+                "--expected-revision",
+                "1",
+                "--reason",
+                "historical retry",
+                "--yes",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        )
+        .unwrap();
+
+        let captured = server.join().unwrap();
+        assert_eq!(
+            captured[0].0,
+            "GET /budgets/bgt_0123456789ab/versions HTTP/1.1"
+        );
+        assert!(captured[0].1.is_none());
+        assert_eq!(
+            captured[1].0,
+            "POST /budgets/bgt_0123456789ab/versions HTTP/1.1"
+        );
+        assert_eq!(
+            captured[1].1.as_ref().unwrap(),
+            &json!({
+                "amount_limit_cents": 500,
+                "expected_revision": 1,
+                "reason": "historical retry"
+            })
+        );
+    }
+
+    #[test]
+    fn ambiguous_budget_post_retries_once_with_byte_equivalent_json_intent() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let success_response = json!({
+            "applied_version": sample_budget_version(8, 7, 5_000),
+            "current_budget": sample_budget("active", 8, 5_000, 0, 0),
+            "idempotent_replay": false,
+            "spending_target_warnings": []
+        });
+        let server_success = success_response.clone();
+        let server = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut raw = String::new();
+                stream.read_to_string(&mut raw).unwrap();
+                bodies.push(raw.split_once("\r\n\r\n").unwrap().1.to_string());
+                let response_body = if attempt == 0 {
+                    json!({"ok": true}).to_string()
+                } else {
+                    server_success.to_string()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                )
+                .unwrap();
+            }
+            bodies
+        });
+        let client = CliContext::new(
+            Some(format!("http://{address}")),
+            std::env::temp_dir().join("hubu-cli-budget-retry-test-home"),
+        );
+        let body = json!({
+            "amount_limit_cents": 5_000,
+            "expected_revision": 7,
+            "reason": "historical retry"
+        });
+
+        let response = post_budget_update_with_retry(
+            &client,
+            "/budgets/bgt_0123456789ab/versions",
+            "bgt_0123456789ab",
+            &body,
+        )
+        .unwrap();
+        assert_eq!(response, success_response);
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], bodies[1]);
+    }
+
+    #[test]
+    fn typed_storage_outcome_retries_once_and_recovers_exact_replay() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let success_response = json!({
+            "applied_version": sample_budget_version(8, 7, 5_000),
+            "current_budget": sample_budget("active", 8, 5_000, 0, 0),
+            "idempotent_replay": true,
+            "spending_target_warnings": []
+        });
+        let server_success = success_response.clone();
+        let server = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut raw = String::new();
+                stream.read_to_string(&mut raw).unwrap();
+                bodies.push(raw.split_once("\r\n\r\n").unwrap().1.to_string());
+                let (status, response_body) = if attempt == 0 {
+                    (
+                        "500 Internal Server Error",
+                        json!({
+                            "error": "budget update could not be completed",
+                            "error_code": "budget_update_storage_error",
+                            "retry_guidance": {
+                                "action": "retry_exactly",
+                                "message": "reuse the pinned intent"
+                            }
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    ("200 OK", server_success.to_string())
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                )
+                .unwrap();
+            }
+            bodies
+        });
+        let client = CliContext::new(
+            Some(format!("http://{address}")),
+            std::env::temp_dir().join("hubu-cli-budget-storage-retry-test-home"),
+        );
+        let body = json!({
+            "amount_limit_cents": 5_000,
+            "expected_revision": 7,
+            "reason": "historical retry"
+        });
+
+        let response = post_budget_update_with_retry(
+            &client,
+            "/budgets/bgt_0123456789ab/versions",
+            "bgt_0123456789ab",
+            &body,
+        )
+        .unwrap();
+        assert_eq!(response, success_response);
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], bodies[1]);
+    }
+
+    #[test]
+    fn structured_budget_rejection_is_never_retried() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = String::new();
+            stream.read_to_string(&mut raw).unwrap();
+            let response_body =
+                r#"{"error":"refresh first","error_code":"budget_revision_conflict"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            )
+            .unwrap();
+            drop(stream);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            listener.set_nonblocking(true).unwrap();
+            matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            )
+        });
+        let client = CliContext::new(
+            Some(format!("http://{address}")),
+            std::env::temp_dir().join("hubu-cli-budget-rejection-test-home"),
+        );
+        let body = json!({
+            "amount_limit_cents": 5_000,
+            "expected_revision": 7
+        });
+
+        let error = post_budget_update_with_retry(
+            &client,
+            "/budgets/bgt_0123456789ab/versions",
+            "bgt_0123456789ab",
+            &body,
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<HttpApplicationError>().is_some());
+        assert!(error.to_string().contains("HTTP 409"));
+        assert!(server.join().unwrap(), "structured rejection was retried");
+    }
+
+    fn sample_budget(status: &str, revision: u64, total: i64, consumed: i64, frozen: i64) -> Value {
+        json!({
+            "budget_id": "bgt_0123456789ab",
+            "agent_id": "agt_0123456789ab",
+            "status": status,
+            "amount_limit_cents": total,
+            "consumed_amount_cents": consumed,
+            "frozen_amount_cents": frozen,
+            "remaining_amount_cents": total - consumed - frozen,
+            "current_version_id": format!("bgv_{revision:012}"),
+            "current_revision": revision,
+            "starting_at": "2026-08-28T00:00:00+00:00",
+            "ending_before": null
+        })
+    }
+
+    fn sample_budget_version(revision: u64, predecessor_revision: u64, total: i64) -> Value {
+        json!({
+            "version_id": format!("bgv_{revision:012}"),
+            "revision": revision,
+            "predecessor_version_id": format!("bgv_{predecessor_revision:012}"),
+            "predecessor_revision": predecessor_revision,
+            "amount_limit_cents": total,
+            "effective_at": "2026-08-28T00:00:00+00:00",
+            "actor": "usr_0123456789ab",
+            "source": "hubu-api:update-budget-limit",
+            "reason": "historical retry",
+            "request_fingerprint": "sha256:test",
+            "created_at": "2026-08-28T00:00:00+00:00"
+        })
     }
 
     #[test]

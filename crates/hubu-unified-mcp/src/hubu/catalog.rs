@@ -142,13 +142,22 @@ fn all_tool_definitions() -> Vec<Value> {
                 "budget_id": { "type": "string" }
             })),
         ),
-        approval_tool(
-            "hubu_replace_budget",
-            "Replace an active budget with a new forward-looking allowance. Requires a human click.",
-            json_schema(json!({
-                "budget_id": { "type": "string" },
-                "amount_cents": { "type": "integer" }
-            })),
+        idempotent_approval_tool(
+            "hubu_update_budget",
+            "Update the total cap of one stable logical budget from an explicitly pinned revision. The amount is the complete cap, not an added allowance. Requires a human click.",
+            json_schema_required(json!({
+                "budget_id": { "type": "string", "minLength": 1 },
+                "expected_revision": { "type": "integer", "minimum": 1 },
+                "amount_limit_cents": { "type": "integer", "minimum": 1 },
+                "reason": { "type": "string" }
+            }), &["budget_id", "expected_revision", "amount_limit_cents"]),
+        ),
+        read_tool(
+            "hubu_budget_history",
+            "Read one stable logical budget and its immutable versions in ascending revision order.",
+            json_schema_required(json!({
+                "budget_id": { "type": "string", "minLength": 1 }
+            }), &["budget_id"]),
         ),
         approval_tool(
             "hubu_set_spending_target",
@@ -369,6 +378,22 @@ fn approval_tool(name: &str, description: &str, input_schema: Value) -> Value {
             read_only: false,
             destructive: true,
             idempotent: false,
+            human_approval: "required",
+            client_approval_mode: "prompt_before_call",
+            runtime_approval: "client_human_approval_required",
+        },
+    )
+}
+
+fn idempotent_approval_tool(name: &str, description: &str, input_schema: Value) -> Value {
+    tool(
+        name,
+        description,
+        input_schema,
+        ToolAnnotations {
+            read_only: false,
+            destructive: true,
+            idempotent: true,
             human_approval: "required",
             client_approval_mode: "prompt_before_call",
             runtime_approval: "client_human_approval_required",

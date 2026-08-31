@@ -13,7 +13,8 @@ use crate::{
 use response::ForwardError;
 pub(crate) use routing::{denied_retry_guidance, DENIED_OPERATION_GUIDANCE};
 use routing::{
-    public_spend_result, route_tool_call_v1, tool_result_v1, validate_model_spend_arguments,
+    public_spend_result, route_tool_call_v1, tool_error_result_v1, tool_result_v1,
+    validate_model_spend_arguments,
 };
 pub use transport::RoutingConfig;
 
@@ -260,6 +261,11 @@ fn call_tool_with_operation_identity(
             )
         }
         Err(error) => {
+            if matches!(name.as_str(), "hubu_update_budget" | "hubu_budget_history") {
+                if let Some(result) = budget_application_error_tool_result(&error) {
+                    return success_response(id, result);
+                }
+            }
             let message = operation.as_ref().map_or_else(
                 || error.to_string(),
                 |operation| {
@@ -276,6 +282,31 @@ fn call_tool_with_operation_identity(
             error_response(id, -32000, &message)
         }
     }
+}
+
+fn budget_application_error_tool_result(error: &anyhow::Error) -> Option<Value> {
+    let ForwardError::Application {
+        status,
+        message,
+        error_code: Some(error_code),
+        details,
+        retry_guidance,
+    } = error.downcast_ref::<ForwardError>()?
+    else {
+        return None;
+    };
+    let mut envelope = json!({
+        "error": message,
+        "http_status": status,
+        "error_code": error_code,
+    });
+    if let Some(details) = details {
+        envelope["details"] = details.clone();
+    }
+    if let Some(retry_guidance) = retry_guidance {
+        envelope["retry_guidance"] = retry_guidance.clone();
+    }
+    Some(tool_error_result_v1(envelope))
 }
 
 fn operation_failure_message(

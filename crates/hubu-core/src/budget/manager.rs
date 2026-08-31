@@ -860,6 +860,19 @@ impl BudgetManager {
             .unwrap_or_default()
     }
 
+    /// Return the immutable version history for one logical budget in ascending
+    /// revision order.
+    pub fn get_budget_versions_by_budget_id(&self, budget_id: &BudgetId) -> Vec<BudgetVersion> {
+        let mut versions = self
+            .budget_versions
+            .values()
+            .filter(|version| version.budget_id == *budget_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        versions.sort_by_key(|version| version.revision);
+        versions
+    }
+
     pub fn get_evaluated_budget_by_id(
         &self,
         budget_id: &BudgetId,
@@ -1305,6 +1318,62 @@ mod tests {
             })
             .expect("current version limit should authorize the hold");
         assert_eq!(reservation.hold.budget_version_id, second_version.id);
+    }
+
+    #[test]
+    fn budget_version_history_is_sorted_and_scoped_to_one_logical_budget() {
+        let mut original_manager = BudgetManager::new();
+        let created = create_agent_budget(&mut original_manager, 10_000);
+        let unrelated = create_agent_budget(&mut original_manager, 5_000);
+        let second_version = BudgetVersion {
+            id: BudgetVersionId::new(),
+            budget_id: created.budget.id.clone(),
+            revision: 2,
+            predecessor_version_id: Some(created.version.id.clone()),
+            amount_limit_cents: 20_000,
+            effective_at: Utc::now(),
+            actor: "test:budget-owner".to_string(),
+            source: "manager-history-test".to_string(),
+            reason: Some("test ordered history".to_string()),
+            request_fingerprint: "sha256:test-history-revision-2".to_string(),
+            created_at: Utc::now(),
+        };
+        let mut logical_budget = created.budget;
+        logical_budget.current_version_id = second_version.id.clone();
+        let logical_budget_id = logical_budget.id.clone();
+
+        let hydrated = BudgetManager::from_records(
+            vec![unrelated.budget, logical_budget],
+            vec![
+                second_version.clone(),
+                unrelated.version,
+                created.version.clone(),
+            ],
+            vec![
+                unrelated.balance,
+                BudgetBalance {
+                    budget_id: logical_budget_id.clone(),
+                    consumed_amount_cents: 0,
+                    frozen_amount_cents: 0,
+                    remaining_amount_cents: 20_000,
+                },
+            ],
+            vec![],
+        )
+        .expect("version graph should hydrate from unordered records");
+
+        let versions = hydrated.get_budget_versions_by_budget_id(&logical_budget_id);
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].id, created.version.id);
+        assert_eq!(versions[0].revision, 1);
+        assert_eq!(versions[1].id, second_version.id);
+        assert_eq!(versions[1].revision, 2);
+        assert!(versions
+            .iter()
+            .all(|version| version.budget_id == logical_budget_id));
+        assert!(hydrated
+            .get_budget_versions_by_budget_id(&BudgetId::new())
+            .is_empty());
     }
 
     #[test]

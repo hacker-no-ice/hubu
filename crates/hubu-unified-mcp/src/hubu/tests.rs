@@ -197,7 +197,36 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
 
     let expected = super::catalog::tool_definitions();
     assert_eq!(&actual[3..], expected.as_slice());
-    assert_eq!(expected.len(), 30);
+    assert_eq!(expected.len(), 31);
+    assert!(!actual
+        .iter()
+        .any(|tool| tool["name"] == "hubu_replace_budget"));
+    let update = actual
+        .iter()
+        .find(|tool| tool["name"] == "hubu_update_budget")
+        .unwrap();
+    assert_eq!(
+        update["inputSchema"]["required"],
+        json!(["budget_id", "expected_revision", "amount_limit_cents"])
+    );
+    assert_eq!(
+        update["inputSchema"]["properties"]["expected_revision"]["minimum"],
+        1
+    );
+    assert_eq!(
+        update["inputSchema"]["properties"]["amount_limit_cents"]["minimum"],
+        1
+    );
+    assert_eq!(update["inputSchema"]["additionalProperties"], false);
+    assert_eq!(update["annotations"]["idempotentHint"], true);
+    assert_eq!(update["annotations"]["destructiveHint"], true);
+    let history = actual
+        .iter()
+        .find(|tool| tool["name"] == "hubu_budget_history")
+        .unwrap();
+    assert_eq!(history["inputSchema"]["required"], json!(["budget_id"]));
+    assert_eq!(history["inputSchema"]["additionalProperties"], false);
+    assert_eq!(history["annotations"]["readOnlyHint"], true);
     let get = actual
         .iter()
         .find(|tool| tool["name"] == "hubu_get_spend_approval")
@@ -262,7 +291,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 38);
+    assert_eq!(tools.len(), 39);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -280,7 +309,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 36);
+    assert_eq!(degraded.len(), 37);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -329,6 +358,15 @@ fn unified_approval_profile_contains_only_callable_continuations() {
         .as_array()
         .unwrap()
         .contains(&json!("hubu_resolve_spend_approval")));
+    assert!(profile["client_policy"]["auto_approve_tools"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("hubu_budget_history")));
+    assert!(profile["client_policy"]["prompt_before_call_tools"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("hubu_update_budget")));
+    assert!(!profile.to_string().contains("hubu_replace_budget"));
     assert!(profile["client_policy"]["auto_approve_tools"]
         .as_array()
         .unwrap()
@@ -478,10 +516,22 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::None,
         ),
         (
-            "hubu_replace_budget",
-            empty.clone(),
+            "hubu_update_budget",
+            json!({
+                "budget_id":"bgt_0123456789ab",
+                "expected_revision":1,
+                "amount_limit_cents":5_000,
+                "reason":"raise total cap"
+            }),
             "POST",
-            "/budgets/replace",
+            "/budgets/bgt_0123456789ab/versions",
+            HubuRequestCapabilityV1::None,
+        ),
+        (
+            "hubu_budget_history",
+            json!({"budget_id":"bgt_0123456789ab"}),
+            "GET",
+            "/budgets/bgt_0123456789ab/versions",
             HubuRequestCapabilityV1::None,
         ),
         (
@@ -583,7 +633,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::Reconciliation,
         ),
     ];
-    assert_eq!(cases.len(), 29);
+    assert_eq!(cases.len(), 30);
     for (name, arguments, method, path, capability) in cases {
         let params = json!({
             "name": name,
@@ -623,6 +673,16 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
         }
         if name == "hubu_apply_policy" {
             assert_eq!(request.body.as_ref().unwrap()["source"], "mcp");
+        }
+        if name == "hubu_update_budget" {
+            assert_eq!(
+                request.body.as_ref().unwrap(),
+                &json!({
+                    "expected_revision": 1,
+                    "amount_limit_cents": 5_000,
+                    "reason": "raise total cap"
+                })
+            );
         }
         assert_eq!(result["structuredContent"]["status"], "ok");
     }
@@ -703,6 +763,193 @@ fn approved_query_variants_match_owned_routing_contract() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("pass only one"));
+}
+
+#[test]
+fn budget_version_arguments_and_transport_paths_fail_closed() {
+    for (name, arguments, expected) in [
+        (
+            "hubu_update_budget",
+            json!({"budget_id":"bgt_0123456789ab","expected_revision":0,"amount_limit_cents":1}),
+            "expected_revision >= 1",
+        ),
+        (
+            "hubu_update_budget",
+            json!({"budget_id":"bgt_0123456789ab","expected_revision":1,"amount_limit_cents":0}),
+            "amount_limit_cents >= 1",
+        ),
+        (
+            "hubu_update_budget",
+            json!({"budget_id":"bgt_0123456789ab/versions","expected_revision":1,"amount_limit_cents":1}),
+            "safe public identifier",
+        ),
+        (
+            "hubu_update_budget",
+            json!({"budget_id":"bgt_0123456789ab","expected_revision":1,"amount_limit_cents":1,"extra":true}),
+            "accepts only",
+        ),
+        (
+            "hubu_budget_history",
+            json!({"budget_id":"bgt_0123456789ai"}),
+            "safe public identifier",
+        ),
+        (
+            "hubu_budget_history",
+            json!({"budget_id":"bgt_0123456789ab","extra":true}),
+            "accepts only budget_id",
+        ),
+    ] {
+        let error = route_tool_call_v1(
+            json!({"name":name,"arguments":arguments}),
+            true,
+            true,
+            None,
+            |_| panic!("invalid budget route must not reach the backend"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(expected), "{name}: {error}");
+    }
+
+    for method in ["GET", "POST"] {
+        assert!(super::transport::is_approved_http_route(
+            method,
+            "/budgets/bgt_0123456789ab/versions"
+        ));
+    }
+    for path in [
+        "/budgets/replace",
+        "/budgets/bgt_0123456789ab",
+        "/budgets/bgt_0123456789ab/versions/extra",
+        "/budgets/bgt_0123456789ab/versions?all=true",
+        "/budgets/bgt_0123456789ab%2fescape/versions",
+        "/budgets/../versions",
+    ] {
+        assert!(
+            !super::transport::is_approved_http_route("POST", path),
+            "{path}"
+        );
+    }
+    assert!(!super::transport::is_approved_http_route(
+        "DELETE",
+        "/budgets/bgt_0123456789ab/versions"
+    ));
+
+    let old = route_tool_call_v1(
+        json!({"name":"hubu_replace_budget","arguments":{}}),
+        true,
+        true,
+        None,
+        |_| panic!("retired budget tool must not reach the backend"),
+    )
+    .unwrap_err();
+    assert!(old.to_string().contains("unknown Hubu MCP tool"));
+}
+
+#[test]
+fn budget_application_errors_are_typed_tool_results_and_recursively_redacted() {
+    let body = r#"{
+        "error":"revision conflict hubu-token-canary",
+        "error_code":"budget_revision_conflict",
+        "details":{
+            "expected_revision":1,
+            "current_revision":2,
+            "hubu-token-canary":"secret-bearing key",
+            "nested":["approval-secret-canary",{"reconciliation-secret-canary":"nested secret-bearing key"}]
+        },
+        "retry_guidance":{
+            "action":"refresh_budget_history",
+            "message":"do not expose hubu-token-canary"
+        }
+    }"#;
+    let (endpoint, request, handle) = one_shot_http_server(409, body);
+    let server = server_with_spend_approval(
+        &endpoint,
+        None,
+        true,
+        false,
+        Some("approval-secret-canary"),
+        Some("reconciliation-secret-canary"),
+    );
+
+    let response = tool_call(
+        &server,
+        "hubu_update_budget",
+        json!({
+            "budget_id":"bgt_0123456789ab",
+            "expected_revision":1,
+            "amount_limit_cents":5_000,
+            "reason":"raise cap"
+        }),
+        None,
+    );
+    let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+
+    assert!(raw.starts_with("POST /budgets/bgt_0123456789ab/versions HTTP/1.1"));
+    let forwarded: Value = serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert!(forwarded.get("budget_id").is_none());
+    assert_eq!(forwarded["expected_revision"], 1);
+    assert_eq!(forwarded["amount_limit_cents"], 5_000);
+    assert_eq!(response["result"]["isError"], true);
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["http_status"], 409);
+    assert_eq!(structured["error_code"], "budget_revision_conflict");
+    assert_eq!(structured["details"]["expected_revision"], 1);
+    assert_eq!(structured["details"]["current_revision"], 2);
+    assert_eq!(
+        structured["retry_guidance"]["action"],
+        "refresh_budget_history"
+    );
+    assert_eq!(
+        response["result"]["content"][0]["text"],
+        serde_json::to_string_pretty(structured).unwrap()
+    );
+    let serialized = response.to_string();
+    for secret in [
+        "hubu-token-canary",
+        "approval-secret-canary",
+        "reconciliation-secret-canary",
+    ] {
+        assert!(!serialized.contains(secret));
+    }
+    assert!(serialized.matches("<redacted>").count() >= 4);
+}
+
+#[test]
+fn budget_history_not_found_is_a_typed_tool_result_but_other_hubu_tools_are_unchanged() {
+    let (endpoint, request, handle) = one_shot_http_server(
+        404,
+        r#"{"error":"budget not found","error_code":"budget_not_found"}"#,
+    );
+    let server = server_with_backends(&endpoint, None, false, None);
+    let response = tool_call(
+        &server,
+        "hubu_budget_history",
+        json!({"budget_id":"bgt_0123456789ab"}),
+        None,
+    );
+    request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(response["result"]["structuredContent"]["http_status"], 404);
+    assert_eq!(
+        response["result"]["structuredContent"]["error_code"],
+        "budget_not_found"
+    );
+    assert!(response["result"]["structuredContent"]
+        .get("details")
+        .is_none());
+
+    let (endpoint, request, handle) = one_shot_http_server(
+        409,
+        r#"{"error":"ordinary failure","error_code":"budget_revision_conflict"}"#,
+    );
+    let server = server_with_backends(&endpoint, None, false, None);
+    let response = tool_call(&server, "hubu_list_users", json!({}), None);
+    request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+    assert_eq!(response["error"]["code"], -32000);
+    assert!(response.get("result").is_none());
 }
 
 #[test]
