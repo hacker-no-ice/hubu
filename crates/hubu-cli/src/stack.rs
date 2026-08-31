@@ -2385,12 +2385,11 @@ fn validate_provider_source(source: &ProvidersSource) -> Result<()> {
             if source.maximum_spend_minor.is_some()
                 || source.live_spend_acknowledgement.is_some()
                 || source.targets.is_empty()
-                || source
-                    .targets
-                    .iter()
-                    .any(|target| target.adapter.as_deref() != Some("fixture"))
+                || source.targets.iter().any(|target| {
+                    target.adapter.as_deref() != Some("fixture") || target.credential.is_some()
+                })
             {
-                bail!("providers.toml sandbox mode requires fixture-only targets and forbids live-spend fields");
+                bail!("providers.toml sandbox mode requires credential-free fixture targets and forbids live-spend fields");
             }
         }
         ProviderMode::Live => {
@@ -4324,8 +4323,10 @@ mod tests {
             if mode == "sandbox" {
                 let mut stack_source: StackSource = toml::from_str(&stack).unwrap();
                 stack_source.gongbu.as_mut().unwrap().ownership = Some(Ownership::External);
-                let providers_source: ProvidersSource = toml::from_str(&providers).unwrap();
+                let mut providers_source: ProvidersSource = toml::from_str(&providers).unwrap();
                 assert!(validate_stack_mode(&stack_source, &providers_source).is_err());
+                providers_source.targets[0].credential = Some("custom-reference".into());
+                assert!(validate_provider_source(&providers_source).is_err());
             }
         }
         let invalid = root.path().join("invalid");

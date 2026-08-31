@@ -893,7 +893,12 @@ fn validate_managed_temporal_cli(config: &TemporalConfig) -> Result<(), ServerEr
         .unwrap_or_default()
         .split_whitespace();
     let reported_cli_version = match (fields.next(), fields.next(), fields.next()) {
-        (Some("temporal"), Some("version"), Some(value)) => value,
+        (Some(product), Some(label), Some(value))
+            if product.eq_ignore_ascii_case("temporal")
+                && label.eq_ignore_ascii_case("version") =>
+        {
+            value
+        }
         _ => {
             return Err(invalid(
                 "managed Temporal CLI version output has an unsupported format",
@@ -1102,7 +1107,7 @@ mod tests {
         fs::write(&prices, "{}").unwrap();
         fs::write(
             &binary,
-            "#!/bin/sh\necho 'temporal version 1.0.0 (Server 9.9.9, UI 8.8.8)'\n",
+            "#!/bin/sh\necho 'Temporal Version v1.0.0 (Server 9.9.9, UI 8.8.8)'\n",
         )
         .unwrap();
         #[cfg(unix)]
