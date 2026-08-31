@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hubu Policy Authoring"
+  short_description: "Author reviewable, extensible Hubu spending policies"
+  default_prompt: "Use $hubu-policy-authoring to turn my spending constraints into a validated Hubu policy and attach it at the intended scope."
