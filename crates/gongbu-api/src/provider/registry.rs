@@ -193,9 +193,9 @@ impl ProviderAdapter for DeterministicFixtureAdapter {
                 images: Some(1),
                 ..Default::default()
             }),
-            // The deterministic fixture has no vendor charge. Settlement therefore
-            // uses the frozen catalog estimate selected for the request.
-            actual_vendor_cost: None,
+            actual_vendor_cost: Some(
+                crate::provider_contract::ActualVendorCost::new(1, 2, "USD").unwrap(),
+            ),
             provider_request_id: Some(format!("local-fixture-request-{provider_request_id}")),
             provider_operation_id: None,
             artifacts: vec![NormalizedArtifact {
