@@ -2531,6 +2531,12 @@ fn validate_provider_credential_isolation(
 
 fn validate_stack_mode(stack: &StackSource, providers: &ProvidersSource) -> Result<()> {
     match stack.mode {
+        StackMode::Sandbox
+            if stack.gongbu.as_ref().and_then(|value| value.ownership)
+                != Some(Ownership::Managed) =>
+        {
+            bail!("sandbox stack mode requires managed Gongbu ownership")
+        }
         StackMode::Sandbox if providers.mode != Some(ProviderMode::Sandbox) => {
             bail!("sandbox stack mode requires providers.toml sandbox mode")
         }
@@ -4315,6 +4321,12 @@ mod tests {
             assert_eq!(stack.contains("[gongbu]"), has_gongbu);
             assert_eq!(stack.contains("[temporal]"), has_gongbu);
             assert!(providers.contains(&format!("mode = \"{provider_mode}\"")));
+            if mode == "sandbox" {
+                let mut stack_source: StackSource = toml::from_str(&stack).unwrap();
+                stack_source.gongbu.as_mut().unwrap().ownership = Some(Ownership::External);
+                let providers_source: ProvidersSource = toml::from_str(&providers).unwrap();
+                assert!(validate_stack_mode(&stack_source, &providers_source).is_err());
+            }
         }
         let invalid = root.path().join("invalid");
         assert!(init(

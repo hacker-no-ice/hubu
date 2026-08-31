@@ -769,6 +769,12 @@ fn startup_bootstrap_secret_provider() -> Result<Arc<dyn SecretProvider>, Server
             .map(|provider| Arc::new(provider) as Arc<dyn SecretProvider>)
             .map_err(|_| invalid("managed stack credential directory is unavailable"));
     }
+    #[cfg(feature = "local-fixture-canary")]
+    if std::env::var("GONGBU_LOCAL_FIXTURE_CANARY").as_deref() == Ok("1") {
+        return crate::secrets::LocalFixtureSecrets::from_environment()
+            .map(|provider| Arc::new(provider) as Arc<dyn SecretProvider>)
+            .map_err(|_| invalid("local fixture credential directory is unavailable"));
+    }
     Ok(Arc::new(MacOsKeychain))
 }
 
