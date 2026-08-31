@@ -946,16 +946,17 @@ fn prepare_temporal_dependency(mode: StackMode, install: bool) -> Result<()> {
         if !status.success() {
             bail!("Homebrew failed to install the Temporal CLI");
         }
+        if discover_binary("temporal").is_none() {
+            bail!("Temporal CLI was installed but is not discoverable on PATH");
+        }
+        Ok(())
     }
     #[cfg(not(target_os = "macos"))]
-    bail!(
-        "--install-temporal is currently supported only on macOS; install Temporal CLI from https://docs.temporal.io/cli/setup-cli"
-    );
-
-    if discover_binary("temporal").is_none() {
-        bail!("Temporal CLI was installed but is not discoverable on PATH");
+    {
+        bail!(
+            "--install-temporal is currently supported only on macOS; install Temporal CLI from https://docs.temporal.io/cli/setup-cli"
+        )
     }
-    Ok(())
 }
 
 fn select_profile(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
