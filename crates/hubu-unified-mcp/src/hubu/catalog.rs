@@ -137,7 +137,7 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         approval_tool(
             "hubu_revoke_budget",
-            "Revoke an active budget. Requires a human click.",
+            "Administratively revoke a budget so it cannot reserve future spend. Requires a human click.",
             json_schema(json!({
                 "budget_id": { "type": "string" }
             })),
@@ -219,7 +219,7 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         read_tool(
             "hubu_list_budgets",
-            "List active budgets for the active Hubu user.",
+            "List scheduled, active, and exhausted budgets for the active Hubu user. Set include_all to include expired and revoked budgets.",
             json_schema(json!({
                 "include_all": { "type": "boolean" }
             })),

@@ -1,4 +1,6 @@
-use crate::budget::model::{BudgetError, BudgetHoldError};
+use crate::budget::model::{
+    BudgetAvailability, BudgetError, BudgetEvaluationError, BudgetHoldError,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BudgetManagerError {
@@ -14,11 +16,8 @@ pub enum BudgetManagerError {
     #[error("budget balance not found")]
     MissingBudgetBalance,
 
-    #[error("budget is not active")]
-    BudgetNotActive,
-
-    #[error("budget period is not active")]
-    BudgetPeriodInactive,
+    #[error("budget is unavailable: {0}")]
+    BudgetUnavailable(BudgetAvailability),
 
     #[error("budget currency does not match request currency")]
     CurrencyMismatch,
@@ -29,8 +28,8 @@ pub enum BudgetManagerError {
     #[error("budget does not have enough remaining balance")]
     InsufficientRemainingBudget,
 
-    #[error("budget has frozen holds")]
-    BudgetHasFrozenHolds,
+    #[error("budget is already revoked")]
+    BudgetAlreadyRevoked,
 
     #[error("spend decision already has a budget hold")]
     DuplicateSpendDecisionHold,
@@ -66,5 +65,11 @@ impl From<BudgetError> for BudgetManagerError {
 impl From<BudgetHoldError> for BudgetManagerError {
     fn from(error: BudgetHoldError) -> Self {
         Self::InvalidBudgetHoldTransition(error)
+    }
+}
+
+impl From<BudgetEvaluationError> for BudgetManagerError {
+    fn from(error: BudgetEvaluationError) -> Self {
+        Self::InvalidPersistedState(error.to_string())
     }
 }

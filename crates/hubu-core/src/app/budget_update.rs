@@ -36,8 +36,8 @@ pub enum BudgetUpdateServiceError {
 ///
 /// Callers must hold the budget-manager lock through this method. The
 /// repository commits the immutable successor, CAS pointer, logical balance,
-/// and status before the in-memory manager is changed, so any transaction
-/// failure leaves memory untouched.
+/// and logical update timestamp before the in-memory manager is changed, so
+/// any transaction failure leaves memory untouched.
 pub struct BudgetUpdateService;
 
 impl BudgetUpdateService {

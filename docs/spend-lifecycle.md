@@ -90,10 +90,33 @@ An agent budget is a hard spending limit. A user spending target is advisory:
 it helps a human compare aggregate allocations with a preferred amount but does
 not block budget creation or spend.
 
-An agent budget has one owner, an immutable limit and currency, a time window,
-a lifecycle status, and balances split into consumed, frozen, and remaining
-amounts. Only one budget for a given agent and currency may cover an instant;
-recurring periods use half-open boundaries so adjacent periods do not overlap.
+An agent budget has one owner, a stable logical ID, an immutable currency and
+time window, and a current immutable version containing its total limit and
+change provenance. Consumed and frozen usage belong to the logical budget;
+remaining is checked against the current-version limit. Every hold records both
+the logical budget ID and the version that authorized it.
+
+SQLite persists only the budget's administrative state: `active` or `revoked`.
+Hubu derives availability from one captured instant and the current balance,
+using this precedence:
+
+```text
+revoked -> scheduled -> expired -> exhausted -> active
+```
+
+Periods are half-open: a budget is scheduled before `starting_at`, is eligible
+at `starting_at`, and is expired at `ending_before`. A zero or negative
+remaining balance is exhausted only while the period is otherwise live.
+Default budget listing includes scheduled, active, and exhausted budgets;
+requesting all budgets also includes expired and revoked budgets.
+
+Only an effectively active budget may accept a new reservation. Existing holds
+remain attributable and may settle, release, expire, or enter reconciliation
+after the budget becomes exhausted, expired, or revoked. Those finalization
+paths update hold and balance state without changing the administrative state.
+All non-revoked periods participate in overlap prevention for the same agent
+and currency, including exhausted periods; revocation is the explicit way to
+remove a period from that constraint.
 
 After policy allows a request, Hubu atomically reserves the authorized maximum
 as a budget hold. A hold moves through:

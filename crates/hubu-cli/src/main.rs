@@ -3181,13 +3181,13 @@ Examples:
 
 fn print_budget_list_help() {
     println!(
-        "List agent budgets for the active human user
+        "List scheduled, active, and exhausted agent budgets for the active human user
 
 Usage:
   hubu budget list [--all]
 
 Options:
-  --all  Include revoked budgets
+  --all  Also include expired and revoked budgets
 
 Examples:
   hubu budget list
@@ -3197,7 +3197,7 @@ Examples:
 
 fn print_budget_revoke_help() {
     println!(
-        "Revoke an active budget so it cannot reserve future spend
+        "Administratively revoke a budget so it cannot reserve future spend
 
 Usage:
   hubu budget revoke --budget-id ID"
