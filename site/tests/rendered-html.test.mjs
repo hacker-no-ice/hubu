@@ -237,19 +237,62 @@ test("uses document navigation for deployed subpage reliability", async () => {
   assert.doesNotMatch(sources.join("\n"), /next\/link|<Link\b/);
 });
 
-test("keeps component drill-down diagrams and resettable architecture playback", async () => {
-  const [html, script] = await Promise.all([
+test("publishes the high-level topology and four focused component drills", async () => {
+  const [html, script, styles, publishedHtml] = await Promise.all([
     readFile(new URL("../architecture/index.html", import.meta.url), "utf8"),
     readFile(new URL("../architecture/architecture.js", import.meta.url), "utf8"),
+    readFile(new URL("../architecture/architecture.css", import.meta.url), "utf8"),
+    readFile(new URL("../public/architecture/index.html", import.meta.url), "utf8"),
   ]);
+  assert.equal(publishedHtml, html);
+  assert.match(html, /src="\/brand\/hubu-wordmark\.svg"/);
+  assert.match(html, />\/ architecture</);
+  assert.match(html, /HIGH-LEVEL TOPOLOGY/);
+  assert.match(html, /Hubu governs every billable operation/);
+  assert.doesNotMatch(html, /Hubu governs every request/);
+  assert.match(html, /AGENT ADAPTER PROCESS/);
+  assert.match(html, /Operation registry SQLite/);
+  assert.match(html, /HUBU CLIENT/);
+  assert.match(html, /GONGBU CLIENT/);
+  assert.match(html, /Hubu HTTP API/);
+  assert.match(html, /Hubu SQLite/);
+  assert.match(html, /Execution API/);
+  assert.match(html, /Temporal worker/);
+  assert.match(html, /Provider catalog \+ execution/);
+  assert.match(html, /catalog · validate · persist · schedule/);
+  assert.match(html, /submit once \+ resume poll/);
+  assert.match(html, /Gongbu SQLite/);
+  assert.match(html, /executions · checkpoints · receipts/);
+  assert.match(html, /Provider APIs/);
   assert.match(html, /id="detail-diagram"/);
-  assert.match(html, /data-component="registration"/);
-  assert.match(html, /data-component="policy"/);
-  assert.match(html, /data-component="budgets"/);
-  assert.match(html, /data-component="persistence"/);
-  assert.match(script, /Identity \+ registration/);
-  assert.match(script, /function stopPlayback\(\)/);
-  assert.match(script, /setAttribute\("aria-pressed", "false"\)/);
+  assert.match(html, /id="tab-registration"[^>]+aria-controls="component-panel"/);
+  assert.match(html, /id="component-panel"[^>]+role="tabpanel"[^>]+aria-labelledby="tab-registration"/);
+  assert.deepEqual(
+    [...html.matchAll(/role="tab"[^>]+data-component="([^"]+)"/g)].map((match) => match[1]),
+    ["registration", "policy", "budgets", "executor"],
+  );
+  assert.match(script, /Owner user/);
+  assert.match(script, /Agent identity/);
+  assert.match(script, /Evaluate every rule, then decide/);
+  assert.match(script, /deny > needs approval > allow > default/);
+  assert.match(script, /Version, reserve, then finalize/);
+  assert.match(script, /settle · release · reconcile/);
+  assert.match(script, /Execute only approved work/);
+  assert.match(script, /Supported profile validation/);
+  assert.match(script, /generation POST once/);
+  assert.match(script, /same provider operation · read-only polling/);
+  assert.match(script, /never resubmit after an ambiguous post-transmission interruption/);
+  assert.match(script, /setAttribute\("aria-labelledby", selectedTab\.id\)/);
+  assert.match(script, /ArrowRight/);
+  assert.match(script, /ArrowLeft/);
+  assert.match(script, /event\.key === "Home"/);
+  assert.match(script, /event\.key === "End"/);
+  assert.match(script, /tab\.tabIndex = selected \? 0 : -1/);
+  assert.match(styles, /@media \(max-width: 640px\)/);
+  assert.match(styles, /\.detail-diagram\.is-relations \{ grid-template-columns: 1fr; \}/);
+  assert.doesNotMatch(script, /asking Hubu to settle, release, or reconcile/);
+  assert.doesNotMatch(html, /admin \+ lifecycle → Hubu/);
+  assert.doesNotMatch(`${html}\n${script}`, /v4\.2|Unified MCP <code>|data-stage-button|play-flow|setInterval/);
 });
 
 test("publishes the original engineering architecture explorer separately", async () => {
