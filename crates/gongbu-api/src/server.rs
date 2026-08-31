@@ -527,7 +527,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         caller_secret.expose().to_vec(),
         hubu_secret.expose().to_vec(),
     ];
-    let providers = validated_provider_catalog(&config)?;
+    let mut providers = validated_provider_catalog(&config)?;
     for target in providers
         .targets()
         .revisions()
@@ -542,6 +542,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
             .map_err(|_| invalid("an enabled provider credential is unavailable"))?;
         redaction_values.push(secret.expose().to_vec());
     }
+    providers.mark_credential_references_present();
     let limits = config.artifacts.limits();
 
     let repository = Repository::open(
@@ -779,6 +780,7 @@ fn validated_provider_catalog(
         .ok_or_else(|| invalid("live provider pricing_catalog_path is required"))?;
     let targets = ProviderTargetConfig::from_path(targets_path)
         .map_err(|error| invalid(format!("provider target catalog: {error}")))?;
+    validate_provider_credential_separation(config, &targets)?;
     reject_fixture_targets(&targets)?;
     let pricing = PricingCatalog::load(pricing_path)
         .map_err(|error| invalid(format!("pricing catalog: {error}")))?;
@@ -788,6 +790,28 @@ fn validated_provider_catalog(
         &ProviderRegistry::production(&config.artifacts.limits()),
     )
     .map_err(|error| invalid(format!("provider catalog binding: {error}")))
+}
+
+fn validate_provider_credential_separation(
+    config: &ServerConfig,
+    targets: &ProviderTargetConfig,
+) -> Result<(), ServerError> {
+    let hubu = config.hubu.credential_reference.validated()?;
+    let caller = config
+        .authentication
+        .bearer_credential_reference
+        .validated()?;
+    for target in targets.revisions() {
+        let provider = target
+            .secret_reference()
+            .map_err(|_| invalid("provider credential reference is invalid"))?;
+        if provider == hubu || provider == caller {
+            return Err(invalid(
+                "provider credentials must be isolated from Hubu and Gongbu caller credentials",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_managed_temporal_cli(config: &TemporalConfig) -> Result<(), ServerError> {
@@ -1167,6 +1191,118 @@ mod tests {
         let value = config(root.path());
         let path = root.path().join("gongbu.json");
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(validate_runtime_inputs(&path).is_err());
+        assert!(!root.path().join("state").exists());
+        assert!(!root.path().join("artifacts").exists());
+    }
+
+    #[test]
+    fn runtime_validator_accepts_isolated_gemini_and_supported_flux_without_side_effects() {
+        let root = tempdir().unwrap();
+        let value = config(root.path());
+        let document: serde_json::Value =
+            serde_json::from_str(include_str!("../../../contracts/provider-profiles-v1.json"))
+                .unwrap();
+        let profile = &document["profiles"][0];
+        let policies = &profile["policies"];
+        let mut flux_target = profile["target"].clone();
+        flux_target["secret_service"] = serde_json::json!("operator.bfl");
+        flux_target["secret_account"] = serde_json::json!("flux");
+        let targets = serde_json::json!({
+            "schema_version":3,
+            "supported_profiles":[{
+                "contract":profile["contract"],
+                "pricing_version":profile["pricing_version"],
+                "poll_policy":policies["poll"],
+                "artifact_delivery_policy":policies["artifact_delivery"],
+                "recovery_policy":policies["recovery"],
+                "generation_retries":policies["generation_retries"],
+                "fallback":policies["fallback"]
+            }],
+            "provider_configs":[
+                {
+                    "provider_config_version":"gemini-v1",
+                    "workload_type":"image_generation",
+                    "provider":"google",
+                    "adapter":"gemini_developer_image",
+                    "model":"gemini-image-v1",
+                    "secret_service":"operator.google",
+                    "secret_account":"gemini",
+                    "active":true,
+                    "execution_enabled":true,
+                    "settings":{"type":"gemini_developer_image","config":{
+                        "endpoint":"https://generativelanguage.googleapis.com",
+                        "api_version":"v1beta","timeout_ms":30000,
+                        "max_retries":0,"headers":{}
+                    }}
+                },
+                flux_target
+            ]
+        });
+        let mut pricing_rules = profile["pricing_rules"].as_array().unwrap().clone();
+        pricing_rules.push(serde_json::json!({
+            "rule_id":"gemini-v1","provider":"google","model":"gemini-image-v1",
+            "currency":"USD","components":[{
+                "unit":"image","rate_numerator_minor":4,"rate_denominator":1
+            }]
+        }));
+        let pricing = serde_json::json!({
+            "schema_version":2,
+            "catalog_version":"operator-mixed-2026-08-28-v1",
+            "rules":pricing_rules
+        });
+        fs::write(
+            value.providers.target_catalog_path.as_ref().unwrap(),
+            serde_json::to_vec(&targets).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            value.providers.pricing_catalog_path.as_ref().unwrap(),
+            serde_json::to_vec(&pricing).unwrap(),
+        )
+        .unwrap();
+        let path = root.path().join("gongbu.json");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let validated = validate_runtime_inputs(&path).unwrap();
+        let catalog = validated_provider_catalog(&validated).unwrap();
+        assert_eq!(catalog.supported_profiles().len(), 1);
+        assert_eq!(catalog.targets().revisions().count(), 2);
+        assert!(
+            !catalog.supported_profiles()[0]
+                .readiness
+                .credential_reference_present
+        );
+        assert!(!catalog.supported_profiles()[0].readiness.live_qualified);
+        assert!(!root.path().join("state").exists());
+        assert!(!root.path().join("artifacts").exists());
+
+        let mut shared_provider_credential = targets.clone();
+        shared_provider_credential["provider_configs"][0]["secret_service"] =
+            serde_json::json!("operator.bfl");
+        shared_provider_credential["provider_configs"][0]["secret_account"] =
+            serde_json::json!("flux");
+        fs::write(
+            value.providers.target_catalog_path.as_ref().unwrap(),
+            serde_json::to_vec(&shared_provider_credential).unwrap(),
+        )
+        .unwrap();
+        assert!(validate_runtime_inputs(&path).is_err());
+
+        let mut bootstrap_collision = targets;
+        let flux = bootstrap_collision["provider_configs"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|target| target["provider"] == "flux")
+            .unwrap();
+        flux["secret_service"] = serde_json::json!(value.hubu.credential_reference.service.clone());
+        flux["secret_account"] = serde_json::json!(value.hubu.credential_reference.account.clone());
+        fs::write(
+            value.providers.target_catalog_path.as_ref().unwrap(),
+            serde_json::to_vec(&bootstrap_collision).unwrap(),
+        )
+        .unwrap();
         assert!(validate_runtime_inputs(&path).is_err());
         assert!(!root.path().join("state").exists());
         assert!(!root.path().join("artifacts").exists());

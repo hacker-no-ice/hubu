@@ -13,6 +13,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
     });
     vec![
         json!({"name":"gongbu_create_execution","description":"Continue one authorized normalized operation into one Gongbu execution using its opaque continuation identifier and execution intent.","inputSchema":{"type":"object","additionalProperties":false,"required":["schema_version","spend_auth_token_id","input","input_schema_version","workload_type","provider","adapter","model"],"properties":create_properties}}),
+        json!({"name":"gongbu_get_provider_catalog","description":"Get the production-validated managed provider profile catalog, including frozen pricing, capability policies, and non-network readiness evidence.","inputSchema":{"type":"object","additionalProperties":false,"properties":{}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}),
         json!({"name":"gongbu_get_execution","description":"Get coarse status and redacted outcome for an execution.","inputSchema":id_schema("execution_id")}),
         json!({"name":"gongbu_list_artifacts","description":"List portable metadata for an execution's artifacts.","inputSchema":id_schema("execution_id")}),
         json!({"name":"gongbu_get_artifact","description":"Get portable base64 image content and safe metadata for an artifact.","inputSchema":id_schema("artifact_id")}),

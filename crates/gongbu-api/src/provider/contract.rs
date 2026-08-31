@@ -526,6 +526,14 @@ impl PricingCatalog {
                     .is_some_and(|selector| selector.image_size == image_size)
         })
     }
+
+    pub fn catalog_version(&self) -> &str {
+        &self.0.version
+    }
+
+    pub(crate) fn rules(&self) -> &[PricingRule] {
+        &self.0.rules
+    }
 }
 
 fn normalize_image_size(value: &str) -> Result<String> {

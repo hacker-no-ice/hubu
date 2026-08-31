@@ -1,10 +1,11 @@
 {
   "contract_version": "hubu-gongbu-mcp-v1",
-  "routing_revision": 4,
+  "routing_revision": 5,
   "tools": [
     { "name": "gongbu_create_execution", "owner": "gongbu" },
     { "name": "gongbu_get_artifact", "owner": "gongbu" },
     { "name": "gongbu_get_execution", "owner": "gongbu" },
+    { "name": "gongbu_get_provider_catalog", "owner": "gongbu" },
     { "name": "gongbu_list_artifacts", "owner": "gongbu" },
     { "name": "hubu_add_policy", "owner": "hubu" },
     { "name": "hubu_apply_policy", "owner": "hubu" },

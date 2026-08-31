@@ -5,6 +5,7 @@ use super::response::ToolError;
 
 pub(super) enum PreparedCall {
     Create(CreateExecutionRequest),
+    GetProviderCatalog,
     GetExecution(String),
     ListArtifacts(String),
     GetArtifact(String),
@@ -18,6 +19,10 @@ pub(super) fn prepare(name: &str, arguments: Value) -> Result<PreparedCall, Tool
             request.validate()?;
             validate_id(&request.spend_auth_token_id)?;
             Ok(PreparedCall::Create(request))
+        }
+        "gongbu_get_provider_catalog" => {
+            let _: EmptyInput = parse(arguments)?;
+            Ok(PreparedCall::GetProviderCatalog)
         }
         "gongbu_get_execution" => {
             let input: ExecutionIdInput = parse(arguments)?;
@@ -164,3 +169,7 @@ struct ExecutionIdInput {
 struct ArtifactIdInput {
     artifact_id: String,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyInput {}

@@ -7,6 +7,7 @@ pub mod gemini_image;
 pub mod http_kernel;
 pub mod ideogram_image;
 pub mod registry;
+pub mod supported_profiles;
 pub mod targets;
 
 #[cfg(test)]

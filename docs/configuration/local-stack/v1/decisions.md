@@ -100,6 +100,38 @@ Use a new label whenever the content changes. Examples of meaningful changes inc
 
 Do not use a mutable label such as `latest` and then replace its meaning. Gongbu persists configuration digests and pricing snapshots so execution history remains attributable to the exact reviewed inputs.
 
+## Supported profile versus generic target
+
+Use `[[supported_profiles]]` when its named, versioned contract exactly matches
+the desired capability. The initial contract,
+`hubu.flux-2-pro.text-to-image/v1`, freezes the FLUX provider, adapter, model,
+three dimension presets, PNG/JPEG output, zero generation retries, no fallback,
+poll and artifact policies, durable recovery policy, and its dated rational USD
+pricing. The operator supplies only an opaque credential reference and the two
+explicit spend choices.
+
+Use raw `[[targets]]` and `[[pricing_rules]]` for other providers such as
+Gemini. A composite FLUX-plus-Gemini catalog requires a new immutable
+`catalog_version`, distinct credential aliases, and unambiguous target and
+pricing keys. Raw entries cannot override or duplicate a supported contract.
+Both providers stay inside Gongbu's execution boundary with separate targets,
+credentials, attempts, and artifacts; Hubu's governance database remains a
+separate process and failure domain.
+
+### Readiness is not qualification
+
+The supported-provider catalog reports four independent facts:
+
+- configuration resolved the exact contract;
+- the credential reference is present for the local process identity;
+- the rendered contract passed Gongbu's production validator; and
+- live qualification was performed.
+
+The last fact is deliberately false with `not_performed` for the initial FLUX
+profile. Catalog, doctor, render, and production validation never call BFL or
+claim that a provider transaction succeeded. See the
+[managed FLUX.2 runbook](../../../operations/managed-flux-profile.md).
+
 ## Provider targets and adapter settings
 
 A provider target key consists of:

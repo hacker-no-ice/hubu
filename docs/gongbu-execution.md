@@ -171,6 +171,15 @@ accepted in execution requests, stored in repository records, included in
 fixtures, returned by APIs, written to Temporal payloads, or emitted in logs and
 errors.
 
+The managed-stack contract `hubu.flux-2-pro.text-to-image/v1` binds the exact
+FLUX target, certified preset dimensions, three dated rational USD prices,
+poll/artifact/recovery policies, zero generation retries, and no fallback.
+Gongbu's production validator compares the rendered schema-v3 binding, target,
+and pricing against that shipped contract before serving. The sanitized catalog
+reports validation and Keychain-reference presence separately from live
+qualification; validation never calls BFL. See the
+[managed FLUX.2 profile runbook](operations/managed-flux-profile.md).
+
 ### FLUX settled cost units
 
 Black Forest Labs defines settled generation cost as the top-level numeric

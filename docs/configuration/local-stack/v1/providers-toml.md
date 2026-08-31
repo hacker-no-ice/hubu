@@ -26,25 +26,34 @@ This is the operator-owned source schema. The rendered Gongbu provider target an
 | Allowed values | `disabled`, `live` |
 | Spend impact | `disabled` cannot perform provider work; `live` may incur charges after activation and execution |
 
-In disabled mode, omit `catalog_version`, `maximum_spend_minor`, `live_spend_acknowledgement`, every `[[targets]]` table, and every `[[pricing_rules]]` table.
+In disabled mode, omit `catalog_version`, `maximum_spend_minor`,
+`live_spend_acknowledgement`, every `[[supported_profiles]]` and `[[targets]]`
+table, and every `[[pricing_rules]]` table.
 
 ```toml
 schema_version = 1
 mode = "disabled"
 ```
 
-Live mode requires all remaining top-level fields, at least one complete target, and at least one complete pricing rule.
+Live mode requires the two spend fields plus either a supported profile or at
+least one complete raw target and matching raw pricing. A mixed supported/raw
+catalog follows the composite rules below.
 
 ### `catalog_version`
 
 | Attribute | Value |
 | --- | --- |
-| Required | Live mode only |
+| Required | Generic or composite live mode; optional for exactly one supported profile with no raw targets or pricing |
 | Supplied by | Chosen by the operator |
 | Type | Non-empty string |
 | Meaning | Immutable label for the complete verified pricing catalog |
 
 Choose a label that identifies the exact prices and source date used to prepare the catalog, for example `operator-verified-2026-08-24`. Never reuse a catalog version for different content. The rendered catalog is canonicalized and digested so an execution can retain the exact pricing snapshot it used.
+
+For exactly one supported profile with no raw target or pricing entries, omit
+this field and Hubu derives the profile's immutable pricing version. If supplied
+in that profile-only shape, it must equal the frozen version. A composite
+supported-plus-raw catalog requires a new operator-owned immutable label.
 
 ### `maximum_spend_minor`
 
@@ -73,9 +82,42 @@ live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
 
 The exact string is a deliberate safety gate, not a customizable description. It acknowledges that a valid active target can transmit chargeable work. It does not replace Hubu authorization, a budget, or the provider account's controls.
 
+## `[[supported_profiles]]`
+
+A supported-profile selection expands one named immutable contract into its
+exact provider target, adapter settings, and pricing rules. The initial and only
+supported contract is:
+
+```toml
+[[supported_profiles]]
+contract = "hubu.flux-2-pro.text-to-image/v1"
+credential = "bfl_flux2_pro"
+```
+
+`contract` must match a shipped contract exactly. `credential` names an opaque
+entry from `credentials.toml`; it never contains a key. Both fields are
+required and unknown fields are rejected.
+
+This FLUX contract pins provider `flux`, adapter `flux2_api`, non-preview model
+`flux-2-pro`, one image, normalized PNG/JPEG, 1k=`1024x1024`,
+2k=`1920x1088`, 4k=`2048x2048`, zero generation retries, no fallback, the
+500 ms async poll policy, the one-label BFL delivery policy, durable async
+resume, and pricing version `bfl-flux-2-pro-usd-2026-08-28-v1`. Its frozen
+USD-cent rational rates are `3/1`, `45/10`, and `75/10` for 1k, 2k, and 4k.
+These are versioned configuration reviewed on 2026-08-28, not timeless current
+BFL prices. Review the [managed FLUX.2 runbook](../../../operations/managed-flux-profile.md)
+before activation.
+
+Raw targets cannot duplicate a supported target, and raw pricing cannot
+override its provider/model rules. Multiple supported selections must use
+distinct credential aliases.
+
 ## `[[targets]]`
 
-Each target records one immutable provider configuration revision for a workload/provider/adapter/model key. Live mode requires at least one target. All target fields are required, including the booleans and settings table.
+Each raw target records one immutable provider configuration revision for a
+workload/provider/adapter/model key. Live mode requires at least one raw target
+unless `[[supported_profiles]]` supplies the target. All raw target fields are
+required, including the booleans and settings table.
 
 ### `targets.provider_config_version`
 

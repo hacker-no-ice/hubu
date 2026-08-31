@@ -10,8 +10,9 @@ use super::{
     request::{self, PreparedCall},
     response::{
         api_error, artifact_result, execution_result, scrub_artifact_metadata, text_result,
-        ApiErrorContext, ArtifactListResponse, ExecutionResponse, ToolError, ToolErrorClass,
-        ToolResult, EXECUTION_V1_SCHEMA_VERSION, EXECUTION_V2_SCHEMA_VERSION,
+        ApiErrorContext, ArtifactListResponse, ExecutionResponse, ProviderCatalogResponse,
+        ToolError, ToolErrorClass, ToolResult, EXECUTION_V1_SCHEMA_VERSION,
+        EXECUTION_V2_SCHEMA_VERSION,
     },
     AdmissionDiagnostic,
 };
@@ -162,6 +163,12 @@ fn execute(
             let (result, lifecycle) =
                 execution_result(response, Some(expected), None, EXECUTION_V2_SCHEMA_VERSION)?;
             Ok((result, Some(lifecycle)))
+        }
+        PreparedCall::GetProviderCatalog => {
+            let response: ProviderCatalogResponse =
+                json_request::<Value, _>(client, Method::GET, "v1/provider-catalog", None)?;
+            response.validate()?;
+            Ok((text_result(&response), None))
         }
         PreparedCall::GetExecution(execution_id) => {
             let response: ExecutionResponse = json_request::<Value, _>(

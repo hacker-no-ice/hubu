@@ -168,6 +168,26 @@ Every referenced key must exist and contain non-empty `service` and `account`
 fields. Multiple targets may intentionally share a credential, but provider
 selection and revision semantics remain explicit in each target.
 
+### Supported FLUX profile credential
+
+For `hubu.flux-2-pro.text-to-image/v1`, create the BFL API key yourself and
+store it with the macOS **Keychain Access** app. Never paste, print, export, or
+shell the key, and never place it in an environment variable, command, source
+file, log, SQLite database, or support conversation. Hubu records only the
+operator-chosen service/account lookup pair:
+
+```toml
+[opaque.bfl_flux2_pro]
+service = "operator-owned BFL Keychain service"
+account = "operator-owned BFL Keychain account"
+```
+
+The corresponding `[[supported_profiles]]` entry uses
+`credential = "bfl_flux2_pro"`. Doctor asks Keychain only whether that item is
+present; it does not request or compare its value and it does not call BFL.
+Read the [managed FLUX.2 runbook](../../../operations/managed-flux-profile.md)
+before enabling live mode.
+
 ## Rotation
 
 Managed credentials are not rotated by editing their hidden paths. The current

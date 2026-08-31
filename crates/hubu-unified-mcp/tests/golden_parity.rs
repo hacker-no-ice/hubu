@@ -66,6 +66,14 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
+            name: "gongbu_get_provider_catalog",
+            owner: gongbu,
+            method: "GET",
+            path: "/v1/provider-catalog",
+            arguments: json!({}),
+            meta: None,
+        },
+        GoldenCase {
             name: "gongbu_list_artifacts",
             owner: gongbu,
             method: "GET",
@@ -353,8 +361,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        35,
-        "golden matrix must contain exactly 35 cases"
+        36,
+        "golden matrix must contain exactly 36 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -367,8 +375,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        35,
-        "routing fixture must map 35 tools"
+        36,
+        "routing fixture must map 36 tools"
     );
     assert_eq!(
         expected.len(),
@@ -391,7 +399,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Gongbu)
             .count(),
-        4
+        5
     );
 }
 
@@ -430,10 +438,51 @@ fn artifact_list_response() -> Value {
     })
 }
 
+fn provider_catalog_response() -> Value {
+    json!({
+        "schema_version": 1,
+        "profiles": [{
+            "contract": "hubu.flux-2-pro.text-to-image/v1",
+            "pricing_version": "bfl-flux-2-pro-usd-2026-08-28-v1",
+            "pricing_reviewed_on": "2026-08-28",
+            "target": {
+                "workload_type": "image_generation",
+                "provider": "flux",
+                "adapter": "flux2_api",
+                "model": "flux-2-pro"
+            },
+            "capability": {
+                "image_count": 1,
+                "output_formats": ["png", "jpeg"],
+                "presets": [
+                    {"name":"1k","width":1024,"height":1024,"currency":"USD","rate_numerator_minor":3,"rate_denominator":1},
+                    {"name":"2k","width":1920,"height":1088,"currency":"USD","rate_numerator_minor":45,"rate_denominator":10},
+                    {"name":"4k","width":2048,"height":2048,"currency":"USD","rate_numerator_minor":75,"rate_denominator":10}
+                ]
+            },
+            "policies": {
+                "generation_retries": 0,
+                "fallback": false,
+                "poll": "bfl-async-status-poll-500ms-v1",
+                "artifact_delivery": "bfl-delivery-single-region-label-v1",
+                "recovery": "hubu-durable-async-resume-v1"
+            },
+            "readiness": {
+                "configured": true,
+                "credential_reference_present": true,
+                "production_validated": true,
+                "live_qualified": false,
+                "live_qualification": "not_performed"
+            }
+        }]
+    })
+}
+
 fn success_body(case: &GoldenCase) -> Value {
     match case.name {
         "gongbu_create_execution" => execution_response(),
         "gongbu_get_execution" => execution_observation_response_for("operation-107", "exec-107"),
+        "gongbu_get_provider_catalog" => provider_catalog_response(),
         "gongbu_list_artifacts" => artifact_list_response(),
         "gongbu_get_artifact" => unreachable!("artifact success uses image bytes"),
         "hubu_authorize_spend" => json!({
@@ -654,6 +703,21 @@ fn all_mapped_tools_have_unified_owned_golden_routing_coverage() {
             assert_eq!(response["result"]["content"][1]["type"], "image");
             assert_eq!(response["result"]["content"][1]["mimeType"], "image/png");
             assert_eq!(response["result"]["content"][1]["data"], "iVBORw0KGgo=");
+        }
+        if case.name == "gongbu_get_provider_catalog" {
+            let catalog: Value = serde_json::from_str(
+                response["result"]["content"][0]["text"]
+                    .as_str()
+                    .expect("catalog is returned as JSON text"),
+            )
+            .expect("catalog text is JSON");
+            assert_eq!(catalog["profiles"][0]["target"]["model"], "flux-2-pro");
+            assert_eq!(
+                catalog["profiles"][0]["capability"]["presets"][2]["width"],
+                2048
+            );
+            assert_eq!(catalog["profiles"][0]["readiness"]["live_qualified"], false);
+            assert!(!catalog.to_string().contains("secret"));
         }
         let backend = match case.owner {
             Owner::Hubu => &hubu,

@@ -27,6 +27,10 @@ const LIVE_SPEND_ACKNOWLEDGEMENT: &str = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND";
 const MANAGED_GONGBU_SECRET_SERVICE: &str = "hubu.managed-stack.v1";
 const MANAGED_GONGBU_HUBU_ACCOUNT: &str = "hubu-executor";
 const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
+const SUPPORTED_PROVIDER_PROFILES: &str =
+    include_str!("../../../contracts/provider-profiles-v1.json");
+const SUPPORTED_PROVIDER_PROFILES_SHA256: &str =
+    "920d1f14c9da7273648d8cbfddca273092c6a94ffc49c0c2f04831681a4b3263";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -369,9 +373,244 @@ struct ProvidersSource {
     maximum_spend_minor: Option<i64>,
     live_spend_acknowledgement: Option<String>,
     #[serde(default)]
+    supported_profiles: Vec<SupportedProfileSource>,
+    #[serde(default)]
     targets: Vec<ProviderTargetSource>,
     #[serde(default)]
     pricing_rules: Vec<toml::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupportedProfileSource {
+    contract: Option<String>,
+    credential: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupportedProfilesDocument {
+    schema_version: u32,
+    profiles: Vec<SupportedProfileContract>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupportedProfileContract {
+    contract: String,
+    pricing_version: String,
+    pricing_reviewed_on: String,
+    target: SupportedProfileTarget,
+    capability: SupportedProfileCapability,
+    policies: SupportedProfilePolicies,
+    pricing_rules: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupportedProfileTarget {
+    provider_config_version: String,
+    workload_type: String,
+    provider: String,
+    adapter: String,
+    model: String,
+    active: bool,
+    execution_enabled: bool,
+    settings: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SupportedProfileCapability {
+    image_count: u32,
+    output_formats: Vec<String>,
+    presets: Vec<SupportedProfilePreset>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SupportedProfilePreset {
+    name: String,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SupportedProfilePolicies {
+    generation_retries: u32,
+    fallback: bool,
+    poll: String,
+    artifact_delivery: String,
+    recovery: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProviderCatalogReport {
+    schema_version: u32,
+    profiles: Vec<ProviderProfileCatalogEntry>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProviderProfileCatalogEntry {
+    contract: String,
+    pricing_version: String,
+    pricing_reviewed_on: String,
+    target: ProviderProfileTargetSummary,
+    capability: ProviderProfileCapabilitySummary,
+    policies: SupportedProfilePolicies,
+    readiness: ProviderProfileReadiness,
+    #[serde(skip)]
+    credential_alias: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProviderProfileCapabilitySummary {
+    image_count: u32,
+    output_formats: Vec<String>,
+    presets: Vec<ProviderProfilePresetSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProviderProfilePresetSummary {
+    name: String,
+    width: u32,
+    height: u32,
+    currency: String,
+    rate_numerator_minor: i64,
+    rate_denominator: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProviderProfileTargetSummary {
+    workload_type: String,
+    provider: String,
+    adapter: String,
+    model: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProviderProfileReadiness {
+    configured: bool,
+    credential_reference_present: Option<bool>,
+    production_validated: bool,
+    live_qualified: bool,
+    live_qualification: &'static str,
+}
+
+fn supported_profiles_document() -> Result<SupportedProfilesDocument> {
+    if format!(
+        "{:x}",
+        Sha256::digest(SUPPORTED_PROVIDER_PROFILES.as_bytes())
+    ) != SUPPORTED_PROVIDER_PROFILES_SHA256
+    {
+        bail!("embedded supported provider profile contract digest is invalid");
+    }
+    let document: SupportedProfilesDocument = serde_json::from_str(SUPPORTED_PROVIDER_PROFILES)
+        .context("parse embedded supported provider profile contracts")?;
+    if document.schema_version != 1 || document.profiles.is_empty() {
+        bail!("embedded supported provider profile contracts are invalid");
+    }
+    let mut contracts = BTreeSet::new();
+    if document
+        .profiles
+        .iter()
+        .any(|profile| !contracts.insert(profile.contract.clone()))
+    {
+        bail!("embedded supported provider profile contracts contain a duplicate contract");
+    }
+    Ok(document)
+}
+
+fn supported_profile_contract(contract: &str) -> Result<SupportedProfileContract> {
+    supported_profiles_document()?
+        .profiles
+        .into_iter()
+        .find(|profile| profile.contract == contract)
+        .ok_or_else(|| anyhow!("unsupported managed provider profile contract `{contract}`"))
+}
+
+fn selected_supported_profiles(
+    source: &ProvidersSource,
+) -> Result<Vec<(String, String, SupportedProfileContract)>> {
+    source
+        .supported_profiles
+        .iter()
+        .map(|selection| {
+            let contract = selection
+                .contract
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("supported profile contract is required"))?;
+            let credential = selection
+                .credential
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("supported profile credential reference is required"))?;
+            Ok((
+                contract.to_owned(),
+                credential.to_owned(),
+                supported_profile_contract(contract)?,
+            ))
+        })
+        .collect()
+}
+
+fn provider_profile_catalog_entries(
+    source: &ProvidersSource,
+    configured: bool,
+) -> Vec<ProviderProfileCatalogEntry> {
+    selected_supported_profiles(source)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(_, credential_alias, profile)| {
+            let presets = profile
+                .capability
+                .presets
+                .iter()
+                .map(|preset| {
+                    let rule = profile.pricing_rules.iter().find(|rule| {
+                        rule.pointer("/selector/image_size").and_then(Value::as_str)
+                            == Some(preset.name.as_str())
+                    })?;
+                    let component = rule.get("components").and_then(Value::as_array)?.first()?;
+                    Some(ProviderProfilePresetSummary {
+                        name: preset.name.clone(),
+                        width: preset.width,
+                        height: preset.height,
+                        currency: rule.get("currency")?.as_str()?.to_owned(),
+                        rate_numerator_minor: component.get("rate_numerator_minor")?.as_i64()?,
+                        rate_denominator: component.get("rate_denominator")?.as_i64()?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(ProviderProfileCatalogEntry {
+                contract: profile.contract,
+                pricing_version: profile.pricing_version,
+                pricing_reviewed_on: profile.pricing_reviewed_on,
+                target: ProviderProfileTargetSummary {
+                    workload_type: profile.target.workload_type,
+                    provider: profile.target.provider,
+                    adapter: profile.target.adapter,
+                    model: profile.target.model,
+                },
+                capability: ProviderProfileCapabilitySummary {
+                    image_count: profile.capability.image_count,
+                    output_formats: profile.capability.output_formats,
+                    presets,
+                },
+                policies: profile.policies,
+                readiness: ProviderProfileReadiness {
+                    configured,
+                    credential_reference_present: None,
+                    production_validated: false,
+                    live_qualified: false,
+                    live_qualification: "not_performed",
+                },
+                credential_alias,
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -447,6 +686,7 @@ pub(crate) fn command(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         "init" => init(args, hubu_home),
         "select" => select_profile(args, hubu_home),
         "profiles" => profiles(args, hubu_home),
+        "catalog" => catalog(args, hubu_home),
         "doctor" => doctor::command(args, hubu_home),
         "render" => render(args, hubu_home),
         "activate" => activate(args, hubu_home),
@@ -681,6 +921,82 @@ fn profiles(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
                 style.accent(profile.path.display())
             );
         }
+    }
+    Ok(())
+}
+
+fn catalog(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
+    if take_help(&mut args) {
+        print_catalog_help();
+        return Ok(());
+    }
+    let json_output = crate::take_flag(&mut args, "--json");
+    let profile = take_profile(&mut args, hubu_home)?;
+    ensure_no_args(args)?;
+    let report = doctor::inspect_profile(&profile);
+    let catalog = ProviderCatalogReport {
+        schema_version: 1,
+        profiles: report.provider_profiles,
+    };
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&catalog)?);
+        return Ok(());
+    }
+    let style = crate::terminal::stdout();
+    if catalog.profiles.is_empty() {
+        println!(
+            "{}",
+            style.muted("No supported provider profiles are configured.")
+        );
+        return Ok(());
+    }
+    println!("{}", style.title("Hubu supported provider catalog"));
+    for entry in catalog.profiles {
+        println!();
+        println!(
+            "{}: {}",
+            style.label("contract"),
+            style.accent(&entry.contract)
+        );
+        println!(
+            "{}: {}/{}/{}/{}",
+            style.label("target"),
+            entry.target.workload_type,
+            entry.target.provider,
+            entry.target.adapter,
+            entry.target.model
+        );
+        println!(
+            "{}: {} (reviewed {})",
+            style.label("pricing"),
+            entry.pricing_version,
+            entry.pricing_reviewed_on
+        );
+        for preset in &entry.capability.presets {
+            println!(
+                "  {}  {}x{}  {}/{} {} minor units",
+                preset.name,
+                preset.width,
+                preset.height,
+                preset.rate_numerator_minor,
+                preset.rate_denominator,
+                preset.currency
+            );
+        }
+        let reference = match entry.readiness.credential_reference_present {
+            Some(true) => "present",
+            Some(false) => "missing",
+            None => "unknown",
+        };
+        println!(
+            "{}: configured={} credential_reference={} production_validated={} live_qualified={} ({})",
+            style.label("readiness"),
+            entry.readiness.configured,
+            reference,
+            entry.readiness.production_validated,
+            entry.readiness.live_qualified,
+            entry.readiness.live_qualification
+        );
     }
     Ok(())
 }
@@ -995,6 +1311,7 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
         bail!("incomplete stack profile:\n  - {}", missing.join("\n  - "));
     }
     validate_provider_source(&providers)?;
+    validate_provider_credential_isolation(&providers, &credentials)?;
     validate_topology(&stack)?;
     let credential_paths = resolve_credential_paths(profile, &stack, &credentials)?;
     validate_credential_resource_separation(profile, &stack, &credential_paths)?;
@@ -1771,10 +2088,31 @@ fn render_provider_config(
 }
 
 fn render_pricing_catalog(providers: &ProvidersSource) -> Result<Value> {
+    let supported = selected_supported_profiles(providers)?;
+    let catalog_version = match providers.catalog_version.as_deref() {
+        Some(version) => version.to_owned(),
+        None if supported.len() == 1 && providers.pricing_rules.is_empty() => {
+            supported[0].2.pricing_version.clone()
+        }
+        None => bail!(
+            "providers.toml:catalog_version is required for a composite or generic live catalog"
+        ),
+    };
+    let mut rules = supported
+        .iter()
+        .flat_map(|(_, _, profile)| profile.pricing_rules.clone())
+        .collect::<Vec<_>>();
+    rules.extend(
+        providers
+            .pricing_rules
+            .iter()
+            .map(toml_to_json)
+            .collect::<Result<Vec<_>>>()?,
+    );
     Ok(json!({
         "schema_version": 2,
-        "catalog_version": providers.catalog_version.as_ref().expect("checked"),
-        "rules": providers.pricing_rules.iter().map(toml_to_json).collect::<Result<Vec<_>>>()?,
+        "catalog_version": catalog_version,
+        "rules": rules,
     }))
 }
 
@@ -1830,15 +2168,15 @@ fn expected_generated_files(stack: &StackSource, providers: &ProvidersSource) ->
 }
 
 fn render_targets(providers: &ProvidersSource, credentials: &CredentialsSource) -> Result<Value> {
-    let configs = providers
+    let supported = selected_supported_profiles(providers)?;
+    let mut configs = providers
         .targets
         .iter()
         .map(|target| {
             let credential = target.credential.as_ref().expect("checked");
             let secret = credentials.opaque.get(credential).ok_or_else(|| {
                 anyhow!(
-                    "providers.toml target references unknown credentials.toml opaque key `{}`",
-                    credential
+                    "providers.toml target references unknown credentials.toml opaque key `{credential}`"
                 )
             })?;
             Ok(json!({
@@ -1855,7 +2193,47 @@ fn render_targets(providers: &ProvidersSource, credentials: &CredentialsSource) 
             }))
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(json!({"schema_version": 2, "provider_configs": configs}))
+    for (_, credential, profile) in &supported {
+        let secret = credentials.opaque.get(credential).ok_or_else(|| {
+            anyhow!(
+                "supported provider profile references unknown credentials.toml opaque key `{credential}`"
+            )
+        })?;
+        configs.push(json!({
+            "provider_config_version": profile.target.provider_config_version,
+            "workload_type": profile.target.workload_type,
+            "provider": profile.target.provider,
+            "adapter": profile.target.adapter,
+            "model": profile.target.model,
+            "secret_service": secret.service.as_ref().expect("checked"),
+            "secret_account": secret.account.as_ref().expect("checked"),
+            "active": profile.target.active,
+            "execution_enabled": profile.target.execution_enabled,
+            "settings": profile.target.settings,
+        }));
+    }
+    if supported.is_empty() {
+        return Ok(json!({"schema_version": 2, "provider_configs": configs}));
+    }
+    let bindings = supported
+        .into_iter()
+        .map(|(_, _, profile)| {
+            json!({
+                "contract": profile.contract,
+                "pricing_version": profile.pricing_version,
+                "poll_policy": profile.policies.poll,
+                "artifact_delivery_policy": profile.policies.artifact_delivery,
+                "recovery_policy": profile.policies.recovery,
+                "generation_retries": profile.policies.generation_retries,
+                "fallback": profile.policies.fallback,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "schema_version": 3,
+        "supported_profiles": bindings,
+        "provider_configs": configs,
+    }))
 }
 
 fn render_temporal(source: &TemporalSource) -> Result<Value> {
@@ -1887,6 +2265,7 @@ fn validate_provider_source(source: &ProvidersSource) -> Result<()> {
             if source.catalog_version.is_some()
                 || source.maximum_spend_minor.is_some()
                 || source.live_spend_acknowledgement.is_some()
+                || !source.supported_profiles.is_empty()
                 || !source.targets.is_empty()
                 || !source.pricing_rules.is_empty()
             {
@@ -1898,6 +2277,131 @@ fn validate_provider_source(source: &ProvidersSource) -> Result<()> {
                 || source.live_spend_acknowledgement.as_deref() != Some(LIVE_SPEND_ACKNOWLEDGEMENT)
             {
                 bail!("providers.toml live mode requires a positive maximum_spend_minor and the exact Gongbu live-spend acknowledgement");
+            }
+            let supported = selected_supported_profiles(source)?;
+            let mut contracts = BTreeSet::new();
+            let mut credentials = BTreeSet::new();
+            for (contract, credential, profile) in &supported {
+                if !contracts.insert(contract) {
+                    bail!("providers.toml contains a duplicate supported profile contract");
+                }
+                if !credentials.insert(credential) {
+                    bail!("providers.toml supported profiles must use distinct credential aliases");
+                }
+                if source.targets.iter().any(|target| {
+                    target.provider_config_version.as_deref()
+                        == Some(profile.target.provider_config_version.as_str())
+                        || (target.provider.as_deref() == Some(profile.target.provider.as_str())
+                            && target.adapter.as_deref() == Some(profile.target.adapter.as_str())
+                            && target.model.as_deref() == Some(profile.target.model.as_str()))
+                }) {
+                    bail!(
+                        "providers.toml raw targets cannot override or duplicate a supported profile target"
+                    );
+                }
+                for rule in &source.pricing_rules {
+                    let rule = toml_to_json(rule)?;
+                    if rule.get("provider").and_then(Value::as_str)
+                        == Some(profile.target.provider.as_str())
+                        && rule.get("model").and_then(Value::as_str)
+                            == Some(profile.target.model.as_str())
+                    {
+                        bail!(
+                            "providers.toml raw pricing rules cannot override supported profile pricing"
+                        );
+                    }
+                }
+            }
+            if supported.len() == 1
+                && source.targets.is_empty()
+                && source.pricing_rules.is_empty()
+                && source
+                    .catalog_version
+                    .as_deref()
+                    .is_some_and(|version| version != supported[0].2.pricing_version.as_str())
+            {
+                bail!(
+                    "providers.toml profile-only catalog_version must match the supported profile pricing version"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_provider_credential_isolation(
+    source: &ProvidersSource,
+    credentials: &CredentialsSource,
+) -> Result<()> {
+    if source.mode != Some(ProviderMode::Live) {
+        return Ok(());
+    }
+
+    let supported = selected_supported_profiles(source)?;
+    let mut bindings = source
+        .targets
+        .iter()
+        .map(|target| {
+            Ok((
+                target.provider.as_deref().ok_or_else(|| {
+                    anyhow!("provider target is missing its provider before credential validation")
+                })?,
+                target.credential.as_deref().ok_or_else(|| {
+                    anyhow!(
+                        "provider target is missing its credential before credential validation"
+                    )
+                })?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    bindings.extend(
+        supported.iter().map(|(_, credential, profile)| {
+            (profile.target.provider.as_str(), credential.as_str())
+        }),
+    );
+
+    let bootstrap_coordinates = ["gongbu_hubu", "gongbu_caller"]
+        .into_iter()
+        .filter_map(|alias| {
+            credentials.opaque.get(alias).and_then(|reference| {
+                Some((reference.service.as_deref()?, reference.account.as_deref()?))
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    let mut provider_by_coordinate = BTreeMap::<(&str, &str), &str>::new();
+    for (provider, alias) in bindings {
+        if matches!(alias, "gongbu_hubu" | "gongbu_caller") {
+            bail!(
+                "provider targets cannot use the reserved Gongbu bootstrap credential alias `{alias}`"
+            );
+        }
+        let reference = credentials.opaque.get(alias).ok_or_else(|| {
+            anyhow!("provider target references unknown credentials.toml opaque key `{alias}`")
+        })?;
+        let coordinate = (
+            reference
+                .service
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("provider credential reference has no service"))?,
+            reference
+                .account
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("provider credential reference has no account"))?,
+        );
+        if bootstrap_coordinates.contains(&coordinate) {
+            bail!(
+                "provider credential references must be isolated from Gongbu bootstrap credentials"
+            );
+        }
+        if !supported.is_empty() {
+            if let Some(existing_provider) = provider_by_coordinate.insert(coordinate, provider) {
+                if existing_provider != provider {
+                    bail!(
+                        "supported managed provider catalogs require distinct credential references for different providers"
+                    );
+                }
             }
         }
     }
@@ -2470,6 +2974,9 @@ fn missing_fields(
                 .catalog_version
                 .as_deref()
                 .is_none_or(str::is_empty)
+                && (providers.supported_profiles.is_empty()
+                    || !providers.targets.is_empty()
+                    || !providers.pricing_rules.is_empty())
             {
                 missing.push("providers.toml:catalog_version".into());
             }
@@ -2479,8 +2986,26 @@ fn missing_fields(
             if providers.live_spend_acknowledgement.is_none() {
                 missing.push("providers.toml:live_spend_acknowledgement".into());
             }
-            if providers.targets.is_empty() {
+            if providers.targets.is_empty() && providers.supported_profiles.is_empty() {
                 missing.push("providers.toml:targets".into());
+            }
+            for (index, profile) in providers.supported_profiles.iter().enumerate() {
+                if profile.contract.as_deref().is_none_or(str::is_empty) {
+                    missing.push(format!(
+                        "providers.toml:supported_profiles[{index}].contract"
+                    ));
+                }
+                if profile.credential.as_deref().is_none_or(str::is_empty) {
+                    missing.push(format!(
+                        "providers.toml:supported_profiles[{index}].credential"
+                    ));
+                }
+                if let Some(key) = profile.credential.as_deref().filter(|key| !key.is_empty()) {
+                    let field = format!("credentials.toml:opaque.{key}");
+                    if !credentials.opaque.contains_key(key) && !missing.contains(&field) {
+                        missing.push(field);
+                    }
+                }
             }
             for (index, target) in providers.targets.iter().enumerate() {
                 for (value, field) in [
@@ -2514,7 +3039,7 @@ fn missing_fields(
                     }
                 }
             }
-            if providers.pricing_rules.is_empty() {
+            if providers.pricing_rules.is_empty() && providers.supported_profiles.is_empty() {
                 missing.push("providers.toml:pricing_rules".into());
             }
         }
@@ -3225,6 +3750,13 @@ schema_version = 1
 
 # Add one section per live provider credential, then reference its key from
 # providers.toml, for example [opaque.provider_image].
+
+# Supported FLUX profile example. The operator creates the BFL key and stores
+# its value themselves with macOS Keychain Access; only its non-secret lookup
+# coordinates belong here. Never paste, export, print, or shell the key value.
+# [opaque.bfl_flux2_pro]
+# service = "<operator-owned Keychain service>"
+# account = "<operator-owned Keychain account>"
 "#
     .into()
 }
@@ -3238,10 +3770,21 @@ schema_version = 1
 # mode = "disabled"
 # mode = "live"
 
-# Live mode additionally requires every field and table below.
-# catalog_version = "<operator-owned immutable catalog version>"
+# Live mode additionally requires an explicit spend ceiling and acknowledgement.
 # Set maximum_spend_minor to a positive operator-approved minor-unit ceiling.
 # live_spend_acknowledgement = "<exact acknowledgement required by Gongbu>"
+
+# Ready-to-run supported FLUX profile. Its version freezes the exact target,
+# three preset dimensions and rational USD prices, polling/artifact/recovery
+# policies, zero generation retries, and no fallback. A profile-only catalog
+# derives its immutable catalog version; a mixed raw-target catalog must set a
+# separate operator-owned catalog_version for the composite document.
+# [[supported_profiles]]
+# contract = "hubu.flux-2-pro.text-to-image/v1"
+# credential = "bfl_flux2_pro"
+
+# Generic or mixed-provider mode requires an immutable composite catalog label.
+# catalog_version = "<operator-owned immutable catalog version>"
 
 # [[targets]]
 # provider_config_version = "<immutable version>"
@@ -3325,7 +3868,7 @@ https://hubustack.dev/configuration/local-stack/v1/
 
 fn print_help() {
     println!(
-        "Manage local Hubu stack profiles\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack select --profile ABSOLUTE_DIR\n  hubu stack profiles [--json]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack activate --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack rollback --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack generations [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]\n\nProfile precedence:\n  explicit --profile, selected profile, platform default"
+        "Manage local Hubu stack profiles\n\nUsage:\n  hubu stack init [--profile ABSOLUTE_DIR]\n  hubu stack select --profile ABSOLUTE_DIR\n  hubu stack profiles [--json]\n  hubu stack catalog [--profile ABSOLUTE_DIR] [--json]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack activate --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack rollback --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack generations [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]\n\nProfile precedence:\n  explicit --profile, selected profile, platform default"
     );
 }
 
@@ -3344,6 +3887,12 @@ fn print_select_help() {
 fn print_profiles_help() {
     println!(
         "List known initialized local stack profiles without scanning the machine\n\nUsage:\n  hubu stack profiles [--json]\n\nProfiles are read from the registry and the immediate children of the conventional stacks directory."
+    );
+}
+
+fn print_catalog_help() {
+    println!(
+        "Show the exact sanitized supported-provider contract and independent readiness facts without calling a provider\n\nUsage:\n  hubu stack catalog [--profile ABSOLUTE_DIR] [--json]\n\nThe command may inspect only source files, selected local validators, macOS Keychain item existence, and local service health. It never reads a provider secret or calls a provider."
     );
 }
 
@@ -4104,6 +4653,199 @@ components = [{ unit = "image", rate_numerator_minor = 67, rate_denominator = 10
                 "rate_denominator": 10,
             })
         );
+    }
+
+    #[test]
+    fn supported_flux_profile_renders_exact_contract_and_composes_with_gemini() {
+        let providers: ProvidersSource = toml::from_str(&format!(
+            r#"schema_version = 1
+mode = "live"
+catalog_version = "operator-mixed-2026-08-28-v1"
+maximum_spend_minor = 25
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+
+[[supported_profiles]]
+contract = "hubu.flux-2-pro.text-to-image/v1"
+credential = "bfl_flux2_pro"
+
+[[targets]]
+provider_config_version = "gemini-v1"
+workload_type = "image_generation"
+provider = "google"
+adapter = "gemini_developer_image"
+model = "gemini-image-v1"
+credential = "gemini"
+active = true
+execution_enabled = true
+[targets.settings]
+type = "gemini_developer_image"
+[targets.settings.config]
+endpoint = "https://generativelanguage.googleapis.com"
+api_version = "v1beta"
+timeout_ms = 30000
+max_retries = 0
+headers = {{}}
+
+[[pricing_rules]]
+rule_id = "gemini-v1"
+provider = "google"
+model = "gemini-image-v1"
+currency = "USD"
+components = [{{ unit = "image", rate_numerator_minor = 4, rate_denominator = 1 }}]
+"#
+        ))
+        .unwrap();
+        let credentials: CredentialsSource = toml::from_str(
+            r#"schema_version = 1
+[opaque.bfl_flux2_pro]
+service = "operator.bfl"
+account = "flux"
+[opaque.gemini]
+service = "operator.google"
+account = "gemini"
+"#,
+        )
+        .unwrap();
+
+        validate_provider_source(&providers).unwrap();
+        validate_provider_credential_isolation(&providers, &credentials).unwrap();
+        let targets = render_targets(&providers, &credentials).unwrap();
+        assert_eq!(targets["schema_version"], 3);
+        assert_eq!(targets["provider_configs"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            targets["supported_profiles"][0],
+            json!({
+                "contract":"hubu.flux-2-pro.text-to-image/v1",
+                "pricing_version":"bfl-flux-2-pro-usd-2026-08-28-v1",
+                "poll_policy":"bfl-async-status-poll-500ms-v1",
+                "artifact_delivery_policy":"bfl-delivery-single-region-label-v1",
+                "recovery_policy":"hubu-durable-async-resume-v1",
+                "generation_retries":0,
+                "fallback":false
+            })
+        );
+        let flux = targets["provider_configs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["provider"] == "flux")
+            .unwrap();
+        assert_eq!(flux["adapter"], "flux2_api");
+        assert_eq!(flux["model"], "flux-2-pro");
+        assert_eq!(flux["settings"]["config"]["poll_interval_ms"], 500);
+        assert_eq!(flux["settings"]["config"]["max_retries"], 0);
+        assert_eq!(
+            flux["settings"]["config"]["approved_artifact_hosts"],
+            json!([])
+        );
+
+        let pricing = render_pricing_catalog(&providers).unwrap();
+        assert_eq!(pricing["catalog_version"], "operator-mixed-2026-08-28-v1");
+        assert_eq!(pricing["rules"].as_array().unwrap().len(), 4);
+        let flux_prices = pricing["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|rule| rule["provider"] == "flux")
+            .collect::<Vec<_>>();
+        assert_eq!(flux_prices.len(), 3);
+        assert_eq!(flux_prices[0]["selector"]["image_size"], "1k");
+        assert_eq!(flux_prices[0]["components"][0]["rate_numerator_minor"], 3);
+        assert_eq!(flux_prices[1]["components"][0]["rate_numerator_minor"], 45);
+        assert_eq!(flux_prices[1]["components"][0]["rate_denominator"], 10);
+        assert_eq!(flux_prices[2]["components"][0]["rate_numerator_minor"], 75);
+        assert_eq!(flux_prices[2]["components"][0]["rate_denominator"], 10);
+
+        let catalog = ProviderCatalogReport {
+            schema_version: 1,
+            profiles: provider_profile_catalog_entries(&providers, true),
+        };
+        let sanitized = serde_json::to_string(&catalog).unwrap();
+        assert!(sanitized.contains("1920"));
+        assert!(sanitized.contains("USD"));
+        assert!(!sanitized.contains("operator.bfl"));
+        assert!(!sanitized.contains("credential_alias"));
+
+        let shared_credentials: CredentialsSource = toml::from_str(
+            r#"schema_version = 1
+[opaque.bfl_flux2_pro]
+service = "operator.shared"
+account = "same"
+[opaque.gemini]
+service = "operator.shared"
+account = "same"
+"#,
+        )
+        .unwrap();
+        assert!(validate_provider_credential_isolation(&providers, &shared_credentials).is_err());
+
+        let bootstrap_collision: CredentialsSource = toml::from_str(
+            r#"schema_version = 1
+[opaque.bfl_flux2_pro]
+service = "operator.bfl"
+account = "flux"
+[opaque.gemini]
+service = "hubu.bootstrap"
+account = "executor"
+[opaque.gongbu_hubu]
+service = "hubu.bootstrap"
+account = "executor"
+"#,
+        )
+        .unwrap();
+        assert!(validate_provider_credential_isolation(&providers, &bootstrap_collision).is_err());
+    }
+
+    #[test]
+    fn supported_profile_only_derives_pricing_version_and_rejects_overrides() {
+        let source = |extra: &str| {
+            toml::from_str::<ProvidersSource>(&format!(
+                r#"schema_version = 1
+mode = "live"
+maximum_spend_minor = 25
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+{extra}
+[[supported_profiles]]
+contract = "hubu.flux-2-pro.text-to-image/v1"
+credential = "bfl"
+"#
+            ))
+            .unwrap()
+        };
+        let providers = source("");
+        validate_provider_source(&providers).unwrap();
+        assert_eq!(
+            render_pricing_catalog(&providers).unwrap()["catalog_version"],
+            "bfl-flux-2-pro-usd-2026-08-28-v1"
+        );
+
+        let changed_catalog = source("catalog_version = \"timeless-current-price\"");
+        assert!(validate_provider_source(&changed_catalog).is_err());
+        let overridden = source(
+            r#"[[pricing_rules]]
+rule_id = "override"
+provider = "flux"
+model = "flux-2-pro"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 1, rate_denominator = 1 }]"#,
+        );
+        assert!(validate_provider_source(&overridden).is_err());
+
+        let alternate_workload = source(
+            r#"[[targets]]
+provider_config_version = "flux-edit-bypass"
+workload_type = "image_edit"
+provider = "flux"
+adapter = "flux2_api"
+model = "flux-2-pro"
+credential = "other"
+active = true
+execution_enabled = true
+settings = { type = "fixture" }
+"#,
+        );
+        assert!(validate_provider_source(&alternate_workload).is_err());
     }
 
     #[cfg(unix)]

@@ -67,12 +67,17 @@ choice is unclear:
 | --- | --- | --- |
 | `stack.toml` | Binaries, managed or external services, Temporal, and local paths | [`stack.toml`](https://hubustack.dev/configuration/local-stack/v1/stack-toml) |
 | `credentials.toml` | Provider references or advanced external-service overrides | [`credentials.toml`](https://hubustack.dev/configuration/local-stack/v1/credentials-toml) |
-| `providers.toml` | Disabled or live mode, targets, pricing, and spend ceiling | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
+| `providers.toml` | Disabled or live mode, supported profiles or raw targets, pricing, and spend ceiling | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
 
 For a first local evaluation, start with the
 [provider-disabled example](https://hubustack.dev/configuration/local-stack/v1/examples#provider-disabled-local-profile).
 Never put bearer tokens, provider API keys, or other raw secrets in the TOML
 files. Live provider execution can incur charges.
+
+For the supported narrow FLUX.2 path, follow the
+[managed profile and recovery runbook](operations/managed-flux-profile.md) and
+inspect its exact sanitized contract with `hubu stack catalog --json`. Catalog,
+doctor, and render never call BFL or claim live qualification.
 
 Check the profile and follow the reported field paths until it is ready:
 
@@ -81,7 +86,10 @@ hubu stack doctor
 ```
 
 Doctor is read-only. An explicit `--profile "$profile"` can override the saved
-selection for any one stack command.
+selection for any one stack command. `hubu stack doctor --json` emits the
+version-2 report contract, which adds the supported-profile catalog and keeps
+configured, credential-reference-present, production-validated, and
+live-qualified state independent.
 
 ## Start and inspect the stack
 

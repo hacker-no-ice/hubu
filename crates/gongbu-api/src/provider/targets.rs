@@ -14,7 +14,7 @@ use std::{
 use thiserror::Error;
 
 const PROVIDER_CONFIG_ENV: &str = "GONGBU_PROVIDER_CONFIG";
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 const BFL_API_HOSTS: &[&str] = &["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"];
 pub const LEGACY_UNRESOLVED_DIGEST: &str = "legacy-unresolved";
 
@@ -60,6 +60,10 @@ pub enum Error {
     NotConfigured,
     #[error("persisted provider configuration digest does not match")]
     DigestMismatch,
+    #[error("supported provider profile binding is invalid")]
+    InvalidSupportedProfile,
+    #[error("duplicate supported provider profile binding")]
+    DuplicateSupportedProfile,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -253,6 +257,19 @@ impl ProviderConfigVersion {
 pub struct ProviderTargetConfig {
     revisions: BTreeMap<(TargetKey, String), ProviderConfigVersion>,
     active: BTreeMap<TargetKey, String>,
+    supported_profiles: Vec<SupportedProfileBinding>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SupportedProfileBinding {
+    pub contract: String,
+    pub pricing_version: String,
+    pub poll_policy: String,
+    pub artifact_delivery_policy: String,
+    pub recovery_policy: String,
+    pub generation_retries: u32,
+    pub fallback: bool,
 }
 
 impl ProviderTargetConfig {
@@ -260,6 +277,7 @@ impl ProviderTargetConfig {
         Self {
             revisions: BTreeMap::new(),
             active: BTreeMap::new(),
+            supported_profiles: Vec::new(),
         }
     }
 
@@ -283,6 +301,9 @@ impl ProviderTargetConfig {
     }
     pub fn revisions(&self) -> impl Iterator<Item = &ProviderConfigVersion> {
         self.revisions.values()
+    }
+    pub fn supported_profiles(&self) -> &[SupportedProfileBinding] {
+        &self.supported_profiles
     }
     pub fn resolve(
         &self,
@@ -351,6 +372,8 @@ impl ProviderTargetConfig {
 struct RawCatalog {
     #[serde(default = "legacy_schema_version")]
     schema_version: u32,
+    #[serde(default)]
+    supported_profiles: Vec<SupportedProfileBinding>,
     provider_configs: Vec<RawRevision>,
 }
 fn legacy_schema_version() -> u32 {
@@ -388,12 +411,36 @@ struct RawRevision {
 impl TryFrom<RawCatalog> for ProviderTargetConfig {
     type Error = Error;
     fn try_from(raw: RawCatalog) -> Result<Self> {
-        if !matches!(raw.schema_version, 1 | CURRENT_SCHEMA_VERSION) {
+        if !matches!(raw.schema_version, 1 | 2 | CURRENT_SCHEMA_VERSION) {
+            return Err(Error::UnsupportedSchema);
+        }
+        if raw.schema_version < 3 && !raw.supported_profiles.is_empty() {
             return Err(Error::UnsupportedSchema);
         }
         if raw.provider_configs.is_empty() {
             return Err(Error::Empty);
         }
+        let mut profile_contracts = BTreeSet::new();
+        for profile in &raw.supported_profiles {
+            if [
+                profile.contract.as_str(),
+                profile.pricing_version.as_str(),
+                profile.poll_policy.as_str(),
+                profile.artifact_delivery_policy.as_str(),
+                profile.recovery_policy.as_str(),
+            ]
+            .iter()
+            .any(|value| value.is_empty() || value.trim() != *value || value.len() > 255)
+                || !profile_contracts.insert(profile.contract.clone())
+            {
+                return Err(if profile_contracts.contains(&profile.contract) {
+                    Error::DuplicateSupportedProfile
+                } else {
+                    Error::InvalidSupportedProfile
+                });
+            }
+        }
+        let supported_profiles = raw.supported_profiles;
         let mut revisions = BTreeMap::new();
         let mut active = BTreeMap::new();
         let mut version_digests = BTreeMap::<String, String>::new();
@@ -418,7 +465,11 @@ impl TryFrom<RawCatalog> for ProviderTargetConfig {
                 return Err(Error::AmbiguousActiveRevision);
             }
         }
-        Ok(Self { revisions, active })
+        Ok(Self {
+            revisions,
+            active,
+            supported_profiles,
+        })
     }
 }
 
@@ -454,7 +505,12 @@ impl Serialize for ProviderTargetConfig {
             })
             .collect();
         RawCatalog {
-            schema_version: CURRENT_SCHEMA_VERSION,
+            schema_version: if self.supported_profiles.is_empty() {
+                2
+            } else {
+                CURRENT_SCHEMA_VERSION
+            },
+            supported_profiles: self.supported_profiles.clone(),
             provider_configs,
         }
         .serialize(serializer)

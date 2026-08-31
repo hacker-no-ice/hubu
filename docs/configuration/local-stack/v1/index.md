@@ -81,10 +81,12 @@ Keep Hubu and Gongbu separate even though the profile coordinates them. They ret
 ### Live provider preparation
 
 1. Complete and validate the local topology first.
-2. Read [provider targets and adapter settings](decisions.md#provider-targets-and-adapter-settings).
-3. Read [pricing, authorization, holds, and settlement](decisions.md#pricing-authorization-holds-and-settlement).
-4. Verify provider identifiers, endpoints, supported models, prices, and billing units with the provider.
-5. Use the [live-provider example](examples.md#representative-live-provider-profile) as structure, not as current provider data.
+2. For the supported FLUX subset, follow the
+   [managed FLUX.2 profile runbook](../../../operations/managed-flux-profile.md).
+3. For a generic target, read [provider targets and adapter settings](decisions.md#provider-targets-and-adapter-settings).
+4. Read [pricing, authorization, holds, and settlement](decisions.md#pricing-authorization-holds-and-settlement).
+5. Verify provider identifiers, endpoints, supported models, prices, and billing units with the provider.
+6. Use the [live-provider examples](examples.md#supported-managed-flux2-profile) as version-matched structure, not as timeless current provider data.
 
 ### External or customized topology
 
@@ -133,6 +135,7 @@ The opaque table name is a local reference key. Its `service` and `account` valu
 - [`providers.toml`: modes, targets, settings, pricing, and spend gate](providers-toml.md)
 - [Decision guides](decisions.md)
 - [Complete annotated examples](examples.md)
+- [Managed FLUX.2 profile and recovery runbook](../../../operations/managed-flux-profile.md)
 - [Local stack quick start](../../../local-stack.md)
 
 ## Versioning

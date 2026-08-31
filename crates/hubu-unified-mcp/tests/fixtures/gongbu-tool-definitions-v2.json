@@ -28,6 +28,21 @@
     }
   },
   {
+    "name": "gongbu_get_provider_catalog",
+    "description": "Get the production-validated managed provider profile catalog, including frozen pricing, capability policies, and non-network readiness evidence.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "gongbu_get_execution",
     "description": "Get coarse status and redacted outcome for an execution.",
     "inputSchema": {
