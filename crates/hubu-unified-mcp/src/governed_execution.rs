@@ -124,8 +124,19 @@ pub(super) fn tool_definition() -> Value {
                         "schema_version", "input", "input_schema_version"
                     ],
                     "oneOf": [
-                        {"required": ["target_id"]},
-                        {"required": ["workload_type", "provider", "adapter", "model"]}
+                        {
+                            "required": ["target_id"],
+                            "not": {"anyOf": [
+                                {"required": ["workload_type"]},
+                                {"required": ["provider"]},
+                                {"required": ["adapter"]},
+                                {"required": ["model"]}
+                            ]}
+                        },
+                        {
+                            "required": ["workload_type", "provider", "adapter", "model"],
+                            "not": {"required": ["target_id"]}
+                        }
                     ],
                     "properties": {
                         "schema_version": {"type": "integer", "const": 2},
@@ -1097,6 +1108,29 @@ mod tests {
         for field in ["workload_type", "provider", "adapter", "model"] {
             assert!(arguments.get(field).is_none());
         }
+    }
+
+    #[test]
+    fn governed_execution_schema_makes_target_id_and_raw_tuple_strictly_exclusive() {
+        let definition = tool_definition();
+        assert_eq!(
+            definition["inputSchema"]["properties"]["execution"]["oneOf"],
+            json!([
+                {
+                    "required":["target_id"],
+                    "not":{"anyOf":[
+                        {"required":["workload_type"]},
+                        {"required":["provider"]},
+                        {"required":["adapter"]},
+                        {"required":["model"]}
+                    ]}
+                },
+                {
+                    "required":["workload_type","provider","adapter","model"],
+                    "not":{"required":["target_id"]}
+                }
+            ])
+        );
     }
 
     #[test]

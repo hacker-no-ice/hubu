@@ -27,9 +27,20 @@
         "input_schema_version"
       ],
       "oneOf": [
-        { "required": ["target_id"] },
         {
-          "required": ["workload_type", "provider", "adapter", "model"]
+          "required": ["target_id"],
+          "not": {
+            "anyOf": [
+              { "required": ["workload_type"] },
+              { "required": ["provider"] },
+              { "required": ["adapter"] },
+              { "required": ["model"] }
+            ]
+          }
+        },
+        {
+          "required": ["workload_type", "provider", "adapter", "model"],
+          "not": { "required": ["target_id"] }
         }
       ],
       "properties": {

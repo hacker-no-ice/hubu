@@ -224,10 +224,10 @@ runtime options, and copy the returned `execution_scope` into authorization:
     "reason": "Generate one product illustration",
     "execution_scope": {
       "schema_version": 1,
-      "provider": "fixture",
-      "executor": "gongbu",
-      "capability": "image_generation",
-      "billing_merchant": "fixture"
+      "provider": "provider:local:fixture",
+      "executor": "executor:gongbu:image",
+      "capability": "capability:image:generate",
+      "billing_merchant": "merchant:local"
     }
   },
   "execution": {

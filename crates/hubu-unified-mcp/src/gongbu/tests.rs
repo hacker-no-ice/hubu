@@ -140,6 +140,32 @@ fn provider_catalog_routes_read_only_and_returns_only_the_validated_contract() {
 }
 
 #[test]
+fn create_schema_makes_target_id_and_raw_tuple_strictly_exclusive() {
+    let create = tool_definitions()
+        .into_iter()
+        .find(|tool| tool["name"] == "gongbu_create_execution")
+        .unwrap();
+    assert_eq!(
+        create["inputSchema"]["oneOf"],
+        json!([
+            {
+                "required":["target_id"],
+                "not":{"anyOf":[
+                    {"required":["workload_type"]},
+                    {"required":["provider"]},
+                    {"required":["adapter"]},
+                    {"required":["model"]}
+                ]}
+            },
+            {
+                "required":["workload_type","provider","adapter","model"],
+                "not":{"required":["target_id"]}
+            }
+        ])
+    );
+}
+
+#[test]
 fn selectable_target_catalog_is_read_only_structured_and_sanitized() {
     let response = format!(
         r#"{{"schema_version":2,"targets":[{{"target_id":"{TARGET_ID}","workload_type":"image_generation","provider":"google","model":"gemini-image","execution_scope":{{"schema_version":1,"provider":"provider:google:gemini-developer","executor":"executor:gongbu:image","capability":"capability:image:generate","billing_merchant":"merchant:google"}},"image_sizes":["1k","2k"],"pricing":[{{"rule_id":"gemini-1k","selector":{{"image_size":"1k"}},"currency":"USD","components":[{{"unit":"image","rate_numerator_minor":4,"rate_denominator":1}}]}},{{"rule_id":"gemini-2k","selector":{{"image_size":"2k"}},"currency":"USD","components":[{{"unit":"image","rate_numerator_minor":8,"rate_denominator":1}}]}}]}}]}}"#
