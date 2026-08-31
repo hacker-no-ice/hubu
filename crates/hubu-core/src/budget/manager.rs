@@ -310,6 +310,68 @@ impl BudgetManager {
         }
     }
 
+    /// Apply a repository-authoritative version append after its transaction
+    /// has committed.
+    ///
+    /// This operation is intentionally infallible: the SQLite repository has
+    /// already validated lineage, balance, and current-pointer ownership. An
+    /// exact retry may name an older `applied_version` while `current` points at
+    /// a later head, so the manager indexes the immutable applied successor but
+    /// never moves its logical head backward.
+    pub fn apply_persisted_budget_version_append(
+        &mut self,
+        applied_version: BudgetVersion,
+        current: BudgetWithBalance,
+    ) {
+        self.index_persisted_budget_version(applied_version);
+        self.index_persisted_budget_version(current.version.clone());
+
+        let current_revision = current.version.revision;
+        let local_revision = self
+            .budgets
+            .get(&current.budget.id)
+            .and_then(|budget| self.budget_versions.get(&budget.current_version_id))
+            .map(|version| version.revision);
+        if local_revision.is_some_and(|revision| revision > current_revision) {
+            return;
+        }
+
+        debug_assert_eq!(current.budget.id, current.version.budget_id);
+        debug_assert_eq!(current.budget.current_version_id, current.version.id);
+        debug_assert_eq!(current.budget.id, current.balance.budget_id);
+        debug_assert_eq!(
+            current.balance.remaining_amount_cents,
+            current
+                .version
+                .amount_limit_cents
+                .checked_sub(current.balance.consumed_amount_cents)
+                .and_then(|value| value.checked_sub(current.balance.frozen_amount_cents))
+                .expect("persisted budget balance must remain representable")
+        );
+        debug_assert_eq!(
+            current.balance.frozen_amount_cents,
+            self.budget_holds
+                .values()
+                .filter(|hold| {
+                    hold.budget_id == current.budget.id
+                        && matches!(
+                            hold.status,
+                            BudgetHoldStatus::Frozen | BudgetHoldStatus::Claimed
+                        )
+                })
+                .map(|hold| hold.amount_cents)
+                .sum::<i64>()
+        );
+
+        if !self.budgets.contains_key(&current.budget.id) {
+            self.index_budget(&current.budget);
+        }
+        self.budget_balances
+            .insert(current.budget.id.clone(), current.balance);
+        self.budgets
+            .insert(current.budget.id.clone(), current.budget);
+    }
+
     /// Create one budget and initialize its cached balance.
     ///
     /// An agent may only have one budget for a currency at any point in time.
@@ -896,6 +958,28 @@ impl BudgetManager {
         self.budget_balances
             .insert(budget.id.clone(), budget_with_balance.balance.clone());
         self.budgets.insert(budget.id.clone(), budget.clone());
+    }
+
+    fn index_persisted_budget_version(&mut self, version: BudgetVersion) {
+        if let Some(existing_id) = self
+            .budget_version_id_by_revision
+            .get(&(version.budget_id.clone(), version.revision))
+        {
+            debug_assert_eq!(existing_id, &version.id);
+        }
+        if let Some(predecessor_id) = &version.predecessor_version_id {
+            if let Some(existing_id) = self.successor_version_id_by_predecessor.get(predecessor_id)
+            {
+                debug_assert_eq!(existing_id, &version.id);
+            }
+            self.successor_version_id_by_predecessor
+                .insert(predecessor_id.clone(), version.id.clone());
+        }
+        self.budget_version_id_by_revision.insert(
+            (version.budget_id.clone(), version.revision),
+            version.id.clone(),
+        );
+        self.budget_versions.insert(version.id.clone(), version);
     }
 
     fn budgets_with_balances(&self, budget_ids: &[BudgetId]) -> Vec<BudgetWithBalance> {

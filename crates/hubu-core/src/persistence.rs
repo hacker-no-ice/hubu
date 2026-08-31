@@ -1,9 +1,10 @@
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Utc};
 use hubu_common::ids::{
-    AgentId, BudgetVersionId, PaymentId, PolicyId, SpendExecutorClaimId, UserId,
+    AgentId, BudgetId, BudgetVersionId, PaymentId, PolicyId, SpendExecutorClaimId, UserId,
 };
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
@@ -12,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::budget::{
-    initial_budget_request_fingerprint, Budget, BudgetBalance, BudgetHold, BudgetHoldStatus,
-    BudgetStatus, BudgetVersion,
+    budget_update_request_fingerprint, initial_budget_request_fingerprint, Budget, BudgetBalance,
+    BudgetHold, BudgetHoldStatus, BudgetStatus, BudgetVersion, BudgetWithBalance,
 };
 use crate::policy::Policy;
 use crate::spend::{
@@ -164,6 +165,95 @@ pub trait BudgetRepository {
     fn load_budget_versions(&self) -> Result<Vec<BudgetVersion>, StorageError>;
     fn load_budget_balances(&self) -> Result<Vec<BudgetBalance>, StorageError>;
     fn load_budget_holds(&self) -> Result<Vec<BudgetHold>, StorageError>;
+}
+
+/// Storage command for appending one immutable successor to a logical budget.
+///
+/// `amount_limit_cents` is the new total limit, never a delta. The repository
+/// resolves the expected revision and computes the request fingerprint inside
+/// its serialized transaction.
+#[derive(Debug, Clone)]
+pub struct AppendBudgetVersionRequest {
+    pub budget_id: BudgetId,
+    pub expected_revision: u64,
+    pub amount_limit_cents: i64,
+    pub actor: String,
+    pub source: String,
+    pub reason: Option<String>,
+    pub effective_at: DateTime<Utc>,
+}
+
+/// Durable result of a version append or exact retry.
+///
+/// On a historical exact retry, `applied_version` is the stable direct
+/// successor created for the requested edge while `current` is the latest
+/// authoritative logical snapshot. They are normally the same revision, but
+/// keeping them distinct prevents an old retry from rewinding current state.
+#[derive(Debug, Clone)]
+pub struct AppendBudgetVersionResult {
+    pub applied_version: BudgetVersion,
+    /// Revision of the immutable version that the applied successor directly
+    /// follows. This remains the requested edge revision on historical replay,
+    /// even when `current` has advanced further.
+    pub predecessor_revision: u64,
+    pub current: BudgetWithBalance,
+    pub idempotent_replay: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AppendBudgetVersionError {
+    #[error("budget update amount must be positive")]
+    AmountLimitMustBePositive,
+
+    #[error("budget update expected_revision must be at least 1")]
+    ExpectedRevisionMustBePositive,
+
+    #[error("budget version actor is required")]
+    MissingActor,
+
+    #[error("budget version source is required")]
+    MissingSource,
+
+    #[error("budget not found")]
+    UnknownBudget,
+
+    #[error("revoked budget cannot be updated")]
+    BudgetRevoked,
+
+    #[error("expired budget cannot be updated")]
+    BudgetExpired,
+
+    #[error(
+        "budget limit {requested_amount_cents} is below committed usage {committed_amount_cents}"
+    )]
+    LimitBelowCommitted {
+        requested_amount_cents: i64,
+        committed_amount_cents: i64,
+    },
+
+    #[error(
+        "budget revision conflict: expected revision {expected_revision}, current revision is {current_revision}"
+    )]
+    RevisionConflict {
+        expected_revision: u64,
+        current_revision: u64,
+    },
+
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+impl From<rusqlite::Error> for AppendBudgetVersionError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
+pub trait BudgetVersionRepository {
+    fn append_budget_version(
+        &mut self,
+        request: &AppendBudgetVersionRequest,
+    ) -> Result<AppendBudgetVersionResult, AppendBudgetVersionError>;
 }
 
 pub trait SpendingTargetRepository {
@@ -379,7 +469,7 @@ impl SqliteGovernanceRepository {
         balance: &BudgetBalance,
     ) -> Result<(), StorageError> {
         let sqlite_tx = self.conn.transaction()?;
-        validate_hold_and_balance_relationship(&sqlite_tx, hold, balance)?;
+        validate_hold_and_balance_relationship(&sqlite_tx, hold, balance, false)?;
         sqlite_tx.execute(
             "INSERT INTO spend_executor_claims
              (id, spend_auth_token_id, owner_user_id, agent_id, operation_key,
@@ -445,7 +535,7 @@ impl SqliteGovernanceRepository {
         let sqlite_tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_hold_and_balance_relationship(&sqlite_tx, hold, balance)?;
+        validate_hold_and_balance_relationship(&sqlite_tx, hold, balance, true)?;
         sqlite_tx.execute(
             "INSERT INTO spend_auth_tokens
              (id, owner_user_id, spend_decision_id, expires_at, claim_ttl_seconds,
@@ -1006,6 +1096,7 @@ impl SqliteGovernanceRepository {
     }
 
     fn from_connection(conn: Connection) -> Result<Self, StorageError> {
+        conn.busy_timeout(StdDuration::from_secs(5))?;
         let mut repository = Self { conn };
         repository.init()?;
         Ok(repository)
@@ -3458,12 +3549,29 @@ impl BudgetRepository for SqliteGovernanceRepository {
                 "budget version id already names different immutable content".to_string(),
             ));
         }
-        sqlite_tx.execute(
+        let pointer_rows = sqlite_tx.execute(
             "INSERT INTO budget_current_versions (budget_id, version_id)
              VALUES (?1, ?2)
-             ON CONFLICT(budget_id) DO UPDATE SET version_id = excluded.version_id",
+             ON CONFLICT(budget_id) DO NOTHING",
             params![budget.id.to_string(), version.id.to_string()],
         )?;
+        if pointer_rows == 1 && (version.revision != 1 || version.predecessor_version_id.is_some())
+        {
+            return Err(StorageError::InvalidData(
+                "a new logical budget must start at root revision 1".to_string(),
+            ));
+        }
+        let matching_pointer_count: i64 = sqlite_tx.query_row(
+            "SELECT COUNT(*) FROM budget_current_versions
+             WHERE budget_id = ?1 AND version_id = ?2",
+            params![budget.id.to_string(), version.id.to_string()],
+            |row| row.get(0),
+        )?;
+        if matching_pointer_count != 1 {
+            return Err(StorageError::InvalidData(
+                "save_budget_with_balance cannot replace an existing current version".to_string(),
+            ));
+        }
         upsert_balance(&sqlite_tx, balance)?;
         sqlite_tx.commit()?;
         Ok(())
@@ -3475,7 +3583,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
         balance: &BudgetBalance,
     ) -> Result<(), StorageError> {
         let sqlite_tx = self.conn.transaction()?;
-        validate_hold_and_balance_relationship(&sqlite_tx, hold, balance)?;
+        validate_hold_and_balance_relationship(&sqlite_tx, hold, balance, true)?;
         sqlite_tx.execute(
             "INSERT INTO budget_holds
              (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
@@ -3507,7 +3615,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
         balance: &BudgetBalance,
     ) -> Result<(), StorageError> {
         let sqlite_tx = self.conn.transaction()?;
-        validate_hold_and_balance_relationship(&sqlite_tx, hold, balance)?;
+        validate_hold_and_balance_relationship(&sqlite_tx, hold, balance, false)?;
         let hold_rows = sqlite_tx.execute(
             "UPDATE budget_holds
              SET status = ?2, executor_claim_id = ?3, updated_at = ?4, expires_at = ?5
@@ -3605,6 +3713,274 @@ impl BudgetRepository for SqliteGovernanceRepository {
         )?;
         let rows = stmt.query_map([], budget_hold_from_row)?;
         collect_rows(rows)
+    }
+}
+
+impl BudgetVersionRepository for SqliteGovernanceRepository {
+    fn append_budget_version(
+        &mut self,
+        request: &AppendBudgetVersionRequest,
+    ) -> Result<AppendBudgetVersionResult, AppendBudgetVersionError> {
+        if request.amount_limit_cents <= 0 {
+            return Err(AppendBudgetVersionError::AmountLimitMustBePositive);
+        }
+        if request.expected_revision == 0 {
+            return Err(AppendBudgetVersionError::ExpectedRevisionMustBePositive);
+        }
+        let actor = request.actor.trim();
+        if actor.is_empty() {
+            return Err(AppendBudgetVersionError::MissingActor);
+        }
+        let source = request.source.trim();
+        if source.is_empty() {
+            return Err(AppendBudgetVersionError::MissingSource);
+        }
+        let reason = request
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty());
+        let request_fingerprint = budget_update_request_fingerprint(
+            &request.budget_id,
+            request.expected_revision,
+            request.amount_limit_cents,
+            actor,
+            source,
+            reason,
+        );
+
+        let transaction = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = match load_current_budget_snapshot(&transaction, &request.budget_id)? {
+            Some(current) => current,
+            None => {
+                let logical_budget_exists: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM budgets WHERE id = ?1)",
+                    params![request.budget_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                if logical_budget_exists {
+                    return Err(StorageError::InvalidData(
+                        "logical budget is missing its current version or balance".to_string(),
+                    )
+                    .into());
+                }
+                return Err(AppendBudgetVersionError::UnknownBudget);
+            }
+        };
+        let expected = load_budget_version_by_revision(
+            &transaction,
+            &request.budget_id,
+            request.expected_revision,
+        )?;
+        let Some(expected) = expected else {
+            return Err(AppendBudgetVersionError::RevisionConflict {
+                expected_revision: request.expected_revision,
+                current_revision: current.version.revision,
+            });
+        };
+
+        // The expected edge owns retry identity. Check its direct successor
+        // before rejecting a stale head so an exact retry can recover after an
+        // ambiguous commit, even when later revisions now exist.
+        if let Some(successor) =
+            load_budget_version_successor(&transaction, &request.budget_id, &expected.id)?
+        {
+            let exact_replay = successor.revision == request.expected_revision + 1
+                && successor.amount_limit_cents == request.amount_limit_cents
+                && successor.actor == actor
+                && successor.source == source
+                && successor.reason.as_deref() == reason
+                && successor.request_fingerprint == request_fingerprint;
+            if !exact_replay {
+                return Err(AppendBudgetVersionError::RevisionConflict {
+                    expected_revision: request.expected_revision,
+                    current_revision: current.version.revision,
+                });
+            }
+            if current.version.revision < successor.revision {
+                return Err(StorageError::InvalidData(
+                    "budget successor exists beyond the current-version pointer".to_string(),
+                )
+                .into());
+            }
+            transaction.commit()?;
+            return Ok(AppendBudgetVersionResult {
+                applied_version: successor,
+                predecessor_revision: expected.revision,
+                current,
+                idempotent_replay: true,
+            });
+        }
+
+        if current.version.revision != request.expected_revision
+            || current.version.id != expected.id
+        {
+            return Err(AppendBudgetVersionError::RevisionConflict {
+                expected_revision: request.expected_revision,
+                current_revision: current.version.revision,
+            });
+        }
+        match current.budget.status {
+            BudgetStatus::Revoked => return Err(AppendBudgetVersionError::BudgetRevoked),
+            BudgetStatus::Expired => return Err(AppendBudgetVersionError::BudgetExpired),
+            BudgetStatus::Active | BudgetStatus::Exhausted => {}
+        }
+        if current
+            .budget
+            .period
+            .ending_before
+            .is_some_and(|ending_before| ending_before <= request.effective_at)
+        {
+            return Err(AppendBudgetVersionError::BudgetExpired);
+        }
+        validate_balance_for_limit(&current.balance, current.version.amount_limit_cents)?;
+        let frozen_hold_amount_cents: i64 = transaction.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0)
+             FROM budget_holds
+             WHERE budget_id = ?1 AND status IN ('frozen', 'claimed')",
+            params![request.budget_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if frozen_hold_amount_cents != current.balance.frozen_amount_cents {
+            return Err(StorageError::InvalidData(
+                "frozen budget balance must equal its active holds".to_string(),
+            )
+            .into());
+        }
+        let committed_amount_cents = current
+            .balance
+            .consumed_amount_cents
+            .checked_add(current.balance.frozen_amount_cents)
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "budget committed usage exceeds the representable range".to_string(),
+                )
+            })?;
+        if request.amount_limit_cents < committed_amount_cents {
+            return Err(AppendBudgetVersionError::LimitBelowCommitted {
+                requested_amount_cents: request.amount_limit_cents,
+                committed_amount_cents,
+            });
+        }
+        let revision = request.expected_revision.checked_add(1).ok_or_else(|| {
+            StorageError::InvalidData("budget version revision overflow".to_string())
+        })?;
+        let sqlite_revision = i64::try_from(revision).map_err(|_| {
+            StorageError::InvalidData("budget version revision exceeds SQLite range".to_string())
+        })?;
+        let version = BudgetVersion {
+            id: BudgetVersionId::new(),
+            budget_id: request.budget_id.clone(),
+            revision,
+            predecessor_version_id: Some(expected.id.clone()),
+            amount_limit_cents: request.amount_limit_cents,
+            effective_at: request.effective_at,
+            actor: actor.to_string(),
+            source: source.to_string(),
+            reason: reason.map(ToString::to_string),
+            request_fingerprint,
+            created_at: request.effective_at,
+        };
+        transaction.execute(
+            "INSERT INTO budget_versions
+             (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+              effective_at, actor, source, reason, request_fingerprint, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                version.id.to_string(),
+                version.budget_id.to_string(),
+                sqlite_revision,
+                expected.id.to_string(),
+                version.amount_limit_cents,
+                version.effective_at.to_rfc3339(),
+                version.actor,
+                version.source,
+                version.reason,
+                version.request_fingerprint,
+                version.created_at.to_rfc3339(),
+            ],
+        )?;
+        let pointer_rows = transaction.execute(
+            "UPDATE budget_current_versions
+             SET version_id = ?1
+             WHERE budget_id = ?2 AND version_id = ?3",
+            params![
+                version.id.to_string(),
+                request.budget_id.to_string(),
+                expected.id.to_string(),
+            ],
+        )?;
+        require_one_updated_row(
+            pointer_rows,
+            "budget current-version compare-and-set failed after serialization",
+        )?;
+
+        let remaining_amount_cents = request.amount_limit_cents - committed_amount_cents;
+        let balance = BudgetBalance {
+            budget_id: request.budget_id.clone(),
+            consumed_amount_cents: current.balance.consumed_amount_cents,
+            frozen_amount_cents: current.balance.frozen_amount_cents,
+            remaining_amount_cents,
+        };
+        let balance_rows = transaction.execute(
+            "UPDATE budget_balances
+             SET remaining_amount_cents = ?1, updated_at = ?2
+             WHERE budget_id = ?3
+               AND consumed_amount_cents = ?4
+               AND frozen_amount_cents = ?5
+               AND remaining_amount_cents = ?6",
+            params![
+                balance.remaining_amount_cents,
+                request.effective_at.to_rfc3339(),
+                request.budget_id.to_string(),
+                current.balance.consumed_amount_cents,
+                current.balance.frozen_amount_cents,
+                current.balance.remaining_amount_cents,
+            ],
+        )?;
+        require_one_updated_row(
+            balance_rows,
+            "budget balance changed during serialized version append",
+        )?;
+
+        let mut budget = current.budget;
+        let previous_status = budget_status(&budget.status);
+        budget.current_version_id = version.id.clone();
+        budget.status = if balance.remaining_amount_cents == 0 {
+            BudgetStatus::Exhausted
+        } else {
+            BudgetStatus::Active
+        };
+        budget.updated_at = request.effective_at;
+        let budget_rows = transaction.execute(
+            "UPDATE budgets
+             SET status = ?1, updated_at = ?2
+             WHERE id = ?3 AND status = ?4",
+            params![
+                budget_status(&budget.status),
+                budget.updated_at.to_rfc3339(),
+                budget.id.to_string(),
+                previous_status,
+            ],
+        )?;
+        require_one_updated_row(
+            budget_rows,
+            "logical budget status changed during serialized version append",
+        )?;
+        transaction.commit()?;
+
+        Ok(AppendBudgetVersionResult {
+            applied_version: version.clone(),
+            predecessor_revision: expected.revision,
+            current: BudgetWithBalance {
+                budget,
+                version,
+                balance,
+            },
+            idempotent_replay: false,
+        })
     }
 }
 
@@ -4086,6 +4462,132 @@ fn budget_hold_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetHold, rusqlite:
     })
 }
 
+fn load_current_budget_snapshot(
+    conn: &Connection,
+    budget_id: &BudgetId,
+) -> Result<Option<BudgetWithBalance>, StorageError> {
+    conn.query_row(
+        "SELECT budget.id, budget.scope_type, budget.scope_id, budget.currency,
+                budget.starting_at, budget.ending_before, budget.status,
+                budget.created_at, budget.updated_at,
+                version.id, version.budget_id, version.revision,
+                version.predecessor_version_id, version.amount_limit_cents,
+                version.effective_at, version.actor, version.source, version.reason,
+                version.request_fingerprint, version.created_at,
+                balance.budget_id, balance.consumed_amount_cents,
+                balance.frozen_amount_cents, balance.remaining_amount_cents
+         FROM budgets AS budget
+         JOIN budget_current_versions AS current ON current.budget_id = budget.id
+         JOIN budget_versions AS version
+           ON version.budget_id = current.budget_id AND version.id = current.version_id
+         JOIN budget_balances AS balance ON balance.budget_id = budget.id
+         WHERE budget.id = ?1",
+        params![budget_id.to_string()],
+        |row| {
+            let logical_budget_id: String = row.get(0)?;
+            let scope_type: String = row.get(1)?;
+            let scope_id: String = row.get(2)?;
+            let currency: String = row.get(3)?;
+            let starting_at: String = row.get(4)?;
+            let ending_before: Option<String> = row.get(5)?;
+            let status: String = row.get(6)?;
+            let budget_created_at: String = row.get(7)?;
+            let budget_updated_at: String = row.get(8)?;
+            let version_id: String = row.get(9)?;
+            let version_budget_id: String = row.get(10)?;
+            let revision: i64 = row.get(11)?;
+            let predecessor_version_id: Option<String> = row.get(12)?;
+            let effective_at: String = row.get(14)?;
+            let version_created_at: String = row.get(19)?;
+            let balance_budget_id: String = row.get(20)?;
+            let revision = u64::try_from(revision).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    11,
+                    rusqlite::types::Type::Integer,
+                    Box::new(error),
+                )
+            })?;
+            let budget = Budget {
+                id: parse_id(&logical_budget_id)?,
+                agent_id: parse_budget_agent_id(&scope_type, &scope_id)?,
+                current_version_id: parse_id(&version_id)?,
+                currency: parse_currency(&currency)?,
+                period: TimePeriod::new(
+                    parse_timestamp(&starting_at)?,
+                    parse_optional_timestamp(ending_before)?,
+                )
+                .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                status: parse_budget_status(&status)?,
+                created_at: parse_timestamp(&budget_created_at)?,
+                updated_at: parse_timestamp(&budget_updated_at)?,
+            };
+            let version = BudgetVersion {
+                id: parse_id(&version_id)?,
+                budget_id: parse_id(&version_budget_id)?,
+                revision,
+                predecessor_version_id: parse_optional_id(predecessor_version_id)?,
+                amount_limit_cents: row.get(13)?,
+                effective_at: parse_timestamp(&effective_at)?,
+                actor: row.get(15)?,
+                source: row.get(16)?,
+                reason: row.get(17)?,
+                request_fingerprint: row.get(18)?,
+                created_at: parse_timestamp(&version_created_at)?,
+            };
+            let balance = BudgetBalance {
+                budget_id: parse_id(&balance_budget_id)?,
+                consumed_amount_cents: row.get(21)?,
+                frozen_amount_cents: row.get(22)?,
+                remaining_amount_cents: row.get(23)?,
+            };
+            Ok(BudgetWithBalance {
+                budget,
+                version,
+                balance,
+            })
+        },
+    )
+    .optional()
+    .map_err(StorageError::from)
+}
+
+fn load_budget_version_by_revision(
+    conn: &Connection,
+    budget_id: &BudgetId,
+    revision: u64,
+) -> Result<Option<BudgetVersion>, StorageError> {
+    let revision = i64::try_from(revision).map_err(|_| {
+        StorageError::InvalidData("budget version revision exceeds SQLite range".to_string())
+    })?;
+    conn.query_row(
+        "SELECT id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+                effective_at, actor, source, reason, request_fingerprint, created_at
+         FROM budget_versions
+         WHERE budget_id = ?1 AND revision = ?2",
+        params![budget_id.to_string(), revision],
+        budget_version_from_row,
+    )
+    .optional()
+    .map_err(StorageError::from)
+}
+
+fn load_budget_version_successor(
+    conn: &Connection,
+    budget_id: &BudgetId,
+    predecessor_version_id: &BudgetVersionId,
+) -> Result<Option<BudgetVersion>, StorageError> {
+    conn.query_row(
+        "SELECT id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+                effective_at, actor, source, reason, request_fingerprint, created_at
+         FROM budget_versions
+         WHERE budget_id = ?1 AND predecessor_version_id = ?2",
+        params![budget_id.to_string(), predecessor_version_id.to_string()],
+        budget_version_from_row,
+    )
+    .optional()
+    .map_err(StorageError::from)
+}
+
 fn budget_version_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetVersion, rusqlite::Error> {
     let id: String = row.get(0)?;
     let budget_id: String = row.get(1)?;
@@ -4137,6 +4639,7 @@ fn validate_hold_and_balance_relationship(
     conn: &Connection,
     hold: &BudgetHold,
     balance: &BudgetBalance,
+    require_current_version: bool,
 ) -> Result<(), StorageError> {
     if hold.budget_id != balance.budget_id {
         return Err(StorageError::InvalidData(
@@ -4161,6 +4664,22 @@ fn validate_hold_and_balance_relationship(
         return Err(StorageError::InvalidData(
             "budget hold attribution does not match its logical budget and version".to_string(),
         ));
+    }
+    if require_current_version {
+        let matching_current_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM budget_current_versions
+             WHERE budget_id = ?1 AND version_id = ?2",
+            params![
+                hold.budget_id.to_string(),
+                hold.budget_version_id.to_string()
+            ],
+            |row| row.get(0),
+        )?;
+        if matching_current_count != 1 {
+            return Err(StorageError::InvalidData(
+                "a new budget hold must reference the current budget version".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -4454,8 +4973,10 @@ mod tests {
     };
 
     use super::*;
+    use crate::app::{BudgetUpdateService, UpdateBudgetLimitRequest};
     use crate::budget::{
-        BudgetManager, BudgetVersionProvenance, CreateSingleBudgetRequest, ReserveBudgetRequest,
+        BudgetManager, BudgetVersionProvenance, CreateSingleBudgetRequest,
+        CreateSingleBudgetResponse, ReserveBudgetRequest,
     };
     use crate::policy::{
         condition::{Condition, Field, PolicyValue},
@@ -4480,6 +5001,46 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    fn create_persisted_budget(
+        repo: &mut SqliteGovernanceRepository,
+        manager: &mut BudgetManager,
+        amount_limit_cents: i64,
+    ) -> CreateSingleBudgetResponse {
+        let created = manager
+            .create_single_budget_with_provenance(
+                CreateSingleBudgetRequest {
+                    agent_id: agent_id(),
+                    amount_limit_cents,
+                    currency: Currency::Usd,
+                    period: TimePeriod::new(
+                        Utc::now() - Duration::hours(1),
+                        Some(Utc::now() + Duration::days(1)),
+                    )
+                    .unwrap(),
+                },
+                BudgetVersionProvenance::new(user_id().to_string(), "test:create-budget"),
+            )
+            .unwrap();
+        repo.save_budget_with_balance(&created.budget, &created.version, &created.balance)
+            .unwrap();
+        created
+    }
+
+    fn budget_update_request(
+        budget_id: BudgetId,
+        expected_revision: u64,
+        amount_limit_cents: i64,
+    ) -> UpdateBudgetLimitRequest {
+        UpdateBudgetLimitRequest {
+            budget_id,
+            expected_revision,
+            amount_limit_cents,
+            actor: user_id().to_string(),
+            source: Some("test:budget-update".to_string()),
+            reason: Some("adjust total allocation".to_string()),
+        }
     }
 
     fn settlement_receipt(actual_vendor_cost_cents: i64) -> SpendExecutorSettlementReceipt {
@@ -6287,6 +6848,695 @@ mod tests {
             assert_eq!(claim.operation_key, decision.operation_key);
         }
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn budget_version_append_replays_across_restart_without_rewinding_a_later_head() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-budget-version-replay-{}.sqlite",
+            BudgetId::new()
+        ));
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let mut manager = BudgetManager::new();
+        let created = create_persisted_budget(&mut repo, &mut manager, 10_000);
+        let mut first_request = budget_update_request(created.budget.id.clone(), 1, 15_000);
+        first_request.actor = format!("  {}  ", user_id());
+        first_request.source = Some("  test:budget-update  ".to_string());
+        first_request.reason = Some("  adjust total allocation  ".to_string());
+        let first = BudgetUpdateService
+            .update_limit(first_request.clone(), Utc::now(), &mut manager, &mut repo)
+            .unwrap();
+        assert!(!first.idempotent_replay);
+        assert_eq!(first.current.budget.id, created.budget.id);
+        assert_eq!(first.predecessor_revision, 1);
+        assert_eq!(first.applied_version.revision, 2);
+        assert_eq!(
+            first.applied_version.revision,
+            first.predecessor_revision + 1
+        );
+        assert_eq!(
+            first.applied_version.predecessor_version_id.as_ref(),
+            Some(&created.version.id)
+        );
+        assert_eq!(first.applied_version.source, "test:budget-update");
+        assert_eq!(
+            first.applied_version.reason.as_deref(),
+            Some("adjust total allocation")
+        );
+        assert_eq!(
+            first.applied_version.request_fingerprint,
+            budget_update_request_fingerprint(
+                &created.budget.id,
+                1,
+                15_000,
+                &user_id().to_string(),
+                "test:budget-update",
+                Some("adjust total allocation"),
+            )
+        );
+
+        let immediate_replay = BudgetUpdateService
+            .update_limit(
+                first_request.clone(),
+                Utc::now() + Duration::seconds(1),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap();
+        assert!(immediate_replay.idempotent_replay);
+        assert_eq!(immediate_replay.predecessor_revision, 1);
+        assert_eq!(
+            immediate_replay.applied_version.id,
+            first.applied_version.id
+        );
+
+        let mut second_request = budget_update_request(created.budget.id.clone(), 2, 20_000);
+        second_request.source = None;
+        let second = BudgetUpdateService
+            .update_limit(
+                second_request,
+                Utc::now() + Duration::seconds(2),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap();
+        assert_eq!(second.predecessor_revision, 2);
+        assert_eq!(second.applied_version.revision, 3);
+        assert_eq!(second.applied_version.source, "hubu-core:budget-update");
+        let historical_replay = BudgetUpdateService
+            .update_limit(
+                first_request.clone(),
+                Utc::now() + Duration::seconds(3),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap();
+        assert!(historical_replay.idempotent_replay);
+        assert_eq!(historical_replay.predecessor_revision, 1);
+        assert_eq!(
+            historical_replay.applied_version.id,
+            first.applied_version.id
+        );
+        assert_eq!(
+            historical_replay.current.version.id,
+            second.applied_version.id
+        );
+        assert_eq!(
+            manager
+                .get_budget_by_id(&created.budget.id)
+                .unwrap()
+                .version
+                .id,
+            second.applied_version.id
+        );
+
+        let rewind_error = repo
+            .save_budget_with_balance(&created.budget, &created.version, &created.balance)
+            .expect_err("the compatibility save path must not rewind the current pointer");
+        assert!(rewind_error
+            .to_string()
+            .contains("cannot replace an existing current version"));
+        drop(repo);
+
+        let mut reopened = SqliteGovernanceRepository::open(&path).unwrap();
+        let mut restarted = BudgetManager::from_records(
+            reopened.load_budgets().unwrap(),
+            reopened.load_budget_versions().unwrap(),
+            reopened.load_budget_balances().unwrap(),
+            reopened.load_budget_holds().unwrap(),
+        )
+        .unwrap();
+        let restarted_replay = BudgetUpdateService
+            .update_limit(
+                first_request,
+                Utc::now() + Duration::seconds(4),
+                &mut restarted,
+                &mut reopened,
+            )
+            .unwrap();
+        assert!(restarted_replay.idempotent_replay);
+        assert_eq!(restarted_replay.predecessor_revision, 1);
+        assert_eq!(
+            restarted_replay.applied_version.id,
+            first.applied_version.id
+        );
+        assert_eq!(
+            restarted_replay.current.version.id,
+            second.applied_version.id
+        );
+        assert_eq!(reopened.load_budget_versions().unwrap().len(), 3);
+        drop(reopened);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn retry_after_committed_response_loss_heals_the_in_memory_manager() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let mut manager = BudgetManager::new();
+        let created = create_persisted_budget(&mut repo, &mut manager, 10_000);
+        let request = budget_update_request(created.budget.id.clone(), 1, 15_000);
+        let committed_at = Utc::now();
+        let committed = repo
+            .append_budget_version(&AppendBudgetVersionRequest {
+                budget_id: request.budget_id.clone(),
+                expected_revision: request.expected_revision,
+                amount_limit_cents: request.amount_limit_cents,
+                actor: request.actor.clone(),
+                source: request.source.clone().unwrap(),
+                reason: request.reason.clone(),
+                effective_at: committed_at,
+            })
+            .unwrap();
+        assert!(!committed.idempotent_replay);
+        assert_eq!(committed.predecessor_revision, 1);
+        assert_eq!(committed.applied_version.revision, 2);
+        assert_eq!(repo.load_budget_versions().unwrap().len(), 2);
+        assert_eq!(
+            manager
+                .get_budget_by_id(&created.budget.id)
+                .unwrap()
+                .version
+                .id,
+            created.version.id
+        );
+
+        let recovered = BudgetUpdateService
+            .update_limit(
+                request.clone(),
+                committed_at + Duration::seconds(1),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap();
+        assert!(recovered.idempotent_replay);
+        assert_eq!(recovered.predecessor_revision, 1);
+        assert_eq!(recovered.applied_version.id, committed.applied_version.id);
+        assert_eq!(
+            manager
+                .get_budget_by_id(&created.budget.id)
+                .unwrap()
+                .version
+                .id,
+            committed.applied_version.id
+        );
+        assert_eq!(
+            manager
+                .get_budget_by_id(&created.budget.id)
+                .unwrap()
+                .balance
+                .remaining_amount_cents,
+            15_000
+        );
+
+        let repeated = BudgetUpdateService
+            .update_limit(
+                request,
+                committed_at + Duration::seconds(2),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap();
+        assert!(repeated.idempotent_replay);
+        assert_eq!(repeated.predecessor_revision, 1);
+        assert_eq!(repeated.applied_version.id, committed.applied_version.id);
+        assert_eq!(repo.load_budget_versions().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn changed_or_stale_budget_update_conflicts_without_appending() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let mut manager = BudgetManager::new();
+        let created = create_persisted_budget(&mut repo, &mut manager, 10_000);
+        BudgetUpdateService
+            .update_limit(
+                budget_update_request(created.budget.id.clone(), 1, 15_000),
+                Utc::now(),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap();
+
+        let changed = BudgetUpdateService
+            .update_limit(
+                budget_update_request(created.budget.id.clone(), 1, 16_000),
+                Utc::now(),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            changed,
+            crate::app::BudgetUpdateServiceError::Append(
+                AppendBudgetVersionError::RevisionConflict {
+                    expected_revision: 1,
+                    current_revision: 2
+                }
+            )
+        ));
+        let mut changed_reason = budget_update_request(created.budget.id.clone(), 1, 15_000);
+        changed_reason.reason = Some("different audit reason".to_string());
+        assert!(matches!(
+            BudgetUpdateService
+                .update_limit(changed_reason, Utc::now(), &mut manager, &mut repo,)
+                .unwrap_err(),
+            crate::app::BudgetUpdateServiceError::Append(
+                AppendBudgetVersionError::RevisionConflict { .. }
+            )
+        ));
+        let mut changed_source = budget_update_request(created.budget.id.clone(), 1, 15_000);
+        changed_source.source = Some("test:different-source".to_string());
+        assert!(matches!(
+            BudgetUpdateService
+                .update_limit(changed_source, Utc::now(), &mut manager, &mut repo,)
+                .unwrap_err(),
+            crate::app::BudgetUpdateServiceError::Append(
+                AppendBudgetVersionError::RevisionConflict { .. }
+            )
+        ));
+        let mut changed_actor = budget_update_request(created.budget.id.clone(), 1, 15_000);
+        changed_actor.actor = UserId::new().to_string();
+        assert!(matches!(
+            BudgetUpdateService
+                .update_limit(changed_actor, Utc::now(), &mut manager, &mut repo,)
+                .unwrap_err(),
+            crate::app::BudgetUpdateServiceError::Append(
+                AppendBudgetVersionError::RevisionConflict { .. }
+            )
+        ));
+        let stale = BudgetUpdateService
+            .update_limit(
+                budget_update_request(created.budget.id.clone(), 3, 20_000),
+                Utc::now(),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            stale,
+            crate::app::BudgetUpdateServiceError::Append(
+                AppendBudgetVersionError::RevisionConflict {
+                    expected_revision: 3,
+                    current_revision: 2
+                }
+            )
+        ));
+        assert_eq!(repo.load_budget_versions().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn budget_update_enforces_committed_floor_and_preserves_predecessor_holds() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let mut decisions = [spend_decision(), spend_decision(), spend_decision()];
+        for (index, decision) in decisions.iter_mut().enumerate() {
+            decision.operation_key = format!("budget-update-hold-{index}");
+            repo.save_spend_decision(decision).unwrap();
+        }
+        let mut manager = BudgetManager::new();
+        let created = create_persisted_budget(&mut repo, &mut manager, 10_000);
+
+        let consumed_hold = manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: created.budget.id.clone(),
+                spend_decision_id: decisions[0].id.clone(),
+                amount_cents: 4_000,
+                currency: Currency::Usd,
+                expires_at: Utc::now() + Duration::hours(1),
+            })
+            .unwrap();
+        repo.save_budget_hold(&consumed_hold.hold, &consumed_hold.balance)
+            .unwrap();
+        let consumed = manager.settle_budget(&consumed_hold.hold.id).unwrap();
+        repo.update_budget_hold(&consumed.hold, &consumed.balance)
+            .unwrap();
+
+        let first_frozen = manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: created.budget.id.clone(),
+                spend_decision_id: decisions[1].id.clone(),
+                amount_cents: 1_500,
+                currency: Currency::Usd,
+                expires_at: Utc::now() + Duration::hours(1),
+            })
+            .unwrap();
+        repo.save_budget_hold(&first_frozen.hold, &first_frozen.balance)
+            .unwrap();
+        let second_frozen = manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: created.budget.id.clone(),
+                spend_decision_id: decisions[2].id.clone(),
+                amount_cents: 1_500,
+                currency: Currency::Usd,
+                expires_at: Utc::now() + Duration::hours(1),
+            })
+            .unwrap();
+        repo.save_budget_hold(&second_frozen.hold, &second_frozen.balance)
+            .unwrap();
+
+        let below_floor = BudgetUpdateService
+            .update_limit(
+                budget_update_request(created.budget.id.clone(), 1, 6_999),
+                Utc::now(),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            below_floor,
+            crate::app::BudgetUpdateServiceError::Append(
+                AppendBudgetVersionError::LimitBelowCommitted {
+                    requested_amount_cents: 6_999,
+                    committed_amount_cents: 7_000
+                }
+            )
+        ));
+        let at_floor = BudgetUpdateService
+            .update_limit(
+                budget_update_request(created.budget.id.clone(), 1, 7_000),
+                Utc::now(),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap();
+        assert_eq!(at_floor.current.balance.remaining_amount_cents, 0);
+        assert!(matches!(
+            at_floor.current.budget.status,
+            BudgetStatus::Exhausted
+        ));
+
+        let increased = BudgetUpdateService
+            .update_limit(
+                budget_update_request(created.budget.id.clone(), 2, 8_000),
+                Utc::now(),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap();
+        assert_eq!(increased.current.balance.remaining_amount_cents, 1_000);
+        assert!(matches!(
+            increased.current.budget.status,
+            BudgetStatus::Active
+        ));
+
+        let settled = manager.settle_budget(&first_frozen.hold.id).unwrap();
+        repo.update_budget_hold(&settled.hold, &settled.balance)
+            .unwrap();
+        let released = manager.release_budget(&second_frozen.hold.id).unwrap();
+        repo.update_budget_hold(&released.hold, &released.balance)
+            .unwrap();
+        assert_eq!(settled.hold.budget_version_id, created.version.id);
+        assert_eq!(released.hold.budget_version_id, created.version.id);
+        let final_state = manager.get_budget_by_id(&created.budget.id).unwrap();
+        assert_eq!(final_state.version.id, increased.applied_version.id);
+        assert_eq!(final_state.balance.consumed_amount_cents, 5_500);
+        assert_eq!(final_state.balance.frozen_amount_cents, 0);
+        assert_eq!(final_state.balance.remaining_amount_cents, 2_500);
+
+        let mut new_decision = spend_decision();
+        new_decision.operation_key = "budget-update-current-version-hold".to_string();
+        repo.save_spend_decision(&new_decision).unwrap();
+        let now = Utc::now();
+        let historical_new_hold = BudgetHold {
+            id: BudgetHoldId::new(),
+            budget_id: created.budget.id.clone(),
+            budget_version_id: created.version.id.clone(),
+            spend_decision_id: new_decision.id.clone(),
+            amount_cents: 500,
+            currency: Currency::Usd,
+            status: BudgetHoldStatus::Frozen,
+            executor_claim_id: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: now + Duration::hours(1),
+        };
+        let historical_new_balance = BudgetBalance {
+            budget_id: created.budget.id.clone(),
+            consumed_amount_cents: 5_500,
+            frozen_amount_cents: 500,
+            remaining_amount_cents: 2_000,
+        };
+        let historical_error = repo
+            .save_budget_hold(&historical_new_hold, &historical_new_balance)
+            .expect_err("new holds must not attribute authorization to an old version");
+        assert!(historical_error
+            .to_string()
+            .contains("must reference the current budget version"));
+
+        let current_reservation = manager
+            .reserve_budget(ReserveBudgetRequest {
+                budget_id: created.budget.id.clone(),
+                spend_decision_id: new_decision.id,
+                amount_cents: 500,
+                currency: Currency::Usd,
+                expires_at: now + Duration::hours(1),
+            })
+            .unwrap();
+        assert_eq!(
+            current_reservation.hold.budget_version_id,
+            increased.applied_version.id
+        );
+        repo.save_budget_hold(&current_reservation.hold, &current_reservation.balance)
+            .unwrap();
+    }
+
+    #[test]
+    fn budget_update_rejects_revoked_and_effectively_expired_budgets() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let mut manager = BudgetManager::new();
+        let created = create_persisted_budget(&mut repo, &mut manager, 10_000);
+        let revoked = manager.revoke_budget(&created.budget.id).unwrap();
+        repo.save_budget_with_balance(&revoked.budget, &revoked.version, &revoked.balance)
+            .unwrap();
+        let revoked_error = BudgetUpdateService
+            .update_limit(
+                budget_update_request(created.budget.id.clone(), 1, 12_000),
+                Utc::now(),
+                &mut manager,
+                &mut repo,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            revoked_error,
+            crate::app::BudgetUpdateServiceError::Append(AppendBudgetVersionError::BudgetRevoked)
+        ));
+
+        let mut expired_repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let mut expired_manager = BudgetManager::new();
+        let expired = create_persisted_budget(&mut expired_repo, &mut expired_manager, 10_000);
+        let after_period = expired.budget.period.ending_before.unwrap() + Duration::seconds(1);
+        let expired_error = BudgetUpdateService
+            .update_limit(
+                budget_update_request(expired.budget.id, 1, 12_000),
+                after_period,
+                &mut expired_manager,
+                &mut expired_repo,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            expired_error,
+            crate::app::BudgetUpdateServiceError::Append(AppendBudgetVersionError::BudgetExpired)
+        ));
+    }
+
+    #[test]
+    fn concurrent_budget_updates_create_one_successor_and_replay_or_conflict() {
+        fn seed(path: &Path) -> BudgetId {
+            let mut repo = SqliteGovernanceRepository::open(path).unwrap();
+            let mut manager = BudgetManager::new();
+            create_persisted_budget(&mut repo, &mut manager, 10_000)
+                .budget
+                .id
+        }
+
+        let same_path = std::env::temp_dir().join(format!(
+            "hubu-budget-version-concurrent-replay-{}.sqlite",
+            BudgetId::new()
+        ));
+        let same_budget_id = seed(&same_path);
+        let same_request = AppendBudgetVersionRequest {
+            budget_id: same_budget_id.clone(),
+            expected_revision: 1,
+            amount_limit_cents: 15_000,
+            actor: user_id().to_string(),
+            source: "test:concurrent".to_string(),
+            reason: Some("same edge".to_string()),
+            effective_at: Utc::now(),
+        };
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = [
+            SqliteGovernanceRepository::open(&same_path).unwrap(),
+            SqliteGovernanceRepository::open(&same_path).unwrap(),
+        ]
+        .into_iter()
+        .map(|mut repo| {
+            let barrier = Arc::clone(&barrier);
+            let request = same_request.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                repo.append_budget_version(&request)
+            })
+        })
+        .collect::<Vec<_>>();
+        barrier.wait();
+        let same_results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            same_results
+                .iter()
+                .filter(|result| result.idempotent_replay)
+                .count(),
+            1
+        );
+        assert_eq!(
+            same_results[0].applied_version.id,
+            same_results[1].applied_version.id
+        );
+        assert_eq!(
+            SqliteGovernanceRepository::open(&same_path)
+                .unwrap()
+                .load_budget_versions()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let changed_path = std::env::temp_dir().join(format!(
+            "hubu-budget-version-concurrent-conflict-{}.sqlite",
+            BudgetId::new()
+        ));
+        let changed_budget_id = seed(&changed_path);
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = [15_000, 16_000]
+            .into_iter()
+            .map(|amount_limit_cents| {
+                let mut repo = SqliteGovernanceRepository::open(&changed_path).unwrap();
+                let barrier = Arc::clone(&barrier);
+                let request = AppendBudgetVersionRequest {
+                    budget_id: changed_budget_id.clone(),
+                    expected_revision: 1,
+                    amount_limit_cents,
+                    actor: user_id().to_string(),
+                    source: "test:concurrent".to_string(),
+                    reason: Some("changed edge".to_string()),
+                    effective_at: Utc::now(),
+                };
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    repo.append_budget_version(&request)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let changed_results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            changed_results
+                .iter()
+                .filter(|result| result.is_ok())
+                .count(),
+            1
+        );
+        assert_eq!(
+            changed_results
+                .iter()
+                .filter(|result| matches!(
+                    result,
+                    Err(AppendBudgetVersionError::RevisionConflict { .. })
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            SqliteGovernanceRepository::open(&changed_path)
+                .unwrap()
+                .load_budget_versions()
+                .unwrap()
+                .len(),
+            2
+        );
+        std::fs::remove_file(same_path).ok();
+        std::fs::remove_file(changed_path).ok();
+    }
+
+    #[test]
+    fn injected_budget_append_failures_roll_back_storage_and_leave_manager_unchanged() {
+        let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+        let mut manager = BudgetManager::new();
+        let created = create_persisted_budget(&mut repo, &mut manager, 10_000);
+        let request = budget_update_request(created.budget.id.clone(), 1, 15_000);
+
+        for (trigger_name, operation, table_name, message) in [
+            (
+                "fail_budget_version_insert",
+                "INSERT",
+                "budget_versions",
+                "injected immutable version failure",
+            ),
+            (
+                "fail_budget_pointer_update",
+                "UPDATE",
+                "budget_current_versions",
+                "injected pointer failure",
+            ),
+            (
+                "fail_budget_balance_update",
+                "UPDATE",
+                "budget_balances",
+                "injected balance failure",
+            ),
+            (
+                "fail_logical_budget_update",
+                "UPDATE",
+                "budgets",
+                "injected logical budget failure",
+            ),
+        ] {
+            repo.conn
+                .execute_batch(&format!(
+                    "CREATE TEMP TRIGGER {trigger_name}
+                     BEFORE {operation} ON {table_name}
+                     BEGIN
+                       SELECT RAISE(ABORT, '{message}');
+                     END;"
+                ))
+                .unwrap();
+            let error = BudgetUpdateService
+                .update_limit(request.clone(), Utc::now(), &mut manager, &mut repo)
+                .unwrap_err();
+            assert!(error.to_string().contains(message));
+            let manager_snapshot = manager.get_budget_by_id(&created.budget.id).unwrap();
+            assert_eq!(manager_snapshot.version.id, created.version.id);
+            assert_eq!(manager_snapshot.version.amount_limit_cents, 10_000);
+            assert!(matches!(
+                manager_snapshot.budget.status,
+                BudgetStatus::Active
+            ));
+            assert_eq!(manager_snapshot.balance.consumed_amount_cents, 0);
+            assert_eq!(manager_snapshot.balance.frozen_amount_cents, 0);
+            assert_eq!(manager_snapshot.balance.remaining_amount_cents, 10_000);
+            assert_eq!(repo.load_budget_versions().unwrap().len(), 1);
+            let persisted_budget = &repo.load_budgets().unwrap()[0];
+            assert_eq!(persisted_budget.current_version_id, created.version.id);
+            assert!(matches!(persisted_budget.status, BudgetStatus::Active));
+            assert_eq!(persisted_budget.updated_at, created.budget.updated_at);
+            let persisted_balance = &repo.load_budget_balances().unwrap()[0];
+            assert_eq!(persisted_balance.consumed_amount_cents, 0);
+            assert_eq!(persisted_balance.frozen_amount_cents, 0);
+            assert_eq!(persisted_balance.remaining_amount_cents, 10_000);
+            repo.conn
+                .execute_batch(&format!("DROP TRIGGER {trigger_name};"))
+                .unwrap();
+        }
+
+        let retried = BudgetUpdateService
+            .update_limit(request, Utc::now(), &mut manager, &mut repo)
+            .unwrap();
+        assert_eq!(retried.predecessor_revision, 1);
+        assert_eq!(retried.applied_version.revision, 2);
+        assert_eq!(repo.load_budget_versions().unwrap().len(), 2);
     }
 
     #[test]
