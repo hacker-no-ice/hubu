@@ -95,7 +95,7 @@ exec $(quote "${real_hubu_server_bin}") "\$@"
 EOF
 chmod 700 "${hubu_server_bin}"
 
-init_output="$("${hubu_bin}" stack init --profile "${profile}")"
+init_output="$("${hubu_bin}" stack init --mode local-stack --profile "${profile}")"
 "${hubu_bin}" stack select --profile "${profile}" >/dev/null
 profile_canonical="$(cd "${profile}" && pwd -P)"
 managed_credential_root="${profile_canonical}/state/credentials"
@@ -111,11 +111,13 @@ fi
 [[ -z "$(find "${managed_credential_root}" -type f ! -name .gitignore -print -quit)" ]] || fail "init created credential material"
 
 doctor_output="$("${hubu_bin}" stack doctor --profile "${profile}" 2>&1 || true)"
-grep -F 'stack.toml:hubu.ownership' <<<"${doctor_output}" >/dev/null
+if grep -F 'stack.toml:hubu.ownership' <<<"${doctor_output}" >/dev/null; then
+  fail "outcome-oriented init left Hubu ownership unresolved"
+fi
 if grep -F 'credentials.toml:files.hubu_auth' <<<"${doctor_output}" >/dev/null; then
   fail "managed Hubu capability paths were presented as user input"
 fi
-grep -F 'providers.toml:mode' <<<"${doctor_output}" >/dev/null
+grep -F 'providers.toml:targets' <<<"${doctor_output}" >/dev/null
 
 cat >"${profile}/credentials.toml" <<EOF
 schema_version = 1

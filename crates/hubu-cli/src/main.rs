@@ -334,11 +334,11 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         .unwrap_or_else(default_mcp_server_path);
     let gongbu_endpoint = handoff
         .as_ref()
-        .map(|value| value.gongbu_endpoint.clone())
+        .and_then(|value| value.gongbu_endpoint.clone())
         .or(manual_gongbu_endpoint);
     let gongbu_token_file = handoff
         .as_ref()
-        .map(|value| value.gongbu_token_file.clone())
+        .and_then(|value| value.gongbu_token_file.clone())
         .or(manual_gongbu_token_file);
     if gongbu_endpoint.is_some() != gongbu_token_file.is_some() {
         bail!("--gongbu-endpoint and --gongbu-token-file must be provided together");

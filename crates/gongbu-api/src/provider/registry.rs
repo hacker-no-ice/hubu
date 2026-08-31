@@ -20,18 +20,17 @@ use super::{
     supported_profiles::{self, CatalogProfile},
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
 };
-use crate::{artifact::ArtifactLimits, execution_scope::for_target};
+use crate::{
+    artifact::ArtifactLimits, execution_scope::for_target, secrets::ProviderSecret,
+};
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
 
-#[cfg(feature = "local-fixture-canary")]
 use super::contract::{
     AdapterCapabilities, AdapterOutcome, NormalizedArtifact, NormalizedRequest, ProviderFailure,
     ProviderPhase,
 };
-#[cfg(feature = "local-fixture-canary")]
-use crate::secrets::ProviderSecret;
 
 pub type BoundAdapter = Arc<dyn ProviderAdapter + Send + Sync>;
 type Factory = dyn Fn(&ProviderConfigVersion) -> Result<BoundAdapter, ContractError> + Send + Sync;
@@ -124,8 +123,18 @@ impl ProviderRegistry {
         });
         #[cfg(feature = "local-fixture-canary")]
         if local_fixture_canary_enabled() {
-            registry.register("example", "fixture", |_| Ok(Arc::new(LocalFixtureAdapter)));
+            registry.register("example", "fixture", |_| {
+                Ok(Arc::new(DeterministicFixtureAdapter))
+            });
         }
+        registry
+    }
+
+    pub fn sandbox() -> Self {
+        let mut registry = Self::new();
+        registry.register("sandbox", "fixture", |_| {
+            Ok(Arc::new(DeterministicFixtureAdapter))
+        });
         registry
     }
 
@@ -151,11 +160,9 @@ fn local_fixture_canary_enabled() -> bool {
     std::env::var("GONGBU_LOCAL_FIXTURE_CANARY").as_deref() == Ok("1")
 }
 
-#[cfg(feature = "local-fixture-canary")]
-struct LocalFixtureAdapter;
+struct DeterministicFixtureAdapter;
 
-#[cfg(feature = "local-fixture-canary")]
-impl ProviderAdapter for LocalFixtureAdapter {
+impl ProviderAdapter for DeterministicFixtureAdapter {
     fn adapter_id(&self) -> &str {
         "fixture"
     }
@@ -186,9 +193,9 @@ impl ProviderAdapter for LocalFixtureAdapter {
                 images: Some(1),
                 ..Default::default()
             }),
-            actual_vendor_cost: Some(
-                crate::provider_contract::ActualVendorCost::new(1, 2, "USD").unwrap(),
-            ),
+            // The deterministic fixture has no vendor charge. Settlement therefore
+            // uses the frozen catalog estimate selected for the request.
+            actual_vendor_cost: None,
             provider_request_id: Some(format!("local-fixture-request-{provider_request_id}")),
             provider_operation_id: None,
             artifacts: vec![NormalizedArtifact {

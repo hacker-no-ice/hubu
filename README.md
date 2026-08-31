@@ -52,10 +52,10 @@ and start the principal-neutral stack:
 
 ```sh
 profile=/absolute/path/to/profile
-hubu stack init --profile "$profile"
+hubu stack init --mode sandbox --install-temporal --profile "$profile"
 hubu stack select --profile "$profile"
-# Edit stack.toml and providers.toml. Add credentials.toml provider references
-# only for live targets; managed service credential paths are internal.
+# Sandbox needs no provider edits or credentials. Local-stack mode accepts
+# operator-approved live targets and opaque provider references.
 hubu stack start
 hubu stack status
 hubu protocol agent-registration

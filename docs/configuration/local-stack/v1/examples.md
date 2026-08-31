@@ -5,14 +5,34 @@ every active `/absolute/...` path and public ID with values from your
 installation. Managed service credential locations are not active fields in
 these examples; the launcher selects them internally.
 
-## Provider-disabled local profile
+## Sandbox outcome
 
-This is the recommended first profile. It manages Hubu, Gongbu, and local Temporal while omitting all provider targets, prices, spend ceilings, and live-spend acknowledgement.
+This is the recommended first profile. Initialization writes the complete
+Hubu, Gongbu, and Temporal topology plus a deterministic fixture target and
+synthetic pricing:
+
+```sh
+hubu stack init --mode sandbox --install-temporal --profile /absolute/path/to/profile
+hubu stack doctor --profile /absolute/path/to/profile
+```
+
+Internal authentication, governance, authorization, execution submission,
+receipts, and settlement use the real stack boundaries. Only the external
+provider edge is replaced. Sandbox configuration contains no provider
+credential, live-spend ceiling, or acknowledgement and cannot contact or
+charge an external provider.
+
+## Provider-disabled local-stack variation
+
+This advanced variation manages Hubu, Gongbu, and local Temporal while
+omitting all provider targets. It is useful for dependency diagnostics but,
+unlike sandbox mode, cannot demonstrate governed provider execution.
 
 ### `stack.toml`
 
 ```toml
 schema_version = 1
+mode = "local-stack"
 allow_development_builds = false
 
 [binaries]
@@ -93,6 +113,29 @@ path, port, version, and explicit reference is valid. Before first start it
 reports the derived managed credentials as pending managed work. Provider
 readiness is reported separately as disabled.
 
+## Hubu-only outcome
+
+Hubu-only mode deliberately removes the execution plane:
+
+```sh
+hubu stack init --mode hubu-only --profile /absolute/path/to/profile
+```
+
+Its `stack.toml` contains `mode = "hubu-only"`, `[binaries]`, `[hubu]`, and
+`[runtime]`. It omits `[gongbu]`, `[temporal]`, and `binaries.gongbu_server`.
+Its provider source is intentionally minimal:
+
+```toml
+schema_version = 1
+mode = "disabled"
+```
+
+The generated unified-MCP handoff contains only Hubu endpoint and credential
+references. Missing Gongbu and Temporal are reported as intentionally absent,
+not as unhealthy services. Operator-owned workflows may use Hubu registration,
+policy, authorization, and budget contracts without adopting Gongbu provider
+execution.
+
 ## Supported managed FLUX.2 profile
 
 This is the ready-to-render provider shape for
@@ -146,7 +189,11 @@ Live execution can incur charges after a verified configuration is rendered, act
 
 ### `stack.toml`
 
-Use the same complete `stack.toml` from the provider-disabled example. Provider mode does not merge Hubu and Gongbu or change their topology. Register and fund each agent in Hubu after startup; registration does not change the stack generation or Gongbu configuration.
+Use the same complete `stack.toml` from the
+[provider-disabled local-stack variation](#provider-disabled-local-stack-variation).
+Provider mode does not merge Hubu and Gongbu or change their topology. Register
+and fund each agent in Hubu after startup; registration does not change the
+stack generation or Gongbu configuration.
 
 ### `credentials.toml`
 

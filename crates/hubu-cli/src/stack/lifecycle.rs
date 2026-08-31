@@ -169,18 +169,21 @@ fn inspect_status(profile: &Path) -> Result<StackStatusReport> {
     let manifest = read_active_manifest(profile).ok();
     let state = read_runtime_state(profile)?;
     let doctor = doctor::inspect_profile(profile);
-    let components = vec![
-        component_status(
-            "hubu-server",
-            "hubu",
-            stack
-                .as_ref()
-                .and_then(|value| value.hubu.as_ref())
-                .and_then(|value| value.ownership),
-            doctor.component_ready("hubu"),
-            state.as_ref(),
-        ),
-        component_status(
+    let mut components = vec![component_status(
+        "hubu-server",
+        "hubu",
+        stack
+            .as_ref()
+            .and_then(|value| value.hubu.as_ref())
+            .and_then(|value| value.ownership),
+        doctor.component_ready("hubu"),
+        state.as_ref(),
+    )];
+    if stack
+        .as_ref()
+        .is_none_or(|value| value.mode.includes_gongbu())
+    {
+        components.push(component_status(
             "gongbu-server",
             "gongbu",
             stack
@@ -189,15 +192,15 @@ fn inspect_status(profile: &Path) -> Result<StackStatusReport> {
                 .and_then(|value| value.ownership),
             doctor.component_ready("gongbu"),
             state.as_ref(),
-        ),
-    ];
+        ));
+    }
     let temporal = stack.as_ref().and_then(|value| value.temporal.as_ref());
     let gongbu_ownership = stack
         .as_ref()
         .and_then(|value| value.gongbu.as_ref())
         .and_then(|value| value.ownership);
     let profile_arg = shell_display(profile);
-    let commands = BTreeMap::from([
+    let mut commands = BTreeMap::from([
         (
             "doctor".into(),
             format!("hubu stack doctor --profile {profile_arg}"),
@@ -218,15 +221,20 @@ fn inspect_status(profile: &Path) -> Result<StackStatusReport> {
             "codex_init".into(),
             format!("hubu init codex --stack-profile {profile_arg}"),
         ),
-        (
+    ]);
+    if stack
+        .as_ref()
+        .is_none_or(|value| value.mode.includes_gongbu())
+    {
+        commands.insert(
             "temporal_workflows".into(),
             temporal_workflow_command(temporal, gongbu_ownership),
-        ),
-        (
+        );
+        commands.insert(
             "artifact_retrieval".into(),
             "use the authenticated Gongbu artifact endpoint for the execution artifact id".into(),
-        ),
-    ]);
+        );
+    }
     let generation_id = manifest.as_ref().map(|value| value.generation_id.clone());
     let source_or_render_drift = manifest.as_ref().is_none_or(|value| {
         source_digests(profile)
@@ -249,10 +257,15 @@ fn inspect_status(profile: &Path) -> Result<StackStatusReport> {
         restart_impact,
         components,
         temporal: TemporalStatus {
-            ownership: match (gongbu_ownership, temporal.and_then(|value| value.mode)) {
-                (Some(Ownership::External), _) => "external_gongbu",
-                (_, Some(TemporalMode::ManagedLocal)) => "gongbu_managed_local",
-                (_, Some(TemporalMode::External)) => "external_temporal",
+            ownership: match (
+                stack.as_ref().map(|value| value.mode),
+                gongbu_ownership,
+                temporal.and_then(|value| value.mode),
+            ) {
+                (Some(StackMode::HubuOnly), _, _) => "not_applicable",
+                (_, Some(Ownership::External), _) => "external_gongbu",
+                (_, _, Some(TemporalMode::ManagedLocal)) => "gongbu_managed_local",
+                (_, _, Some(TemporalMode::External)) => "external_temporal",
                 _ => "unconfigured",
             },
             ui_url: temporal.and_then(|value| {
@@ -965,7 +978,12 @@ fn bootstrap_managed_gongbu_credentials(profile: &Path, manifest: &ActiveManifes
         .arg("--hubu-token-file")
         .arg(&paths.hubu_auth)
         .arg("--caller-token-file")
-        .arg(&paths.gongbu_caller)
+        .arg(
+            paths
+                .gongbu_caller
+                .as_ref()
+                .expect("managed Gongbu caller path"),
+        )
         .arg("--secret-dir")
         .arg(&paths.gongbu_secret_dir)
         .stdin(Stdio::null())
@@ -1646,7 +1664,9 @@ pub(super) fn ensure_profile_stopped(profile: &Path) -> Result<()> {
             endpoints.push((
                 "gongbu-server",
                 "active generation",
-                handoff.gongbu_endpoint,
+                handoff
+                    .gongbu_endpoint
+                    .ok_or_else(|| anyhow!("active managed Gongbu handoff has no endpoint"))?,
             ));
         }
     }
@@ -2238,8 +2258,8 @@ ownership = "managed"
             approval_token_file: PathBuf::from("/tmp/hubu-approval"),
             reconciliation_token_file: PathBuf::from("/tmp/hubu-reconciliation"),
             operation_state_path: PathBuf::from("/tmp/hubu-unified-operations.sqlite3"),
-            gongbu_endpoint: "http://127.0.0.1:2".into(),
-            gongbu_token_file: PathBuf::from("/tmp/gongbu-caller"),
+            gongbu_endpoint: Some("http://127.0.0.1:2".into()),
+            gongbu_token_file: Some(PathBuf::from("/tmp/gongbu-caller")),
         };
         let handoff_bytes = serde_json::to_vec_pretty(&handoff).unwrap();
         let launch_bytes = b"{}\n";

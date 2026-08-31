@@ -259,6 +259,7 @@ fn inspect_profile_with(
     let mut source_constraints_valid = true;
     if validate_provider_source(&providers).is_err()
         || validate_provider_credential_isolation(&providers, &credentials).is_err()
+        || validate_stack_mode(&stack, &providers).is_err()
     {
         source_constraints_valid = false;
         report.checks.push(check(
@@ -282,7 +283,7 @@ fn inspect_profile_with(
     });
     let local_fixture_canary = cfg!(feature = "local-fixture-canary")
         && std::env::var("HUBU_LOCAL_FIXTURE_CANARY").as_deref() == Ok("1");
-    if fixture_only && !local_fixture_canary {
+    if fixture_only && stack.mode != StackMode::Sandbox && !local_fixture_canary {
         source_constraints_valid = false;
         report.provider_readiness = ProviderReadiness::FixtureOnly;
         report.checks.push(check(
@@ -301,7 +302,11 @@ fn inspect_profile_with(
             "local_fixture_canary_explicit",
             "providers",
             Some("providers.toml:targets".into()),
-            "the feature-gated local acceptance canary explicitly selected a fixture adapter",
+            if stack.mode == StackMode::Sandbox {
+                "sandbox mode uses the deterministic fixture only at the external provider edge"
+            } else {
+                "the feature-gated local acceptance canary explicitly selected a fixture adapter"
+            },
         ));
     }
     if validate_topology(&stack).is_err() {
@@ -475,7 +480,7 @@ fn inspect_profile_with(
     let configured_files = credentials.files.as_ref();
     let hubu_managed =
         stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed);
-    let credential_fields = [
+    let mut credential_fields = vec![
         (
             "hubu_auth",
             "hubu",
@@ -515,17 +520,19 @@ fn inspect_profile_with(
                 .and_then(|files| files.hubu_reconciliation.as_ref())
                 .is_some(),
         ),
-        (
+    ];
+    if let Some(gongbu_caller) = credential_paths.gongbu_caller.clone() {
+        credential_fields.push((
             "gongbu_caller",
             "gongbu",
             "credentials.toml:files.gongbu_caller",
-            credential_paths.gongbu_caller.clone(),
+            gongbu_caller,
             credential_paths.managed_gongbu_handoff,
             configured_files
                 .and_then(|files| files.gongbu_caller.as_ref())
                 .is_some(),
-        ),
-    ];
+        ));
+    }
     let mut resolved_credentials = BTreeMap::new();
     let mut pending_managed_owners = BTreeSet::new();
     for (component, owner, field, path, provisioned_by_managed_start, explicitly_configured) in
@@ -741,6 +748,15 @@ fn inspect_profile_with(
             None,
             "artifact destination and safety limits passed the selected Gongbu validator",
         ));
+    } else if stack.mode == StackMode::HubuOnly {
+        report.checks.push(check(
+            CheckLayer::Renderability,
+            CheckStatus::Skipped,
+            "gongbu_intentionally_absent",
+            "gongbu",
+            None,
+            "Hubu-only mode intentionally omits Gongbu, Temporal, provider catalogs, and artifacts",
+        ));
     } else {
         report.checks.push(check(
             CheckLayer::Renderability,
@@ -769,7 +785,6 @@ fn inspect_profile_with(
         Err(_) => return report,
     };
     let hubu = stack.hubu.as_ref().expect("complete");
-    let gongbu = stack.gongbu.as_ref().expect("complete");
     let hubu_ready = probe_hubu(
         &client,
         hubu.endpoint.as_deref().expect("complete"),
@@ -779,24 +794,25 @@ fn inspect_profile_with(
         hubu.ownership.expect("complete"),
         &mut report.checks,
     );
-    let gongbu_ready = probe_gongbu(
-        &client,
-        gongbu.endpoint.as_deref().expect("complete"),
-        resolved_credentials.get("gongbu_caller").expect("resolved"),
-        provenance_for(&provenances, "gongbu-server")
-            .or_else(|| provenance_for(&provenances, "hubu")),
-        gongbu.ownership.expect("complete"),
-        &mut report.checks,
-    );
-    let temporal_ready = probe_temporal(
-        &stack,
-        gongbu_ready == ServiceProbe::Ready,
-        &mut report.checks,
-    );
+    let gongbu_ready = stack.gongbu.as_ref().map(|gongbu| {
+        probe_gongbu(
+            &client,
+            gongbu.endpoint.as_deref().expect("complete"),
+            resolved_credentials.get("gongbu_caller").expect("resolved"),
+            provenance_for(&provenances, "gongbu-server")
+                .or_else(|| provenance_for(&provenances, "hubu")),
+            gongbu.ownership.expect("complete"),
+            &mut report.checks,
+        )
+    });
+    let temporal_ready = gongbu_ready.is_none_or(|ready| {
+        probe_temporal(&stack, ready == ServiceProbe::Ready, &mut report.checks)
+    });
 
     let pending_while_running = (pending_managed_owners.contains("hubu")
         && hubu_ready != ServiceProbe::NotRunning)
-        || (pending_managed_owners.contains("gongbu") && gongbu_ready != ServiceProbe::NotRunning);
+        || (pending_managed_owners.contains("gongbu")
+            && gongbu_ready != Some(ServiceProbe::NotRunning));
     if pending_while_running {
         report.checks.push(runtime_fail(
             "managed_credential_missing_while_running",
@@ -808,7 +824,13 @@ fn inspect_profile_with(
     let required_external_ready = opaque_available
         && !pending_while_running
         && service_can_start(hubu.ownership.expect("complete"), hubu_ready)
-        && service_can_start(gongbu.ownership.expect("complete"), gongbu_ready)
+        && stack
+            .gongbu
+            .as_ref()
+            .zip(gongbu_ready)
+            .is_none_or(|(gongbu, ready)| {
+                service_can_start(gongbu.ownership.expect("complete"), ready)
+            })
         && temporal_ready;
     if required_external_ready {
         report.classification = ProfileClassification::ReadyToStart;
@@ -816,7 +838,7 @@ fn inspect_profile_with(
     if opaque_available
         && !pending_while_running
         && hubu_ready == ServiceProbe::Ready
-        && gongbu_ready == ServiceProbe::Ready
+        && gongbu_ready.is_none_or(|ready| ready == ServiceProbe::Ready)
         && temporal_ready
     {
         report.classification = ProfileClassification::RunningReady;
@@ -1120,7 +1142,7 @@ fn validate_handoff(
         && Some(&handoff.hubu_token_file) == credentials.get("hubu_auth")
         && Some(&handoff.approval_token_file) == credentials.get("hubu_approval")
         && Some(&handoff.reconciliation_token_file) == credentials.get("hubu_reconciliation")
-        && Some(&handoff.gongbu_token_file) == credentials.get("gongbu_caller")
+        && handoff.gongbu_token_file.as_ref() == credentials.get("gongbu_caller")
         && handoff.operation_state_path.is_absolute()
         && generation.ancestors().nth(3).is_some_and(|profile| {
             handoff.operation_state_path == profile.join("state/hubu-unified-operations.sqlite3")
@@ -1134,7 +1156,7 @@ fn validate_handoff(
             .gongbu
             .as_ref()
             .and_then(|value| value.endpoint.as_ref())
-            == Some(&handoff.gongbu_endpoint)
+            == handoff.gongbu_endpoint.as_ref()
 }
 
 fn report_operation_registry_path(path: &Path, checks: &mut Vec<DoctorCheck>) {
@@ -1502,6 +1524,7 @@ fn provider_readiness(source: &ProvidersSource) -> ProviderReadiness {
     } else {
         match source.mode {
             Some(ProviderMode::Disabled) => ProviderReadiness::Disabled,
+            Some(ProviderMode::Sandbox) => ProviderReadiness::FixtureOnly,
             Some(ProviderMode::Live) => ProviderReadiness::Unknown,
             None => ProviderReadiness::Unknown,
         }
@@ -2316,7 +2339,12 @@ account = "gongbu-caller"
         let root = tempdir().unwrap();
         let profile = root.path().join("profile");
         init(
-            vec!["--profile".into(), profile.display().to_string()],
+            vec![
+                "--mode".into(),
+                "local-stack".into(),
+                "--profile".into(),
+                profile.display().to_string(),
+            ],
             root.path(),
         )
         .unwrap();
@@ -2325,10 +2353,10 @@ account = "gongbu-caller"
         let report = inspect_profile(&profile);
         assert_eq!(report.classification, ProfileClassification::Incomplete);
         let json = serde_json::to_string(&report).unwrap();
-        assert!(json.contains("stack.toml:hubu.ownership"));
-        assert!(json.contains("stack.toml:gongbu.ownership"));
+        assert!(!json.contains("stack.toml:hubu.ownership"));
+        assert!(!json.contains("stack.toml:gongbu.ownership"));
         assert!(!json.contains("credentials.toml:files.hubu_auth"));
-        assert!(json.contains("providers.toml:mode"));
+        assert!(json.contains("providers.toml:targets"));
         assert!(!json.contains("stack.toml:identity"));
         let after = ["stack.toml", "credentials.toml", "providers.toml"]
             .map(|name| fs::read(profile.join(name)).unwrap());
