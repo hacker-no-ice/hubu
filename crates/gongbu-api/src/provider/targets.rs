@@ -109,10 +109,18 @@ impl TargetKey {
 
     /// Stable, opaque selector for the logical target across configuration revisions.
     pub fn public_id(&self) -> String {
-        format!(
-            "gongbu:target:v1:{:x}",
-            Sha256::digest(self.canonical_name().as_bytes())
-        )
+        let mut digest = Sha256::new();
+        digest.update(b"gongbu-target-v1\0");
+        for part in [
+            &self.workload_type,
+            &self.provider,
+            &self.adapter,
+            &self.model,
+        ] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
+        }
+        format!("gongbu:target:v1:{:x}", digest.finalize())
     }
 }
 
@@ -841,6 +849,17 @@ mod tests {
         let changed =
             TargetKey::new("image_generation", "google", "gemini_image", "image-v2").unwrap();
         assert_ne!(key.public_id(), changed.public_id());
+
+        let delimiter_in_workload = TargetKey::new("a/b", "c", "d", "e").unwrap();
+        let delimiter_in_model = TargetKey::new("a", "b", "c", "d/e").unwrap();
+        assert_eq!(
+            delimiter_in_workload.canonical_name(),
+            delimiter_in_model.canonical_name()
+        );
+        assert_ne!(
+            delimiter_in_workload.public_id(),
+            delimiter_in_model.public_id()
+        );
     }
 
     fn catalog(json: &str) -> ProviderTargetConfig {

@@ -419,7 +419,10 @@ impl Api {
     ) -> Result<HttpResponse, ApiError> {
         let request: CreateExecutionV2Request =
             serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
-        let target = resolve_v2_target(&request, &self.providers)?;
+        if request.schema_version != SCHEMA_VERSION {
+            return Err(ApiError::validation());
+        }
+        let target = resolve_v2_target(&request, &self.providers, &self.repository)?;
         let request = translate_v2(request, target)?;
         self.create(caller, request, SCHEMA_VERSION)
     }
@@ -846,6 +849,7 @@ fn translate_v1(request: CreateExecutionV1Request) -> Result<CreateExecutionRequ
 fn resolve_v2_target(
     request: &CreateExecutionV2Request,
     providers: &ValidatedProviderCatalog,
+    repository: &Repository,
 ) -> Result<TargetKey, ApiError> {
     let tuple = (
         request.workload_type.as_deref(),
@@ -854,12 +858,30 @@ fn resolve_v2_target(
         request.model.as_deref(),
     );
     match (request.target_id.as_deref(), tuple) {
-        (Some(target_id), (None, None, None, None)) => providers
-            .resolve_target_id(target_id)
-            .map(ProviderConfigVersion::target_key)
-            .map_err(|_| {
-                ApiError::validation_with_diagnostics("target_not_selectable", &["target_id"])
-            }),
+        (Some(target_id), (None, None, None, None)) => {
+            match repository.get_execution_by_spend_auth_token(&request.spend_auth_token_id) {
+                Ok(existing) => {
+                    let persisted = TargetKey::new(
+                        existing.workload_type,
+                        existing.provider,
+                        existing.adapter,
+                        existing.model,
+                    )
+                    .map_err(map_target_error)?;
+                    if persisted.public_id() == target_id {
+                        return Ok(persisted);
+                    }
+                }
+                Err(PersistenceError::NotFound) => {}
+                Err(error) => return Err(map_persistence(error)),
+            }
+            providers
+                .resolve_target_id(target_id)
+                .map(ProviderConfigVersion::target_key)
+                .map_err(|_| {
+                    ApiError::validation_with_diagnostics("target_not_selectable", &["target_id"])
+                })
+        }
         (None, (Some(workload_type), Some(provider), Some(adapter), Some(model))) => {
             TargetKey::new(workload_type, provider, adapter, model).map_err(map_target_error)
         }
@@ -1686,6 +1708,58 @@ mod tests {
     }
 
     #[test]
+    fn target_id_replay_recovers_persisted_execution_after_target_deactivation() {
+        let fixture = fixture();
+        let target_id = fixture.api.providers.selectable_targets()[0]
+            .target_id
+            .clone();
+        let mut selected = request("target-id-deactivation-replay");
+        for field in ["workload_type", "provider", "adapter", "model"] {
+            selected.as_object_mut().unwrap().remove(field);
+        }
+        selected["target_id"] = json!(target_id);
+        let created = execution(&call_create(&fixture, &selected));
+
+        let inactive_targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version":2,
+            "provider_configs":[{
+                "provider_config_version":"provider-v1",
+                "workload_type":"image_generation",
+                "provider":"example",
+                "adapter":"fixture",
+                "model":"image-v1",
+                "secret_service":"gongbu.example",
+                "secret_account":"local",
+                "active":false,
+                "execution_enabled":true,
+                "settings":{"type":"fixture"}
+            }]
+        }))
+        .unwrap();
+        inactive_targets.validate().unwrap();
+        let replay_api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            catalog(inactive_targets, fixture.api.providers.pricing().clone()),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        assert!(replay_api.providers.selectable_targets().is_empty());
+
+        let replayed = replay_api.handle(
+            "POST",
+            "/v2/executions",
+            Some(&fixture.caller),
+            &serde_json::to_vec(&selected).unwrap(),
+        );
+        assert_eq!(replayed.status, 200);
+        assert_eq!(execution(&replayed).execution_id, created.execution_id);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn target_id_cannot_be_mixed_with_or_escape_the_operator_catalog() {
         let fixture = fixture();
         let mut mixed = request("mixed-target-selector");
@@ -1880,7 +1954,8 @@ mod tests {
             .unwrap();
         persisted.hubu_claim_id = Some("claim-created-by-workflow".into());
         let submitted: CreateExecutionV2Request = serde_json::from_value(submitted).unwrap();
-        let target = resolve_v2_target(&submitted, &fixture.api.providers).unwrap();
+        let target =
+            resolve_v2_target(&submitted, &fixture.api.providers, &fixture.repository).unwrap();
         let decoded = translate_v2(submitted, target).unwrap();
 
         assert!(immutable_request_matches(
