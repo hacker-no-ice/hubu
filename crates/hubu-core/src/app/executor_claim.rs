@@ -601,7 +601,7 @@ mod tests {
                 })
                 .expect("budget should create");
             repository
-                .save_budget_with_balance(&budget.budget, &budget.balance)
+                .save_budget_with_balance(&budget.budget, &budget.version, &budget.balance)
                 .expect("budget should persist");
             let policy = Policy {
                 id: "claim-service-policy".to_string(),

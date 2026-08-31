@@ -1,18 +1,21 @@
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId, SpendExecutorClaimId};
+use hubu_common::ids::{
+    AgentId, BudgetHoldId, BudgetId, BudgetVersionId, SpendDecisionId, SpendExecutorClaimId,
+};
 use hubu_common::money::Currency;
 use hubu_common::time::TimePeriod;
+use sha2::{Digest, Sha256};
 
-/// Spending limit for one agent over a time period.
+/// Stable logical spending allocation for one agent over a time period.
 ///
-/// Budgets define the maximum amount that may be reserved or consumed for an
-/// agent. The current balance can be tracked separately in [`BudgetBalance`] so
-/// the limit remains immutable while usage changes over time.
+/// Agent, currency, and period are immutable properties of this logical
+/// allocation. The limit is owned solely by the [`BudgetVersion`] named by
+/// `current_version_id`.
 #[derive(Debug, Clone)]
 pub struct Budget {
     pub id: BudgetId,
     pub agent_id: AgentId,
-    pub amount_limit_cents: i64,
+    pub current_version_id: BudgetVersionId,
     pub currency: Currency,
     pub period: TimePeriod,
     pub status: BudgetStatus,
@@ -26,30 +29,90 @@ pub enum BudgetError {
 }
 
 impl Budget {
-    pub fn new(
-        id: BudgetId,
-        agent_id: AgentId,
-        amount_limit_cents: i64,
-        currency: Currency,
-        period: TimePeriod,
-    ) -> Result<Self, BudgetError> {
-        if amount_limit_cents <= 0 {
-            return Err(BudgetError::AmountLimitMustBePositive);
-        }
-
+    pub fn new(id: BudgetId, agent_id: AgentId, currency: Currency, period: TimePeriod) -> Self {
         let created_at = Utc::now();
 
-        Ok(Self {
+        Self {
             id,
             agent_id,
-            amount_limit_cents,
+            current_version_id: BudgetVersionId::new(),
             currency,
             period,
             status: BudgetStatus::Active,
             created_at,
             updated_at: created_at,
+        }
+    }
+}
+
+/// Immutable configuration revision for a logical [`Budget`].
+#[derive(Debug, Clone)]
+pub struct BudgetVersion {
+    pub id: BudgetVersionId,
+    pub budget_id: BudgetId,
+    pub revision: u64,
+    pub predecessor_version_id: Option<BudgetVersionId>,
+    pub amount_limit_cents: i64,
+    pub effective_at: DateTime<Utc>,
+    pub actor: String,
+    pub source: String,
+    pub reason: Option<String>,
+    pub request_fingerprint: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl BudgetVersion {
+    pub fn initial(
+        budget: &Budget,
+        amount_limit_cents: i64,
+        actor: impl Into<String>,
+        source: impl Into<String>,
+        reason: Option<String>,
+    ) -> Result<Self, BudgetError> {
+        if amount_limit_cents <= 0 {
+            return Err(BudgetError::AmountLimitMustBePositive);
+        }
+        let actor = actor.into();
+        let source = source.into();
+        Ok(Self {
+            id: budget.current_version_id.clone(),
+            budget_id: budget.id.clone(),
+            revision: 1,
+            predecessor_version_id: None,
+            amount_limit_cents,
+            effective_at: budget.created_at,
+            actor,
+            source,
+            reason,
+            request_fingerprint: initial_budget_request_fingerprint(
+                &budget.agent_id,
+                amount_limit_cents,
+                budget.currency,
+                &budget.period,
+            ),
+            created_at: budget.created_at,
         })
     }
+}
+
+pub fn initial_budget_request_fingerprint(
+    agent_id: &AgentId,
+    amount_limit_cents: i64,
+    currency: Currency,
+    period: &TimePeriod,
+) -> String {
+    let canonical = format!(
+        "agent_id={}\namount_limit_cents={}\ncurrency={}\nstarting_at={}\nending_before={}",
+        agent_id,
+        amount_limit_cents,
+        currency,
+        period.starting_at.to_rfc3339(),
+        period
+            .ending_before
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_default(),
+    );
+    format!("sha256:{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
 /// Current lifecycle state of a budget.
@@ -67,9 +130,10 @@ pub enum BudgetStatus {
 
 /// Cached usage totals for a budget.
 ///
-/// These values make budget checks and reporting cheap. They can later be
-/// rebuilt from spend decisions or ledger events if those become the source of
-/// truth.
+/// Consumed and frozen belong to the stable logical budget. Remaining is a
+/// derived compatibility cache (`current version limit - consumed - frozen`),
+/// validated whenever records are persisted or hydrated; it may legitimately
+/// be negative after a human-confirmed provider overrun.
 #[derive(Debug, Clone)]
 pub struct BudgetBalance {
     pub budget_id: BudgetId,
@@ -87,6 +151,7 @@ pub struct BudgetBalance {
 pub struct BudgetHold {
     pub id: BudgetHoldId,
     pub budget_id: BudgetId,
+    pub budget_version_id: BudgetVersionId,
     pub spend_decision_id: SpendDecisionId,
     pub amount_cents: i64,
     pub currency: Currency,
