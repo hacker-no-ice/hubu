@@ -20,9 +20,7 @@ use super::{
     supported_profiles::{self, CatalogProfile},
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
 };
-use crate::{
-    artifact::ArtifactLimits, execution_scope::for_target, secrets::ProviderSecret,
-};
+use crate::{artifact::ArtifactLimits, execution_scope::for_target, secrets::ProviderSecret};
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;

@@ -581,6 +581,7 @@ try:
     expected_tools = {
         "hubu_budget_history",
         "gongbu_get_provider_catalog",
+        "gongbu_list_execution_targets",
         "hubu_get_spend_approval",
         "hubu_resolve_spend_approval",
         "hubu_resume_operation",
@@ -589,7 +590,7 @@ try:
     tools = request("tools/list").get("tools", [])
     tool_names = {tool.get("name") for tool in tools}
     if (
-        len(tool_names) != 40
+        len(tool_names) != 41
         or not expected_tools.issubset(tool_names)
         or "hubu_replace_budget" in tool_names
     ):
