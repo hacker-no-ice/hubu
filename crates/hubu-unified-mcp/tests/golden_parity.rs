@@ -369,8 +369,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        36,
-        "golden matrix must contain exactly 36 cases"
+        37,
+        "golden matrix must contain exactly 37 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -383,8 +383,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        36,
-        "routing fixture must map 36 tools"
+        37,
+        "routing fixture must map 37 tools"
     );
     assert_eq!(
         expected.len(),
@@ -407,7 +407,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Gongbu)
             .count(),
-        5
+        6
     );
 }
 

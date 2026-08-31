@@ -491,9 +491,9 @@ envelope without changing either backend's wire contract.
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 39 other tool names with owner
+state and compatible version metadata, and all 40 other tool names with owner
 and availability. Together with `hubu_unified_capabilities`, the stdio surface
-exposes 40 tools, 36 of which route to a backend.
+exposes 41 tools, 37 of which route to a backend.
 
 The version-1 compatibility boundary requires:
 

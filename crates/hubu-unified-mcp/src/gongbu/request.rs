@@ -201,7 +201,3 @@ struct ExecutionIdInput {
 struct ArtifactIdInput {
     artifact_id: String,
 }
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EmptyInput {}

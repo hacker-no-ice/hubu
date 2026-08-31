@@ -1,6 +1,6 @@
 {
   "contract_version": "hubu-gongbu-mcp-v1",
-  "routing_revision": 5,
+  "routing_revision": 6,
   "tools": [
     { "name": "gongbu_create_execution", "owner": "gongbu" },
     { "name": "gongbu_get_artifact", "owner": "gongbu" },
