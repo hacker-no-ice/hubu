@@ -166,9 +166,33 @@ persisted execution account and agent. Submitting an identical body first
 replays the persisted token locally and does not ask Hubu to resolve a token
 that may already be claimed or settled. A changed immutable field conflicts.
 Settlement and release use the persisted execution agent. On restart, Gongbu
-resubmits nonterminal executions to their
-stable workflow IDs and never creates a second provider or financial side
-effect merely to recover scheduling.
+reschedules nonterminal executions at their stable workflow IDs and never
+creates a second provider or financial side effect merely to recover
+scheduling.
+
+For asynchronous FLUX work, that stable workflow separates one
+patch-protected `submit_provider` activity from
+`poll_provider_operation`. A successful submit checkpoints only the safe
+request ID, operation ID, validated BFL polling host, and original absolute
+deadline in Gongbu SQLite before long polling. Temporal carries only the
+execution ID and phase enum; credentials, raw bodies, polling or signed URLs,
+and artifact storage paths remain outside its payloads.
+
+Use these recovery dispositions when inspecting an interrupted execution:
+
+- A failure proven to precede transmission is non-billable and may release the
+  Hubu authorization.
+- If submission may have succeeded but interruption occurred before the
+  operation checkpoint committed, preserve the execution for reconciliation.
+  Do not create a new operation key, resubmit the generation, or release the
+  claim.
+- If the checkpoint committed, restart Gongbu normally. The worker resumes GET
+  polling for that same operation under the original deadline, with the same
+  `ProviderAttempt` and no second Hubu financial mutation.
+
+An expired original deadline is not refreshed by restart. Continue to inspect
+the existing execution and its reconciliation record instead of submitting a
+replacement operation.
 
 Agents normally use these routes through [Unified MCP](../unified-mcp.md).
 

@@ -26,7 +26,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS hubu_authorization_token
  ON hubu_authorization_snapshots(spend_auth_token_id);
 CREATE TABLE IF NOT EXISTS provider_attempts(
  provider_attempt_id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions ON DELETE CASCADE, provider TEXT NOT NULL,
- provider_request_id TEXT, provider_operation_id TEXT, outcome TEXT NOT NULL CHECK(outcome IN ('started','succeeded','failed','ambiguous','canceled')),
+ provider_request_id TEXT, provider_operation_id TEXT,
+ -- Safe asynchronous resume checkpoint. The raw polling URL is never stored;
+ -- adapters persist only its validated host and reconstruct the documented path.
+ provider_polling_host TEXT, provider_deadline_unix_ms INTEGER CHECK(provider_deadline_unix_ms IS NULL OR provider_deadline_unix_ms>0),
+ operation_checkpointed_at TEXT,
+ outcome TEXT NOT NULL CHECK(outcome IN ('started','succeeded','failed','ambiguous','canceled')),
  usage_json TEXT CHECK(usage_json IS NULL OR json_valid(usage_json)), usage_schema_version INTEGER CHECK(usage_schema_version IS NULL OR usage_schema_version>0),
  -- v4 compatibility projection. The exact amount below is authoritative.
  provider_amount_minor INTEGER CHECK(provider_amount_minor IS NULL OR provider_amount_minor>=0), provider_currency TEXT,

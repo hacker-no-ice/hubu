@@ -7,7 +7,9 @@ use crate::{
         AttemptResult, CreateReceiptParams, Error as PersistenceError, Execution, ExecutionUpdate,
         Repository, StagedProviderArtifact,
     },
-    provider_contract::{ActualVendorCost, ContractError, NormalizedUsage, PricingSnapshot},
+    provider_contract::{
+        ActualVendorCost, AsyncProviderOperation, ContractError, NormalizedUsage, PricingSnapshot,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::to_value;
@@ -27,6 +29,11 @@ pub struct ProviderSuccess {
     /// only when the provider does not report a charge.
     pub actual_vendor_cost: Option<ActualVendorCost>,
     pub artifacts: Vec<ProviderArtifact>,
+}
+#[derive(Clone, Debug)]
+pub enum ProviderSubmission {
+    Complete(ProviderSuccess),
+    Pending(AsyncProviderOperation),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivityError {
@@ -64,6 +71,26 @@ pub trait ProviderActivities {
         execution: &Execution,
         attempt_id: &str,
     ) -> Result<ProviderSuccess, ActivityError>;
+    fn submit(
+        &self,
+        execution: &Execution,
+        attempt_id: &str,
+    ) -> Result<ProviderSubmission, ActivityError> {
+        self.invoke(execution, attempt_id)
+            .map(ProviderSubmission::Complete)
+    }
+    fn poll_existing(
+        &self,
+        _execution: &Execution,
+        _attempt_id: &str,
+        operation: &AsyncProviderOperation,
+    ) -> Result<ProviderSuccess, ActivityError> {
+        Err(ActivityError::AmbiguousWithEvidence {
+            code: "provider_resume_unsupported".into(),
+            request_id: operation.provider_request_id.clone(),
+            operation_id: Some(operation.provider_operation_id.clone()),
+        })
+    }
 }
 pub trait ArtifactActivities {
     fn preflight(&self) -> Result<(), ActivityError>;
@@ -121,9 +148,16 @@ impl From<Execution> for ExecutionPhaseResult {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPhaseOutcome {
+    PollExisting,
     PersistArtifacts,
     ReleaseAuthorization,
     Complete(ExecutionPhaseResult),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderCheckpointBoundary {
+    BeforePersist,
+    AfterPersist,
 }
 
 impl ExecutionWorkflow<'_> {
@@ -168,15 +202,23 @@ impl ExecutionWorkflow<'_> {
                 "claimed" => {
                     self.validate_claim_phase(execution_id, &now)?;
                 }
-                "executing" => match self.provider_phase_with_clock(execution_id, &now, clock)? {
-                    ProviderPhaseOutcome::PersistArtifacts => {
-                        self.artifact_phase(execution_id, &clock())?;
+                "executing" => {
+                    let mut outcome =
+                        self.provider_submit_phase_with_clock(execution_id, &now, clock)?;
+                    if outcome == ProviderPhaseOutcome::PollExisting {
+                        outcome =
+                            self.provider_poll_phase_with_clock(execution_id, &clock(), clock)?;
                     }
-                    ProviderPhaseOutcome::ReleaseAuthorization => {
-                        self.release_phase(execution_id, &clock())?;
+                    match outcome {
+                        ProviderPhaseOutcome::PersistArtifacts => {
+                            self.artifact_phase(execution_id, &clock())?;
+                        }
+                        ProviderPhaseOutcome::ReleaseAuthorization => {
+                            self.release_phase(execution_id, &clock())?;
+                        }
+                        ProviderPhaseOutcome::PollExisting | ProviderPhaseOutcome::Complete(_) => {}
                     }
-                    ProviderPhaseOutcome::Complete(_) => {}
-                },
+                }
                 "settling" => {
                     self.settlement_phase(execution_id, &now)?;
                 }
@@ -275,11 +317,46 @@ impl ExecutionWorkflow<'_> {
         self.provider_phase_with_clock(execution_id, now, &|| now.to_owned())
     }
 
+    /// Legacy single-activity wrapper retained for Temporal histories created
+    /// before HUB-170. New workflows call the submit and poll phases as
+    /// separate activities.
     pub(crate) fn provider_phase_with_clock(
         &self,
         execution_id: &str,
         phase_at: &str,
         clock: &dyn Fn() -> String,
+    ) -> Result<ProviderPhaseOutcome, WorkflowError> {
+        let outcome = self.provider_submit_phase_with_clock(execution_id, phase_at, clock)?;
+        if outcome == ProviderPhaseOutcome::PollExisting {
+            self.provider_poll_phase_with_clock(execution_id, &clock(), clock)
+        } else {
+            Ok(outcome)
+        }
+    }
+
+    pub fn provider_submit_phase(
+        &self,
+        execution_id: &str,
+        now: &str,
+    ) -> Result<ProviderPhaseOutcome, WorkflowError> {
+        self.provider_submit_phase_with_clock(execution_id, now, &|| now.to_owned())
+    }
+
+    pub(crate) fn provider_submit_phase_with_clock(
+        &self,
+        execution_id: &str,
+        phase_at: &str,
+        clock: &dyn Fn() -> String,
+    ) -> Result<ProviderPhaseOutcome, WorkflowError> {
+        self.provider_submit_phase_with_checkpoint_hook(execution_id, phase_at, clock, &|_| {})
+    }
+
+    fn provider_submit_phase_with_checkpoint_hook(
+        &self,
+        execution_id: &str,
+        phase_at: &str,
+        clock: &dyn Fn() -> String,
+        checkpoint_hook: &dyn Fn(ProviderCheckpointBoundary),
     ) -> Result<ProviderPhaseOutcome, WorkflowError> {
         let execution = self.repository.get_execution(execution_id)?;
         if execution.status != "executing" {
@@ -288,30 +365,30 @@ impl ExecutionWorkflow<'_> {
         let attempt = self
             .repository
             .get_provider_attempt_for_execution(execution_id)?;
-        if attempt.completed_at.is_some() {
-            return match attempt.outcome.as_str() {
-                "succeeded"
-                    if !self
-                        .repository
-                        .get_staged_provider_artifacts(&attempt.provider_attempt_id)?
-                        .is_empty() =>
-                {
-                    Ok(ProviderPhaseOutcome::PersistArtifacts)
-                }
-                "failed" => Ok(ProviderPhaseOutcome::ReleaseAuthorization),
-                outcome => {
-                    self.advance_completed_attempt(&execution, outcome, phase_at)?;
-                    Ok(ProviderPhaseOutcome::Complete(
-                        self.repository.get_execution(execution_id)?.into(),
-                    ))
-                }
-            };
+        if let Some(outcome) = self.completed_provider_phase(&execution, &attempt, phase_at)? {
+            return Ok(outcome);
+        }
+        match self.repository.provider_operation(&attempt) {
+            Ok(Some(_)) => return Ok(ProviderPhaseOutcome::PollExisting),
+            Err(_) => {
+                let held = self.transition(
+                    &execution,
+                    "reconciliation_required",
+                    Some("provider_operation_checkpoint_invalid"),
+                    phase_at,
+                    Some("ambiguous"),
+                    None,
+                    None,
+                )?;
+                return Ok(ProviderPhaseOutcome::Complete(held.into()));
+            }
+            Ok(None) => {}
         }
         if attempt.transmission_started_at.is_some() {
             let held = self.transition(
                 &execution,
                 "reconciliation_required",
-                Some("provider_delivery_interrupted"),
+                Some("provider_submission_interrupted"),
                 phase_at,
                 Some("ambiguous"),
                 None,
@@ -324,19 +401,163 @@ impl ExecutionWorkflow<'_> {
             .begin_provider_transmission(&attempt.provider_attempt_id, &transmission_started_at)?;
         let provider_result = self
             .provider
-            .invoke(&execution, &attempt.provider_attempt_id);
+            .submit(&execution, &attempt.provider_attempt_id);
+        if let Ok(ProviderSubmission::Pending(operation)) = &provider_result {
+            checkpoint_hook(ProviderCheckpointBoundary::BeforePersist);
+            let checkpointed_at = clock();
+            match self.repository.record_provider_operation(
+                &attempt.provider_attempt_id,
+                operation,
+                &checkpointed_at,
+            ) {
+                Ok(_) => {
+                    checkpoint_hook(ProviderCheckpointBoundary::AfterPersist);
+                    return Ok(ProviderPhaseOutcome::PollExisting);
+                }
+                Err(_) => {
+                    let persisted = self
+                        .repository
+                        .get_provider_attempt(&attempt.provider_attempt_id)
+                        .ok()
+                        .and_then(|attempt| self.repository.provider_operation(&attempt).ok())
+                        .flatten();
+                    if persisted.as_ref() == Some(operation) {
+                        checkpoint_hook(ProviderCheckpointBoundary::AfterPersist);
+                        return Ok(ProviderPhaseOutcome::PollExisting);
+                    }
+                    let held = self.transition(
+                        &execution,
+                        "reconciliation_required",
+                        Some("provider_operation_persistence_failed"),
+                        &checkpointed_at,
+                        Some("ambiguous"),
+                        None,
+                        None,
+                    )?;
+                    return Ok(ProviderPhaseOutcome::Complete(held.into()));
+                }
+            }
+        }
         let completed_at = clock();
         match provider_result {
-            Ok(success) if success.artifacts.is_empty() => {
-                self.repository.complete_provider_attempt(
-                    &attempt.provider_attempt_id,
-                    &successful_attempt(&success, &completed_at),
-                )?;
+            Ok(ProviderSubmission::Complete(success)) => self.finish_provider_result(
+                &execution,
+                &attempt.provider_attempt_id,
+                Ok(success),
+                &completed_at,
+            ),
+            Ok(ProviderSubmission::Pending(_)) => {
+                unreachable!("pending provider submission returns after checkpoint")
+            }
+            Err(error) => self.finish_provider_result(
+                &execution,
+                &attempt.provider_attempt_id,
+                Err(error),
+                &completed_at,
+            ),
+        }
+    }
+
+    pub fn provider_poll_phase(
+        &self,
+        execution_id: &str,
+        now: &str,
+    ) -> Result<ProviderPhaseOutcome, WorkflowError> {
+        self.provider_poll_phase_with_clock(execution_id, now, &|| now.to_owned())
+    }
+
+    pub(crate) fn provider_poll_phase_with_clock(
+        &self,
+        execution_id: &str,
+        phase_at: &str,
+        clock: &dyn Fn() -> String,
+    ) -> Result<ProviderPhaseOutcome, WorkflowError> {
+        let execution = self.repository.get_execution(execution_id)?;
+        if execution.status != "executing" {
+            return Ok(ProviderPhaseOutcome::Complete(execution.into()));
+        }
+        let attempt = self
+            .repository
+            .get_provider_attempt_for_execution(execution_id)?;
+        if let Some(outcome) = self.completed_provider_phase(&execution, &attempt, phase_at)? {
+            return Ok(outcome);
+        }
+        let operation = match self.repository.provider_operation(&attempt) {
+            Ok(Some(operation)) => operation,
+            Ok(None) | Err(_) => {
                 let held = self.transition(
                     &execution,
                     "reconciliation_required",
+                    Some("provider_operation_checkpoint_invalid"),
+                    phase_at,
+                    Some("ambiguous"),
+                    None,
+                    None,
+                )?;
+                return Ok(ProviderPhaseOutcome::Complete(held.into()));
+            }
+        };
+        let provider_result =
+            self.provider
+                .poll_existing(&execution, &attempt.provider_attempt_id, &operation);
+        let provider_result = bind_poll_result_to_checkpoint(provider_result, &operation);
+        self.finish_provider_result(
+            &execution,
+            &attempt.provider_attempt_id,
+            provider_result,
+            &clock(),
+        )
+    }
+
+    fn completed_provider_phase(
+        &self,
+        execution: &Execution,
+        attempt: &crate::execution::ProviderAttempt,
+        phase_at: &str,
+    ) -> Result<Option<ProviderPhaseOutcome>, WorkflowError> {
+        if attempt.completed_at.is_none() {
+            return Ok(None);
+        }
+        let outcome = match attempt.outcome.as_str() {
+            "succeeded"
+                if !self
+                    .repository
+                    .get_staged_provider_artifacts(&attempt.provider_attempt_id)?
+                    .is_empty() =>
+            {
+                ProviderPhaseOutcome::PersistArtifacts
+            }
+            "failed" => ProviderPhaseOutcome::ReleaseAuthorization,
+            outcome => {
+                self.advance_completed_attempt(execution, outcome, phase_at)?;
+                ProviderPhaseOutcome::Complete(
+                    self.repository
+                        .get_execution(&execution.execution_id)?
+                        .into(),
+                )
+            }
+        };
+        Ok(Some(outcome))
+    }
+
+    fn finish_provider_result(
+        &self,
+        execution: &Execution,
+        attempt_id: &str,
+        provider_result: Result<ProviderSuccess, ActivityError>,
+        completed_at: &str,
+    ) -> Result<ProviderPhaseOutcome, WorkflowError> {
+        match provider_result {
+            Ok(success) if success.artifacts.is_empty() => {
+                self.repository.complete_provider_attempt(
+                    attempt_id,
+                    &successful_attempt(&success, completed_at),
+                )?;
+                let held = self.transition(
+                    execution,
+                    "reconciliation_required",
                     Some("provider_returned_no_artifacts"),
-                    &completed_at,
+                    completed_at,
                     Some("succeeded"),
                     Some("failed"),
                     None,
@@ -353,16 +574,16 @@ impl ExecutionWorkflow<'_> {
                     })
                     .collect::<Vec<_>>();
                 self.repository.complete_provider_attempt_with_artifacts(
-                    &attempt.provider_attempt_id,
-                    &successful_attempt(&success, &completed_at),
+                    attempt_id,
+                    &successful_attempt(&success, completed_at),
                     &staged,
                 )?;
                 Ok(ProviderPhaseOutcome::PersistArtifacts)
             }
             Err(ActivityError::Proven(code)) => {
                 self.repository.complete_provider_attempt(
-                    &attempt.provider_attempt_id,
-                    &attempt_failure("failed", &code, &completed_at),
+                    attempt_id,
+                    &attempt_failure("failed", &code, completed_at),
                 )?;
                 Ok(ProviderPhaseOutcome::ReleaseAuthorization)
             }
@@ -371,23 +592,23 @@ impl ExecutionWorkflow<'_> {
                 request_id,
                 operation_id,
             }) => {
-                let mut failure = attempt_failure("failed", &code, &completed_at);
+                let mut failure = attempt_failure("failed", &code, completed_at);
                 failure.provider_request_id = request_id;
                 failure.provider_operation_id = operation_id;
                 self.repository
-                    .complete_provider_attempt(&attempt.provider_attempt_id, &failure)?;
+                    .complete_provider_attempt(attempt_id, &failure)?;
                 Ok(ProviderPhaseOutcome::ReleaseAuthorization)
             }
             Err(ActivityError::Ambiguous(code)) => {
                 self.repository.complete_provider_attempt(
-                    &attempt.provider_attempt_id,
-                    &attempt_failure("ambiguous", &code, &completed_at),
+                    attempt_id,
+                    &attempt_failure("ambiguous", &code, completed_at),
                 )?;
                 let held = self.transition(
-                    &execution,
+                    execution,
                     "reconciliation_required",
                     Some(&code),
-                    &completed_at,
+                    completed_at,
                     Some("ambiguous"),
                     None,
                     None,
@@ -399,16 +620,16 @@ impl ExecutionWorkflow<'_> {
                 request_id,
                 operation_id,
             }) => {
-                let mut failure = attempt_failure("ambiguous", &code, &completed_at);
+                let mut failure = attempt_failure("ambiguous", &code, completed_at);
                 failure.provider_request_id = request_id;
                 failure.provider_operation_id = operation_id;
                 self.repository
-                    .complete_provider_attempt(&attempt.provider_attempt_id, &failure)?;
+                    .complete_provider_attempt(attempt_id, &failure)?;
                 let held = self.transition(
-                    &execution,
+                    execution,
                     "reconciliation_required",
                     Some(&code),
-                    &completed_at,
+                    completed_at,
                     Some("ambiguous"),
                     None,
                     None,
@@ -935,6 +1156,56 @@ impl ExecutionWorkflow<'_> {
         Ok(updated)
     }
 }
+
+fn bind_poll_result_to_checkpoint(
+    result: Result<ProviderSuccess, ActivityError>,
+    operation: &AsyncProviderOperation,
+) -> Result<ProviderSuccess, ActivityError> {
+    let request_id = operation.provider_request_id.clone();
+    let operation_id = Some(operation.provider_operation_id.clone());
+    match result {
+        Ok(mut success) => {
+            let candidate = AsyncProviderOperation {
+                provider_request_id: success.request_id.clone(),
+                provider_operation_id: success.operation_id.clone().unwrap_or_default(),
+                polling_host: operation.polling_host.clone(),
+                deadline_unix_ms: operation.deadline_unix_ms,
+            };
+            let request_matches = operation.provider_request_id.is_none()
+                || success.request_id == operation.provider_request_id;
+            if candidate.validate().is_err()
+                || candidate.provider_operation_id != operation.provider_operation_id
+                || !request_matches
+            {
+                return Err(ActivityError::AmbiguousWithEvidence {
+                    code: "provider_operation_identity_mismatch".into(),
+                    request_id,
+                    operation_id,
+                });
+            }
+            success.operation_id = Some(operation.provider_operation_id.clone());
+            if operation.provider_request_id.is_some() {
+                success.request_id = operation.provider_request_id.clone();
+            }
+            Ok(success)
+        }
+        Err(ActivityError::Proven(code) | ActivityError::ProvenWithEvidence { code, .. }) => {
+            Err(ActivityError::ProvenWithEvidence {
+                code,
+                request_id,
+                operation_id,
+            })
+        }
+        Err(ActivityError::Ambiguous(code) | ActivityError::AmbiguousWithEvidence { code, .. }) => {
+            Err(ActivityError::AmbiguousWithEvidence {
+                code,
+                request_id,
+                operation_id,
+            })
+        }
+    }
+}
+
 fn typed_outcome(value: &str) -> crate::execution::LifecycleOutcome {
     crate::execution::LifecycleOutcome::parse(value)
         .expect("workflow only emits defined lifecycle outcomes")
@@ -1131,6 +1402,69 @@ mod tests {
                     },
                 })
             }
+        }
+    }
+    struct AsyncProvider {
+        submits: Cell<u32>,
+        polls: Cell<u32>,
+        submit_error: RefCell<Option<ActivityError>>,
+        operation: AsyncProviderOperation,
+        last_polled_operation: RefCell<Option<AsyncProviderOperation>>,
+    }
+    impl Default for AsyncProvider {
+        fn default() -> Self {
+            Self {
+                submits: Cell::new(0),
+                polls: Cell::new(0),
+                submit_error: RefCell::new(None),
+                operation: AsyncProviderOperation {
+                    provider_request_id: Some("request-170".into()),
+                    provider_operation_id: "operation-170".into(),
+                    polling_host: "api.bfl.ai".into(),
+                    deadline_unix_ms: 1_799_999_999_000,
+                },
+                last_polled_operation: RefCell::new(None),
+            }
+        }
+    }
+    impl ProviderActivities for AsyncProvider {
+        fn preflight(&self, _: &Execution) -> Result<(), ActivityError> {
+            Ok(())
+        }
+
+        fn invoke(&self, _: &Execution, _: &str) -> Result<ProviderSuccess, ActivityError> {
+            unreachable!("the asynchronous test provider uses submit and poll_existing")
+        }
+
+        fn submit(&self, _: &Execution, _: &str) -> Result<ProviderSubmission, ActivityError> {
+            self.submits.set(self.submits.get() + 1);
+            if let Some(error) = self.submit_error.borrow_mut().take() {
+                return Err(error);
+            }
+            Ok(ProviderSubmission::Pending(self.operation.clone()))
+        }
+
+        fn poll_existing(
+            &self,
+            _: &Execution,
+            _: &str,
+            operation: &AsyncProviderOperation,
+        ) -> Result<ProviderSuccess, ActivityError> {
+            self.polls.set(self.polls.get() + 1);
+            self.last_polled_operation.replace(Some(operation.clone()));
+            Ok(ProviderSuccess {
+                request_id: operation.provider_request_id.clone(),
+                operation_id: Some(operation.provider_operation_id.clone()),
+                usage: NormalizedUsage {
+                    images: Some(1),
+                    ..Default::default()
+                },
+                actual_vendor_cost: Some(ActualVendorCost::new(100, 2, "USD").unwrap()),
+                artifacts: vec![ProviderArtifact {
+                    media_type: "image/png".into(),
+                    bytes: vec![1],
+                }],
+            })
         }
     }
     struct Artifacts<'a> {
@@ -2373,6 +2707,389 @@ mod tests {
                 .provider_attempt_id,
             attempt.provider_attempt_id
         );
+    }
+
+    #[test]
+    fn async_worker_loss_before_checkpoint_reconciles_without_resubmit_or_release() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("before-checkpoint.sqlite3");
+        let hubu = Hubu::default();
+        let provider = AsyncProvider::default();
+
+        let (execution_id, attempt_id) = {
+            let repository = Repository::open(&path, Redactor::default()).unwrap();
+            let execution = execution(&repository, "async-before-checkpoint");
+            let artifacts = Artifacts {
+                repo: &repository,
+                calls: Cell::new(0),
+            };
+            let workflow = ExecutionWorkflow {
+                repository: &repository,
+                hubu: &hubu,
+                provider: &provider,
+                artifacts: &artifacts,
+            };
+            workflow
+                .preflight_phase(&execution.execution_id, "preflight")
+                .unwrap();
+            workflow
+                .claim_phase(&execution.execution_id, "claim")
+                .unwrap();
+            workflow
+                .validate_claim_phase(&execution.execution_id, "validate")
+                .unwrap();
+            let attempt = repository
+                .get_provider_attempt_for_execution(&execution.execution_id)
+                .unwrap();
+
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                workflow.provider_submit_phase_with_checkpoint_hook(
+                    &execution.execution_id,
+                    "submit",
+                    &|| "2026-08-28T18:00:00Z".into(),
+                    &|boundary| {
+                        assert_eq!(boundary, ProviderCheckpointBoundary::BeforePersist);
+                        panic!("simulated worker loss before operation checkpoint")
+                    },
+                )
+            }))
+            .is_err());
+
+            let interrupted = repository
+                .get_provider_attempt(&attempt.provider_attempt_id)
+                .unwrap();
+            assert!(interrupted.transmission_started_at.is_some());
+            assert_eq!(repository.provider_operation(&interrupted).unwrap(), None);
+            assert_eq!(provider.submits.get(), 1);
+            assert_eq!(provider.polls.get(), 0);
+            assert_eq!(hubu.releases.get(), 0);
+            assert_eq!(hubu.settles.get(), 0);
+            (execution.execution_id.clone(), attempt.provider_attempt_id)
+        };
+
+        let restarted = Repository::open(&path, Redactor::default()).unwrap();
+        let artifacts = Artifacts {
+            repo: &restarted,
+            calls: Cell::new(0),
+        };
+        let workflow = ExecutionWorkflow {
+            repository: &restarted,
+            hubu: &hubu,
+            provider: &provider,
+            artifacts: &artifacts,
+        };
+        let outcome = workflow
+            .provider_submit_phase(&execution_id, "restart")
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ProviderPhaseOutcome::Complete(ExecutionPhaseResult {
+                ref status,
+                ..
+            }) if status == "reconciliation_required"
+        ));
+        assert_eq!(
+            restarted
+                .get_execution(&execution_id)
+                .unwrap()
+                .failure_code
+                .as_deref(),
+            Some("provider_submission_interrupted")
+        );
+        assert_eq!(provider.submits.get(), 1);
+        assert_eq!(provider.polls.get(), 0);
+        assert_eq!(hubu.releases.get(), 0);
+        assert_eq!(hubu.settles.get(), 0);
+        assert_eq!(
+            restarted
+                .get_provider_attempt_for_execution(&execution_id)
+                .unwrap()
+                .provider_attempt_id,
+            attempt_id
+        );
+        let attempts = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM provider_attempts WHERE execution_id=?1",
+                [&execution_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 1);
+
+        let evidence = restarted
+            .get_reconciliation(&execution_id)
+            .unwrap()
+            .evidence;
+        assert_eq!(evidence["provider_attempt_id"], attempt_id);
+        assert!(evidence["provider_request_id"].is_null());
+        assert!(evidence["provider_operation_id"].is_null());
+        assert!(evidence["timestamps"]["transmission_started_at"].is_string());
+        let encoded = serde_json::to_string(&evidence).unwrap();
+        assert!(!encoded.contains("signed_url"));
+        assert!(!encoded.contains("storage_key"));
+        assert!(!encoded.contains("raw_body"));
+    }
+
+    #[test]
+    fn resumed_poll_results_cannot_replace_or_bypass_checkpoint_identity() {
+        let operation = AsyncProviderOperation {
+            provider_request_id: Some("request-170".into()),
+            provider_operation_id: "operation-170".into(),
+            polling_host: "api.bfl.ai".into(),
+            deadline_unix_ms: 1_799_999_999_000,
+        };
+        let mismatched = ProviderSuccess {
+            request_id: Some("https://storage.invalid/raw?signature=secret".into()),
+            operation_id: Some("different-operation".into()),
+            usage: NormalizedUsage {
+                images: Some(1),
+                ..Default::default()
+            },
+            actual_vendor_cost: None,
+            artifacts: vec![ProviderArtifact {
+                media_type: "image/png".into(),
+                bytes: vec![1],
+            }],
+        };
+        assert!(matches!(
+            bind_poll_result_to_checkpoint(Ok(mismatched), &operation),
+            Err(ActivityError::AmbiguousWithEvidence {
+                code,
+                request_id: Some(request_id),
+                operation_id: Some(operation_id),
+            }) if code == "provider_operation_identity_mismatch"
+                && request_id == "request-170"
+                && operation_id == "operation-170"
+        ));
+
+        let provider_rejection = ActivityError::ProvenWithEvidence {
+            code: "provider_rejected".into(),
+            request_id: Some("https://unsafe.invalid/request".into()),
+            operation_id: Some("https://unsafe.invalid/operation".into()),
+        };
+        assert!(matches!(
+            bind_poll_result_to_checkpoint(Err(provider_rejection), &operation),
+            Err(ActivityError::ProvenWithEvidence {
+                code,
+                request_id: Some(request_id),
+                operation_id: Some(operation_id),
+            }) if code == "provider_rejected"
+                && request_id == "request-170"
+                && operation_id == "operation-170"
+        ));
+    }
+
+    #[test]
+    fn async_worker_loss_after_checkpoint_resumes_same_operation_and_settles_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("after-checkpoint.sqlite3");
+        let hubu = Hubu::default();
+        let provider = AsyncProvider::default();
+
+        let (execution_id, attempt_id) = {
+            let repository = Repository::open(&path, Redactor::default()).unwrap();
+            let execution = execution(&repository, "async-after-checkpoint");
+            let artifacts = Artifacts {
+                repo: &repository,
+                calls: Cell::new(0),
+            };
+            let workflow = ExecutionWorkflow {
+                repository: &repository,
+                hubu: &hubu,
+                provider: &provider,
+                artifacts: &artifacts,
+            };
+            workflow
+                .preflight_phase(&execution.execution_id, "preflight")
+                .unwrap();
+            workflow
+                .claim_phase(&execution.execution_id, "claim")
+                .unwrap();
+            workflow
+                .validate_claim_phase(&execution.execution_id, "validate")
+                .unwrap();
+            let attempt = repository
+                .get_provider_attempt_for_execution(&execution.execution_id)
+                .unwrap();
+
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                workflow.provider_submit_phase_with_checkpoint_hook(
+                    &execution.execution_id,
+                    "submit",
+                    &|| "2026-08-28T18:00:01Z".into(),
+                    &|boundary| {
+                        if boundary == ProviderCheckpointBoundary::AfterPersist {
+                            panic!("simulated worker loss after operation checkpoint")
+                        }
+                    },
+                )
+            }))
+            .is_err());
+
+            let checkpointed = repository
+                .get_provider_attempt(&attempt.provider_attempt_id)
+                .unwrap();
+            assert_eq!(
+                repository.provider_operation(&checkpointed).unwrap(),
+                Some(provider.operation.clone())
+            );
+            assert_eq!(
+                checkpointed.operation_checkpointed_at.as_deref(),
+                Some("2026-08-28T18:00:01Z")
+            );
+            assert_eq!(
+                checkpointed.provider_deadline_unix_ms,
+                Some(provider.operation.deadline_unix_ms)
+            );
+            assert_eq!(provider.submits.get(), 1);
+            assert_eq!(provider.polls.get(), 0);
+            (execution.execution_id.clone(), attempt.provider_attempt_id)
+        };
+
+        let restarted = Repository::open(&path, Redactor::default()).unwrap();
+        let artifacts = Artifacts {
+            repo: &restarted,
+            calls: Cell::new(0),
+        };
+        let workflow = ExecutionWorkflow {
+            repository: &restarted,
+            hubu: &hubu,
+            provider: &provider,
+            artifacts: &artifacts,
+        };
+        assert_eq!(
+            workflow
+                .provider_submit_phase(&execution_id, "submit-redelivery")
+                .unwrap(),
+            ProviderPhaseOutcome::PollExisting
+        );
+        assert_eq!(
+            workflow
+                .provider_submit_phase(&execution_id, "submit-redelivery-again")
+                .unwrap(),
+            ProviderPhaseOutcome::PollExisting
+        );
+        assert_eq!(provider.submits.get(), 1);
+        assert_eq!(provider.polls.get(), 0);
+
+        assert_eq!(
+            workflow.provider_poll_phase(&execution_id, "poll").unwrap(),
+            ProviderPhaseOutcome::PersistArtifacts
+        );
+        assert_eq!(
+            workflow
+                .provider_poll_phase(&execution_id, "poll-response-lost")
+                .unwrap(),
+            ProviderPhaseOutcome::PersistArtifacts
+        );
+        assert_eq!(provider.submits.get(), 1);
+        assert_eq!(provider.polls.get(), 1);
+        assert_eq!(
+            provider.last_polled_operation.borrow().as_ref(),
+            Some(&provider.operation)
+        );
+        assert_eq!(
+            provider
+                .last_polled_operation
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .deadline_unix_ms,
+            1_799_999_999_000
+        );
+
+        assert_eq!(
+            workflow
+                .artifact_phase(&execution_id, "artifacts")
+                .unwrap()
+                .status,
+            "settling"
+        );
+        assert_eq!(
+            workflow
+                .settlement_phase(&execution_id, "settlement")
+                .unwrap()
+                .status,
+            "succeeded"
+        );
+        assert_eq!(artifacts.calls.get(), 1);
+        assert_eq!(hubu.settles.get(), 1);
+        assert_eq!(hubu.releases.get(), 0);
+        assert_eq!(
+            restarted
+                .get_provider_attempt_for_execution(&execution_id)
+                .unwrap()
+                .provider_attempt_id,
+            attempt_id
+        );
+        assert!(restarted
+            .get_receipt_for_execution(&execution_id)
+            .unwrap()
+            .settled_at
+            .is_some());
+        let attempts = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM provider_attempts WHERE execution_id=?1",
+                [&execution_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 1);
+
+        assert_eq!(
+            workflow
+                .run(&execution_id, "terminal-replay")
+                .unwrap()
+                .status,
+            "succeeded"
+        );
+        assert_eq!(provider.submits.get(), 1);
+        assert_eq!(provider.polls.get(), 1);
+        assert_eq!(hubu.settles.get(), 1);
+        assert_eq!(hubu.releases.get(), 0);
+        assert_eq!(artifacts.calls.get(), 1);
+    }
+
+    #[test]
+    fn async_proven_pre_send_failure_releases_without_poll_or_settlement() {
+        let repository = Repository::in_memory().unwrap();
+        let execution = execution(&repository, "async-proven-before-send");
+        let hubu = Hubu::default();
+        let provider = AsyncProvider::default();
+        provider.submit_error.replace(Some(ActivityError::Proven(
+            "provider_not_transmitted".into(),
+        )));
+        let artifacts = Artifacts {
+            repo: &repository,
+            calls: Cell::new(0),
+        };
+        let workflow = ExecutionWorkflow {
+            repository: &repository,
+            hubu: &hubu,
+            provider: &provider,
+            artifacts: &artifacts,
+        };
+
+        assert_eq!(
+            workflow.run(&execution.execution_id, "now").unwrap().status,
+            "released"
+        );
+        assert_eq!(provider.submits.get(), 1);
+        assert_eq!(provider.polls.get(), 0);
+        assert_eq!(hubu.releases.get(), 1);
+        assert_eq!(hubu.settles.get(), 0);
+        assert_eq!(artifacts.calls.get(), 0);
+        let attempt = repository
+            .get_provider_attempt_for_execution(&execution.execution_id)
+            .unwrap();
+        assert_eq!(attempt.outcome, "failed");
+        assert_eq!(
+            attempt.failure_code.as_deref(),
+            Some("provider_not_transmitted")
+        );
+        assert!(attempt.completed_at.is_some());
     }
     #[test]
     fn terminal_states_are_immutable_and_skips_are_forbidden() {

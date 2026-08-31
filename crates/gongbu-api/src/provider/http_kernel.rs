@@ -15,7 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
     sync::OnceLock,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 
@@ -25,7 +25,10 @@ pub const ACTIVITY_OPERATIONAL_HEADROOM: Duration = Duration::from_secs(30);
 pub const MAX_PROVIDER_DEADLINE: Duration = Duration::from_secs(270);
 
 #[derive(Clone, Copy, Debug)]
-pub struct InvocationDeadline(Instant);
+pub struct InvocationDeadline {
+    instant: Instant,
+    unix_millis: i64,
+}
 
 thread_local! {
     static ACTIVITY_PROVIDER_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
@@ -65,22 +68,64 @@ impl InvocationDeadline {
         if timeout.is_zero() || timeout > MAX_PROVIDER_DEADLINE {
             return Err(HttpKernelError::InvalidDeadline);
         }
-        let configured = Instant::now() + timeout;
-        let deadline = ACTIVITY_PROVIDER_DEADLINE
+        let now = Instant::now();
+        let configured = now + timeout;
+        let instant = ACTIVITY_PROVIDER_DEADLINE
             .with(|slot| slot.get())
             .map_or(configured, |activity| configured.min(activity));
-        if deadline <= Instant::now() {
+        if instant <= now {
             return Err(HttpKernelError::DeadlineExceeded);
         }
-        Ok(Self(deadline))
+        let remaining = instant
+            .checked_duration_since(now)
+            .ok_or(HttpKernelError::DeadlineExceeded)?;
+        let unix_millis = unix_millis(SystemTime::now())?
+            .checked_add(
+                i64::try_from(remaining.as_millis())
+                    .map_err(|_| HttpKernelError::InvalidDeadline)?,
+            )
+            .ok_or(HttpKernelError::InvalidDeadline)?;
+        Ok(Self {
+            instant,
+            unix_millis,
+        })
+    }
+
+    /// Recreate an invocation budget without resetting its absolute deadline.
+    /// The current Temporal activity deadline can only shorten this budget.
+    pub fn from_unix_millis(deadline_unix_ms: i64) -> Result<Self, HttpKernelError> {
+        let now = unix_millis(SystemTime::now())?;
+        let remaining_ms = deadline_unix_ms
+            .checked_sub(now)
+            .filter(|remaining| *remaining > 0)
+            .ok_or(HttpKernelError::DeadlineExceeded)?;
+        let mut deadline = Self::from_timeout(Duration::from_millis(
+            u64::try_from(remaining_ms).map_err(|_| HttpKernelError::InvalidDeadline)?,
+        ))?;
+        deadline.unix_millis = deadline.unix_millis.min(deadline_unix_ms);
+        Ok(deadline)
     }
 
     pub fn remaining(self) -> Result<Duration, HttpKernelError> {
-        self.0
+        self.instant
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
             .ok_or(HttpKernelError::DeadlineExceeded)
     }
+
+    pub fn unix_millis(self) -> i64 {
+        self.unix_millis
+    }
+}
+
+fn unix_millis(value: SystemTime) -> Result<i64, HttpKernelError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| HttpKernelError::InvalidDeadline)?
+            .as_millis(),
+    )
+    .map_err(|_| HttpKernelError::InvalidDeadline)
 }
 
 pub fn valid_provider_deadline_ms(timeout_ms: u64) -> bool {
@@ -325,6 +370,18 @@ mod tests {
         .unwrap();
         let deadline = InvocationDeadline::from_timeout(Duration::from_secs(1)).unwrap();
         assert!(deadline.remaining().unwrap() <= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn persisted_absolute_deadline_is_reused_instead_of_reset() {
+        let initial = InvocationDeadline::from_timeout(Duration::from_millis(250)).unwrap();
+        let absolute_unix_ms = initial.unix_millis();
+        std::thread::sleep(Duration::from_millis(30));
+
+        let resumed = InvocationDeadline::from_unix_millis(absolute_unix_ms).unwrap();
+
+        assert_eq!(resumed.unix_millis(), absolute_unix_ms);
+        assert!(resumed.remaining().unwrap() < Duration::from_millis(240));
     }
 
     #[test]

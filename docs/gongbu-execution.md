@@ -21,7 +21,7 @@ Gongbu owns:
 
 - operator-controlled provider targets and pricing;
 - provider credentials and calls;
-- durable execution and provider-attempt records;
+- durable execution, provider-attempt, and safe asynchronous-operation records;
 - Temporal workflows and activities;
 - exact integer cost calculation, frozen pricing snapshots, and settlement
   evidence;
@@ -52,10 +52,20 @@ For a new execution, Gongbu then:
 5. Starts the stable Temporal workflow
    `gongbu-execution-{execution_id}` on the `gongbu-executions` task queue.
 6. Claims the Hubu authorization from the durable workflow.
-7. Creates a `ProviderAttempt` before irreversible provider transmission.
-8. Normalizes artifacts and preserves exact provider cost, currency, decimal
+7. Creates exactly one `ProviderAttempt` before irreversible provider
+   transmission.
+8. For new asynchronous histories, uses Temporal's patch-protected
+   `submit_provider` activity to submit once. After a successful FLUX submit,
+   Gongbu checkpoints the safe provider request ID, operation ID, validated BFL
+   polling host, and original absolute deadline in Gongbu SQLite before any
+   long polling begins.
+9. Uses `poll_provider_operation` to read that checkpoint and poll the existing
+   operation. Activity or worker recovery performs status GETs for the same
+   operation under the same deadline; it never sends a second generation POST.
+   Synchronous adapters retain their existing one-activity behavior.
+10. Normalizes artifacts and preserves exact provider cost, currency, decimal
    scale, and the complete frozen pricing snapshot.
-9. Settles confirmed billable work, routes a cost above the authorized maximum
+11. Settles confirmed billable work, routes a cost above the authorized maximum
    to reconciliation with its evidence intact, or releases confirmed
    non-billable work.
 
@@ -84,13 +94,25 @@ version and reason in each process. The event contains the static
 and field names. It never copies a request body, value, identifier, target
 value, raw error, or unknown diagnostic into that event.
 
-## Retry and reconciliation
+## Recovery and reconciliation
 
 Execution identity, its persisted account and agent snapshot, operation key,
-provider-attempt identity, Hubu claim, and
-Temporal workflow ID remain stable across recovery. A restart resubmits
-nonterminal executions to the same workflow identity rather than creating a
-second provider call.
+provider-attempt identity, Hubu claim, and Temporal workflow ID remain stable
+across recovery. New asynchronous workflow histories cross a Temporal patch
+before running `submit_provider` and then `poll_provider_operation`; histories
+that predate the patch retain their deterministic synchronous activity path.
+Restarting or replaying the new path reuses the same `ProviderAttempt` and safe
+SQLite operation checkpoint instead of creating a second provider call or
+financial mutation.
+
+A failure proven to occur before transmission remains non-billable and may
+release the authorization. Once submission may have crossed the provider
+boundary, Gongbu must establish the operation checkpoint before it can safely
+continue. An interruption immediately before that checkpoint is ambiguous even
+if the generation POST may have succeeded, so Gongbu records compact safe
+reconciliation evidence and neither resubmits nor releases the claim. An
+interruption immediately after the checkpoint resumes status GET polling for
+the same operation and never resets the original absolute deadline.
 
 An ambiguous provider or settlement outcome becomes
 `reconciliation_required`. Gongbu does not blindly retry the provider call or
@@ -186,6 +208,16 @@ when it is an HTTPS URL on exactly `api.bfl.ai`, `api.eu.bfl.ai`, or
 `api.us.bfl.ai`. User information, explicit ports, fragments, redirects, and
 all other origins are rejected before the credentialed request is sent.
 
+The generation POST is isolated in the patch-protected `submit_provider`
+activity and is never retried as provider generation work. A successful submit
+must be followed immediately by one atomic Gongbu SQLite checkpoint containing
+only the validated request ID when present, operation ID, polling hostname, and
+the absolute adapter deadline. The polling URL itself is not persisted.
+`poll_provider_operation` reconstructs the status request from frozen runtime
+configuration and that checkpoint, then issues only GET requests for the same
+operation. Worker restart and activity recovery reuse the checkpoint and its
+deadline rather than submitting again or granting a fresh timeout budget.
+
 The [Get Result OpenAPI](https://docs.bfl.ai/api-reference/utility/get-result)
 enumerates `Pending`, `Reasoning`, `Generating`, `Ready`, `Request Moderated`,
 `Content Moderated`, `Task not found`, and `Error`. Gongbu treats the first
@@ -203,6 +235,12 @@ insufficient credit, `403` to permission failure, and `429` to rate limiting;
 Gongbu also classifies `401` defensively as authentication failure. Raw provider
 bodies are not retained. Only compact, validated, non-secret request and
 operation identifiers may survive as reconciliation evidence.
+
+If a generation request may have reached BFL but its operation ID cannot be
+durably established, the workflow also reconciles. It does not infer safety
+from a missing checkpoint, retry the POST, or release the Hubu claim. Once the
+checkpoint exists, subsequent polling ambiguity retains that same safe
+operation evidence for recovery or reconciliation.
 
 Artifact URLs follow a different, credential-free path. Gongbu accepts only
 HTTPS `delivery.<region>.bfl.ai` hosts with exactly one safe region label,
@@ -279,9 +317,15 @@ Gongbu readiness requires the selected Temporal service and a polling worker.
 Losing either closes new execution admission while preserving inspection and
 recovery state.
 
-Workflow inputs contain execution identifiers and non-secret business data.
-Activities resolve credentials at execution time so secrets do not enter
-Temporal history.
+The patch-protected provider activities exchange only the `execution_id` and a
+small phase enum through Temporal. Durable normalized input, provider-attempt
+identity, and the asynchronous operation checkpoint remain in Gongbu SQLite;
+activities reload them at execution time. The checkpoint allowlists only the
+safe request ID, operation ID, validated polling hostname, and original
+absolute deadline. Credentials, raw provider bodies, complete polling URLs,
+signed artifact URLs, and storage paths have no representation in Temporal
+payloads or the operation checkpoint. Activities resolve credentials and
+reconstruct provider requests at execution time.
 
 ## Artifacts
 

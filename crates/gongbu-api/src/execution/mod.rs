@@ -4,7 +4,8 @@ use crate::redaction::Redactor;
 use crate::{
     execution_scope::{for_target, ExecutionScope},
     provider_contract::{
-        ActualVendorCost, NormalizedUsage, PricingSnapshot, PRICING_SNAPSHOT_SCHEMA_VERSION,
+        ActualVendorCost, AsyncProviderOperation, NormalizedUsage, PricingSnapshot,
+        PRICING_SNAPSHOT_SCHEMA_VERSION,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -217,6 +218,9 @@ pub struct ProviderAttempt {
     pub provider: String,
     pub provider_request_id: Option<String>,
     pub provider_operation_id: Option<String>,
+    pub provider_polling_host: Option<String>,
+    pub provider_deadline_unix_ms: Option<i64>,
+    pub operation_checkpointed_at: Option<String>,
     pub outcome: String,
     pub usage: Option<Value>,
     pub usage_schema_version: Option<i64>,
@@ -343,6 +347,7 @@ impl Repository {
         migrate_resolved_target_columns(&c)?;
         migrate_execution_scope_column(&c)?;
         migrate_precise_vendor_cost_columns(&c)?;
+        migrate_provider_operation_checkpoint_columns(&c)?;
         Ok(Self(Arc::new(Mutex::new(c)), redactor))
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
@@ -693,6 +698,9 @@ impl Repository {
             provider: n.provider.clone(),
             provider_request_id: n.provider_request_id.clone(),
             provider_operation_id: n.provider_operation_id.clone(),
+            provider_polling_host: None,
+            provider_deadline_unix_ms: None,
+            operation_checkpointed_at: None,
             outcome: "started".into(),
             usage: None,
             usage_schema_version: None,
@@ -746,6 +754,87 @@ impl Repository {
             Ok(())
         } else {
             Err(Error::Stale)
+        }
+    }
+    /// Atomically checkpoint the safe state needed to resume an accepted
+    /// asynchronous provider operation. Identical redelivery is idempotent;
+    /// conflicting evidence is rejected and can never cause a second submit.
+    pub fn record_provider_operation(
+        &self,
+        attempt_id: &str,
+        operation: &AsyncProviderOperation,
+        checkpointed_at: &str,
+    ) -> Result<ProviderAttempt> {
+        operation
+            .validate()
+            .map_err(|_| Error::Invalid("provider operation checkpoint"))?;
+        self.reject_registered_secrets([
+            attempt_id,
+            operation.provider_request_id.as_deref().unwrap_or(""),
+            operation.provider_operation_id.as_str(),
+            operation.polling_host.as_str(),
+            checkpointed_at,
+        ])?;
+        self.reject_registered_numbers([operation.deadline_unix_ms])?;
+
+        let connection = self.0.lock().unwrap();
+        let changed = connection.execute(
+            "UPDATE provider_attempts SET provider_request_id=?1,provider_operation_id=?2,provider_polling_host=?3,provider_deadline_unix_ms=?4,operation_checkpointed_at=?5 WHERE provider_attempt_id=?6 AND outcome='started' AND completed_at IS NULL AND transmission_started_at IS NOT NULL AND provider_operation_id IS NULL AND provider_polling_host IS NULL AND provider_deadline_unix_ms IS NULL AND operation_checkpointed_at IS NULL",
+            params![
+                operation.provider_request_id,
+                operation.provider_operation_id,
+                operation.polling_host,
+                operation.deadline_unix_ms,
+                checkpointed_at,
+                attempt_id
+            ],
+        )?;
+        drop(connection);
+        if changed == 1 {
+            return self.get_provider_attempt(attempt_id);
+        }
+
+        let existing = self.get_provider_attempt(attempt_id)?;
+        if existing.outcome == "started"
+            && existing.completed_at.is_none()
+            && existing.transmission_started_at.is_some()
+            && existing.provider_request_id == operation.provider_request_id
+            && existing.provider_operation_id.as_deref()
+                == Some(operation.provider_operation_id.as_str())
+            && existing.provider_polling_host.as_deref() == Some(operation.polling_host.as_str())
+            && existing.provider_deadline_unix_ms == Some(operation.deadline_unix_ms)
+            && existing.operation_checkpointed_at.as_deref() == Some(checkpointed_at)
+        {
+            Ok(existing)
+        } else {
+            Err(Error::Stale)
+        }
+    }
+
+    pub fn provider_operation(
+        &self,
+        attempt: &ProviderAttempt,
+    ) -> Result<Option<AsyncProviderOperation>> {
+        match (
+            attempt.provider_operation_id.as_ref(),
+            attempt.provider_polling_host.as_ref(),
+            attempt.provider_deadline_unix_ms,
+            attempt.operation_checkpointed_at.as_ref(),
+        ) {
+            (None, None, None, None) => Ok(None),
+            (Some(operation_id), Some(polling_host), Some(deadline_unix_ms), Some(_)) => {
+                let operation = AsyncProviderOperation {
+                    provider_request_id: attempt.provider_request_id.clone(),
+                    provider_operation_id: operation_id.clone(),
+                    polling_host: polling_host.clone(),
+                    deadline_unix_ms,
+                };
+                operation
+                    .validate()
+                    .map_err(|_| Error::Invalid("provider operation checkpoint"))?;
+                Ok(Some(operation))
+            }
+            _ => Err(Error::Invalid("provider operation checkpoint")),
         }
     }
     pub fn complete_provider_attempt(&self, id: &str, r: &AttemptResult) -> Result<()> {
@@ -920,15 +1009,15 @@ impl Repository {
         &self,
         execution_id: &str,
     ) -> Result<ProviderAttempt> {
-        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
-            let usage: Option<String> = r.get(6)?;
-            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, outcome:r.get(5)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(7)?, actual_vendor_cost:actual_vendor_cost_from_row(r,8,9,10)?, failure_code:r.get(11)?, failure_message_redacted:r.get(12)?, started_at:r.get(13)?, transmission_started_at:r.get(14)?, completed_at:r.get(15)? })
+        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,provider_polling_host,provider_deadline_unix_ms,operation_checkpointed_at,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
+            let usage: Option<String> = r.get(9)?;
+            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, provider_polling_host:r.get(5)?, provider_deadline_unix_ms:r.get(6)?, operation_checkpointed_at:r.get(7)?, outcome:r.get(8)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(10)?, actual_vendor_cost:actual_vendor_cost_from_row(r,11,12,13)?, failure_code:r.get(14)?, failure_message_redacted:r.get(15)?, started_at:r.get(16)?, transmission_started_at:r.get(17)?, completed_at:r.get(18)? })
         }).optional()?.ok_or(Error::NotFound)
     }
     pub fn get_provider_attempt(&self, provider_attempt_id: &str) -> Result<ProviderAttempt> {
-        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE provider_attempt_id=?1", [provider_attempt_id], |r| {
-            let usage: Option<String> = r.get(6)?;
-            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, outcome:r.get(5)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(7)?, actual_vendor_cost:actual_vendor_cost_from_row(r,8,9,10)?, failure_code:r.get(11)?, failure_message_redacted:r.get(12)?, started_at:r.get(13)?, transmission_started_at:r.get(14)?, completed_at:r.get(15)? })
+        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,provider_polling_host,provider_deadline_unix_ms,operation_checkpointed_at,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE provider_attempt_id=?1", [provider_attempt_id], |r| {
+            let usage: Option<String> = r.get(9)?;
+            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, provider_polling_host:r.get(5)?, provider_deadline_unix_ms:r.get(6)?, operation_checkpointed_at:r.get(7)?, outcome:r.get(8)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(10)?, actual_vendor_cost:actual_vendor_cost_from_row(r,11,12,13)?, failure_code:r.get(14)?, failure_message_redacted:r.get(15)?, started_at:r.get(16)?, transmission_started_at:r.get(17)?, completed_at:r.get(18)? })
         }).optional()?.ok_or(Error::NotFound)
     }
     pub fn create_artifact(&self, n: &CreateArtifactParams) -> Result<Artifact> {
@@ -1521,6 +1610,27 @@ fn migrate_precise_vendor_cost_columns(c: &Connection) -> rusqlite::Result<()> {
          WHERE pricing_snapshot_json IS NULL",
         [],
     )?;
+    Ok(())
+}
+
+fn migrate_provider_operation_checkpoint_columns(c: &Connection) -> rusqlite::Result<()> {
+    let mut statement = c.prepare("PRAGMA table_info(provider_attempts)")?;
+    let existing: std::collections::BTreeSet<String> = statement
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(statement);
+    for (name, definition) in [
+        ("provider_polling_host", "TEXT"),
+        ("provider_deadline_unix_ms", "INTEGER"),
+        ("operation_checkpointed_at", "TEXT"),
+    ] {
+        if !existing.contains(name) {
+            c.execute(
+                &format!("ALTER TABLE provider_attempts ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -2596,6 +2706,121 @@ mod tests {
             r.create_receipt(&mismatched),
             Err(Error::Invalid("receipt attempt relationship"))
         ));
+    }
+
+    #[test]
+    fn provider_operation_checkpoint_is_durable_idempotent_and_conflict_safe() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("provider-operation.sqlite3");
+        let repository = Repository::open(&path, Redactor::default()).unwrap();
+        let execution = repository
+            .create_execution(&new("account", "async-checkpoint"))
+            .unwrap();
+        let attempt_id = attempt(&repository, &execution);
+        let operation = AsyncProviderOperation {
+            provider_request_id: Some("request-170".into()),
+            provider_operation_id: "operation-170".into(),
+            polling_host: "api.bfl.ai".into(),
+            deadline_unix_ms: 1_799_999_999_000,
+        };
+
+        let stored = repository
+            .record_provider_operation(&attempt_id, &operation, "2026-08-28T18:00:01Z")
+            .unwrap();
+        assert_eq!(
+            repository.provider_operation(&stored).unwrap(),
+            Some(operation.clone())
+        );
+        assert_eq!(stored.provider_request_id, operation.provider_request_id);
+        assert_eq!(
+            stored.provider_operation_id.as_deref(),
+            Some("operation-170")
+        );
+        assert_eq!(stored.provider_polling_host.as_deref(), Some("api.bfl.ai"));
+        assert_eq!(
+            stored.provider_deadline_unix_ms,
+            Some(operation.deadline_unix_ms)
+        );
+        assert_eq!(
+            stored.operation_checkpointed_at.as_deref(),
+            Some("2026-08-28T18:00:01Z")
+        );
+        assert_eq!(repository.count("provider_attempts"), 1);
+        drop(repository);
+
+        let restarted = Repository::open(&path, Redactor::default()).unwrap();
+        let reopened = restarted.get_provider_attempt(&attempt_id).unwrap();
+        assert_eq!(
+            restarted.provider_operation(&reopened).unwrap(),
+            Some(operation.clone())
+        );
+        assert_eq!(
+            restarted
+                .record_provider_operation(&attempt_id, &operation, "2026-08-28T18:00:01Z",)
+                .unwrap(),
+            reopened
+        );
+
+        let conflicting = AsyncProviderOperation {
+            provider_operation_id: "operation-171".into(),
+            ..operation.clone()
+        };
+        assert!(matches!(
+            restarted.record_provider_operation(&attempt_id, &conflicting, "2026-08-28T18:00:01Z"),
+            Err(Error::Stale)
+        ));
+        assert_eq!(
+            restarted
+                .provider_operation(&restarted.get_provider_attempt(&attempt_id).unwrap())
+                .unwrap(),
+            Some(operation)
+        );
+        assert_eq!(restarted.count("provider_attempts"), 1);
+    }
+
+    #[test]
+    fn provider_operation_checkpoint_rejects_secrets_and_unsafe_evidence_atomically() {
+        const CANARY: &str = "gongbu-checkpoint-secret-170";
+        let repository =
+            Repository::in_memory_with_redactor(Redactor::new([CANARY.as_bytes()])).unwrap();
+        let execution = repository
+            .create_execution(&new("account", "safe-checkpoint"))
+            .unwrap();
+        let attempt_id = attempt(&repository, &execution);
+        let secret_bearing = AsyncProviderOperation {
+            provider_request_id: Some(CANARY.into()),
+            provider_operation_id: "operation-safe".into(),
+            polling_host: "api.bfl.ai".into(),
+            deadline_unix_ms: 1_799_999_999_000,
+        };
+
+        assert!(matches!(
+            repository.record_provider_operation(
+                &attempt_id,
+                &secret_bearing,
+                "2026-08-28T18:00:01Z"
+            ),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+        let unsafe_url = AsyncProviderOperation {
+            provider_request_id: Some("request-safe".into()),
+            provider_operation_id: "https://example.invalid/result?token=signed".into(),
+            polling_host: "api.bfl.ai".into(),
+            deadline_unix_ms: 1_799_999_999_000,
+        };
+        assert!(matches!(
+            repository.record_provider_operation(&attempt_id, &unsafe_url, "2026-08-28T18:00:01Z"),
+            Err(Error::Invalid("provider operation checkpoint"))
+        ));
+
+        let unchanged = repository.get_provider_attempt(&attempt_id).unwrap();
+        assert_eq!(repository.provider_operation(&unchanged).unwrap(), None);
+        assert_eq!(unchanged.provider_request_id, None);
+        assert_eq!(unchanged.provider_operation_id, None);
+        assert_eq!(unchanged.provider_polling_host, None);
+        assert_eq!(unchanged.provider_deadline_unix_ms, None);
+        assert_eq!(unchanged.operation_checkpointed_at, None);
+        assert_eq!(repository.count("provider_attempts"), 1);
     }
 
     #[test]

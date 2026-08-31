@@ -31,6 +31,7 @@ use temporalio_sdk::{
 };
 
 pub const EXECUTION_TASK_QUEUE: &str = "gongbu-executions";
+const HUB_170_SUBMIT_POLL_PATCH: &str = "hub-170-flux-submit-poll";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemporalWorkerConfig {
@@ -116,6 +117,16 @@ pub trait DurableExecutionRunner: Send + Sync + 'static {
         activity_deadline: Option<SystemTime>,
     ) -> Result<ExecutionPhaseResult, String>;
     fn execute_provider(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ProviderPhaseOutcome, String>;
+    fn submit_provider(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ProviderPhaseOutcome, String>;
+    fn poll_provider_operation(
         &self,
         execution_id: &str,
         activity_deadline: Option<SystemTime>,
@@ -261,6 +272,32 @@ impl DurableExecutionRunner for PersistedExecutionRunner {
             .provider_phase_with_clock(execution_id, &phase_at, self.now.as_ref())
             .map_err(|error| error.to_string())
     }
+    fn submit_provider(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ProviderPhaseOutcome, String> {
+        let _deadline =
+            crate::provider::http_kernel::ActivityDeadlineGuard::enter(activity_deadline)
+                .map_err(|error| error.to_string())?;
+        let phase_at = (self.now)();
+        self.workflow()
+            .provider_submit_phase_with_clock(execution_id, &phase_at, self.now.as_ref())
+            .map_err(|error| error.to_string())
+    }
+    fn poll_provider_operation(
+        &self,
+        execution_id: &str,
+        activity_deadline: Option<SystemTime>,
+    ) -> Result<ProviderPhaseOutcome, String> {
+        let _deadline =
+            crate::provider::http_kernel::ActivityDeadlineGuard::enter(activity_deadline)
+                .map_err(|error| error.to_string())?;
+        let phase_at = (self.now)();
+        self.workflow()
+            .provider_poll_phase_with_clock(execution_id, &phase_at, self.now.as_ref())
+            .map_err(|error| error.to_string())
+    }
     fn persist_artifacts(
         &self,
         execution_id: &str,
@@ -350,14 +387,35 @@ impl GranularExecutionWorkflow {
                 .status;
         }
         if status == "executing" {
-            match ctx
-                .execute_activity(
+            let provider_outcome = if ctx.patched(HUB_170_SUBMIT_POLL_PATCH) {
+                let submitted = ctx
+                    .execute_activity(
+                        GranularExecutionActivities::submit_provider,
+                        execution_id.clone(),
+                        options.clone(),
+                    )
+                    .await?;
+                if submitted == ProviderPhaseOutcome::PollExisting {
+                    ctx.execute_activity(
+                        GranularExecutionActivities::poll_provider_operation,
+                        execution_id.clone(),
+                        options.clone(),
+                    )
+                    .await?
+                } else {
+                    submitted
+                }
+            } else {
+                // Existing Temporal histories retain the original activity
+                // command and its single-activity submit/poll wrapper.
+                ctx.execute_activity(
                     GranularExecutionActivities::execute_provider,
                     execution_id.clone(),
                     options.clone(),
                 )
                 .await?
-            {
+            };
+            match provider_outcome {
                 ProviderPhaseOutcome::PersistArtifacts => {
                     status = ctx
                         .execute_activity(
@@ -377,6 +435,12 @@ impl GranularExecutionWorkflow {
                         )
                         .await?
                         .status;
+                }
+                ProviderPhaseOutcome::PollExisting => {
+                    return Err(ApplicationFailure::new(std::io::Error::other(
+                        "provider poll phase remained pending",
+                    ))
+                    .into());
                 }
                 ProviderPhaseOutcome::Complete(completed) => status = completed.status,
             }
@@ -533,6 +597,34 @@ impl GranularExecutionActivities {
         let runner = Arc::clone(&self.runner);
         let deadline = ctx.info().deadline;
         tokio::task::spawn_blocking(move || runner.execute_provider(&execution_id, deadline))
+            .await
+            .map_err(activity_failure)?
+            .map_err(activity_failure)
+    }
+
+    #[activity]
+    pub async fn submit_provider(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        execution_id: String,
+    ) -> Result<ProviderPhaseOutcome, ActivityError> {
+        let runner = Arc::clone(&self.runner);
+        let deadline = ctx.info().deadline;
+        tokio::task::spawn_blocking(move || runner.submit_provider(&execution_id, deadline))
+            .await
+            .map_err(activity_failure)?
+            .map_err(activity_failure)
+    }
+
+    #[activity]
+    pub async fn poll_provider_operation(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        execution_id: String,
+    ) -> Result<ProviderPhaseOutcome, ActivityError> {
+        let runner = Arc::clone(&self.runner);
+        let deadline = ctx.info().deadline;
+        tokio::task::spawn_blocking(move || runner.poll_provider_operation(&execution_id, deadline))
             .await
             .map_err(activity_failure)?
             .map_err(activity_failure)
@@ -888,6 +980,32 @@ async fn signal_reconciliation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream;
+    use temporalio_common::{
+        data_converters::DataConverter,
+        protos::{
+            constants::PATCH_MARKER_NAME,
+            coresdk::{common::build_has_change_marker_details, AsJsonPayloadExt, IntoPayloadsExt},
+            temporal::api::{
+                common::v1::{ActivityType, Payload, WorkflowType},
+                enums::v1::{EventType, TaskQueueKind},
+                history::v1::{
+                    ActivityTaskCompletedEventAttributes, ActivityTaskScheduledEventAttributes,
+                    ActivityTaskStartedEventAttributes, History, HistoryEvent,
+                    MarkerRecordedEventAttributes, WorkflowExecutionCompletedEventAttributes,
+                    WorkflowExecutionStartedEventAttributes, WorkflowTaskCompletedEventAttributes,
+                    WorkflowTaskScheduledEventAttributes, WorkflowTaskStartedEventAttributes,
+                },
+                taskqueue::v1::TaskQueue,
+            },
+        },
+        worker::WorkerTaskTypes,
+        WorkflowDefinition,
+    };
+    use temporalio_sdk::runtime::{
+        replay::{HistoryForReplay, ReplayWorkerInput},
+        WorkerVersioningStrategy,
+    };
 
     struct Runner;
     impl DurableExecutionRunner for Runner {
@@ -930,6 +1048,20 @@ mod tests {
         ) -> Result<ProviderPhaseOutcome, String> {
             Ok(ProviderPhaseOutcome::PersistArtifacts)
         }
+        fn submit_provider(
+            &self,
+            _: &str,
+            _: Option<SystemTime>,
+        ) -> Result<ProviderPhaseOutcome, String> {
+            Ok(ProviderPhaseOutcome::PollExisting)
+        }
+        fn poll_provider_operation(
+            &self,
+            _: &str,
+            _: Option<SystemTime>,
+        ) -> Result<ProviderPhaseOutcome, String> {
+            Ok(ProviderPhaseOutcome::PersistArtifacts)
+        }
         fn persist_artifacts(
             &self,
             _: &str,
@@ -960,10 +1092,269 @@ mod tests {
         }
     }
 
+    struct ReplayHistoryBuilder {
+        events: Vec<HistoryEvent>,
+        event_id: i64,
+        workflow_task_scheduled_event_id: i64,
+        previous_workflow_task_completed_event_id: i64,
+    }
+
+    impl ReplayHistoryBuilder {
+        fn new() -> Self {
+            let mut history = Self {
+                events: Vec::new(),
+                event_id: 0,
+                workflow_task_scheduled_event_id: 0,
+                previous_workflow_task_completed_event_id: 0,
+            };
+            history.add(
+                EventType::WorkflowExecutionStarted,
+                WorkflowExecutionStartedEventAttributes {
+                    original_execution_run_id: "17000000-0000-4000-8000-000000000001".into(),
+                    workflow_type: Some(WorkflowType {
+                        name: GranularExecutionWorkflow::run.name().to_owned(),
+                    }),
+                    input: vec![ExecutionWorkflowInput {
+                        execution_id: "execution-170".into(),
+                        recovery_delays_seconds: vec![1],
+                    }
+                    .as_json_payload()
+                    .unwrap()]
+                    .into_payloads(),
+                    workflow_task_timeout: Some(Duration::from_secs(5).try_into().unwrap()),
+                    task_queue: Some(TaskQueue {
+                        name: "hub-170-replay".into(),
+                        kind: TaskQueueKind::Normal as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            );
+            history.add_full_workflow_task();
+            history
+        }
+
+        fn add(
+            &mut self,
+            event_type: EventType,
+            attributes: impl Into<HistoryEventAttributes>,
+        ) -> i64 {
+            self.event_id += 1;
+            self.events.push(HistoryEvent {
+                event_id: self.event_id,
+                event_type: event_type as i32,
+                attributes: Some(attributes.into()),
+                ..Default::default()
+            });
+            self.event_id
+        }
+
+        fn add_full_workflow_task(&mut self) {
+            self.workflow_task_scheduled_event_id = self.add(
+                EventType::WorkflowTaskScheduled,
+                WorkflowTaskScheduledEventAttributes::default(),
+            );
+            self.add(
+                EventType::WorkflowTaskStarted,
+                WorkflowTaskStartedEventAttributes {
+                    scheduled_event_id: self.workflow_task_scheduled_event_id,
+                    ..Default::default()
+                },
+            );
+            self.previous_workflow_task_completed_event_id = self.add(
+                EventType::WorkflowTaskCompleted,
+                WorkflowTaskCompletedEventAttributes {
+                    scheduled_event_id: self.workflow_task_scheduled_event_id,
+                    ..Default::default()
+                },
+            );
+        }
+
+        fn add_patch(&mut self) {
+            self.add(
+                EventType::MarkerRecorded,
+                MarkerRecordedEventAttributes {
+                    marker_name: PATCH_MARKER_NAME.into(),
+                    details: build_has_change_marker_details(HUB_170_SUBMIT_POLL_PATCH, false)
+                        .unwrap(),
+                    workflow_task_completed_event_id: self
+                        .previous_workflow_task_completed_event_id,
+                    ..Default::default()
+                },
+            );
+        }
+
+        fn complete(self) -> HistoryForReplay {
+            HistoryForReplay::new(
+                History {
+                    events: self.events,
+                },
+                "hub-170-replay",
+            )
+        }
+    }
+
+    type HistoryEventAttributes =
+        temporalio_common::protos::temporal::api::history::v1::history_event::Attributes;
+
+    fn add_completed_activity(
+        history: &mut ReplayHistoryBuilder,
+        sequence: u32,
+        activity_type: &str,
+        output: Payload,
+    ) {
+        let scheduled = history.add(
+            EventType::ActivityTaskScheduled,
+            ActivityTaskScheduledEventAttributes {
+                activity_id: sequence.to_string(),
+                activity_type: Some(ActivityType {
+                    name: activity_type.to_owned(),
+                }),
+                input: vec!["execution-170".as_json_payload().unwrap()].into_payloads(),
+                start_to_close_timeout: Some(TEMPORAL_ACTIVITY_TIMEOUT.try_into().unwrap()),
+                workflow_task_completed_event_id: history.previous_workflow_task_completed_event_id,
+                ..Default::default()
+            },
+        );
+        let started = history.add(
+            EventType::ActivityTaskStarted,
+            ActivityTaskStartedEventAttributes {
+                scheduled_event_id: scheduled,
+                ..Default::default()
+            },
+        );
+        history.add(
+            EventType::ActivityTaskCompleted,
+            ActivityTaskCompletedEventAttributes {
+                scheduled_event_id: scheduled,
+                started_event_id: started,
+                result: vec![output].into_payloads(),
+                ..Default::default()
+            },
+        );
+        history.add_full_workflow_task();
+    }
+
+    fn completed_replay_history(split_submit_poll: bool) -> HistoryForReplay {
+        let mut history = ReplayHistoryBuilder::new();
+        add_completed_activity(
+            &mut history,
+            1,
+            GranularExecutionActivities::preflight_execution.name(),
+            phase("preflighting").as_json_payload().unwrap(),
+        );
+        add_completed_activity(
+            &mut history,
+            2,
+            GranularExecutionActivities::claim_authorization.name(),
+            phase("claimed").as_json_payload().unwrap(),
+        );
+        add_completed_activity(
+            &mut history,
+            3,
+            GranularExecutionActivities::validate_claim.name(),
+            phase("executing").as_json_payload().unwrap(),
+        );
+        if split_submit_poll {
+            history.add_patch();
+            add_completed_activity(
+                &mut history,
+                4,
+                GranularExecutionActivities::submit_provider.name(),
+                ProviderPhaseOutcome::PollExisting
+                    .as_json_payload()
+                    .unwrap(),
+            );
+            add_completed_activity(
+                &mut history,
+                5,
+                GranularExecutionActivities::poll_provider_operation.name(),
+                ProviderPhaseOutcome::PersistArtifacts
+                    .as_json_payload()
+                    .unwrap(),
+            );
+        } else {
+            add_completed_activity(
+                &mut history,
+                4,
+                GranularExecutionActivities::execute_provider.name(),
+                ProviderPhaseOutcome::PersistArtifacts
+                    .as_json_payload()
+                    .unwrap(),
+            );
+        }
+        let next_sequence = if split_submit_poll { 6 } else { 5 };
+        add_completed_activity(
+            &mut history,
+            next_sequence,
+            GranularExecutionActivities::persist_artifacts.name(),
+            phase("settling").as_json_payload().unwrap(),
+        );
+        add_completed_activity(
+            &mut history,
+            next_sequence + 1,
+            GranularExecutionActivities::settle_spend.name(),
+            phase("succeeded").as_json_payload().unwrap(),
+        );
+        history.add(
+            EventType::WorkflowExecutionCompleted,
+            WorkflowExecutionCompletedEventAttributes {
+                workflow_task_completed_event_id: history.previous_workflow_task_completed_event_id,
+                ..Default::default()
+            },
+        );
+        history.complete()
+    }
+
+    async fn replay(history: HistoryForReplay) {
+        let config = temporalio_sdk::runtime::WorkerConfig::builder()
+            .namespace("default")
+            .task_queue("hub-170-replay")
+            .max_outstanding_activities(1_usize)
+            .max_outstanding_local_activities(1_usize)
+            .max_outstanding_workflow_tasks(1_usize)
+            .versioning_strategy(WorkerVersioningStrategy::None {
+                build_id: "hub-170-test".into(),
+            })
+            .task_types(WorkerTaskTypes::workflow_only())
+            .skip_client_worker_set_check(true)
+            .build()
+            .unwrap();
+        let core = temporalio_sdk::runtime::init_replay_worker(ReplayWorkerInput::new(
+            config,
+            stream::iter([history]),
+        ))
+        .unwrap();
+        let mut worker = Worker::new_from_core(Arc::new(core), DataConverter::default());
+        worker
+            .register_workflow::<GranularExecutionWorkflow>()
+            .unwrap();
+        worker.run().await.unwrap();
+    }
+
     #[test]
     fn registers_workflow_and_activity_on_execution_queue() {
         let options = worker_options(Arc::new(Runner));
         assert_eq!(options.task_queue, EXECUTION_TASK_QUEUE);
+        let registered = format!("{:?}", options.activities());
+        for activity in [
+            GranularExecutionActivities::execute_provider.name(),
+            GranularExecutionActivities::submit_provider.name(),
+            GranularExecutionActivities::poll_provider_operation.name(),
+        ] {
+            assert!(registered.contains(activity), "missing activity {activity}");
+        }
+    }
+
+    #[test]
+    fn submit_poll_workflow_patch_id_is_stable() {
+        assert_eq!(HUB_170_SUBMIT_POLL_PATCH, "hub-170-flux-submit-poll");
+    }
+
+    #[tokio::test]
+    async fn legacy_and_split_provider_histories_both_replay_deterministically() {
+        replay(completed_replay_history(false)).await;
+        replay(completed_replay_history(true)).await;
     }
 
     #[test]

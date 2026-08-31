@@ -13,8 +13,9 @@ use crate::{
     lifecycle::{AdmissionRoute, DependencyName, DependencyProbeOutcome, LifecycleReason},
     provider::{
         contract::{
-            enforce_cost, vendor_idempotency_key, AdapterOutcome, NormalizedRequest,
-            PricingSnapshot, PricingUnit, ProviderFailure, SpendDisposition,
+            enforce_cost, vendor_idempotency_key, AdapterOutcome, AdapterSubmission,
+            AsyncProviderOperation, NormalizedRequest, PricingSnapshot, PricingUnit,
+            ProviderFailure, SpendDisposition,
         },
         flux2_api,
         registry::ValidatedProviderCatalog,
@@ -26,7 +27,7 @@ use crate::{
     },
     workflow::{
         ActivityError as WorkflowActivityError, ArtifactActivities, HubuActivities,
-        ProviderActivities, ProviderArtifact, ProviderSuccess,
+        ProviderActivities, ProviderArtifact, ProviderSubmission, ProviderSuccess,
     },
 };
 use axum::{
@@ -216,6 +217,109 @@ impl ProviderActivities for GenericProviderActivities {
             .map_err(map_provider_failure)?;
         normalize_provider_success(outcome)
     }
+
+    fn submit(
+        &self,
+        execution: &Execution,
+        _attempt_id: &str,
+    ) -> Result<ProviderSubmission, WorkflowActivityError> {
+        let (target, adapter, request, normalized_input) = self.selected(execution)?;
+        let secret = self
+            .secrets
+            .resolve(
+                &target
+                    .secret_reference()
+                    .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?,
+            )
+            .map_err(|_| WorkflowActivityError::Proven("secret_unavailable".into()))?;
+        let idempotency_key = ValidatedProviderCatalog::needs_stable_idempotency_key(target)
+            .then(|| {
+                vendor_idempotency_key(
+                    &target.provider,
+                    &target.model,
+                    &execution.account_id,
+                    &execution.operation_key,
+                )
+            })
+            .transpose()
+            .map_err(map_contract_error)?;
+        let submission = adapter
+            .submit(
+                &request,
+                &normalized_input,
+                &secret,
+                idempotency_key.as_deref(),
+            )
+            .map_err(map_provider_failure)?;
+        normalize_provider_submission(submission)
+    }
+
+    fn poll_existing(
+        &self,
+        execution: &Execution,
+        _attempt_id: &str,
+        operation: &AsyncProviderOperation,
+    ) -> Result<ProviderSuccess, WorkflowActivityError> {
+        let (target, adapter, request, normalized_input) = self
+            .selected(execution)
+            .map_err(|error| reconcile_local_poll_failure(error, operation))?;
+        let secret = self
+            .secrets
+            .resolve(&target.secret_reference().map_err(|_| {
+                reconcile_local_poll_failure(
+                    WorkflowActivityError::Proven("secret_unavailable".into()),
+                    operation,
+                )
+            })?)
+            .map_err(|_| {
+                reconcile_local_poll_failure(
+                    WorkflowActivityError::Proven("secret_unavailable".into()),
+                    operation,
+                )
+            })?;
+        let outcome = adapter
+            .poll(&request, &normalized_input, &secret, operation)
+            .map_err(map_provider_failure)?;
+        normalize_provider_success(outcome)
+            .map_err(|error| reconcile_local_poll_failure(error, operation))
+    }
+}
+
+fn reconcile_local_poll_failure(
+    error: WorkflowActivityError,
+    operation: &AsyncProviderOperation,
+) -> WorkflowActivityError {
+    let code = match error {
+        WorkflowActivityError::Proven(code)
+        | WorkflowActivityError::Ambiguous(code)
+        | WorkflowActivityError::ProvenWithEvidence { code, .. }
+        | WorkflowActivityError::AmbiguousWithEvidence { code, .. } => code,
+    };
+    WorkflowActivityError::AmbiguousWithEvidence {
+        code,
+        request_id: operation.provider_request_id.clone(),
+        operation_id: Some(operation.provider_operation_id.clone()),
+    }
+}
+
+fn normalize_provider_submission(
+    submission: AdapterSubmission,
+) -> Result<ProviderSubmission, WorkflowActivityError> {
+    match submission {
+        AdapterSubmission::Complete(outcome) => {
+            normalize_provider_success(outcome).map(ProviderSubmission::Complete)
+        }
+        AdapterSubmission::Pending(operation) => {
+            if operation.validate().is_err() {
+                // The rejected object has not passed the compact evidence
+                // allowlist, so none of its fields may enter persistence.
+                return Err(WorkflowActivityError::Ambiguous(
+                    "invalid_provider_operation".into(),
+                ));
+            }
+            Ok(ProviderSubmission::Pending(operation))
+        }
+    }
 }
 
 fn map_contract_error(error: crate::provider_contract::ContractError) -> WorkflowActivityError {
@@ -255,11 +359,9 @@ fn normalize_provider_success(
     outcome: AdapterOutcome,
 ) -> Result<ProviderSuccess, WorkflowActivityError> {
     if outcome.validate().is_err() {
-        return Err(WorkflowActivityError::AmbiguousWithEvidence {
-            code: "invalid_provider_success".into(),
-            request_id: outcome.provider_request_id,
-            operation_id: outcome.provider_operation_id,
-        });
+        return Err(WorkflowActivityError::Ambiguous(
+            "invalid_provider_success".into(),
+        ));
     }
     Ok(ProviderSuccess {
         request_id: outcome.provider_request_id,
@@ -2123,13 +2225,39 @@ mod tests {
         };
         assert!(matches!(
             normalize_provider_success(invalid_success),
-            Err(WorkflowActivityError::AmbiguousWithEvidence {
-                code,
-                request_id: Some(request_id),
-                operation_id: Some(operation_id),
-            }) if code == "invalid_provider_success"
-                && request_id == "request-2"
-                && operation_id == "operation-2"
+            Err(WorkflowActivityError::Ambiguous(code)) if code == "invalid_provider_success"
         ));
+    }
+
+    #[test]
+    fn invalid_async_submission_evidence_is_discarded_and_local_poll_failures_reconcile() {
+        let unsafe_submission = AdapterSubmission::Pending(AsyncProviderOperation {
+            provider_request_id: Some("https://storage.invalid/raw?signature=secret".into()),
+            provider_operation_id: "https://provider.invalid/operation/1".into(),
+            polling_host: "api.bfl.ai".into(),
+            deadline_unix_ms: 1_800_000_000_000,
+        });
+        assert!(matches!(
+            normalize_provider_submission(unsafe_submission),
+            Err(WorkflowActivityError::Ambiguous(code)) if code == "invalid_provider_operation"
+        ));
+
+        let checkpoint = AsyncProviderOperation {
+            provider_request_id: Some("request-170".into()),
+            provider_operation_id: "operation-170".into(),
+            polling_host: "api.bfl.ai".into(),
+            deadline_unix_ms: 1_800_000_000_000,
+        };
+        assert_eq!(
+            reconcile_local_poll_failure(
+                WorkflowActivityError::Proven("secret_unavailable".into()),
+                &checkpoint,
+            ),
+            WorkflowActivityError::AmbiguousWithEvidence {
+                code: "secret_unavailable".into(),
+                request_id: Some("request-170".into()),
+                operation_id: Some("operation-170".into()),
+            }
+        );
     }
 }

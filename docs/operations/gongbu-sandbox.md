@@ -79,13 +79,25 @@ gongbu-sandbox inspect --run-dir "$RUN_DIR"
 ```
 
 The Temporal history should show preflight, claim, validation, provider work,
-artifact persistence, and settlement in order. Proven non-billable failures
-release authorization. Ambiguous outcomes enter reconciliation.
+artifact persistence, and settlement in order. For new asynchronous workflow
+histories, provider work is a patch-protected `submit_provider` activity,
+followed by the durable operation checkpoint and
+`poll_provider_operation`. Proven pre-transmission failures release
+authorization. Ambiguous outcomes enter reconciliation.
 
 Replay the identical submit command with the same operation key and immutable
-inputs. It must return the same execution ID without another provider or Hubu
-financial mutation. If a real-provider request times out, do not submit a new
-operation key because the provider may already have accepted a billable call.
+inputs. It must return the same execution ID, `ProviderAttempt`, and Hubu
+financial mutation. Recovery after an asynchronous operation checkpoint issues
+only status GETs for the persisted operation under its original deadline; it
+must not produce another generation POST.
+
+An interruption before provider transmission is releasable. If provider
+submission may have succeeded but interruption occurs before the operation
+checkpoint commits, the execution must reconcile without resubmission or
+release. If interruption occurs after the checkpoint, restarting the worker
+must resume the same operation. If a real-provider request times out, do not
+submit a new operation key because the provider may already have accepted a
+billable call.
 
 Use `gongbu-sandbox --help` and subcommand help for the current option surface.
 The implementation's mode checks remain authoritative over copied examples.

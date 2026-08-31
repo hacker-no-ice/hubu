@@ -1,9 +1,11 @@
 # Live provider testing
 
 Live Gongbu provider tests are ignored by default and must never run in ordinary
-tests or CI. Each test makes one potentially billable request with no retry or
-fallback. Use short-lived credentials, operator-verified pricing, a strict
-minor-unit ceiling, and the adapter's exact confirmation string.
+tests or CI. Each test makes one potentially billable generation submission
+with no resubmission or fallback. An asynchronous adapter may perform bounded
+read-only status polling for that same operation under its original deadline.
+Use short-lived credentials, operator-verified pricing, a strict minor-unit
+ceiling, and the adapter's exact confirmation string.
 
 The preferred end-to-end path is the guarded
 [Gongbu sandbox](gongbu-sandbox.md). The ignored adapter tests below are useful
@@ -103,5 +105,7 @@ the provider. It never chooses a price from returned artifact dimensions.
 The tests fail closed when target configuration, credentials, exact
 confirmation, output preflight, price selection, or spend ceiling is absent or
 inconsistent. After a timeout or ambiguous response, inspect provider and local
-evidence before any retry; a lost response does not prove the request was
-unbilled.
+evidence before any new billable action; a lost response does not prove the
+request was unbilled. Resume read-only polling only when Gongbu durably recorded
+the existing operation. Without that checkpoint, reconcile rather than rerun
+the generation test or release its claim.
