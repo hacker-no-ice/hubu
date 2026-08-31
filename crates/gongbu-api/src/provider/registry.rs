@@ -1,7 +1,7 @@
 //! Static adapter factories and the startup-validated provider catalog.
 
 use super::{
-    contract::{ContractError, PricingCatalog, ProviderAdapter},
+    contract::{ContractError, PriceComponent, PricingCatalog, PricingSelector, ProviderAdapter},
     flux2_api::{
         Flux2ApiAdapter, ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID,
         PROVIDER_ID as FLUX_PROVIDER_ID, SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
@@ -20,7 +20,8 @@ use super::{
     supported_profiles::{self, CatalogProfile},
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
 };
-use crate::artifact::ArtifactLimits;
+use crate::{artifact::ArtifactLimits, execution_scope::for_target};
+use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
 
@@ -34,6 +35,35 @@ use crate::secrets::ProviderSecret;
 
 pub type BoundAdapter = Arc<dyn ProviderAdapter + Send + Sync>;
 type Factory = dyn Fn(&ProviderConfigVersion) -> Result<BoundAdapter, ContractError> + Send + Sync;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SelectableTarget {
+    pub target_id: String,
+    pub workload_type: String,
+    pub provider: String,
+    pub model: String,
+    pub execution_scope: SelectableExecutionScope,
+    pub image_sizes: Vec<String>,
+    pub pricing: Vec<SelectablePricing>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SelectableExecutionScope {
+    pub schema_version: u32,
+    pub provider: String,
+    pub executor: String,
+    pub capability: String,
+    pub billing_merchant: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SelectablePricing {
+    pub rule_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<PricingSelector>,
+    pub currency: String,
+    pub components: Vec<PriceComponent>,
+}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RegistryError {
@@ -258,6 +288,66 @@ impl ValidatedProviderCatalog {
         }
     }
 
+    pub fn selectable_targets(&self) -> Vec<SelectableTarget> {
+        self.targets
+            .revisions()
+            .filter(|target| target.is_active() && target.is_execution_enabled())
+            .filter_map(|target| {
+                let key = target.target_key();
+                let scope = for_target(&key.provider, &key.adapter)?;
+                let execution_scope = SelectableExecutionScope {
+                    schema_version: scope.schema_version,
+                    provider: scope.provider.id,
+                    executor: scope.executor.id,
+                    capability: scope.capability.id,
+                    billing_merchant: scope.billing_merchant.id,
+                };
+                let pricing = self
+                    .pricing
+                    .rules_for_target(&key)
+                    .into_iter()
+                    .map(|rule| SelectablePricing {
+                        rule_id: rule.rule_id,
+                        selector: rule.selector,
+                        currency: rule.currency,
+                        components: rule.components,
+                    })
+                    .collect::<Vec<_>>();
+                let mut image_sizes = pricing
+                    .iter()
+                    .filter_map(|rule| {
+                        rule.selector
+                            .as_ref()
+                            .map(|selector| selector.image_size.clone())
+                    })
+                    .collect::<Vec<_>>();
+                image_sizes.sort();
+                image_sizes.dedup();
+                Some(SelectableTarget {
+                    target_id: key.public_id(),
+                    workload_type: key.workload_type,
+                    provider: key.provider,
+                    model: key.model,
+                    execution_scope,
+                    image_sizes,
+                    pricing,
+                })
+            })
+            .collect()
+    }
+
+    pub fn resolve_target_id(
+        &self,
+        target_id: &str,
+    ) -> Result<&ProviderConfigVersion, RegistryError> {
+        let target = self
+            .targets
+            .resolve_target_id(target_id)
+            .map_err(|_| RegistryError::TargetUnavailable)?;
+        self.bound(target)?;
+        Ok(target)
+    }
+
     pub fn resolve_active(&self, key: &TargetKey) -> Result<&ProviderConfigVersion, RegistryError> {
         let target = self
             .targets
@@ -437,5 +527,20 @@ mod tests {
             let key = TargetKey::new("image_generation", provider, adapter, model).unwrap();
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
+        let selectable = catalog.selectable_targets();
+        assert_eq!(selectable.len(), 3);
+        let flux = selectable
+            .iter()
+            .find(|target| target.provider == "flux")
+            .unwrap();
+        assert_eq!(flux.image_sizes, ["1k", "2k", "4k"]);
+        assert_eq!(
+            flux.execution_scope.billing_merchant,
+            "merchant:black-forest-labs"
+        );
+        assert_eq!(
+            catalog.resolve_target_id(&flux.target_id).unwrap().model,
+            "flux-2-pro"
+        );
     }
 }

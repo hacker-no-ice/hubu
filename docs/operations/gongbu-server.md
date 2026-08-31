@@ -208,9 +208,12 @@ Agents normally use these routes through [Unified MCP](../unified-mcp.md).
 ### Diagnose rejected admission
 
 An HTTP 400 response may add one safe diagnostic to the existing
-`invalid_request` error: `target_not_selectable` names the four target fields,
-while `pricing_selector_not_matched` names `input.image_size`. Gongbu reports
-field paths only and never echoes their submitted values.
+`invalid_request` error: `target_not_selectable` names either `target_id` or the
+four legacy target fields, while `pricing_selector_not_matched` names
+`input.image_size`. Gongbu reports field paths only and never echoes their
+submitted values. Use authenticated `GET /v2/execution-targets` (normally via
+`gongbu_list_execution_targets`) to refresh the active operator-approved
+choices before creating corrected work.
 
 The first occurrence of each allowlisted route-version/reason pair in a Gongbu
 process writes one structured line to stderr (and thus to a launcher-managed

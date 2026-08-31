@@ -82,6 +82,14 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
+            name: "gongbu_list_execution_targets",
+            owner: gongbu,
+            method: "GET",
+            path: "/v2/execution-targets",
+            arguments: json!({}),
+            meta: None,
+        },
+        GoldenCase {
             name: "hubu_add_policy",
             owner: hubu,
             method: "POST",
@@ -361,8 +369,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        36,
-        "golden matrix must contain exactly 36 cases"
+        37,
+        "golden matrix must contain exactly 37 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -375,8 +383,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        36,
-        "routing fixture must map 36 tools"
+        37,
+        "routing fixture must map 37 tools"
     );
     assert_eq!(
         expected.len(),
@@ -399,7 +407,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Gongbu)
             .count(),
-        5
+        6
     );
 }
 
@@ -484,6 +492,7 @@ fn success_body(case: &GoldenCase) -> Value {
         "gongbu_get_execution" => execution_observation_response_for("operation-107", "exec-107"),
         "gongbu_get_provider_catalog" => provider_catalog_response(),
         "gongbu_list_artifacts" => artifact_list_response(),
+        "gongbu_list_execution_targets" => json!({"schema_version":2,"targets":[]}),
         "gongbu_get_artifact" => unreachable!("artifact success uses image bytes"),
         "hubu_authorize_spend" => json!({
             "fixture":"HUB-125",

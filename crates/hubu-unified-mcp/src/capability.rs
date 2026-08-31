@@ -167,7 +167,7 @@ mod tests {
             let capability = capabilities_value(&snapshot(hubu, gongbu));
             assert_eq!(capability["backends"]["hubu"]["state"], json!(hubu));
             assert_eq!(capability["backends"]["gongbu"]["state"], json!(gongbu));
-            assert_eq!(capability["tools"].as_array().unwrap().len(), 39);
+            assert_eq!(capability["tools"].as_array().unwrap().len(), 40);
             let names = capability["tools"]
                 .as_array()
                 .unwrap()

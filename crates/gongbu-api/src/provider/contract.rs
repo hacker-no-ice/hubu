@@ -534,6 +534,16 @@ impl PricingCatalog {
     pub(crate) fn rules(&self) -> &[PricingRule] {
         &self.0.rules
     }
+
+    /// Sanitized pricing rules that make the runtime choices for one target discoverable.
+    pub fn rules_for_target(&self, target: &TargetKey) -> Vec<PricingRule> {
+        self.0
+            .rules
+            .iter()
+            .filter(|rule| rule.provider == target.provider && rule.model == target.model)
+            .cloned()
+            .collect()
+    }
 }
 
 fn normalize_image_size(value: &str) -> Result<String> {

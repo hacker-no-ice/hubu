@@ -9,10 +9,10 @@ use crate::BackendClient;
 use super::{
     request::{self, PreparedCall},
     response::{
-        api_error, artifact_result, execution_result, scrub_artifact_metadata, text_result,
-        ApiErrorContext, ArtifactListResponse, ExecutionResponse, ProviderCatalogResponse,
-        ToolError, ToolErrorClass, ToolResult, EXECUTION_V1_SCHEMA_VERSION,
-        EXECUTION_V2_SCHEMA_VERSION,
+        api_error, artifact_result, execution_result, execution_target_catalog_result,
+        scrub_artifact_metadata, text_result, ApiErrorContext, ArtifactListResponse,
+        ExecutionResponse, ExecutionTargetCatalogResponse, ProviderCatalogResponse, ToolError,
+        ToolErrorClass, ToolResult, EXECUTION_V1_SCHEMA_VERSION, EXECUTION_V2_SCHEMA_VERSION,
     },
     AdmissionDiagnostic,
 };
@@ -151,6 +151,11 @@ fn execute(
     ToolError,
 > {
     match call {
+        PreparedCall::ListExecutionTargets => {
+            let response: ExecutionTargetCatalogResponse =
+                json_request::<Value, _>(client, Method::GET, "v2/execution-targets", None)?;
+            Ok((execution_target_catalog_result(response)?, None))
+        }
         PreparedCall::Create(request) => {
             let expected = expected.ok_or_else(|| {
                 ToolError::new(
@@ -375,6 +380,11 @@ mod tests {
                 "pricing_selector_not_matched",
                 serde_json::json!(["input.image_size"]),
                 AdmissionDiagnostic::PricingSelectorNotMatched,
+            ),
+            (
+                "target_not_selectable",
+                serde_json::json!(["target_id"]),
+                AdmissionDiagnostic::TargetIdNotSelectable,
             ),
         ];
         for (reason_code, fields, expected) in cases {

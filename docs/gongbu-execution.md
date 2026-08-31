@@ -34,7 +34,8 @@ The components communicate over
 ## Admission and execution flow
 
 The canonical caller submits a Hubu spend-authorization token plus execution
-intent and an operator-configured target to `POST /v2/executions`.
+intent and either a `target_id` discovered from `GET /v2/execution-targets` or
+the legacy explicit target tuple to `POST /v2/executions`.
 
 For a new execution, Gongbu then:
 
@@ -142,10 +143,24 @@ The projection contains elapsed durations only. It does not expose raw
 provider-attempt identifiers or timestamps, and callers must not infer provider
 time from how long an external observer sees the execution in `executing`.
 
-## Provider targets and pricing
+## Provider targets, discovery, and pricing
 
-Provider selection is an operator decision, not a caller override. A production
-target binds:
+Provider availability is an operator decision; selection among the available
+targets is a per-request caller decision. `GET /v2/execution-targets` projects
+only active, execution-enabled targets with an opaque stable `target_id`, safe
+provider/model labels, the Hubu authorization scope, supported image-size
+selectors, and exact configured price components. It never returns adapter
+settings, credential references, endpoints, headers, configuration revisions,
+or configuration digests.
+
+The ID is stable across credential, endpoint, and provider-configuration
+revision rotation for the same workload/provider/adapter/model key. A changed
+model or adapter is a different logical target and therefore receives a new
+ID. New callers select that ID and runtime inputs such as `image_size`; the
+legacy raw tuple remains accepted for compatibility but cannot be combined
+with `target_id` in one request.
+
+A production target binds:
 
 - workload type;
 - provider, adapter, and model;
@@ -155,6 +170,7 @@ target binds:
 - maximum authorized spend; and
 - whether live provider execution is explicitly enabled.
 
+Agents cannot register or synthesize targets through discovery or execution.
 Admission fails closed when target selection is unknown or ambiguous, price or
 scope differs from Hubu authorization, a required credential is unavailable,
 or the live-spend gate is incomplete.

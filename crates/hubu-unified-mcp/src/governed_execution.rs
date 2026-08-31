@@ -121,13 +121,31 @@ pub(super) fn tool_definition() -> Value {
                     "type": "object",
                     "additionalProperties": false,
                     "required": [
-                        "schema_version", "input", "input_schema_version", "workload_type",
-                        "provider", "adapter", "model"
+                        "schema_version", "input", "input_schema_version"
+                    ],
+                    "oneOf": [
+                        {
+                            "required": ["target_id"],
+                            "not": {"anyOf": [
+                                {"required": ["workload_type"]},
+                                {"required": ["provider"]},
+                                {"required": ["adapter"]},
+                                {"required": ["model"]}
+                            ]}
+                        },
+                        {
+                            "required": ["workload_type", "provider", "adapter", "model"],
+                            "not": {"required": ["target_id"]}
+                        }
                     ],
                     "properties": {
                         "schema_version": {"type": "integer", "const": 2},
                         "input": {"type": "object"},
                         "input_schema_version": {"type": "integer", "minimum": 1},
+                        "target_id": {
+                            "type": "string",
+                            "pattern": "^gongbu:target:v1:[a-f0-9]{64}$"
+                        },
                         "workload_type": {"type": "string", "minLength": 1},
                         "provider": {"type": "string", "minLength": 1},
                         "adapter": {"type": "string", "minLength": 1},
@@ -1072,6 +1090,46 @@ mod tests {
         assert_eq!(
             definition["inputSchema"]["properties"]["max_inline_artifact_bytes"]["maximum"],
             MAX_INLINE_ARTIFACT_BYTES
+        );
+    }
+
+    #[test]
+    fn governed_execution_accepts_a_discovered_target_id_without_a_raw_tuple() {
+        let target_id = format!("gongbu:target:v1:{}", "a".repeat(64));
+        let intent = json!({
+            "schema_version":2,
+            "input":{"prompt":"circle","image_size":"2k"},
+            "input_schema_version":1,
+            "target_id":target_id
+        });
+        let arguments = gongbu::governed_execution_arguments(&intent, "authorization-1").unwrap();
+        assert_eq!(arguments["target_id"], target_id);
+        assert_eq!(arguments["spend_auth_token_id"], "authorization-1");
+        for field in ["workload_type", "provider", "adapter", "model"] {
+            assert!(arguments.get(field).is_none());
+        }
+    }
+
+    #[test]
+    fn governed_execution_schema_makes_target_id_and_raw_tuple_strictly_exclusive() {
+        let definition = tool_definition();
+        assert_eq!(
+            definition["inputSchema"]["properties"]["execution"]["oneOf"],
+            json!([
+                {
+                    "required":["target_id"],
+                    "not":{"anyOf":[
+                        {"required":["workload_type"]},
+                        {"required":["provider"]},
+                        {"required":["adapter"]},
+                        {"required":["model"]}
+                    ]}
+                },
+                {
+                    "required":["workload_type","provider","adapter","model"],
+                    "not":{"required":["target_id"]}
+                }
+            ])
         );
     }
 

@@ -22,6 +22,8 @@ use super::{
 
 const EXECUTION: &str = r#"{"schema_version":2,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":"backend echoed op-1","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
 const PROVIDER_CATALOG: &str = r#"{"schema_version":1,"profiles":[{"contract":"hubu.flux-2-pro.text-to-image/v1","pricing_version":"bfl-flux-2-pro-usd-2026-08-28-v1","pricing_reviewed_on":"2026-08-28","target":{"workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro"},"capability":{"image_count":1,"output_formats":["png","jpeg"],"presets":[{"name":"1k","width":1024,"height":1024,"currency":"USD","rate_numerator_minor":3,"rate_denominator":1},{"name":"2k","width":1920,"height":1088,"currency":"USD","rate_numerator_minor":45,"rate_denominator":10},{"name":"4k","width":2048,"height":2048,"currency":"USD","rate_numerator_minor":75,"rate_denominator":10}]},"policies":{"generation_retries":0,"fallback":false,"poll":"bfl-async-status-poll-500ms-v1","artifact_delivery":"bfl-delivery-single-region-label-v1","recovery":"hubu-durable-async-resume-v1"},"readiness":{"configured":true,"credential_reference_present":true,"production_validated":true,"live_qualified":false,"live_qualification":"not_performed"}}]}"#;
+const TARGET_ID: &str =
+    "gongbu:target:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn mock_server(
     responses: Vec<(&'static str, &'static str, &'static str)>,
@@ -138,6 +140,62 @@ fn provider_catalog_routes_read_only_and_returns_only_the_validated_contract() {
 }
 
 #[test]
+fn create_schema_makes_target_id_and_raw_tuple_strictly_exclusive() {
+    let create = tool_definitions()
+        .into_iter()
+        .find(|tool| tool["name"] == "gongbu_create_execution")
+        .unwrap();
+    assert_eq!(
+        create["inputSchema"]["oneOf"],
+        json!([
+            {
+                "required":["target_id"],
+                "not":{"anyOf":[
+                    {"required":["workload_type"]},
+                    {"required":["provider"]},
+                    {"required":["adapter"]},
+                    {"required":["model"]}
+                ]}
+            },
+            {
+                "required":["workload_type","provider","adapter","model"],
+                "not":{"required":["target_id"]}
+            }
+        ])
+    );
+}
+
+#[test]
+fn selectable_target_catalog_is_read_only_structured_and_sanitized() {
+    let response = format!(
+        r#"{{"schema_version":2,"targets":[{{"target_id":"{TARGET_ID}","workload_type":"image_generation","provider":"google","model":"gemini-image","execution_scope":{{"schema_version":1,"provider":"provider:google:gemini-developer","executor":"executor:gongbu:image","capability":"capability:image:generate","billing_merchant":"merchant:google"}},"image_sizes":["1k","2k"],"pricing":[{{"rule_id":"gemini-1k","selector":{{"image_size":"1k"}},"currency":"USD","components":[{{"unit":"image","rate_numerator_minor":4,"rate_denominator":1}}]}},{{"rule_id":"gemini-2k","selector":{{"image_size":"2k"}},"currency":"USD","components":[{{"unit":"image","rate_numerator_minor":8,"rate_denominator":1}}]}}]}}]}}"#
+    );
+    let response: &'static str = Box::leak(response.into_boxed_str());
+    let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", response)]);
+    let result = call_tool(
+        &client(&endpoint, "gongbu-execution-secret"),
+        "gongbu_list_execution_targets",
+        json!({}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], false);
+    assert_eq!(
+        result["structuredContent"]["targets"][0]["target_id"],
+        TARGET_ID
+    );
+    assert_eq!(
+        result["structuredContent"]["targets"][0]["image_sizes"],
+        json!(["1k", "2k"])
+    );
+    let serialized = result.to_string();
+    for private in ["credential", "endpoint", "headers", "config_version"] {
+        assert!(!serialized.contains(private));
+    }
+    assert!(requests.lock().unwrap()[0].starts_with("GET /v2/execution-targets "));
+}
+
+#[test]
 fn provider_catalog_rejects_arguments_and_unsanitized_responses() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -170,6 +228,22 @@ fn provider_catalog_rejects_arguments_and_unsanitized_responses() {
 }
 
 #[test]
+fn selectable_target_catalog_rejects_unapproved_backend_fields() {
+    let response = r#"{"schema_version":2,"targets":[],"credential":"secret-canary"}"#;
+    let (endpoint, _) = mock_server(vec![("200 OK", "application/json", response)]);
+    let result = call_tool(
+        &client(&endpoint, "gongbu-execution-secret"),
+        "gongbu_list_execution_targets",
+        json!({}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], true);
+    assert!(result.to_string().contains("invalid_response"));
+    assert!(!result.to_string().contains("secret-canary"));
+}
+
+#[test]
 fn provider_catalog_rejects_contract_pricing_policy_and_readiness_drift() {
     let exact: Value = serde_json::from_str(PROVIDER_CATALOG).unwrap();
     for (pointer, changed) in [
@@ -188,6 +262,31 @@ fn provider_catalog_rejects_contract_pricing_policy_and_readiness_drift() {
         *mutated.pointer_mut(pointer).unwrap() = changed;
         let response: ProviderCatalogResponse = serde_json::from_value(mutated).unwrap();
         assert_eq!(response.validate().unwrap_err().code(), "invalid_response");
+    }
+}
+
+#[test]
+fn target_id_execution_is_forwarded_without_a_raw_target_tuple() {
+    let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", EXECUTION)]);
+    let arguments = json!({
+        "schema_version":2,
+        "spend_auth_token_id":"hubu-token-1",
+        "input":{"prompt":"circle","image_count":1,"image_size":"2k"},
+        "input_schema_version":1,
+        "target_id":TARGET_ID
+    });
+    let result = call_tool(
+        &client(&endpoint, "gongbu-execution-secret"),
+        "gongbu_create_execution",
+        arguments,
+        Some(&continuation()),
+    )
+    .result;
+    assert_eq!(result["isError"], false);
+    let request = &requests.lock().unwrap()[0];
+    assert!(request.contains(&format!(r#""target_id":"{TARGET_ID}""#)));
+    for field in ["workload_type", "provider", "adapter", "model"] {
+        assert!(!request.contains(&format!(r#""{field}":"#)));
     }
 }
 

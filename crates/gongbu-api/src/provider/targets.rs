@@ -106,6 +106,22 @@ impl TargetKey {
             self.workload_type, self.provider, self.adapter, self.model
         )
     }
+
+    /// Stable, opaque selector for the logical target across configuration revisions.
+    pub fn public_id(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"gongbu-target-v1\0");
+        for part in [
+            &self.workload_type,
+            &self.provider,
+            &self.adapter,
+            &self.model,
+        ] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
+        }
+        format!("gongbu:target:v1:{:x}", digest.finalize())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -325,6 +341,18 @@ impl ProviderTargetConfig {
             return Err(Error::ExecutionDisabled);
         }
         Ok(revision)
+    }
+
+    pub fn resolve_target_id(&self, target_id: &str) -> Result<&ProviderConfigVersion> {
+        let mut matches = self
+            .active
+            .keys()
+            .filter(|key| key.public_id() == target_id);
+        let key = matches.next().ok_or(Error::NotSelectable)?;
+        if matches.next().is_some() {
+            return Err(Error::NotSelectable);
+        }
+        self.resolve_active(key)
     }
     pub fn resolve_revision(
         &self,
@@ -811,6 +839,28 @@ fn canonicalize(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_target_id_is_stable_across_config_revisions() {
+        let key = TargetKey::new("image_generation", "google", "gemini_image", "image-v1").unwrap();
+        assert_eq!(key.public_id(), key.clone().public_id());
+        assert!(key.public_id().starts_with("gongbu:target:v1:"));
+        assert_eq!(key.public_id().len(), "gongbu:target:v1:".len() + 64);
+        let changed =
+            TargetKey::new("image_generation", "google", "gemini_image", "image-v2").unwrap();
+        assert_ne!(key.public_id(), changed.public_id());
+
+        let delimiter_in_workload = TargetKey::new("a/b", "c", "d", "e").unwrap();
+        let delimiter_in_model = TargetKey::new("a", "b", "c", "d/e").unwrap();
+        assert_eq!(
+            delimiter_in_workload.canonical_name(),
+            delimiter_in_model.canonical_name()
+        );
+        assert_ne!(
+            delimiter_in_workload.public_id(),
+            delimiter_in_model.public_id()
+        );
+    }
 
     fn catalog(json: &str) -> ProviderTargetConfig {
         serde_json::from_str(json).unwrap()

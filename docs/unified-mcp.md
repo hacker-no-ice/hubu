@@ -93,10 +93,11 @@ hubu_submit_spend
 hubu_update_budget
 ```
 
-Gongbu-owned tools cover the supported-provider catalog, execution, and
-artifacts:
+Gongbu-owned tools cover the supported-provider catalog, configured-target
+discovery, execution, and artifacts:
 
 ```text
+gongbu_list_execution_targets
 gongbu_create_execution
 gongbu_get_execution
 gongbu_get_provider_catalog
@@ -211,7 +212,9 @@ for that decision and resolution itself never starts provider work.
 
 The input combines the existing authorization fields with the existing Gongbu
 execution intent. Trusted harness identity remains in MCP `_meta`, outside the
-model-authored arguments:
+model-authored arguments. Agents should first call
+`gongbu_list_execution_targets`, choose one operator-approved target and its
+runtime options, and copy the returned `execution_scope` into authorization:
 
 ```json
 {
@@ -221,10 +224,10 @@ model-authored arguments:
     "reason": "Generate one product illustration",
     "execution_scope": {
       "schema_version": 1,
-      "provider": "fixture",
-      "executor": "gongbu",
-      "capability": "image_generation",
-      "billing_merchant": "fixture"
+      "provider": "provider:local:fixture",
+      "executor": "executor:gongbu:image",
+      "capability": "capability:image:generate",
+      "billing_merchant": "merchant:local"
     }
   },
   "execution": {
@@ -234,13 +237,17 @@ model-authored arguments:
       "image_count": 1
     },
     "input_schema_version": 1,
-    "workload_type": "image_generation",
-    "provider": "fixture",
-    "adapter": "fixture",
-    "model": "fixture-v1"
+    "target_id": "gongbu:target:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   }
 }
 ```
+
+Discovery returns structured content containing only the opaque target ID,
+workload type, provider/model labels, authorization scope, supported
+`image_size` values, and exact configured price components. It omits adapter
+settings, endpoints, headers, credentials, and provider configuration
+revisions. The raw workload/provider/adapter/model tuple remains accepted for
+backward compatibility, but a request must use exactly one selector form.
 
 The router normalizes that complete request once and durably stores its bounded,
 validated intent before authorization dispatch. It performs the existing Hubu
@@ -376,10 +383,11 @@ the primitive list/get tools to recover the omitted artifacts without rerunning
 the provider. The primitive authorization, create, status, list, and get tools
 remain the recovery and diagnostic surface for all other paths.
 
-For `gongbu_create_execution`, the router preserves Gongbu's two allowlisted
-admission diagnostics: `target_not_selectable` with the four target field names,
-or `pricing_selector_not_matched` with `input.image_size`. These are field paths,
-not request or target values. Because create is acknowledged before background
+For `gongbu_create_execution`, the router preserves Gongbu's allowlisted
+admission diagnostics: `target_not_selectable` with either `target_id` or the
+four legacy target field names, and `pricing_selector_not_matched` with
+`input.image_size`. These are field paths, not request or target values. Because
+create is acknowledged before background
 dispatch, a definitive admission rejection surfaces later in the terminal
 `hubu_operation_status.result` as the stable `execution_request_invalid` code
 plus the allowlisted `reason_code` and `fields`; the same projection survives
@@ -483,16 +491,16 @@ envelope without changing either backend's wire contract.
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 39 other tool names with owner
+state and compatible version metadata, and all 40 other tool names with owner
 and availability. Together with `hubu_unified_capabilities`, the stdio surface
-exposes 40 tools, 36 of which route to a backend.
+exposes 41 tools, 37 of which route to a backend.
 
 The version-1 compatibility boundary requires:
 
 | Surface | Required value |
 | --- | --- |
 | Unified contract | `hubu-gongbu-mcp-v1` |
-| Routing revision | `5` |
+| Routing revision | `6` |
 | MCP protocol | `2024-11-05` |
 | Hubu and Gongbu executor contract | `hubu-spend-executor-v4.3` |
 | Gongbu API schema | `2` |

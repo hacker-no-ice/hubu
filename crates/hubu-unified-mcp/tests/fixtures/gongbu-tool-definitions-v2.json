@@ -1,7 +1,22 @@
 [
   {
+    "name": "gongbu_list_execution_targets",
+    "description": "List the operator-approved execution targets and runtime image options currently selectable by agents. Returned targets omit credentials, endpoints, headers, and provider configuration revisions.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
     "name": "gongbu_create_execution",
-    "description": "Continue one authorized normalized operation into one Gongbu execution using its opaque continuation identifier and execution intent.",
+    "description": "Continue one authorized normalized operation into one Gongbu execution using its opaque continuation identifier and execution intent. Prefer a target_id returned by gongbu_list_execution_targets; the legacy raw target tuple remains accepted for compatibility.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -9,17 +24,34 @@
         "schema_version",
         "spend_auth_token_id",
         "input",
-        "input_schema_version",
-        "workload_type",
-        "provider",
-        "adapter",
-        "model"
+        "input_schema_version"
+      ],
+      "oneOf": [
+        {
+          "required": ["target_id"],
+          "not": {
+            "anyOf": [
+              { "required": ["workload_type"] },
+              { "required": ["provider"] },
+              { "required": ["adapter"] },
+              { "required": ["model"] }
+            ]
+          }
+        },
+        {
+          "required": ["workload_type", "provider", "adapter", "model"],
+          "not": { "required": ["target_id"] }
+        }
       ],
       "properties": {
         "schema_version": { "type": "integer", "const": 2 },
         "spend_auth_token_id": { "type": "string", "minLength": 1, "maxLength": 255 },
         "input": { "type": "object" },
         "input_schema_version": { "type": "integer", "minimum": 1 },
+        "target_id": {
+          "type": "string",
+          "pattern": "^gongbu:target:v1:[a-f0-9]{64}$"
+        },
         "workload_type": { "type": "string", "minLength": 1 },
         "provider": { "type": "string", "minLength": 1 },
         "adapter": { "type": "string", "minLength": 1 },

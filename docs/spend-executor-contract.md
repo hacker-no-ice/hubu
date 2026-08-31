@@ -371,7 +371,11 @@ guidance.
    ```
 
 2. The agent sends only `spend_auth_token_id` plus execution intent and target
-   selection to canonical `POST /v2/executions` with `schema_version: 2`. It
+   selection to canonical `POST /v2/executions` with `schema_version: 2`. New
+   callers select one opaque `target_id` from `GET /v2/execution-targets`;
+   legacy callers may continue to send the complete
+   workload/provider/adapter/model tuple, but the two selector forms cannot be
+   mixed. The request
    does not repeat account, operation key, money, typed scope, task ID, reason,
    lease profile, or expiry.
 
@@ -391,6 +395,12 @@ guidance.
    or protected lifecycle state before the Gongbu request. The public operation
    handle remains visible for correlation but is not authority and is not an
    execution-creation input.
+
+   Target discovery is read-only and installation-authenticated. Its compact
+   execution-scope selector is safe to copy into Hubu authorization, while its
+   exact price components and supported image-size selectors let the agent
+   form a matching amount and runtime request. Discovery omits credentials,
+   endpoints, headers, adapter settings, and configuration revisions.
 
 3. Before persistence, the executor performs a read-only resolution:
 
