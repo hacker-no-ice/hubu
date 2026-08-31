@@ -159,6 +159,11 @@ Required tag. Allowed current values are `gemini_image`, `gemini_developer_image
 
 Required for every non-fixture adapter. **Defined by the provider integration.** Use the expected HTTPS API origin or base endpoint, not a documentation page. Verify the exact path behavior in the adapter's operational guide.
 
+For `flux2_api`, the endpoint must be one of BFL's current documented API
+origins: `https://api.bfl.ai`, `https://api.eu.bfl.ai`, or
+`https://api.us.bfl.ai`. Paths, query strings, fragments, user information,
+explicit ports, and other origins are rejected before execution is enabled.
+
 ### `targets.settings.config.api_version`
 
 Required for every non-fixture adapter. **Defined by the provider.** Use the exact API version supported by the selected adapter and model.
@@ -185,7 +190,16 @@ Required only for `gemini_image`. **Defined by the provider deployment.** Use a 
 
 ### `targets.settings.config.approved_artifact_hosts`
 
-Artifact-host allowlist for provider-referenced downloads. It is optional for `gemini_image` and defaults to empty. It is required and must contain at least one host for `flux2_api` and `ideogram_image`. Add only provider-controlled hosts required by the adapter response contract.
+Artifact-host allowlist for provider-referenced downloads. It is optional for
+`gemini_image` and defaults to empty. It is required and must contain at least
+one host for `ideogram_image`.
+
+For `flux2_api`, this optional list can only narrow Gongbu's fixed BFL delivery
+policy. Each entry must be an exact `delivery.<region>.bfl.ai` hostname with one
+safe region label; wildcards, extra labels, lookalikes, URL syntax, and suffix
+matches are rejected. An empty list follows BFL's documented region-varying
+delivery host family while retaining that same one-label constraint. These
+artifact hosts never receive the BFL `x-key` credential.
 
 ### `targets.settings.config.poll_interval_ms`
 

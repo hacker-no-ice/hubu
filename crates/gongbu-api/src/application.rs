@@ -1571,7 +1571,7 @@ mod tests {
                     "api_version":"v1",
                     "timeout_ms":1000,
                     "poll_interval_ms":10,
-                    "approved_artifact_hosts":["cdn.bfl.ai"]
+                    "approved_artifact_hosts":["delivery.us.bfl.ai"]
                 }}
             }]
         }))
@@ -1871,7 +1871,7 @@ mod tests {
             "provider_configs": [
                 {"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://google.example","api_version":"v1","project":"project","location":"us","timeout_ms":1000}}},
                 {"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}},
-                {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://flux.example","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["flux.example"]}}}
+                {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"mixed","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["delivery.us.bfl.ai"]}}}
             ]
         })).unwrap();
         let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();

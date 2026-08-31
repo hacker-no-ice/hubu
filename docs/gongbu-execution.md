@@ -175,6 +175,50 @@ Normal settlement, restart, replay, and reconciliation reuse that value and the
 receipt's already-derived budget-cent amount; they never apply the credit
 conversion or conservative cent ceiling a second time.
 
+### FLUX asynchronous transport and artifact delivery
+
+BFL's current
+[integration guide](https://docs.bfl.ai/api_integration/integration_guidelines)
+requires clients to poll the URL returned by a generation request and notes
+that artifact delivery regions can change. Gongbu keeps those two network
+policies separate. A provider-returned polling URL may receive `x-key` only
+when it is an HTTPS URL on exactly `api.bfl.ai`, `api.eu.bfl.ai`, or
+`api.us.bfl.ai`. User information, explicit ports, fragments, redirects, and
+all other origins are rejected before the credentialed request is sent.
+
+The [Get Result OpenAPI](https://docs.bfl.ai/api-reference/utility/get-result)
+enumerates `Pending`, `Reasoning`, `Generating`, `Ready`, `Request Moderated`,
+`Content Moderated`, `Task not found`, and `Error`. Gongbu treats the first
+three as pollable, `Ready` as success, and every other state as immediately
+terminal; it never keeps polling a terminal response until timeout. Moderation
+and provider `Error` outcomes release the authorization because BFL's current
+[moderation guidance](https://help.bfl.ai/articles/4212278032-my-prompt-is-getting-moderated)
+says moderated requests are not charged and only `Ready` consumes credits.
+`Task not found`, malformed results, transport ambiguity after submission, and
+other outcomes that cannot prove whether work was accepted go to
+reconciliation. Before an operation is accepted, a
+definitive rejection releases the authorization; after acceptance, the same
+HTTP ambiguity reconciles. BFL's documented HTTP failures map `402` to
+insufficient credit, `403` to permission failure, and `429` to rate limiting;
+Gongbu also classifies `401` defensively as authentication failure. Raw provider
+bodies are not retained. Only compact, validated, non-secret request and
+operation identifiers may survive as reconciliation evidence.
+
+Artifact URLs follow a different, credential-free path. Gongbu accepts only
+HTTPS `delivery.<region>.bfl.ai` hosts with exactly one safe region label,
+rejects redirects and URL ambiguity, and never forwards `x-key`. Because BFL's
+[quick start](https://docs.bfl.ai/quick_start/generating_images) describes these
+as short-lived signed URLs, the adapter downloads them immediately within the
+invocation's byte and time limits. The signed URL is neither returned nor
+persisted. Gongbu decodes and validates the bounded response as PNG or JPEG
+before the downloaded bytes enter normalized artifact storage.
+Although the
+[`flux-2-pro` request contract](https://docs.bfl.ai/api-reference/models/generate-or-edit-an-image-with-flux2-%5Bpro%5D)
+offers JPEG, PNG, and WebP output, Gongbu's initial normalized FLUX subset is
+PNG and JPEG. The same contract defines `safety_tolerance` as the integer range
+`0..=5`; Gongbu rejects `6`, non-integers, and unsupported values before any
+provider request.
+
 ### Certified FLUX.2 output dimensions
 
 The `flux2_api` adapter pins the non-preview `flux-2-pro` model described in the

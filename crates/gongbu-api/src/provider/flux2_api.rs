@@ -12,10 +12,13 @@ use super::{
         ProviderAdapter, ProviderFailure, ProviderPhase, Result, RetryPolicy,
     },
     http_kernel::{
-        provider_request_id, read_bounded, shared_client, validate_https_origin,
-        ArtifactDownloadPolicy, CredentialForwarding, InvocationDeadline,
+        provider_request_id, read_bounded, shared_client, url_has_explicit_port,
+        validate_https_origin, ArtifactDownloadPolicy, CredentialForwarding, InvocationDeadline,
     },
-    targets::{valid_artifact_hosts, Flux2ApiConfig, ProviderConfigVersion},
+    targets::{
+        valid_artifact_hosts, valid_bfl_api_host, valid_bfl_delivery_host, Flux2ApiConfig,
+        ProviderConfigVersion,
+    },
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
 use reqwest::{
@@ -281,7 +284,11 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             || config.timeout_ms == 0
             || config.poll_interval_ms == 0
             || config.max_retries != 0
-            || !valid_artifact_hosts(&config.approved_artifact_hosts, true)
+            || !valid_artifact_hosts(&config.approved_artifact_hosts, false)
+            || !config
+                .approved_artifact_hosts
+                .iter()
+                .all(|host| valid_bfl_delivery_host(host))
             || max_artifact_bytes == 0
             || max_artifact_bytes > usize::MAX as u64
         {
@@ -366,31 +373,46 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 &body,
             )
             .map_err(|error| classify_transport(error, secret, true, None, None))?;
-        let request_id = response
-            .request_id
-            .or_else(|| string_at(&response.body, &["request_id", "requestId"]));
+        let mut request_id = safe_evidence(response.request_id, secret)
+            .or_else(|| safe_string_at(&response.body, &["request_id", "requestId"], secret));
         if (400..500).contains(&response.status) {
-            return Err(ProviderFailure::release(
-                "provider_rejected",
+            return Err(classify_http_status(
+                response.status,
                 ProviderPhase::Submission,
+                false,
+                request_id,
+                None,
             ));
         }
         if !(200..300).contains(&response.status) {
-            return Err(with_evidence("provider_failure", request_id, None));
+            return Err(reconcile_with_evidence(
+                "provider_failure",
+                ProviderPhase::Submission,
+                request_id,
+                None,
+            ));
         }
-        let operation_id = string_at(&response.body, &["id", "operation_id", "operationId"]);
+        let operation_id = safe_string_at(
+            &response.body,
+            &["id", "operation_id", "operationId"],
+            secret,
+        );
         let mut current = response.body;
-        if is_failed(&current) {
-            return Err(
-                ProviderFailure::release("provider_rejected", ProviderPhase::Processing)
-                    .with_evidence(request_id, operation_id),
-            );
+        let mut state = classify_result_state(&current, true).map_err(|_| {
+            with_evidence(
+                "malformed_response",
+                request_id.clone(),
+                operation_id.clone(),
+            )
+        })?;
+        if let Some(failure) = state.failure(request_id.clone(), operation_id.clone()) {
+            return Err(failure);
         }
-        if !is_ready(&current) {
+        if state != BflResultState::Ready {
             let operation_id = operation_id
                 .clone()
                 .ok_or_else(|| with_evidence("malformed_response", request_id.clone(), None))?;
-            let poll_url = poll_url(&self.config, &current, &operation_id).map_err(|error| {
+            let poll_url = poll_url(&current).map_err(|error| {
                 let code = match error {
                     ContractError::Provider { code } => code,
                     _ => "provider_contract_failure".into(),
@@ -432,36 +454,51 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                             Some(operation_id.clone()),
                         )
                     })?;
+                let poll_request_id = safe_evidence(response.request_id, secret).or_else(|| {
+                    safe_string_at(&response.body, &["request_id", "requestId"], secret)
+                });
+                if request_id.is_none() {
+                    request_id = poll_request_id;
+                }
                 if (400..500).contains(&response.status) {
-                    return Err(with_evidence(
-                        "provider_rejected",
+                    return Err(classify_http_status(
+                        response.status,
+                        ProviderPhase::Processing,
+                        true,
                         request_id,
                         Some(operation_id),
                     ));
                 }
                 if !(200..300).contains(&response.status) {
-                    return Err(with_evidence(
+                    return Err(reconcile_with_evidence(
                         "provider_failure",
+                        ProviderPhase::Processing,
                         request_id,
                         Some(operation_id),
                     ));
                 }
                 current = response.body;
-                if is_failed(&current) {
-                    return Err(ProviderFailure::release(
-                        "provider_rejected",
-                        ProviderPhase::Processing,
+                state = classify_result_state(&current, false).map_err(|_| {
+                    with_evidence(
+                        "malformed_response",
+                        request_id.clone(),
+                        Some(operation_id.clone()),
                     )
-                    .with_evidence(request_id, Some(operation_id)));
-                }
-                if is_ready(&current) {
-                    break;
+                })?;
+                match state {
+                    BflResultState::Ready => break,
+                    BflResultState::Pending => {}
+                    _ => {
+                        return Err(state
+                            .failure(request_id.clone(), Some(operation_id.clone()))
+                            .expect("terminal BFL state has a failure"));
+                    }
                 }
             }
         }
-        let operation_id =
-            operation_id.or_else(|| string_at(&current, &["id", "operation_id", "operationId"]));
-        let artifact_url = artifact_url(&current).ok_or_else(|| {
+        let operation_id = operation_id
+            .or_else(|| safe_string_at(&current, &["id", "operation_id", "operationId"], secret));
+        let raw_artifact_url = artifact_url(&current).ok_or_else(|| {
             with_evidence(
                 if current.get("result").is_some() {
                     "missing_image"
@@ -472,67 +509,50 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 operation_id.clone(),
             )
         })?;
-        let artifact_url = Url::parse(artifact_url).map_err(|_| {
-            with_evidence(
-                "artifact_policy_failure",
-                request_id.clone(),
-                operation_id.clone(),
-            )
-        })?;
+        let artifact_url = Url::parse(raw_artifact_url)
+            .map_err(|_| artifact_failure(request_id.clone(), operation_id.clone()))?;
+        if url_has_explicit_port(raw_artifact_url)
+            || artifact_url
+                .host_str()
+                .is_none_or(|host| !valid_bfl_delivery_host(host))
+        {
+            return Err(artifact_failure(request_id, operation_id));
+        }
+        let policy_hosts = if self.config.approved_artifact_hosts.is_empty() {
+            vec![artifact_url
+                .host_str()
+                .expect("validated BFL delivery URL has a host")
+                .to_owned()]
+        } else {
+            self.config.approved_artifact_hosts.clone()
+        };
         let artifact_policy = ArtifactDownloadPolicy::new(
-            &self.config.approved_artifact_hosts,
+            &policy_hosts,
             self.max_artifact_bytes as u64,
             CredentialForwarding::Prohibited,
         )
-        .map_err(|_| {
-            with_evidence(
-                "artifact_policy_failure",
-                request_id.clone(),
-                operation_id.clone(),
-            )
-        })?;
+        .map_err(|_| artifact_failure(request_id.clone(), operation_id.clone()))?;
         if artifact_policy.validate_url(&artifact_url).is_err() {
-            return Err(with_evidence(
-                "artifact_policy_failure",
-                request_id,
-                operation_id,
-            ));
+            return Err(artifact_failure(request_id, operation_id));
         }
         let bytes = self
             .transport
             .fetch_artifact(
                 &artifact_url,
-                deadline.remaining().map_err(|_| {
-                    with_evidence(
-                        "artifact_policy_failure",
-                        request_id.clone(),
-                        operation_id.clone(),
-                    )
-                })?,
+                deadline
+                    .remaining()
+                    .map_err(|_| artifact_failure(request_id.clone(), operation_id.clone()))?,
                 self.max_artifact_bytes,
             )
             .map_err(|error| {
                 let _ = Redactor::new([secret.expose()]).error_chain(error.as_ref());
-                with_evidence(
-                    "artifact_policy_failure",
-                    request_id.clone(),
-                    operation_id.clone(),
-                )
+                artifact_failure(request_id.clone(), operation_id.clone())
             })?;
         if bytes.len() > self.max_artifact_bytes {
-            return Err(with_evidence(
-                "artifact_policy_failure",
-                request_id,
-                operation_id,
-            ));
+            return Err(artifact_failure(request_id, operation_id));
         }
-        let media_type = canonical_image_media_type(None, &bytes).map_err(|_| {
-            with_evidence(
-                "artifact_policy_failure",
-                request_id.clone(),
-                operation_id.clone(),
-            )
-        })?;
+        let media_type = canonical_image_media_type(None, &bytes)
+            .map_err(|_| artifact_failure(request_id.clone(), operation_id.clone()))?;
         let actual_vendor_cost = settled_cost(&current).map_err(|_| {
             with_evidence(
                 "invalid_provider_cost",
@@ -742,7 +762,7 @@ fn validate_flux_options(request: &NormalizedRequest, input: &Value) -> Result<(
         .is_some_and(|value| value.as_u64().is_none())
         || options
             .get("safety_tolerance")
-            .is_some_and(|value| !matches!(value.as_u64(), Some(0..=6)))
+            .is_some_and(|value| !matches!(value.as_u64(), Some(0..=5)))
         || options
             .get("output_format")
             .is_some_and(|value| !matches!(value.as_str(), Some("png" | "jpeg")))
@@ -754,7 +774,10 @@ fn validate_flux_options(request: &NormalizedRequest, input: &Value) -> Result<(
 
 fn submit_url(config: &Flux2ApiConfig, model: &str) -> Result<Url> {
     let mut url = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
-    if validate_https_origin(&url, None).is_err() {
+    if validate_https_origin(&url, None).is_err()
+        || url_has_explicit_port(&config.endpoint)
+        || !valid_bfl_api_host(url.host_str())
+    {
         return Err(provider_error("config_invalid"));
     }
     url.set_path(&format!(
@@ -764,28 +787,45 @@ fn submit_url(config: &Flux2ApiConfig, model: &str) -> Result<Url> {
     ));
     Ok(url)
 }
-fn poll_url(config: &Flux2ApiConfig, body: &Value, operation_id: &str) -> Result<Url> {
-    let url = if let Some(value) = string_at(body, &["polling_url", "pollingUrl"]) {
-        Url::parse(&value).map_err(|_| provider_error("malformed_response"))?
-    } else {
-        let mut url = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
-        url.set_path(&format!(
-            "{}/get_result",
-            config.api_version.trim_matches('/')
-        ));
-        url.query_pairs_mut().append_pair("id", operation_id);
-        url
-    };
-    let base = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
-    if url.scheme() != "https" || url.host_str() != base.host_str() {
-        return Err(provider_error("artifact_policy_failure"));
+fn poll_url(body: &Value) -> Result<Url> {
+    let value = string_at(body, &["polling_url", "pollingUrl"])
+        .ok_or_else(|| provider_error("malformed_response"))?;
+    let url = Url::parse(&value).map_err(|_| provider_error("malformed_response"))?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url_has_explicit_port(&value)
+        || url.fragment().is_some()
+        || !valid_bfl_api_host(url.host_str())
+    {
+        return Err(provider_error("polling_origin_rejected"));
     }
     Ok(url)
 }
+
 fn string_at(body: &Value, names: &[&str]) -> Option<String> {
     names
         .iter()
         .find_map(|name| body.get(*name)?.as_str().map(str::to_owned))
+}
+fn safe_string_at(body: &Value, names: &[&str], secret: &ProviderSecret) -> Option<String> {
+    safe_evidence(string_at(body, names), secret)
+}
+fn safe_evidence(value: Option<String>, secret: &ProviderSecret) -> Option<String> {
+    value.filter(|value| {
+        !value.is_empty()
+            && value.len() <= 255
+            && value.trim() == value
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+            && (secret.expose().is_empty()
+                || !value
+                    .as_bytes()
+                    .windows(secret.expose().len())
+                    .any(|window| window == secret.expose()))
+    })
 }
 fn status(body: &Value) -> Option<String> {
     body.get("status")
@@ -815,17 +855,51 @@ pub(crate) fn bfl_credit_cost_to_usd(raw: &str) -> Result<ActualVendorCost> {
     ActualVendorCost::from_decimal_scaled_units(raw, "USD", BFL_CREDIT_USD_SCALE)
 }
 
-fn is_ready(body: &Value) -> bool {
-    matches!(
-        status(body).as_deref(),
-        Some("ready" | "succeeded" | "completed")
-    ) || artifact_url(body).is_some()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BflResultState {
+    Pending,
+    Ready,
+    Rejected(&'static str),
+    Ambiguous(&'static str),
 }
-fn is_failed(body: &Value) -> bool {
-    matches!(
-        status(body).as_deref(),
-        Some("error" | "failed" | "rejected" | "content moderated")
-    )
+
+impl BflResultState {
+    fn failure(
+        self,
+        request_id: Option<String>,
+        operation_id: Option<String>,
+    ) -> Option<ProviderFailure> {
+        match self {
+            Self::Pending | Self::Ready => None,
+            Self::Rejected(code) => Some(
+                ProviderFailure::release(code, ProviderPhase::Processing)
+                    .with_evidence(request_id, operation_id),
+            ),
+            Self::Ambiguous(code) => Some(
+                ProviderFailure::reconcile(code, ProviderPhase::Processing)
+                    .with_evidence(request_id, operation_id),
+            ),
+        }
+    }
+}
+
+fn classify_result_state(body: &Value, allow_async_submission: bool) -> Result<BflResultState> {
+    let state = match status(body).as_deref() {
+        Some("pending" | "reasoning" | "generating") => BflResultState::Pending,
+        Some("ready" | "succeeded" | "completed") => BflResultState::Ready,
+        Some("request moderated") => BflResultState::Rejected("provider_request_moderated"),
+        Some("content moderated") => BflResultState::Rejected("provider_content_moderated"),
+        Some("error" | "failed") => BflResultState::Rejected("provider_error"),
+        Some("rejected") => BflResultState::Rejected("provider_rejected"),
+        Some("task not found") => BflResultState::Ambiguous("provider_task_not_found"),
+        Some(_) => return Err(provider_error("malformed_response")),
+        None if artifact_url(body).is_some() => BflResultState::Ready,
+        // The documented asynchronous submission response has no status. Its
+        // required operation id and polling URL are validated by the caller.
+        None if allow_async_submission && body.get("id").is_some() => BflResultState::Pending,
+        None => return Err(provider_error("malformed_response")),
+    };
+    Ok(state)
 }
 fn provider_error(code: &str) -> ContractError {
     ContractError::Provider { code: code.into() }
@@ -837,6 +911,43 @@ fn with_evidence(
 ) -> ProviderFailure {
     ProviderFailure::reconcile(code, ProviderPhase::Processing)
         .with_evidence(request_id, operation_id)
+}
+fn reconcile_with_evidence(
+    code: &str,
+    phase: ProviderPhase,
+    request_id: Option<String>,
+    operation_id: Option<String>,
+) -> ProviderFailure {
+    ProviderFailure::reconcile(code, phase).with_evidence(request_id, operation_id)
+}
+fn artifact_failure(request_id: Option<String>, operation_id: Option<String>) -> ProviderFailure {
+    reconcile_with_evidence(
+        "artifact_policy_failure",
+        ProviderPhase::Artifact,
+        request_id,
+        operation_id,
+    )
+}
+fn classify_http_status(
+    status: u16,
+    phase: ProviderPhase,
+    accepted_operation: bool,
+    request_id: Option<String>,
+    operation_id: Option<String>,
+) -> ProviderFailure {
+    let code = match status {
+        401 => "provider_authentication_failed",
+        402 => "provider_insufficient_credit",
+        403 => "provider_permission_denied",
+        429 => "provider_rate_limited",
+        _ => "provider_rejected",
+    };
+    let failure = if accepted_operation {
+        ProviderFailure::reconcile(code, phase)
+    } else {
+        ProviderFailure::release(code, phase)
+    };
+    failure.with_evidence(request_id, operation_id)
 }
 fn classify_transport(
     error: Box<dyn StdError + Send + Sync>,
@@ -927,11 +1038,13 @@ mod tests {
         }
         fn poll(
             &self,
-            _: &Url,
-            _: &[u8],
+            url: &Url,
+            credential: &[u8],
             _: Duration,
             _: &BTreeMap<String, String>,
         ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+            assert!(valid_bfl_api_host(url.host_str()));
+            assert_eq!(credential, b"secret-canary");
             if self.fail_poll.is_some() {
                 return Err(Box::new(HttpFailure::UnknownOutcome));
             }
@@ -948,10 +1061,73 @@ mod tests {
         }
         fn fetch_artifact(
             &self,
-            _: &Url,
+            url: &Url,
             _: Duration,
             _: usize,
         ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+            assert!(url.host_str().is_some_and(valid_bfl_delivery_host));
+            Ok(self.artifact.clone())
+        }
+    }
+
+    type CredentialedPollTraffic = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
+    #[derive(Clone, Default)]
+    struct Traffic {
+        submissions: Arc<Mutex<Vec<String>>>,
+        polls: CredentialedPollTraffic,
+        artifacts: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[derive(Clone)]
+    struct SecurityFixture {
+        traffic: Traffic,
+        submit_response: TransportResponse,
+        poll_responses: Arc<Mutex<Vec<TransportResponse>>>,
+        artifact: Vec<u8>,
+    }
+
+    impl Flux2Transport for SecurityFixture {
+        fn submit(
+            &self,
+            url: &Url,
+            credential: &[u8],
+            _: Duration,
+            _: &BTreeMap<String, String>,
+            _: Option<(&str, &str)>,
+            _: &Value,
+        ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+            assert_eq!(credential, b"secret-canary");
+            self.traffic
+                .submissions
+                .lock()
+                .unwrap()
+                .push(url.to_string());
+            Ok(self.submit_response.clone())
+        }
+
+        fn poll(
+            &self,
+            url: &Url,
+            credential: &[u8],
+            _: Duration,
+            _: &BTreeMap<String, String>,
+        ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
+            self.traffic
+                .polls
+                .lock()
+                .unwrap()
+                .push((url.to_string(), credential.to_vec()));
+            Ok(self.poll_responses.lock().unwrap().remove(0))
+        }
+
+        fn fetch_artifact(
+            &self,
+            url: &Url,
+            _: Duration,
+            _: usize,
+        ) -> std::result::Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+            self.traffic.artifacts.lock().unwrap().push(url.to_string());
             Ok(self.artifact.clone())
         }
     }
@@ -963,9 +1139,39 @@ mod tests {
             poll_interval_ms: 1,
             max_retries: 0,
             idempotency_header: Some("x-idempotency-key".into()),
-            approved_artifact_hosts: vec!["cdn.bfl.ai".into()],
+            approved_artifact_hosts: vec!["delivery.us.bfl.ai".into()],
             headers: BTreeMap::new(),
         }
+    }
+    fn security_fixture(
+        submit_status: u16,
+        submit_body: Value,
+        polls: Vec<(u16, Value)>,
+    ) -> (Flux2ApiAdapter<SecurityFixture>, Traffic) {
+        let traffic = Traffic::default();
+        let transport = SecurityFixture {
+            traffic: traffic.clone(),
+            submit_response: TransportResponse {
+                status: submit_status,
+                request_id: Some("req-1".into()),
+                body: submit_body,
+            },
+            poll_responses: Arc::new(Mutex::new(
+                polls
+                    .into_iter()
+                    .map(|(status, body)| TransportResponse {
+                        status,
+                        request_id: Some("poll-1".into()),
+                        body,
+                    })
+                    .collect(),
+            )),
+            artifact: png(),
+        };
+        (
+            Flux2ApiAdapter::new(config(), MODEL_ID.into(), transport).unwrap(),
+            traffic,
+        )
     }
     fn request() -> NormalizedRequest {
         request_for("1k")
@@ -1058,7 +1264,7 @@ mod tests {
                 }
                 Case::EvidenceRetention => {
                     let (mut adapter, calls) = fixture(vec![
-                        json!({"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}}),
+                        json!({"id":"op-1","status":"Ready","result":{"sample":"https://delivery.us.bfl.ai/out.png"}}),
                     ]);
                     adapter.transport.artifact = vec![0];
                     (adapter, calls)
@@ -1068,7 +1274,7 @@ mod tests {
                 ]),
                 Case::ArtifactBound => {
                     let (mut adapter, calls) = fixture(vec![
-                        json!({"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}}),
+                        json!({"id":"op-1","status":"Ready","result":{"sample":"https://delivery.us.bfl.ai/out.png"}}),
                     ]);
                     adapter.transport.artifact = vec![0; MAX_ARTIFACT_BYTES + 1];
                     (adapter, calls)
@@ -1104,10 +1310,377 @@ mod tests {
     }
 
     #[test]
+    fn credentialed_poll_redirect_is_blocked() {
+        assert_redirect_blocked(|url| {
+            ReqwestFlux2Transport
+                .poll(
+                    url,
+                    b"credential-canary",
+                    Duration::from_secs(2),
+                    &BTreeMap::new(),
+                )
+                .is_err()
+        });
+    }
+
+    #[test]
+    fn provider_returned_polling_urls_use_only_explicit_bfl_api_origins() {
+        for host in ["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"] {
+            let polling_url = format!("https://{host}/v1/get_result?id=op-1");
+            let signed_artifact =
+                "https://delivery.us.bfl.ai/out.png?signature=artifact-url-canary";
+            let (adapter, traffic) = security_fixture(
+                202,
+                json!({"id":"op-1","polling_url":polling_url.clone()}),
+                vec![(
+                    200,
+                    json!({"id":"op-1","status":"Ready","result":{"sample":signed_artifact}}),
+                )],
+            );
+            let outcome = adapter
+                .invoke(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap();
+            assert_eq!(
+                traffic.polls.lock().unwrap().as_slice(),
+                &[(polling_url, b"secret-canary".to_vec())]
+            );
+            assert_eq!(
+                traffic.artifacts.lock().unwrap().as_slice(),
+                &[signed_artifact.to_owned()]
+            );
+            let persisted_shape = serde_json::to_string(&outcome).unwrap();
+            assert!(!persisted_shape.contains("artifact-url-canary"));
+            assert!(!persisted_shape.contains("delivery.us.bfl.ai"));
+        }
+    }
+
+    #[test]
+    fn unsafe_polling_urls_fail_before_forwarding_x_key() {
+        for polling_url in [
+            "http://api.bfl.ai/v1/get_result?id=op-1",
+            "https://user@api.bfl.ai/v1/get_result?id=op-1",
+            "https://user:password@api.bfl.ai/v1/get_result?id=op-1",
+            "https://api.bfl.ai:443/v1/get_result?id=op-1",
+            "HTTPS://api.bfl.ai:443/v1/get_result?id=op-1",
+            "https:/\\api.bfl.ai:443/v1/get_result?id=op-1",
+            "https:////api.bfl.ai:443/v1/get_result?id=op-1",
+            "https://api.bfl.ai:8443/v1/get_result?id=op-1",
+            "https://api.bfl.ai/v1/get_result?id=op-1#fragment",
+            "https://api.bfl.ai.evil.example/v1/get_result?id=op-1",
+            "https://evil.api.bfl.ai/v1/get_result?id=op-1",
+            "https://api.bfl.ai./v1/get_result?id=op-1",
+            "https://delivery.us.bfl.ai/v1/get_result?id=op-1",
+        ] {
+            let (adapter, traffic) = security_fixture(
+                202,
+                json!({"id":"op-1","polling_url":polling_url}),
+                Vec::new(),
+            );
+            let error = adapter
+                .invoke(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "polling_origin_rejected", "{polling_url}");
+            assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
+            assert_eq!(error.evidence.request_id.as_deref(), Some("req-1"));
+            assert_eq!(error.evidence.operation_id.as_deref(), Some("op-1"));
+            assert!(traffic.polls.lock().unwrap().is_empty(), "{polling_url}");
+            assert!(
+                traffic.artifacts.lock().unwrap().is_empty(),
+                "{polling_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_non_string_polling_url_is_malformed_without_polling() {
+        for body in [
+            json!({"id":"op-1"}),
+            json!({"id":"op-1","polling_url":null}),
+            json!({"id":"op-1","polling_url":42}),
+        ] {
+            let (adapter, traffic) = security_fixture(202, body, Vec::new());
+            let error = adapter
+                .invoke(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "malformed_response");
+            assert_eq!(error.phase, ProviderPhase::Processing);
+            assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
+            assert_eq!(error.evidence.operation_id.as_deref(), Some("op-1"));
+            assert!(traffic.polls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn result_states_are_terminal_or_pollable_without_timeout_fallthrough() {
+        for (status, expected_code, disposition) in [
+            (
+                "Request Moderated",
+                "provider_request_moderated",
+                SpendDisposition::Release,
+            ),
+            (
+                "Content Moderated",
+                "provider_content_moderated",
+                SpendDisposition::Release,
+            ),
+            ("Error", "provider_error", SpendDisposition::Release),
+            (
+                "Task not found",
+                "provider_task_not_found",
+                SpendDisposition::Reconcile,
+            ),
+        ] {
+            let (adapter, traffic) = security_fixture(
+                202,
+                json!({"id":"op-1","polling_url":"https://api.bfl.ai/v1/get_result?id=op-1"}),
+                vec![
+                    (
+                        200,
+                        json!({"id":"op-1","status":status,"details":{"raw":"secret-canary body-canary"}}),
+                    ),
+                    (
+                        200,
+                        json!({"id":"op-1","status":"Ready","result":{"sample":"https://delivery.us.bfl.ai/out.png"}}),
+                    ),
+                ],
+            );
+            let error = adapter
+                .invoke(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, expected_code, "{status}");
+            assert_eq!(error.spend_disposition, disposition, "{status}");
+            assert_eq!(traffic.polls.lock().unwrap().len(), 1, "{status}");
+            assert!(traffic.artifacts.lock().unwrap().is_empty(), "{status}");
+            let redacted = serde_json::to_string(&error).unwrap();
+            assert!(!redacted.contains("secret-canary"), "{status}");
+            assert!(!redacted.contains("body-canary"), "{status}");
+        }
+
+        for body in [
+            json!({"id":"op-1","status":"Undocumented"}),
+            json!({"id":"op-1","details":{"raw":"body-canary"}}),
+        ] {
+            let (adapter, traffic) = security_fixture(
+                202,
+                json!({"id":"op-1","polling_url":"https://api.bfl.ai/v1/get_result?id=op-1"}),
+                vec![
+                    (200, body),
+                    (
+                        200,
+                        json!({"id":"op-1","status":"Ready","result":{"sample":"https://delivery.us.bfl.ai/out.png"}}),
+                    ),
+                ],
+            );
+            let error = adapter
+                .invoke(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "malformed_response");
+            assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
+            assert_eq!(traffic.polls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn documented_polling_states_continue_to_ready() {
+        let (adapter, traffic) = security_fixture(
+            202,
+            json!({"id":"op-1","polling_url":"https://api.us.bfl.ai/v1/get_result?id=op-1"}),
+            vec![
+                (200, json!({"id":"op-1","status":"Pending"})),
+                (200, json!({"id":"op-1","status":"Reasoning"})),
+                (200, json!({"id":"op-1","status":"Generating"})),
+                (
+                    200,
+                    json!({"id":"op-1","status":"Ready","result":{"sample":"https://delivery.us.bfl.ai/out.png"}}),
+                ),
+            ],
+        );
+        adapter
+            .invoke(
+                &request(),
+                &input(),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap();
+        assert_eq!(traffic.polls.lock().unwrap().len(), 4);
+        assert_eq!(traffic.artifacts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn authentication_credit_and_rate_limit_http_outcomes_are_redacted() {
+        for (status, expected_code) in [
+            (401, "provider_authentication_failed"),
+            (402, "provider_insufficient_credit"),
+            (403, "provider_permission_denied"),
+            (429, "provider_rate_limited"),
+        ] {
+            let (adapter, traffic) = security_fixture(
+                status,
+                json!({"detail":"secret-canary raw-body-canary"}),
+                Vec::new(),
+            );
+            let error = adapter
+                .invoke(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, expected_code, "HTTP {status}");
+            assert_eq!(error.phase, ProviderPhase::Submission, "HTTP {status}");
+            assert_eq!(error.spend_disposition, SpendDisposition::Release);
+            assert_eq!(traffic.submissions.lock().unwrap().len(), 1);
+            assert!(traffic.polls.lock().unwrap().is_empty());
+            let redacted = serde_json::to_string(&error).unwrap();
+            assert!(!redacted.contains("secret-canary"));
+            assert!(!redacted.contains("raw-body-canary"));
+
+            let (adapter, traffic) = security_fixture(
+                202,
+                json!({"id":"op-1","polling_url":"https://api.bfl.ai/v1/get_result?id=op-1"}),
+                vec![(status, json!({"detail":"secret-canary raw-body-canary"}))],
+            );
+            let error = adapter
+                .invoke(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, expected_code, "poll HTTP {status}");
+            assert_eq!(error.phase, ProviderPhase::Processing, "HTTP {status}");
+            assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
+            assert_eq!(error.evidence.operation_id.as_deref(), Some("op-1"));
+            assert_eq!(traffic.polls.lock().unwrap().len(), 1);
+            let redacted = serde_json::to_string(&error).unwrap();
+            assert!(!redacted.contains("secret-canary"));
+            assert!(!redacted.contains("raw-body-canary"));
+        }
+    }
+
+    #[test]
+    fn bfl_delivery_host_policy_is_exactly_one_safe_region_label() {
+        for host in [
+            "delivery.us.bfl.ai",
+            "delivery.eu-1.bfl.ai",
+            "delivery.us1.bfl.ai",
+        ] {
+            assert!(valid_bfl_delivery_host(host), "{host}");
+        }
+        for host in [
+            "delivery.bfl.ai",
+            "delivery..bfl.ai",
+            "delivery.-us.bfl.ai",
+            "delivery.us-.bfl.ai",
+            "delivery.us.east.bfl.ai",
+            "delivery.us.bfl.ai.evil.example",
+            "evil.delivery.us.bfl.ai",
+            "delivery-us.bfl.ai",
+            "api.us.bfl.ai",
+        ] {
+            assert!(!valid_bfl_delivery_host(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn unsafe_artifact_origins_never_reach_credential_free_fetch() {
+        for artifact_url in [
+            "http://delivery.us.bfl.ai/out.png?signature=x",
+            "https://user@delivery.us.bfl.ai/out.png?signature=x",
+            "https://delivery.us.bfl.ai:443/out.png?signature=x",
+            "HTTPS://delivery.us.bfl.ai:443/out.png?signature=x",
+            "https:\\/delivery.us.bfl.ai:443/out.png?signature=x",
+            "https://delivery.us.bfl.ai:8443/out.png?signature=x",
+            "https://delivery.us.bfl.ai/out.png?signature=x#fragment",
+            "https://delivery.bfl.ai/out.png?signature=x",
+            "https://delivery.us.east.bfl.ai/out.png?signature=x",
+            "https://delivery.us.bfl.ai.evil.example/out.png?signature=x",
+            "https://evil.delivery.us.bfl.ai/out.png?signature=x",
+            "https://api.bfl.ai/out.png?signature=x",
+        ] {
+            let (adapter, traffic) = security_fixture(
+                202,
+                json!({"id":"op-1","polling_url":"https://api.bfl.ai/v1/get_result?id=op-1"}),
+                vec![(
+                    200,
+                    json!({"id":"op-1","status":"Ready","result":{"sample":artifact_url}}),
+                )],
+            );
+            let error = adapter
+                .invoke(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "artifact_policy_failure", "{artifact_url}");
+            assert_eq!(error.phase, ProviderPhase::Artifact, "{artifact_url}");
+            assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
+            assert_eq!(traffic.polls.lock().unwrap().len(), 1);
+            assert!(
+                traffic.artifacts.lock().unwrap().is_empty(),
+                "{artifact_url}"
+            );
+            let redacted = serde_json::to_string(&error).unwrap();
+            assert!(!redacted.contains("signature=x"));
+            assert!(!redacted.contains("secret-canary"));
+        }
+    }
+
+    #[test]
+    fn only_compact_non_secret_provider_evidence_is_retained() {
+        let secret = secret_for_test("secret-canary");
+        assert_eq!(
+            safe_evidence(Some("request_123:part-2".into()), &secret).as_deref(),
+            Some("request_123:part-2")
+        );
+        for unsafe_value in [
+            "secret-canary",
+            "prefix-secret-canary-suffix",
+            "https://api.bfl.ai/v1/get_result?id=secret-canary",
+            " request-1",
+            "request/1",
+            "request?token=x",
+        ] {
+            assert_eq!(safe_evidence(Some(unsafe_value.into()), &secret), None);
+        }
+        assert_eq!(safe_evidence(Some("a".repeat(256)), &secret), None);
+    }
+
+    #[test]
     fn submits_once_polls_same_operation_and_normalizes_missing_cost() {
         let (adapter, submits) = fixture(vec![
             json!({"id":"op-1","status":"Pending"}),
-            json!({"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}}),
+            json!({"id":"op-1","status":"Ready","result":{"sample":"https://delivery.us.bfl.ai/out.png"}}),
         ]);
         assert!(!adapter.capabilities().vendor_enforced_idempotency);
         let outcome = adapter
@@ -1129,7 +1702,7 @@ mod tests {
     #[test]
     fn parses_top_level_fractional_credit_cost_from_the_json_decimal_lexeme() {
         let outcome = invoke_ready_json(
-            r#"{"id":"op-1","status":"Ready","cost":1.400,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":1.400,"result":{"sample":"https://delivery.us.bfl.ai/out.png"}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -1141,9 +1714,9 @@ mod tests {
     #[test]
     fn ignores_undocumented_nested_cost_and_normalizes_missing_or_null_cost() {
         for raw in [
-            r#"{"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png","cost":999}}"#,
-            r#"{"id":"op-1","status":"Ready","result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
-            r#"{"id":"op-1","status":"Ready","cost":null,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","result":{"sample":"https://delivery.us.bfl.ai/out.png","cost":999}}"#,
+            r#"{"id":"op-1","status":"Ready","result":{"sample":"https://delivery.us.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":null,"result":{"sample":"https://delivery.us.bfl.ai/out.png"}}"#,
         ] {
             assert_eq!(invoke_ready_json(raw).unwrap().actual_vendor_cost, None);
         }
@@ -1152,7 +1725,7 @@ mod tests {
     #[test]
     fn top_level_cost_is_authoritative_over_nested_result_data() {
         let outcome = invoke_ready_json(
-            r#"{"id":"op-1","status":"Ready","cost":4.5,"result":{"sample":"https://cdn.bfl.ai/out.png","cost":900}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":4.5,"result":{"sample":"https://delivery.us.bfl.ai/out.png","cost":900}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -1200,11 +1773,11 @@ mod tests {
     #[test]
     fn rejects_malformed_negative_out_of_scale_and_overflowing_costs() {
         for raw in [
-            r#"{"id":"op-1","status":"Ready","cost":"1.5","result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
-            r#"{"id":"op-1","status":"Ready","cost":{},"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
-            r#"{"id":"op-1","status":"Ready","cost":-0.01,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
-            r#"{"id":"op-1","status":"Ready","cost":0.00000000000000001,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
-            r#"{"id":"op-1","status":"Ready","cost":9223372036854775808e2,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":"1.5","result":{"sample":"https://delivery.us.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":{},"result":{"sample":"https://delivery.us.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":-0.01,"result":{"sample":"https://delivery.us.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":0.00000000000000001,"result":{"sample":"https://delivery.us.bfl.ai/out.png"}}"#,
+            r#"{"id":"op-1","status":"Ready","cost":9223372036854775808e2,"result":{"sample":"https://delivery.us.bfl.ai/out.png"}}"#,
         ] {
             let error = invoke_ready_json(raw).unwrap_err();
             assert_eq!(error.code, "invalid_provider_cost");
@@ -1216,9 +1789,9 @@ mod tests {
     #[test]
     fn synchronous_readiness_matches_every_supported_artifact_result_shape() {
         for body in [
-            json!({"id":"op-1","result":{"sample":"https://cdn.bfl.ai/out.png"}}),
-            json!({"id":"op-1","result":{"image":{"url":"https://cdn.bfl.ai/out.png"}}}),
-            json!({"id":"op-1","sample":"https://cdn.bfl.ai/out.png"}),
+            json!({"id":"op-1","result":{"sample":"https://delivery.us.bfl.ai/out.png"}}),
+            json!({"id":"op-1","result":{"image":{"url":"https://delivery.us.bfl.ai/out.png"}}}),
+            json!({"id":"op-1","sample":"https://delivery.us.bfl.ai/out.png"}),
         ] {
             let submits = Arc::new(Mutex::new(0));
             let adapter = Flux2ApiAdapter::new(
@@ -1249,8 +1822,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_artifact_allowlist_rejects_adapter_before_submission() {
-        for hosts in [vec![], vec!["https://cdn.bfl.ai".into()]] {
+    fn invalid_artifact_pins_reject_adapter_before_submission() {
+        for hosts in [
+            vec!["https://delivery.us.bfl.ai".into()],
+            vec!["cdn.bfl.ai".into()],
+            vec!["delivery.us.bfl.ai.evil.example".into()],
+        ] {
             let submits = Arc::new(Mutex::new(0));
             let mut invalid = config();
             invalid.approved_artifact_hosts = hosts;
@@ -1270,6 +1847,72 @@ mod tests {
             .is_err());
             assert_eq!(*submits.lock().unwrap(), 0);
         }
+    }
+
+    #[test]
+    fn empty_artifact_pins_follow_only_the_narrow_bfl_delivery_family() {
+        let signed_artifact = "https://delivery.eu-2.bfl.ai/out.png?signature=short-lived";
+        let (template, traffic) = security_fixture(
+            202,
+            json!({"id":"op-1","polling_url":"https://api.eu.bfl.ai/v1/get_result?id=op-1"}),
+            vec![(
+                200,
+                json!({"id":"op-1","status":"Ready","result":{"sample":signed_artifact}}),
+            )],
+        );
+        let mut unpinned = config();
+        unpinned.approved_artifact_hosts.clear();
+        let adapter = Flux2ApiAdapter::new(unpinned, MODEL_ID.into(), template.transport).unwrap();
+        adapter
+            .invoke(
+                &request(),
+                &input(),
+                &secret_for_test("secret-canary"),
+                Some("opaque-key"),
+            )
+            .unwrap();
+        assert_eq!(
+            traffic.artifacts.lock().unwrap().as_slice(),
+            &[signed_artifact.to_owned()]
+        );
+    }
+
+    #[test]
+    fn adapter_configuration_accepts_only_explicit_bfl_api_origins() {
+        let (template, traffic) = security_fixture(
+            202,
+            json!({"id":"op-1","status":"Request Moderated"}),
+            Vec::new(),
+        );
+        for host in ["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"] {
+            let mut valid = config();
+            valid.endpoint = format!("https://{host}");
+            assert!(
+                Flux2ApiAdapter::new(valid, MODEL_ID.into(), template.transport.clone()).is_ok()
+            );
+        }
+        for endpoint in [
+            "http://api.bfl.ai",
+            "https://user@api.bfl.ai",
+            "https://api.bfl.ai:443",
+            "HTTPS://api.bfl.ai:443",
+            "https:///api.bfl.ai:443",
+            "https://api.bfl.ai:8443",
+            "https://api.bfl.ai/path",
+            "https://api.bfl.ai?query=x",
+            "https://api.bfl.ai#fragment",
+            "https://api.bfl.ai.evil.example",
+            "https://evil.api.bfl.ai",
+            "https://api.us1.bfl.ai",
+        ] {
+            let mut invalid = config();
+            invalid.endpoint = endpoint.into();
+            assert!(
+                Flux2ApiAdapter::new(invalid, MODEL_ID.into(), template.transport.clone()).is_err(),
+                "{endpoint}"
+            );
+        }
+        assert!(traffic.submissions.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1469,13 +2112,59 @@ mod tests {
     }
 
     #[test]
+    fn flux2_safety_tolerance_is_exactly_zero_through_five() {
+        for tolerance in 0..=5 {
+            let (adapter, submits) = fixture(Vec::new());
+            let options = json!({
+                "width":1024,
+                "height":1024,
+                "safety_tolerance":tolerance
+            });
+            adapter
+                .preflight_input(
+                    &request(),
+                    &json!({"prompt":"cat","image_size":"1k","options":options}),
+                )
+                .unwrap();
+            assert_eq!(*submits.lock().unwrap(), 0);
+        }
+
+        for tolerance in [
+            json!(6),
+            json!(7),
+            json!(-1),
+            json!(1.5),
+            json!("5"),
+            Value::Null,
+        ] {
+            let (adapter, submits) = fixture(Vec::new());
+            let options = json!({
+                "width":1024,
+                "height":1024,
+                "safety_tolerance":tolerance
+            });
+            let error = adapter
+                .invoke(
+                    &request(),
+                    &json!({"prompt":"cat","image_size":"1k","options":options}),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "invalid_request");
+            assert_eq!(error.phase, ProviderPhase::PreSend);
+            assert_eq!(*submits.lock().unwrap(), 0);
+        }
+    }
+
+    #[test]
     fn invalid_options_are_rejected_before_submission() {
         for options in [
             json!({"width":1024,"height":1024,"unknown":1}),
             json!({"width":63,"height":1024}),
             json!({"width":1024}),
             json!({"width":1024,"height":1024,"seed":-1}),
-            json!({"width":1024,"height":1024,"safety_tolerance":7}),
+            json!({"width":1024,"height":1024,"safety_tolerance":6}),
             json!({"width":1024,"height":1024,"output_format":"gif"}),
         ] {
             let (adapter, submits) = fixture(Vec::new());
@@ -1592,7 +2281,7 @@ mod tests {
                 Some("opaque-key"),
             )
             .unwrap_err();
-        assert_eq!(error.code, "provider_rejected");
+        assert_eq!(error.code, "provider_authentication_failed");
         assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
         assert_eq!(error.evidence.operation_id.as_deref(), Some("op-1"));
         assert_eq!(*submits.lock().unwrap(), 1);
@@ -1671,7 +2360,7 @@ mod tests {
             Fixture {
                 submit: submits,
                 polls: Arc::new(Mutex::new(vec![serde_json::from_str(
-                    r#"{"id":"op-1","status":"Ready","cost":45,"result":{"sample":"https://cdn.bfl.ai/out.png"}}"#,
+                    r#"{"id":"op-1","status":"Ready","cost":45,"result":{"sample":"https://delivery.us.bfl.ai/out.png"}}"#,
                 )
                 .unwrap()])),
                 artifact: png.clone(),

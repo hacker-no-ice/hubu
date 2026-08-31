@@ -144,7 +144,8 @@ test("publishes the versioned local-stack configuration reference at stable publ
   assert.match(providersHtml, /provider_config_version/);
   assert.match(providersHtml, /1\.\.=270000/);
   assert.match(providersHtml, /only currently accepted value is <code>0<\/code>/);
-  assert.match(providersHtml, /required and must contain at least one host for <code>flux2_api<\/code> and <code>ideogram_image<\/code>/);
+  assert.match(providersHtml, /required and must contain at least\s+one host for <code>ideogram_image<\/code>/);
+  assert.match(providersHtml, /delivery\.&lt;region&gt;\.bfl\.ai/);
 });
 
 test("documents every schema-v1 local-stack source field", async () => {
