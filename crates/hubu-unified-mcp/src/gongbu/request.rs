@@ -144,36 +144,15 @@ pub(super) struct CreateExecutionRequest {
     spend_auth_token_id: String,
     input: Value,
     input_schema_version: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    target_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    workload_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    adapter: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
+    target_id: String,
 }
 
 impl CreateExecutionRequest {
     fn validate(&self) -> Result<(), ToolError> {
-        let raw_tuple = [
-            self.workload_type.as_deref(),
-            self.provider.as_deref(),
-            self.adapter.as_deref(),
-            self.model.as_deref(),
-        ];
-        let target_id_selection = self.target_id.as_deref().is_some_and(valid_target_id)
-            && raw_tuple.iter().all(|value| value.is_none());
-        let tuple_selection = self.target_id.is_none()
-            && raw_tuple
-                .iter()
-                .all(|value| value.is_some_and(|value| !value.is_empty()));
         if self.schema_version != 2
             || !self.input.is_object()
             || self.input_schema_version < 1
-            || !(target_id_selection || tuple_selection)
+            || !valid_target_id(&self.target_id)
         {
             return Err(ToolError::invalid());
         }

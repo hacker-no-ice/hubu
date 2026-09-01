@@ -435,10 +435,7 @@ fn request(operation_key: &str) -> Value {
         "spend_auth_token_id": operation_key,
         "input": {"prompt": "cat", "image_count": 1},
         "input_schema_version": 1,
-        "workload_type": "image_generation",
-        "provider": "example",
-        "adapter": "fixture",
-        "model": "image-v1"
+        "target_id": "gongbu:target:v1:050acc365f58cc4d45a99e3c491925193d81e848452209ef5eba2d54b5550efa"
     })
 }
 

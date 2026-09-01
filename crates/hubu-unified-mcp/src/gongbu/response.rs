@@ -199,11 +199,6 @@ fn allowlisted_validation_diagnostic(
     };
     match reason_code {
         "target_not_selectable"
-            if exactly_matches(AdmissionDiagnostic::TargetNotSelectable.fields()) =>
-        {
-            Some(AdmissionDiagnostic::TargetNotSelectable)
-        }
-        "target_not_selectable"
             if exactly_matches(AdmissionDiagnostic::TargetIdNotSelectable.fields()) =>
         {
             Some(AdmissionDiagnostic::TargetIdNotSelectable)
@@ -461,7 +456,14 @@ pub(super) struct ProviderCatalogResponse {
 
 impl ProviderCatalogResponse {
     pub(super) fn validate(&self) -> Result<(), ToolError> {
-        if self.schema_version != 1 || self.contracts.len() > 1 {
+        let mut ids = std::collections::BTreeSet::new();
+        if self.schema_version != 1
+            || self.contracts.len() > 2
+            || self
+                .contracts
+                .iter()
+                .any(|contract| !ids.insert(contract.contract.as_str()))
+        {
             return Err(ToolError::invalid_response());
         }
         self.contracts
@@ -637,6 +639,42 @@ struct ProviderCatalogReadiness {
 }
 
 fn validate_provider_contract(contract: &ProviderCatalogContract) -> Result<(), ToolError> {
+    match contract.contract.as_str() {
+        "hubu.gemini-3.1-flash-lite-image.text-to-image/v1" => {
+            validate_gemini_provider_contract(contract)
+        }
+        "hubu.flux-2-pro.text-to-image/v1" => validate_flux_provider_contract(contract),
+        _ => Err(ToolError::invalid_response()),
+    }
+}
+
+fn validate_gemini_provider_contract(contract: &ProviderCatalogContract) -> Result<(), ToolError> {
+    let exact_target = contract.target.workload_type == "image_generation"
+        && contract.target.provider == "google"
+        && contract.target.adapter == "gemini_developer_image"
+        && contract.target.model == "gemini-3.1-flash-lite-image";
+    let exact_capability = contract.capability.image_count == 1
+        && contract.capability.output_formats == ["png", "jpeg"]
+        && contract.capability.presets.len() == 1
+        && exact_provider_preset(&contract.capability.presets[0], "1k", 1024, 1024, 336, 100);
+    let exact_policies = contract.policies.generation_retries == 0
+        && !contract.policies.fallback
+        && contract.policies.poll == "synchronous-response-v1"
+        && contract.policies.artifact_delivery == "google-inline-image-v1"
+        && contract.policies.recovery == "hubu-durable-synchronous-replay-v1";
+    if contract.pricing_version != "google-gemini-3.1-flash-lite-image-usd-2026-09-01-v1"
+        || contract.pricing_reviewed_on != "2026-09-01"
+        || !exact_target
+        || !exact_capability
+        || !exact_policies
+        || !exact_provider_readiness(contract)
+    {
+        return Err(ToolError::invalid_response());
+    }
+    Ok(())
+}
+
+fn validate_flux_provider_contract(contract: &ProviderCatalogContract) -> Result<(), ToolError> {
     let exact_target = contract.target.workload_type == "image_generation"
         && contract.target.provider == "flux"
         && contract.target.adapter == "flux2_api"
@@ -649,21 +687,40 @@ fn validate_provider_contract(contract: &ProviderCatalogContract) -> Result<(), 
         && contract.policies.poll == "bfl-async-status-poll-500ms-v1"
         && contract.policies.artifact_delivery == "bfl-delivery-single-region-label-v1"
         && contract.policies.recovery == "hubu-durable-async-resume-v1";
-    let exact_readiness = contract.readiness.configured
-        && contract.readiness.production_validated
-        && !contract.readiness.live_qualified
-        && contract.readiness.live_qualification == "not_performed";
-    if contract.contract != "hubu.flux-2-pro.text-to-image/v1"
-        || contract.pricing_version != "bfl-flux-2-pro-usd-2026-08-28-v1"
+    if contract.pricing_version != "bfl-flux-2-pro-usd-2026-08-28-v1"
         || contract.pricing_reviewed_on != "2026-08-28"
         || !exact_target
         || !exact_capability
         || !exact_policies
-        || !exact_readiness
+        || !exact_provider_readiness(contract)
     {
         return Err(ToolError::invalid_response());
     }
     Ok(())
+}
+
+fn exact_provider_readiness(contract: &ProviderCatalogContract) -> bool {
+    contract.readiness.configured
+        && contract.readiness.credential_reference_present
+        && contract.readiness.production_validated
+        && !contract.readiness.live_qualified
+        && contract.readiness.live_qualification == "not_performed"
+}
+
+fn exact_provider_preset(
+    preset: &ProviderCatalogPreset,
+    name: &str,
+    width: u32,
+    height: u32,
+    numerator: i64,
+    denominator: i64,
+) -> bool {
+    preset.name == name
+        && preset.width == width
+        && preset.height == height
+        && preset.currency == "USD"
+        && preset.rate_numerator_minor == numerator
+        && preset.rate_denominator == denominator
 }
 
 fn exact_provider_presets(presets: &[ProviderCatalogPreset]) -> bool {
@@ -675,12 +732,7 @@ fn exact_provider_presets(presets: &[ProviderCatalogPreset]) -> bool {
     presets.len() == expected.len()
         && presets.iter().zip(expected).all(
             |(preset, (name, width, height, numerator, denominator))| {
-                preset.name == name
-                    && preset.width == width
-                    && preset.height == height
-                    && preset.currency == "USD"
-                    && preset.rate_numerator_minor == numerator
-                    && preset.rate_denominator == denominator
+                exact_provider_preset(preset, name, width, height, numerator, denominator)
             },
         )
 }

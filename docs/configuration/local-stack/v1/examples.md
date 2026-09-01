@@ -215,48 +215,25 @@ account = "image-provider-credential"
 schema_version = 1
 mode = "live"
 
-# Create new immutable labels whenever target or pricing content changes.
-catalog_version = "operator-verified-REPLACE_WITH_DATE_AND_REVISION"
+# Required because this example combines two immutable contracts.
+catalog_version = "gemini-flux-composite-REPLACE_WITH_DATE_AND_REVISION"
 
 # Positive USD cents approved as this profile's explicit upper boundary.
 maximum_spend_minor = 25
 live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
 
-[[targets]]
-provider_config_version = "provider-image-REPLACE_WITH_IMMUTABLE_REVISION"
-workload_type = "image_generation"
-provider = "REPLACE_WITH_GONGBU_PROVIDER_ID"
-adapter = "gemini_developer_image"
-model = "REPLACE_WITH_EXACT_PROVIDER_MODEL_ID"
-credential = "provider_image"
-active = true
-execution_enabled = true
+[[contract_bindings]]
+contract = "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
+credential = "google_gemini_developer"
 
-[targets.settings]
-type = "gemini_developer_image"
-
-[targets.settings.config]
-endpoint = "https://provider.example"
-api_version = "REPLACE_WITH_SUPPORTED_API_VERSION"
-timeout_ms = 30000
-max_retries = 0
-headers = {}
-
-[[pricing_rules]]
-rule_id = "provider-model-1k-REPLACE"
-provider = "REPLACE_WITH_GONGBU_PROVIDER_ID"
-model = "REPLACE_WITH_EXACT_PROVIDER_MODEL_ID"
-currency = "USD"
-selector = { image_size = "1k" }
-
-# Illustrative one-cent price only. Replace with the exact verified provider
-# rate in cents expressed as an integer numerator and denominator.
-components = [
-  { unit = "image", rate_numerator_minor = 1, rate_denominator = 1 },
-]
+[[contract_bindings]]
+contract = "hubu.flux-2-pro.text-to-image/v1"
+credential = "bfl_flux2_pro"
 ```
 
-If the selected model enables `2k` or `4k`, add a separate selector-qualified rule for every enabled size. If billing also includes input or output tokens, use an unqualified multi-component rule when supported by the request/pricing contract; never omit billable components.
+The contracts supply immutable targets, adapter settings, capabilities, and
+pricing. Runtime callers discover the resulting opaque `target_id` values and
+never submit these provider details.
 
 ### Live-profile review checklist
 

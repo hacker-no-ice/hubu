@@ -990,22 +990,14 @@ async fn dispatch(State(state): State<ApplicationState>, request: Request<Body>)
                 .unwrap_or_else(|_| json!({"status":"unavailable"})),
         );
     }
-    if method == "POST"
-        && matches!(path.as_str(), "/v1/executions" | "/v2/executions")
-        && !state.ready.load(Ordering::SeqCst)
-    {
-        let schema_version = if path == "/v1/executions" {
-            crate::http::V1_SCHEMA_VERSION
-        } else {
-            crate::http::SCHEMA_VERSION
-        };
+    if method == "POST" && path == "/v2/executions" && !state.ready.load(Ordering::SeqCst) {
+        let schema_version = crate::http::SCHEMA_VERSION;
         return json_transport(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"schema_version":schema_version,"error":{"code":"not_ready","message":"execution admission is temporarily unavailable"}}),
         );
     }
     let admission_route = match (method.as_str(), path.as_str()) {
-        ("POST", "/v1/executions") => Some(AdmissionRoute::CreateExecutionV1),
         ("POST", "/v2/executions") => Some(AdmissionRoute::CreateExecutionV2),
         _ => None,
     };
@@ -2191,7 +2183,12 @@ mod tests {
             "../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let contract_definition = &document["contracts"][0];
+        let contract_definition = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["contract"] == "hubu.flux-2-pro.text-to-image/v1")
+            .unwrap();
         let policies = &contract_definition["policies"];
         let mut target_document = contract_definition["target"].clone();
         target_document["secret_service"] = json!("gongbu.bfl.test");

@@ -2822,10 +2822,7 @@ mod tests {
             "spend_auth_token_id": token,
             "input": {"prompt": "durable prompt", "image_count": 1},
             "input_schema_version": 1,
-            "workload_type": "image_generation",
-            "provider": "fixture",
-            "adapter": "fixture",
-            "model": "fixture-v1"
+            "target_id": format!("gongbu:target:v1:{}", "a".repeat(64))
         })
     }
 
@@ -2840,10 +2837,7 @@ mod tests {
                 "schema_version": 2,
                 "input": {"prompt": "durable prompt", "image_count": 1},
                 "input_schema_version": 1,
-                "workload_type": "image_generation",
-                "provider": "fixture",
-                "adapter": "fixture",
-                "model": "fixture-v1"
+                "target_id": format!("gongbu:target:v1:{}", "a".repeat(64))
             },
             "max_inline_artifact_bytes": 1024
         })
@@ -5401,10 +5395,7 @@ mod tests {
             "spend_auth_token_id": "dispatched-authorization",
             "input": {"prompt": "recover me"},
             "input_schema_version": 1,
-            "workload_type": "image_generation",
-            "provider": "fixture",
-            "adapter": "fixture",
-            "model": "fixture-v1"
+            "target_id": format!("gongbu:target:v1:{}", "a".repeat(64))
         });
         let mut registry = OperationRegistry::open(&path).unwrap();
         let operation = registry

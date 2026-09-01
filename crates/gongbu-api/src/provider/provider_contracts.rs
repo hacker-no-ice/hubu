@@ -11,7 +11,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "3e7a50e24a1b37c84582e07d44ab509c6bbde7c2081845ad475a4ea65b14bb6c";
+    "a8693c06ea5c593ab0fd6044b066aab87224bc4afd98c22e8d48a8ea8bb2999a";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -145,7 +145,53 @@ pub(crate) fn validate_and_project(
     targets: &ProviderTargetConfig,
     pricing: &PricingCatalog,
 ) -> Result<Vec<CatalogContract>, Error> {
+    validate_and_project_with_mode(targets, pricing, true)
+}
+
+pub(crate) fn validate_selected_and_project(
+    targets: &ProviderTargetConfig,
+    pricing: &PricingCatalog,
+) -> Result<Vec<CatalogContract>, Error> {
+    validate_and_project_with_mode(targets, pricing, false)
+}
+
+fn validate_and_project_with_mode(
+    targets: &ProviderTargetConfig,
+    pricing: &PricingCatalog,
+    require_shipped_bindings: bool,
+) -> Result<Vec<CatalogContract>, Error> {
     let document = document()?;
+    let selected = targets
+        .contract_bindings()
+        .iter()
+        .map(|binding| binding.contract.as_str())
+        .collect::<BTreeSet<_>>();
+
+    // Shipped provider identities are contract-only. A raw Gemini or FLUX row
+    // must never become a parallel route around the frozen target and price.
+    for definition in &document.contracts {
+        let known_target_present = targets.revisions().any(|target| {
+            target.provider == definition.target.provider
+                && target.adapter == definition.target.adapter
+        });
+        let known_pricing_present = pricing.rules().iter().any(|rule| {
+            rule.provider == definition.target.provider && rule.model == definition.target.model
+        });
+        if require_shipped_bindings
+            && (known_target_present || known_pricing_present)
+            && !selected.contains(definition.contract.as_str())
+        {
+            return Err(Error::UnknownContract);
+        }
+    }
+    if selected.len() > 1
+        && document.contracts.iter().any(|definition| {
+            selected.contains(definition.contract.as_str())
+                && pricing.catalog_version() == definition.pricing_version
+        })
+    {
+        return Err(Error::PricingMismatch);
+    }
     let mut projected = Vec::new();
     for binding in targets.contract_bindings() {
         let contract_definition = document
@@ -338,7 +384,7 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
 mod tests {
     use super::*;
     use crate::provider::targets::ProviderTargetConfig;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn exact_targets() -> ProviderTargetConfig {
         serde_json::from_value(json!({
@@ -379,6 +425,68 @@ mod tests {
         .unwrap()
     }
 
+    fn mixed_contract_inputs(shared_credential: bool) -> (ProviderTargetConfig, PricingCatalog) {
+        let document: Value = serde_json::from_str(CONTRACT_DOCUMENT).unwrap();
+        let contracts = document["contracts"].as_array().unwrap();
+        let bindings = contracts
+            .iter()
+            .rev()
+            .map(|contract| {
+                let policies = &contract["policies"];
+                json!({
+                    "contract":contract["contract"],
+                    "pricing_version":contract["pricing_version"],
+                    "poll_policy":policies["poll"],
+                    "artifact_delivery_policy":policies["artifact_delivery"],
+                    "recovery_policy":policies["recovery"],
+                    "generation_retries":policies["generation_retries"],
+                    "fallback":policies["fallback"]
+                })
+            })
+            .collect::<Vec<_>>();
+        let provider_configs = contracts
+            .iter()
+            .map(|contract| {
+                let mut target = contract["target"].clone();
+                target["secret_service"] = json!(if shared_credential {
+                    "operator.shared"
+                } else if target["provider"] == "google" {
+                    "operator.google"
+                } else {
+                    "operator.bfl"
+                });
+                target["secret_account"] = json!(if shared_credential {
+                    "same"
+                } else if target["provider"] == "google" {
+                    "gemini"
+                } else {
+                    "flux"
+                });
+                target
+            })
+            .collect::<Vec<_>>();
+        let rules = contracts
+            .iter()
+            .flat_map(|contract| contract["pricing_rules"].as_array().unwrap().clone())
+            .collect::<Vec<_>>();
+        let targets = serde_json::from_value(json!({
+            "schema_version":3,
+            "contract_bindings":bindings,
+            "provider_configs":provider_configs
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version":2,
+                "catalog_version":"hubu-gemini-flux-composite-2026-09-01-v1",
+                "rules":rules
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        (targets, pricing)
+    }
+
     #[test]
     fn exact_contract_projects_sanitized_unqualified_catalog() {
         let contracts = validate_and_project(&exact_targets(), &exact_pricing()).unwrap();
@@ -387,6 +495,26 @@ mod tests {
         assert_eq!(contracts[0].capability.presets[1].rate_numerator_minor, 45);
         assert!(!contracts[0].readiness.credential_reference_present);
         assert!(!contracts[0].readiness.live_qualified);
+    }
+
+    #[test]
+    fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
+        let (targets, pricing) = mixed_contract_inputs(false);
+        let projected = validate_and_project(&targets, &pricing).unwrap();
+        assert_eq!(projected.len(), 2);
+        assert!(projected.iter().any(|contract| {
+            contract.contract == "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
+                && contract.capability.presets[0].rate_numerator_minor == 336
+        }));
+        assert!(projected
+            .iter()
+            .any(|contract| contract.contract == "hubu.flux-2-pro.text-to-image/v1"));
+
+        let (targets, pricing) = mixed_contract_inputs(true);
+        assert!(matches!(
+            validate_and_project(&targets, &pricing),
+            Err(Error::CredentialIsolation)
+        ));
     }
 
     #[test]
@@ -465,7 +593,7 @@ mod tests {
         let targets: ProviderTargetConfig = serde_json::from_value(targets).unwrap();
         assert!(matches!(
             validate_and_project(&targets, &exact_pricing()),
-            Err(Error::CredentialIsolation)
+            Err(Error::UnknownContract)
         ));
     }
 }

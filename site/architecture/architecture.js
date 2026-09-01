@@ -81,11 +81,11 @@ const components = {
   executor: {
     kind: "GONGBU EXECUTOR",
     title: "Execute only approved work",
-    copy: "Gemini Developer API and FLUX are the documented live integrations. They share Hubu governance, Gongbu credential isolation, exact pricing, spend ceilings, submit-once behavior, reconciliation, artifact checks, and qualification gates while retaining their provider-specific transports.",
+    copy: "Gemini Developer API and FLUX are frozen in one provider-contract framework and selected publicly only by opaque target IDs. They share Hubu governance, Gongbu credential isolation, exact pricing, claims, settlement, replay, redaction, and qualification gates while retaining synchronous Gemini and asynchronous submit/poll FLUX transports.",
     diagram: [
-      ["Unified MCP / caller", "revision 7 · 42 tools · 38 backend routes"],
+      ["Unified MCP / caller", "opaque target_id only"],
       ["Scoped key record", "one exact trusted call"],
-      ["Provider contract validation", "target + price + execution policies"],
+      ["Provider contract validation", "Gemini + FLUX exact subset"],
       ["Hubu resolution", "exact-match authority"],
       ["Execution record", "persist before scheduling"],
       ["Temporal workflow", "claim authorization"],
@@ -111,6 +111,7 @@ const components = {
       ["Execution plane guide", "docs/gongbu-execution.md"],
       ["Live provider operations", "docs/operations/live-providers.md"],
       ["FLUX provider contract runbook", "docs/operations/flux-provider-contract.md"],
+      ["Gemini provider contract runbook", "docs/operations/gemini-provider-contract.md"],
       ["Operation-key skill", "skills/generate-hubu-operation-key/SKILL.md"],
       ["Unified MCP guide", "docs/unified-mcp.md"],
       ["Operation registry", "crates/hubu-unified-mcp/src/operation_registry.rs"],

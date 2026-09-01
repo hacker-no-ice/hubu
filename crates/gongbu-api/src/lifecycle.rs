@@ -37,6 +37,7 @@ pub enum DependencyProbeOutcome {
 /// Static admission routes that may emit a bounded rejection diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionRoute {
+    #[cfg(test)]
     CreateExecutionV1,
     CreateExecutionV2,
 }
@@ -44,6 +45,7 @@ pub(crate) enum AdmissionRoute {
 impl AdmissionRoute {
     fn version(self) -> u32 {
         match self {
+            #[cfg(test)]
             Self::CreateExecutionV1 => 1,
             Self::CreateExecutionV2 => 2,
         }
@@ -65,24 +67,13 @@ enum AdmissionReasonCode {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 enum AdmissionField {
-    #[serde(rename = "workload_type")]
-    WorkloadType,
-    #[serde(rename = "provider")]
-    Provider,
-    #[serde(rename = "adapter")]
-    Adapter,
-    #[serde(rename = "model")]
-    Model,
+    #[serde(rename = "target_id")]
+    TargetId,
     #[serde(rename = "input.image_size")]
     InputImageSize,
 }
 
-const TARGET_FIELDS: &[AdmissionField] = &[
-    AdmissionField::WorkloadType,
-    AdmissionField::Provider,
-    AdmissionField::Adapter,
-    AdmissionField::Model,
-];
+const TARGET_FIELDS: &[AdmissionField] = &[AdmissionField::TargetId];
 const PRICING_SELECTOR_FIELDS: &[AdmissionField] = &[AdmissionField::InputImageSize];
 
 #[derive(Debug, Deserialize)]
@@ -292,7 +283,7 @@ mod tests {
         let event = admission_rejection_event(
             AdmissionRoute::CreateExecutionV2,
             400,
-            br#"{"schema_version":2,"error":{"code":"invalid_request","message":"request validation failed","reason_code":"target_not_selectable","fields":["workload_type","provider","adapter","model"]}}"#,
+            br#"{"schema_version":2,"error":{"code":"invalid_request","message":"request validation failed","reason_code":"target_not_selectable","fields":["target_id"]}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -304,7 +295,7 @@ mod tests {
                 "status": 400,
                 "code": "invalid_request",
                 "reason_code": "target_not_selectable",
-                "fields": ["workload_type", "provider", "adapter", "model"]
+                "fields": ["target_id"]
             })
         );
 
@@ -356,7 +347,7 @@ mod tests {
         let target = admission_rejection_event(
             AdmissionRoute::CreateExecutionV2,
             400,
-            br#"{"schema_version":2,"error":{"code":"invalid_request","message":"generic","reason_code":"target_not_selectable","fields":["workload_type","provider","adapter","model"]}}"#,
+            br#"{"schema_version":2,"error":{"code":"invalid_request","message":"generic","reason_code":"target_not_selectable","fields":["target_id"]}}"#,
         )
         .unwrap();
         let selector = admission_rejection_event(
@@ -368,7 +359,7 @@ mod tests {
         let v1_target = admission_rejection_event(
             AdmissionRoute::CreateExecutionV1,
             400,
-            br#"{"schema_version":1,"error":{"code":"invalid_request","message":"generic","reason_code":"target_not_selectable","fields":["workload_type","provider","adapter","model"]}}"#,
+            br#"{"schema_version":1,"error":{"code":"invalid_request","message":"generic","reason_code":"target_not_selectable","fields":["target_id"]}}"#,
         )
         .unwrap();
 

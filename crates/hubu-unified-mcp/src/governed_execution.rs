@@ -123,22 +123,7 @@ pub(super) fn tool_definition() -> Value {
                     "type": "object",
                     "additionalProperties": false,
                     "required": [
-                        "schema_version", "input", "input_schema_version"
-                    ],
-                    "oneOf": [
-                        {
-                            "required": ["target_id"],
-                            "not": {"anyOf": [
-                                {"required": ["workload_type"]},
-                                {"required": ["provider"]},
-                                {"required": ["adapter"]},
-                                {"required": ["model"]}
-                            ]}
-                        },
-                        {
-                            "required": ["workload_type", "provider", "adapter", "model"],
-                            "not": {"required": ["target_id"]}
-                        }
+                        "schema_version", "input", "input_schema_version", "target_id"
                     ],
                     "properties": {
                         "schema_version": {"type": "integer", "const": 2},
@@ -148,10 +133,6 @@ pub(super) fn tool_definition() -> Value {
                             "type": "string",
                             "pattern": "^gongbu:target:v1:[a-f0-9]{64}$"
                         },
-                        "workload_type": {"type": "string", "minLength": 1},
-                        "provider": {"type": "string", "minLength": 1},
-                        "adapter": {"type": "string", "minLength": 1},
-                        "model": {"type": "string", "minLength": 1}
                     }
                 },
                 "max_inline_artifact_bytes": {
@@ -1133,10 +1114,7 @@ mod tests {
                 "schema_version":2,
                 "input":{"prompt":"circle"},
                 "input_schema_version":1,
-                "workload_type":"image_generation",
-                "provider":"fixture",
-                "adapter":"fixture",
-                "model":"v1"
+                "target_id":format!("gongbu:target:v1:{}", "a".repeat(64))
             }
         })
     }
@@ -1174,26 +1152,20 @@ mod tests {
     }
 
     #[test]
-    fn governed_execution_schema_makes_target_id_and_raw_tuple_strictly_exclusive() {
+    fn governed_execution_schema_requires_only_target_id() {
         let definition = tool_definition();
         assert_eq!(
-            definition["inputSchema"]["properties"]["execution"]["oneOf"],
+            definition["inputSchema"]["properties"]["execution"]["required"],
             json!([
-                {
-                    "required":["target_id"],
-                    "not":{"anyOf":[
-                        {"required":["workload_type"]},
-                        {"required":["provider"]},
-                        {"required":["adapter"]},
-                        {"required":["model"]}
-                    ]}
-                },
-                {
-                    "required":["workload_type","provider","adapter","model"],
-                    "not":{"required":["target_id"]}
-                }
+                "schema_version",
+                "input",
+                "input_schema_version",
+                "target_id"
             ])
         );
+        assert!(definition["inputSchema"]["properties"]["execution"]
+            .get("oneOf")
+            .is_none());
     }
 
     #[test]

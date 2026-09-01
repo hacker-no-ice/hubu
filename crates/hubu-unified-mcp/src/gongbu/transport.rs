@@ -386,11 +386,6 @@ mod tests {
     fn durable_admission_diagnostics_are_closed_and_do_not_change_retryability() {
         let cases = [
             (
-                "target_not_selectable",
-                serde_json::json!(["workload_type", "provider", "adapter", "model"]),
-                AdmissionDiagnostic::TargetNotSelectable,
-            ),
-            (
                 "pricing_selector_not_matched",
                 serde_json::json!(["input.image_size"]),
                 AdmissionDiagnostic::PricingSelectorNotMatched,
@@ -434,7 +429,7 @@ mod tests {
             "error": {
                 "code": "invalid_request",
                 "reason_code": "target_not_selectable",
-                "fields": ["workload_type", "provider", "adapter", "model"]
+                "fields": ["provider"]
             }
         }))
         .unwrap();
