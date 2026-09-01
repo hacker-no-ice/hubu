@@ -15,7 +15,7 @@ use std::{
 const REPORT_SCHEMA_VERSION: u32 = 2;
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const OPERATION_REGISTRY_APPLICATION_ID: i64 = 0x4855_424f;
-const OPERATION_REGISTRY_SCHEMA_VERSION: i64 = 1;
+const OPERATION_REGISTRY_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1244,9 +1244,21 @@ fn validate_operation_registry(path: &Path) -> rusqlite::Result<()> {
         "SELECT singleton, installation_id, created_at FROM installation_identity LIMIT 0",
     )?;
     connection.prepare(
-        "SELECT platform, installation_id, harness_call_id, request_hash, operation_key,
+        "SELECT platform, installation_id, harness_call_id, request_hash,
+                normalized_request_json, tool_name, operation_key, operation_key_record_id,
+                governed_result_json, operation_handle,
                 codex_call_id, claude_tool_use_id, hubu_invocation_id,
-                controlled_installation_id, task_id, created_at
+                controlled_installation_id, task_id, decision, decision_id,
+                auth_token_id, approval_request_id, approval_status, approval_synced_at,
+                authorization_expires_at,
+                result_json, dispatch_started_at, result_recorded_at,
+                gongbu_request_hash, gongbu_request_json, gongbu_execution_id, gongbu_status,
+                gongbu_outcome, gongbu_create_started_at,
+                gongbu_result_recorded_at, operation_state, operation_result_code,
+                dispatch_attempts, observation_failures, reconciliation_attempts,
+                operation_deadline_at, next_operation_attempt_at,
+                worker_lease_id, worker_lease_expires_at,
+                operation_updated_at, created_at
          FROM harness_operations LIMIT 0",
     )?;
     let installation_count = connection.query_row(
@@ -2083,6 +2095,78 @@ mod tests {
         assert_eq!(strip_ansi(&colored), plain);
     }
 
+    fn write_operation_registry_fixture(
+        path: &Path,
+        schema_version: i64,
+        include_governed_result: bool,
+    ) {
+        let governed_result_column = if include_governed_result {
+            "governed_result_json TEXT,"
+        } else {
+            ""
+        };
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE installation_identity (
+                     singleton INTEGER PRIMARY KEY,
+                     installation_id TEXT NOT NULL,
+                     created_at TEXT NOT NULL
+                 );
+                 CREATE TABLE harness_operations (
+                     platform TEXT NOT NULL,
+                     installation_id TEXT NOT NULL,
+                     harness_call_id TEXT NOT NULL,
+                     request_hash TEXT NOT NULL,
+                     normalized_request_json TEXT,
+                     tool_name TEXT NOT NULL,
+                     operation_key TEXT,
+                     operation_key_record_id TEXT,
+                     {governed_result_column}
+                     operation_handle TEXT NOT NULL,
+                     codex_call_id TEXT,
+                     claude_tool_use_id TEXT,
+                     hubu_invocation_id TEXT,
+                     controlled_installation_id TEXT,
+                     task_id TEXT,
+                     decision TEXT,
+                     decision_id TEXT,
+                     auth_token_id TEXT,
+                     approval_request_id TEXT,
+                     approval_status TEXT,
+                     approval_synced_at TEXT,
+                     authorization_expires_at TEXT,
+                     result_json TEXT,
+                     dispatch_started_at TEXT,
+                     result_recorded_at TEXT,
+                     gongbu_request_hash TEXT,
+                     gongbu_request_json TEXT,
+                     gongbu_execution_id TEXT,
+                     gongbu_status TEXT,
+                     gongbu_outcome TEXT,
+                     gongbu_create_started_at TEXT,
+                     gongbu_result_recorded_at TEXT,
+                     operation_state TEXT,
+                     operation_result_code TEXT,
+                     dispatch_attempts INTEGER NOT NULL DEFAULT 0,
+                     observation_failures INTEGER NOT NULL DEFAULT 0,
+                     reconciliation_attempts INTEGER NOT NULL DEFAULT 0,
+                     operation_deadline_at TEXT,
+                     next_operation_attempt_at TEXT,
+                     worker_lease_id TEXT,
+                     worker_lease_expires_at TEXT,
+                     operation_updated_at TEXT,
+                     created_at TEXT NOT NULL
+                 );
+                 INSERT INTO installation_identity VALUES (
+                     1, 'hubu-installation:v1:test', CURRENT_TIMESTAMP
+                 );
+                 PRAGMA application_id = {OPERATION_REGISTRY_APPLICATION_ID};
+                 PRAGMA user_version = {schema_version};"
+            ))
+            .unwrap();
+    }
+
     #[test]
     fn operation_registry_path_reports_degraded_billable_capability_without_failing_stack() {
         let root = tempdir().unwrap();
@@ -2110,37 +2194,41 @@ mod tests {
         assert_eq!(checks[0].code, "operation_registry_invalid");
 
         let valid_path = root.path().join("valid.sqlite3");
-        let valid = Connection::open(&valid_path).unwrap();
-        valid
-            .execute_batch(
-                "CREATE TABLE installation_identity (
-                     singleton INTEGER PRIMARY KEY,
-                     installation_id TEXT NOT NULL,
-                     created_at TEXT NOT NULL
-                 );
-                 CREATE TABLE harness_operations (
-                     platform TEXT NOT NULL,
-                     installation_id TEXT NOT NULL,
-                     harness_call_id TEXT NOT NULL,
-                     request_hash TEXT NOT NULL,
-                     operation_key TEXT NOT NULL,
-                     codex_call_id TEXT,
-                     claude_tool_use_id TEXT,
-                     hubu_invocation_id TEXT,
-                     controlled_installation_id TEXT,
-                     task_id TEXT,
-                     created_at TEXT NOT NULL
-                 );
-                 INSERT INTO installation_identity VALUES (1, 'hubu-installation:v1:test', CURRENT_TIMESTAMP);
-                 PRAGMA application_id = 1213547087;
-                 PRAGMA user_version = 1;",
-            )
-            .unwrap();
-        drop(valid);
+        write_operation_registry_fixture(&valid_path, OPERATION_REGISTRY_SCHEMA_VERSION, true);
         checks.clear();
         report_operation_registry_path(&valid_path, &mut checks);
         assert_eq!(checks[0].status, CheckStatus::Pass);
         assert_eq!(checks[0].code, "operation_registry_path_ready");
+    }
+
+    #[test]
+    fn operation_registry_validation_is_read_only_and_schema_strict() {
+        let root = tempdir().unwrap();
+        let valid_path = root.path().join("valid-v6.sqlite3");
+        write_operation_registry_fixture(&valid_path, OPERATION_REGISTRY_SCHEMA_VERSION, true);
+        let bytes_before = fs::read(&valid_path).unwrap();
+
+        validate_operation_registry(&valid_path).unwrap();
+
+        assert_eq!(fs::read(&valid_path).unwrap(), bytes_before);
+
+        for version in [
+            OPERATION_REGISTRY_SCHEMA_VERSION - 1,
+            OPERATION_REGISTRY_SCHEMA_VERSION + 1,
+        ] {
+            let path = root.path().join(format!("unsupported-v{version}.sqlite3"));
+            write_operation_registry_fixture(&path, version, true);
+            assert!(validate_operation_registry(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn operation_registry_validation_requires_current_v6_columns() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("missing-governed-result.sqlite3");
+        write_operation_registry_fixture(&path, OPERATION_REGISTRY_SCHEMA_VERSION, false);
+
+        assert!(validate_operation_registry(&path).is_err());
     }
 
     #[cfg(unix)]

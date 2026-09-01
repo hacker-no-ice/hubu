@@ -92,6 +92,29 @@
     }
   },
   {
+    "name": "gongbu_get_redaction_attestation",
+    "description": "Get Gongbu's execution-bound FLUX redaction attestation containing only versioned safe fingerprints, booleans, and counters.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execution_id"],
+      "properties": {
+        "execution_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "gongbu_list_artifacts",
     "description": "List portable metadata for an execution's artifacts.",
     "inputSchema": {

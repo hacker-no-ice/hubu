@@ -1,8 +1,12 @@
-use std::{fs, io, path::Path, time::Duration};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -16,10 +20,12 @@ const MAX_PLATFORM_BYTES: usize = 64;
 const MAX_HARNESS_ID_BYTES: usize = 512;
 const MAX_TASK_ID_BYTES: usize = 512;
 const MAX_TOOL_NAME_BYTES: usize = 128;
-const PREVIOUS_SCHEMA_VERSION: i64 = 4;
-const SCHEMA_VERSION: i64 = 5;
+const LEGACY_SCHEMA_VERSION: i64 = 4;
+const PREVIOUS_SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const APPLICATION_ID: i64 = 0x4855_424f;
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
+const MAX_GOVERNED_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const WORKER_LEASE_SECONDS: i64 = 10;
 const OPERATION_DEADLINE_HOURS: i64 = 24;
@@ -317,6 +323,7 @@ struct PersistedOperation {
 pub(crate) struct OperationRegistry {
     connection: Connection,
     installation_id: String,
+    preallocated_operation_key_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for OperationRegistry {
@@ -329,12 +336,23 @@ impl std::fmt::Debug for OperationRegistry {
 }
 
 impl OperationRegistry {
+    #[cfg(test)]
     pub(crate) fn open(path: &Path) -> Result<Self> {
+        Self::open_with_preallocated_keys(path, None)
+    }
+
+    pub(crate) fn open_with_preallocated_keys(
+        path: &Path,
+        preallocated_operation_key_path: Option<&Path>,
+    ) -> Result<Self> {
         if path == Path::new(":memory:") {
             bail!("unified MCP operation registry requires a persistent on-disk path; in-memory state is test-only");
         }
         if !path.is_absolute() {
             bail!("unified MCP operation registry path must be absolute");
+        }
+        if preallocated_operation_key_path.is_some_and(|path| !path.is_absolute()) {
+            bail!("preallocated operation key store path must be absolute");
         }
         if let Ok(metadata) = fs::symlink_metadata(path) {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -361,10 +379,16 @@ impl OperationRegistry {
                 format!("secure unified MCP operation registry `{}`", path.display())
             })?;
         }
-        Self::from_connection(connection)
+        Self::from_connection(
+            connection,
+            preallocated_operation_key_path.map(Path::to_path_buf),
+        )
     }
 
-    fn from_connection(mut connection: Connection) -> Result<Self> {
+    fn from_connection(
+        mut connection: Connection,
+        preallocated_operation_key_path: Option<PathBuf>,
+    ) -> Result<Self> {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         let application_id =
@@ -378,8 +402,11 @@ impl OperationRegistry {
         )?;
         if application_id == 0 && version == 0 && user_table_count == 0 {
             create_schema(&connection)?;
-        } else if application_id == APPLICATION_ID && version == PREVIOUS_SCHEMA_VERSION {
+        } else if application_id == APPLICATION_ID && version == LEGACY_SCHEMA_VERSION {
             migrate_v4_to_v5(&mut connection)?;
+            migrate_v5_to_v6(&mut connection)?;
+        } else if application_id == APPLICATION_ID && version == PREVIOUS_SCHEMA_VERSION {
+            migrate_v5_to_v6(&mut connection)?;
         } else if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
             bail!("unified MCP operation registry identity or schema version is unsupported; refusing to modify the configured database");
         }
@@ -407,6 +434,7 @@ impl OperationRegistry {
         let mut registry = Self {
             connection,
             installation_id,
+            preallocated_operation_key_path,
         };
         registry.remove_expired_authorization_identifiers()?;
         Ok(registry)
@@ -414,7 +442,7 @@ impl OperationRegistry {
 
     #[cfg(test)]
     pub(crate) fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, None)
     }
 
     pub(crate) fn resolve_or_allocate(
@@ -523,36 +551,71 @@ impl OperationRegistry {
             });
         }
 
-        let operation_key = format!(
-            "hubu:operation:v1:{}:{}",
-            identity.platform,
-            Uuid::new_v4().simple()
-        );
+        let (operation_key, operation_key_record_id) =
+            if let Some(path) = self.preallocated_operation_key_path.as_deref() {
+                if identity.codex_call_id.is_none() {
+                    bail!("preallocated operation keys require trusted Codex callId identity");
+                }
+                let record = preallocated_operation_key(
+                    path,
+                    tool_name,
+                    arguments,
+                    &self.installation_id,
+                    identity,
+                    &request_hash,
+                )
+                .map_err(|error| {
+                    if error.to_string().contains("permissions are unsafe") {
+                        error
+                    } else {
+                        anyhow!("preallocated operation key record is already bound or invalid")
+                    }
+                })?;
+                (record.operation_key, Some(record.record_id))
+            } else {
+                (
+                    format!(
+                        "hubu:operation:v1:{}:{}",
+                        identity.platform,
+                        Uuid::new_v4().simple()
+                    ),
+                    None,
+                )
+            };
         let operation_handle = format!("hubu:public-operation:v1:{}", Uuid::new_v4().simple());
-        transaction.execute(
-            "INSERT INTO harness_operations (
+        transaction
+            .execute(
+                "INSERT INTO harness_operations (
                  platform, installation_id, harness_call_id, request_hash, normalized_request_json,
-                 tool_name, operation_key,
+                 tool_name, operation_key, operation_key_record_id,
                  operation_handle,
                  codex_call_id, claude_tool_use_id, hubu_invocation_id,
                  controlled_installation_id, task_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                identity.platform,
-                self.installation_id,
-                identity.harness_call_id,
-                request_hash,
-                normalized_request_json,
-                tool_name,
-                operation_key,
-                operation_handle,
-                identity.codex_call_id,
-                identity.claude_tool_use_id,
-                identity.hubu_invocation_id,
-                identity.controlled_installation_id,
-                identity.task_id,
-            ],
-        )?;
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    identity.platform,
+                    self.installation_id,
+                    identity.harness_call_id,
+                    request_hash,
+                    normalized_request_json,
+                    tool_name,
+                    operation_key,
+                    operation_key_record_id,
+                    operation_handle,
+                    identity.codex_call_id,
+                    identity.claude_tool_use_id,
+                    identity.hubu_invocation_id,
+                    identity.controlled_installation_id,
+                    identity.task_id,
+                ],
+            )
+            .map_err(|error| {
+                if self.preallocated_operation_key_path.is_some() {
+                    anyhow!("preallocated operation key record is already bound or invalid")
+                } else {
+                    error.into()
+                }
+            })?;
         transaction.commit()?;
         Ok(OperationResolution {
             operation_key: Some(operation_key),
@@ -745,6 +808,110 @@ impl OperationRegistry {
         )?;
         if changed != 1 {
             bail!("normalized operation result has no matching operation");
+        }
+        transaction.commit()?;
+        Ok(result.clone())
+    }
+
+    pub(crate) fn governed_result(&self, operation_handle: &str) -> Result<Option<Value>> {
+        validate_public_operation_handle(operation_handle)?;
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT operation_key, governed_result_json
+                 FROM harness_operations
+                 WHERE operation_handle = ?1 AND tool_name = ?2",
+                params![operation_handle, crate::governed_execution::TOOL_NAME],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((operation_key, result_json)) = stored else {
+            return Ok(None);
+        };
+        if operation_key
+            .as_deref()
+            .zip(result_json.as_deref())
+            .is_some_and(|(operation_key, result)| result.contains(operation_key))
+        {
+            bail!("recorded governed execution result contains private backend identity");
+        }
+        let result = result_json
+            .as_deref()
+            .map(|result| {
+                serde_json::from_str(result).context("decode recorded governed execution result")
+            })
+            .transpose()?;
+        if result
+            .as_ref()
+            .is_some_and(|result| !valid_terminal_governed_result(result, operation_handle))
+        {
+            bail!("recorded governed execution result is not a safe terminal projection");
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn record_governed_result(
+        &mut self,
+        operation_handle: &str,
+        result: &Value,
+    ) -> Result<Value> {
+        validate_public_operation_handle(operation_handle)?;
+        if !valid_terminal_governed_result(result, operation_handle) {
+            bail!("governed execution result is not a safe terminal projection");
+        }
+        let result_json = serde_json::to_string(result)?;
+        if result_json.len() > MAX_GOVERNED_RESULT_BYTES {
+            bail!("governed execution result is too large to persist safely");
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (operation_key, existing) = transaction
+            .query_row(
+                "SELECT operation_key, governed_result_json
+                 FROM harness_operations
+                 WHERE operation_handle = ?1 AND tool_name = ?2",
+                params![operation_handle, crate::governed_execution::TOOL_NAME],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("governed execution result has no matching operation"))?;
+        if operation_key
+            .as_deref()
+            .is_some_and(|operation_key| result_json.contains(operation_key))
+        {
+            bail!("governed execution result contains private backend identity");
+        }
+        if let Some(existing) = existing {
+            let result = serde_json::from_str(&existing)
+                .context("decode recorded governed execution result")?;
+            transaction.commit()?;
+            return Ok(result);
+        }
+        let changed = transaction.execute(
+            "UPDATE harness_operations
+             SET governed_result_json = ?2
+             WHERE operation_handle = ?1 AND tool_name = ?3
+                   AND governed_result_json IS NULL",
+            params![
+                operation_handle,
+                result_json,
+                crate::governed_execution::TOOL_NAME
+            ],
+        )?;
+        if changed != 1 {
+            bail!("governed execution result could not be persisted");
         }
         transaction.commit()?;
         Ok(result.clone())
@@ -1948,6 +2115,226 @@ fn contains_protected_identity(value: &Value) -> bool {
     }
 }
 
+fn valid_terminal_governed_result(value: &Value, operation_handle: &str) -> bool {
+    !contains_protected_identity(value)
+        && value
+            .pointer("/structuredContent/operation_handle")
+            .and_then(Value::as_str)
+            == Some(operation_handle)
+        && value
+            .pointer("/structuredContent/terminal")
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
+struct PreallocatedOperationKey {
+    record_id: String,
+    operation_key: String,
+}
+
+fn preallocated_operation_key(
+    path: &Path,
+    tool_name: &str,
+    arguments: &Value,
+    installation_id: &str,
+    identity: &NormalizedHarnessIdentity,
+    request_hash: &str,
+) -> Result<PreallocatedOperationKey> {
+    validate_preallocated_store_files(path)?;
+    let binding_id = preallocated_binding_id(installation_id, identity, request_hash)?;
+
+    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|_| anyhow!("preallocated operation key store is unavailable"))?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|_| anyhow!("preallocated operation key store is unavailable"))?;
+
+    let expected_scope = canonicalize(&json!({
+        "schema_version": 1,
+        "tool_name": tool_name,
+        "arguments": canonicalize(arguments),
+    }));
+    let expected_scope_json = serde_json::to_string(&expected_scope)?;
+    let expected_scope_sha256 = format!("{:x}", Sha256::digest(expected_scope_json.as_bytes()));
+
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| anyhow!("preallocated operation key store is unavailable"))?;
+    let rows = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT record_id, operation_key, scope_json, scope_sha256,
+                        binding_id, bound_at
+                 FROM operations
+                 WHERE status = 'active' AND (scope_sha256 = ?1 OR scope_json = ?2)
+                 ORDER BY record_id
+                 LIMIT 2",
+            )
+            .map_err(|_| anyhow!("preallocated operation key store schema is invalid"))?;
+        statement
+            .query_map(params![expected_scope_sha256, expected_scope_json], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>)
+            .map_err(|_| anyhow!("preallocated operation key store is unreadable"))?
+    };
+    let [(record_id, operation_key, scope_json, scope_sha256, stored_binding, bound_at)] =
+        rows.as_slice()
+    else {
+        bail!("exactly one active preallocated operation key record is required");
+    };
+
+    let stored_scope_sha256 = format!("{:x}", Sha256::digest(scope_json.as_bytes()));
+    if scope_json != &expected_scope_json
+        || scope_sha256 != &expected_scope_sha256
+        || scope_sha256 != &stored_scope_sha256
+        || !valid_preallocated_identifiers(record_id, operation_key)
+        || stored_binding
+            .as_ref()
+            .is_some_and(|stored| stored != &binding_id)
+        || stored_binding.is_some() != bound_at.is_some()
+    {
+        bail!("preallocated operation key record scope or identity is invalid");
+    }
+
+    if stored_binding.is_none() {
+        let changed = transaction
+            .execute(
+                "UPDATE operations
+                 SET binding_id = ?2, bound_at = ?3, updated_at = ?3
+                 WHERE record_id = ?1 AND status = 'active' AND binding_id IS NULL",
+                params![
+                    record_id,
+                    binding_id,
+                    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+                ],
+            )
+            .map_err(|_| anyhow!("preallocated operation key record could not be claimed"))?;
+        if changed != 1 {
+            bail!("preallocated operation key record could not be claimed");
+        }
+    }
+    transaction
+        .commit()
+        .map_err(|_| anyhow!("preallocated operation key record could not be claimed"))?;
+    secure_preallocated_store_sidecars(path)?;
+
+    Ok(PreallocatedOperationKey {
+        record_id: record_id.clone(),
+        operation_key: operation_key.clone(),
+    })
+}
+
+fn preallocated_binding_id(
+    installation_id: &str,
+    identity: &NormalizedHarnessIdentity,
+    request_hash: &str,
+) -> Result<String> {
+    let projection = canonicalize(&json!({
+        "schema_version": 1,
+        "installation_id": installation_id,
+        "platform": identity.platform,
+        "harness_call_id": identity.harness_call_id,
+        "request_hash": request_hash,
+    }));
+    let serialized = serde_json::to_vec(&projection)?;
+    Ok(format!(
+        "hubu:preallocated-binding:v1:{:x}",
+        Sha256::digest(serialized)
+    ))
+}
+
+fn validate_preallocated_store_files(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| anyhow!("preallocated operation key store is unavailable"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("preallocated operation key store is unavailable");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            bail!("preallocated operation key store permissions are unsafe");
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("preallocated operation key store is unavailable"))?;
+        let parent_metadata = fs::symlink_metadata(parent)
+            .map_err(|_| anyhow!("preallocated operation key store is unavailable"))?;
+        if parent_metadata.file_type().is_symlink()
+            || !parent_metadata.is_dir()
+            || parent_metadata.permissions().mode() & 0o077 != 0
+        {
+            bail!("preallocated operation key store directory permissions are unsafe");
+        }
+        for sidecar in preallocated_store_sidecars(path) {
+            let Ok(sidecar_metadata) = fs::symlink_metadata(&sidecar) else {
+                continue;
+            };
+            if sidecar_metadata.file_type().is_symlink()
+                || !sidecar_metadata.is_file()
+                || sidecar_metadata.permissions().mode() & 0o077 != 0
+            {
+                bail!("preallocated operation key store sidecar permissions are unsafe");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn preallocated_store_sidecars(path: &Path) -> [PathBuf; 2] {
+    let with_suffix = |suffix: &str| {
+        let mut value = path.as_os_str().to_os_string();
+        value.push(suffix);
+        PathBuf::from(value)
+    };
+    [with_suffix("-wal"), with_suffix("-shm")]
+}
+
+fn secure_preallocated_store_sidecars(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for sidecar in preallocated_store_sidecars(path) {
+            let Ok(metadata) = fs::symlink_metadata(&sidecar) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("preallocated operation key store sidecar permissions are unsafe");
+            }
+            fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600))
+                .map_err(|_| anyhow!("preallocated operation key store sidecar is unavailable"))?;
+        }
+    }
+    Ok(())
+}
+
+fn valid_preallocated_identifiers(record_id: &str, operation_key: &str) -> bool {
+    let Some(record_suffix) = record_id.strip_prefix("hop_") else {
+        return false;
+    };
+    let Some(key_suffix) = operation_key.strip_prefix("codex:v1:") else {
+        return false;
+    };
+    valid_lower_hex_identifier(record_suffix)
+        && valid_lower_hex_identifier(key_suffix)
+        && record_suffix != key_suffix
+}
+
+fn valid_lower_hex_identifier(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 fn migrate_v4_to_v5(connection: &mut Connection) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1969,6 +2356,27 @@ fn migrate_v4_to_v5(connection: &mut Connection) -> Result<()> {
                  WHERE approval_request_id IS NOT NULL;",
         )
         .context("migrate unified MCP operation registry approval continuation schema")?;
+    transaction.pragma_update(None, "user_version", PREVIOUS_SCHEMA_VERSION)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v5_to_v6(connection: &mut Connection) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin unified MCP operation registry v5 to v6 migration")?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE harness_operations ADD COLUMN operation_key_record_id TEXT
+                 CHECK(operation_key_record_id IS NULL OR length(operation_key_record_id) = 36);
+             ALTER TABLE harness_operations ADD COLUMN governed_result_json TEXT
+                 CHECK(governed_result_json IS NULL OR
+                       (json_valid(governed_result_json) AND length(governed_result_json) <= 16777216));
+             CREATE UNIQUE INDEX harness_operation_key_record
+                 ON harness_operations(operation_key_record_id)
+                 WHERE operation_key_record_id IS NOT NULL;",
+        )
+        .context("migrate unified MCP preallocated operation key binding schema")?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -1990,6 +2398,8 @@ fn create_schema(connection: &Connection) -> Result<()> {
              normalized_request_json TEXT CHECK(normalized_request_json IS NULL OR (json_valid(normalized_request_json) AND length(normalized_request_json) <= 1048576)),
              tool_name TEXT NOT NULL CHECK(length(tool_name) BETWEEN 1 AND 128),
              operation_key TEXT UNIQUE CHECK(operation_key IS NULL OR length(operation_key) BETWEEN 1 AND 160),
+             operation_key_record_id TEXT CHECK(operation_key_record_id IS NULL OR length(operation_key_record_id) = 36),
+             governed_result_json TEXT CHECK(governed_result_json IS NULL OR (json_valid(governed_result_json) AND length(governed_result_json) <= 16777216)),
              operation_handle TEXT NOT NULL UNIQUE CHECK(length(operation_handle) BETWEEN 1 AND 160),
              codex_call_id TEXT CHECK(codex_call_id IS NULL OR length(codex_call_id) BETWEEN 1 AND 512),
              claude_tool_use_id TEXT CHECK(claude_tool_use_id IS NULL OR length(claude_tool_use_id) BETWEEN 1 AND 512),
@@ -2029,6 +2439,9 @@ fn create_schema(connection: &Connection) -> Result<()> {
          );
          CREATE UNIQUE INDEX harness_operation_auth_token
              ON harness_operations(auth_token_id) WHERE auth_token_id IS NOT NULL;
+         CREATE UNIQUE INDEX harness_operation_key_record
+             ON harness_operations(operation_key_record_id)
+             WHERE operation_key_record_id IS NOT NULL;
          CREATE UNIQUE INDEX harness_operation_approval_request
              ON harness_operations(approval_request_id) WHERE approval_request_id IS NOT NULL;
          CREATE INDEX harness_operation_due
@@ -2271,7 +2684,8 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     connection
         .prepare(
             "SELECT platform, installation_id, harness_call_id, request_hash,
-                    normalized_request_json, tool_name, operation_key,
+                    normalized_request_json, tool_name, operation_key, operation_key_record_id,
+                    governed_result_json,
                     operation_handle,
                     codex_call_id, claude_tool_use_id, hubu_invocation_id,
                     controlled_installation_id, task_id, decision, decision_id,
@@ -2318,7 +2732,7 @@ fn canonicalize(value: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Barrier, thread};
+    use std::{process::Command, sync::Barrier, thread};
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -2327,6 +2741,79 @@ mod tests {
 
     fn codex(call_id: &str) -> NormalizedHarnessIdentity {
         NormalizedHarnessIdentity::from_meta(Some(&json!({"callId": call_id}))).unwrap()
+    }
+
+    fn preallocated_scope(tool_name: &str, arguments: &Value) -> (String, String) {
+        let scope = canonicalize(&json!({
+            "schema_version": 1,
+            "tool_name": tool_name,
+            "arguments": canonicalize(arguments),
+        }));
+        let scope_json = serde_json::to_string(&scope).unwrap();
+        let scope_sha256 = format!("{:x}", Sha256::digest(scope_json.as_bytes()));
+        (scope_json, scope_sha256)
+    }
+
+    fn create_preallocated_store(path: &Path) -> Connection {
+        let connection = Connection::open(path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        connection
+            .execute_batch(
+                "CREATE TABLE operations (
+                     record_id TEXT PRIMARY KEY,
+                     operation_key TEXT NOT NULL UNIQUE,
+                     label TEXT NOT NULL,
+                     scope_json TEXT NOT NULL,
+                     scope_sha256 TEXT NOT NULL,
+                     status TEXT NOT NULL,
+                     binding_id TEXT UNIQUE,
+                     bound_at TEXT,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        connection
+    }
+
+    fn insert_preallocated_record(
+        connection: &Connection,
+        suffix: &str,
+        status: &str,
+        scope_json: &str,
+        scope_sha256: &str,
+        operation_key: Option<&str>,
+    ) {
+        let derived_operation_key = || {
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(format!("fixed-fixture-key:{suffix}").as_bytes())
+            );
+            format!("codex:v1:{}", &digest[..32])
+        };
+        connection
+            .execute(
+                "INSERT INTO operations(
+                     record_id, operation_key, label, scope_json, scope_sha256,
+                     status, binding_id, bound_at, created_at, updated_at
+                 ) VALUES (?1, ?2, 'fixed test fixture', ?3, ?4, ?5,
+                           NULL, NULL, '2026-08-28T00:00:00Z', '2026-08-28T00:00:00Z')",
+                params![
+                    format!("hop_{suffix}"),
+                    operation_key
+                        .map(str::to_owned)
+                        .unwrap_or_else(derived_operation_key),
+                    scope_json,
+                    scope_sha256,
+                    status,
+                ],
+            )
+            .unwrap();
     }
 
     fn execution_arguments(token: &str) -> Value {
@@ -2514,6 +3001,622 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("refusing backend access"));
+    }
+
+    #[test]
+    fn preallocated_operation_key_binds_once_and_replays_after_restart() {
+        let root = tempdir().unwrap();
+        let registry_path = root.path().join("router.sqlite3");
+        let helper_path = root.path().join("operation-keys.sqlite3");
+        let arguments = json!({"z": [2, 1], "a": {"nested": true}});
+        let (scope_json, scope_sha256) =
+            preallocated_scope(crate::governed_execution::TOOL_NAME, &arguments);
+        let helper = create_preallocated_store(&helper_path);
+        let suffix = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let operation_key = "codex:v1:11111111111111111111111111111111";
+        insert_preallocated_record(
+            &helper,
+            suffix,
+            "active",
+            &scope_json,
+            &scope_sha256,
+            Some(operation_key),
+        );
+        drop(helper);
+
+        let mut registry =
+            OperationRegistry::open_with_preallocated_keys(&registry_path, Some(&helper_path))
+                .unwrap();
+        let first = registry
+            .resolve_or_allocate(
+                &codex("preallocated-call"),
+                crate::governed_execution::TOOL_NAME,
+                &arguments,
+            )
+            .unwrap();
+        assert_eq!(first.operation_key.as_deref(), Some(operation_key));
+        assert_eq!(
+            registry
+                .connection
+                .query_row(
+                    "SELECT operation_key_record_id FROM harness_operations",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "hop_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        let helper_after_claim = Connection::open(&helper_path).unwrap();
+        let (binding_id, bound_at) = helper_after_claim
+            .query_row("SELECT binding_id, bound_at FROM operations", [], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .unwrap();
+        assert!(binding_id
+            .as_deref()
+            .is_some_and(|value| value.starts_with("hubu:preallocated-binding:v1:")));
+        assert!(bound_at.is_some());
+        drop(helper_after_claim);
+
+        let competing_registry_path = root.path().join("competing-router.sqlite3");
+        let mut competing = OperationRegistry::open_with_preallocated_keys(
+            &competing_registry_path,
+            Some(&helper_path),
+        )
+        .unwrap();
+        let competing_error = competing
+            .resolve_or_allocate(
+                &codex("preallocated-call"),
+                crate::governed_execution::TOOL_NAME,
+                &arguments,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(competing_error.contains("already bound or invalid"));
+        assert_eq!(
+            competing
+                .connection
+                .query_row("SELECT COUNT(*) FROM harness_operations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        drop(competing);
+
+        let error = registry
+            .resolve_or_allocate(
+                &codex("different-call"),
+                crate::governed_execution::TOOL_NAME,
+                &arguments,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already bound or invalid"));
+        assert!(!error.contains("codex:v1:"));
+        drop(registry);
+
+        fs::rename(&helper_path, root.path().join("operation-keys.offline")).unwrap();
+        let mut restarted =
+            OperationRegistry::open_with_preallocated_keys(&registry_path, Some(&helper_path))
+                .unwrap();
+        let replay = restarted
+            .resolve_or_allocate(
+                &codex("preallocated-call"),
+                crate::governed_execution::TOOL_NAME,
+                &json!({"a": {"nested": true}, "z": [2, 1]}),
+            )
+            .unwrap();
+        assert_eq!(replay, first);
+    }
+
+    #[test]
+    fn official_helper_record_is_router_compatible_and_public_output_is_redacted() {
+        let root = tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let registry_path = root.path().join("router.sqlite3");
+        let helper_path = root.path().join("operation-keys.sqlite3");
+        let arguments_path = root.path().join("governed-arguments.json");
+        let arguments = governed_arguments();
+        fs::write(&arguments_path, serde_json::to_vec(&arguments).unwrap()).unwrap();
+        let helper_script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../skills/generate-hubu-operation-key/scripts/operation_keys.py");
+
+        let output = Command::new("python3")
+            .arg("-B")
+            .arg(helper_script)
+            .arg("--db")
+            .arg(&helper_path)
+            .arg("begin-unified")
+            .arg("--label")
+            .arg("fixed non-billable router compatibility fixture")
+            .arg("--tool-name")
+            .arg(crate::governed_execution::TOOL_NAME)
+            .arg("--arguments-file")
+            .arg(&arguments_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "operation-key helper fixture failed"
+        );
+        let public_output = String::from_utf8(output.stdout).unwrap();
+        assert!(!public_output.contains("operation_key"));
+        assert!(!public_output.contains("codex:v1:"));
+        assert!(!public_output.contains("arguments"));
+        assert!(!public_output.contains(helper_path.to_string_lossy().as_ref()));
+        let reference: Value = serde_json::from_str(&public_output).unwrap();
+        let record_id = reference["record_id"].as_str().unwrap();
+
+        let mut registry =
+            OperationRegistry::open_with_preallocated_keys(&registry_path, Some(&helper_path))
+                .unwrap();
+        let resolution = registry
+            .resolve_or_allocate(
+                &codex("official-helper-compatibility"),
+                crate::governed_execution::TOOL_NAME,
+                &arguments,
+            )
+            .unwrap();
+        let operation_key = resolution.operation_key.as_deref().unwrap();
+        assert!(valid_preallocated_identifiers(record_id, operation_key));
+        assert!(record_id.strip_prefix("hop_") != operation_key.strip_prefix("codex:v1:"));
+    }
+
+    #[test]
+    fn official_helper_migrates_legacy_store_without_exposing_private_material() {
+        let root = tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let helper_path = root.path().join("legacy-operation-keys.sqlite3");
+        let fixed_operation_key = "codex:v1:56565656565656565656565656565656";
+        let legacy = Connection::open(&helper_path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE operations (
+                     record_id TEXT PRIMARY KEY,
+                     operation_key TEXT NOT NULL UNIQUE,
+                     label TEXT NOT NULL,
+                     scope_json TEXT NOT NULL,
+                     scope_sha256 TEXT NOT NULL,
+                     status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'abandoned')),
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX operations_status_created
+                     ON operations(status, created_at);",
+            )
+            .unwrap();
+        legacy
+            .execute(
+                "INSERT INTO operations VALUES(
+                     'hop_45454545454545454545454545454545', ?1,
+                     'fixed legacy migration fixture', '{\"fixture\":true}',
+                     'd4e59d060b1f1e3f56fdb81a1e6ffbd6a4e85155f4dfc6f8e2a2f454b62ec223',
+                     'active', '2026-08-28T00:00:00Z', '2026-08-28T00:00:00Z'
+                 )",
+                [fixed_operation_key],
+            )
+            .unwrap();
+        drop(legacy);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let helper_script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../skills/generate-hubu-operation-key/scripts/operation_keys.py");
+        let output = Command::new("python3")
+            .arg("-B")
+            .arg(helper_script)
+            .arg("--db")
+            .arg(&helper_path)
+            .arg("list")
+            .arg("--status")
+            .arg("active")
+            .arg("--reference-only")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "legacy helper migration failed");
+        let public_output = String::from_utf8(output.stdout).unwrap();
+        assert!(!public_output.contains(fixed_operation_key));
+        assert!(!public_output.contains("operation_key"));
+        assert!(!public_output.contains("scope_json"));
+        assert!(!public_output.contains(helper_path.to_string_lossy().as_ref()));
+
+        let migrated = Connection::open(&helper_path).unwrap();
+        let columns = migrated
+            .prepare("PRAGMA table_info(operations)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "binding_id"));
+        assert!(columns.iter().any(|column| column == "bound_at"));
+        assert_eq!(
+            migrated
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema
+                     WHERE type = 'index' AND name = 'operations_binding'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        let preserved = migrated
+            .query_row(
+                "SELECT operation_key, binding_id, bound_at FROM operations",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(preserved, (fixed_operation_key.to_owned(), None, None));
+        drop(migrated);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in std::iter::once(helper_path.clone())
+                .chain(preallocated_store_sidecars(&helper_path))
+            {
+                if path.exists() {
+                    assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o077, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preallocated_operation_key_store_mismatches_fail_before_router_allocation() {
+        let arguments = json!({"amount": 3, "currency": "USD"});
+        let tool_name = crate::governed_execution::TOOL_NAME;
+        let (scope_json, scope_sha256) = preallocated_scope(tool_name, &arguments);
+
+        for case in [
+            "missing",
+            "inactive",
+            "bad-hash",
+            "bad-key",
+            "coupled-key",
+            "duplicate",
+        ] {
+            let root = tempdir().unwrap();
+            let registry_path = root.path().join("router.sqlite3");
+            let helper_path = root.path().join("operation-keys.sqlite3");
+            let helper = create_preallocated_store(&helper_path);
+            match case {
+                "missing" => {}
+                "inactive" => insert_preallocated_record(
+                    &helper,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "completed",
+                    &scope_json,
+                    &scope_sha256,
+                    None,
+                ),
+                "bad-hash" => insert_preallocated_record(
+                    &helper,
+                    "cccccccccccccccccccccccccccccccc",
+                    "active",
+                    &scope_json,
+                    &"0".repeat(64),
+                    None,
+                ),
+                "bad-key" => insert_preallocated_record(
+                    &helper,
+                    "dddddddddddddddddddddddddddddddd",
+                    "active",
+                    &scope_json,
+                    &scope_sha256,
+                    Some("not-a-valid-operation-key"),
+                ),
+                "coupled-key" => insert_preallocated_record(
+                    &helper,
+                    "abababababababababababababababab",
+                    "active",
+                    &scope_json,
+                    &scope_sha256,
+                    Some("codex:v1:abababababababababababababababab"),
+                ),
+                "duplicate" => {
+                    insert_preallocated_record(
+                        &helper,
+                        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                        "active",
+                        &scope_json,
+                        &scope_sha256,
+                        None,
+                    );
+                    insert_preallocated_record(
+                        &helper,
+                        "ffffffffffffffffffffffffffffffff",
+                        "active",
+                        &scope_json,
+                        &scope_sha256,
+                        None,
+                    );
+                }
+                _ => unreachable!(),
+            }
+            drop(helper);
+
+            let mut registry =
+                OperationRegistry::open_with_preallocated_keys(&registry_path, Some(&helper_path))
+                    .unwrap();
+            assert!(registry
+                .resolve_or_allocate(&codex(case), tool_name, &arguments)
+                .is_err());
+            assert_eq!(
+                registry
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM harness_operations", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                0,
+                "case {case} must not allocate router state"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preallocated_operation_key_store_rejects_unsafe_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let registry_path = root.path().join("router.sqlite3");
+        let helper_path = root.path().join("operation-keys.sqlite3");
+        let arguments = json!({"amount": 3});
+        let (scope_json, scope_sha256) =
+            preallocated_scope(crate::governed_execution::TOOL_NAME, &arguments);
+        let helper = create_preallocated_store(&helper_path);
+        insert_preallocated_record(
+            &helper,
+            "99999999999999999999999999999999",
+            "active",
+            &scope_json,
+            &scope_sha256,
+            None,
+        );
+        drop(helper);
+        fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut registry =
+            OperationRegistry::open_with_preallocated_keys(&registry_path, Some(&helper_path))
+                .unwrap();
+        assert!(registry
+            .resolve_or_allocate(
+                &codex("unsafe-helper-permissions"),
+                crate::governed_execution::TOOL_NAME,
+                &arguments,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("permissions are unsafe"));
+        assert_eq!(
+            registry
+                .connection
+                .query_row("SELECT COUNT(*) FROM harness_operations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preallocated_operation_key_store_rejects_unsafe_directory_and_sidecar() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let arguments = json!({"amount": 3});
+        let tool_name = crate::governed_execution::TOOL_NAME;
+        let (scope_json, scope_sha256) = preallocated_scope(tool_name, &arguments);
+
+        let directory_root = tempdir().unwrap();
+        let unsafe_parent = directory_root.path().join("unsafe-parent");
+        fs::create_dir(&unsafe_parent).unwrap();
+        let helper_path = unsafe_parent.join("operation-keys.sqlite3");
+        let helper = create_preallocated_store(&helper_path);
+        insert_preallocated_record(
+            &helper,
+            "12121212121212121212121212121212",
+            "active",
+            &scope_json,
+            &scope_sha256,
+            None,
+        );
+        drop(helper);
+        fs::set_permissions(&unsafe_parent, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut registry = OperationRegistry::open_with_preallocated_keys(
+            &directory_root.path().join("router.sqlite3"),
+            Some(&helper_path),
+        )
+        .unwrap();
+        assert!(registry
+            .resolve_or_allocate(&codex("unsafe-parent"), tool_name, &arguments)
+            .unwrap_err()
+            .to_string()
+            .contains("permissions are unsafe"));
+        fs::set_permissions(&unsafe_parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let sidecar_root = tempdir().unwrap();
+        let sidecar_helper_path = sidecar_root.path().join("operation-keys.sqlite3");
+        let helper = create_preallocated_store(&sidecar_helper_path);
+        insert_preallocated_record(
+            &helper,
+            "34343434343434343434343434343434",
+            "active",
+            &scope_json,
+            &scope_sha256,
+            None,
+        );
+        drop(helper);
+        let sidecar = preallocated_store_sidecars(&sidecar_helper_path)[0].clone();
+        fs::write(&sidecar, b"fixed non-secret sidecar fixture").unwrap();
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut registry = OperationRegistry::open_with_preallocated_keys(
+            &sidecar_root.path().join("router.sqlite3"),
+            Some(&sidecar_helper_path),
+        )
+        .unwrap();
+        assert!(registry
+            .resolve_or_allocate(&codex("unsafe-sidecar"), tool_name, &arguments)
+            .unwrap_err()
+            .to_string()
+            .contains("permissions are unsafe"));
+    }
+
+    #[test]
+    fn governed_result_cache_is_exact_durable_and_rejects_private_identity() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("router.sqlite3");
+        let request = governed_arguments();
+        let (operation, first_result) = {
+            let mut registry = OperationRegistry::open(&path).unwrap();
+            let operation = registry
+                .resolve_or_allocate(
+                    &codex("governed-result-cache"),
+                    crate::governed_execution::TOOL_NAME,
+                    &request,
+                )
+                .unwrap();
+            let first_result = json!({
+                "content": [],
+                "structuredContent": {
+                    "schema_version": 1,
+                    "operation_handle": operation.operation_handle,
+                    "outcome": "succeeded",
+                    "terminal": true,
+                    "timing": {"total_ms": 7}
+                },
+                "isError": false
+            });
+            assert_eq!(
+                registry
+                    .record_governed_result(&operation.operation_handle, &first_result)
+                    .unwrap(),
+                first_result
+            );
+            assert_eq!(
+                registry
+                    .record_governed_result(
+                        &operation.operation_handle,
+                        &json!({
+                            "content": [],
+                            "structuredContent": {
+                                "schema_version": 1,
+                                "operation_handle": operation.operation_handle,
+                                "outcome": "succeeded",
+                                "terminal": true,
+                                "timing": {"total_ms": 99}
+                            },
+                            "isError": false
+                        }),
+                    )
+                    .unwrap(),
+                first_result,
+                "the first public composite result must win exact redelivery"
+            );
+            (operation, first_result)
+        };
+
+        let restarted = OperationRegistry::open(&path).unwrap();
+        assert_eq!(
+            restarted
+                .governed_result(&operation.operation_handle)
+                .unwrap(),
+            Some(first_result)
+        );
+        drop(restarted);
+
+        let mut registry = OperationRegistry::open(&path).unwrap();
+        let second = registry
+            .resolve_or_allocate(
+                &codex("governed-result-private"),
+                crate::governed_execution::TOOL_NAME,
+                &request,
+            )
+            .unwrap();
+        assert!(registry
+            .record_governed_result(
+                &second.operation_handle,
+                &json!({
+                    "content": [],
+                    "structuredContent": {
+                        "operation_handle": second.operation_handle,
+                        "terminal": true,
+                        "operation_key": "must-not-persist"
+                    },
+                    "isError": false
+                }),
+            )
+            .is_err());
+        assert!(registry
+            .governed_result(&second.operation_handle)
+            .unwrap()
+            .is_none());
+        let private_key = second.operation_key.as_deref().unwrap();
+        assert!(registry
+            .record_governed_result(
+                &second.operation_handle,
+                &json!({
+                    "content": [],
+                    "structuredContent": {
+                        "operation_handle": second.operation_handle,
+                        "terminal": true,
+                        "message": format!("private identity {private_key}")
+                    },
+                    "isError": false
+                }),
+            )
+            .is_err());
+
+        let third = registry
+            .resolve_or_allocate(
+                &codex("governed-result-nonterminal"),
+                crate::governed_execution::TOOL_NAME,
+                &request,
+            )
+            .unwrap();
+        assert!(registry
+            .record_governed_result(
+                &third.operation_handle,
+                &json!({
+                    "content": [],
+                    "structuredContent": {
+                        "operation_handle": third.operation_handle,
+                        "outcome": "in_progress",
+                        "terminal": false
+                    },
+                    "isError": false
+                }),
+            )
+            .is_err());
+        assert!(registry
+            .governed_result(&third.operation_handle)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -4371,7 +5474,10 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
-                "DROP INDEX harness_operation_approval_request;
+                "DROP INDEX harness_operation_key_record;
+                 DROP INDEX harness_operation_approval_request;
+                 ALTER TABLE harness_operations DROP COLUMN operation_key_record_id;
+                 ALTER TABLE harness_operations DROP COLUMN governed_result_json;
                  ALTER TABLE harness_operations DROP COLUMN normalized_request_json;
                  ALTER TABLE harness_operations DROP COLUMN approval_status;
                  ALTER TABLE harness_operations DROP COLUMN approval_synced_at;
@@ -4456,7 +5562,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_registry_is_rejected_for_the_v5_forward_migration_contract() {
+    fn v1_registry_is_rejected_for_the_v6_forward_migration_contract() {
         let root = tempdir().unwrap();
         let path = root.path().join("operations.sqlite3");
         let connection = Connection::open(&path).unwrap();

@@ -291,6 +291,133 @@ fn target_id_execution_is_forwarded_without_a_raw_target_tuple() {
 }
 
 #[test]
+fn redaction_attestation_routes_read_only_and_preserves_only_the_strict_projection() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let response = json!({
+        "schema_version":1,
+        "attestation_contract":"gongbu.flux-redaction-attestation/v1",
+        "allowlist_projection":true,
+        "terminal_execution":true,
+        "registered_provider_secret_resolved":true,
+        "registered_provider_secret_absent_from_scanned_projections":true,
+        "scan":{
+            "logical_database_record_count":4,
+            "artifact_metadata_record_count":1,
+            "public_projection_count":3,
+            "bytes_scanned":4096
+        },
+        "facts":{
+            "authorization_snapshot_count":1,
+            "claim_reference_count":1,
+            "provider_attempt_count":1,
+            "provider_submission_count":1,
+            "durable_checkpoint_count":1,
+            "provider_poll_count":2,
+            "artifact_fetch_count":1,
+            "artifact_count":1,
+            "receipt_count":1,
+            "settlement_delivery_count":1,
+            "authorized_minor":3,
+            "authorization_currency":"USD",
+            "provider_cost_minor":3,
+            "provider_cost_currency":"USD",
+            "settled_minor":3,
+            "settled_currency":"USD",
+            "artifact_content_sha256":digest
+        },
+        "execution_sha256":digest,
+        "artifact_sha256":digest,
+        "settlement_sha256":digest,
+        "combined_projection_sha256":digest
+    })
+    .to_string();
+    let response = Box::leak(response.into_boxed_str());
+    let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", response)]);
+    let result = call_tool(
+        &client(&endpoint, "gongbu-attestation-caller"),
+        "gongbu_get_redaction_attestation",
+        json!({"execution_id":"exec-1"}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("gongbu.flux-redaction-attestation/v1"));
+    assert!(!text.contains("exec-1"));
+    assert!(!text.contains("gongbu-attestation-caller"));
+    assert!(!text.contains("http"));
+    assert!(!text.contains("path"));
+    assert!(!text.contains("operation_key"));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("GET /v1/executions/exec-1/redaction-attestation "));
+}
+
+#[test]
+fn redaction_attestation_rejects_probe_arguments_and_unsanitized_responses() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let result = call_tool(
+        &client(&endpoint, "secret"),
+        "gongbu_get_redaction_attestation",
+        json!({"execution_id":"exec-1","candidate":"secret-canary"}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], true);
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let mut response = json!({
+        "schema_version":1,
+        "attestation_contract":"gongbu.flux-redaction-attestation/v1",
+        "allowlist_projection":true,
+        "terminal_execution":true,
+        "registered_provider_secret_resolved":true,
+        "registered_provider_secret_absent_from_scanned_projections":true,
+        "scan":{"logical_database_record_count":4,"artifact_metadata_record_count":1,"public_projection_count":3,"bytes_scanned":4096},
+        "facts":{"authorization_snapshot_count":1,"claim_reference_count":1,"provider_attempt_count":1,"provider_submission_count":1,"durable_checkpoint_count":1,"provider_poll_count":2,"artifact_fetch_count":1,"artifact_count":1,"receipt_count":1,"settlement_delivery_count":1,"authorized_minor":3,"authorization_currency":"USD","provider_cost_minor":3,"provider_cost_currency":"USD","settled_minor":3,"settled_currency":"USD","artifact_content_sha256":digest},
+        "execution_sha256":digest,
+        "artifact_sha256":digest,
+        "settlement_sha256":digest,
+        "combined_projection_sha256":digest
+    });
+    let mut detected = response.clone();
+    detected["registered_provider_secret_absent_from_scanned_projections"] = json!(false);
+    let detected = Box::leak(detected.to_string().into_boxed_str());
+    let (endpoint, _) = mock_server(vec![("200 OK", "application/json", detected)]);
+    let result = call_tool(
+        &client(&endpoint, "secret"),
+        "gongbu_get_redaction_attestation",
+        json!({"execution_id":"exec-1"}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], true);
+    assert!(result.to_string().contains("invalid_response"));
+
+    response["execution_id"] = json!("exec-secret");
+    response["storage_path"] = json!("/private/secret");
+    let response = Box::leak(response.to_string().into_boxed_str());
+    let (endpoint, _) = mock_server(vec![("200 OK", "application/json", response)]);
+    let result = call_tool(
+        &client(&endpoint, "secret"),
+        "gongbu_get_redaction_attestation",
+        json!({"execution_id":"exec-1"}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], true);
+    assert!(result.to_string().contains("invalid_response"));
+    assert!(!result.to_string().contains("exec-secret"));
+    assert!(!result.to_string().contains("/private/secret"));
+}
+
+#[test]
 fn create_keeps_private_operation_identity_internal() {
     let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", EXECUTION)]);
     let result = call_tool(
@@ -315,7 +442,7 @@ fn create_keeps_private_operation_identity_internal() {
 
 #[test]
 fn durable_observation_returns_only_validated_gongbu_timing() {
-    let response = r#"{"schema_version":1,"execution_id":"exec-1","operation_key":"op-1","status":"succeeded","outcome":"succeeded","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"2026-08-05T00:00:00Z","updated_at":"2026-08-05T00:00:04Z","started_at":"2026-08-05T00:00:00.100Z","completed_at":"2026-08-05T00:00:04Z","timing":{"schema_version":1,"scope":"gongbu_execution","execution_total_ms":4000,"provider_interaction_ms":3500,"non_provider_ms":500}}"#;
+    let response = r#"{"schema_version":1,"execution_id":"exec-1","operation_key":"op-1","status":"succeeded","outcome":"succeeded","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"2026-08-05T00:00:00Z","updated_at":"2026-08-05T00:00:04Z","started_at":"2026-08-05T00:00:00.100Z","completed_at":"2026-08-05T00:00:04Z","timing":{"schema_version":1,"scope":"gongbu_execution","execution_total_ms":4000,"provider_interaction_ms":3500,"non_provider_ms":500},"provider_transport":{"schema_version":1,"poll_count":2,"artifact_fetch_count":1}}"#;
     let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", response)]);
     let mut expected = continuation();
     expected.execution_id = Some("exec-1".into());
@@ -330,6 +457,9 @@ fn durable_observation_returns_only_validated_gongbu_timing() {
     assert_eq!(observed.execution_total_ms, Some(4_000));
     assert_eq!(observed.provider_interaction_ms, Some(3_500));
     assert_eq!(observed.non_provider_ms, Some(500));
+    let provider_transport = observed.provider_transport.unwrap();
+    assert_eq!(provider_transport.poll_count, 2);
+    assert_eq!(provider_transport.artifact_fetch_count, 1);
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].starts_with("GET /v1/executions/exec-1 "));

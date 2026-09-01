@@ -309,6 +309,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     let manual_reconciliation_token_file =
         take_value(&mut args, "--reconciliation-token-file").map(PathBuf::from);
     let manual_operation_state_path = take_value(&mut args, "--mcp-state-file").map(PathBuf::from);
+    let operation_key_db = take_value(&mut args, "--operation-key-db").map(PathBuf::from);
     if stack_profile.is_some()
         && (manual_mcp_server.is_some()
             || manual_gongbu_endpoint.is_some()
@@ -404,6 +405,15 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         })?
     };
     let operation_state_path = absolute_path(&operation_state_path)?;
+    let operation_key_db = operation_key_db
+        .map(|path| {
+            if !path.is_absolute() {
+                bail!("--operation-key-db requires an absolute private path");
+            }
+            Ok(path)
+        })
+        .transpose()
+        .context("resolve preallocated operation-key database path")?;
     let gongbu_token_file = gongbu_token_file
         .as_deref()
         .map(|path| {
@@ -426,6 +436,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         approval_token_file: &approval_token_file,
         reconciliation_token_file: &reconciliation_token_file,
         operation_state_path: &operation_state_path,
+        operation_key_db: operation_key_db.as_deref(),
         gongbu: gongbu_endpoint.as_deref().zip(gongbu_token_file.as_deref()),
         trust_client_approval,
     });
@@ -449,6 +460,9 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         reconciliation_token_file.display()
     );
     println!("  mcp_state_file: {}", operation_state_path.display());
+    if let Some(operation_key_db) = &operation_key_db {
+        println!("  operation_key_db: {}", operation_key_db.display());
+    }
     if let Some(profile) = &stack_profile {
         println!("  stack_profile: {}", profile.display());
         println!("  backends: keep the rendered profile's Hubu and Gongbu services running");
@@ -3511,7 +3525,7 @@ fn print_init_help() {
 
 Usage:
   hubu init [--policy FILE] [--force]
-  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
@@ -3532,7 +3546,7 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
@@ -3544,6 +3558,7 @@ Options:
   --reconciliation-token-file FILE
                              Separate human reconciliation capability file (default: beside --token-file)
   --mcp-state-file FILE      Durable unified MCP operation registry (default: $HUBU_UNIFIED_OPERATION_STATE_PATH or beside --token-file)
+  --operation-key-db FILE    Absolute private helper database for explicitly authorized, preallocated billable operation keys
   --gongbu-endpoint URL     Optional Gongbu backend URL for the unified entry
   --gongbu-token-file FILE  Gongbu bearer token file; required with --gongbu-endpoint
   --force                   Replace an existing unmanaged [mcp_servers.hubu] config block
@@ -3552,6 +3567,7 @@ Options:
 
 Notes:
   Hubu spend tools are pre-approved in Codex; Hubu policy still controls needs_approval outcomes.
+  Omit --operation-key-db until a guarded workflow requires the key-redacted preallocation bridge. The option configures only a non-secret path and never creates or reads a key.
   The command writes the only supported agent-facing surface, hubu-unified-mcp.
   Keep --trust-client-approval off for normal agent spend workflows.
   Use --trust-client-approval only when you want to ask Codex to perform setup/admin actions behind a human approval prompt.
@@ -3559,6 +3575,7 @@ Notes:
 
 Examples:
   hubu init codex --token-file ~/.hubu/hubu.auth-token
+  hubu init codex --operation-key-db /absolute/private/operation-keys.sqlite3 --dry-run
   hubu init codex --trust-client-approval
   hubu init codex --dry-run"
     );

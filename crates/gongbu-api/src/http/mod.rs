@@ -4,6 +4,7 @@
 //! the method/path/body here. Execution identity comes only from Hubu authorization.
 use crate::{
     artifacts::{ArtifactService, Error as ArtifactError},
+    attestation::{AttestationError, RedactionAttestor},
     execution_scope::{for_target, ExecutionScope},
     hubu::{HttpClientError, SpendAuthorizationResolver},
     persistence::{
@@ -129,6 +130,15 @@ pub struct ExecutionResponse {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub timing: ExecutionTimingResponse,
+    pub provider_transport: ProviderTransportResponse,
+}
+
+/// Agent-safe durable counts of provider-boundary transport calls.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProviderTransportResponse {
+    pub schema_version: u32,
+    pub poll_count: u64,
+    pub artifact_fetch_count: u64,
 }
 
 /// Agent-safe elapsed time derived from Gongbu-owned durable timestamps.
@@ -270,6 +280,13 @@ impl ApiError {
             "operation key was already used with different immutable input",
         )
     }
+    fn attestation_not_ready() -> Self {
+        Self::new(
+            409,
+            "attestation_not_ready",
+            "execution is not ready for redaction attestation",
+        )
+    }
     fn internal() -> Self {
         Self::new(500, "internal_error", "request could not be completed")
     }
@@ -300,6 +317,7 @@ pub struct Api {
     now: Arc<dyn Fn() -> String + Send + Sync>,
     maximum_spend_minor: i64,
     authorization_resolver: Option<Arc<dyn SpendAuthorizationResolver + Send + Sync>>,
+    redaction_attestor: Option<RedactionAttestor>,
 }
 
 impl Api {
@@ -329,6 +347,7 @@ impl Api {
             now: Arc::new(now),
             maximum_spend_minor,
             authorization_resolver: None,
+            redaction_attestor: None,
         }
     }
 
@@ -349,7 +368,23 @@ impl Api {
             now: Arc::new(now),
             maximum_spend_minor,
             authorization_resolver: Some(authorization_resolver),
+            redaction_attestor: None,
         }
+    }
+
+    /// Enable the production, execution-bound redaction attestation path with
+    /// the same Gongbu-owned credential provider used by execution activities.
+    pub fn with_redaction_attestation_secrets(
+        mut self,
+        secrets: Arc<dyn crate::secrets::SecretProvider>,
+    ) -> Self {
+        self.redaction_attestor = Some(RedactionAttestor::new(
+            self.repository.clone(),
+            self.artifacts.clone(),
+            self.providers.clone(),
+            secrets,
+        ));
+        self
     }
 
     pub fn handle(
@@ -375,6 +410,14 @@ impl Api {
                     }
                     ("GET", ["v1", "executions", execution_id, "artifacts"]) => {
                         self.list_artifacts(caller, execution_id)
+                    }
+                    ("GET", ["v1", "executions", execution_id, "redaction-attestation"])
+                        if body.is_empty() =>
+                    {
+                        self.redaction_attestation(caller, execution_id)
+                    }
+                    ("GET", ["v1", "executions", _, "redaction-attestation"]) => {
+                        Err(ApiError::validation())
                     }
                     ("GET", ["v1", "artifacts", artifact_id]) => {
                         self.get_artifact(caller, artifact_id)
@@ -727,6 +770,60 @@ impl Api {
         ))
     }
 
+    fn redaction_attestation(
+        &self,
+        caller: &AuthenticatedCaller,
+        execution_id: &str,
+    ) -> Result<HttpResponse, ApiError> {
+        let attestor = self
+            .redaction_attestor
+            .as_ref()
+            .ok_or_else(ApiError::internal)?;
+        let execution = self.authorized_execution(caller, execution_id)?;
+        let artifacts = self
+            .artifacts
+            .list_for_account(execution_id, &execution.account_id)
+            .map_err(map_artifact_error)?;
+        let public_execution =
+            execution_response(&self.repository, execution.clone(), V1_SCHEMA_VERSION)?;
+        // Scan a fixed allowlist of the public execution projection. The
+        // general execution response intentionally contains the private,
+        // caller-bound operation key; it must never become secret-comparison
+        // candidate material for this attestation.
+        let public_execution = json!({
+            "schema_version": public_execution.schema_version,
+            "execution_id": public_execution.execution_id,
+            "status": public_execution.status,
+            "outcome": public_execution.outcome,
+            "failure": public_execution.failure,
+            "authorization": public_execution.authorization,
+            "created_at": public_execution.created_at,
+            "updated_at": public_execution.updated_at,
+            "started_at": public_execution.started_at,
+            "completed_at": public_execution.completed_at,
+            "timing": public_execution.timing,
+            "provider_transport": public_execution.provider_transport,
+        });
+        let public_artifacts = serde_json::to_value(ArtifactListResponse {
+            schema_version: V1_SCHEMA_VERSION,
+            execution_id: execution_id.into(),
+            artifacts: artifacts.into_iter().map(artifact_response).collect(),
+        })
+        .map_err(|_| ApiError::internal())?;
+        let public_catalog = serde_json::to_value(ProviderCatalogResponse {
+            schema_version: V1_SCHEMA_VERSION,
+            profiles: self.providers.supported_profiles().to_vec(),
+        })
+        .map_err(|_| ApiError::internal())?;
+        let attestation = attestor
+            .attest(
+                &execution,
+                &[public_execution, public_artifacts, public_catalog],
+            )
+            .map_err(map_attestation_error)?;
+        Ok(json_response(200, &attestation))
+    }
+
     fn get_artifact(
         &self,
         caller: &AuthenticatedCaller,
@@ -1051,15 +1148,18 @@ fn execution_response(
         Some(execution.created_at.as_str()),
         execution.completed_at.as_deref(),
     );
-    let provider_interaction_ms =
+    let provider_attempt =
         match repository.get_provider_attempt_for_execution(&execution.execution_id) {
-            Ok(attempt) => elapsed_ms(
-                attempt.transmission_started_at.as_deref(),
-                attempt.completed_at.as_deref(),
-            ),
+            Ok(attempt) => Some(attempt),
             Err(PersistenceError::NotFound) => None,
             Err(error) => return Err(map_persistence(error)),
         };
+    let provider_interaction_ms = provider_attempt.as_ref().and_then(|attempt| {
+        elapsed_ms(
+            attempt.transmission_started_at.as_deref(),
+            attempt.completed_at.as_deref(),
+        )
+    });
     let timing = ExecutionTimingResponse {
         schema_version: 1,
         scope: "gongbu_execution".into(),
@@ -1085,6 +1185,15 @@ fn execution_response(
         started_at: execution.started_at,
         completed_at: execution.completed_at,
         timing,
+        provider_transport: ProviderTransportResponse {
+            schema_version: 1,
+            poll_count: provider_attempt
+                .as_ref()
+                .map_or(0, |attempt| attempt.provider_poll_count),
+            artifact_fetch_count: provider_attempt
+                .as_ref()
+                .map_or(0, |attempt| attempt.artifact_fetch_count),
+        },
     })
 }
 
@@ -1120,6 +1229,15 @@ fn map_persistence(error: PersistenceError) -> ApiError {
             ApiError::validation()
         }
         _ => ApiError::internal(),
+    }
+}
+
+fn map_attestation_error(error: AttestationError) -> ApiError {
+    match error {
+        AttestationError::NotFound => ApiError::not_found(),
+        AttestationError::NotReady => ApiError::attestation_not_ready(),
+        AttestationError::UnsupportedTarget => ApiError::validation(),
+        AttestationError::SecretUnavailable | AttestationError::Internal => ApiError::internal(),
     }
 }
 
@@ -1175,16 +1293,16 @@ mod tests {
     use super::*;
     use crate::{
         artifacts::{ArtifactLimits, LocalFsStorage},
-        execution::{AttemptResult, ExecutionUpdate},
+        execution::{AttemptResult, CreateReceiptParams, ExecutionUpdate, LifecycleOutcome},
         provider::{
             contract::{
-                AdapterCapabilities, AdapterOutcome, PricingCatalog, ProviderAdapter,
-                ProviderFailure,
+                ActualVendorCost, AdapterCapabilities, AdapterOutcome, AsyncProviderOperation,
+                NormalizedUsage, PricingCatalog, ProviderAdapter, ProviderFailure,
             },
             registry::ProviderRegistry,
         },
         provider_targets::ProviderTargetConfig,
-        secrets::ProviderSecret,
+        secrets::{ProviderSecret, SecretError, SecretProvider, SecretReference},
     };
     use image::{DynamicImage, ImageOutputFormat, RgbaImage};
     use serde_json::json;
@@ -1216,6 +1334,16 @@ mod tests {
             _: Option<&str>,
         ) -> Result<AdapterOutcome, ProviderFailure> {
             unreachable!("HTTP admission does not invoke providers")
+        }
+    }
+
+    struct AttestationSecrets(&'static str);
+
+    impl SecretProvider for AttestationSecrets {
+        fn resolve(&self, reference: &SecretReference) -> Result<ProviderSecret, SecretError> {
+            assert_eq!(reference.service(), "gongbu.bfl.hubu-hub-172");
+            assert_eq!(reference.account(), "pikachu-live-qualification-v1");
+            Ok(crate::secrets::secret_for_test(self.0))
         }
     }
 
@@ -1319,6 +1447,19 @@ mod tests {
             }
             if spend_auth_token_id.starts_with("flux-") {
                 response.execution_scope = for_target("flux", "flux2_api");
+            }
+            if spend_auth_token_id.starts_with("flux-managed-") {
+                response.amount_cents = 3;
+                response.budget_hold.amount_cents = 3;
+                response.budget_hold.frozen_amount_cents = 3;
+                response.expires_at = "2026-08-28T21:00:00Z".into();
+            }
+            if spend_auth_token_id == "flux-managed-hub-172-attestation" {
+                response.operation_key = "codex:v1:11111111111111111111111111111111".into();
+                response.reason = "HUB-172 guarded FLUX live qualification: one 1k PNG.".into();
+                response.account_id = "aga_n063sdm0pepd".into();
+                response.agent_id = "agt_wk3q33h3j6w8".into();
+                response.task_id = None;
             }
             Ok(response)
         }
@@ -1440,8 +1581,8 @@ mod tests {
         .unwrap();
         let profile = &document["profiles"][0];
         let mut target = profile["target"].clone();
-        target["secret_service"] = json!("gongbu.bfl");
-        target["secret_account"] = json!("operator");
+        target["secret_service"] = json!("gongbu.bfl.hubu-hub-172");
+        target["secret_account"] = json!("pikachu-live-qualification-v1");
         let policies = &profile["policies"];
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 3,
@@ -1508,6 +1649,379 @@ mod tests {
         )
     }
 
+    fn successful_hub_172_attestation_execution(
+        fixture: &Fixture,
+        secret: &'static str,
+        provider_request_id: &str,
+    ) -> (Api, String) {
+        let api = supported_flux_attestation_api(fixture, secret);
+        let mut request = flux_request(
+            "flux-managed-hub-172-attestation",
+            Some("1k"),
+            Some(json!({"output_format":"png"})),
+        );
+        request["input"]["prompt"] =
+            json!("A small blue circle centered on a plain white background.");
+        let created = execution(&api.handle(
+            "POST",
+            "/v2/executions",
+            Some(&fixture.caller),
+            &serde_json::to_vec(&request).unwrap(),
+        ));
+        let preflighting = fixture
+            .repository
+            .update_execution(
+                &created.execution_id,
+                0,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: None,
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-08-28T20:00:01Z",
+            )
+            .unwrap();
+        let claimed = fixture
+            .repository
+            .set_claim(
+                &created.execution_id,
+                preflighting.version,
+                "hub-172-claim",
+                "2026-08-28T20:00:02Z",
+            )
+            .unwrap();
+        let attempt = fixture
+            .repository
+            .start_provider_attempt(&claimed, "2026-08-28T20:00:03Z")
+            .unwrap();
+        fixture
+            .repository
+            .begin_provider_transmission(&attempt.provider_attempt_id, "2026-08-28T20:00:04Z")
+            .unwrap();
+        fixture
+            .repository
+            .record_provider_operation(
+                &attempt.provider_attempt_id,
+                &AsyncProviderOperation {
+                    provider_request_id: Some(provider_request_id.into()),
+                    provider_operation_id: "hub-172-provider-operation".into(),
+                    polling_host: "api.bfl.ai".into(),
+                    deadline_unix_ms: 1_788_000_000_000,
+                },
+                "2026-08-28T20:00:05Z",
+            )
+            .unwrap();
+        fixture
+            .repository
+            .record_provider_poll(&attempt.provider_attempt_id)
+            .unwrap();
+        fixture
+            .repository
+            .record_artifact_fetch(&attempt.provider_attempt_id)
+            .unwrap();
+        let vendor_cost = ActualVendorCost::new(3, 2, "USD").unwrap();
+        fixture
+            .repository
+            .complete_provider_attempt(
+                &attempt.provider_attempt_id,
+                &AttemptResult {
+                    outcome: "succeeded".into(),
+                    completed_at: "2026-08-28T20:00:06Z".into(),
+                    usage: serde_json::to_value(NormalizedUsage {
+                        images: Some(1),
+                        input_tokens: None,
+                        output_tokens: None,
+                    })
+                    .unwrap(),
+                    usage_schema_version: 1,
+                    actual_vendor_cost: Some(vendor_cost.clone()),
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_request_id: Some(provider_request_id.into()),
+                    provider_operation_id: Some("hub-172-provider-operation".into()),
+                },
+            )
+            .unwrap();
+        let mut png = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::new(1024, 1024))
+            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .unwrap();
+        fixture
+            .artifacts
+            .store_image(
+                &created.execution_id,
+                Some(&attempt.provider_attempt_id),
+                "image/png",
+                &png,
+                "2026-08-28T20:00:07Z",
+            )
+            .unwrap();
+        let executing = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        let settling = fixture
+            .repository
+            .complete_artifact_persistence(
+                &executing,
+                &attempt.provider_attempt_id,
+                "2026-08-28T20:00:08Z",
+            )
+            .unwrap();
+        let receipt = fixture
+            .repository
+            .create_receipt(&CreateReceiptParams {
+                receipt_id: "hub-172-receipt".into(),
+                execution_id: created.execution_id.clone(),
+                provider_attempt_id: attempt.provider_attempt_id,
+                settlement_minor: 3,
+                currency: "USD".into(),
+                pricing_catalog_version: "bfl-flux-2-pro-usd-2026-08-28-v1".into(),
+                actual_vendor_cost: vendor_cost,
+                created_at: "2026-08-28T20:00:09Z".into(),
+                settled_at: None,
+                hubu_settlement_id: None,
+            })
+            .unwrap();
+        fixture
+            .repository
+            .begin_settlement_transmission(&receipt.receipt_id, "2026-08-28T20:00:10Z")
+            .unwrap();
+        fixture
+            .repository
+            .complete_receipt(
+                &receipt.receipt_id,
+                "hub-172-settlement",
+                "2026-08-28T20:00:11Z",
+            )
+            .unwrap();
+        fixture
+            .repository
+            .update_execution(
+                &created.execution_id,
+                settling.version,
+                &ExecutionUpdate {
+                    status: "succeeded".into(),
+                    outcome: Some("succeeded".into()),
+                    started_at: Some("2026-08-28T20:00:03Z".into()),
+                    completed_at: Some("2026-08-28T20:00:12Z".into()),
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: Some(LifecycleOutcome::Succeeded),
+                    artifact_outcome: Some(LifecycleOutcome::Succeeded),
+                    settlement_outcome: Some(LifecycleOutcome::Succeeded),
+                },
+                "2026-08-28T20:00:12Z",
+            )
+            .unwrap();
+        (api, created.execution_id)
+    }
+
+    fn supported_flux_attestation_api(fixture: &Fixture, secret: &'static str) -> Api {
+        Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            supported_flux_catalog(),
+            fixture.scheduler.clone(),
+            3,
+            fixture.resolver.clone(),
+            || "2026-08-28T20:00:00Z".into(),
+        )
+        .with_redaction_attestation_secrets(Arc::new(AttestationSecrets(secret)))
+    }
+
+    #[test]
+    fn terminal_flux_redaction_attestation_is_strict_and_secret_free() {
+        const CANARY: &str = "fixture-provider-secret-attestation-canary-9f83";
+        let fixture = fixture();
+        let (api, execution_id) =
+            successful_hub_172_attestation_execution(&fixture, CANARY, "hub-172-provider-request");
+
+        let response = api.handle(
+            "GET",
+            &format!("/v1/executions/{execution_id}/redaction-attestation"),
+            Some(&fixture.caller),
+            &[],
+        );
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body).unwrap();
+        assert!(!body.contains(CANARY));
+        assert!(!body.contains(&execution_id));
+        assert!(!body.contains("https://"));
+        assert!(!body.contains("storage_key"));
+        let attestation: crate::attestation::RedactionAttestation =
+            serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            attestation.attestation_contract,
+            "gongbu.flux-redaction-attestation/v1"
+        );
+        assert!(attestation.allowlist_projection);
+        assert!(attestation.terminal_execution);
+        assert!(attestation.registered_provider_secret_resolved);
+        assert!(attestation.registered_provider_secret_absent_from_scanned_projections);
+        assert_eq!(attestation.scan.logical_database_record_count, 4);
+        assert_eq!(attestation.scan.artifact_metadata_record_count, 1);
+        assert_eq!(attestation.scan.public_projection_count, 3);
+        assert_eq!(attestation.facts.authorization_snapshot_count, 1);
+        assert_eq!(attestation.facts.claim_reference_count, 1);
+        assert_eq!(attestation.facts.provider_attempt_count, 1);
+        assert_eq!(attestation.facts.provider_submission_count, 1);
+        assert_eq!(attestation.facts.durable_checkpoint_count, 1);
+        assert_eq!(attestation.facts.provider_poll_count, 1);
+        assert_eq!(attestation.facts.artifact_fetch_count, 1);
+        assert_eq!(attestation.facts.artifact_count, 1);
+        assert_eq!(attestation.facts.receipt_count, 1);
+        assert_eq!(attestation.facts.settlement_delivery_count, 1);
+        assert_eq!(attestation.facts.authorized_minor, 3);
+        assert_eq!(attestation.facts.authorization_currency, "USD");
+        assert_eq!(attestation.facts.provider_cost_minor, Some(3));
+        assert_eq!(
+            attestation.facts.provider_cost_currency.as_deref(),
+            Some("USD")
+        );
+        assert_eq!(attestation.facts.settled_minor, Some(3));
+        assert_eq!(attestation.facts.settled_currency.as_deref(), Some("USD"));
+        for digest in [
+            &attestation.execution_sha256,
+            &attestation.artifact_sha256,
+            &attestation.settlement_sha256,
+            &attestation.combined_projection_sha256,
+            &attestation.facts.artifact_content_sha256,
+        ] {
+            assert_eq!(digest.len(), 71);
+            assert!(digest
+                .strip_prefix("sha256:")
+                .is_some_and(|value| value.bytes().all(|byte| byte.is_ascii_hexdigit())));
+        }
+    }
+
+    #[test]
+    fn caller_bound_operation_key_is_not_secret_probe_material() {
+        const OPERATION_KEY: &str = "codex:v1:11111111111111111111111111111111";
+        let fixture = fixture();
+        let (api, execution_id) = successful_hub_172_attestation_execution(
+            &fixture,
+            OPERATION_KEY,
+            "hub-172-provider-request",
+        );
+        let response = api.handle(
+            "GET",
+            &format!("/v1/executions/{execution_id}/redaction-attestation"),
+            Some(&fixture.caller),
+            &[],
+        );
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body).unwrap();
+        assert!(!body.contains(OPERATION_KEY));
+        let attestation: crate::attestation::RedactionAttestation =
+            serde_json::from_str(&body).unwrap();
+        assert!(attestation.registered_provider_secret_absent_from_scanned_projections);
+    }
+
+    #[test]
+    fn registered_secret_detection_fails_closed_without_echoing_the_canary() {
+        const CANARY: &str = "fixture-provider-secret-attestation-canary-9f83";
+        let fixture = fixture();
+        let (api, execution_id) =
+            successful_hub_172_attestation_execution(&fixture, CANARY, CANARY);
+        let response = api.handle(
+            "GET",
+            &format!("/v1/executions/{execution_id}/redaction-attestation"),
+            Some(&fixture.caller),
+            &[],
+        );
+        assert_eq!(response.status, 500);
+        let body = String::from_utf8(response.body).unwrap();
+        assert!(!body.contains(CANARY));
+        assert!(!body.contains(&execution_id));
+        assert!(!body.contains("secret"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()["error"]["code"],
+            "internal_error"
+        );
+    }
+
+    #[test]
+    fn redaction_attestation_rejects_body_nonterminal_and_unfrozen_catalog() {
+        const CANARY: &str = "fixture-provider-secret-attestation-canary-9f83";
+        let fixture = fixture();
+        let api = supported_flux_attestation_api(&fixture, CANARY);
+        let created = execution(
+            &api.handle(
+                "POST",
+                "/v2/executions",
+                Some(&fixture.caller),
+                &serde_json::to_vec(&flux_request(
+                    "flux-managed-not-ready",
+                    Some("1k"),
+                    Some(json!({"output_format":"png"})),
+                ))
+                .unwrap(),
+            ),
+        );
+        let path = format!(
+            "/v1/executions/{}/redaction-attestation",
+            created.execution_id
+        );
+        assert_eq!(
+            api.handle("GET", &path, Some(&fixture.caller), b"candidate")
+                .status,
+            400
+        );
+        assert_eq!(
+            api.handle("GET", &path, Some(&fixture.caller), &[]).status,
+            409
+        );
+
+        let arbitrary = flux_api(&fixture, "prices-v2")
+            .with_redaction_attestation_secrets(Arc::new(AttestationSecrets(CANARY)));
+        let created = execution(&arbitrary.handle(
+            "POST",
+            "/v2/executions",
+            Some(&fixture.caller),
+            &serde_json::to_vec(&flux_request("flux-arbitrary-profile", Some("1k"), None)).unwrap(),
+        ));
+        fixture
+            .repository
+            .update_execution(
+                &created.execution_id,
+                0,
+                &ExecutionUpdate {
+                    status: "failed".into(),
+                    outcome: Some("failed".into()),
+                    started_at: None,
+                    completed_at: Some("2026-08-05T20:00:01Z".into()),
+                    failure_code: Some("fixture_failure".into()),
+                    failure_message_redacted: Some("safe".into()),
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-08-05T20:00:01Z",
+            )
+            .unwrap();
+        assert_eq!(
+            arbitrary
+                .handle(
+                    "GET",
+                    &format!(
+                        "/v1/executions/{}/redaction-attestation",
+                        created.execution_id
+                    ),
+                    Some(&fixture.caller),
+                    &[],
+                )
+                .status,
+            400
+        );
+    }
+
     #[test]
     fn operator_maximum_spend_rejects_authorization_and_price_before_persistence() {
         let fixture = fixture();
@@ -1531,6 +2045,60 @@ mod tests {
             .repository
             .get_execution_by_operation("account-a", "over-ceiling")
             .is_err());
+    }
+
+    #[test]
+    fn managed_flux_spend_ceiling_rejects_before_authorization_or_persistence() {
+        let fixture = fixture();
+        let control_token = "flux-managed-at-ceiling";
+        let control = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            supported_flux_catalog(),
+            fixture.scheduler.clone(),
+            3,
+            fixture.resolver.clone(),
+            || "2026-08-28T20:00:00Z".into(),
+        );
+        let control_response = control.handle(
+            "POST",
+            "/v2/executions",
+            Some(&fixture.caller),
+            &serde_json::to_vec(&flux_request(control_token, Some("1k"), None)).unwrap(),
+        );
+        assert_eq!(control_response.status, 200);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        assert!(fixture
+            .repository
+            .get_execution_by_spend_auth_token(control_token)
+            .is_ok());
+        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 1);
+
+        let token = "flux-managed-over-ceiling";
+        let api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            supported_flux_catalog(),
+            fixture.scheduler.clone(),
+            2,
+            fixture.resolver.clone(),
+            || "2026-08-28T20:00:00Z".into(),
+        );
+
+        let response = api.handle(
+            "POST",
+            "/v2/executions",
+            Some(&fixture.caller),
+            &serde_json::to_vec(&flux_request(token, Some("1k"), None)).unwrap(),
+        );
+
+        assert_eq!(response.status, 400);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        assert!(fixture
+            .repository
+            .get_execution_by_spend_auth_token(token)
+            .is_err());
+        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -1892,6 +2460,18 @@ mod tests {
             .unwrap();
         fixture
             .repository
+            .record_provider_poll(&attempt.provider_attempt_id)
+            .unwrap();
+        fixture
+            .repository
+            .record_provider_poll(&attempt.provider_attempt_id)
+            .unwrap();
+        fixture
+            .repository
+            .record_artifact_fetch(&attempt.provider_attempt_id)
+            .unwrap();
+        fixture
+            .repository
             .complete_provider_attempt(
                 &attempt.provider_attempt_id,
                 &AttemptResult {
@@ -1941,6 +2521,9 @@ mod tests {
         assert_eq!(response.timing.execution_total_ms, Some(4_000));
         assert_eq!(response.timing.provider_interaction_ms, Some(3_500));
         assert_eq!(response.timing.non_provider_ms, Some(500));
+        assert_eq!(response.provider_transport.schema_version, 1);
+        assert_eq!(response.provider_transport.poll_count, 2);
+        assert_eq!(response.provider_transport.artifact_fetch_count, 1);
     }
 
     #[test]

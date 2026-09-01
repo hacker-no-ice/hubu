@@ -128,7 +128,9 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
     }));
     let artifact_activities = wiring.artifact_activities(base_artifacts);
     let secrets: Arc<dyn SecretProvider> = Arc::new(MacOsKeychain);
-    let provider_activities = wiring.provider.activities(secrets.clone());
+    let provider_activities = wiring
+        .provider
+        .activities(repository.clone(), secrets.clone());
     let hubu_activities = wiring.hubu.activities();
     let hubu_authorizations = wiring.hubu.authorization_resolver();
     let side_effects = start_side_effect_writer(run.root().to_path_buf(), &wiring);

@@ -16,7 +16,7 @@ use futures::{channel::oneshot, future::poll_fn, Future};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 use std::{sync::Arc, time::Duration};
-use temporalio_client::{Client, WorkflowSignalOptions, WorkflowStartOptions};
+use temporalio_client::{tonic::Code, Client, WorkflowSignalOptions, WorkflowStartOptions};
 use temporalio_common_wasm::protos::temporal::api::enums::v1::{
     TaskQueueType, WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
 };
@@ -66,6 +66,37 @@ impl TemporalWorkerConfig {
 /// This is used as both the startup polling proof and the runtime fail-closed
 /// dependency check.
 pub async fn worker_is_polling(
+    client: &Client,
+    namespace: &str,
+    task_queue: &str,
+) -> Result<bool, temporalio_client::tonic::Status> {
+    run_worker_poll_probe(|| describe_worker_pollers(client, namespace, task_queue)).await
+}
+
+async fn run_worker_poll_probe<F, Fut>(
+    mut probe: F,
+) -> Result<bool, temporalio_client::tonic::Status>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<bool, temporalio_client::tonic::Status>>,
+{
+    let result = probe().await;
+    // DescribeTaskQueue is a normal RPC, so Temporal client 0.6 forwards a
+    // plain transport-rotation cancellation without retrying it. Confirm that
+    // one inconclusive result exactly once so a known one-off rotation does not
+    // enter dependency degradation. The confirmation is authoritative; the
+    // runtime health state machine bounds an unresolved cancellation while
+    // every proven negative or other error remains immediately fail-closed.
+    if result
+        .as_ref()
+        .is_err_and(|error| error.code() == Code::Cancelled)
+    {
+        return probe().await;
+    }
+    result
+}
+
+async fn describe_worker_pollers(
     client: &Client,
     namespace: &str,
     task_queue: &str,
@@ -1006,6 +1037,103 @@ mod tests {
         replay::{HistoryForReplay, ReplayWorkerInput},
         WorkerVersioningStrategy,
     };
+
+    #[tokio::test]
+    async fn cancelled_worker_poll_probe_requires_one_healthy_confirmation() {
+        let calls = std::cell::Cell::new(0);
+        let mut results = std::collections::VecDeque::from([
+            Err(temporalio_client::tonic::Status::cancelled(
+                "connection rotation",
+            )),
+            Ok(true),
+        ]);
+
+        let result = run_worker_poll_probe(|| {
+            calls.set(calls.get() + 1);
+            futures::future::ready(results.pop_front().expect("bounded probe result"))
+        })
+        .await;
+
+        assert!(result.unwrap());
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_worker_poll_confirmation_preserves_negative_and_error_results() {
+        for (confirmation, expected_code) in [
+            (Ok(false), None),
+            (
+                Err(temporalio_client::tonic::Status::cancelled(
+                    "still cancelled",
+                )),
+                Some(Code::Cancelled),
+            ),
+            (
+                Err(temporalio_client::tonic::Status::unavailable(
+                    "dependency unavailable",
+                )),
+                Some(Code::Unavailable),
+            ),
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let mut results = std::collections::VecDeque::from([
+                Err(temporalio_client::tonic::Status::cancelled(
+                    "connection rotation",
+                )),
+                confirmation,
+            ]);
+
+            let result = run_worker_poll_probe(|| {
+                calls.set(calls.get() + 1);
+                futures::future::ready(results.pop_front().expect("bounded probe result"))
+            })
+            .await;
+
+            match expected_code {
+                Some(code) => assert_eq!(result.unwrap_err().code(), code),
+                None => assert!(!result.unwrap()),
+            }
+            assert_eq!(calls.get(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn proven_negative_and_non_cancelled_errors_are_not_confirmed() {
+        for (initial, expected_code) in [
+            (Ok(false), None),
+            (
+                Err(temporalio_client::tonic::Status::unavailable(
+                    "dependency unavailable",
+                )),
+                Some(Code::Unavailable),
+            ),
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let mut results = std::collections::VecDeque::from([initial]);
+
+            let result = run_worker_poll_probe(|| {
+                calls.set(calls.get() + 1);
+                futures::future::ready(results.pop_front().expect("unexpected confirmation"))
+            })
+            .await;
+
+            match expected_code {
+                Some(code) => assert_eq!(result.unwrap_err().code(), code),
+                None => assert!(!result.unwrap()),
+            }
+            assert_eq!(calls.get(), 1);
+        }
+
+        let calls = std::cell::Cell::new(0);
+        let mut results = std::collections::VecDeque::from([Ok(true)]);
+        let result = run_worker_poll_probe(|| {
+            calls.set(calls.get() + 1);
+            futures::future::ready(results.pop_front().expect("unexpected confirmation"))
+        })
+        .await;
+        assert!(result.unwrap());
+        assert_eq!(calls.get(), 1);
+    }
 
     struct Runner;
     impl DurableExecutionRunner for Runner {

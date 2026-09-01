@@ -8,6 +8,7 @@ pub(super) enum PreparedCall {
     Create(CreateExecutionRequest),
     GetProviderCatalog,
     GetExecution(String),
+    GetRedactionAttestation(String),
     ListArtifacts(String),
     GetArtifact(String),
 }
@@ -34,6 +35,11 @@ pub(super) fn prepare(name: &str, arguments: Value) -> Result<PreparedCall, Tool
             let input: ExecutionIdInput = parse(arguments)?;
             validate_id(&input.execution_id)?;
             Ok(PreparedCall::GetExecution(input.execution_id))
+        }
+        "gongbu_get_redaction_attestation" => {
+            let input: ExecutionIdInput = parse(arguments)?;
+            validate_id(&input.execution_id)?;
+            Ok(PreparedCall::GetRedactionAttestation(input.execution_id))
         }
         "gongbu_list_artifacts" => {
             let input: ExecutionIdInput = parse(arguments)?;

@@ -11,8 +11,9 @@ use super::{
     response::{
         api_error, artifact_result, execution_result, execution_target_catalog_result,
         scrub_artifact_metadata, text_result, ApiErrorContext, ArtifactListResponse,
-        ExecutionResponse, ExecutionTargetCatalogResponse, ProviderCatalogResponse, ToolError,
-        ToolErrorClass, ToolResult, EXECUTION_V1_SCHEMA_VERSION, EXECUTION_V2_SCHEMA_VERSION,
+        ExecutionResponse, ExecutionTargetCatalogResponse, ProviderCatalogResponse,
+        RedactionAttestationResponse, ToolError, ToolErrorClass, ToolResult,
+        EXECUTION_V1_SCHEMA_VERSION, EXECUTION_V2_SCHEMA_VERSION,
     },
     AdmissionDiagnostic,
 };
@@ -31,6 +32,7 @@ pub(crate) struct DurableExecutionObservation {
     pub(crate) execution_total_ms: Option<u64>,
     pub(crate) provider_interaction_ms: Option<u64>,
     pub(crate) non_provider_ms: Option<u64>,
+    pub(crate) provider_transport: Option<super::response::ProviderTransport>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -125,6 +127,7 @@ pub(super) fn fetch_durable_execution_observation(
         None,
     )?;
     let timing = response.timing();
+    let provider_transport = response.provider_transport();
     let (_, lifecycle) = execution_result(
         response,
         Some(expected),
@@ -136,6 +139,7 @@ pub(super) fn fetch_durable_execution_observation(
         execution_total_ms: timing.execution_total_ms,
         provider_interaction_ms: timing.provider_interaction_ms,
         non_provider_ms: timing.non_provider_ms,
+        provider_transport,
     })
 }
 
@@ -189,6 +193,16 @@ fn execute(
                 EXECUTION_V1_SCHEMA_VERSION,
             )?;
             Ok((result, expected.map(|_| lifecycle)))
+        }
+        PreparedCall::GetRedactionAttestation(execution_id) => {
+            let response: RedactionAttestationResponse = json_request::<Value, _>(
+                client,
+                Method::GET,
+                &format!("v1/executions/{execution_id}/redaction-attestation"),
+                None,
+            )?;
+            response.validate()?;
+            Ok((text_result(&response), None))
         }
         PreparedCall::ListArtifacts(execution_id) => {
             let mut response: ArtifactListResponse = json_request::<Value, _>(

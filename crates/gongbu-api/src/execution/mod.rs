@@ -221,6 +221,8 @@ pub struct ProviderAttempt {
     pub provider_polling_host: Option<String>,
     pub provider_deadline_unix_ms: Option<i64>,
     pub operation_checkpointed_at: Option<String>,
+    pub provider_poll_count: u64,
+    pub artifact_fetch_count: u64,
     pub outcome: String,
     pub usage: Option<Value>,
     pub usage_schema_version: Option<i64>,
@@ -348,6 +350,7 @@ impl Repository {
         migrate_execution_scope_column(&c)?;
         migrate_precise_vendor_cost_columns(&c)?;
         migrate_provider_operation_checkpoint_columns(&c)?;
+        migrate_provider_transport_counter_columns(&c)?;
         Ok(Self(Arc::new(Mutex::new(c)), redactor))
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
@@ -701,6 +704,8 @@ impl Repository {
             provider_polling_host: None,
             provider_deadline_unix_ms: None,
             operation_checkpointed_at: None,
+            provider_poll_count: 0,
+            artifact_fetch_count: 0,
             outcome: "started".into(),
             usage: None,
             usage_schema_version: None,
@@ -750,6 +755,35 @@ impl Repository {
     }
     pub fn begin_provider_transmission(&self, attempt_id: &str, at: &str) -> Result<()> {
         let changed=self.0.lock().unwrap().execute("UPDATE provider_attempts SET transmission_started_at=?1 WHERE provider_attempt_id=?2 AND transmission_started_at IS NULL AND completed_at IS NULL",params![at,attempt_id])?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(Error::Stale)
+        }
+    }
+    /// Durably record entry into one provider poll transport call. The update
+    /// precedes the transport invocation, so a worker crash can never make an
+    /// attempted provider interaction disappear from recovery evidence.
+    pub fn record_provider_poll(&self, attempt_id: &str) -> Result<()> {
+        self.increment_provider_transport_counter(attempt_id, "provider_poll_count")
+    }
+
+    /// Durably record entry into one provider artifact-fetch transport call.
+    pub fn record_artifact_fetch(&self, attempt_id: &str) -> Result<()> {
+        self.increment_provider_transport_counter(attempt_id, "artifact_fetch_count")
+    }
+
+    fn increment_provider_transport_counter(
+        &self,
+        attempt_id: &str,
+        column: &'static str,
+    ) -> Result<()> {
+        let changed = self.0.lock().unwrap().execute(
+            &format!(
+                "UPDATE provider_attempts SET {column}={column}+1 WHERE provider_attempt_id=?1 AND outcome='started' AND completed_at IS NULL AND transmission_started_at IS NOT NULL AND {column}<9223372036854775807"
+            ),
+            [attempt_id],
+        )?;
         if changed == 1 {
             Ok(())
         } else {
@@ -1009,15 +1043,26 @@ impl Repository {
         &self,
         execution_id: &str,
     ) -> Result<ProviderAttempt> {
-        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,provider_polling_host,provider_deadline_unix_ms,operation_checkpointed_at,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
-            let usage: Option<String> = r.get(9)?;
-            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, provider_polling_host:r.get(5)?, provider_deadline_unix_ms:r.get(6)?, operation_checkpointed_at:r.get(7)?, outcome:r.get(8)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(10)?, actual_vendor_cost:actual_vendor_cost_from_row(r,11,12,13)?, failure_code:r.get(14)?, failure_message_redacted:r.get(15)?, started_at:r.get(16)?, transmission_started_at:r.get(17)?, completed_at:r.get(18)? })
+        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,provider_polling_host,provider_deadline_unix_ms,operation_checkpointed_at,provider_poll_count,artifact_fetch_count,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
+            let usage: Option<String> = r.get(11)?;
+            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, provider_polling_host:r.get(5)?, provider_deadline_unix_ms:r.get(6)?, operation_checkpointed_at:r.get(7)?, provider_poll_count:r.get(8)?, artifact_fetch_count:r.get(9)?, outcome:r.get(10)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(12)?, actual_vendor_cost:actual_vendor_cost_from_row(r,13,14,15)?, failure_code:r.get(16)?, failure_message_redacted:r.get(17)?, started_at:r.get(18)?, transmission_started_at:r.get(19)?, completed_at:r.get(20)? })
         }).optional()?.ok_or(Error::NotFound)
     }
+    pub fn count_provider_attempts_for_execution(&self, execution_id: &str) -> Result<u64> {
+        self.0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM provider_attempts WHERE execution_id=?1",
+                [execution_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
     pub fn get_provider_attempt(&self, provider_attempt_id: &str) -> Result<ProviderAttempt> {
-        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,provider_polling_host,provider_deadline_unix_ms,operation_checkpointed_at,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE provider_attempt_id=?1", [provider_attempt_id], |r| {
-            let usage: Option<String> = r.get(9)?;
-            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, provider_polling_host:r.get(5)?, provider_deadline_unix_ms:r.get(6)?, operation_checkpointed_at:r.get(7)?, outcome:r.get(8)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(10)?, actual_vendor_cost:actual_vendor_cost_from_row(r,11,12,13)?, failure_code:r.get(14)?, failure_message_redacted:r.get(15)?, started_at:r.get(16)?, transmission_started_at:r.get(17)?, completed_at:r.get(18)? })
+        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,provider_polling_host,provider_deadline_unix_ms,operation_checkpointed_at,provider_poll_count,artifact_fetch_count,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE provider_attempt_id=?1", [provider_attempt_id], |r| {
+            let usage: Option<String> = r.get(11)?;
+            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, provider_polling_host:r.get(5)?, provider_deadline_unix_ms:r.get(6)?, operation_checkpointed_at:r.get(7)?, provider_poll_count:r.get(8)?, artifact_fetch_count:r.get(9)?, outcome:r.get(10)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(12)?, actual_vendor_cost:actual_vendor_cost_from_row(r,13,14,15)?, failure_code:r.get(16)?, failure_message_redacted:r.get(17)?, started_at:r.get(18)?, transmission_started_at:r.get(19)?, completed_at:r.get(20)? })
         }).optional()?.ok_or(Error::NotFound)
     }
     pub fn create_artifact(&self, n: &CreateArtifactParams) -> Result<Artifact> {
@@ -1634,6 +1679,25 @@ fn migrate_provider_operation_checkpoint_columns(c: &Connection) -> rusqlite::Re
     Ok(())
 }
 
+fn migrate_provider_transport_counter_columns(c: &Connection) -> rusqlite::Result<()> {
+    let mut statement = c.prepare("PRAGMA table_info(provider_attempts)")?;
+    let existing: std::collections::BTreeSet<String> = statement
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(statement);
+    for name in ["provider_poll_count", "artifact_fetch_count"] {
+        if !existing.contains(name) {
+            c.execute(
+                &format!(
+                    "ALTER TABLE provider_attempts ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0 CHECK({name}>=0)"
+                ),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn actual_vendor_cost_from_row(
     row: &rusqlite::Row<'_>,
     amount_index: usize,
@@ -2167,13 +2231,13 @@ mod tests {
         );
         assert_eq!(reconciliation.automatic_attempts, 2);
         assert!(reconciliation.automatic_attempts_exhausted);
+        let legacy_attempt = repository.get_provider_attempt("legacy-attempt").unwrap();
         assert_eq!(
-            repository
-                .get_provider_attempt("legacy-attempt")
-                .unwrap()
-                .actual_vendor_cost,
+            legacy_attempt.actual_vendor_cost,
             Some(ActualVendorCost::new(7, 2, "USD").unwrap())
         );
+        assert_eq!(legacy_attempt.provider_poll_count, 0);
+        assert_eq!(legacy_attempt.artifact_fetch_count, 0);
         let legacy_receipt = repository
             .get_receipt_for_execution("legacy-reconciliation")
             .unwrap();
@@ -2776,6 +2840,83 @@ mod tests {
             Some(operation)
         );
         assert_eq!(restarted.count("provider_attempts"), 1);
+    }
+
+    #[test]
+    fn provider_transport_counters_are_monotonic_restart_durable_and_terminal_safe() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("provider-transport.sqlite3");
+        let repository = Repository::open(&path, Redactor::default()).unwrap();
+        let mut params = new("account", "transport-counters");
+        params.hubu_claim_id = None;
+        let pending = repository.create_execution(&params).unwrap();
+        let preflighting = repository
+            .update_execution(
+                &pending.execution_id,
+                pending.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: None,
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-08-05T20:00:01Z",
+            )
+            .unwrap();
+        let claimed = repository
+            .set_claim(
+                &preflighting.execution_id,
+                preflighting.version,
+                "claim-transport-counters",
+                "2026-08-05T20:00:02Z",
+            )
+            .unwrap();
+        let attempt_id = repository
+            .start_provider_attempt(&claimed, "2026-08-05T20:00:03Z")
+            .unwrap()
+            .provider_attempt_id;
+
+        assert!(matches!(
+            repository.record_provider_poll(&attempt_id),
+            Err(Error::Stale)
+        ));
+        let pretransmission = repository.get_provider_attempt(&attempt_id).unwrap();
+        assert_eq!(pretransmission.provider_poll_count, 0);
+        assert_eq!(pretransmission.artifact_fetch_count, 0);
+        repository
+            .begin_provider_transmission(&attempt_id, "2026-08-05T20:00:04Z")
+            .unwrap();
+
+        repository.record_provider_poll(&attempt_id).unwrap();
+        repository.record_provider_poll(&attempt_id).unwrap();
+        repository.record_artifact_fetch(&attempt_id).unwrap();
+        let before_restart = repository.get_provider_attempt(&attempt_id).unwrap();
+        assert_eq!(before_restart.provider_poll_count, 2);
+        assert_eq!(before_restart.artifact_fetch_count, 1);
+        drop(repository);
+
+        let restarted = Repository::open(&path, Redactor::default()).unwrap();
+        let recovered = restarted.get_provider_attempt(&attempt_id).unwrap();
+        assert_eq!(recovered.provider_poll_count, 2);
+        assert_eq!(recovered.artifact_fetch_count, 1);
+        restarted.record_provider_poll(&attempt_id).unwrap();
+        let cumulative = restarted.get_provider_attempt(&attempt_id).unwrap();
+        assert_eq!(cumulative.provider_poll_count, 3);
+        assert_eq!(cumulative.artifact_fetch_count, 1);
+
+        complete_success(&restarted, &attempt_id);
+        assert!(matches!(
+            restarted.record_artifact_fetch(&attempt_id),
+            Err(Error::Stale)
+        ));
+        let terminal = restarted.get_provider_attempt(&attempt_id).unwrap();
+        assert_eq!(terminal.provider_poll_count, 3);
+        assert_eq!(terminal.artifact_fetch_count, 1);
     }
 
     #[test]

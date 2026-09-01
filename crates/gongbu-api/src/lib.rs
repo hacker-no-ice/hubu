@@ -2,6 +2,7 @@
 
 pub mod application;
 pub mod artifact;
+pub mod attestation;
 pub mod config;
 pub mod execution;
 pub mod execution_scope;

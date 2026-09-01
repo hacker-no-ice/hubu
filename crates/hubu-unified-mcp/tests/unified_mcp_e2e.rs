@@ -1,7 +1,8 @@
 mod support;
 
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::{
     thread,
     time::{Duration, Instant},
@@ -82,6 +83,465 @@ fn routing_fixture() -> Value {
         "../../../fixtures/unified-mcp-routing-v1.json"
     ))
     .unwrap()
+}
+
+fn canonicalize_fixture(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.iter().map(canonicalize_fixture).collect()),
+        Value::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            let mut canonical = Map::new();
+            for key in keys {
+                canonical.insert(key.clone(), canonicalize_fixture(&values[key]));
+            }
+            Value::Object(canonical)
+        }
+        value => value.clone(),
+    }
+}
+
+fn canonical_request_hash_fixture(tool_name: &str, arguments: &Value) -> String {
+    let mut digest = Sha256::new();
+    digest.update(tool_name.as_bytes());
+    digest.update([0]);
+    digest.update(serde_json::to_vec(&canonicalize_fixture(arguments)).unwrap());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn preallocated_binding_fixture(
+    installation_id: &str,
+    call_id: &str,
+    tool_name: &str,
+    arguments: &Value,
+) -> String {
+    let projection = canonicalize_fixture(&json!({
+        "schema_version": 1,
+        "installation_id": installation_id,
+        "platform": "codex",
+        "harness_call_id": call_id,
+        "request_hash": canonical_request_hash_fixture(tool_name, arguments),
+    }));
+    format!(
+        "hubu:preallocated-binding:v1:{:x}",
+        Sha256::digest(serde_json::to_vec(&projection).unwrap())
+    )
+}
+
+fn governed_observation_without_timing(response: &Value) -> Value {
+    let mut projection = response["result"]["structuredContent"].clone();
+    projection
+        .as_object_mut()
+        .expect("governed structured content")
+        .remove("timing");
+    projection
+}
+
+fn create_operation_key_fixture(path: &std::path::Path, arguments: Option<&Value>) {
+    let connection = Connection::open(path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    connection
+        .execute_batch(
+            "CREATE TABLE operations (
+                 record_id TEXT PRIMARY KEY,
+                 operation_key TEXT NOT NULL UNIQUE,
+                 label TEXT NOT NULL,
+                 scope_json TEXT NOT NULL,
+                 scope_sha256 TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 binding_id TEXT UNIQUE,
+                 bound_at TEXT,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    if let Some(arguments) = arguments {
+        let scope = canonicalize_fixture(&json!({
+            "schema_version": 1,
+            "tool_name": "hubu_submit_governed_execution",
+            "arguments": canonicalize_fixture(arguments),
+        }));
+        let scope_json = serde_json::to_string(&scope).unwrap();
+        let scope_sha256 = format!("{:x}", Sha256::digest(scope_json.as_bytes()));
+        connection
+            .execute(
+                "INSERT INTO operations VALUES(
+                     'hop_22222222222222222222222222222222',
+                     'codex:v1:33333333333333333333333333333333',
+                     'fixed process fixture', ?1, ?2, 'active', NULL, NULL,
+                     '2026-08-28T00:00:00Z', '2026-08-28T00:00:00Z'
+                 )",
+                [scope_json, scope_sha256],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn preallocated_operation_key_mismatch_stops_before_backend_traffic() {
+    let root = tempfile::tempdir().unwrap();
+    let state_path = root.path().join("router.sqlite3");
+    let helper_path = root.path().join("operation-keys.sqlite3");
+    create_operation_key_fixture(&helper_path, None);
+
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut mcp = McpProcess::start_with_preallocated_operation_keys(
+        Some((&hubu, HUBU_TOKEN)),
+        Some((&gongbu, GONGBU_TOKEN)),
+        &state_path,
+        &helper_path,
+    );
+    mcp.initialize();
+    let hubu_non_probe_requests = || {
+        hubu.requests()
+            .iter()
+            .filter(|request| !matches!(request.path.as_str(), "/health" | "/version"))
+            .count()
+    };
+    let gongbu_non_probe_requests = || {
+        gongbu
+            .requests()
+            .iter()
+            .filter(|request| !matches!(request.path.as_str(), "/livez" | "/readyz" | "/version"))
+            .count()
+    };
+    let hubu_requests_before = hubu_non_probe_requests();
+    let gongbu_requests_before = gongbu_non_probe_requests();
+    let rejected = mcp.call_with_meta(
+        2,
+        "hubu_submit_governed_execution",
+        json!({
+            "authorization": {
+                "account_id": "account-offline",
+                "amount_cents": 3,
+                "reason": "fixed offline fixture"
+            },
+            "execution": {
+                "schema_version": 2,
+                "input": {"prompt": "fixed offline fixture", "image_count": 1},
+                "input_schema_version": 1,
+                "workload_type": "image_generation",
+                "provider": "fixture",
+                "adapter": "fixture",
+                "model": "fixture-v1"
+            },
+            "max_inline_artifact_bytes": 1024
+        }),
+        json!({"callId": "missing-preallocated-record"}),
+    );
+    assert!(
+        rejected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already bound or invalid"),
+        "unexpected rejection: {rejected}"
+    );
+    assert_eq!(hubu_non_probe_requests(), hubu_requests_before);
+    assert_eq!(gongbu_non_probe_requests(), gongbu_requests_before);
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 0);
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 0);
+    assert_eq!(
+        Connection::open(&state_path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM harness_operations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn preallocated_operation_key_flows_once_through_governed_execution_and_restarts() {
+    let root = tempfile::tempdir().unwrap();
+    let state_path = root.path().join("router.sqlite3");
+    let helper_path = root.path().join("operation-keys.sqlite3");
+    let arguments = json!({
+        "authorization": {
+            "account_id": "account-offline",
+            "amount_cents": 3,
+            "reason": "fixed offline fixture"
+        },
+        "execution": {
+            "schema_version": 2,
+            "input": {"prompt": "fixed offline fixture", "image_count": 1},
+            "input_schema_version": 1,
+            "workload_type": "image_generation",
+            "provider": "fixture",
+            "adapter": "fixture",
+            "model": "fixture-v1"
+        },
+        "max_inline_artifact_bytes": 1024
+    });
+    create_operation_key_fixture(&helper_path, Some(&arguments));
+
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    hubu.respond_json(
+        "POST",
+        "/spend/authorize",
+        200,
+        json!({
+            "decision": "needs_approval",
+            "decision_id": "fixed-decision",
+            "reasons": ["human_review_required"],
+            "approval": {"approval_request_id": "fixed-approval"}
+        }),
+    );
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+    let mut first = McpProcess::start_with_preallocated_operation_keys(
+        Some((&hubu, HUBU_TOKEN)),
+        Some((&gongbu, GONGBU_TOKEN)),
+        &state_path,
+        &helper_path,
+    );
+    first.initialize();
+    let response = first.call_with_meta(
+        10,
+        "hubu_submit_governed_execution",
+        arguments.clone(),
+        json!({"callId": "fixed-preallocated-call"}),
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["outcome"],
+        "approval_required"
+    );
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 0);
+    let authorization_body = hubu
+        .requests()
+        .into_iter()
+        .find(|request| request.path == "/spend/authorize")
+        .and_then(|request| request.raw.split("\r\n\r\n").nth(1).map(str::to_owned))
+        .map(|body| serde_json::from_str::<Value>(&body).unwrap())
+        .unwrap();
+    assert_eq!(
+        authorization_body["operation_key"],
+        "codex:v1:33333333333333333333333333333333"
+    );
+    let serialized = response.to_string();
+    assert!(!serialized.contains("operation_key"));
+    assert!(!serialized.contains("codex:v1:"));
+
+    let replay = first.call_with_meta(
+        11,
+        "hubu_submit_governed_execution",
+        arguments.clone(),
+        json!({"callId": "fixed-preallocated-call"}),
+    );
+    assert_eq!(
+        governed_observation_without_timing(&replay),
+        governed_observation_without_timing(&response)
+    );
+    assert!(!replay.to_string().contains("codex:v1:"));
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+    let distinct = first.call_with_meta(
+        12,
+        "hubu_submit_governed_execution",
+        arguments.clone(),
+        json!({"callId": "fixed-preallocated-distinct-call"}),
+    );
+    assert!(distinct["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("already bound or invalid"));
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+    first.finish(&[HUBU_TOKEN, GONGBU_TOKEN, "codex:v1:"]);
+
+    std::fs::rename(&helper_path, root.path().join("operation-keys.offline")).unwrap();
+    let mut restarted = McpProcess::start_with_preallocated_operation_keys(
+        Some((&hubu, HUBU_TOKEN)),
+        Some((&gongbu, GONGBU_TOKEN)),
+        &state_path,
+        &helper_path,
+    );
+    restarted.initialize();
+    let recovered = restarted.call_with_meta(
+        13,
+        "hubu_submit_governed_execution",
+        arguments,
+        json!({"callId": "fixed-preallocated-call"}),
+    );
+    assert_eq!(
+        governed_observation_without_timing(&recovered),
+        governed_observation_without_timing(&response)
+    );
+    assert!(!recovered.to_string().contains("codex:v1:"));
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 0);
+    restarted.finish(&[HUBU_TOKEN, GONGBU_TOKEN, "codex:v1:"]);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn prebound_crash_gap_recovers_once_without_duplicate_backend_mutation() {
+    const TOOL_NAME: &str = "hubu_submit_governed_execution";
+    const CALL_ID: &str = "fixed-prebound-crash-gap-call";
+    const BOUND_AT: &str = "2026-08-28T01:02:03Z";
+
+    let root = tempfile::tempdir().unwrap();
+    let state_path = root.path().join("router.sqlite3");
+    let helper_path = root.path().join("operation-keys.sqlite3");
+    let arguments = json!({
+        "authorization": {
+            "account_id": "account-offline",
+            "amount_cents": 3,
+            "reason": "fixed prebound crash-gap fixture"
+        },
+        "execution": {
+            "schema_version": 2,
+            "input": {"prompt": "fixed prebound crash-gap fixture", "image_count": 1},
+            "input_schema_version": 1,
+            "workload_type": "image_generation",
+            "provider": "fixture",
+            "adapter": "fixture",
+            "model": "fixture-v1"
+        },
+        "max_inline_artifact_bytes": 1024
+    });
+    create_operation_key_fixture(&helper_path, Some(&arguments));
+
+    let hubu = BackendStub::start(BackendKind::Hubu);
+    hubu.respond_json(
+        "POST",
+        "/spend/authorize",
+        200,
+        json!({
+            "decision": "needs_approval",
+            "decision_id": "fixed-prebound-decision",
+            "reasons": ["human_review_required"],
+            "approval": {"approval_request_id": "fixed-prebound-approval"}
+        }),
+    );
+    let gongbu = BackendStub::start(BackendKind::Gongbu);
+
+    // Starting and stopping the router commits its stable installation identity
+    // without allocating a harness operation or touching a backend mutation.
+    let mut bootstrap = McpProcess::start_with_preallocated_operation_keys(
+        Some((&hubu, HUBU_TOKEN)),
+        Some((&gongbu, GONGBU_TOKEN)),
+        &state_path,
+        &helper_path,
+    );
+    bootstrap.initialize();
+    bootstrap.finish(&[HUBU_TOKEN, GONGBU_TOKEN, "codex:v1:"]);
+    let state = Connection::open(&state_path).unwrap();
+    let installation_id = state
+        .query_row(
+            "SELECT installation_id FROM installation_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state
+            .query_row("SELECT COUNT(*) FROM harness_operations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    drop(state);
+
+    // This is the durable state immediately after the helper claim committed
+    // but before the router row committed. Only the identical binding may use it.
+    let binding_id = preallocated_binding_fixture(&installation_id, CALL_ID, TOOL_NAME, &arguments);
+    let helper = Connection::open(&helper_path).unwrap();
+    assert_eq!(
+        helper
+            .execute(
+                "UPDATE operations
+                 SET binding_id = ?1, bound_at = ?2, updated_at = ?2",
+                rusqlite::params![binding_id, BOUND_AT],
+            )
+            .unwrap(),
+        1
+    );
+    drop(helper);
+
+    let mut recovered = McpProcess::start_with_preallocated_operation_keys(
+        Some((&hubu, HUBU_TOKEN)),
+        Some((&gongbu, GONGBU_TOKEN)),
+        &state_path,
+        &helper_path,
+    );
+    recovered.initialize();
+    let first =
+        recovered.call_with_meta(20, TOOL_NAME, arguments.clone(), json!({"callId": CALL_ID}));
+    assert_eq!(
+        first["result"]["structuredContent"]["outcome"],
+        "approval_required"
+    );
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 0);
+
+    let replay =
+        recovered.call_with_meta(21, TOOL_NAME, arguments.clone(), json!({"callId": CALL_ID}));
+    assert_eq!(
+        governed_observation_without_timing(&replay),
+        governed_observation_without_timing(&first)
+    );
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 0);
+
+    let competing = recovered.call_with_meta(
+        22,
+        TOOL_NAME,
+        arguments,
+        json!({"callId": "fixed-prebound-competing-call"}),
+    );
+    assert!(competing["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("already bound or invalid"));
+    assert_eq!(hubu.request_count("POST", "/spend/authorize"), 1);
+    assert_eq!(gongbu.request_count("POST", "/v2/executions"), 0);
+
+    let state = Connection::open(&state_path).unwrap();
+    assert_eq!(
+        state
+            .query_row("SELECT COUNT(*) FROM harness_operations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    drop(state);
+    let helper = Connection::open(&helper_path).unwrap();
+    let persisted_binding = helper
+        .query_row(
+            "SELECT binding_id, bound_at, updated_at FROM operations",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        persisted_binding,
+        (binding_id, BOUND_AT.to_owned(), BOUND_AT.to_owned())
+    );
+    drop(helper);
+    assert!(!first.to_string().contains("codex:v1:"));
+    assert!(!replay.to_string().contains("codex:v1:"));
+    recovered.finish(&[HUBU_TOKEN, GONGBU_TOKEN, "codex:v1:"]);
 }
 
 fn wait_for_backend_states(
@@ -1582,7 +2042,7 @@ fn governed_hubu_to_gongbu_execution_fails_closed_without_hubu() {
     let listed = mcp.list_tools();
     assert_eq!(
         tool_names(&listed).len(),
-        41,
+        42,
         "unexpected catalog {listed}; Hubu requests: {:?}; Gongbu requests: {:?}",
         hubu.requests(),
         gongbu.requests()
