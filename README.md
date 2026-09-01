@@ -100,7 +100,8 @@ Restart Codex after the command completes.
 
 ### 5. Verify Hubu in a new Codex thread
 
-Open a new Codex thread in this repository and use `/mcp`, or ask Codex:
+Open a new Codex thread in any repository—the generated Hubu MCP configuration
+is available across projects. Use `/mcp`, or ask Codex:
 
 ```text
 List the Hubu MCP tools, then call hubu_unified_capabilities and summarize the
@@ -121,25 +122,26 @@ records:
 Read hubu_registration_guidance. Register the human Alice Example with username
 alice-example, then register two agents named image-researcher and
 image-designer with version local-dev. Show me the returned user, agent, agent
-account, version, and session IDs before continuing.
+account (`account_id`), version, and session IDs before continuing.
 ```
 
 The returned `agent_id` identifies the agent for policy and budget assignment;
-the returned `agent_account_id` identifies its spending account for governed
-work. Let Codex carry those exact values into later calls instead of replacing
-an unexplained `agt_...` placeholder by hand.
+the returned `account_id` identifies its spending account for governed work.
+Let Codex carry those exact values into later calls instead of replacing an
+unexplained `agt_...` placeholder by hand.
 
-Next ask Codex to use the repository's
-[Hubu Policy Authoring skill](skills/hubu-policy-authoring/SKILL.md) to turn
-your intent into a reviewable policy:
+Next ask Codex to read and follow the repository's
+[Hubu Policy Authoring skill](skills/hubu-policy-authoring/SKILL.md). Naming its
+absolute path makes it available without a separate skill installation, even
+when the Codex thread is in another repository:
 
 ```text
-Use $hubu-policy-authoring to draft a user-default policy for these agents:
-allow image generation only through the execution targets configured in this
-profile, cap each request at $1.00, and require approval for anything unmatched.
-Validate the policy, show me the assignment scope and rules, and wait for my
-approval before applying it. After I approve it, create a $10 USD budget for
-each exact agent ID.
+Read and follow /absolute/path/to/hubu/skills/hubu-policy-authoring/SKILL.md to
+draft a user-default policy for these agents: allow image generation only
+through the execution targets configured in this profile, cap each request at
+$1.00, and require approval for anything unmatched. Validate the policy, show
+me the assignment scope and rules, and wait for my approval before applying it.
+After I approve it, create a $10 USD budget for each exact agent ID.
 ```
 
 Finally, discover rather than guess the configured provider target:
