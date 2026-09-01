@@ -10,8 +10,8 @@ control of payment keys, provider credentials, or unrestricted budgets.
 > Hubu provides a complete managed local stack for governed agent workloads,
 > including experimental third-party provider integrations that can incur real
 > charges. Use live mode cautiously, with reviewed targets, conservative
-> policies, and strict budgets. No production direct-payment rail is supported
-> yet—the built-in direct-payment path remains a mock—and Hubu is not approved
+> policies, and strict budgets. No production direct payment rail is supported
+> yet. The built-in direct payment path remains a mock, and Hubu is not approved
 > as money-grade production financial infrastructure.
 
 ## Why Hubu and Gongbu?

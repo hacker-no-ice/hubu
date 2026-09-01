@@ -13,8 +13,8 @@ systems keep separate processes, storage, credentials, and failure domains.
 > **Project status: experimental and local-first.** Hubu runs a complete managed
 > governance and execution stack, including configured third-party provider
 > workloads that can incur real charges. Use live mode cautiously, with reviewed
-> targets, conservative policies, and strict budgets. No production direct-payment
-> rail is supported yet—the built-in direct-payment path remains a mock—and Hubu
+> targets, conservative policies, and strict budgets. No production direct payment
+> rail is supported yet. The built-in direct payment path remains a mock, and Hubu
 > is not approved as money-grade production financial infrastructure.
 
 ## Quick Start

@@ -348,7 +348,7 @@ jobs:
         run: |
           set -euo pipefail
           prerelease_flag=()
-          risk_note="Experimental, local-first software. Configured third-party provider workloads can incur real charges; use reviewed targets, conservative policies, and strict budgets. No production direct-payment rail is supported—the built-in direct-payment path is a mock—and Hubu is not approved as money-grade production financial infrastructure."
+          risk_note="Experimental, local-first software. Configured third-party provider workloads can incur real charges; use reviewed targets, conservative policies, and strict budgets. No production direct payment rail is supported yet. The built-in direct payment path is a mock, and Hubu is not approved as money-grade production financial infrastructure."
           channel_note="Stable version channel. For initial technical users, the recommended macOS path is to clone this exact tag, verify the full source commit above, and run scripts/install-from-source.sh. Locally compiled binaries are not Developer ID-signed, notarized, or Apple-verified. Archives are secondary automation evidence. ${risk_note}"
           if [[ "${PRERELEASE}" == "true" ]]; then
             prerelease_flag+=(--prerelease)
