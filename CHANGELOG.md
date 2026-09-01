@@ -22,7 +22,9 @@ Future release template
 - Describe only fixes that materially affect users or operators.
 -->
 
-## v0.2.1-rc.1 — 2026-09-01
+## Unreleased
+
+<!-- Draft release target: v0.2.1-rc.1. -->
 
 ### Highlights
 
