@@ -96,6 +96,11 @@ before those tool calls.
 hubu init codex --stack-profile "$profile" --trust-client-approval
 ```
 
+If you prefer to perform registration, policy, and budget administration in a
+terminal, omit `--trust-client-approval` and follow the
+[CLI administration reference](docs/cli.md) for example commands and detailed
+guidance. Governed workloads remain available through MCP.
+
 Restart Codex after the command completes.
 
 ### 5. Verify Hubu in a new Codex thread
@@ -104,9 +109,10 @@ Open a new Codex thread in any repository—the generated Hubu MCP configuration
 is available across projects. Use `/mcp`, or ask Codex:
 
 ```text
-List the Hubu MCP tools, then call hubu_unified_capabilities and summarize the
-readiness of Hubu, Gongbu, the operation registry, and configured execution
-targets. Do not make any changes yet.
+List the Hubu MCP tools. Call hubu_unified_capabilities to summarize the
+readiness of Hubu, Gongbu, and the operation registry, then call
+gongbu_list_execution_targets to summarize the configured execution targets.
+Do not make any changes yet.
 ```
 
 The catalog should include registration, policy, budget, target-discovery, and
