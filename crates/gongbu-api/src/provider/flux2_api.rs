@@ -506,6 +506,13 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 })?,
             );
             thread::sleep(wait);
+            let poll_timeout = deadline.remaining().map_err(|_| {
+                with_evidence(
+                    "timeout_unknown_outcome",
+                    request_id.clone(),
+                    Some(operation_id.clone()),
+                )
+            })?;
             if !observer.record(ProviderTransportInteraction::Poll) {
                 return Err(reconcile_with_evidence(
                     "provider_transport_evidence_unavailable",
@@ -514,13 +521,6 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                     Some(operation_id),
                 ));
             }
-            let poll_timeout = deadline.remaining().map_err(|_| {
-                with_evidence(
-                    "timeout_unknown_outcome",
-                    request_id.clone(),
-                    Some(operation_id.clone()),
-                )
-            })?;
             let response = self
                 .transport
                 .poll(
@@ -636,6 +636,9 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         if artifact_policy.validate_url(&artifact_url).is_err() {
             return Err(artifact_failure(request_id, operation_id));
         }
+        let artifact_timeout = deadline
+            .remaining()
+            .map_err(|_| artifact_failure(request_id.clone(), operation_id.clone()))?;
         if !observer.record(ProviderTransportInteraction::ArtifactFetch) {
             return Err(reconcile_with_evidence(
                 "provider_transport_evidence_unavailable",
@@ -644,9 +647,6 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 operation_id,
             ));
         }
-        let artifact_timeout = deadline
-            .remaining()
-            .map_err(|_| artifact_failure(request_id.clone(), operation_id.clone()))?;
         let bytes = self
             .transport
             .fetch_artifact(&artifact_url, artifact_timeout, self.max_artifact_bytes)
@@ -1311,12 +1311,23 @@ mod tests {
         artifacts: Arc<Mutex<Vec<String>>>,
     }
 
+    #[derive(Default)]
+    struct RecordingObserver(Mutex<Vec<ProviderTransportInteraction>>);
+
+    impl ProviderTransportObserver for RecordingObserver {
+        fn record(&self, interaction: ProviderTransportInteraction) -> bool {
+            self.0.lock().unwrap().push(interaction);
+            true
+        }
+    }
+
     #[derive(Clone)]
     struct SecurityFixture {
         traffic: Traffic,
         submit_response: TransportResponse,
         poll_responses: Arc<Mutex<Vec<TransportResponse>>>,
         artifact: Vec<u8>,
+        poll_delay_ms: u64,
     }
 
     impl Flux2Transport for SecurityFixture {
@@ -1350,6 +1361,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((url.to_string(), credential.to_vec()));
+            thread::sleep(Duration::from_millis(self.poll_delay_ms));
             Ok(self.poll_responses.lock().unwrap().remove(0))
         }
 
@@ -1399,6 +1411,7 @@ mod tests {
                     .collect(),
             )),
             artifact: png(),
+            poll_delay_ms: 0,
         };
         (
             Flux2ApiAdapter::new(config(), MODEL_ID.into(), transport).unwrap(),
@@ -2014,15 +2027,6 @@ mod tests {
 
     #[test]
     fn observed_resume_records_each_transport_boundary_before_the_call() {
-        #[derive(Default)]
-        struct Observer(Mutex<Vec<ProviderTransportInteraction>>);
-        impl ProviderTransportObserver for Observer {
-            fn record(&self, interaction: ProviderTransportInteraction) -> bool {
-                self.0.lock().unwrap().push(interaction);
-                true
-            }
-        }
-
         let (adapter, traffic) = security_fixture(
             202,
             json!({
@@ -2043,7 +2047,7 @@ mod tests {
             ],
         );
         let secret = secret_for_test("secret-canary");
-        let observer = Observer::default();
+        let observer = RecordingObserver::default();
         let AdapterSubmission::Pending(operation) = adapter
             .submit_observed(&request(), &input(), &secret, Some("opaque-key"), &observer)
             .unwrap()
@@ -2216,6 +2220,93 @@ mod tests {
         assert!(traffic.submissions.lock().unwrap().is_empty());
         assert!(traffic.polls.lock().unwrap().is_empty());
         assert!(traffic.artifacts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn poll_deadline_expires_before_transport_evidence_is_recorded() {
+        let (mut adapter, traffic) =
+            security_fixture(202, json!({"id":"unused","status":"Pending"}), Vec::new());
+        adapter.config.poll_interval_ms = 50;
+        let deadline_unix_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 10;
+        let operation = AsyncProviderOperation {
+            provider_request_id: Some("req-1".into()),
+            provider_operation_id: "op-1".into(),
+            polling_host: "api.us.bfl.ai".into(),
+            deadline_unix_ms,
+        };
+        let observer = RecordingObserver::default();
+
+        let error = adapter
+            .poll_observed(
+                &request(),
+                &input(),
+                &secret_for_test("secret-canary"),
+                &operation,
+                &observer,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, "timeout_unknown_outcome");
+        assert!(traffic.polls.lock().unwrap().is_empty());
+        assert!(traffic.artifacts.lock().unwrap().is_empty());
+        assert!(observer.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn artifact_deadline_expires_before_fetch_evidence_is_recorded() {
+        let (mut adapter, traffic) = security_fixture(
+            202,
+            json!({"id":"unused","status":"Pending"}),
+            vec![(
+                200,
+                json!({
+                    "id":"op-1",
+                    "status":"Ready",
+                    "result":{"sample":"https://delivery.us.bfl.ai/out.png"}
+                }),
+            )],
+        );
+        adapter.transport.poll_delay_ms = 30;
+        let deadline_unix_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 15;
+        let operation = AsyncProviderOperation {
+            provider_request_id: Some("req-1".into()),
+            provider_operation_id: "op-1".into(),
+            polling_host: "api.us.bfl.ai".into(),
+            deadline_unix_ms,
+        };
+        let observer = RecordingObserver::default();
+
+        let error = adapter
+            .poll_observed(
+                &request(),
+                &input(),
+                &secret_for_test("secret-canary"),
+                &operation,
+                &observer,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, "artifact_policy_failure");
+        assert_eq!(traffic.polls.lock().unwrap().len(), 1);
+        assert!(traffic.artifacts.lock().unwrap().is_empty());
+        assert_eq!(
+            observer.0.lock().unwrap().as_slice(),
+            &[ProviderTransportInteraction::Poll]
+        );
     }
 
     #[test]
