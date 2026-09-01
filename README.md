@@ -145,9 +145,9 @@ when the Codex thread is in another repository:
 Read and follow /absolute/path/to/hubu/skills/hubu-policy-authoring/SKILL.md to
 draft a user-default policy for these agents: allow image generation only
 through the execution targets configured in this profile, cap each request at
-$1.00, and require approval for anything unmatched. Validate the policy, show
+$0.10, and require approval for anything unmatched. Validate the policy, show
 me the assignment scope and rules, and wait for my approval before applying it.
-After I approve it, create a $10 USD budget for each exact agent ID.
+After I approve it, create a $1 USD budget for each exact agent ID.
 ```
 
 Finally, discover rather than guess the configured provider target:
