@@ -26,7 +26,7 @@ GET /spend/executor/guidance
 GET /.well-known/hubu-spend-executor.json
 ```
 
-The HUB-33 precise-cost extension is additive within v4.3. It adds a precise
+The precise-cost fields are additive within `hubu-spend-executor-v4.3`. They add a precise
 integer external-cost object, preserves the complete frozen pricing snapshot,
 and separates exact provider cost from the conservatively rounded number of
 cents charged to a Hubu budget. Normal and human-reconciled billed settlement
@@ -42,7 +42,7 @@ shape makes v4.3 intentionally startup-incompatible with v4.2.
 V4.2 introduced the read-only `POST /spend/executor/resolve` capability used
 for token-only executor admission.
 
-The unified MCP continuation binding added for HUB-126 remains independent of
+The unified MCP continuation binding remains independent of
 the v4.3 cost fields. It makes the existing `auth_token_id` /
 `spend_auth_token_id` the agent-visible continuation identifier for one private
 normalized operation. The agent never supplies or receives `operation_key` on

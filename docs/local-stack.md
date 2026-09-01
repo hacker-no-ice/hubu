@@ -89,10 +89,12 @@ execution path without contacting an external provider or incurring cost.
 Never put bearer tokens, provider API keys, or other raw secrets in the TOML
 files. Live provider execution can incur charges.
 
-For the supported narrow FLUX.2 path, follow the
-[managed profile and recovery runbook](operations/managed-flux-profile.md) and
-inspect its exact sanitized contract with `hubu stack catalog --json`. Catalog,
-doctor, and render never call BFL or claim live qualification.
+For billable targets, start with [live provider
+operations](operations/live-providers.md). The supported FLUX.2 integration has
+an additional [managed profile](operations/managed-flux-profile.md) for its
+frozen contract and asynchronous recovery details. Inspect the sanitized
+catalog with `hubu stack catalog --json`; catalog, doctor, and render never call
+a provider or claim live qualification.
 
 Check the profile and follow the reported field paths until it is ready:
 

@@ -28,7 +28,7 @@ Only after the human has authorized the live operation, write the exact public M
 python3 skills/generate-hubu-operation-key/scripts/operation_keys.py \
   --db /absolute/private/path/operation-keys.sqlite3 \
   begin-unified \
-  --label "HUB-172 one approved generation" \
+  --label "one approved managed FLUX generation" \
   --tool-name hubu_submit_governed_execution \
   --arguments-file /absolute/private/path/governed-arguments.json
 ```

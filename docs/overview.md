@@ -92,6 +92,7 @@ protocol rather than a single agent harness.
 ## Start exploring
 
 - [Start the local Hubu stack →](local-stack.md)
+- [Operate supported live providers →](operations/live-providers.md)
 - [Understand policy, budgets, and spend lifecycle →](spend-lifecycle.md)
 - [See how Gongbu executes authorized work →](gongbu-execution.md)
 - [Integrate through unified MCP →](unified-mcp.md)

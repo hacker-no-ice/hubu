@@ -117,7 +117,7 @@ credential coordinates or values, call BFL, or convert
 `gongbu_get_redaction_attestation` accepts only one known execution ID and
 forwards to Gongbu's authenticated, bodyless
 `GET /v1/executions/{id}/redaction-attestation`. Gongbu allows it only for the
-exact successful HUB-172 managed-FLUX tuple. Its response contains versioned
+exact successful managed-FLUX redaction-attestation tuple. Its response contains versioned
 safe facts, bounded scan counts, and canonical hashes; it never returns backend
 identifiers, credential coordinates or material, provider bodies, URLs, or
 storage locations. The endpoint resolves no credential until the fixed tuple

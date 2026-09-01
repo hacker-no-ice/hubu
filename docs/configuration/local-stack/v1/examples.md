@@ -178,8 +178,9 @@ The profile-only catalog derives
 rules into raw tables. Run `hubu stack catalog --json`, doctor, and render to
 review exact target, resolutions, rational USD rates, and independent readiness
 facts without contacting BFL. `live_qualified` remains false with
-`not_performed` in this release. Follow the
-[managed FLUX.2 profile and recovery runbook](../../../operations/managed-flux-profile.md).
+`not_performed` in this release. Apply the shared [live provider operations
+guide](../../../operations/live-providers.md), then follow the
+[managed FLUX.2 profile](../../../operations/managed-flux-profile.md).
 
 ## Representative generic live-provider profile
 
@@ -263,7 +264,7 @@ If the selected model enables `2k` or `4k`, add a separate selector-qualified ru
 - [ ] Each agent that will request spend is registered in Hubu and has the intended policy and budget.
 - [ ] Managed service credentials are omitted; or every advanced/external file override is distinct, private, and owned by the selected service.
 - [ ] Provider opaque coordinates resolve under the Gongbu process identity without exposing values.
-- [ ] Provider, adapter, model, endpoint, API version, region/project fields, and artifact hosts are authoritative.
+- [ ] Provider, adapter, model, endpoint, API version, adapter settings, and artifact hosts are authoritative.
 - [ ] `provider_config_version` and `catalog_version` have never represented different content.
 - [ ] Every enabled request selector has exactly one matching pricing rule.
 - [ ] Every billable component is represented using exact minor-unit rational rates.

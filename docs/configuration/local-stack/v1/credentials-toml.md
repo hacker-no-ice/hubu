@@ -185,8 +185,10 @@ account = "operator-owned BFL Keychain account"
 The corresponding `[[supported_profiles]]` entry uses
 `credential = "bfl_flux2_pro"`. Doctor asks Keychain only whether that item is
 present; it does not request or compare its value and it does not call BFL.
-Read the [managed FLUX.2 runbook](../../../operations/managed-flux-profile.md)
-before enabling live mode.
+Apply the shared [live provider operations
+guide](../../../operations/live-providers.md), then read the
+[managed FLUX.2 profile](../../../operations/managed-flux-profile.md) before
+enabling live mode.
 
 ## Rotation
 
