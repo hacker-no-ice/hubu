@@ -17,6 +17,11 @@ systems keep separate processes, storage, credentials, and failure domains.
 
 ## Quick Start
 
+The recommended first-run path is hybrid: use the CLI for deterministic stack
+bootstrap and independent verification, then let Codex handle the administrative
+mechanics and governed workload while you review every policy, limit, and
+authority-changing operation before approving it.
+
 ### 1. Install and verify the binaries
 
 For `v0.2.1` and later during the initial technical-user phase, build all four
@@ -121,8 +126,8 @@ selected profile and backend readiness.
 
 ### 6. Try a governed workload from Codex
 
-Keep the remaining walkthrough in Codex. First establish the owner and agent
-records:
+Let Codex handle the mechanics while you review the proposed state at each
+checkpoint. First establish the owner and agent records:
 
 ```text
 Read hubu_registration_guidance. Register the human Alice Example with username
@@ -149,6 +154,25 @@ $0.10, and require approval for anything unmatched. Validate the policy, show
 me the assignment scope and rules, and wait for my approval before applying it.
 After I approve it, create a $1 USD budget for each exact agent ID.
 ```
+
+Before running a workload, ask Codex to explain the resulting governance state
+and then verify it independently from the terminal:
+
+```text
+Using read-only Hubu MCP tools, show the registered agents, applied user-default
+policy, and active budgets. Confirm the 10-cent per-request cap and each exact
+agent's $1 total budget, then give me the equivalent read-only CLI commands.
+Do not make any changes.
+```
+
+```sh
+hubu agent list
+hubu policy show
+hubu budget list
+```
+
+The MCP and CLI views should report the same public IDs, policy assignment, and
+limits. Resolve any mismatch before submitting work.
 
 Finally, discover rather than guess the configured provider target:
 

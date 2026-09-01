@@ -1,10 +1,10 @@
 # CLI administration reference
 
-Use the `hubu` CLI when you prefer to keep human administration in a terminal
-and use MCP only for agent workloads. With a selected, running stack profile,
-these commands automatically use that profile's authenticated client handoff.
-Run `hubu <command> --help` for the exact syntax supported by your installed
-release.
+Use the `hubu` CLI when you prefer to keep human administration in a terminal,
+or to independently verify changes proposed and applied through MCP. With a
+selected, running stack profile, these commands automatically use that
+profile's authenticated client handoff. Run `hubu <command> --help` for the
+exact syntax supported by your installed release.
 
 ## Register the owner and agents
 
