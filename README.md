@@ -10,10 +10,12 @@ Rust workspace. Agents interact through the unified MCP server, while the two
 systems keep separate processes, storage, credentials, and failure domains.
 
 > [!WARNING]
-> **Project status: experimental and local-first.** Hubu currently runs a
-> localhost demo server, uses a mock payment rail, and is **not approved for
-> real-money production use**. Its policy, budget, authorization, and ledger
-> boundaries are a foundation to harden, not a claim of money-grade security.
+> **Project status: experimental and local-first.** Hubu runs a complete managed
+> governance and execution stack, including configured third-party provider
+> workloads that can incur real charges. Use live mode cautiously, with reviewed
+> targets, conservative policies, and strict budgets. No production direct-payment
+> rail is supported yet—the built-in direct-payment path remains a mock—and Hubu
+> is not approved as money-grade production financial infrastructure.
 
 ## Quick Start
 

@@ -7,11 +7,12 @@ control of payment keys, provider credentials, or unrestricted budgets.
 
 > **Experimental and local-first**
 >
-> Hubu currently provides a local environment for developing and testing
-> governed agent workloads. Provider-backed workloads remain experimental.
-> Hubu is not approved for real-money, money-grade production use, and its
-> current security boundaries should not be treated as production financial
-> infrastructure.
+> Hubu provides a complete managed local stack for governed agent workloads,
+> including experimental third-party provider integrations that can incur real
+> charges. Use live mode cautiously, with reviewed targets, conservative
+> policies, and strict budgets. No production direct-payment rail is supported
+> yet—the built-in direct-payment path remains a mock—and Hubu is not approved
+> as money-grade production financial infrastructure.
 
 ## Why Hubu and Gongbu?
 
