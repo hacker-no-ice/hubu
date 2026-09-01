@@ -21,12 +21,6 @@ pub struct ExecutionScope {
 
 pub fn for_target(provider: &str, adapter: &str) -> Option<ExecutionScope> {
     let (provider_id, provider_name, merchant_id, merchant_name) = match (provider, adapter) {
-        ("google", "gemini_image") => (
-            "provider:google:gemini-vertex",
-            "Google Gemini on Vertex AI",
-            "merchant:google-cloud",
-            "Google Cloud",
-        ),
         ("google", "gemini_developer_image") => (
             "provider:google:gemini-developer",
             "Google Gemini Developer API",
@@ -94,7 +88,6 @@ mod tests {
         ))
         .unwrap();
         for (provider, adapter) in [
-            ("google", "gemini_image"),
             ("google", "gemini_developer_image"),
             ("flux", "flux2_api"),
             ("ideogram", "ideogram_image"),

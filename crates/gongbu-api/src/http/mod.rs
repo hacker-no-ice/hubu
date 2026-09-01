@@ -1429,7 +1429,7 @@ mod tests {
             } else if spend_auth_token_id.starts_with("identity-mismatch") {
                 response.account_id = "account-b".into();
             } else if spend_auth_token_id.starts_with("scope-mismatch") {
-                response.execution_scope = for_target("google", "gemini_image");
+                response.execution_scope = for_target("google", "gemini_developer_image");
             } else if spend_auth_token_id.starts_with("token-swap") {
                 response.spend_auth_token_id = "different-token".into();
             } else if spend_auth_token_id.starts_with("expired") {
