@@ -1070,7 +1070,7 @@ mod tests {
     use crate::{
         provider::{
             contract::PricingCatalog,
-            gemini_image::{GeminiImageAdapter, GeminiTransport},
+            gemini_developer_image::{GeminiDeveloperImageAdapter, GeminiDeveloperTransport},
             ideogram_image::{IdeogramImageAdapter, IdeogramTransport},
             registry::ProviderRegistry,
         },
@@ -1421,7 +1421,7 @@ mod tests {
         use crate::{
             artifact::{ArtifactLimits, LocalFsStorage},
             execution::{CreateExecutionParams, HubuTokenReference},
-            provider::gemini_image::TransportResponse,
+            provider::gemini_developer_image::TransportResponse,
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use base64::{engine::general_purpose::STANDARD, Engine};
@@ -1441,8 +1441,8 @@ mod tests {
             }
         }
         struct FixtureTransport(AtomicUsize, Vec<u8>);
-        impl GeminiTransport for FixtureTransport {
-            fn generate(
+        impl GeminiDeveloperTransport for FixtureTransport {
+            fn create_interaction(
                 &self,
                 endpoint: &reqwest::Url,
                 _: &[u8],
@@ -1450,23 +1450,16 @@ mod tests {
                 _: &std::collections::BTreeMap<String, String>,
                 _: &serde_json::Value,
             ) -> Result<TransportResponse, Box<dyn std::error::Error + Send + Sync>> {
-                assert_eq!(endpoint.host_str(), Some("v1.googleapis.example"));
+                assert_eq!(
+                    endpoint.host_str(),
+                    Some("generativelanguage.googleapis.com")
+                );
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(TransportResponse {
                     status: 200,
                     request_id: Some("google-request-1".into()),
-                    operation_id: Some("google-operation-1".into()),
-                    body: json!({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":STANDARD.encode(&self.1)}}]}}],"usageMetadata":{"promptTokenCount":3}}),
+                    body: json!({"id":"interaction-1","status":"completed","steps":[{"type":"model_output","content":[{"type":"image","mime_type":"image/png","data":STANDARD.encode(&self.1)}]}],"usage":{"input_tokens":3,"output_tokens":7}}),
                 })
-            }
-            fn fetch_artifact(
-                &self,
-                _: &reqwest::Url,
-                _: Option<&[u8]>,
-                _: Duration,
-                _: usize,
-            ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-                unreachable!("inline fixture must not fetch a reference")
             }
         }
         #[derive(Default)]
@@ -1506,8 +1499,8 @@ mod tests {
             .unwrap();
         let calls = Arc::new(FixtureTransport(AtomicUsize::new(0), png.clone()));
         let targets: ProviderTargetConfig = serde_json::from_value(json!({"schema_version":2,"provider_configs":[
-          {"provider_config_version":"google-pcv-1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"fixture-v1","active":false,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://v1.googleapis.example","api_version":"v1","project":"sensitive-project","location":"us-central1","timeout_ms":1000,"max_retries":0}}},
-          {"provider_config_version":"google-pcv-2","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"fixture-v2","active":true,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://v2.googleapis.example","api_version":"v1","project":"sensitive-project","location":"us-central1","timeout_ms":1000,"max_retries":0}}}
+          {"provider_config_version":"google-pcv-1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google","secret_account":"fixture-v1","active":false,"execution_enabled":true,"settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000,"max_retries":0}}},
+          {"provider_config_version":"google-pcv-2","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google","secret_account":"fixture-v2","active":true,"execution_enabled":true,"settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000,"max_retries":0}}}
         ]})).unwrap();
         targets.validate().unwrap();
         let repository = Repository::in_memory().unwrap();
@@ -1522,12 +1515,13 @@ mod tests {
             normalized_input: json!({"prompt":"draw a cat","image_count":1}),
             input_hash: "hash".into(),
             input_schema_version: 1,
-            target: "image_generation/google/gemini_image/gemini-image-v1".into(),
+            target: "image_generation/google/gemini_developer_image/gemini-3.1-flash-lite-image"
+                .into(),
             config_version: "google-pcv-1".into(),
             workload_type: "image_generation".into(),
             provider: "google".into(),
-            adapter: "gemini_image".into(),
-            model: "gemini-image-v1".into(),
+            adapter: "gemini_developer_image".into(),
+            model: "gemini-3.1-flash-lite-image".into(),
             provider_config_version: "google-pcv-1".into(),
             provider_config_digest: targets
                 .revisions()
@@ -1535,7 +1529,7 @@ mod tests {
                 .unwrap()
                 .digest()
                 .to_owned(),
-            pricing_snapshot: json!({"schema_version":2,"provider":"google","model":"gemini-image-v1","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-image","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"25","exact_estimate_denominator":"1","estimated_amount_minor":25,"currency":"USD"}),
+            pricing_snapshot: json!({"schema_version":2,"provider":"google","model":"gemini-3.1-flash-lite-image","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-developer-image","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"25","exact_estimate_denominator":"1","estimated_amount_minor":25,"currency":"USD"}),
             pricing_schema_version: 2,
             execution_scope: None,
             created_at: "now".into(),
@@ -1570,14 +1564,14 @@ mod tests {
         let hubu = Arc::new(FixtureHubu::default());
         let mut registry = ProviderRegistry::new();
         let fixture_calls = calls.clone();
-        registry.register("google", "gemini_image", move |target| {
-            Ok(Arc::new(GeminiImageAdapter::new(
-                target.gemini_image().cloned().unwrap(),
+        registry.register("google", "gemini_developer_image", move |target| {
+            Ok(Arc::new(GeminiDeveloperImageAdapter::new(
+                target.gemini_developer_image().cloned().unwrap(),
                 target.model.clone(),
                 fixture_calls.clone(),
             )?))
         });
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"prices-v2","rules":[{"rule_id":"gemini-image","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"prices-v2","rules":[{"rule_id":"gemini-developer-image","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]}]}"#).unwrap();
         let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
         let runner = PersistedExecutionRunner::new(
             repository.clone(),
@@ -1607,10 +1601,7 @@ mod tests {
             attempt.provider_request_id.as_deref(),
             Some("google-request-1")
         );
-        assert_eq!(
-            attempt.provider_operation_id.as_deref(),
-            Some("google-operation-1")
-        );
+        assert_eq!(attempt.provider_operation_id, None);
         let artifacts = artifact_service
             .list_for_account(&execution.execution_id, "account")
             .unwrap();
@@ -2539,12 +2530,12 @@ mod tests {
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 2,
             "provider_configs": [
-                {"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"gemini","active":true,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://google.example","api_version":"v1","project":"project","location":"us","timeout_ms":1000}}},
+                {"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google","secret_account":"gemini","active":true,"execution_enabled":true,"settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000}}},
                 {"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"ideogram","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}},
                 {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"flux","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["delivery.us.bfl.ai"]}}}
             ]
         })).unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
             .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
@@ -2552,7 +2543,7 @@ mod tests {
         let calls = Arc::new(Calls::default());
         let mut registry = ProviderRegistry::new();
         for (provider, id, ambiguous) in [
-            ("google", "gemini_image", false),
+            ("google", "gemini_developer_image", false),
             ("ideogram", "ideogram_image", true),
             ("flux", "flux2_api", false),
         ] {
@@ -2631,7 +2622,13 @@ mod tests {
                 })
                 .unwrap()
         };
-        let gemini = create("google", "gemini_image", "gemini-image-v1", "google-v1", 25);
+        let gemini = create(
+            "google",
+            "gemini_developer_image",
+            "gemini-3.1-flash-lite-image",
+            "google-v1",
+            25,
+        );
         let ideogram = create(
             "ideogram",
             "ideogram_image",
@@ -2683,7 +2680,7 @@ mod tests {
         );
 
         let counts = calls.counts.lock().unwrap();
-        assert_eq!(counts.get("gemini_image"), Some(&1));
+        assert_eq!(counts.get("gemini_developer_image"), Some(&1));
         assert_eq!(counts.get("ideogram_image"), Some(&1));
         assert_eq!(counts.get("flux2_api"), Some(&1));
         drop(counts);

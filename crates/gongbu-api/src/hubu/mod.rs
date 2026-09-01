@@ -512,7 +512,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn execution_params() -> crate::execution::CreateExecutionParams {
-        let scope = crate::execution_scope::for_target("google", "gemini_image").unwrap();
+        let scope = crate::execution_scope::for_target("google", "gemini_developer_image").unwrap();
         crate::execution::CreateExecutionParams {
             account_id: "account-1".into(),
             operation_key: "operation-1".into(),
@@ -524,11 +524,11 @@ mod tests {
             normalized_input: json!({"prompt":"cat","image_count":1}),
             input_hash: "sha256:input".into(),
             input_schema_version: 1,
-            target: "image_generation/google/gemini_image/gemini-image-v1".into(),
+            target: "image_generation/google/gemini_developer_image/gemini-image-v1".into(),
             config_version: "provider-v1".into(),
             workload_type: "image_generation".into(),
             provider: "google".into(),
-            adapter: "gemini_image".into(),
+            adapter: "gemini_developer_image".into(),
             model: "gemini-image-v1".into(),
             provider_config_version: "provider-v1".into(),
             provider_config_digest: format!("sha256:{}", "a".repeat(64)),
@@ -775,7 +775,7 @@ mod tests {
                 "operation_key":"operation-1","reason":"test","spend_auth_token_id":"token-1",
                 "decision_id":"decision-1","account_id":"account-1","agent_id":"claim-agent",
                 "amount_cents":100,"currency":"USD","merchant":null,
-                "execution_scope":crate::execution_scope::for_target("google", "gemini_image"),
+                "execution_scope":crate::execution_scope::for_target("google", "gemini_developer_image"),
                 "task_id":null,"lease_profile":"default","status":"claimed",
                 "expires_at":"2099-01-01T00:00:00Z",
                 "budget_hold":{"hold_id":"hold-1","budget_id":"budget-1","status":"frozen",

@@ -127,29 +127,11 @@ impl TargetKey {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "config", rename_all = "snake_case")]
 pub enum AdapterSettings {
-    GeminiImage(GeminiImageConfig),
     GeminiDeveloperImage(GeminiDeveloperImageConfig),
     Flux2Api(Flux2ApiConfig),
     IdeogramImage(IdeogramImageConfig),
     /// Test/local adapters have no transport configuration or credential override.
     Fixture,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GeminiImageConfig {
-    pub endpoint: String,
-    pub api_version: String,
-    pub project: String,
-    pub location: String,
-    /// Overall invocation budget shared by submit and referenced-artifact fetch.
-    pub timeout_ms: u64,
-    #[serde(default)]
-    pub max_retries: u32,
-    #[serde(default)]
-    pub approved_artifact_hosts: Vec<String>,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -238,12 +220,6 @@ impl ProviderConfigVersion {
     }
     pub fn settings(&self) -> &AdapterSettings {
         &self.settings
-    }
-    pub fn gemini_image(&self) -> Option<&GeminiImageConfig> {
-        match &self.settings {
-            AdapterSettings::GeminiImage(v) => Some(v),
-            _ => None,
-        }
     }
     pub fn gemini_developer_image(&self) -> Option<&GeminiDeveloperImageConfig> {
         match &self.settings {
@@ -427,8 +403,6 @@ struct RawRevision {
     #[serde(default)]
     settings: Option<AdapterSettings>,
     #[serde(default)]
-    gemini_image: Option<GeminiImageConfig>,
-    #[serde(default)]
     gemini_developer_image: Option<GeminiDeveloperImageConfig>,
     #[serde(default)]
     flux2_api: Option<Flux2ApiConfig>,
@@ -526,7 +500,6 @@ impl Serialize for ProviderTargetConfig {
                 execution_enabled: Some(r.execution_enabled),
                 enabled: None,
                 settings: Some(r.settings.clone()),
-                gemini_image: None,
                 gemini_developer_image: None,
                 flux2_api: None,
                 ideogram_image: None,
@@ -555,7 +528,6 @@ fn validate_revision(schema: u32, raw: RawRevision) -> Result<ProviderConfigVers
     SecretReference::new(raw.secret_service.clone(), raw.secret_account.clone())
         .map_err(|_| Error::InvalidSecretReference)?;
     let legacy_settings = [
-        raw.gemini_image.is_some(),
         raw.gemini_developer_image.is_some(),
         raw.flux2_api.is_some(),
         raw.ideogram_image.is_some(),
@@ -570,8 +542,6 @@ fn validate_revision(schema: u32, raw: RawRevision) -> Result<ProviderConfigVers
         settings
     } else if legacy_settings > 1 {
         return Err(Error::InvalidAdapterSettings);
-    } else if let Some(v) = raw.gemini_image {
-        AdapterSettings::GeminiImage(v)
     } else if let Some(v) = raw.gemini_developer_image {
         AdapterSettings::GeminiDeveloperImage(v)
     } else if let Some(v) = raw.flux2_api {
@@ -617,22 +587,6 @@ fn validate_revision(schema: u32, raw: RawRevision) -> Result<ProviderConfigVers
 
 fn validate_settings(key: &TargetKey, settings: &AdapterSettings) -> Result<()> {
     match (key.provider.as_str(), key.adapter.as_str(), settings) {
-        ("google", "gemini_image", AdapterSettings::GeminiImage(c)) => {
-            validate_transport(
-                &c.endpoint,
-                &c.api_version,
-                c.timeout_ms,
-                c.max_retries,
-                &c.headers,
-                &["authorization", "x-goog-api-key"],
-            )?;
-            if !valid_identifier(&c.project)
-                || !valid_identifier(&c.location)
-                || !valid_artifact_hosts(&c.approved_artifact_hosts, false)
-            {
-                return Err(Error::InvalidTransportSettings);
-            }
-        }
         ("google", "gemini_developer_image", AdapterSettings::GeminiDeveloperImage(c)) => {
             validate_transport(
                 &c.endpoint,
@@ -715,11 +669,6 @@ fn normalize_settings(settings: &mut AdapterSettings) {
         }
     }
     match settings {
-        AdapterSettings::GeminiImage(config) => transport(
-            &mut config.endpoint,
-            &mut config.headers,
-            Some(&mut config.approved_artifact_hosts),
-        ),
         AdapterSettings::GeminiDeveloperImage(config) => {
             transport(&mut config.endpoint, &mut config.headers, None)
         }
@@ -842,12 +791,23 @@ mod tests {
 
     #[test]
     fn public_target_id_is_stable_across_config_revisions() {
-        let key = TargetKey::new("image_generation", "google", "gemini_image", "image-v1").unwrap();
+        let key = TargetKey::new(
+            "image_generation",
+            "google",
+            "gemini_developer_image",
+            "image-v1",
+        )
+        .unwrap();
         assert_eq!(key.public_id(), key.clone().public_id());
         assert!(key.public_id().starts_with("gongbu:target:v1:"));
         assert_eq!(key.public_id().len(), "gongbu:target:v1:".len() + 64);
-        let changed =
-            TargetKey::new("image_generation", "google", "gemini_image", "image-v2").unwrap();
+        let changed = TargetKey::new(
+            "image_generation",
+            "google",
+            "gemini_developer_image",
+            "image-v2",
+        )
+        .unwrap();
         assert_ne!(key.public_id(), changed.public_id());
 
         let delimiter_in_workload = TargetKey::new("a/b", "c", "d", "e").unwrap();
@@ -884,15 +844,24 @@ mod tests {
         );
 
         let ordered = catalog(
-            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"gemini_image","config":{"endpoint":"https://example.com","api_version":"v1","project":"p","location":"l","timeout_ms":1000,"approved_artifact_hosts":["b.example","a.example"],"headers":{"X-Client":"gongbu"}}}}]}"#,
+            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000,"headers":{"X-Client":"gongbu"}}}}]}"#,
         );
         let normalized = catalog(
-            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"gemini_image","config":{"endpoint":"https://example.com/","api_version":"v1","project":"p","location":"l","timeout_ms":1000,"approved_artifact_hosts":["a.example","b.example"],"headers":{"x-client":"gongbu"}}}}]}"#,
+            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com/","api_version":"v1beta","timeout_ms":1000,"headers":{"x-client":"gongbu"}}}}]}"#,
         );
         assert_eq!(
             ordered.revisions().next().unwrap().digest(),
             normalized.revisions().next().unwrap().digest()
         );
+    }
+
+    #[test]
+    fn vertex_gemini_configuration_is_not_a_supported_adapter() {
+        let result = serde_json::from_str::<ProviderTargetConfig>(
+            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"vertex-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image","secret_service":"svc","secret_account":"acct","active":true,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://example.googleapis.com","api_version":"v1","project":"project","location":"us-central1","timeout_ms":1000}}}]}"#,
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]

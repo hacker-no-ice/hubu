@@ -10,9 +10,6 @@ use super::{
         GeminiDeveloperImageAdapter, ADAPTER_ID as GEMINI_DEVELOPER_ADAPTER_ID,
         PROVIDER_ID as GEMINI_DEVELOPER_PROVIDER_ID,
     },
-    gemini_image::{
-        GeminiImageAdapter, ADAPTER_ID as GEMINI_ADAPTER_ID, PROVIDER_ID as GEMINI_PROVIDER_ID,
-    },
     ideogram_image::{
         IdeogramImageAdapter, ADAPTER_ID as IDEOGRAM_ADAPTER_ID,
         PROVIDER_ID as IDEOGRAM_PROVIDER_ID,
@@ -91,11 +88,6 @@ impl ProviderRegistry {
     pub fn production(artifact_limits: &ArtifactLimits) -> Self {
         let max_artifact_bytes = artifact_limits.max_encoded_bytes;
         let mut registry = Self::new();
-        registry.register(GEMINI_PROVIDER_ID, GEMINI_ADAPTER_ID, move |target| {
-            Ok(Arc::new(
-                GeminiImageAdapter::from_target_with_artifact_limit(target, max_artifact_bytes)?,
-            ))
-        });
         registry.register(
             GEMINI_DEVELOPER_PROVIDER_ID,
             GEMINI_DEVELOPER_ADAPTER_ID,
@@ -520,15 +512,15 @@ mod tests {
     }
 
     #[test]
-    fn production_registry_binds_gemini_ideogram_and_flux() {
+    fn production_registry_binds_gemini_developer_ideogram_and_flux() {
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version":2,"provider_configs":[
-                {"provider_config_version":"g-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_image","model":"gemini-image-v1","secret_service":"gongbu.google","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"gemini_image","config":{"endpoint":"https://google.example","api_version":"v1","project":"project","location":"us","timeout_ms":1000}}},
+                {"provider_config_version":"g-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000}}},
                 {"provider_config_version":"i-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}},
                 {"provider_config_version":"f-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["delivery.us.bfl.ai"]}}}
             ]
         })).unwrap();
-        let incomplete_pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2-incomplete","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":2,"rate_denominator":1}]}]}"#).unwrap();
+        let incomplete_pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2-incomplete","rules":[{"rule_id":"g","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":2,"rate_denominator":1}]}]}"#).unwrap();
         assert_eq!(
             ValidatedProviderCatalog::bind(
                 targets.clone(),
@@ -540,7 +532,7 @@ mod tests {
                 "image_generation/flux/flux2_api/flux-2-pro".into()
             ))
         );
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":2,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":4,"rate_denominator":1}]}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":2,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":4,"rate_denominator":1}]}]}"#).unwrap();
         let catalog = ValidatedProviderCatalog::bind(
             targets,
             pricing,
@@ -548,7 +540,11 @@ mod tests {
         )
         .unwrap();
         for (provider, adapter, model) in [
-            ("google", "gemini_image", "gemini-image-v1"),
+            (
+                "google",
+                "gemini_developer_image",
+                "gemini-3.1-flash-lite-image",
+            ),
             ("ideogram", "ideogram_image", "ideogram-v3"),
             ("flux", "flux2_api", "flux-2-pro"),
         ] {

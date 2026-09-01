@@ -1,7 +1,6 @@
 //! Gemini Developer API image adapter using the Interactions endpoint.
 //!
-//! This is deliberately distinct from the Vertex `gemini_image` adapter. It
-//! sends one API-key-authenticated request, never retries, and accepts only one
+//! It sends one API-key-authenticated request, never retries, and accepts only one
 //! inline image for the shared artifact policy and persistence pipeline.
 
 use super::{

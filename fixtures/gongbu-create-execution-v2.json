@@ -8,6 +8,6 @@
   "input_schema_version": 1,
   "workload_type": "image_generation",
   "provider": "google",
-  "adapter": "gemini_image",
-  "model": "gemini-2.5-flash-image"
+  "adapter": "gemini_developer_image",
+  "model": "gemini-3.1-flash-lite-image"
 }
