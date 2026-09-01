@@ -348,13 +348,14 @@ jobs:
         run: |
           set -euo pipefail
           prerelease_flag=()
-          channel_note="Stable version channel. For initial technical users, the recommended macOS path is to clone this exact tag, verify the full source commit above, and run scripts/install-from-source.sh. Locally compiled binaries are not Developer ID-signed, notarized, or Apple-verified. Archives are secondary automation evidence. Experimental, local-first software using a mock payment rail; not approved for real-money production use."
+          risk_note="Experimental, local-first software. Configured third-party provider workloads can incur real charges; use reviewed targets, conservative policies, and strict budgets. No production direct-payment rail is supported—the built-in direct-payment path is a mock—and Hubu is not approved as money-grade production financial infrastructure."
+          channel_note="Stable version channel. For initial technical users, the recommended macOS path is to clone this exact tag, verify the full source commit above, and run scripts/install-from-source.sh. Locally compiled binaries are not Developer ID-signed, notarized, or Apple-verified. Archives are secondary automation evidence. ${risk_note}"
           if [[ "${PRERELEASE}" == "true" ]]; then
             prerelease_flag+=(--prerelease)
-            channel_note="Commit-addressed canary prerelease for automation and archive evidence. The source installer supports versioned stable and release-candidate tags, not main-* canary tags. Experimental, local-first software using a mock payment rail; not approved for real-money production use. Pin this exact tag and checksum; do not depend on a rolling newest build."
+            channel_note="Commit-addressed canary prerelease for automation and archive evidence. The source installer supports versioned stable and release-candidate tags, not main-* canary tags. ${risk_note} Pin this exact tag and checksum; do not depend on a rolling newest build."
           fi
           if [[ "${RELEASE_CHANNEL}" == "candidate" ]]; then
-            channel_note="Versioned release candidate for validation before stable promotion. For initial technical users, the recommended macOS path is to clone this exact tag, verify the full source commit above, and run scripts/install-from-source.sh. Locally compiled binaries are not Developer ID-signed, notarized, or Apple-verified. Archives are secondary automation evidence. Experimental, local-first software using a mock payment rail; not approved for real-money production use."
+            channel_note="Versioned release candidate for validation before stable promotion. For initial technical users, the recommended macOS path is to clone this exact tag, verify the full source commit above, and run scripts/install-from-source.sh. Locally compiled binaries are not Developer ID-signed, notarized, or Apple-verified. Archives are secondary automation evidence. ${risk_note}"
           fi
           notes=$(printf 'Hubu product version: `%s`\n\nSource commit: `%s`\n\nSupported agent surface: `hubu-unified-mcp`\n\nBinaries: `hubu`, `hubu-server`, `hubu-unified-mcp`, `gongbu-server`\n\nUnified MCP cutover: HUB-97; retired MCP source removal: HUB-98.\n\nExecutor contract: `hubu-spend-executor-v4.3`\n\n%s' "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${channel_note}")
           gh release create "${RELEASE_TAG}" \
