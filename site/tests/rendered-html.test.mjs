@@ -179,7 +179,6 @@ test("documents every schema-v1 local-stack source field", async () => {
       "targets.settings.type", "targets.settings.config.endpoint",
       "targets.settings.config.api_version", "targets.settings.config.timeout_ms",
       "targets.settings.config.max_retries", "targets.settings.config.headers",
-      "targets.settings.config.project", "targets.settings.config.location",
       "targets.settings.config.approved_artifact_hosts",
       "targets.settings.config.poll_interval_ms", "targets.settings.config.idempotency_header",
       "pricing_rules.rule_id", "pricing_rules.provider", "pricing_rules.model",
@@ -194,6 +193,17 @@ test("documents every schema-v1 local-stack source field", async () => {
     const source = await readFile(new URL(path, import.meta.url), "utf8");
     for (const field of fields) assert.match(source, new RegExp("### `" + field.replaceAll(".", "\\.") + "`"), `${path} is missing ${field}`);
   }
+});
+
+test("publishes one live-provider operations entry point", async () => {
+  const response = await render("/docs/operations/live-providers");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Live provider operations/);
+  assert.match(html, /Gemini Developer API/);
+  assert.match(html, /FLUX\.2 Pro/);
+  assert.match(html, /Submission, retry, and reconciliation/);
+  assert.doesNotMatch(html, /Vertex AI/);
 });
 
 test("keeps managed credential locations out of the first-run profile", async () => {

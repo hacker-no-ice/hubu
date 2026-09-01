@@ -5,6 +5,12 @@ managed-stack path for the deliberately narrow FLUX capability. It renders one
 immutable target and its matching pricing rules; it is not a general BFL
 configuration template.
 
+Start with [live provider operations](live-providers.md) for the shared
+credential, governance, pricing, spend, retry, reconciliation, artifact, and
+qualification boundaries. This page covers only the FLUX contract and its BFL
+authentication, sizing, asynchronous transport, artifact, cost, activation,
+and recovery differences.
+
 This profile prepares a production-validated stack, but this release does not
 make a billable qualification call. Its catalog therefore always reports
 `live_qualified = false` and `live_qualification = "not_performed"`. A later
@@ -132,23 +138,7 @@ authorization, policy, budget, and human approval still apply per request; the
 profile ceiling does not replace any of them. Ordinary demo and CI paths remain
 fixture-only and non-billable.
 
-## Gemini and FLUX together
-
-A managed stack may combine this supported FLUX profile with a separately
-configured Gemini target. The composite pricing document needs its own new,
-immutable `catalog_version`, while the embedded FLUX rules retain their frozen
-identity. Use distinct opaque credential aliases and Keychain items. Raw
-targets or rules may add Gemini, but may not duplicate or override this FLUX
-target or its prices.
-
-Doctor, render, and production validation evaluate the combined catalog. The
-providers keep separate target selection, credentials, provider attempts, and
-normalized artifacts. Gongbu owns provider execution in its own database and
-artifact root; Hubu keeps its separate governance database and financial
-failure domain. A Gemini failure or credential never becomes a FLUX fallback,
-and neither provider receives the other's credential.
-
-## Recovery and known inherited caveats
+## FLUX transport, artifact, and recovery details
 
 FLUX submission and polling are separate durable activities. After a successful
 submit, Gongbu checkpoints the safe request ID, operation ID, validated polling
@@ -161,10 +151,9 @@ releasing the claim.
 The artifact policy accepts only an HTTPS `delivery.<region>.bfl.ai` host with
 exactly one safe dot-separated region label, matching BFL's current
 [region-varying delivery guidance](https://docs.bfl.ai/api_integration/integration_guidelines).
-An unresolved HUB-169 review claim proposed a hyphenated host family that the
-official guidance does not support; this profile deliberately preserves the
-existing dot-separated policy rather than broadening it. Artifact downloads
-never receive the BFL `x-key` credential.
+The artifact policy deliberately preserves the documented dot-separated host
+family rather than broadening it to an unsupported hyphenated variant. Artifact
+downloads never receive the BFL `x-key` credential.
 
 The feature-gated local Temporal acceptance adapter reports the selected
 1k/2k/4k fixture price so the full offline stack can assert exact settlement at

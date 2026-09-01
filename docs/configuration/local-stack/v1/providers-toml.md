@@ -124,8 +124,10 @@ This FLUX contract pins provider `flux`, adapter `flux2_api`, non-preview model
 resume, and pricing version `bfl-flux-2-pro-usd-2026-08-28-v1`. Its frozen
 USD-cent rational rates are `3/1`, `45/10`, and `75/10` for 1k, 2k, and 4k.
 These are versioned configuration reviewed on 2026-08-28, not timeless current
-BFL prices. Review the [managed FLUX.2 runbook](../../../operations/managed-flux-profile.md)
-before activation.
+BFL prices. Apply the shared [live provider operations
+guide](../../../operations/live-providers.md), then review the
+[managed FLUX.2 profile](../../../operations/managed-flux-profile.md) before
+activation.
 
 Raw targets cannot duplicate a supported target, and raw pricing cannot
 override its provider/model rules. Multiple supported selections must use
@@ -162,7 +164,6 @@ Never reuse a version label with changed model, credential coordinates, activati
 
 **Defined by Gongbu's adapter registry.** Current adapter IDs include:
 
-- `gemini_image` for Google Vertex AI image generation;
 - `gemini_developer_image` for the Gemini Developer API image path;
 - `flux2_api` for the Flux 2 API adapter;
 - `ideogram_image` for the Ideogram image adapter;
@@ -172,7 +173,7 @@ The adapter ID must agree with `targets.settings.type`. Do not infer one from pr
 
 ### `targets.model`
 
-**Defined by the provider and selected adapter.** Use the exact provider model ID sent on requests and repeat the identical value in each matching pricing rule. Verify availability, region, API version, and billing behavior with the provider.
+**Defined by the provider and selected adapter.** Use the exact provider model ID sent on requests and repeat the identical value in each matching pricing rule. Verify availability, API version, and billing behavior with the provider.
 
 ### `targets.credential`
 
@@ -223,7 +224,7 @@ The selected `gongbu-server` production validator is authoritative. Unknown adap
 
 ### `targets.settings.type`
 
-Required tag. Allowed current values are `gemini_image`, `gemini_developer_image`, `flux2_api`, `ideogram_image`, and `fixture`. It must match `targets.adapter`.
+Required tag. Allowed current values are `gemini_developer_image`, `flux2_api`, `ideogram_image`, and `fixture`. It must match `targets.adapter`.
 
 ### `targets.settings.config.endpoint`
 
@@ -259,18 +260,10 @@ checkpointed asynchronous operation is recovery, not a generation retry.
 
 Optional map of non-secret HTTP headers, defaulting to empty. Header names are normalized by Gongbu. Do not place authorization values or provider secrets here; use `targets.credential` and the owning secret resolver.
 
-### `targets.settings.config.project`
-
-Required only for `gemini_image`. **Defined by the operator's Google Cloud environment.** Identifies the Vertex AI project used by the adapter.
-
-### `targets.settings.config.location`
-
-Required only for `gemini_image`. **Defined by the provider deployment.** Use a location where the selected model and project are available.
-
 ### `targets.settings.config.approved_artifact_hosts`
 
-Artifact-host allowlist for provider-referenced downloads. It is optional for
-`gemini_image` and defaults to empty. It is required and must contain at least
+Artifact-host allowlist for provider-referenced downloads. It defaults to empty
+when an adapter does not require it. It is required and must contain at least
 one host for `ideogram_image`.
 
 For `flux2_api`, this optional list can only narrow Gongbu's fixed BFL delivery

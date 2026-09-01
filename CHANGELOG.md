@@ -75,8 +75,8 @@ Future release template
   outcomes that still require financial reconciliation.
 - Added the Gongbu execution plane for durable provider work, including
   Temporal-backed recovery, operator-controlled targets and exact pricing,
-  normalized artifacts, and image adapters for Vertex AI Gemini, the Gemini
-  Developer API, Ideogram, and Flux 2. Sequential and concurrent executions
+  normalized artifacts, and image adapters for the Gemini Developer API,
+  Ideogram, and Flux 2. Sequential and concurrent executions
   can share an agent-scoped budget while retaining per-hold validation.
 - Added dependency-aware local-stack profiles for initialization, rendering,
   startup, readiness diagnosis, safe updates, recovery, managed service

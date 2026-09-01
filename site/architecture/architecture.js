@@ -81,7 +81,7 @@ const components = {
   executor: {
     kind: "GONGBU EXECUTOR",
     title: "Execute only approved work",
-    copy: "At startup, Gongbu production-validates the supported provider profile. For guarded live work, the unified surface binds one human-authorized key record to the exact trusted call; Gongbu then derives the target and price, exact-matches Hubu authority, persists execution before scheduling, and owns submit-once provider work through receipt and artifact evidence.",
+    copy: "Gemini Developer API and FLUX are the documented live integrations. They share Hubu governance, Gongbu credential isolation, exact pricing, spend ceilings, submit-once behavior, reconciliation, artifact checks, and qualification gates while retaining their provider-specific transports.",
     diagram: [
       ["Unified MCP / caller", "revision 7 · 42 tools · 38 backend routes"],
       ["Scoped key record", "one exact trusted call"],
@@ -109,6 +109,7 @@ const components = {
     ],
     links: [
       ["Execution plane guide", "docs/gongbu-execution.md"],
+      ["Live provider operations", "docs/operations/live-providers.md"],
       ["Managed FLUX runbook", "docs/operations/managed-flux-profile.md"],
       ["Operation-key skill", "skills/generate-hubu-operation-key/SKILL.md"],
       ["Unified MCP guide", "docs/unified-mcp.md"],

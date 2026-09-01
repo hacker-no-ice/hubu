@@ -195,7 +195,7 @@ accepted in execution requests, stored in repository records, included in
 fixtures, returned by APIs, written to Temporal payloads, or emitted in logs and
 errors.
 
-The guarded HUB-172 workflow additionally has one authenticated, bodyless
+The managed-FLUX redaction-attestation contract additionally has one authenticated, bodyless
 read-only attestation endpoint at
 `GET /v1/executions/{id}/redaction-attestation`. It accepts only the exact
 successful frozen FLUX tuple and clean one-authorization-snapshot,
@@ -339,7 +339,7 @@ input and pricing snapshot retain the selected preset and exact transmitted
 dimensions, so exact replay reconstructs the frozen request after catalog
 rotation or process restart instead of consulting the current catalog.
 
-For pre-HUB-168 schema-v2 executions whose snapshot predates the additive
+For schema-v2 executions whose snapshot predates the additive
 `output_dimensions` field, recovery is limited to the same pinned FLUX target
 and a supported frozen selector. Gongbu derives the certified pair on a cloned
 request only when the persisted input selects that same preset and either omits
@@ -401,9 +401,9 @@ or artifact ID. This local trust model does not provide strong multi-user or
 per-agent isolation.
 
 For local startup, shutdown, backup, and troubleshooting, use
-[Gongbu server operations](operations/gongbu-server.md). For deterministic and
-live-provider test modes, use the [sandbox](operations/gongbu-sandbox.md) and
-[live provider testing](operations/live-provider-testing.md) guides.
+[Gongbu server operations](operations/gongbu-server.md). For deterministic
+execution use the [sandbox](operations/gongbu-sandbox.md); for billable targets,
+use the shared [live provider operations](operations/live-providers.md) guide.
 
 The implementation lives in [`crates/gongbu-api`](../crates/gongbu-api).
 

@@ -116,8 +116,8 @@ poll and artifact policies, durable recovery policy, and its dated rational USD
 pricing. The operator supplies only an opaque credential reference and the two
 explicit spend choices.
 
-Use raw `[[targets]]` and `[[pricing_rules]]` for other providers such as
-Gemini. A composite FLUX-plus-Gemini catalog requires a new immutable
+Use raw `[[targets]]` and `[[pricing_rules]]` for other providers such as the
+Gemini Developer API. A composite FLUX-plus-Gemini catalog requires a new immutable
 `catalog_version`, distinct credential aliases, and unambiguous target and
 pricing keys. Raw entries cannot override or duplicate a supported contract.
 Both providers stay inside Gongbu's execution boundary with separate targets,
@@ -134,9 +134,11 @@ The supported-provider catalog reports four independent facts:
 - live qualification was performed.
 
 The last fact is deliberately false with `not_performed` for the initial FLUX
-profile. Catalog, doctor, render, and production validation never call BFL or
-claim that a provider transaction succeeded. See the
-[managed FLUX.2 runbook](../../../operations/managed-flux-profile.md).
+profile. Catalog, doctor, render, and production validation never call a
+provider or claim that a provider transaction succeeded. Start with [live
+provider operations](../../../operations/live-providers.md), then see the
+[managed FLUX.2 profile](../../../operations/managed-flux-profile.md) for its
+provider-specific contract.
 
 ## Provider targets and adapter settings
 

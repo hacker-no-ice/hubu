@@ -95,7 +95,8 @@ After restarting Codex, agents can request governed provider-backed work
 through Hubu's unified MCP tools: Hubu authorizes and reserves budget, Gongbu
 executes the work and stores its artifacts, and Hubu records the outcome. Live
 provider execution is experimental and can incur charges; use explicit targets
-and conservative spend ceilings.
+and conservative spend ceilings. External operators should begin with the
+[live provider operations guide](docs/operations/live-providers.md).
 
 ## Documentation
 

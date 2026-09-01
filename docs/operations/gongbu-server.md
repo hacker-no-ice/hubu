@@ -44,7 +44,7 @@ live-spend acknowledgement.
 
 ## Precise-cost database upgrade
 
-The HUB-33 upgrade runs when Gongbu opens its SQLite repository. It converts
+The precise-cost database migration runs when Gongbu opens its SQLite repository. It converts
 legacy v4.3 provider-attempt and receipt minor-unit amounts to exact integer
 amounts with decimal scale 2 and the already stored currency. Existing frozen
 execution pricing JSON, execution IDs, provider-attempt IDs, receipt IDs, and
@@ -164,7 +164,7 @@ execution intent selected from operator configuration:
   "input_schema_version": 1,
   "workload_type": "image_generation",
   "provider": "google",
-  "adapter": "gemini_image",
+  "adapter": "gemini_developer_image",
   "model": "OPERATOR_APPROVED_MODEL"
 }
 ```
