@@ -30,8 +30,8 @@ Future release template
 
 - Added a durable governed-execution path through unified MCP, including human
   approval and exact-operation resume. Gongbu is now principal-neutral, so
-  multiple agents can use one runtime and shared logical budgets while Hubu
-  remains authoritative for each operation's identity and settlement.
+  multiple agents can use one runtime while logical budgets remain agent-scoped
+  and Hubu remains authoritative for each operation's identity and settlement.
 - Added versioned updates and history for stable logical budgets, preserving
   cumulative usage, immutable provenance, and exact historical replay.
 - Added three outcome-oriented `hubu stack init` modes: `sandbox` for the full
