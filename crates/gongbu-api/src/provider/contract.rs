@@ -972,6 +972,28 @@ pub struct AdapterOutcome {
     pub artifacts: Vec<NormalizedArtifact>,
 }
 
+/// A provider-boundary call whose durable count is part of operator evidence.
+/// Observers are called immediately before entering the transport method; a
+/// rejected observation must prevent that transport call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderTransportInteraction {
+    Poll,
+    ArtifactFetch,
+}
+
+pub trait ProviderTransportObserver: Send + Sync {
+    fn record(&self, interaction: ProviderTransportInteraction) -> bool;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopProviderTransportObserver;
+
+impl ProviderTransportObserver for NoopProviderTransportObserver {
+    fn record(&self, _interaction: ProviderTransportInteraction) -> bool {
+        true
+    }
+}
+
 /// Safe, resumable state for a provider operation that was accepted but did
 /// not complete in the submission response. This is deliberately an allowlist:
 /// raw provider bodies, credentials, signed URLs, and artifact storage paths
@@ -1100,6 +1122,16 @@ pub trait ProviderAdapter: Send + Sync {
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome, ProviderFailure>;
+    fn invoke_observed(
+        &self,
+        request: &NormalizedRequest,
+        normalized_input: &serde_json::Value,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+        _observer: &dyn ProviderTransportObserver,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        self.invoke(request, normalized_input, secret, vendor_idempotency_key)
+    }
     /// Submit provider work once. Synchronous adapters retain their existing
     /// behavior through this default implementation.
     fn submit(
@@ -1111,6 +1143,16 @@ pub trait ProviderAdapter: Send + Sync {
     ) -> Result<AdapterSubmission, ProviderFailure> {
         self.invoke(request, normalized_input, secret, vendor_idempotency_key)
             .map(AdapterSubmission::Complete)
+    }
+    fn submit_observed(
+        &self,
+        request: &NormalizedRequest,
+        normalized_input: &serde_json::Value,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+        _observer: &dyn ProviderTransportObserver,
+    ) -> Result<AdapterSubmission, ProviderFailure> {
+        self.submit(request, normalized_input, secret, vendor_idempotency_key)
     }
     /// Poll a previously checkpointed asynchronous operation. The default is
     /// fail-closed because synchronous adapters never create such checkpoints.
@@ -1128,6 +1170,16 @@ pub trait ProviderAdapter: Send + Sync {
                     Some(operation.provider_operation_id.clone()),
                 ),
         )
+    }
+    fn poll_observed(
+        &self,
+        request: &NormalizedRequest,
+        normalized_input: &serde_json::Value,
+        secret: &ProviderSecret,
+        operation: &AsyncProviderOperation,
+        _observer: &dyn ProviderTransportObserver,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        self.poll(request, normalized_input, secret, operation)
     }
     fn redact_error(&self, _error: &(dyn std::error::Error + 'static)) -> ContractError {
         ContractError::Provider {

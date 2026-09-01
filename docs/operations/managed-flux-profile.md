@@ -166,11 +166,11 @@ official guidance does not support; this profile deliberately preserves the
 existing dot-separated policy rather than broadening it. Artifact downloads
 never receive the BFL `x-key` credential.
 
-One inherited local Temporal acceptance fixture still reports a one-cent cost
-for every size while its 2k assertion expects two cents. That HUB-170 fixture
-mismatch is unchanged and is not evidence about the supported profile's frozen
-pricing. Do not adjust production pricing or host policy to make either
-predecessor caveat disappear.
+The feature-gated local Temporal acceptance adapter reports the selected
+1k/2k/4k fixture price so the full offline stack can assert exact settlement at
+each fixture size. It is not a production provider adapter and does not alter
+this supported profile's frozen BFL pricing. Do not adjust production pricing
+or host policy to make a predecessor caveat disappear.
 
 Treat the selected Keychain `service` and `account` as part of the immutable
 provider-target revision. Do not change those coordinates while an execution

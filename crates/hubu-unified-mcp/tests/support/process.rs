@@ -32,7 +32,7 @@ impl McpProcess {
     pub fn start(hubu: Option<(&BackendStub, &str)>, gongbu: Option<(&BackendStub, &str)>) -> Self {
         let state = tempfile::tempdir().unwrap();
         let state_path = state.path().join("operations.sqlite3");
-        Self::start_configured(hubu, gongbu, &state_path, Some(state))
+        Self::start_configured(hubu, gongbu, &state_path, None, Some(state))
     }
 
     pub fn start_with_operation_state(
@@ -40,13 +40,29 @@ impl McpProcess {
         gongbu: Option<(&BackendStub, &str)>,
         operation_state_path: &Path,
     ) -> Self {
-        Self::start_configured(hubu, gongbu, operation_state_path, None)
+        Self::start_configured(hubu, gongbu, operation_state_path, None, None)
+    }
+
+    pub fn start_with_preallocated_operation_keys(
+        hubu: Option<(&BackendStub, &str)>,
+        gongbu: Option<(&BackendStub, &str)>,
+        operation_state_path: &Path,
+        operation_key_db_path: &Path,
+    ) -> Self {
+        Self::start_configured(
+            hubu,
+            gongbu,
+            operation_state_path,
+            Some(operation_key_db_path),
+            None,
+        )
     }
 
     fn start_configured(
         hubu: Option<(&BackendStub, &str)>,
         gongbu: Option<(&BackendStub, &str)>,
         operation_state_path: &Path,
+        operation_key_db_path: Option<&Path>,
         state: Option<tempfile::TempDir>,
     ) -> Self {
         let executable = env::var_os("HUBU_UNIFIED_MCP_CANARY_BIN")
@@ -59,12 +75,16 @@ impl McpProcess {
             .env_remove("HUBU_UNIFIED_GONGBU_BEARER_TOKEN")
             .env_remove("HUBU_APPROVAL_TOKEN")
             .env_remove("HUBU_APPROVAL_TOKEN_FILE")
+            .env_remove("HUBU_UNIFIED_OPERATION_KEY_DB")
             .env("HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS", "1000")
             .env("HUBU_UNIFIED_OPERATION_TICK_MS", "10")
             .env("HUBU_UNIFIED_OPERATION_STATE_PATH", operation_state_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(operation_key_db_path) = operation_key_db_path {
+            command.env("HUBU_UNIFIED_OPERATION_KEY_DB", operation_key_db_path);
+        }
         if let Some((stub, token)) = hubu {
             command
                 .env("HUBU_UNIFIED_HUBU_ENDPOINT", stub.endpoint())

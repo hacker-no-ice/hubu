@@ -63,7 +63,9 @@ For a new execution, Gongbu then:
 9. Uses `poll_provider_operation` to read that checkpoint and poll the existing
    operation. Activity or worker recovery performs status GETs for the same
    operation under the same deadline; it never sends a second generation POST.
-   Synchronous adapters retain their existing one-activity behavior.
+   Before every poll or artifact fetch, Gongbu durably increments the matching
+   provider-attempt counter; a failed counter write prevents the transport
+   call. Synchronous adapters retain their existing one-activity behavior.
 10. Normalizes artifacts and preserves exact provider cost, currency, decimal
    scale, and the complete frozen pricing snapshot.
 11. Settles confirmed billable work, routes a cost above the authorized maximum
@@ -143,6 +145,12 @@ The projection contains elapsed durations only. It does not expose raw
 provider-attempt identifiers or timestamps, and callers must not infer provider
 time from how long an external observer sees the execution in `executing`.
 
+Execution responses also expose
+`provider_transport: { schema_version: 1, poll_count,
+artifact_fetch_count }`. The counters are cumulative, restart-durable entries
+into Gongbu-owned transport boundaries, not router polling estimates. A
+pretransmission or terminal attempt cannot advance them.
+
 ## Provider targets, discovery, and pricing
 
 Provider availability is an operator decision; selection among the available
@@ -186,6 +194,18 @@ Provider credentials belong to Gongbu's runtime identity. They are never
 accepted in execution requests, stored in repository records, included in
 fixtures, returned by APIs, written to Temporal payloads, or emitted in logs and
 errors.
+
+The guarded HUB-172 workflow additionally has one authenticated, bodyless
+read-only attestation endpoint at
+`GET /v1/executions/{id}/redaction-attestation`. It accepts only the exact
+successful frozen FLUX tuple and clean one-authorization-snapshot,
+one-claim-reference, one-attempt, one-artifact, one-receipt path. Gongbu
+revalidates the stored artifact bytes, resolves the currently registered key
+only after all fixed checks pass, and exact-matches it against named
+Gongbu-owned projections. A match fails closed. The response is an allowlisted
+set of booleans, counts, money facts, content digest, and canonical component
+hashes; it exposes no IDs, timestamps, coordinate, secret-derived hash, provider
+body, URL, or storage location and performs no provider work.
 
 The managed-stack contract `hubu.flux-2-pro.text-to-image/v1` binds the exact
 FLUX target, certified preset dimensions, three dated rational USD prices,

@@ -1430,6 +1430,93 @@ mod tests {
     }
 
     #[test]
+    fn managed_flux_invalid_reference_and_artifact_root_fail_before_runtime_state() {
+        let root = tempdir().unwrap();
+        let value = config(root.path());
+        let document: serde_json::Value =
+            serde_json::from_str(include_str!("../../../contracts/provider-profiles-v1.json"))
+                .unwrap();
+        let profile = &document["profiles"][0];
+        let policies = &profile["policies"];
+        let mut flux_target = profile["target"].clone();
+        flux_target["secret_service"] = serde_json::json!("gongbu.bfl.test");
+        flux_target["secret_account"] = serde_json::json!("hub-172-fixture");
+        let targets = serde_json::json!({
+            "schema_version":3,
+            "supported_profiles":[{
+                "contract":profile["contract"],
+                "pricing_version":profile["pricing_version"],
+                "poll_policy":policies["poll"],
+                "artifact_delivery_policy":policies["artifact_delivery"],
+                "recovery_policy":policies["recovery"],
+                "generation_retries":policies["generation_retries"],
+                "fallback":policies["fallback"]
+            }],
+            "provider_configs":[flux_target]
+        });
+        let pricing = serde_json::json!({
+            "schema_version":2,
+            "catalog_version":profile["pricing_version"],
+            "rules":profile["pricing_rules"]
+        });
+        fs::write(
+            value.providers.pricing_catalog_path.as_ref().unwrap(),
+            serde_json::to_vec(&pricing).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            value.providers.target_catalog_path.as_ref().unwrap(),
+            serde_json::to_vec(&targets).unwrap(),
+        )
+        .unwrap();
+        let config_path = root.path().join("gongbu.json");
+        fs::write(&config_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        validate_runtime_inputs(&config_path).unwrap();
+        assert!(!root.path().join("state").exists());
+        assert!(!root.path().join("artifacts").exists());
+
+        for field in ["secret_service", "secret_account"] {
+            let mut invalid = targets.clone();
+            invalid["provider_configs"][0][field] = serde_json::json!("");
+            fs::write(
+                value.providers.target_catalog_path.as_ref().unwrap(),
+                serde_json::to_vec(&invalid).unwrap(),
+            )
+            .unwrap();
+
+            let error = validate_runtime_inputs(&config_path).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid provider secret reference"),
+                "{field}: {error}"
+            );
+            assert!(!root.path().join("state").exists(), "{field}");
+            assert!(!root.path().join("artifacts").exists(), "{field}");
+        }
+
+        fs::write(
+            value.providers.target_catalog_path.as_ref().unwrap(),
+            serde_json::to_vec(&targets).unwrap(),
+        )
+        .unwrap();
+        let mut invalid_artifact_root = value;
+        invalid_artifact_root.state.artifact_root = "relative-artifacts".into();
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&invalid_artifact_root).unwrap(),
+        )
+        .unwrap();
+
+        assert!(validate_runtime_inputs(&config_path)
+            .unwrap_err()
+            .to_string()
+            .contains("artifact_root must be a safe absolute path"));
+        assert!(!root.path().join("state").exists());
+        assert!(!root.path().join("artifacts").exists());
+    }
+
+    #[test]
     fn runtime_validator_rejects_managed_temporal_version_mismatch() {
         let root = tempdir().unwrap();
         let mut value = config(root.path());

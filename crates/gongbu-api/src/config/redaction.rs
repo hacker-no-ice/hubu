@@ -18,6 +18,64 @@ pub struct Redactor {
     exact: Vec<String>,
     marker: &'static str,
 }
+
+/// Ephemeral exact-match scanner used only inside Gongbu-owned attestations.
+///
+/// The scanner accepts no caller-provided candidate. Its patterns are derived
+/// from the already-selected provider credential and are cleared on drop.
+/// Besides the raw bytes, scan the same JSON, Rust-debug, and percent-encoded
+/// renderings covered by the persistence/log redactor.
+pub(crate) struct RegisteredSecretScanner {
+    patterns: Vec<Vec<u8>>,
+}
+
+impl RegisteredSecretScanner {
+    pub(crate) fn new(secret: &[u8]) -> Self {
+        let mut patterns = vec![secret.to_vec()];
+        if let Ok(value) = std::str::from_utf8(secret) {
+            let mut json = serde_json::to_string(value)
+                .expect("string serialization cannot fail")
+                .into_bytes();
+            patterns.push(json[1..json.len() - 1].to_vec());
+            json.fill(0);
+            let mut debug = format!("{value:?}").into_bytes();
+            patterns.push(debug[1..debug.len() - 1].to_vec());
+            debug.fill(0);
+        }
+        let mut percent = percent_encode(secret).into_bytes();
+        patterns.push(percent.clone());
+        patterns.push(percent.iter().map(u8::to_ascii_lowercase).collect());
+        percent.fill(0);
+        patterns.retain(|pattern| !pattern.is_empty());
+        patterns.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+        let mut unique = Vec::with_capacity(patterns.len());
+        for mut pattern in patterns {
+            if unique.last().is_some_and(|previous| previous == &pattern) {
+                pattern.fill(0);
+            } else {
+                unique.push(pattern);
+            }
+        }
+        Self { patterns: unique }
+    }
+
+    pub(crate) fn contains(&self, input: &[u8]) -> bool {
+        self.patterns.iter().any(|pattern| {
+            pattern.len() <= input.len()
+                && input
+                    .windows(pattern.len())
+                    .any(|candidate| candidate == pattern)
+        })
+    }
+}
+
+impl Drop for RegisteredSecretScanner {
+    fn drop(&mut self) {
+        for pattern in &mut self.patterns {
+            pattern.fill(0);
+        }
+    }
+}
 impl Redactor {
     pub fn new<'a>(secrets: impl IntoIterator<Item = &'a [u8]>) -> Self {
         let mut exact: Vec<_> = secrets
@@ -233,5 +291,19 @@ mod tests {
         let value =
             Redactor::new([b"abc/def?x".as_slice()]).redact("SDK client_secret=abc%2fdef%3fx");
         assert!(!value.contains("abc%2fdef%3fx"));
+    }
+
+    #[test]
+    fn ephemeral_scanner_covers_raw_escaped_and_percent_encoded_renderings() {
+        let secret = b"canary-\"slash\\value?";
+        let scanner = RegisteredSecretScanner::new(secret);
+        assert!(scanner.contains(secret));
+        assert!(scanner.contains(br#"canary-\"slash\\value?"#));
+        assert!(scanner.contains(b"canary-%22slash%5Cvalue%3F"));
+        assert!(scanner.contains(b"canary-%22slash%5cvalue%3f"));
+        assert!(!scanner.contains(b"unrelated safe projection"));
+
+        let duplicate_scanner = RegisteredSecretScanner::new(b"plain-alphanumeric");
+        assert_eq!(duplicate_scanner.patterns.len(), 1);
     }
 }

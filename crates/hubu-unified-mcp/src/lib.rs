@@ -46,7 +46,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.3";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 6;
+pub const ROUTING_REVISION: u32 = 7;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -58,6 +58,7 @@ const CAPABILITY_POLL_INTERVAL_ENV: &str = "HUBU_UNIFIED_CAPABILITY_POLL_INTERVA
 const OPERATION_TICK_ENV: &str = "HUBU_UNIFIED_OPERATION_TICK_MS";
 const GOVERNED_EXECUTION_WAIT_ENV: &str = "HUBU_UNIFIED_GOVERNED_EXECUTION_WAIT_MS";
 const OPERATION_STATE_PATH_ENV: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
+const OPERATION_KEY_DB_ENV: &str = "HUBU_UNIFIED_OPERATION_KEY_DB";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
 const TRUST_SPEND_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_SPEND_APPROVAL";
 const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
@@ -82,6 +83,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("gongbu_get_artifact", BackendOwner::Gongbu),
     ("gongbu_get_execution", BackendOwner::Gongbu),
     ("gongbu_get_provider_catalog", BackendOwner::Gongbu),
+    ("gongbu_get_redaction_attestation", BackendOwner::Gongbu),
     ("gongbu_list_artifacts", BackendOwner::Gongbu),
     ("gongbu_list_execution_targets", BackendOwner::Gongbu),
     ("hubu_add_policy", BackendOwner::Hubu),
@@ -204,6 +206,7 @@ pub struct Config {
     pub operation_tick: Duration,
     pub governed_execution_wait: Duration,
     pub operation_state_path: Option<PathBuf>,
+    pub preallocated_operation_key_path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -216,6 +219,7 @@ impl Default for Config {
             operation_tick: DEFAULT_OPERATION_TICK,
             governed_execution_wait: DEFAULT_GOVERNED_EXECUTION_WAIT,
             operation_state_path: None,
+            preallocated_operation_key_path: None,
         }
     }
 }
@@ -240,6 +244,15 @@ impl Config {
         let operation_state_path = lookup(OPERATION_STATE_PATH_ENV)
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from);
+        let preallocated_operation_key_path = lookup(OPERATION_KEY_DB_ENV)
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from);
+        if preallocated_operation_key_path
+            .as_deref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(ConfigError::InvalidOperationKeyDbPath);
+        }
         let mut hubu_routing = HubuRoutingConfig::new_with_spend_approval(
             lookup(TRUST_CLIENT_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
             lookup(TRUST_SPEND_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
@@ -266,6 +279,7 @@ impl Config {
             operation_tick: operation_tick(lookup(OPERATION_TICK_ENV))?,
             governed_execution_wait: governed_execution_wait(lookup(GOVERNED_EXECUTION_WAIT_ENV))?,
             operation_state_path,
+            preallocated_operation_key_path,
         })
     }
 }
@@ -366,6 +380,8 @@ pub enum ConfigError {
     InvalidOperationTick,
     #[error("governed execution wait must be between 10 and 45000 milliseconds")]
     InvalidGovernedExecutionWait,
+    #[error("preallocated operation key database path must be absolute")]
+    InvalidOperationKeyDbPath,
 }
 
 impl fmt::Display for BackendOwner {
@@ -576,7 +592,10 @@ impl Server {
                     reason_code: "configuration_invalid",
                 }
             }
-            Some(path) => match operation_registry::OperationRegistry::open(path) {
+            Some(path) => match operation_registry::OperationRegistry::open_with_preallocated_keys(
+                path,
+                config.preallocated_operation_key_path.as_deref(),
+            ) {
                 Ok(registry) => OperationRegistryCapability::Available(Mutex::new(registry)),
                 Err(_) => OperationRegistryCapability::Unavailable {
                     reason_code: "state_unavailable",
@@ -1057,6 +1076,32 @@ impl Server {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .durable_operation_status(operation_handle)
+    }
+
+    fn governed_result(&self, operation_handle: &str) -> anyhow::Result<Option<Value>> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("governed execution result requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .governed_result(operation_handle)
+    }
+
+    fn record_governed_result(
+        &self,
+        operation_handle: &str,
+        result: &Value,
+    ) -> anyhow::Result<Value> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("governed execution result requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_governed_result(operation_handle, result)
     }
 
     fn approval_sync_target_for_handle(
@@ -1587,6 +1632,24 @@ mod tests {
     }
 
     #[test]
+    fn preallocated_operation_key_database_requires_an_absolute_path() {
+        let config = Config::from_lookup(lookup(&[
+            (OPERATION_STATE_PATH_ENV, "/tmp/hubu-unified-test.sqlite3"),
+            (OPERATION_KEY_DB_ENV, "/tmp/hubu-operation-keys.sqlite3"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.preallocated_operation_key_path.as_deref(),
+            Some(Path::new("/tmp/hubu-operation-keys.sqlite3"))
+        );
+
+        assert_eq!(
+            Config::from_lookup(lookup(&[(OPERATION_KEY_DB_ENV, "relative.sqlite3")])).unwrap_err(),
+            ConfigError::InvalidOperationKeyDbPath
+        );
+    }
+
+    #[test]
     fn validates_injectable_capability_poll_interval() {
         assert_eq!(poll_interval(None).unwrap(), Duration::from_secs(30));
         assert_eq!(
@@ -2011,7 +2074,7 @@ mod tests {
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
         assert_eq!(capability["routing_revision"], ROUTING_REVISION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 41);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 42);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

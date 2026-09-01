@@ -74,6 +74,14 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
+            name: "gongbu_get_redaction_attestation",
+            owner: gongbu,
+            method: "GET",
+            path: "/v1/executions/exec-107/redaction-attestation",
+            arguments: json!({"execution_id":"exec-107"}),
+            meta: None,
+        },
+        GoldenCase {
             name: "gongbu_list_artifacts",
             owner: gongbu,
             method: "GET",
@@ -369,8 +377,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        37,
-        "golden matrix must contain exactly 37 cases"
+        38,
+        "golden matrix must contain exactly 38 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -383,8 +391,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        37,
-        "routing fixture must map 37 tools"
+        38,
+        "routing fixture must map 38 tools"
     );
     assert_eq!(
         expected.len(),
@@ -407,7 +415,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Gongbu)
             .count(),
-        6
+        7
     );
 }
 
@@ -486,11 +494,53 @@ fn provider_catalog_response() -> Value {
     })
 }
 
+fn redaction_attestation_response() -> Value {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    json!({
+        "schema_version": 1,
+        "attestation_contract": "gongbu.flux-redaction-attestation/v1",
+        "allowlist_projection": true,
+        "terminal_execution": true,
+        "registered_provider_secret_resolved": true,
+        "registered_provider_secret_absent_from_scanned_projections": true,
+        "scan": {
+            "logical_database_record_count": 4,
+            "artifact_metadata_record_count": 1,
+            "public_projection_count": 3,
+            "bytes_scanned": 4096
+        },
+        "facts": {
+            "authorization_snapshot_count": 1,
+            "claim_reference_count": 1,
+            "provider_attempt_count": 1,
+            "provider_submission_count": 1,
+            "durable_checkpoint_count": 1,
+            "provider_poll_count": 2,
+            "artifact_fetch_count": 1,
+            "artifact_count": 1,
+            "receipt_count": 1,
+            "settlement_delivery_count": 1,
+            "authorized_minor": 3,
+            "authorization_currency": "USD",
+            "provider_cost_minor": 3,
+            "provider_cost_currency": "USD",
+            "settled_minor": 3,
+            "settled_currency": "USD",
+            "artifact_content_sha256": digest
+        },
+        "execution_sha256": digest,
+        "artifact_sha256": digest,
+        "settlement_sha256": digest,
+        "combined_projection_sha256": digest
+    })
+}
+
 fn success_body(case: &GoldenCase) -> Value {
     match case.name {
         "gongbu_create_execution" => execution_response(),
         "gongbu_get_execution" => execution_observation_response_for("operation-107", "exec-107"),
         "gongbu_get_provider_catalog" => provider_catalog_response(),
+        "gongbu_get_redaction_attestation" => redaction_attestation_response(),
         "gongbu_list_artifacts" => artifact_list_response(),
         "gongbu_list_execution_targets" => json!({"schema_version":2,"targets":[]}),
         "gongbu_get_artifact" => unreachable!("artifact success uses image bytes"),

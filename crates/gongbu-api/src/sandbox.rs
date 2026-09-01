@@ -1552,6 +1552,7 @@ pub enum ProviderWiring {
 impl ProviderWiring {
     pub fn activities(
         &self,
+        repository: Repository,
         secrets: Arc<dyn SecretProvider>,
     ) -> Arc<dyn ProviderActivities + Send + Sync> {
         match self {
@@ -1560,7 +1561,7 @@ impl ProviderWiring {
                 catalog,
                 maximum_spend_minor,
             } => Arc::new(SpendCappedProvider {
-                delegate: GenericProviderActivities::new(catalog.clone(), secrets),
+                delegate: GenericProviderActivities::new(repository, catalog.clone(), secrets),
                 maximum_spend_minor: *maximum_spend_minor,
             }),
         }
@@ -2043,7 +2044,7 @@ mod tests {
                 crate::redaction::Redactor::default(),
             )
             .unwrap();
-            let wiring = SandboxWiring::from_config(&config, repository).unwrap();
+            let wiring = SandboxWiring::from_config(&config, repository.clone()).unwrap();
             assert_eq!(
                 matches!(&wiring.hubu, HubuWiring::Mock(_)),
                 hubu == BoundaryMode::Mock
@@ -2055,7 +2056,7 @@ mod tests {
             if provider == BoundaryMode::Real {
                 let error = wiring
                     .provider
-                    .activities(Arc::new(UnavailableSecrets))
+                    .activities(repository.clone(), Arc::new(UnavailableSecrets))
                     .preflight(&execution())
                     .unwrap_err();
                 assert_eq!(

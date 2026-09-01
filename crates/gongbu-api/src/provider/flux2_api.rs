@@ -8,9 +8,10 @@
 use super::{
     contract::{
         canonical_image_media_type, ActualVendorCost, AdapterCapabilities, AdapterOutcome,
-        AdapterSubmission, AsyncProviderOperation, ContractError, NormalizedArtifact,
-        NormalizedRequest, NormalizedUsage, OutputDimensions, ProviderAdapter, ProviderFailure,
-        ProviderPhase, Result, RetryPolicy,
+        AdapterSubmission, AsyncProviderOperation, ContractError, NoopProviderTransportObserver,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutputDimensions, ProviderAdapter,
+        ProviderFailure, ProviderPhase, ProviderTransportInteraction, ProviderTransportObserver,
+        Result, RetryPolicy,
     },
     http_kernel::{
         provider_request_id, read_bounded, shared_client, url_has_explicit_port,
@@ -359,6 +360,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         input: &Value,
         secret: &ProviderSecret,
         idempotency_key: Option<&str>,
+        observer: &dyn ProviderTransportObserver,
     ) -> Result<AdapterSubmission, ProviderFailure> {
         let body = self.submission_body(request, input)?;
         let deadline =
@@ -420,7 +422,14 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         }
         if state == BflResultState::Ready {
             return self
-                .complete_ready(current, request_id, operation_id, secret, deadline)
+                .complete_ready(
+                    current,
+                    request_id,
+                    operation_id,
+                    secret,
+                    deadline,
+                    observer,
+                )
                 .map(AdapterSubmission::Complete);
         }
 
@@ -459,6 +468,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         input: &Value,
         secret: &ProviderSecret,
         operation: &AsyncProviderOperation,
+        observer: &dyn ProviderTransportObserver,
     ) -> Result<AdapterOutcome, ProviderFailure> {
         let evidence = || {
             (
@@ -496,18 +506,27 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 })?,
             );
             thread::sleep(wait);
+            if !observer.record(ProviderTransportInteraction::Poll) {
+                return Err(reconcile_with_evidence(
+                    "provider_transport_evidence_unavailable",
+                    ProviderPhase::Processing,
+                    request_id,
+                    Some(operation_id),
+                ));
+            }
+            let poll_timeout = deadline.remaining().map_err(|_| {
+                with_evidence(
+                    "timeout_unknown_outcome",
+                    request_id.clone(),
+                    Some(operation_id.clone()),
+                )
+            })?;
             let response = self
                 .transport
                 .poll(
                     &poll_url,
                     secret.expose(),
-                    deadline.remaining().map_err(|_| {
-                        with_evidence(
-                            "timeout_unknown_outcome",
-                            request_id.clone(),
-                            Some(operation_id.clone()),
-                        )
-                    })?,
+                    poll_timeout,
                     &self.config.headers,
                 )
                 .map_err(|error| {
@@ -558,6 +577,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                         Some(operation_id),
                         secret,
                         deadline,
+                        observer,
                     );
                 }
                 BflResultState::Pending => {}
@@ -577,6 +597,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         operation_id: Option<String>,
         secret: &ProviderSecret,
         deadline: InvocationDeadline,
+        observer: &dyn ProviderTransportObserver,
     ) -> Result<AdapterOutcome, ProviderFailure> {
         let raw_artifact_url = artifact_url(&current).ok_or_else(|| {
             with_evidence(
@@ -615,15 +636,20 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         if artifact_policy.validate_url(&artifact_url).is_err() {
             return Err(artifact_failure(request_id, operation_id));
         }
+        if !observer.record(ProviderTransportInteraction::ArtifactFetch) {
+            return Err(reconcile_with_evidence(
+                "provider_transport_evidence_unavailable",
+                ProviderPhase::Artifact,
+                request_id,
+                operation_id,
+            ));
+        }
+        let artifact_timeout = deadline
+            .remaining()
+            .map_err(|_| artifact_failure(request_id.clone(), operation_id.clone()))?;
         let bytes = self
             .transport
-            .fetch_artifact(
-                &artifact_url,
-                deadline
-                    .remaining()
-                    .map_err(|_| artifact_failure(request_id.clone(), operation_id.clone()))?,
-                self.max_artifact_bytes,
-            )
+            .fetch_artifact(&artifact_url, artifact_timeout, self.max_artifact_bytes)
             .map_err(|error| {
                 let _ = Redactor::new([secret.expose()]).error_chain(error.as_ref());
                 artifact_failure(request_id.clone(), operation_id.clone())
@@ -702,9 +728,27 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome, ProviderFailure> {
-        match self.submit(request, input, secret, vendor_idempotency_key)? {
+        self.invoke_observed(
+            request,
+            input,
+            secret,
+            vendor_idempotency_key,
+            &NoopProviderTransportObserver,
+        )
+    }
+    fn invoke_observed(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+        observer: &dyn ProviderTransportObserver,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        match self.submit_observed(request, input, secret, vendor_idempotency_key, observer)? {
             AdapterSubmission::Complete(outcome) => Ok(outcome),
-            AdapterSubmission::Pending(operation) => self.poll(request, input, secret, &operation),
+            AdapterSubmission::Pending(operation) => {
+                self.poll_observed(request, input, secret, &operation, observer)
+            }
         }
     }
     fn submit(
@@ -714,13 +758,29 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterSubmission, ProviderFailure> {
+        self.submit_observed(
+            request,
+            input,
+            secret,
+            vendor_idempotency_key,
+            &NoopProviderTransportObserver,
+        )
+    }
+    fn submit_observed(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+        observer: &dyn ProviderTransportObserver,
+    ) -> Result<AdapterSubmission, ProviderFailure> {
         if vendor_idempotency_key.is_some() != self.config.idempotency_header.is_some() {
             return Err(ProviderFailure::release(
                 "idempotency_policy_mismatch",
                 ProviderPhase::PreSend,
             ));
         }
-        self.submit_once_inner(request, input, secret, vendor_idempotency_key)
+        self.submit_once_inner(request, input, secret, vendor_idempotency_key, observer)
     }
     fn poll(
         &self,
@@ -729,7 +789,23 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
         secret: &ProviderSecret,
         operation: &AsyncProviderOperation,
     ) -> Result<AdapterOutcome, ProviderFailure> {
-        self.poll_existing_inner(request, input, secret, operation)
+        self.poll_observed(
+            request,
+            input,
+            secret,
+            operation,
+            &NoopProviderTransportObserver,
+        )
+    }
+    fn poll_observed(
+        &self,
+        request: &NormalizedRequest,
+        input: &Value,
+        secret: &ProviderSecret,
+        operation: &AsyncProviderOperation,
+        observer: &dyn ProviderTransportObserver,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        self.poll_existing_inner(request, input, secret, operation, observer)
     }
     fn redact_error(&self, error: &(dyn StdError + 'static)) -> ContractError {
         let _ = Redactor::default().error_chain(error);
@@ -1934,6 +2010,97 @@ mod tests {
         assert_eq!(traffic.polls.lock().unwrap().len(), 1);
         assert_eq!(traffic.artifacts.lock().unwrap().len(), 1);
         assert_eq!(outcome.provider_operation_id.as_deref(), Some("op-1"));
+    }
+
+    #[test]
+    fn observed_resume_records_each_transport_boundary_before_the_call() {
+        #[derive(Default)]
+        struct Observer(Mutex<Vec<ProviderTransportInteraction>>);
+        impl ProviderTransportObserver for Observer {
+            fn record(&self, interaction: ProviderTransportInteraction) -> bool {
+                self.0.lock().unwrap().push(interaction);
+                true
+            }
+        }
+
+        let (adapter, traffic) = security_fixture(
+            202,
+            json!({
+                "id":"op-1",
+                "polling_url":"https://api.us.bfl.ai/v1/get_result?id=op-1",
+                "status":"Pending"
+            }),
+            vec![
+                (200, json!({"id":"op-1","status":"Pending"})),
+                (
+                    200,
+                    json!({
+                        "id":"op-1",
+                        "status":"Ready",
+                        "result":{"sample":"https://delivery.us.bfl.ai/out.png?signature=short-lived"}
+                    }),
+                ),
+            ],
+        );
+        let secret = secret_for_test("secret-canary");
+        let observer = Observer::default();
+        let AdapterSubmission::Pending(operation) = adapter
+            .submit_observed(&request(), &input(), &secret, Some("opaque-key"), &observer)
+            .unwrap()
+        else {
+            panic!("expected an asynchronous operation");
+        };
+
+        adapter
+            .poll_observed(&request(), &input(), &secret, &operation, &observer)
+            .unwrap();
+
+        assert_eq!(traffic.submissions.lock().unwrap().len(), 1);
+        assert_eq!(traffic.polls.lock().unwrap().len(), 2);
+        assert_eq!(traffic.artifacts.lock().unwrap().len(), 1);
+        assert_eq!(
+            observer.0.lock().unwrap().as_slice(),
+            &[
+                ProviderTransportInteraction::Poll,
+                ProviderTransportInteraction::Poll,
+                ProviderTransportInteraction::ArtifactFetch,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejected_transport_observation_prevents_the_provider_call() {
+        struct Reject;
+        impl ProviderTransportObserver for Reject {
+            fn record(&self, _interaction: ProviderTransportInteraction) -> bool {
+                false
+            }
+        }
+
+        let (adapter, traffic) = security_fixture(
+            202,
+            json!({
+                "id":"op-1",
+                "polling_url":"https://api.us.bfl.ai/v1/get_result?id=op-1",
+                "status":"Pending"
+            }),
+            vec![(200, json!({"id":"op-1","status":"Pending"}))],
+        );
+        let secret = secret_for_test("secret-canary");
+        let AdapterSubmission::Pending(operation) = adapter
+            .submit(&request(), &input(), &secret, Some("opaque-key"))
+            .unwrap()
+        else {
+            panic!("expected an asynchronous operation");
+        };
+
+        let error = adapter
+            .poll_observed(&request(), &input(), &secret, &operation, &Reject)
+            .unwrap_err();
+
+        assert_eq!(error.code, "provider_transport_evidence_unavailable");
+        assert!(traffic.polls.lock().unwrap().is_empty());
+        assert!(traffic.artifacts.lock().unwrap().is_empty());
     }
 
     #[test]

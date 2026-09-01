@@ -319,6 +319,7 @@ pub(super) fn execution_result(
         outcome: response.outcome.clone(),
     };
     let timing = response.timing();
+    let provider_transport = response.provider_transport();
     let private_operation_key = response.operation_key.clone();
     let public = PublicExecutionResponse {
         schema_version: response.schema_version,
@@ -333,6 +334,7 @@ pub(super) fn execution_result(
         started_at: response.started_at,
         completed_at: response.completed_at,
         timing,
+        provider_transport,
     };
     let mut public = serde_json::to_value(public).expect("public execution response serializes");
     scrub_private_projection(&mut public, &private_operation_key);
@@ -468,6 +470,112 @@ impl ProviderCatalogResponse {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct RedactionAttestationResponse {
+    schema_version: u32,
+    attestation_contract: String,
+    allowlist_projection: bool,
+    terminal_execution: bool,
+    registered_provider_secret_resolved: bool,
+    registered_provider_secret_absent_from_scanned_projections: bool,
+    scan: RedactionScanCounters,
+    facts: RedactionAttestationFacts,
+    execution_sha256: String,
+    artifact_sha256: String,
+    settlement_sha256: String,
+    combined_projection_sha256: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RedactionScanCounters {
+    logical_database_record_count: u64,
+    artifact_metadata_record_count: u64,
+    public_projection_count: u64,
+    bytes_scanned: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RedactionAttestationFacts {
+    authorization_snapshot_count: u64,
+    claim_reference_count: u64,
+    provider_attempt_count: u64,
+    provider_submission_count: u64,
+    durable_checkpoint_count: u64,
+    provider_poll_count: u64,
+    artifact_fetch_count: u64,
+    artifact_count: u64,
+    receipt_count: u64,
+    settlement_delivery_count: u64,
+    authorized_minor: i64,
+    authorization_currency: String,
+    provider_cost_minor: Option<i64>,
+    provider_cost_currency: Option<String>,
+    settled_minor: Option<i64>,
+    settled_currency: Option<String>,
+    artifact_content_sha256: String,
+}
+
+impl RedactionAttestationResponse {
+    pub(super) fn validate(&self) -> Result<(), ToolError> {
+        let bounded_counts = self.scan.logical_database_record_count == 4
+            && self.scan.artifact_metadata_record_count == 1
+            && self.scan.public_projection_count == 3
+            && (1..=16 * 1024 * 1024).contains(&self.scan.bytes_scanned);
+        let facts = &self.facts;
+        let bounded_facts = facts.authorization_snapshot_count == 1
+            && facts.claim_reference_count == 1
+            && facts.provider_attempt_count == 1
+            && facts.provider_submission_count == 1
+            && facts.durable_checkpoint_count == 1
+            && (1..=540).contains(&facts.provider_poll_count)
+            && facts.artifact_fetch_count == 1
+            && facts.artifact_count == 1
+            && self.scan.artifact_metadata_record_count == 1
+            && facts.receipt_count == 1
+            && facts.settlement_delivery_count == 1
+            && facts.authorized_minor == 3
+            && facts.authorization_currency == "USD"
+            && facts.provider_cost_minor.is_some() == facts.provider_cost_currency.is_some()
+            && facts.settled_minor.is_some() == facts.settled_currency.is_some()
+            && facts.provider_cost_minor == Some(3)
+            && facts.provider_cost_currency.as_deref() == Some("USD")
+            && facts.settled_minor == Some(3)
+            && facts.settled_currency.as_deref() == Some("USD");
+        let valid_digests = [
+            &self.execution_sha256,
+            &self.artifact_sha256,
+            &self.settlement_sha256,
+            &self.combined_projection_sha256,
+            &facts.artifact_content_sha256,
+        ]
+        .into_iter()
+        .all(|digest| {
+            digest.strip_prefix("sha256:").is_some_and(|value| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            })
+        });
+        if self.schema_version != 1
+            || self.attestation_contract != "gongbu.flux-redaction-attestation/v1"
+            || !self.allowlist_projection
+            || !self.terminal_execution
+            || !self.registered_provider_secret_resolved
+            || !self.registered_provider_secret_absent_from_scanned_projections
+            || !bounded_counts
+            || !bounded_facts
+            || !valid_digests
+        {
+            return Err(ToolError::invalid_response());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ProviderCatalogProfile {
     contract: String,
     pricing_version: String,
@@ -597,6 +705,8 @@ pub(super) struct ExecutionResponse {
     completed_at: Option<String>,
     #[serde(default)]
     timing: ExecutionTiming,
+    #[serde(default)]
+    provider_transport: Option<ProviderTransport>,
 }
 
 impl ExecutionResponse {
@@ -619,6 +729,17 @@ impl ExecutionResponse {
             ExecutionTiming::default()
         }
     }
+
+    pub(super) fn provider_transport(&self) -> Option<ProviderTransport> {
+        self.provider_transport
+            .as_ref()
+            .filter(|transport| {
+                transport.schema_version == 1
+                    && transport.poll_count <= i64::MAX.unsigned_abs()
+                    && transport.artifact_fetch_count <= i64::MAX.unsigned_abs()
+            })
+            .cloned()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -636,6 +757,16 @@ struct PublicExecutionResponse {
     started_at: Option<String>,
     completed_at: Option<String>,
     timing: ExecutionTiming,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_transport: Option<ProviderTransport>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProviderTransport {
+    pub(crate) schema_version: u32,
+    pub(crate) poll_count: u64,
+    pub(crate) artifact_fetch_count: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -801,6 +932,11 @@ mod tests {
             started_at: None,
             completed_at: None,
             timing: ExecutionTiming::default(),
+            provider_transport: Some(ProviderTransport {
+                schema_version: 1,
+                poll_count: 2,
+                artifact_fetch_count: 1,
+            }),
         }
     }
 
@@ -914,6 +1050,9 @@ mod tests {
         assert_eq!(public["timing"]["execution_total_ms"], 4_000);
         assert_eq!(public["timing"]["provider_interaction_ms"], 3_500);
         assert_eq!(public["timing"]["non_provider_ms"], 500);
+        assert_eq!(public["provider_transport"]["schema_version"], 1);
+        assert_eq!(public["provider_transport"]["poll_count"], 2);
+        assert_eq!(public["provider_transport"]["artifact_fetch_count"], 1);
         assert!(public["timing"].get("transmission_started_at").is_none());
         assert!(public.get("operation_key").is_none());
     }
@@ -922,8 +1061,10 @@ mod tests {
     fn absent_or_inconsistent_timing_is_safely_unavailable() {
         let mut legacy = serde_json::to_value(execution()).unwrap();
         legacy.as_object_mut().unwrap().remove("timing");
+        legacy.as_object_mut().unwrap().remove("provider_transport");
         let legacy: ExecutionResponse = serde_json::from_value(legacy).unwrap();
         assert_eq!(legacy.timing(), ExecutionTiming::default());
+        assert_eq!(legacy.provider_transport(), None);
 
         let mut inconsistent = execution();
         inconsistent.timing = ExecutionTiming {
@@ -937,5 +1078,16 @@ mod tests {
 
         inconsistent.timing.scope = "router_polling".into();
         assert_eq!(inconsistent.timing(), ExecutionTiming::default());
+
+        inconsistent
+            .provider_transport
+            .as_mut()
+            .unwrap()
+            .schema_version = 99;
+        assert_eq!(inconsistent.provider_transport(), None);
+
+        let mut out_of_range = execution();
+        out_of_range.provider_transport.as_mut().unwrap().poll_count = u64::MAX;
+        assert_eq!(out_of_range.provider_transport(), None);
     }
 }

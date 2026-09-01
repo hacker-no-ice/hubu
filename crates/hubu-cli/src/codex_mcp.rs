@@ -12,6 +12,7 @@ pub(crate) struct UnifiedConfig<'a> {
     pub approval_token_file: &'a Path,
     pub reconciliation_token_file: &'a Path,
     pub operation_state_path: &'a Path,
+    pub operation_key_db: Option<&'a Path>,
     pub gongbu: Option<(&'a str, &'a Path)>,
     pub trust_client_approval: bool,
 }
@@ -60,6 +61,13 @@ pub(crate) fn unified_block(config: UnifiedConfig<'_>) -> String {
             "HUBU_UNIFIED_GONGBU_ENDPOINT = \"{}\"\nHUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE = \"{}\"",
             toml_string(endpoint),
             toml_string(&token_file.display().to_string()),
+        );
+    }
+    if let Some(operation_key_db) = config.operation_key_db {
+        let _ = writeln!(
+            block,
+            "HUBU_UNIFIED_OPERATION_KEY_DB = \"{}\"",
+            toml_string(&operation_key_db.display().to_string()),
         );
     }
     finish_block(&mut block, config.trust_client_approval);
@@ -198,6 +206,7 @@ mod tests {
             approval_token_file: Path::new("/tmp/hubu\\approval-token"),
             reconciliation_token_file: Path::new("/tmp/hubu\\reconciliation-token"),
             operation_state_path: Path::new("/tmp/hubu\\unified-operations.sqlite3"),
+            operation_key_db: Some(Path::new("/tmp/hubu\\operation-keys.sqlite3")),
             gongbu: Some(("http://127.0.0.1:8788", Path::new("/tmp/gongbu-token"))),
             trust_client_approval: false,
         });
@@ -211,6 +220,8 @@ mod tests {
         assert!(block.contains(
             "HUBU_UNIFIED_OPERATION_STATE_PATH = \"/tmp/hubu\\\\unified-operations.sqlite3\""
         ));
+        assert!(block
+            .contains("HUBU_UNIFIED_OPERATION_KEY_DB = \"/tmp/hubu\\\\operation-keys.sqlite3\""));
         assert!(block.contains(
             "[mcp_servers.hubu.tools.hubu_authorize_spend]\napproval_mode = \"approve\""
         ));
@@ -222,6 +233,24 @@ mod tests {
         assert!(block.contains(
             "[mcp_servers.hubu.tools.hubu_resolve_spend_approval]\napproval_mode = \"prompt\""
         ));
+        toml::from_str::<toml::Value>(&block).unwrap();
+    }
+
+    #[test]
+    fn unified_block_omits_preallocated_key_store_until_explicitly_configured() {
+        let block = unified_block(UnifiedConfig {
+            mcp_server: Path::new("/tmp/hubu-unified-mcp"),
+            hubu_endpoint: "http://127.0.0.1:8787",
+            hubu_token_file: Path::new("/tmp/hubu-token"),
+            approval_token_file: Path::new("/tmp/approval-token"),
+            reconciliation_token_file: Path::new("/tmp/reconciliation-token"),
+            operation_state_path: Path::new("/tmp/unified-operations.sqlite3"),
+            operation_key_db: None,
+            gongbu: None,
+            trust_client_approval: false,
+        });
+
+        assert!(!block.contains("HUBU_UNIFIED_OPERATION_KEY_DB"));
         toml::from_str::<toml::Value>(&block).unwrap();
     }
 }

@@ -94,13 +94,15 @@ hubu_update_budget
 ```
 
 Gongbu-owned tools cover the supported-provider catalog, configured-target
-discovery, execution, and artifacts:
+discovery, execution, artifacts, and the narrowly scoped guarded-FLUX
+attestation:
 
 ```text
 gongbu_list_execution_targets
 gongbu_create_execution
 gongbu_get_execution
 gongbu_get_provider_catalog
+gongbu_get_redaction_attestation
 gongbu_list_artifacts
 gongbu_get_artifact
 ```
@@ -111,6 +113,15 @@ result exposes exact supported target/model, resolutions, currency, rational
 pricing, policy versions, and independent readiness facts. It does not expose
 credential coordinates or values, call BFL, or convert
 `live_qualified = false` into a readiness claim.
+
+`gongbu_get_redaction_attestation` accepts only one known execution ID and
+forwards to Gongbu's authenticated, bodyless
+`GET /v1/executions/{id}/redaction-attestation`. Gongbu allows it only for the
+exact successful HUB-172 managed-FLUX tuple. Its response contains versioned
+safe facts, bounded scan counts, and canonical hashes; it never returns backend
+identifiers, credential coordinates or material, provider bodies, URLs, or
+storage locations. The endpoint resolves no credential until the fixed tuple
+and clean-success cardinalities pass, and a detected key match fails closed.
 
 The static ownership table is authoritative; prefix inference is not a routing
 rule. Unknown names fail closed until a routing revision assigns them. Exact
@@ -143,7 +154,11 @@ trusted harness identity and a newly allocated private operation key.
 - `hubu_submit_governed_execution` returns one composite outcome, the public
   handle, adapter/execution status when available, server-observed timing, and
   eligible inline artifacts when terminal execution and delivery fit its total
-  internal budget.
+  internal budget. The first safe terminal public composite result is stored in
+  the router registry; exact call redelivery and restart replay that result byte
+  for byte without recomputing timing or repeating backend mutation.
+  Nonterminal `approval_required` and `in_progress` responses are not cached, so
+  later calls can project an approved or completed durable state.
 - `hubu_get_spend_approval` reads the owner-scoped immutable review and durable
   `pending`, `approved`, or `denied` status without using approval authority.
 - `hubu_resolve_spend_approval` submits exactly one explicit human `approve` or
@@ -155,6 +170,9 @@ trusted harness identity and a newly allocated private operation key.
   binds its stored execution intent and wakes the existing worker idempotently.
   It cannot change the approved scope or create a second logical operation.
 - `gongbu_get_artifact` returns safe metadata followed by PNG or JPEG content.
+- `gongbu_get_redaction_attestation` is read-only and does no provider work. It
+  revalidates the one normalized artifact from Gongbu-owned storage and reports
+  only the exact guarded-qualification projection.
 - Gongbu application errors remain `isError: true` with their sanitized error
   object.
 - Only `hubu_update_budget` and `hubu_budget_history` translate typed Hubu
@@ -373,7 +391,13 @@ attempt IDs and timestamps do not cross the MCP boundary.
 The same Gongbu-owned projection on execution reads is
 `timing: { schema_version: 1, scope: "gongbu_execution",
 execution_total_ms, provider_interaction_ms, non_provider_ms }`, with the three
-durations nullable under the same rules.
+durations nullable under the same rules. Execution reads and terminal governed
+results also include
+`provider_transport: { schema_version: 1, poll_count,
+artifact_fetch_count }`. These counters are durably incremented immediately
+before Gongbu enters each corresponding transport call. A failed counter write
+prevents the call, and restart/replay preserves the cumulative values. They do
+not count router observation polling.
 
 The one-call artifact-delivery promise therefore applies to an ordinary
 auto-approved execution that reaches terminal state while its eligible
@@ -491,16 +515,16 @@ envelope without changing either backend's wire contract.
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 40 other tool names with owner
+state and compatible version metadata, and all 41 other tool names with owner
 and availability. Together with `hubu_unified_capabilities`, the stdio surface
-exposes 41 tools, 37 of which route to a backend.
+exposes 42 tools, 38 of which route to a backend.
 
 The version-1 compatibility boundary requires:
 
 | Surface | Required value |
 | --- | --- |
 | Unified contract | `hubu-gongbu-mcp-v1` |
-| Routing revision | `6` |
+| Routing revision | `7` |
 | MCP protocol | `2024-11-05` |
 | Hubu and Gongbu executor contract | `hubu-spend-executor-v4.3` |
 | Gongbu API schema | `2` |
@@ -587,6 +611,20 @@ For a rendered local stack profile:
 hubu init codex --stack-profile /absolute/path/to/profile
 ```
 
+An explicitly gated workflow that uses the key-redacted preallocation bridge
+also supplies its non-secret, absolute helper-store coordinate:
+
+```sh
+hubu init codex \
+  --stack-profile /absolute/path/to/profile \
+  --operation-key-db /absolute/private/operation-keys.sqlite3
+```
+
+The option only renders `HUBU_UNIFIED_OPERATION_KEY_DB`; it does not create,
+inspect, or allocate a key. Omit it for ordinary operation. Create the private
+store and its first scoped record only after the workflow's separate human
+authorization gate.
+
 With `--stack-profile`, the command consumes the verified handoff from an
 already running stack and writes the managed MCP entry; managed startup has
 already created the required capabilities. The non-stack setup form may create
@@ -613,6 +651,14 @@ Manual MCP clients configure these inputs for the router:
 - `HUBU_UNIFIED_OPERATION_STATE_PATH`, an absolute path to the router-owned
   SQLite registry. Managed setup always renders it. A manual client may omit
   it, but new billable Hubu operations are then unavailable.
+- `HUBU_UNIFIED_OPERATION_KEY_DB`, an optional absolute path to the private
+  operation-key helper database. Use it only for an explicitly gated,
+  human-authorized workflow.
+  When configured, new trusted Codex calls require exactly one active helper
+  record whose canonical tool name and arguments match; absence, mismatch,
+  reuse, or store failure rejects the call before backend access with no
+  allocator fallback. Exact redelivery and restart use the binding already in
+  the router registry and do not reread the helper database.
 - `HUBU_UNIFIED_HUBU_ENDPOINT`
 - `HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
   `HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`
@@ -690,12 +736,22 @@ the registry installation nor participates in operation-key authority or the
 core deduplication tuple. On first successful registry startup the router
 persists its own stable local installation identity. For each call it validates bounded identifiers,
 canonically hashes the tool name and model-authored arguments, and atomically
-resolves or allocates a private backend operation key plus an independent public
+resolves a private backend operation key plus an independent public
 `hubu:public-operation:v1:*` handle by platform, local installation, and harness
-call ID. Exact redelivery reuses the normalized operation. Reusing the same
-identity with different arguments or trusted aliases fails before backend
-access, while a different call ID creates a distinct operation even when its
-arguments are identical.
+call ID. The default path allocates the private key inside the router. When the
+preallocated-key database is configured, the router instead selects one exact
+canonical-scope record, validates the independently generated record and key
+identifiers, rejects a record reference from which the key is derivable, and
+atomically claims the helper record for the stable router installation, trusted
+call identity, and exact request hash before binding it locally. Owner-only
+directory, database, WAL, and SHM permissions are mandatory. The same claim can
+recover after a crash; a different call or router registry cannot reuse it. The
+record ID, key, full scope, and database path are never model-authored fields or
+public results. Trusted Codex `callId` remains the operation identity. Exact
+redelivery reuses the normalized operation.
+Reusing the same identity with different arguments or trusted aliases fails
+before backend access, while a different call ID creates a distinct operation
+even when its arguments are identical.
 
 Only common identity columns and the typed Codex, Claude Code, and controlled
 envelope aliases are stored; arbitrary `_meta` content is not persisted. The
@@ -803,8 +859,10 @@ scheduling, provider work, and financial recovery. For a managed stack, the
 router's client references come from the verified post-start handoff; it does
 not participate in service credential bootstrap.
 
-Registry schema v5 performs one explicit forward migration from v4, preserving
-existing public handles and approval state while adding durable request intent.
+Registry schema v6 performs explicit forward migration from v4 through v5,
+preserving existing public handles and approval state while adding durable
+request intent, one-time preallocated-key record binding, and a bounded safe
+composite-result cache for exact replay.
 A migrated v4 pending row has no reconstructable intent. Before handle resume,
 an exact original-call redelivery can backfill the matching canonical request.
 Otherwise the first handle-resume attempt records terminal

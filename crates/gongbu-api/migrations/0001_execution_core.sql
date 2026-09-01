@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS provider_attempts(
  -- adapters persist only its validated host and reconstruct the documented path.
  provider_polling_host TEXT, provider_deadline_unix_ms INTEGER CHECK(provider_deadline_unix_ms IS NULL OR provider_deadline_unix_ms>0),
  operation_checkpointed_at TEXT,
+ -- Monotonic provider-boundary call evidence. These counters are advanced
+ -- durably before Gongbu enters the corresponding transport call.
+ provider_poll_count INTEGER NOT NULL DEFAULT 0 CHECK(provider_poll_count>=0),
+ artifact_fetch_count INTEGER NOT NULL DEFAULT 0 CHECK(artifact_fetch_count>=0),
  outcome TEXT NOT NULL CHECK(outcome IN ('started','succeeded','failed','ambiguous','canceled')),
  usage_json TEXT CHECK(usage_json IS NULL OR json_valid(usage_json)), usage_schema_version INTEGER CHECK(usage_schema_version IS NULL OR usage_schema_version>0),
  -- v4 compatibility projection. The exact amount below is authoritative.

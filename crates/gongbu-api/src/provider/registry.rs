@@ -173,7 +173,7 @@ impl ProviderAdapter for DeterministicFixtureAdapter {
 
     fn invoke(
         &self,
-        _: &NormalizedRequest,
+        request: &NormalizedRequest,
         _: &serde_json::Value,
         _: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
@@ -186,13 +186,15 @@ impl ProviderAdapter for DeterministicFixtureAdapter {
                     ProviderPhase::Submission,
                 )
             })?;
+        let actual_cost_minor = local_fixture_cost_minor(request.image_size.as_deref())?;
         Ok(AdapterOutcome {
             usage: Some(crate::provider_contract::NormalizedUsage {
                 images: Some(1),
                 ..Default::default()
             }),
             actual_vendor_cost: Some(
-                crate::provider_contract::ActualVendorCost::new(1, 2, "USD").unwrap(),
+                crate::provider_contract::ActualVendorCost::new(actual_cost_minor, 2, "USD")
+                    .unwrap(),
             ),
             provider_request_id: Some(format!("local-fixture-request-{provider_request_id}")),
             provider_operation_id: None,
@@ -206,6 +208,18 @@ impl ProviderAdapter for DeterministicFixtureAdapter {
                 ],
             }],
         })
+    }
+}
+
+fn local_fixture_cost_minor(image_size: Option<&str>) -> Result<i64, ProviderFailure> {
+    match image_size {
+        Some("1k") => Ok(1),
+        Some("2k") => Ok(2),
+        Some("4k") => Ok(3),
+        _ => Err(ProviderFailure::release(
+            "fixture_image_size_invalid",
+            ProviderPhase::Submission,
+        )),
     }
 }
 
@@ -466,6 +480,15 @@ mod tests {
         assert!(ValidatedProviderCatalog::needs_stable_idempotency_key(
             target
         ));
+    }
+
+    #[test]
+    fn local_fixture_actual_cost_matches_each_selected_size_rule() {
+        assert_eq!(local_fixture_cost_minor(Some("1k")).unwrap(), 1);
+        assert_eq!(local_fixture_cost_minor(Some("2k")).unwrap(), 2);
+        assert_eq!(local_fixture_cost_minor(Some("4k")).unwrap(), 3);
+        assert!(local_fixture_cost_minor(None).is_err());
+        assert!(local_fixture_cost_minor(Some("unexpected")).is_err());
     }
 
     #[test]

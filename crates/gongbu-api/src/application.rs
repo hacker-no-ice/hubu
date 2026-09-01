@@ -15,7 +15,8 @@ use crate::{
         contract::{
             enforce_cost, vendor_idempotency_key, AdapterOutcome, AdapterSubmission,
             AsyncProviderOperation, NormalizedRequest, PricingSnapshot, PricingUnit,
-            ProviderFailure, SpendDisposition,
+            ProviderFailure, ProviderTransportInteraction, ProviderTransportObserver,
+            SpendDisposition,
         },
         flux2_api,
         registry::ValidatedProviderCatalog,
@@ -48,7 +49,7 @@ use std::{
     },
     time::Duration,
 };
-use temporalio_client::Client;
+use temporalio_client::{tonic::Code, Client};
 use temporalio_sdk::Runtime;
 use thiserror::Error;
 use tokio::time::Instant;
@@ -60,17 +61,26 @@ pub const DEPENDENCY_FAILURE_GRACE: Duration = Duration::from_secs(30);
 /// Selection is exact: this dispatcher never routes, falls back, or invokes a
 /// second provider for one execution.
 pub struct GenericProviderActivities {
+    repository: Repository,
     providers: ValidatedProviderCatalog,
     secrets: Arc<dyn SecretProvider>,
 }
 
 impl GenericProviderActivities {
-    pub fn production(providers: ValidatedProviderCatalog) -> Self {
-        Self::new(providers, Arc::new(MacOsKeychain))
+    pub fn production(repository: Repository, providers: ValidatedProviderCatalog) -> Self {
+        Self::new(repository, providers, Arc::new(MacOsKeychain))
     }
 
-    pub fn new(providers: ValidatedProviderCatalog, secrets: Arc<dyn SecretProvider>) -> Self {
-        Self { providers, secrets }
+    pub fn new(
+        repository: Repository,
+        providers: ValidatedProviderCatalog,
+        secrets: Arc<dyn SecretProvider>,
+    ) -> Self {
+        Self {
+            repository,
+            providers,
+            secrets,
+        }
     }
 
     fn selected<'a>(
@@ -185,7 +195,7 @@ impl ProviderActivities for GenericProviderActivities {
     fn invoke(
         &self,
         execution: &Execution,
-        _attempt_id: &str,
+        attempt_id: &str,
     ) -> Result<ProviderSuccess, WorkflowActivityError> {
         let (target, adapter, request, normalized_input) = self.selected(execution)?;
         let secret = self
@@ -208,11 +218,15 @@ impl ProviderActivities for GenericProviderActivities {
             .transpose()
             .map_err(map_contract_error)?;
         let outcome = adapter
-            .invoke(
+            .invoke_observed(
                 &request,
                 &normalized_input,
                 &secret,
                 idempotency_key.as_deref(),
+                &DurableProviderTransportObserver {
+                    repository: &self.repository,
+                    attempt_id,
+                },
             )
             .map_err(map_provider_failure)?;
         normalize_provider_success(outcome)
@@ -221,7 +235,7 @@ impl ProviderActivities for GenericProviderActivities {
     fn submit(
         &self,
         execution: &Execution,
-        _attempt_id: &str,
+        attempt_id: &str,
     ) -> Result<ProviderSubmission, WorkflowActivityError> {
         let (target, adapter, request, normalized_input) = self.selected(execution)?;
         let secret = self
@@ -244,11 +258,15 @@ impl ProviderActivities for GenericProviderActivities {
             .transpose()
             .map_err(map_contract_error)?;
         let submission = adapter
-            .submit(
+            .submit_observed(
                 &request,
                 &normalized_input,
                 &secret,
                 idempotency_key.as_deref(),
+                &DurableProviderTransportObserver {
+                    repository: &self.repository,
+                    attempt_id,
+                },
             )
             .map_err(map_provider_failure)?;
         normalize_provider_submission(submission)
@@ -257,7 +275,7 @@ impl ProviderActivities for GenericProviderActivities {
     fn poll_existing(
         &self,
         execution: &Execution,
-        _attempt_id: &str,
+        attempt_id: &str,
         operation: &AsyncProviderOperation,
     ) -> Result<ProviderSuccess, WorkflowActivityError> {
         let (target, adapter, request, normalized_input) = self
@@ -278,10 +296,38 @@ impl ProviderActivities for GenericProviderActivities {
                 )
             })?;
         let outcome = adapter
-            .poll(&request, &normalized_input, &secret, operation)
+            .poll_observed(
+                &request,
+                &normalized_input,
+                &secret,
+                operation,
+                &DurableProviderTransportObserver {
+                    repository: &self.repository,
+                    attempt_id,
+                },
+            )
             .map_err(map_provider_failure)?;
         normalize_provider_success(outcome)
             .map_err(|error| reconcile_local_poll_failure(error, operation))
+    }
+}
+
+struct DurableProviderTransportObserver<'a> {
+    repository: &'a Repository,
+    attempt_id: &'a str,
+}
+
+impl ProviderTransportObserver for DurableProviderTransportObserver<'_> {
+    fn record(&self, interaction: ProviderTransportInteraction) -> bool {
+        match interaction {
+            ProviderTransportInteraction::Poll => {
+                self.repository.record_provider_poll(self.attempt_id)
+            }
+            ProviderTransportInteraction::ArtifactFetch => {
+                self.repository.record_artifact_fetch(self.attempt_id)
+            }
+        }
+        .is_ok()
     }
 }
 
@@ -434,9 +480,11 @@ pub fn provider_execution_runner(
 ) -> Arc<dyn DurableExecutionRunner> {
     let artifact_now = now.clone();
     Arc::new(PersistedExecutionRunner::new(
-        repository,
+        repository.clone(),
         hubu,
-        Arc::new(GenericProviderActivities::new(providers, secrets)),
+        Arc::new(GenericProviderActivities::new(
+            repository, providers, secrets,
+        )),
         Arc::new(ArtifactServiceActivities::new(artifacts, artifact_now)),
         now,
     ))
@@ -511,10 +559,12 @@ pub async fn serve<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    let redaction_attestation_secrets = dependencies.secrets.clone();
     let provider = dependencies.provider_activities.unwrap_or_else(|| {
         Arc::new(GenericProviderActivities::new(
+            dependencies.repository.clone(),
             dependencies.providers.clone(),
-            dependencies.secrets,
+            dependencies.secrets.clone(),
         ))
     });
     let artifacts = dependencies.artifact_activities.unwrap_or_else(|| {
@@ -570,7 +620,8 @@ where
         dependencies.maximum_spend_minor,
         dependencies.hubu_authorizations,
         move || (dependencies.now)(),
-    );
+    )
+    .with_redaction_attestation_secrets(redaction_attestation_secrets);
     let ready = Arc::new(AtomicBool::new(true));
     let state = ApplicationState {
         api,
@@ -639,8 +690,12 @@ async fn monitor_temporal(
     dependency_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ready: Arc<AtomicBool>,
 ) -> LifecycleReason {
-    let mut temporal_health = DependencyHealthTracker::default();
-    let mut hubu_health = DependencyHealthTracker::default();
+    // The listener is exposed only after both Temporal polling and Hubu
+    // compatibility have been positively proved during startup. Seed those
+    // proofs explicitly so an inconclusive runtime cancellation can preserve,
+    // but can never create, readiness.
+    let mut temporal_health = DependencyHealthTracker::from_positive_proof();
+    let mut hubu_health = DependencyHealthTracker::from_positive_proof();
     let probe_interval = dependency_probe_interval(interval, failure_grace);
     loop {
         tokio::time::sleep(probe_interval).await;
@@ -695,6 +750,7 @@ fn dependency_probe_interval(interval: Duration, failure_grace: Duration) -> Dur
 enum DependencySample {
     Healthy,
     Unhealthy,
+    Cancelled,
     Indeterminate,
 }
 
@@ -704,30 +760,68 @@ fn temporal_probe_sample(
     match result {
         Ok(true) => (DependencySample::Healthy, None),
         Ok(false) => (DependencySample::Unhealthy, None),
-        Err(error) => (
-            DependencySample::Indeterminate,
-            Some(format!("{:?}", error.code()).to_ascii_lowercase()),
-        ),
+        Err(error) => {
+            let code = error.code();
+            (
+                if code == Code::Cancelled {
+                    DependencySample::Cancelled
+                } else {
+                    DependencySample::Indeterminate
+                },
+                Some(format!("{code:?}").to_ascii_lowercase()),
+            )
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DependencyHealthObservation {
     Healthy,
-    Degraded { first_failure: bool, failures: u32 },
-    Recovered { failures: u32 },
-    Shutdown { failures: u32 },
+    Degraded {
+        report_transition: bool,
+        failures: u32,
+    },
+    Recovered {
+        failures: u32,
+    },
+    Shutdown {
+        failures: u32,
+    },
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DependencyReadiness {
+    Unproven,
+    Ready,
+    Withdrawn,
+}
+
 struct DependencyHealthTracker {
+    readiness: DependencyReadiness,
     failure_started_at: Option<Instant>,
     consecutive_failures: u32,
 }
 
 impl DependencyHealthTracker {
-    fn is_healthy(&self) -> bool {
-        self.failure_started_at.is_none()
+    #[cfg(test)]
+    fn unproven() -> Self {
+        Self {
+            readiness: DependencyReadiness::Unproven,
+            failure_started_at: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    fn from_positive_proof() -> Self {
+        Self {
+            readiness: DependencyReadiness::Ready,
+            failure_started_at: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.readiness == DependencyReadiness::Ready
     }
 
     fn observe(
@@ -738,24 +832,37 @@ impl DependencyHealthTracker {
     ) -> DependencyHealthObservation {
         if sample == DependencySample::Healthy {
             let failures = self.consecutive_failures;
+            let was_unproven = self.readiness == DependencyReadiness::Unproven;
+            self.readiness = DependencyReadiness::Ready;
             self.failure_started_at = None;
             self.consecutive_failures = 0;
-            return if failures == 0 {
+            return if failures == 0 || was_unproven {
                 DependencyHealthObservation::Healthy
             } else {
                 DependencyHealthObservation::Recovered { failures }
             };
         }
 
+        let was_ready = self.is_ready();
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let failure_started_at = *self.failure_started_at.get_or_insert(now);
         if now.duration_since(failure_started_at) >= failure_grace {
+            self.readiness = DependencyReadiness::Withdrawn;
             DependencyHealthObservation::Shutdown {
                 failures: self.consecutive_failures,
             }
         } else {
+            // Only a transport cancellation may retain a prior positive proof.
+            // It never promotes unproven or already-withdrawn readiness. Every
+            // proven no-poller result and every other transport error withdraws
+            // readiness immediately while retaining the original grace clock.
+            if sample != DependencySample::Cancelled && self.readiness == DependencyReadiness::Ready
+            {
+                self.readiness = DependencyReadiness::Withdrawn;
+            }
             DependencyHealthObservation::Degraded {
-                first_failure: self.consecutive_failures == 1,
+                report_transition: self.consecutive_failures == 1
+                    || (was_ready && !self.is_ready()),
                 failures: self.consecutive_failures,
             }
         }
@@ -768,7 +875,7 @@ fn update_dependency_readiness(
     hubu_health: &DependencyHealthTracker,
 ) {
     ready.store(
-        temporal_health.is_healthy() && hubu_health.is_healthy(),
+        temporal_health.is_ready() && hubu_health.is_ready(),
         Ordering::SeqCst,
     );
 }
@@ -785,11 +892,11 @@ fn record_dependency_sample(
     match observation {
         DependencyHealthObservation::Healthy
         | DependencyHealthObservation::Degraded {
-            first_failure: false,
+            report_transition: false,
             ..
         } => false,
         DependencyHealthObservation::Degraded {
-            first_failure: true,
+            report_transition: true,
             failures,
         } => {
             crate::lifecycle::log_dependency_probe(
@@ -825,7 +932,9 @@ fn probe_outcome(sample: DependencySample) -> DependencyProbeOutcome {
     match sample {
         DependencySample::Healthy => DependencyProbeOutcome::Recovered,
         DependencySample::Unhealthy => DependencyProbeOutcome::Unhealthy,
-        DependencySample::Indeterminate => DependencyProbeOutcome::Indeterminate,
+        DependencySample::Cancelled | DependencySample::Indeterminate => {
+            DependencyProbeOutcome::Indeterminate
+        }
     }
 }
 
@@ -1028,76 +1137,188 @@ mod tests {
     }
 
     #[test]
-    fn transient_dependency_failure_recovers_without_shutdown() {
-        let mut tracker = DependencyHealthTracker::default();
+    fn initial_cancelled_probe_cannot_create_readiness() {
+        let mut tracker = DependencyHealthTracker::unproven();
         let started = Instant::now();
+        let grace = Duration::from_secs(30);
         assert_eq!(
-            tracker.observe(
-                DependencySample::Indeterminate,
-                started,
-                Duration::from_secs(30),
-            ),
+            tracker.observe(DependencySample::Cancelled, started, grace),
             DependencyHealthObservation::Degraded {
-                first_failure: true,
+                report_transition: true,
                 failures: 1,
             }
         );
+        assert!(!tracker.is_ready());
         assert_eq!(
             tracker.observe(
-                DependencySample::Healthy,
+                DependencySample::Cancelled,
                 started + Duration::from_secs(1),
-                Duration::from_secs(30),
+                grace,
             ),
-            DependencyHealthObservation::Recovered { failures: 1 }
+            DependencyHealthObservation::Degraded {
+                report_transition: false,
+                failures: 2,
+            }
         );
+        assert!(!tracker.is_ready());
         assert_eq!(
             tracker.observe(
                 DependencySample::Healthy,
-                started + Duration::from_secs(31),
-                Duration::from_secs(30),
+                started + Duration::from_secs(2),
+                grace,
             ),
             DependencyHealthObservation::Healthy
         );
+        assert!(tracker.is_ready());
+        assert_eq!(tracker.failure_started_at, None);
+        assert_eq!(tracker.consecutive_failures, 0);
     }
 
     #[test]
-    fn temporal_transport_error_is_indeterminate_and_preserves_safe_code() {
+    fn temporal_transport_errors_distinguish_cancelled_from_unavailable() {
+        assert_eq!(
+            temporal_probe_sample(Err(temporalio_client::tonic::Status::cancelled(
+                "connection rotation",
+            ))),
+            (DependencySample::Cancelled, Some("cancelled".into()))
+        );
         assert_eq!(
             temporal_probe_sample(Err(temporalio_client::tonic::Status::unavailable(
-                "connection rotation",
+                "dependency unavailable",
             ))),
             (DependencySample::Indeterminate, Some("unavailable".into()))
         );
     }
 
     #[test]
-    fn sustained_dependency_failure_shuts_down_after_grace() {
-        let mut tracker = DependencyHealthTracker::default();
+    fn positive_proof_survives_short_cancelled_sequence_and_recovers() {
+        let mut tracker = DependencyHealthTracker::from_positive_proof();
         let started = Instant::now();
-        assert!(matches!(
+        let grace = Duration::from_secs(30);
+        assert_eq!(
+            tracker.observe(DependencySample::Cancelled, started, grace),
+            DependencyHealthObservation::Degraded {
+                report_transition: true,
+                failures: 1,
+            }
+        );
+        assert!(tracker.is_ready());
+        assert_eq!(
             tracker.observe(
-                DependencySample::Unhealthy,
-                started,
-                Duration::from_secs(30),
+                DependencySample::Cancelled,
+                started + Duration::from_secs(29),
+                grace,
             ),
+            DependencyHealthObservation::Degraded {
+                report_transition: false,
+                failures: 2,
+            }
+        );
+        assert!(tracker.is_ready());
+        assert_eq!(tracker.failure_started_at, Some(started));
+        assert_eq!(tracker.consecutive_failures, 2);
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Healthy,
+                started + Duration::from_millis(29_500),
+                grace,
+            ),
+            DependencyHealthObservation::Recovered { failures: 2 }
+        );
+        assert!(tracker.is_ready());
+        assert_eq!(tracker.failure_started_at, None);
+        assert_eq!(tracker.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn sustained_cancelled_sequence_shuts_down_at_grace_boundary() {
+        let mut tracker = DependencyHealthTracker::from_positive_proof();
+        let started = Instant::now();
+        let grace = Duration::from_secs(30);
+        assert!(matches!(
+            tracker.observe(DependencySample::Cancelled, started, grace),
             DependencyHealthObservation::Degraded { failures: 1, .. }
         ));
+        assert!(tracker.is_ready());
         assert!(matches!(
             tracker.observe(
-                DependencySample::Unhealthy,
+                DependencySample::Cancelled,
                 started + Duration::from_secs(29),
-                Duration::from_secs(30),
+                grace,
             ),
             DependencyHealthObservation::Degraded { failures: 2, .. }
         ));
+        assert!(tracker.is_ready());
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Cancelled,
+                started + Duration::from_secs(30),
+                grace,
+            ),
+            DependencyHealthObservation::Shutdown { failures: 3 }
+        );
+        assert!(!tracker.is_ready());
+    }
+
+    #[test]
+    fn no_poller_and_non_cancelled_error_withdraw_readiness_immediately() {
+        let started = Instant::now();
+        let grace = Duration::from_secs(30);
+        for sample in [DependencySample::Unhealthy, DependencySample::Indeterminate] {
+            let mut tracker = DependencyHealthTracker::from_positive_proof();
+            assert_eq!(
+                tracker.observe(sample, started, grace),
+                DependencyHealthObservation::Degraded {
+                    report_transition: true,
+                    failures: 1,
+                }
+            );
+            assert!(!tracker.is_ready());
+            assert_eq!(tracker.failure_started_at, Some(started));
+        }
+    }
+
+    #[test]
+    fn mixed_failure_samples_never_reset_or_restore_the_grace_window() {
+        let mut tracker = DependencyHealthTracker::from_positive_proof();
+        let started = Instant::now();
+        let grace = Duration::from_secs(30);
+        tracker.observe(DependencySample::Cancelled, started, grace);
+        assert!(tracker.is_ready());
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Indeterminate,
+                started + Duration::from_secs(5),
+                grace,
+            ),
+            DependencyHealthObservation::Degraded {
+                report_transition: true,
+                failures: 2,
+            }
+        );
+        assert!(!tracker.is_ready());
+        assert_eq!(tracker.failure_started_at, Some(started));
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Cancelled,
+                started + Duration::from_secs(29),
+                grace,
+            ),
+            DependencyHealthObservation::Degraded {
+                report_transition: false,
+                failures: 3,
+            }
+        );
+        assert!(!tracker.is_ready());
         assert_eq!(
             tracker.observe(
                 DependencySample::Unhealthy,
                 started + Duration::from_secs(30),
-                Duration::from_secs(30),
+                grace,
             ),
-            DependencyHealthObservation::Shutdown { failures: 3 }
+            DependencyHealthObservation::Shutdown { failures: 4 }
         );
+        assert!(!tracker.is_ready());
     }
 
     #[test]
@@ -1113,23 +1334,38 @@ mod tests {
     }
 
     #[test]
-    fn dependency_readiness_withdraws_immediately_and_recovers_collectively() {
+    fn dependency_readiness_composes_cancelled_grace_with_fail_closed_hubu() {
         let ready = AtomicBool::new(true);
         let started = Instant::now();
         let grace = Duration::from_secs(30);
-        let mut temporal_health = DependencyHealthTracker::default();
-        let mut hubu_health = DependencyHealthTracker::default();
+        let mut temporal_health = DependencyHealthTracker::from_positive_proof();
+        let mut hubu_health = DependencyHealthTracker::from_positive_proof();
 
-        temporal_health.observe(DependencySample::Indeterminate, started, grace);
+        temporal_health.observe(DependencySample::Cancelled, started, grace);
         update_dependency_readiness(&ready, &temporal_health, &hubu_health);
-        assert!(!ready.load(Ordering::SeqCst));
+        assert!(ready.load(Ordering::SeqCst));
 
         hubu_health.observe(DependencySample::Unhealthy, started, grace);
-        temporal_health.observe(DependencySample::Healthy, started, grace);
         update_dependency_readiness(&ready, &temporal_health, &hubu_health);
         assert!(!ready.load(Ordering::SeqCst));
 
         hubu_health.observe(DependencySample::Healthy, started, grace);
+        update_dependency_readiness(&ready, &temporal_health, &hubu_health);
+        assert!(ready.load(Ordering::SeqCst));
+
+        temporal_health.observe(
+            DependencySample::Indeterminate,
+            started + Duration::from_secs(1),
+            grace,
+        );
+        update_dependency_readiness(&ready, &temporal_health, &hubu_health);
+        assert!(!ready.load(Ordering::SeqCst));
+
+        temporal_health.observe(
+            DependencySample::Healthy,
+            started + Duration::from_secs(2),
+            grace,
+        );
         update_dependency_readiness(&ready, &temporal_health, &hubu_health);
         assert!(ready.load(Ordering::SeqCst));
     }
@@ -1347,6 +1583,7 @@ mod tests {
             repository.clone(),
             hubu.clone(),
             Arc::new(GenericProviderActivities::new(
+                repository.clone(),
                 providers,
                 Arc::new(FixtureSecrets),
             )),
@@ -1522,7 +1759,11 @@ mod tests {
         let runner = PersistedExecutionRunner::new(
             repository.clone(),
             hubu.clone(),
-            Arc::new(GenericProviderActivities::new(providers, Arc::new(Secrets))),
+            Arc::new(GenericProviderActivities::new(
+                repository.clone(),
+                providers,
+                Arc::new(Secrets),
+            )),
             Arc::new(ArtifactServiceActivities::new(artifacts.clone(), || {
                 "now".into()
             })),
@@ -1806,7 +2047,11 @@ mod tests {
         let runner = PersistedExecutionRunner::new(
             repository.clone(),
             hubu.clone(),
-            Arc::new(GenericProviderActivities::new(providers, Arc::new(Secrets))),
+            Arc::new(GenericProviderActivities::new(
+                repository.clone(),
+                providers,
+                Arc::new(Secrets),
+            )),
             Arc::new(ArtifactServiceActivities::new(
                 ArtifactService::new(
                     repository.clone(),
@@ -1836,6 +2081,324 @@ mod tests {
                 .is_err());
         }
         assert_eq!(hubu.claims.load(Ordering::SeqCst), 0);
+        assert_eq!(transport_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn managed_flux_missing_credential_and_artifact_root_fail_before_claim_or_transport() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::{
+                contract::OutputDimensions,
+                flux2_api::{
+                    Flux2ApiAdapter, Flux2Transport, TransportResponse as FluxTransportResponse,
+                },
+            },
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use serde_json::{json, Value};
+        use std::{
+            collections::BTreeMap,
+            error::Error as StdError,
+            fs,
+            sync::atomic::{AtomicUsize, Ordering},
+            time::Duration,
+        };
+        use tempfile::tempdir;
+
+        struct Secrets {
+            calls: AtomicUsize,
+            available: bool,
+        }
+        impl SecretProvider for Secrets {
+            fn resolve(&self, reference: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(reference.service(), "gongbu.bfl.test");
+                assert_eq!(reference.account(), "hub-172-fixture");
+                if self.available {
+                    Ok(crate::secrets::secret_for_test(
+                        "synthetic-managed-flux-fixture",
+                    ))
+                } else {
+                    Err(SecretError::Unavailable)
+                }
+            }
+        }
+
+        #[derive(Clone)]
+        struct Transport(Arc<AtomicUsize>);
+        impl Flux2Transport for Transport {
+            fn submit(
+                &self,
+                _: &reqwest::Url,
+                _: &[u8],
+                _: Duration,
+                _: &BTreeMap<String, String>,
+                _: Option<(&str, &str)>,
+                _: &Value,
+            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                unreachable!("managed FLUX preflight rejection must not submit")
+            }
+            fn poll(
+                &self,
+                _: &reqwest::Url,
+                _: &[u8],
+                _: Duration,
+                _: &BTreeMap<String, String>,
+            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                unreachable!("managed FLUX preflight rejection must not poll")
+            }
+            fn fetch_artifact(
+                &self,
+                _: &reqwest::Url,
+                _: Duration,
+                _: usize,
+            ) -> Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                unreachable!("managed FLUX preflight rejection must not fetch")
+            }
+        }
+
+        #[derive(Default)]
+        struct Hubu {
+            preflights: AtomicUsize,
+            claims: AtomicUsize,
+            settlements: AtomicUsize,
+            releases: AtomicUsize,
+        }
+        impl HubuActivities for Hubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                self.preflights.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                self.claims.fetch_add(1, Ordering::SeqCst);
+                Ok("claim-must-not-be-created".into())
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                _: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                self.settlements.fetch_add(1, Ordering::SeqCst);
+                Ok("settlement-must-not-be-created".into())
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                self.releases.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let document: Value =
+            serde_json::from_str(include_str!("../../../contracts/provider-profiles-v1.json"))
+                .unwrap();
+        let profile = &document["profiles"][0];
+        let policies = &profile["policies"];
+        let mut target_document = profile["target"].clone();
+        target_document["secret_service"] = json!("gongbu.bfl.test");
+        target_document["secret_account"] = json!("hub-172-fixture");
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 3,
+            "supported_profiles": [{
+                "contract": profile["contract"],
+                "pricing_version": profile["pricing_version"],
+                "poll_policy": policies["poll"],
+                "artifact_delivery_policy": policies["artifact_delivery"],
+                "recovery_policy": policies["recovery"],
+                "generation_retries": policies["generation_retries"],
+                "fallback": policies["fallback"]
+            }],
+            "provider_configs": [target_document]
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": profile["pricing_version"],
+                "rules": profile["pricing_rules"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let target = targets
+            .resolve("image_generation", "flux", "flux2_api", "flux-2-pro")
+            .unwrap();
+        let target_name = target.target_key().canonical_name();
+        let target_version = target.provider_config_version.clone();
+        let target_digest = target.digest().to_owned();
+        let request = NormalizedRequest {
+            provider: "flux".into(),
+            model: "flux-2-pro".into(),
+            image_count: Some(1),
+            input_tokens: None,
+            max_output_tokens: None,
+            image_size: Some("1k".into()),
+            output_dimensions: Some(OutputDimensions {
+                width: 1024,
+                height: 1024,
+            }),
+        };
+        let snapshot = pricing
+            .snapshot_for_target(&target.target_key(), &request)
+            .unwrap();
+        assert_eq!(target_version, "hubu-flux-2-pro-t2i-2026-08-28-v1");
+        assert_eq!(snapshot.catalog_version, "bfl-flux-2-pro-usd-2026-08-28-v1");
+        assert_eq!(snapshot.pricing_rule_id, "bfl-flux-2-pro-1k-2026-08-28-v1");
+        assert_eq!(snapshot.estimated_amount_minor, 3);
+
+        let transport_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::new();
+        let fixture_calls = transport_calls.clone();
+        registry.register("flux", "flux2_api", move |target| {
+            Ok(Arc::new(Flux2ApiAdapter::new(
+                target.flux2_api().cloned().unwrap(),
+                target.model.clone(),
+                Transport(fixture_calls.clone()),
+            )?))
+        });
+        let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let create = |suffix: &str| {
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: "account".into(),
+                    operation_key: format!("qualification-{suffix}"),
+                    hubu_authorization_id: format!("token-{suffix}"),
+                    hubu_claim_id: None,
+                    hubu_token_reference: HubuTokenReference::new(format!("token-{suffix}"))
+                        .unwrap(),
+                    authorized_minor: 3,
+                    authorization_currency: "USD".into(),
+                    normalized_input: json!({
+                        "prompt":"small blue circle","image_count":1,"image_size":"1k",
+                        "options":{"width":1024,"height":1024}
+                    }),
+                    input_hash: format!("hash-{suffix}"),
+                    input_schema_version: 1,
+                    target: target_name.clone(),
+                    config_version: target_version.clone(),
+                    workload_type: "image_generation".into(),
+                    provider: "flux".into(),
+                    adapter: "flux2_api".into(),
+                    model: "flux-2-pro".into(),
+                    provider_config_version: target_version.clone(),
+                    provider_config_digest: target_digest.clone(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: i64::from(snapshot.schema_version),
+                    execution_scope: None,
+                    created_at: "2026-08-28T20:00:00Z".into(),
+                })
+                .unwrap()
+        };
+        let missing_credential = create("missing-credential");
+        let invalid_artifact_root = create("invalid-artifact-root");
+        let hubu = Arc::new(Hubu::default());
+
+        let valid_root = tempdir().unwrap();
+        let missing_secrets = Arc::new(Secrets {
+            calls: AtomicUsize::new(0),
+            available: false,
+        });
+        let missing_runner = PersistedExecutionRunner::new(
+            repository.clone(),
+            hubu.clone(),
+            Arc::new(GenericProviderActivities::new(
+                repository.clone(),
+                providers.clone(),
+                missing_secrets.clone(),
+            )),
+            Arc::new(ArtifactServiceActivities::new(
+                ArtifactService::new(
+                    repository.clone(),
+                    LocalFsStorage::new(valid_root.path()),
+                    ArtifactLimits::default(),
+                ),
+                || "now".into(),
+            )),
+            || "now".into(),
+        );
+        assert_eq!(
+            missing_runner
+                .run_execution(&missing_credential.execution_id)
+                .unwrap(),
+            "failed"
+        );
+        assert_eq!(
+            repository
+                .get_execution(&missing_credential.execution_id)
+                .unwrap()
+                .failure_code
+                .as_deref(),
+            Some("secret_unavailable")
+        );
+        assert_eq!(missing_secrets.calls.load(Ordering::SeqCst), 1);
+
+        let blocked = tempdir().unwrap();
+        let blocker = blocked.path().join("not-a-directory");
+        fs::write(&blocker, b"blocked").unwrap();
+        let available_secrets = Arc::new(Secrets {
+            calls: AtomicUsize::new(0),
+            available: true,
+        });
+        let artifact_runner = PersistedExecutionRunner::new(
+            repository.clone(),
+            hubu.clone(),
+            Arc::new(GenericProviderActivities::new(
+                repository.clone(),
+                providers,
+                available_secrets.clone(),
+            )),
+            Arc::new(ArtifactServiceActivities::new(
+                ArtifactService::new(
+                    repository.clone(),
+                    LocalFsStorage::new(blocker.join("artifacts")),
+                    ArtifactLimits::default(),
+                ),
+                || "now".into(),
+            )),
+            || "now".into(),
+        );
+        assert_eq!(
+            artifact_runner
+                .run_execution(&invalid_artifact_root.execution_id)
+                .unwrap(),
+            "failed"
+        );
+        assert_eq!(
+            repository
+                .get_execution(&invalid_artifact_root.execution_id)
+                .unwrap()
+                .failure_code
+                .as_deref(),
+            Some("artifact_preflight_failed")
+        );
+        assert_eq!(available_secrets.calls.load(Ordering::SeqCst), 1);
+
+        for execution in [&missing_credential, &invalid_artifact_root] {
+            assert!(repository
+                .get_provider_attempt_for_execution(&execution.execution_id)
+                .is_err());
+            assert_eq!(
+                repository
+                    .count_artifacts_for_execution(&execution.execution_id)
+                    .unwrap(),
+                0
+            );
+            assert!(repository
+                .get_receipt_for_execution(&execution.execution_id)
+                .is_err());
+        }
+        assert_eq!(hubu.preflights.load(Ordering::SeqCst), 2);
+        assert_eq!(hubu.claims.load(Ordering::SeqCst), 0);
+        assert_eq!(hubu.settlements.load(Ordering::SeqCst), 0);
+        assert_eq!(hubu.releases.load(Ordering::SeqCst), 0);
         assert_eq!(transport_calls.load(Ordering::SeqCst), 0);
     }
 

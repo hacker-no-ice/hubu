@@ -75,6 +75,8 @@ struct GongbuTiming {
     execution_total_ms: Option<u64>,
     provider_interaction_ms: Option<u64>,
     non_provider_ms: Option<u64>,
+    provider_poll_count: Option<u64>,
+    artifact_fetch_count: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -236,6 +238,17 @@ pub(super) fn call_tool(
     else {
         return error_response(id, -32000, "Hubu returned an invalid authorization result");
     };
+    match server.governed_result(&operation_handle) {
+        Ok(Some(result)) => return success_response(id, result),
+        Ok(None) => {}
+        Err(_) => {
+            return error_response(
+                id,
+                -32000,
+                "recorded governed execution result is unavailable",
+            )
+        }
+    }
     let decision = authorization.get("decision").and_then(Value::as_str);
 
     if matches!(decision, Some("deny" | "needs_approval")) {
@@ -259,8 +272,10 @@ pub(super) fn call_tool(
             ("failed", _, _) => "failed",
             _ => "approval_required",
         };
-        return success_response(
+        return durable_composite_response(
+            server,
             id,
+            &operation_handle,
             composite_result(
                 outcome,
                 &status,
@@ -301,8 +316,10 @@ pub(super) fn call_tool(
                 )
             }
         };
-        return success_response(
+        return durable_composite_response(
+            server,
             id,
+            &operation_handle,
             composite_result(
                 "failed",
                 &status,
@@ -340,8 +357,10 @@ pub(super) fn call_tool(
                         )
                     }
                 };
-            return success_response(
+            return durable_composite_response(
+                server,
                 id,
+                &operation_handle,
                 composite_result(
                     "failed",
                     &status,
@@ -390,8 +409,10 @@ pub(super) fn call_tool(
                     )
                 }
             };
-            return success_response(
+            return durable_composite_response(
+                server,
                 id,
+                &operation_handle,
                 composite_result(
                     "failed",
                     &status,
@@ -418,8 +439,10 @@ pub(super) fn call_tool(
     };
     let mut execution_wait = execution_started.elapsed();
     if timed_out {
-        return success_response(
+        return durable_composite_response(
+            server,
             id,
+            &operation_handle,
             composite_result(
                 "in_progress",
                 &status,
@@ -449,6 +472,14 @@ pub(super) fn call_tool(
                             execution_total_ms: observation.execution_total_ms,
                             provider_interaction_ms: observation.provider_interaction_ms,
                             non_provider_ms: observation.non_provider_ms,
+                            provider_poll_count: observation
+                                .provider_transport
+                                .as_ref()
+                                .map(|transport| transport.poll_count),
+                            artifact_fetch_count: observation
+                                .provider_transport
+                                .as_ref()
+                                .map(|transport| transport.artifact_fetch_count),
                         })
                 })
             })
@@ -458,8 +489,10 @@ pub(super) fn call_tool(
     execution_wait = execution_started.elapsed();
 
     if status.state != "succeeded" {
-        return success_response(
+        return durable_composite_response(
+            server,
             id,
+            &operation_handle,
             composite_result(
                 "failed",
                 &status,
@@ -524,8 +557,10 @@ pub(super) fn call_tool(
             "Execution succeeded. Resume artifact delivery with gongbu_list_artifacts and gongbu_get_artifact for this execution; do not rerun the provider."
         }
     });
-    success_response(
+    durable_composite_response(
+        server,
         id,
+        &operation_handle,
         composite_result(
             "succeeded",
             &status,
@@ -541,6 +576,29 @@ pub(super) fn call_tool(
             },
         ),
     )
+}
+
+fn durable_composite_response(
+    server: &Server,
+    id: Value,
+    operation_handle: &str,
+    result: Value,
+) -> Value {
+    if result
+        .pointer("/structuredContent/terminal")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return success_response(id, result);
+    }
+    match server.record_governed_result(operation_handle, &result) {
+        Ok(recorded) => success_response(id, recorded),
+        Err(_) => error_response(
+            id,
+            -32000,
+            "governed execution result could not be persisted",
+        ),
+    }
 }
 
 fn wait_for_terminal(
@@ -859,6 +917,11 @@ fn composite_result(
         "authorization": authorization,
         "artifacts": artifacts,
         "artifact_delivery": artifact_delivery,
+        "provider_transport": {
+            "schema_version": 1,
+            "poll_count": timing.gongbu.provider_poll_count,
+            "artifact_fetch_count": timing.gongbu.artifact_fetch_count
+        },
         "timing": {
             "schema_version": 1,
             "scope": "composite_tool_server_observed",
@@ -1678,6 +1741,11 @@ mod tests {
                                 "execution_total_ms":4,
                                 "provider_interaction_ms":3,
                                 "non_provider_ms":1
+                            },
+                            "provider_transport":{
+                                "schema_version":1,
+                                "poll_count":2,
+                                "artifact_fetch_count":1
                             }
                         }))
                         .unwrap(),
@@ -1732,6 +1800,10 @@ mod tests {
                 "succeeded"
             );
             assert_eq!(timing["provider_interaction_ms"], 3);
+            let provider_transport = &response["result"]["structuredContent"]["provider_transport"];
+            assert_eq!(provider_transport["schema_version"], 1);
+            assert_eq!(provider_transport["poll_count"], 2);
+            assert_eq!(provider_transport["artifact_fetch_count"], 1);
             assert_eq!(
                 timing["total_ms"].as_u64().unwrap(),
                 timing["hubu_authorization_ms"].as_u64().unwrap()
@@ -1774,7 +1846,7 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_composite_returns_in_progress_while_worker_finishes_same_execution() {
+    fn timed_out_composite_advances_then_terminal_result_replays_exactly() {
         let operation_key = Arc::new(Mutex::new(None::<String>));
         let hubu_operation_key = Arc::clone(&operation_key);
         let hubu_version = json!({
@@ -1897,6 +1969,7 @@ mod tests {
         });
         let first = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":params});
         let second = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":params});
+        let third = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":params});
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut writer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (reader, _) = listener.accept().unwrap();
@@ -1905,10 +1978,14 @@ mod tests {
             writer.flush().unwrap();
             thread::sleep(Duration::from_millis(250));
             writeln!(writer, "{second}").unwrap();
+            writeln!(writer, "{third}").unwrap();
             writer.flush().unwrap();
         });
         let mut output = Vec::new();
-        server.run(BufReader::new(reader), &mut output).unwrap();
+        server
+            .clone()
+            .run(BufReader::new(reader), &mut output)
+            .unwrap();
         input_handle.join().unwrap();
         hubu_handle.join().unwrap();
         gongbu_handle.join().unwrap();
@@ -1918,7 +1995,7 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(responses.len(), 2);
+        assert_eq!(responses.len(), 3);
         assert_eq!(
             responses[0]["result"]["structuredContent"]["outcome"],
             "in_progress"
@@ -1931,9 +2008,18 @@ mod tests {
             responses[1]["result"]["structuredContent"]["outcome"],
             "succeeded"
         );
+        assert_ne!(responses[0]["result"], responses[1]["result"]);
+        assert_eq!(responses[1]["result"], responses[2]["result"]);
+        let operation_handle = responses[0]["result"]["structuredContent"]["operation_handle"]
+            .as_str()
+            .unwrap();
         assert_eq!(
-            responses[0]["result"]["structuredContent"]["operation_handle"],
-            responses[1]["result"]["structuredContent"]["operation_handle"]
+            server
+                .durable_operation_status(operation_handle)
+                .unwrap()
+                .state,
+            "succeeded",
+            "status observation advances before terminal replay becomes immutable"
         );
         assert_eq!(
             hubu_requests

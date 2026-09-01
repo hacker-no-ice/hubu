@@ -90,18 +90,30 @@ For an external service:
 Gongbu never starts or stops external Temporal. In both modes, readiness
 requires an active worker polling the configured task queue.
 
-After startup, a single failed Temporal or Hubu dependency probe does not stop
-Gongbu. Hubu probes include protected access with the credential Gongbu loaded,
-not just public health and version. The supervisor allows a fixed 30-second
-recovery grace so routine gRPC connection rotation and other transient
-transport failures can reconnect.
-Readiness and new execution admission are withdrawn on the first failed sample
-and restored only after every dependency is healthy. A healthy sample resets
-its grace window; continuously unhealthy probes still shut down the process.
-Runtime probe intervals are capped at the grace duration so that shutdown is
-re-evaluated within the documented bound. The `gongbu_dependency_probe` log
-event records only the dependency, outcome, consecutive-failure count, and a
-redacted gRPC status code when available.
+Startup still requires a positive Temporal poller proof and Hubu compatibility
+proof before Gongbu can become ready. After startup, a single failed dependency
+probe does not stop Gongbu. Hubu probes include protected access with the
+credential Gongbu loaded, not just public health and version. The supervisor
+allows a fixed 30-second recovery grace so routine gRPC connection rotation and
+other transient transport failures can reconnect.
+
+Temporal's normal task-queue RPC receives one immediate bounded confirmation
+when it returns gRPC `Code::Cancelled`. If that confirmation is also cancelled,
+the monitor keeps tracking the failure count and original grace-window start,
+but preserves readiness only when startup already supplied the positive poller
+proof and only while the window remains strictly below 30 seconds. Cancellation
+never establishes or restores readiness. `Ok(false)`, every non-cancelled
+Temporal error, and any Hubu failure withdraw readiness and new execution
+admission immediately. A healthy sample restores readiness only after all
+dependencies are healthy and resets its own failure window; any uninterrupted
+failure sequence, including cancellations, withdraws readiness and shuts down
+at the grace boundary. Runtime probe intervals are capped at the grace duration
+so shutdown is re-evaluated within the documented bound.
+
+The `gongbu_dependency_probe` log event records only the dependency, outcome,
+consecutive monitor-sample count, and a redacted gRPC status code when
+available. The two RPCs in one cancellation confirmation do not increment that
+monitor-sample count separately.
 
 ## Validate and start
 
