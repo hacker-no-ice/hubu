@@ -457,7 +457,7 @@ fn artifact_list_response() -> Value {
 fn provider_catalog_response() -> Value {
     json!({
         "schema_version": 1,
-        "profiles": [{
+        "contracts": [{
             "contract": "hubu.flux-2-pro.text-to-image/v1",
             "pricing_version": "bfl-flux-2-pro-usd-2026-08-28-v1",
             "pricing_reviewed_on": "2026-08-28",
@@ -770,12 +770,15 @@ fn all_mapped_tools_have_unified_owned_golden_routing_coverage() {
                     .expect("catalog is returned as JSON text"),
             )
             .expect("catalog text is JSON");
-            assert_eq!(catalog["profiles"][0]["target"]["model"], "flux-2-pro");
+            assert_eq!(catalog["contracts"][0]["target"]["model"], "flux-2-pro");
             assert_eq!(
-                catalog["profiles"][0]["capability"]["presets"][2]["width"],
+                catalog["contracts"][0]["capability"]["presets"][2]["width"],
                 2048
             );
-            assert_eq!(catalog["profiles"][0]["readiness"]["live_qualified"], false);
+            assert_eq!(
+                catalog["contracts"][0]["readiness"]["live_qualified"],
+                false
+            );
             assert!(!catalog.to_string().contains("secret"));
         }
         let backend = match case.owner {

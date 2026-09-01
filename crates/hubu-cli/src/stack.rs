@@ -28,10 +28,10 @@ const LIVE_SPEND_ACKNOWLEDGEMENT: &str = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND";
 const MANAGED_GONGBU_SECRET_SERVICE: &str = "hubu.managed-stack.v1";
 const MANAGED_GONGBU_HUBU_ACCOUNT: &str = "hubu-executor";
 const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
-const SUPPORTED_PROVIDER_PROFILES: &str =
-    include_str!("../../../contracts/provider-profiles-v1.json");
-const SUPPORTED_PROVIDER_PROFILES_SHA256: &str =
-    "920d1f14c9da7273648d8cbfddca273092c6a94ffc49c0c2f04831681a4b3263";
+const PROVIDER_CONTRACTS_DOCUMENT: &str =
+    include_str!("../../../contracts/provider-contracts-v1.json");
+const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
+    "3e7a50e24a1b37c84582e07d44ab509c6bbde7c2081845ad475a4ea65b14bb6c";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -420,7 +420,7 @@ struct ProvidersSource {
     maximum_spend_minor: Option<i64>,
     live_spend_acknowledgement: Option<String>,
     #[serde(default)]
-    supported_profiles: Vec<SupportedProfileSource>,
+    contract_bindings: Vec<ProviderContractSource>,
     #[serde(default)]
     targets: Vec<ProviderTargetSource>,
     #[serde(default)]
@@ -429,33 +429,33 @@ struct ProvidersSource {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SupportedProfileSource {
+struct ProviderContractSource {
     contract: Option<String>,
     credential: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SupportedProfilesDocument {
+struct ProviderContractsDocument {
     schema_version: u32,
-    profiles: Vec<SupportedProfileContract>,
+    contracts: Vec<ProviderContractDefinition>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SupportedProfileContract {
+struct ProviderContractDefinition {
     contract: String,
     pricing_version: String,
     pricing_reviewed_on: String,
-    target: SupportedProfileTarget,
-    capability: SupportedProfileCapability,
-    policies: SupportedProfilePolicies,
+    target: ProviderContractTarget,
+    capability: ProviderContractCapability,
+    policies: ProviderContractPolicies,
     pricing_rules: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SupportedProfileTarget {
+struct ProviderContractTarget {
     provider_config_version: String,
     workload_type: String,
     provider: String,
@@ -468,15 +468,15 @@ struct SupportedProfileTarget {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct SupportedProfileCapability {
+struct ProviderContractCapability {
     image_count: u32,
     output_formats: Vec<String>,
-    presets: Vec<SupportedProfilePreset>,
+    presets: Vec<ProviderContractPreset>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct SupportedProfilePreset {
+struct ProviderContractPreset {
     name: String,
     width: u32,
     height: u32,
@@ -484,7 +484,7 @@ struct SupportedProfilePreset {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct SupportedProfilePolicies {
+struct ProviderContractPolicies {
     generation_retries: u32,
     fallback: bool,
     poll: String,
@@ -495,31 +495,31 @@ struct SupportedProfilePolicies {
 #[derive(Clone, Debug, Serialize)]
 struct ProviderCatalogReport {
     schema_version: u32,
-    profiles: Vec<ProviderProfileCatalogEntry>,
+    contracts: Vec<ProviderContractCatalogEntry>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct ProviderProfileCatalogEntry {
+struct ProviderContractCatalogEntry {
     contract: String,
     pricing_version: String,
     pricing_reviewed_on: String,
-    target: ProviderProfileTargetSummary,
-    capability: ProviderProfileCapabilitySummary,
-    policies: SupportedProfilePolicies,
-    readiness: ProviderProfileReadiness,
+    target: ProviderContractTargetSummary,
+    capability: ProviderContractCapabilitySummary,
+    policies: ProviderContractPolicies,
+    readiness: ProviderContractReadiness,
     #[serde(skip)]
     credential_alias: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct ProviderProfileCapabilitySummary {
+struct ProviderContractCapabilitySummary {
     image_count: u32,
     output_formats: Vec<String>,
-    presets: Vec<ProviderProfilePresetSummary>,
+    presets: Vec<ProviderContractPresetSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct ProviderProfilePresetSummary {
+struct ProviderContractPresetSummary {
     name: String,
     width: u32,
     height: u32,
@@ -529,7 +529,7 @@ struct ProviderProfilePresetSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct ProviderProfileTargetSummary {
+struct ProviderContractTargetSummary {
     workload_type: String,
     provider: String,
     adapter: String,
@@ -537,7 +537,7 @@ struct ProviderProfileTargetSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct ProviderProfileReadiness {
+struct ProviderContractReadiness {
     configured: bool,
     credential_reference_present: Option<bool>,
     production_validated: bool,
@@ -545,83 +545,83 @@ struct ProviderProfileReadiness {
     live_qualification: &'static str,
 }
 
-fn supported_profiles_document() -> Result<SupportedProfilesDocument> {
+fn provider_contracts_document() -> Result<ProviderContractsDocument> {
     if format!(
         "{:x}",
-        Sha256::digest(SUPPORTED_PROVIDER_PROFILES.as_bytes())
-    ) != SUPPORTED_PROVIDER_PROFILES_SHA256
+        Sha256::digest(PROVIDER_CONTRACTS_DOCUMENT.as_bytes())
+    ) != PROVIDER_CONTRACTS_DOCUMENT_SHA256
     {
-        bail!("embedded supported provider profile contract digest is invalid");
+        bail!("embedded provider contract document digest is invalid");
     }
-    let document: SupportedProfilesDocument = serde_json::from_str(SUPPORTED_PROVIDER_PROFILES)
-        .context("parse embedded supported provider profile contracts")?;
-    if document.schema_version != 1 || document.profiles.is_empty() {
-        bail!("embedded supported provider profile contracts are invalid");
+    let document: ProviderContractsDocument = serde_json::from_str(PROVIDER_CONTRACTS_DOCUMENT)
+        .context("parse embedded provider contract document")?;
+    if document.schema_version != 1 || document.contracts.is_empty() {
+        bail!("embedded provider contract document is invalid");
     }
     let mut contracts = BTreeSet::new();
     if document
-        .profiles
+        .contracts
         .iter()
-        .any(|profile| !contracts.insert(profile.contract.clone()))
+        .any(|contract_definition| !contracts.insert(contract_definition.contract.clone()))
     {
-        bail!("embedded supported provider profile contracts contain a duplicate contract");
+        bail!("embedded provider contract document contains a duplicate contract");
     }
     Ok(document)
 }
 
-fn supported_profile_contract(contract: &str) -> Result<SupportedProfileContract> {
-    supported_profiles_document()?
-        .profiles
+fn provider_contract_definition(contract: &str) -> Result<ProviderContractDefinition> {
+    provider_contracts_document()?
+        .contracts
         .into_iter()
-        .find(|profile| profile.contract == contract)
-        .ok_or_else(|| anyhow!("unsupported managed provider profile contract `{contract}`"))
+        .find(|contract_definition| contract_definition.contract == contract)
+        .ok_or_else(|| anyhow!("unknown provider contract `{contract}`"))
 }
 
-fn selected_supported_profiles(
+fn selected_provider_contracts(
     source: &ProvidersSource,
-) -> Result<Vec<(String, String, SupportedProfileContract)>> {
+) -> Result<Vec<(String, String, ProviderContractDefinition)>> {
     source
-        .supported_profiles
+        .contract_bindings
         .iter()
         .map(|selection| {
             let contract = selection
                 .contract
                 .as_deref()
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow!("supported profile contract is required"))?;
+                .ok_or_else(|| anyhow!("contract binding contract is required"))?;
             let credential = selection
                 .credential
                 .as_deref()
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow!("supported profile credential reference is required"))?;
+                .ok_or_else(|| anyhow!("contract binding credential reference is required"))?;
             Ok((
                 contract.to_owned(),
                 credential.to_owned(),
-                supported_profile_contract(contract)?,
+                provider_contract_definition(contract)?,
             ))
         })
         .collect()
 }
 
-fn provider_profile_catalog_entries(
+fn provider_contract_catalog_entries(
     source: &ProvidersSource,
     configured: bool,
-) -> Vec<ProviderProfileCatalogEntry> {
-    selected_supported_profiles(source)
+) -> Vec<ProviderContractCatalogEntry> {
+    selected_provider_contracts(source)
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|(_, credential_alias, profile)| {
-            let presets = profile
+        .filter_map(|(_, credential_alias, contract_definition)| {
+            let presets = contract_definition
                 .capability
                 .presets
                 .iter()
                 .map(|preset| {
-                    let rule = profile.pricing_rules.iter().find(|rule| {
+                    let rule = contract_definition.pricing_rules.iter().find(|rule| {
                         rule.pointer("/selector/image_size").and_then(Value::as_str)
                             == Some(preset.name.as_str())
                     })?;
                     let component = rule.get("components").and_then(Value::as_array)?.first()?;
-                    Some(ProviderProfilePresetSummary {
+                    Some(ProviderContractPresetSummary {
                         name: preset.name.clone(),
                         width: preset.width,
                         height: preset.height,
@@ -631,23 +631,23 @@ fn provider_profile_catalog_entries(
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
-            Some(ProviderProfileCatalogEntry {
-                contract: profile.contract,
-                pricing_version: profile.pricing_version,
-                pricing_reviewed_on: profile.pricing_reviewed_on,
-                target: ProviderProfileTargetSummary {
-                    workload_type: profile.target.workload_type,
-                    provider: profile.target.provider,
-                    adapter: profile.target.adapter,
-                    model: profile.target.model,
+            Some(ProviderContractCatalogEntry {
+                contract: contract_definition.contract,
+                pricing_version: contract_definition.pricing_version,
+                pricing_reviewed_on: contract_definition.pricing_reviewed_on,
+                target: ProviderContractTargetSummary {
+                    workload_type: contract_definition.target.workload_type,
+                    provider: contract_definition.target.provider,
+                    adapter: contract_definition.target.adapter,
+                    model: contract_definition.target.model,
                 },
-                capability: ProviderProfileCapabilitySummary {
-                    image_count: profile.capability.image_count,
-                    output_formats: profile.capability.output_formats,
+                capability: ProviderContractCapabilitySummary {
+                    image_count: contract_definition.capability.image_count,
+                    output_formats: contract_definition.capability.output_formats,
                     presets,
                 },
-                policies: profile.policies,
-                readiness: ProviderProfileReadiness {
+                policies: contract_definition.policies,
+                readiness: ProviderContractReadiness {
                     configured,
                     credential_reference_present: None,
                     production_validated: false,
@@ -1026,22 +1026,19 @@ fn catalog(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     let report = doctor::inspect_profile(&profile);
     let catalog = ProviderCatalogReport {
         schema_version: 1,
-        profiles: report.provider_profiles,
+        contracts: report.provider_contracts,
     };
     if json_output {
         println!("{}", serde_json::to_string_pretty(&catalog)?);
         return Ok(());
     }
     let style = crate::terminal::stdout();
-    if catalog.profiles.is_empty() {
-        println!(
-            "{}",
-            style.muted("No supported provider profiles are configured.")
-        );
+    if catalog.contracts.is_empty() {
+        println!("{}", style.muted("No provider contracts are configured."));
         return Ok(());
     }
-    println!("{}", style.title("Hubu supported provider catalog"));
-    for entry in catalog.profiles {
+    println!("{}", style.title("Hubu provider contract catalog"));
+    for entry in catalog.contracts {
         println!();
         println!(
             "{}: {}",
@@ -2186,19 +2183,19 @@ fn render_provider_config(
 }
 
 fn render_pricing_catalog(providers: &ProvidersSource) -> Result<Value> {
-    let supported = selected_supported_profiles(providers)?;
+    let bound_contracts = selected_provider_contracts(providers)?;
     let catalog_version = match providers.catalog_version.as_deref() {
         Some(version) => version.to_owned(),
-        None if supported.len() == 1 && providers.pricing_rules.is_empty() => {
-            supported[0].2.pricing_version.clone()
+        None if bound_contracts.len() == 1 && providers.pricing_rules.is_empty() => {
+            bound_contracts[0].2.pricing_version.clone()
         }
         None => bail!(
             "providers.toml:catalog_version is required for a composite or generic live catalog"
         ),
     };
-    let mut rules = supported
+    let mut rules = bound_contracts
         .iter()
-        .flat_map(|(_, _, profile)| profile.pricing_rules.clone())
+        .flat_map(|(_, _, contract_definition)| contract_definition.pricing_rules.clone())
         .collect::<Vec<_>>();
     rules.extend(
         providers
@@ -2269,7 +2266,7 @@ fn expected_generated_files(stack: &StackSource, providers: &ProvidersSource) ->
 }
 
 fn render_targets(providers: &ProvidersSource, credentials: &CredentialsSource) -> Result<Value> {
-    let supported = selected_supported_profiles(providers)?;
+    let bound_contracts = selected_provider_contracts(providers)?;
     let mut configs = providers
         .targets
         .iter()
@@ -2303,45 +2300,45 @@ fn render_targets(providers: &ProvidersSource, credentials: &CredentialsSource) 
             }))
         })
         .collect::<Result<Vec<_>>>()?;
-    for (_, credential, profile) in &supported {
+    for (_, credential, contract_definition) in &bound_contracts {
         let secret = credentials.opaque.get(credential).ok_or_else(|| {
             anyhow!(
-                "supported provider profile references unknown credentials.toml opaque key `{credential}`"
+                "provider contract references unknown credentials.toml opaque key `{credential}`"
             )
         })?;
         configs.push(json!({
-            "provider_config_version": profile.target.provider_config_version,
-            "workload_type": profile.target.workload_type,
-            "provider": profile.target.provider,
-            "adapter": profile.target.adapter,
-            "model": profile.target.model,
+            "provider_config_version": contract_definition.target.provider_config_version,
+            "workload_type": contract_definition.target.workload_type,
+            "provider": contract_definition.target.provider,
+            "adapter": contract_definition.target.adapter,
+            "model": contract_definition.target.model,
             "secret_service": secret.service.as_ref().expect("checked"),
             "secret_account": secret.account.as_ref().expect("checked"),
-            "active": profile.target.active,
-            "execution_enabled": profile.target.execution_enabled,
-            "settings": profile.target.settings,
+            "active": contract_definition.target.active,
+            "execution_enabled": contract_definition.target.execution_enabled,
+            "settings": contract_definition.target.settings,
         }));
     }
-    if supported.is_empty() {
+    if bound_contracts.is_empty() {
         return Ok(json!({"schema_version": 2, "provider_configs": configs}));
     }
-    let bindings = supported
+    let bindings = bound_contracts
         .into_iter()
-        .map(|(_, _, profile)| {
+        .map(|(_, _, contract_definition)| {
             json!({
-                "contract": profile.contract,
-                "pricing_version": profile.pricing_version,
-                "poll_policy": profile.policies.poll,
-                "artifact_delivery_policy": profile.policies.artifact_delivery,
-                "recovery_policy": profile.policies.recovery,
-                "generation_retries": profile.policies.generation_retries,
-                "fallback": profile.policies.fallback,
+                "contract": contract_definition.contract,
+                "pricing_version": contract_definition.pricing_version,
+                "poll_policy": contract_definition.policies.poll,
+                "artifact_delivery_policy": contract_definition.policies.artifact_delivery,
+                "recovery_policy": contract_definition.policies.recovery,
+                "generation_retries": contract_definition.policies.generation_retries,
+                "fallback": contract_definition.policies.fallback,
             })
         })
         .collect::<Vec<_>>();
     Ok(json!({
         "schema_version": 3,
-        "supported_profiles": bindings,
+        "contract_bindings": bindings,
         "provider_configs": configs,
     }))
 }
@@ -2375,7 +2372,7 @@ fn validate_provider_source(source: &ProvidersSource) -> Result<()> {
             if source.catalog_version.is_some()
                 || source.maximum_spend_minor.is_some()
                 || source.live_spend_acknowledgement.is_some()
-                || !source.supported_profiles.is_empty()
+                || !source.contract_bindings.is_empty()
                 || !source.targets.is_empty()
                 || !source.pricing_rules.is_empty()
             {
@@ -2399,50 +2396,53 @@ fn validate_provider_source(source: &ProvidersSource) -> Result<()> {
             {
                 bail!("providers.toml live mode requires a positive maximum_spend_minor and the exact Gongbu live-spend acknowledgement");
             }
-            let supported = selected_supported_profiles(source)?;
+            let bound_contracts = selected_provider_contracts(source)?;
             let mut contracts = BTreeSet::new();
             let mut credentials = BTreeSet::new();
-            for (contract, credential, profile) in &supported {
+            for (contract, credential, contract_definition) in &bound_contracts {
                 if !contracts.insert(contract) {
-                    bail!("providers.toml contains a duplicate supported profile contract");
+                    bail!("providers.toml contains a duplicate provider contract binding");
                 }
                 if !credentials.insert(credential) {
-                    bail!("providers.toml supported profiles must use distinct credential aliases");
+                    bail!("providers.toml provider contracts must use distinct credential aliases");
                 }
                 if source.targets.iter().any(|target| {
                     target.provider_config_version.as_deref()
-                        == Some(profile.target.provider_config_version.as_str())
-                        || (target.provider.as_deref() == Some(profile.target.provider.as_str())
-                            && target.adapter.as_deref() == Some(profile.target.adapter.as_str())
-                            && target.model.as_deref() == Some(profile.target.model.as_str()))
+                        == Some(contract_definition.target.provider_config_version.as_str())
+                        || (target.provider.as_deref()
+                            == Some(contract_definition.target.provider.as_str())
+                            && target.adapter.as_deref()
+                                == Some(contract_definition.target.adapter.as_str())
+                            && target.model.as_deref()
+                                == Some(contract_definition.target.model.as_str()))
                 }) {
                     bail!(
-                        "providers.toml raw targets cannot override or duplicate a supported profile target"
+                        "providers.toml raw targets cannot override or duplicate a provider contract target"
                     );
                 }
                 for rule in &source.pricing_rules {
                     let rule = toml_to_json(rule)?;
                     if rule.get("provider").and_then(Value::as_str)
-                        == Some(profile.target.provider.as_str())
+                        == Some(contract_definition.target.provider.as_str())
                         && rule.get("model").and_then(Value::as_str)
-                            == Some(profile.target.model.as_str())
+                            == Some(contract_definition.target.model.as_str())
                     {
                         bail!(
-                            "providers.toml raw pricing rules cannot override supported profile pricing"
+                            "providers.toml raw pricing rules cannot override provider contract pricing"
                         );
                     }
                 }
             }
-            if supported.len() == 1
+            if bound_contracts.len() == 1
                 && source.targets.is_empty()
                 && source.pricing_rules.is_empty()
                 && source
                     .catalog_version
                     .as_deref()
-                    .is_some_and(|version| version != supported[0].2.pricing_version.as_str())
+                    .is_some_and(|version| version != bound_contracts[0].2.pricing_version.as_str())
             {
                 bail!(
-                    "providers.toml profile-only catalog_version must match the supported profile pricing version"
+                    "providers.toml contract-only catalog_version must match the provider contract pricing version"
                 );
             }
         }
@@ -2458,7 +2458,7 @@ fn validate_provider_credential_isolation(
         return Ok(());
     }
 
-    let supported = selected_supported_profiles(source)?;
+    let bound_contracts = selected_provider_contracts(source)?;
     let mut bindings = source
         .targets
         .iter()
@@ -2476,9 +2476,14 @@ fn validate_provider_credential_isolation(
         })
         .collect::<Result<Vec<_>>>()?;
     bindings.extend(
-        supported.iter().map(|(_, credential, profile)| {
-            (profile.target.provider.as_str(), credential.as_str())
-        }),
+        bound_contracts
+            .iter()
+            .map(|(_, credential, contract_definition)| {
+                (
+                    contract_definition.target.provider.as_str(),
+                    credential.as_str(),
+                )
+            }),
     );
 
     let bootstrap_coordinates = ["gongbu_hubu", "gongbu_caller"]
@@ -2516,11 +2521,11 @@ fn validate_provider_credential_isolation(
                 "provider credential references must be isolated from Gongbu bootstrap credentials"
             );
         }
-        if !supported.is_empty() {
+        if !bound_contracts.is_empty() {
             if let Some(existing_provider) = provider_by_coordinate.insert(coordinate, provider) {
                 if existing_provider != provider {
                     bail!(
-                        "supported managed provider catalogs require distinct credential references for different providers"
+                        "provider contract bindings require distinct credential references for different providers"
                     );
                 }
             }
@@ -3125,7 +3130,7 @@ fn missing_fields(
                 .catalog_version
                 .as_deref()
                 .is_none_or(str::is_empty)
-                && (providers.supported_profiles.is_empty()
+                && (providers.contract_bindings.is_empty()
                     || !providers.targets.is_empty()
                     || !providers.pricing_rules.is_empty())
             {
@@ -3137,21 +3142,21 @@ fn missing_fields(
             if mode == ProviderMode::Live && providers.live_spend_acknowledgement.is_none() {
                 missing.push("providers.toml:live_spend_acknowledgement".into());
             }
-            if providers.targets.is_empty() && providers.supported_profiles.is_empty() {
+            if providers.targets.is_empty() && providers.contract_bindings.is_empty() {
                 missing.push("providers.toml:targets".into());
             }
-            for (index, profile) in providers.supported_profiles.iter().enumerate() {
-                if profile.contract.as_deref().is_none_or(str::is_empty) {
+            for (index, binding) in providers.contract_bindings.iter().enumerate() {
+                if binding.contract.as_deref().is_none_or(str::is_empty) {
                     missing.push(format!(
-                        "providers.toml:supported_profiles[{index}].contract"
+                        "providers.toml:contract_bindings[{index}].contract"
                     ));
                 }
-                if profile.credential.as_deref().is_none_or(str::is_empty) {
+                if binding.credential.as_deref().is_none_or(str::is_empty) {
                     missing.push(format!(
-                        "providers.toml:supported_profiles[{index}].credential"
+                        "providers.toml:contract_bindings[{index}].credential"
                     ));
                 }
-                if let Some(key) = profile.credential.as_deref().filter(|key| !key.is_empty()) {
+                if let Some(key) = binding.credential.as_deref().filter(|key| !key.is_empty()) {
                     let field = format!("credentials.toml:opaque.{key}");
                     if !credentials.opaque.contains_key(key) && !missing.contains(&field) {
                         missing.push(field);
@@ -3194,7 +3199,7 @@ fn missing_fields(
                     }
                 }
             }
-            if providers.pricing_rules.is_empty() && providers.supported_profiles.is_empty() {
+            if providers.pricing_rules.is_empty() && providers.contract_bindings.is_empty() {
                 missing.push("providers.toml:pricing_rules".into());
             }
         }
@@ -3962,7 +3967,7 @@ schema_version = 1
 # Add one section per live provider credential, then reference its key from
 # providers.toml, for example [opaque.provider_image].
 
-# Supported FLUX profile example. The operator creates the BFL key and stores
+# FLUX provider contract example. The operator creates the BFL key and stores
 # its value themselves with macOS Keychain Access; only its non-secret lookup
 # coordinates belong here. Never paste, export, print, or shell the key value.
 # [opaque.bfl_flux2_pro]
@@ -4022,12 +4027,12 @@ mode = "live"
 # Set maximum_spend_minor to a positive operator-approved minor-unit ceiling.
 # live_spend_acknowledgement = "<exact acknowledgement required by Gongbu>"
 
-# Ready-to-run supported FLUX profile. Its version freezes the exact target,
+# Ready-to-run FLUX provider contract. Its version freezes the exact target,
 # three preset dimensions and rational USD prices, polling/artifact/recovery
-# policies, zero generation retries, and no fallback. A profile-only catalog
+# policies, zero generation retries, and no fallback. A contract-only catalog
 # derives its immutable catalog version; a mixed raw-target catalog must set a
 # separate operator-owned catalog_version for the composite document.
-# [[supported_profiles]]
+# [[contract_bindings]]
 # contract = "hubu.flux-2-pro.text-to-image/v1"
 # credential = "bfl_flux2_pro"
 
@@ -4083,8 +4088,8 @@ files and never starts a service.
 - `credentials.toml`: provider references and advanced external-service
   credential overrides; never raw secret values. Managed-local service
   credentials and their locations are selected internally during start.
-- `providers.toml`: disabled or live provider mode, targets, frozen pricing,
-  spend ceiling, and the explicit live-spend gate.
+- `providers.toml`: disabled or live provider mode, contract bindings or raw
+  targets, frozen pricing, spend ceiling, and the explicit live-spend gate.
 - `generated/`: validated implementation output; do not edit it.
 
 Review any fields marked as needing input. Then run
@@ -4150,7 +4155,7 @@ fn print_profiles_help() {
 
 fn print_catalog_help() {
     println!(
-        "Show the exact sanitized supported-provider contract and independent readiness facts without calling a provider\n\nUsage:\n  hubu stack catalog [--profile ABSOLUTE_DIR] [--json]\n\nThe command may inspect only source files, selected local validators, macOS Keychain item existence, and local service health. It never reads a provider secret or calls a provider."
+        "Show the exact sanitized provider contract and independent readiness facts without calling a provider\n\nUsage:\n  hubu stack catalog [--profile ABSOLUTE_DIR] [--json]\n\nThe command may inspect only source files, selected local validators, macOS Keychain item existence, and local service health. It never reads a provider secret or calls a provider."
     );
 }
 
@@ -5003,7 +5008,7 @@ components = [{ unit = "image", rate_numerator_minor = 67, rate_denominator = 10
     }
 
     #[test]
-    fn supported_flux_profile_renders_exact_contract_and_composes_with_gemini() {
+    fn flux_provider_contract_renders_exact_contract_and_composes_with_gemini() {
         let providers: ProvidersSource = toml::from_str(&format!(
             r#"schema_version = 1
 mode = "live"
@@ -5011,7 +5016,7 @@ catalog_version = "operator-mixed-2026-08-28-v1"
 maximum_spend_minor = 25
 live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
 
-[[supported_profiles]]
+[[contract_bindings]]
 contract = "hubu.flux-2-pro.text-to-image/v1"
 credential = "bfl_flux2_pro"
 
@@ -5060,7 +5065,7 @@ account = "gemini"
         assert_eq!(targets["schema_version"], 3);
         assert_eq!(targets["provider_configs"].as_array().unwrap().len(), 2);
         assert_eq!(
-            targets["supported_profiles"][0],
+            targets["contract_bindings"][0],
             json!({
                 "contract":"hubu.flux-2-pro.text-to-image/v1",
                 "pricing_version":"bfl-flux-2-pro-usd-2026-08-28-v1",
@@ -5105,7 +5110,7 @@ account = "gemini"
 
         let catalog = ProviderCatalogReport {
             schema_version: 1,
-            profiles: provider_profile_catalog_entries(&providers, true),
+            contracts: provider_contract_catalog_entries(&providers, true),
         };
         let sanitized = serde_json::to_string(&catalog).unwrap();
         assert!(sanitized.contains("1920"));
@@ -5144,7 +5149,7 @@ account = "executor"
     }
 
     #[test]
-    fn supported_profile_only_derives_pricing_version_and_rejects_overrides() {
+    fn provider_contract_only_derives_pricing_version_and_rejects_overrides() {
         let source = |extra: &str| {
             toml::from_str::<ProvidersSource>(&format!(
                 r#"schema_version = 1
@@ -5152,7 +5157,7 @@ mode = "live"
 maximum_spend_minor = 25
 live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
 {extra}
-[[supported_profiles]]
+[[contract_bindings]]
 contract = "hubu.flux-2-pro.text-to-image/v1"
 credential = "bfl"
 "#
@@ -5193,6 +5198,26 @@ settings = { type = "fixture" }
 "#,
         );
         assert!(validate_provider_source(&alternate_workload).is_err());
+    }
+
+    #[test]
+    fn legacy_provider_binding_source_field_is_rejected() {
+        let legacy_field = concat!("supported_", "profiles");
+        let source = format!(
+            r#"schema_version = 1
+mode = "live"
+maximum_spend_minor = 25
+live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
+[[{legacy_field}]]
+contract = "hubu.flux-2-pro.text-to-image/v1"
+credential = "bfl"
+"#,
+        );
+        let result = toml::from_str::<ProvidersSource>(&source);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains(&format!("unknown field `{legacy_field}`")));
     }
 
     #[cfg(unix)]

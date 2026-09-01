@@ -700,7 +700,7 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
         {
             return Err(provider_error("invalid_request"));
         }
-        let expected = profile_dimensions(
+        let expected = contract_dimensions(
             request
                 .image_size
                 .as_deref()
@@ -818,7 +818,7 @@ pub(crate) fn bind_output_dimensions(input: &mut Value) -> Result<OutputDimensio
         .get("image_size")
         .and_then(Value::as_str)
         .ok_or_else(|| provider_error("invalid_request"))?;
-    let expected = profile_dimensions(preset)?;
+    let expected = contract_dimensions(preset)?;
     let input = input
         .as_object_mut()
         .ok_or_else(|| provider_error("invalid_request"))?;
@@ -877,7 +877,7 @@ fn supplied_dimension(
     }
 }
 
-pub(crate) fn profile_dimensions(preset: &str) -> Result<OutputDimensions> {
+pub(crate) fn contract_dimensions(preset: &str) -> Result<OutputDimensions> {
     let dimensions = match preset {
         "1k" => OutputDimensions {
             width: 1024,
@@ -1429,14 +1429,14 @@ mod tests {
             input_tokens: None,
             max_output_tokens: None,
             image_size: Some(preset.into()),
-            output_dimensions: Some(profile_dimensions(preset).unwrap()),
+            output_dimensions: Some(contract_dimensions(preset).unwrap()),
         }
     }
     fn input() -> Value {
         input_for("1k")
     }
     fn input_for(preset: &str) -> Value {
-        let dimensions = profile_dimensions(preset).unwrap();
+        let dimensions = contract_dimensions(preset).unwrap();
         json!({
             "prompt":"cat",
             "image_size":preset,
@@ -2583,12 +2583,12 @@ mod tests {
     }
 
     #[test]
-    fn certified_profile_is_literal_complete_and_within_bfl_constraints() {
+    fn certified_contract_is_literal_complete_and_within_bfl_constraints() {
         let cases = [("1k", 1024, 1024), ("2k", 1920, 1088), ("4k", 2048, 2048)];
         assert_eq!(SUPPORTED_PRESETS, cases.map(|(preset, _, _)| preset));
         for (preset, width, height) in cases {
             let expected = OutputDimensions { width, height };
-            assert_eq!(profile_dimensions(preset).unwrap(), expected);
+            assert_eq!(contract_dimensions(preset).unwrap(), expected);
             validate_dimensions(&expected).unwrap();
 
             let mut input = json!({"prompt":"cat","image_size":preset});
@@ -2596,7 +2596,7 @@ mod tests {
             assert_eq!(input["options"]["width"], width);
             assert_eq!(input["options"]["height"], height);
         }
-        assert!(profile_dimensions("preview").is_err());
+        assert!(contract_dimensions("preview").is_err());
     }
 
     #[test]

@@ -2187,19 +2187,20 @@ mod tests {
             }
         }
 
-        let document: Value =
-            serde_json::from_str(include_str!("../../../contracts/provider-profiles-v1.json"))
-                .unwrap();
-        let profile = &document["profiles"][0];
-        let policies = &profile["policies"];
-        let mut target_document = profile["target"].clone();
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let contract_definition = &document["contracts"][0];
+        let policies = &contract_definition["policies"];
+        let mut target_document = contract_definition["target"].clone();
         target_document["secret_service"] = json!("gongbu.bfl.test");
         target_document["secret_account"] = json!("hub-172-fixture");
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 3,
-            "supported_profiles": [{
-                "contract": profile["contract"],
-                "pricing_version": profile["pricing_version"],
+            "contract_bindings": [{
+                "contract": contract_definition["contract"],
+                "pricing_version": contract_definition["pricing_version"],
                 "poll_policy": policies["poll"],
                 "artifact_delivery_policy": policies["artifact_delivery"],
                 "recovery_policy": policies["recovery"],
@@ -2212,8 +2213,8 @@ mod tests {
         let pricing = PricingCatalog::from_json(
             &serde_json::to_vec(&json!({
                 "schema_version": 2,
-                "catalog_version": profile["pricing_version"],
-                "rules": profile["pricing_rules"]
+                "catalog_version": contract_definition["pricing_version"],
+                "rules": contract_definition["pricing_rules"]
             }))
             .unwrap(),
         )

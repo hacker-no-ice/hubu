@@ -14,7 +14,7 @@ use crate::{
     provider::{
         contract::{ContractError, NormalizedRequest, OutputDimensions, PricingSnapshot},
         flux2_api,
-        registry::{SelectableTarget, ValidatedProviderCatalog},
+        registry::{ExecutionTarget, ValidatedProviderCatalog},
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, TargetKey},
     temporal::ExecutionScheduler,
@@ -82,7 +82,7 @@ pub struct CreateExecutionV2Request {
 #[derive(Clone, Debug, Serialize)]
 pub struct ExecutionTargetCatalogResponse {
     pub schema_version: u32,
-    pub targets: Vec<SelectableTarget>,
+    pub targets: Vec<ExecutionTarget>,
 }
 
 #[derive(Clone, Debug)]
@@ -202,7 +202,7 @@ pub struct ArtifactResponse {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProviderCatalogResponse {
     pub schema_version: u32,
-    pub profiles: Vec<crate::provider::supported_profiles::CatalogProfile>,
+    pub contracts: Vec<crate::provider::provider_contracts::CatalogContract>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -439,7 +439,7 @@ impl Api {
             200,
             &ProviderCatalogResponse {
                 schema_version: 1,
-                profiles: self.providers.supported_profiles().to_vec(),
+                contracts: self.providers.provider_contracts().to_vec(),
             },
         ))
     }
@@ -478,7 +478,7 @@ impl Api {
             200,
             &ExecutionTargetCatalogResponse {
                 schema_version: SCHEMA_VERSION,
-                targets: self.providers.selectable_targets(),
+                targets: self.providers.execution_targets(),
             },
         ))
     }
@@ -812,7 +812,7 @@ impl Api {
         .map_err(|_| ApiError::internal())?;
         let public_catalog = serde_json::to_value(ProviderCatalogResponse {
             schema_version: V1_SCHEMA_VERSION,
-            profiles: self.providers.supported_profiles().to_vec(),
+            contracts: self.providers.provider_contracts().to_vec(),
         })
         .map_err(|_| ApiError::internal())?;
         let attestation = attestor
@@ -1576,19 +1576,19 @@ mod tests {
 
     fn supported_flux_catalog() -> ValidatedProviderCatalog {
         let document: Value = serde_json::from_str(include_str!(
-            "../../../../contracts/provider-profiles-v1.json"
+            "../../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let profile = &document["profiles"][0];
-        let mut target = profile["target"].clone();
+        let contract_definition = &document["contracts"][0];
+        let mut target = contract_definition["target"].clone();
         target["secret_service"] = json!("gongbu.bfl.hubu-hub-172");
         target["secret_account"] = json!("pikachu-live-qualification-v1");
-        let policies = &profile["policies"];
+        let policies = &contract_definition["policies"];
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 3,
-            "supported_profiles": [{
-                "contract": profile["contract"],
-                "pricing_version": profile["pricing_version"],
+            "contract_bindings": [{
+                "contract": contract_definition["contract"],
+                "pricing_version": contract_definition["pricing_version"],
                 "poll_policy": policies["poll"],
                 "artifact_delivery_policy": policies["artifact_delivery"],
                 "recovery_policy": policies["recovery"],
@@ -1601,8 +1601,8 @@ mod tests {
         let pricing = PricingCatalog::from_json(
             &serde_json::to_vec(&json!({
                 "schema_version": 2,
-                "catalog_version": profile["pricing_version"],
-                "rules": profile["pricing_rules"]
+                "catalog_version": contract_definition["pricing_version"],
+                "rules": contract_definition["pricing_rules"]
             }))
             .unwrap(),
         )
@@ -1981,12 +1981,15 @@ mod tests {
 
         let arbitrary = flux_api(&fixture, "prices-v2")
             .with_redaction_attestation_secrets(Arc::new(AttestationSecrets(CANARY)));
-        let created = execution(&arbitrary.handle(
-            "POST",
-            "/v2/executions",
-            Some(&fixture.caller),
-            &serde_json::to_vec(&flux_request("flux-arbitrary-profile", Some("1k"), None)).unwrap(),
-        ));
+        let created = execution(
+            &arbitrary.handle(
+                "POST",
+                "/v2/executions",
+                Some(&fixture.caller),
+                &serde_json::to_vec(&flux_request("flux-arbitrary-contract", Some("1k"), None))
+                    .unwrap(),
+            ),
+        );
         fixture
             .repository
             .update_execution(
@@ -2122,18 +2125,18 @@ mod tests {
         let value: Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema_version"], 1);
         assert_eq!(
-            value["profiles"][0]["target"],
+            value["contracts"][0]["target"],
             json!({
                 "workload_type":"image_generation","provider":"flux",
                 "adapter":"flux2_api","model":"flux-2-pro"
             })
         );
         assert_eq!(
-            value["profiles"][0]["capability"]["presets"][1]["width"],
+            value["contracts"][0]["capability"]["presets"][1]["width"],
             1920
         );
         assert_eq!(
-            value["profiles"][0]["readiness"],
+            value["contracts"][0]["readiness"],
             json!({
                 "configured":true,"credential_reference_present":true,
                 "production_validated":true,"live_qualified":false,
@@ -2233,7 +2236,7 @@ mod tests {
     }
 
     #[test]
-    fn selectable_targets_are_sanitized_and_target_id_creates_the_same_execution() {
+    fn execution_targets_are_sanitized_and_target_id_creates_the_same_execution() {
         let fixture = fixture();
         let catalog =
             fixture
@@ -2278,7 +2281,7 @@ mod tests {
     #[test]
     fn target_id_replay_recovers_persisted_execution_after_target_deactivation() {
         let fixture = fixture();
-        let target_id = fixture.api.providers.selectable_targets()[0]
+        let target_id = fixture.api.providers.execution_targets()[0]
             .target_id
             .clone();
         let mut selected = request("target-id-deactivation-replay");
@@ -2314,7 +2317,7 @@ mod tests {
             fixture.resolver.clone(),
             || "2026-08-05T20:00:00Z".into(),
         );
-        assert!(replay_api.providers.selectable_targets().is_empty());
+        assert!(replay_api.providers.execution_targets().is_empty());
 
         let replayed = replay_api.handle(
             "POST",
@@ -2331,7 +2334,7 @@ mod tests {
     fn target_id_cannot_be_mixed_with_or_escape_the_operator_catalog() {
         let fixture = fixture();
         let mut mixed = request("mixed-target-selector");
-        mixed["target_id"] = json!(fixture.api.providers.selectable_targets()[0].target_id);
+        mixed["target_id"] = json!(fixture.api.providers.execution_targets()[0].target_id);
         assert_eq!(call_create(&fixture, &mixed).status, 400);
 
         let mut unknown = request("unknown-target-id");

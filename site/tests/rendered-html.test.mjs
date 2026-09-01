@@ -293,7 +293,7 @@ test("publishes the high-level topology and four focused component drills", asyn
   assert.match(script, /Version, reserve, then finalize/);
   assert.match(script, /settle · release · reconcile/);
   assert.match(script, /Execute only approved work/);
-  assert.match(script, /Supported profile validation/);
+  assert.match(script, /Provider contract validation/);
   assert.match(script, /generation POST once/);
   assert.match(script, /same provider operation · read-only polling/);
   assert.match(script, /never resubmit after an ambiguous post-transmission interruption/);

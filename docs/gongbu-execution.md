@@ -214,7 +214,7 @@ Gongbu's production validator compares the rendered schema-v3 binding, target,
 and pricing against that shipped contract before serving. The sanitized catalog
 reports validation and Keychain-reference presence separately from live
 qualification; validation never calls BFL. See the
-[managed FLUX.2 profile runbook](operations/managed-flux-profile.md).
+[FLUX.2 provider contract runbook](operations/flux-provider-contract.md).
 
 ### FLUX settled cost units
 

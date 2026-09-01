@@ -5,8 +5,8 @@ pub mod flux2_api;
 pub mod gemini_developer_image;
 pub mod http_kernel;
 pub mod ideogram_image;
+pub mod provider_contracts;
 pub mod registry;
-pub mod supported_profiles;
 pub mod targets;
 
 #[cfg(test)]
