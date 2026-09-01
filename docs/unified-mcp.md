@@ -93,7 +93,7 @@ hubu_submit_spend
 hubu_update_budget
 ```
 
-Gongbu-owned tools cover the supported-provider catalog, configured-target
+Gongbu-owned tools cover the provider contract catalog, configured-target
 discovery, execution, artifacts, and the narrowly scoped guarded-FLUX
 attestation:
 
@@ -109,7 +109,7 @@ gongbu_get_artifact
 
 `gongbu_get_provider_catalog` has strict empty input and forwards only to
 Gongbu's authenticated `GET /v1/provider-catalog`. Its sanitized schema-v1
-result exposes exact supported target/model, resolutions, currency, rational
+result exposes exact contract-bound target/model, resolutions, currency, rational
 pricing, policy versions, and independent readiness facts. It does not expose
 credential coordinates or values, call BFL, or convert
 `live_qualified = false` into a readiness claim.

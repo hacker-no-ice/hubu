@@ -1,7 +1,7 @@
-# Managed FLUX.2 profile
+# FLUX.2 provider contract
 
-The versioned contract `hubu.flux-2-pro.text-to-image/v1` is the supported
-managed-stack path for the deliberately narrow FLUX capability. It renders one
+The shipped versioned contract `hubu.flux-2-pro.text-to-image/v1` is the
+managed-stack recipe for the deliberately narrow FLUX capability. It renders one
 immutable target and its matching pricing rules; it is not a general BFL
 configuration template.
 
@@ -11,7 +11,7 @@ qualification boundaries. This page covers only the FLUX contract and its BFL
 authentication, sizing, asynchronous transport, artifact, cost, activation,
 and recovery differences.
 
-This profile prepares a production-validated stack, but this release does not
+This contract prepares a production-validated execution target, but this release does not
 make a billable qualification call. Its catalog therefore always reports
 `live_qualified = false` and `live_qualification = "not_performed"`. A later
 live-qualification procedure must preserve the same spend and credential
@@ -19,7 +19,7 @@ boundaries.
 
 ## Frozen contract
 
-| Field | Supported value |
+| Field | Contract value |
 | --- | --- |
 | Provider / adapter | `flux` / `flux2_api` |
 | Model | non-preview `flux-2-pro` |
@@ -45,14 +45,14 @@ Before activation, compare the version with BFL's
 [pricing documentation](https://docs.bfl.ai/quick_start/pricing) and
 [pricing page](https://bfl.ai/pricing). If the provider's terms no longer
 match, do not edit or override this contract; keep the stack disabled until a
-new reviewed profile version is shipped.
+new reviewed contract version is shipped.
 
 The target follows BFL's documented non-preview
 [FLUX.2 Pro model](https://docs.bfl.ai/flux_2/flux2_overview) and
 [request contract](https://docs.bfl.ai/api-reference/models/generate-or-edit-an-image-with-flux2-%5Bpro%5D).
 Preview models, edits, batch requests, more than one image, arbitrary
 dimensions, WebP, model or quality selection, routing, retries, and fallback
-are outside this profile.
+are outside this contract.
 
 ## BFL account and key prerequisites
 
@@ -79,7 +79,7 @@ item. Doctor checks item existence without retrieving its value. A missing
 item, denied access, or missing reference fails before authorization claim,
 provider-attempt creation, or provider traffic.
 
-## Select and review the profile
+## Select and review the contract binding
 
 Use the normal managed `stack.toml`, then select the frozen contract in
 `providers.toml`:
@@ -93,12 +93,12 @@ mode = "live"
 maximum_spend_minor = 8
 live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
 
-[[supported_profiles]]
+[[contract_bindings]]
 contract = "hubu.flux-2-pro.text-to-image/v1"
 credential = "bfl_flux2_pro"
 ```
 
-For a profile-only catalog, Hubu derives the immutable pricing version from
+For a contract-only catalog, Hubu derives the immutable pricing version from
 the contract. The only operator-specific provider input is the credential
 reference; the spend ceiling and exact acknowledgement remain separate,
 explicit live-spend choices. Do not reproduce the target, settings, dimensions,
@@ -114,7 +114,7 @@ hubu stack render --profile /absolute/path/to/profile
 
 The catalog reports independent facts:
 
-- `configured`: source validation resolved the exact supported contract;
+- `configured`: source validation resolved the exact provider contract;
 - `credential_reference_present`: the referenced Keychain item exists for the
   local process identity; neither its value nor its coordinates are returned;
 - `production_validated`: the rendered target, versioned policies, and all
@@ -130,7 +130,7 @@ surface exposes Keychain coordinates or secret values.
 An unknown contract, missing credential reference, missing or changed pricing
 version, missing poll/delivery/recovery policy, or unsupported option fails
 source or production validation before Hubu claim, `ProviderAttempt` creation,
-or provider work. The supported selection has no fields for changing the model,
+or provider work. The contract binding has no fields for changing the model,
 format set, dimensions, retries, fallback, or policy versions.
 
 Review the generated plan and `maximum_spend_minor` before activation. Hubu
@@ -158,7 +158,7 @@ downloads never receive the BFL `x-key` credential.
 The feature-gated local Temporal acceptance adapter reports the selected
 1k/2k/4k fixture price so the full offline stack can assert exact settlement at
 each fixture size. It is not a production provider adapter and does not alter
-this supported profile's frozen BFL pricing. Do not adjust production pricing
+this provider contract's frozen BFL pricing. Do not adjust production pricing
 or host policy to make a predecessor caveat disappear.
 
 Treat the selected Keychain `service` and `account` as part of the immutable

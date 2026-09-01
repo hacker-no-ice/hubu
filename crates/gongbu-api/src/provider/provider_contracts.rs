@@ -1,31 +1,31 @@
-//! Exact managed-stack provider profiles and their sanitized catalog projection.
+//! Shipped provider contracts and their sanitized catalog projection.
 
 use super::{
     contract::{PricingCatalog, PricingRule, PricingUnit},
-    targets::{AdapterSettings, ProviderTargetConfig, SupportedProfileBinding},
+    targets::{AdapterSettings, ProviderContractBinding, ProviderTargetConfig},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
-const PROFILE_DOCUMENT: &str = include_str!("../../../../contracts/provider-profiles-v1.json");
-const PROFILE_DOCUMENT_SHA256: &str =
-    "920d1f14c9da7273648d8cbfddca273092c6a94ffc49c0c2f04831681a4b3263";
+const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
+const CONTRACT_DOCUMENT_SHA256: &str =
+    "3e7a50e24a1b37c84582e07d44ab509c6bbde7c2081845ad475a4ea65b14bb6c";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
-    #[error("supported provider profile document is invalid")]
+    #[error("provider contract document is invalid")]
     InvalidDocument,
-    #[error("supported provider profile contract is unknown")]
+    #[error("provider contract is unknown")]
     UnknownContract,
-    #[error("supported provider profile binding does not match its frozen contract")]
+    #[error("provider contract binding does not match its frozen contract")]
     BindingMismatch,
-    #[error("supported provider profile target does not match its frozen contract")]
+    #[error("provider contract target does not match its frozen contract")]
     TargetMismatch,
-    #[error("supported provider profile credential is not isolated from another provider")]
+    #[error("provider contract credential is not isolated from another provider")]
     CredentialIsolation,
-    #[error("supported provider profile pricing does not match its frozen contract")]
+    #[error("provider contract pricing does not match its frozen contract")]
     PricingMismatch,
 }
 
@@ -33,12 +33,12 @@ pub(crate) enum Error {
 #[serde(deny_unknown_fields)]
 struct Document {
     schema_version: u32,
-    profiles: Vec<Profile>,
+    contracts: Vec<ContractDefinition>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Profile {
+struct ContractDefinition {
     contract: String,
     pricing_version: String,
     pricing_reviewed_on: String,
@@ -88,7 +88,7 @@ struct Policies {
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct CatalogProfile {
+pub struct CatalogContract {
     pub contract: String,
     pub pricing_version: String,
     pub pricing_reviewed_on: String,
@@ -144,67 +144,73 @@ pub struct CatalogReadiness {
 pub(crate) fn validate_and_project(
     targets: &ProviderTargetConfig,
     pricing: &PricingCatalog,
-) -> Result<Vec<CatalogProfile>, Error> {
+) -> Result<Vec<CatalogContract>, Error> {
     let document = document()?;
     let mut projected = Vec::new();
-    for binding in targets.supported_profiles() {
-        let profile = document
-            .profiles
+    for binding in targets.contract_bindings() {
+        let contract_definition = document
+            .contracts
             .iter()
-            .find(|profile| profile.contract == binding.contract)
+            .find(|contract_definition| contract_definition.contract == binding.contract)
             .ok_or(Error::UnknownContract)?;
-        validate_binding(binding, profile)?;
-        validate_target(targets, profile)?;
-        validate_pricing(pricing, profile)?;
-        projected.push(project(profile)?);
+        validate_binding(binding, contract_definition)?;
+        validate_target(targets, contract_definition)?;
+        validate_pricing(pricing, contract_definition)?;
+        projected.push(project(contract_definition)?);
     }
     Ok(projected)
 }
 
 fn document() -> Result<Document, Error> {
-    let digest = format!("{:x}", Sha256::digest(PROFILE_DOCUMENT.as_bytes()));
-    if digest != PROFILE_DOCUMENT_SHA256 {
+    let digest = format!("{:x}", Sha256::digest(CONTRACT_DOCUMENT.as_bytes()));
+    if digest != CONTRACT_DOCUMENT_SHA256 {
         return Err(Error::InvalidDocument);
     }
     let document: Document =
-        serde_json::from_str(PROFILE_DOCUMENT).map_err(|_| Error::InvalidDocument)?;
-    if document.schema_version != 1 || document.profiles.is_empty() {
+        serde_json::from_str(CONTRACT_DOCUMENT).map_err(|_| Error::InvalidDocument)?;
+    if document.schema_version != 1 || document.contracts.is_empty() {
         return Err(Error::InvalidDocument);
     }
     let mut contracts = BTreeSet::new();
     if document
-        .profiles
+        .contracts
         .iter()
-        .any(|profile| !contracts.insert(profile.contract.clone()))
+        .any(|contract_definition| !contracts.insert(contract_definition.contract.clone()))
     {
         return Err(Error::InvalidDocument);
     }
     Ok(document)
 }
 
-fn validate_binding(binding: &SupportedProfileBinding, profile: &Profile) -> Result<(), Error> {
-    if binding.contract != profile.contract
-        || binding.pricing_version != profile.pricing_version
-        || binding.poll_policy != profile.policies.poll
-        || binding.artifact_delivery_policy != profile.policies.artifact_delivery
-        || binding.recovery_policy != profile.policies.recovery
-        || binding.generation_retries != profile.policies.generation_retries
-        || binding.fallback != profile.policies.fallback
+fn validate_binding(
+    binding: &ProviderContractBinding,
+    contract_definition: &ContractDefinition,
+) -> Result<(), Error> {
+    if binding.contract != contract_definition.contract
+        || binding.pricing_version != contract_definition.pricing_version
+        || binding.poll_policy != contract_definition.policies.poll
+        || binding.artifact_delivery_policy != contract_definition.policies.artifact_delivery
+        || binding.recovery_policy != contract_definition.policies.recovery
+        || binding.generation_retries != contract_definition.policies.generation_retries
+        || binding.fallback != contract_definition.policies.fallback
     {
         return Err(Error::BindingMismatch);
     }
     Ok(())
 }
 
-fn validate_target(targets: &ProviderTargetConfig, profile: &Profile) -> Result<(), Error> {
+fn validate_target(
+    targets: &ProviderTargetConfig,
+    contract_definition: &ContractDefinition,
+) -> Result<(), Error> {
     let matches = targets
         .revisions()
         .filter(|target| {
-            target.provider_config_version == profile.target.provider_config_version
-                && target.workload_type == profile.target.workload_type
-                && target.provider == profile.target.provider
-                && target.adapter == profile.target.adapter
-                && target.model == profile.target.model
+            target.provider_config_version == contract_definition.target.provider_config_version
+                && target.workload_type == contract_definition.target.workload_type
+                && target.provider == contract_definition.target.provider
+                && target.adapter == contract_definition.target.adapter
+                && target.model == contract_definition.target.model
         })
         .collect::<Vec<_>>();
     if matches.len() != 1 {
@@ -214,18 +220,18 @@ fn validate_target(targets: &ProviderTargetConfig, profile: &Profile) -> Result<
     if targets
         .revisions()
         .filter(|candidate| {
-            candidate.provider == profile.target.provider
-                && candidate.adapter == profile.target.adapter
-                && candidate.model == profile.target.model
+            candidate.provider == contract_definition.target.provider
+                && candidate.adapter == contract_definition.target.adapter
+                && candidate.model == contract_definition.target.model
         })
         .count()
         != 1
     {
         return Err(Error::TargetMismatch);
     }
-    if target.is_active() != profile.target.active
-        || target.is_execution_enabled() != profile.target.execution_enabled
-        || target.settings() != &profile.target.settings
+    if target.is_active() != contract_definition.target.active
+        || target.is_execution_enabled() != contract_definition.target.execution_enabled
+        || target.settings() != &contract_definition.target.settings
     {
         return Err(Error::TargetMismatch);
     }
@@ -239,34 +245,38 @@ fn validate_target(targets: &ProviderTargetConfig, profile: &Profile) -> Result<
     Ok(())
 }
 
-fn validate_pricing(pricing: &PricingCatalog, profile: &Profile) -> Result<(), Error> {
+fn validate_pricing(
+    pricing: &PricingCatalog,
+    contract_definition: &ContractDefinition,
+) -> Result<(), Error> {
     let mut actual = pricing
         .rules()
         .iter()
         .filter(|rule| {
-            rule.provider == profile.target.provider && rule.model == profile.target.model
+            rule.provider == contract_definition.target.provider
+                && rule.model == contract_definition.target.model
         })
         .cloned()
         .collect::<Vec<_>>();
-    let mut expected = profile.pricing_rules.clone();
+    let mut expected = contract_definition.pricing_rules.clone();
     actual.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
     expected.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
     if actual != expected
         || (pricing.rules().len() == expected.len()
-            && pricing.catalog_version() != profile.pricing_version)
+            && pricing.catalog_version() != contract_definition.pricing_version)
     {
         return Err(Error::PricingMismatch);
     }
     Ok(())
 }
 
-fn project(profile: &Profile) -> Result<CatalogProfile, Error> {
-    let presets = profile
+fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, Error> {
+    let presets = contract_definition
         .capability
         .presets
         .iter()
         .map(|preset| {
-            let rule = profile
+            let rule = contract_definition
                 .pricing_rules
                 .iter()
                 .find(|rule| {
@@ -292,27 +302,27 @@ fn project(profile: &Profile) -> Result<CatalogProfile, Error> {
             })
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    Ok(CatalogProfile {
-        contract: profile.contract.clone(),
-        pricing_version: profile.pricing_version.clone(),
-        pricing_reviewed_on: profile.pricing_reviewed_on.clone(),
+    Ok(CatalogContract {
+        contract: contract_definition.contract.clone(),
+        pricing_version: contract_definition.pricing_version.clone(),
+        pricing_reviewed_on: contract_definition.pricing_reviewed_on.clone(),
         target: CatalogTarget {
-            workload_type: profile.target.workload_type.clone(),
-            provider: profile.target.provider.clone(),
-            adapter: profile.target.adapter.clone(),
-            model: profile.target.model.clone(),
+            workload_type: contract_definition.target.workload_type.clone(),
+            provider: contract_definition.target.provider.clone(),
+            adapter: contract_definition.target.adapter.clone(),
+            model: contract_definition.target.model.clone(),
         },
         capability: CatalogCapability {
-            image_count: profile.capability.image_count,
-            output_formats: profile.capability.output_formats.clone(),
+            image_count: contract_definition.capability.image_count,
+            output_formats: contract_definition.capability.output_formats.clone(),
             presets,
         },
         policies: CatalogPolicies {
-            generation_retries: profile.policies.generation_retries,
-            fallback: profile.policies.fallback,
-            poll: profile.policies.poll.clone(),
-            artifact_delivery: profile.policies.artifact_delivery.clone(),
-            recovery: profile.policies.recovery.clone(),
+            generation_retries: contract_definition.policies.generation_retries,
+            fallback: contract_definition.policies.fallback,
+            poll: contract_definition.policies.poll.clone(),
+            artifact_delivery: contract_definition.policies.artifact_delivery.clone(),
+            recovery: contract_definition.policies.recovery.clone(),
         },
         readiness: CatalogReadiness {
             configured: true,
@@ -333,7 +343,7 @@ mod tests {
     fn exact_targets() -> ProviderTargetConfig {
         serde_json::from_value(json!({
             "schema_version": 3,
-            "supported_profiles": [{
+            "contract_bindings": [{
                 "contract": "hubu.flux-2-pro.text-to-image/v1",
                 "pricing_version": "bfl-flux-2-pro-usd-2026-08-28-v1",
                 "poll_policy": "bfl-async-status-poll-500ms-v1",
@@ -371,18 +381,18 @@ mod tests {
 
     #[test]
     fn exact_contract_projects_sanitized_unqualified_catalog() {
-        let profiles = validate_and_project(&exact_targets(), &exact_pricing()).unwrap();
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].capability.presets[1].width, 1920);
-        assert_eq!(profiles[0].capability.presets[1].rate_numerator_minor, 45);
-        assert!(!profiles[0].readiness.credential_reference_present);
-        assert!(!profiles[0].readiness.live_qualified);
+        let contracts = validate_and_project(&exact_targets(), &exact_pricing()).unwrap();
+        assert_eq!(contracts.len(), 1);
+        assert_eq!(contracts[0].capability.presets[1].width, 1920);
+        assert_eq!(contracts[0].capability.presets[1].rate_numerator_minor, 45);
+        assert!(!contracts[0].readiness.credential_reference_present);
+        assert!(!contracts[0].readiness.live_qualified);
     }
 
     #[test]
     fn policy_target_and_pricing_mutations_are_rejected() {
         let mut targets = serde_json::to_value(exact_targets()).unwrap();
-        targets["supported_profiles"][0]["poll_policy"] = json!("missing");
+        targets["contract_bindings"][0]["poll_policy"] = json!("missing");
         let targets: ProviderTargetConfig = serde_json::from_value(targets).unwrap();
         assert!(matches!(
             validate_and_project(&targets, &exact_pricing()),

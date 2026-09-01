@@ -82,7 +82,7 @@ choice is unclear:
 | --- | --- | --- |
 | `stack.toml` | Binaries, managed or external services, Temporal, and local paths | [`stack.toml`](https://hubustack.dev/configuration/local-stack/v1/stack-toml) |
 | `credentials.toml` | Provider references or advanced external-service overrides | [`credentials.toml`](https://hubustack.dev/configuration/local-stack/v1/credentials-toml) |
-| `providers.toml` | Disabled, sandbox, or live mode; supported profiles or raw targets, pricing, and live spend gate where applicable | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
+| `providers.toml` | Disabled, sandbox, or live mode; provider contracts or raw targets, pricing, and live spend gate where applicable | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
 
 For a first local evaluation, use sandbox mode. It exercises the governed
 execution path without contacting an external provider or incurring cost.
@@ -90,9 +90,9 @@ Never put bearer tokens, provider API keys, or other raw secrets in the TOML
 files. Live provider execution can incur charges.
 
 For billable targets, start with [live provider
-operations](operations/live-providers.md). The supported FLUX.2 integration has
-an additional [managed profile](operations/managed-flux-profile.md) for its
-frozen contract and asynchronous recovery details. Inspect the sanitized
+operations](operations/live-providers.md). The
+[FLUX.2 provider contract](operations/flux-provider-contract.md) documents its
+frozen recipe and asynchronous recovery details. Inspect the sanitized
 catalog with `hubu stack catalog --json`; catalog, doctor, and render never call
 a provider or claim live qualification.
 
@@ -104,7 +104,7 @@ hubu stack doctor
 
 Doctor is read-only. An explicit `--profile "$profile"` can override the saved
 selection for any one stack command. `hubu stack doctor --json` emits the
-version-2 report contract, which adds the supported-profile catalog and keeps
+version-2 report contract, which adds the provider contract catalog and keeps
 configured, credential-reference-present, production-validated, and
 live-qualified state independent.
 

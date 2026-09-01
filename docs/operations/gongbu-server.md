@@ -138,7 +138,7 @@ execution and artifact endpoints require the caller capability. A 503 from
 `/readyz` means new admission is closed.
 
 An authenticated `GET /v1/provider-catalog` returns the sanitized schema-v1
-supported-profile projection. For the managed FLUX profile it includes the
+provider contract projection. For the shipped FLUX provider contract it includes the
 exact target, model, presets, rational USD pricing, policy versions, and the
 separate configured, credential-reference-present, production-validated, and
 live-qualified facts. It never exposes Keychain coordinates or values and does

@@ -136,7 +136,7 @@ not as unhealthy services. Operator-owned workflows may use Hubu registration,
 policy, authorization, and budget contracts without adopting Gongbu provider
 execution.
 
-## Supported managed FLUX.2 profile
+## FLUX.2 provider contract
 
 This is the ready-to-render provider shape for
 `hubu.flux-2-pro.text-to-image/v1`. Use the complete managed `stack.toml` from
@@ -168,21 +168,21 @@ mode = "live"
 maximum_spend_minor = 8
 live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
 
-[[supported_profiles]]
+[[contract_bindings]]
 contract = "hubu.flux-2-pro.text-to-image/v1"
 credential = "bfl_flux2_pro"
 ```
 
-The profile-only catalog derives
+The contract-only catalog derives
 `bfl-flux-2-pro-usd-2026-08-28-v1`; do not copy the target or its three pricing
 rules into raw tables. Run `hubu stack catalog --json`, doctor, and render to
 review exact target, resolutions, rational USD rates, and independent readiness
 facts without contacting BFL. `live_qualified` remains false with
 `not_performed` in this release. Apply the shared [live provider operations
 guide](../../../operations/live-providers.md), then follow the
-[managed FLUX.2 profile](../../../operations/managed-flux-profile.md).
+[FLUX.2 provider contract](../../../operations/flux-provider-contract.md).
 
-## Representative generic live-provider profile
+## Representative generic live-provider configuration
 
 This example is deliberately **not provider-ready**: `provider.example`, the model, version labels, Keychain coordinates, and illustrative one-cent price must be replaced with authoritative values. It demonstrates the complete schema without claiming current provider configuration or pricing.
 

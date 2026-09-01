@@ -2,7 +2,7 @@
 
 This is the external operator entry point for billable Gongbu provider work.
 Hubu currently supports two documented live integrations: the Gemini Developer
-API image adapter and the managed FLUX.2 profile. Both use the same governance,
+API image adapter and the FLUX.2 provider contract. Both use the same governance,
 credential, pricing, spend, retry, reconciliation, artifact, and qualification
 boundaries described here. Provider-specific sections contain only the
 authentication, transport, sizing, artifact, and recovery differences.
@@ -45,7 +45,7 @@ the value.
 Use `mode = "live"` only after the topology is healthy in sandbox mode. Every
 live profile requires:
 
-- one exact active, execution-enabled provider target or supported contract;
+- one exact active, execution-enabled provider target or provider contract;
 - an opaque credential reference;
 - immutable target and catalog version labels;
 - schema-v2 pricing with exactly one matching rule for every enabled request
@@ -149,7 +149,7 @@ checkpoint, so reconcile rather than rerun.
 
 ## FLUX.2 Pro
 
-The supported FLUX integration uses the managed
+The FLUX provider contract uses the managed
 `hubu.flux-2-pro.text-to-image/v1` contract. It freezes the BFL target, certified
 dimensions, dated rational prices, zero generation retries, no fallback,
 polling, artifact-delivery, and durable-recovery policies. The operator supplies
@@ -160,9 +160,9 @@ the safe request and operation identifiers, validated polling host, and original
 deadline, then performs bounded read-only polling. Restart resumes that same
 operation and never submits a replacement generation.
 
-The shipped managed profile is production-validated but not live-qualified;
+The shipped provider contract is production-validated but not live-qualified;
 its catalog reports `live_qualified = false` and
 `live_qualification = "not_performed"`. Ordinary demos and CI remain
 fixture-only. For BFL authentication, frozen dimensions and prices, settled
 cost conversion, delivery-host policy, activation, and recovery details, read
-the [managed FLUX.2 profile](managed-flux-profile.md).
+the [FLUX.2 provider contract](flux-provider-contract.md).

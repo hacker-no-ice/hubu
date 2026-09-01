@@ -106,9 +106,9 @@ Use a new label whenever the content changes. Examples of meaningful changes inc
 
 Do not use a mutable label such as `latest` and then replace its meaning. Gongbu persists configuration digests and pricing snapshots so execution history remains attributable to the exact reviewed inputs.
 
-## Supported profile versus generic target
+## Provider contract versus generic target
 
-Use `[[supported_profiles]]` when its named, versioned contract exactly matches
+Use `[[contract_bindings]]` when its named, versioned contract exactly matches
 the desired capability. The initial contract,
 `hubu.flux-2-pro.text-to-image/v1`, freezes the FLUX provider, adapter, model,
 three dimension presets, PNG/JPEG output, zero generation retries, no fallback,
@@ -119,14 +119,14 @@ explicit spend choices.
 Use raw `[[targets]]` and `[[pricing_rules]]` for other providers such as the
 Gemini Developer API. A composite FLUX-plus-Gemini catalog requires a new immutable
 `catalog_version`, distinct credential aliases, and unambiguous target and
-pricing keys. Raw entries cannot override or duplicate a supported contract.
+pricing keys. Raw entries cannot override or duplicate a provider contract.
 Both providers stay inside Gongbu's execution boundary with separate targets,
 credentials, attempts, and artifacts; Hubu's governance database remains a
 separate process and failure domain.
 
 ### Readiness is not qualification
 
-The supported-provider catalog reports four independent facts:
+The provider contract catalog reports four independent facts:
 
 - configuration resolved the exact contract;
 - the credential reference is present for the local process identity;
@@ -137,7 +137,7 @@ The last fact is deliberately false with `not_performed` for the initial FLUX
 profile. Catalog, doctor, render, and production validation never call a
 provider or claim that a provider transaction succeeded. Start with [live
 provider operations](../../../operations/live-providers.md), then see the
-[managed FLUX.2 profile](../../../operations/managed-flux-profile.md) for its
+[FLUX.2 provider contract](../../../operations/flux-provider-contract.md) for its
 provider-specific contract.
 
 ## Provider targets and adapter settings

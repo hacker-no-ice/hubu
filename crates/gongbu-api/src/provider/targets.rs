@@ -60,10 +60,10 @@ pub enum Error {
     NotConfigured,
     #[error("persisted provider configuration digest does not match")]
     DigestMismatch,
-    #[error("supported provider profile binding is invalid")]
-    InvalidSupportedProfile,
-    #[error("duplicate supported provider profile binding")]
-    DuplicateSupportedProfile,
+    #[error("provider contract binding is invalid")]
+    InvalidProviderContract,
+    #[error("duplicate provider contract binding")]
+    DuplicateProviderContract,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -249,12 +249,12 @@ impl ProviderConfigVersion {
 pub struct ProviderTargetConfig {
     revisions: BTreeMap<(TargetKey, String), ProviderConfigVersion>,
     active: BTreeMap<TargetKey, String>,
-    supported_profiles: Vec<SupportedProfileBinding>,
+    contract_bindings: Vec<ProviderContractBinding>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct SupportedProfileBinding {
+pub struct ProviderContractBinding {
     pub contract: String,
     pub pricing_version: String,
     pub poll_policy: String,
@@ -269,7 +269,7 @@ impl ProviderTargetConfig {
         Self {
             revisions: BTreeMap::new(),
             active: BTreeMap::new(),
-            supported_profiles: Vec::new(),
+            contract_bindings: Vec::new(),
         }
     }
 
@@ -294,8 +294,8 @@ impl ProviderTargetConfig {
     pub fn revisions(&self) -> impl Iterator<Item = &ProviderConfigVersion> {
         self.revisions.values()
     }
-    pub fn supported_profiles(&self) -> &[SupportedProfileBinding] {
-        &self.supported_profiles
+    pub fn contract_bindings(&self) -> &[ProviderContractBinding] {
+        &self.contract_bindings
     }
     pub fn resolve(
         &self,
@@ -377,7 +377,7 @@ struct RawCatalog {
     #[serde(default = "legacy_schema_version")]
     schema_version: u32,
     #[serde(default)]
-    supported_profiles: Vec<SupportedProfileBinding>,
+    contract_bindings: Vec<ProviderContractBinding>,
     provider_configs: Vec<RawRevision>,
 }
 fn legacy_schema_version() -> u32 {
@@ -416,33 +416,33 @@ impl TryFrom<RawCatalog> for ProviderTargetConfig {
         if !matches!(raw.schema_version, 1 | 2 | CURRENT_SCHEMA_VERSION) {
             return Err(Error::UnsupportedSchema);
         }
-        if raw.schema_version < 3 && !raw.supported_profiles.is_empty() {
+        if raw.schema_version < 3 && !raw.contract_bindings.is_empty() {
             return Err(Error::UnsupportedSchema);
         }
         if raw.provider_configs.is_empty() {
             return Err(Error::Empty);
         }
-        let mut profile_contracts = BTreeSet::new();
-        for profile in &raw.supported_profiles {
+        let mut bound_contracts = BTreeSet::new();
+        for binding in &raw.contract_bindings {
             if [
-                profile.contract.as_str(),
-                profile.pricing_version.as_str(),
-                profile.poll_policy.as_str(),
-                profile.artifact_delivery_policy.as_str(),
-                profile.recovery_policy.as_str(),
+                binding.contract.as_str(),
+                binding.pricing_version.as_str(),
+                binding.poll_policy.as_str(),
+                binding.artifact_delivery_policy.as_str(),
+                binding.recovery_policy.as_str(),
             ]
             .iter()
             .any(|value| value.is_empty() || value.trim() != *value || value.len() > 255)
-                || !profile_contracts.insert(profile.contract.clone())
+                || !bound_contracts.insert(binding.contract.clone())
             {
-                return Err(if profile_contracts.contains(&profile.contract) {
-                    Error::DuplicateSupportedProfile
+                return Err(if bound_contracts.contains(&binding.contract) {
+                    Error::DuplicateProviderContract
                 } else {
-                    Error::InvalidSupportedProfile
+                    Error::InvalidProviderContract
                 });
             }
         }
-        let supported_profiles = raw.supported_profiles;
+        let contract_bindings = raw.contract_bindings;
         let mut revisions = BTreeMap::new();
         let mut active = BTreeMap::new();
         let mut version_digests = BTreeMap::<String, String>::new();
@@ -470,7 +470,7 @@ impl TryFrom<RawCatalog> for ProviderTargetConfig {
         Ok(Self {
             revisions,
             active,
-            supported_profiles,
+            contract_bindings,
         })
     }
 }
@@ -506,12 +506,12 @@ impl Serialize for ProviderTargetConfig {
             })
             .collect();
         RawCatalog {
-            schema_version: if self.supported_profiles.is_empty() {
+            schema_version: if self.contract_bindings.is_empty() {
                 2
             } else {
                 CURRENT_SCHEMA_VERSION
             },
-            supported_profiles: self.supported_profiles.clone(),
+            contract_bindings: self.contract_bindings.clone(),
             provider_configs,
         }
         .serialize(serializer)
@@ -824,6 +824,19 @@ mod tests {
 
     fn catalog(json: &str) -> ProviderTargetConfig {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn legacy_provider_binding_field_is_rejected() {
+        let legacy_field = concat!("supported_", "profiles");
+        let source = format!(
+            r#"{{"schema_version":3,"{legacy_field}":[],"provider_configs":[{{"provider_config_version":"v1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"gongbu.example","secret_account":"local","settings":{{"type":"fixture"}}}}]}}"#,
+        );
+        let result = serde_json::from_str::<ProviderTargetConfig>(&source);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains(&format!("unknown field `{legacy_field}`")));
     }
 
     #[test]

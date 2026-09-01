@@ -87,12 +87,12 @@ Keep Hubu and Gongbu separate even though the profile coordinates them. They ret
 2. Follow the shared [live provider operations
    guide](../../../operations/live-providers.md) for credentials, governance,
    pricing, spend, retry, reconciliation, artifacts, and qualification.
-3. For the supported FLUX subset, follow the provider-specific
-   [managed FLUX.2 profile](../../../operations/managed-flux-profile.md).
+3. For the FLUX provider contract, follow the provider-specific
+   [FLUX.2 provider contract](../../../operations/flux-provider-contract.md).
 4. For a generic target, read [provider targets and adapter settings](decisions.md#provider-targets-and-adapter-settings).
 5. Read [pricing, authorization, holds, and settlement](decisions.md#pricing-authorization-holds-and-settlement).
 6. Verify provider identifiers, endpoints, supported models, prices, and billing units with the provider.
-7. Use the [live-provider examples](examples.md#supported-managed-flux2-profile) as version-matched structure, not as timeless current provider data.
+7. Use the [live-provider examples](examples.md#flux2-provider-contract) as version-matched structure, not as timeless current provider data.
 
 ### External or customized topology
 
@@ -142,7 +142,7 @@ The opaque table name is a local reference key. Its `service` and `account` valu
 - [Decision guides](decisions.md)
 - [Complete annotated examples](examples.md)
 - [Live provider operations](../../../operations/live-providers.md)
-- [Managed FLUX.2 profile and recovery runbook](../../../operations/managed-flux-profile.md)
+- [FLUX.2 provider contract and recovery runbook](../../../operations/flux-provider-contract.md)
 - [Local stack quick start](../../../local-stack.md)
 
 ## Versioning

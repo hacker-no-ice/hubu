@@ -456,15 +456,17 @@ fn scrub_private_projection(value: &mut Value, private_operation_key: &str) {
 #[serde(deny_unknown_fields)]
 pub(super) struct ProviderCatalogResponse {
     schema_version: u32,
-    profiles: Vec<ProviderCatalogProfile>,
+    contracts: Vec<ProviderCatalogContract>,
 }
 
 impl ProviderCatalogResponse {
     pub(super) fn validate(&self) -> Result<(), ToolError> {
-        if self.schema_version != 1 || self.profiles.len() > 1 {
+        if self.schema_version != 1 || self.contracts.len() > 1 {
             return Err(ToolError::invalid_response());
         }
-        self.profiles.iter().try_for_each(validate_provider_profile)
+        self.contracts
+            .iter()
+            .try_for_each(validate_provider_contract)
     }
 }
 
@@ -576,7 +578,7 @@ impl RedactionAttestationResponse {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ProviderCatalogProfile {
+struct ProviderCatalogContract {
     contract: String,
     pricing_version: String,
     pricing_reviewed_on: String,
@@ -634,26 +636,26 @@ struct ProviderCatalogReadiness {
     live_qualification: String,
 }
 
-fn validate_provider_profile(profile: &ProviderCatalogProfile) -> Result<(), ToolError> {
-    let exact_target = profile.target.workload_type == "image_generation"
-        && profile.target.provider == "flux"
-        && profile.target.adapter == "flux2_api"
-        && profile.target.model == "flux-2-pro";
-    let exact_capability = profile.capability.image_count == 1
-        && profile.capability.output_formats == ["png", "jpeg"]
-        && exact_provider_presets(&profile.capability.presets);
-    let exact_policies = profile.policies.generation_retries == 0
-        && !profile.policies.fallback
-        && profile.policies.poll == "bfl-async-status-poll-500ms-v1"
-        && profile.policies.artifact_delivery == "bfl-delivery-single-region-label-v1"
-        && profile.policies.recovery == "hubu-durable-async-resume-v1";
-    let exact_readiness = profile.readiness.configured
-        && profile.readiness.production_validated
-        && !profile.readiness.live_qualified
-        && profile.readiness.live_qualification == "not_performed";
-    if profile.contract != "hubu.flux-2-pro.text-to-image/v1"
-        || profile.pricing_version != "bfl-flux-2-pro-usd-2026-08-28-v1"
-        || profile.pricing_reviewed_on != "2026-08-28"
+fn validate_provider_contract(contract: &ProviderCatalogContract) -> Result<(), ToolError> {
+    let exact_target = contract.target.workload_type == "image_generation"
+        && contract.target.provider == "flux"
+        && contract.target.adapter == "flux2_api"
+        && contract.target.model == "flux-2-pro";
+    let exact_capability = contract.capability.image_count == 1
+        && contract.capability.output_formats == ["png", "jpeg"]
+        && exact_provider_presets(&contract.capability.presets);
+    let exact_policies = contract.policies.generation_retries == 0
+        && !contract.policies.fallback
+        && contract.policies.poll == "bfl-async-status-poll-500ms-v1"
+        && contract.policies.artifact_delivery == "bfl-delivery-single-region-label-v1"
+        && contract.policies.recovery == "hubu-durable-async-resume-v1";
+    let exact_readiness = contract.readiness.configured
+        && contract.readiness.production_validated
+        && !contract.readiness.live_qualified
+        && contract.readiness.live_qualification == "not_performed";
+    if contract.contract != "hubu.flux-2-pro.text-to-image/v1"
+        || contract.pricing_version != "bfl-flux-2-pro-usd-2026-08-28-v1"
+        || contract.pricing_reviewed_on != "2026-08-28"
         || !exact_target
         || !exact_capability
         || !exact_policies

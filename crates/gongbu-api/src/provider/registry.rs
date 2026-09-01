@@ -14,7 +14,7 @@ use super::{
         IdeogramImageAdapter, ADAPTER_ID as IDEOGRAM_ADAPTER_ID,
         PROVIDER_ID as IDEOGRAM_PROVIDER_ID,
     },
-    supported_profiles::{self, CatalogProfile},
+    provider_contracts::{self, CatalogContract},
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
 };
 use crate::{artifact::ArtifactLimits, execution_scope::for_target, secrets::ProviderSecret};
@@ -31,18 +31,18 @@ pub type BoundAdapter = Arc<dyn ProviderAdapter + Send + Sync>;
 type Factory = dyn Fn(&ProviderConfigVersion) -> Result<BoundAdapter, ContractError> + Send + Sync;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct SelectableTarget {
+pub struct ExecutionTarget {
     pub target_id: String,
     pub workload_type: String,
     pub provider: String,
     pub model: String,
-    pub execution_scope: SelectableExecutionScope,
+    pub execution_scope: ExecutionTargetScope,
     pub image_sizes: Vec<String>,
-    pub pricing: Vec<SelectablePricing>,
+    pub pricing: Vec<ExecutionTargetPricing>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct SelectableExecutionScope {
+pub struct ExecutionTargetScope {
     pub schema_version: u32,
     pub provider: String,
     pub executor: String,
@@ -51,7 +51,7 @@ pub struct SelectableExecutionScope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct SelectablePricing {
+pub struct ExecutionTargetPricing {
     pub rule_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selector: Option<PricingSelector>,
@@ -71,8 +71,8 @@ pub enum RegistryError {
     NotBound(String),
     #[error("provider target is unavailable")]
     TargetUnavailable,
-    #[error("supported provider profile is invalid: {0}")]
-    InvalidSupportedProfile(String),
+    #[error("provider contract is invalid: {0}")]
+    InvalidProviderContract(String),
 }
 
 #[derive(Clone, Default)]
@@ -220,7 +220,7 @@ pub struct ValidatedProviderCatalog {
     targets: ProviderTargetConfig,
     pricing: PricingCatalog,
     adapters: BTreeMap<(TargetKey, String), BoundAdapter>,
-    supported_profiles: Vec<CatalogProfile>,
+    provider_contracts: Vec<CatalogContract>,
 }
 
 impl ValidatedProviderCatalog {
@@ -229,7 +229,7 @@ impl ValidatedProviderCatalog {
             targets: ProviderTargetConfig::disabled(),
             pricing: PricingCatalog::disabled(),
             adapters: BTreeMap::new(),
-            supported_profiles: Vec::new(),
+            provider_contracts: Vec::new(),
         }
     }
 
@@ -271,13 +271,13 @@ impl ValidatedProviderCatalog {
                 adapter,
             );
         }
-        let supported_profiles = supported_profiles::validate_and_project(&targets, &pricing)
-            .map_err(|error| RegistryError::InvalidSupportedProfile(error.to_string()))?;
+        let provider_contracts = provider_contracts::validate_and_project(&targets, &pricing)
+            .map_err(|error| RegistryError::InvalidProviderContract(error.to_string()))?;
         Ok(Self {
             targets,
             pricing,
             adapters,
-            supported_profiles,
+            provider_contracts,
         })
     }
 
@@ -289,24 +289,24 @@ impl ValidatedProviderCatalog {
         &self.pricing
     }
 
-    pub fn supported_profiles(&self) -> &[CatalogProfile] {
-        &self.supported_profiles
+    pub fn provider_contracts(&self) -> &[CatalogContract] {
+        &self.provider_contracts
     }
 
     pub(crate) fn mark_credential_references_present(&mut self) {
-        for profile in &mut self.supported_profiles {
-            profile.readiness.credential_reference_present = true;
+        for contract in &mut self.provider_contracts {
+            contract.readiness.credential_reference_present = true;
         }
     }
 
-    pub fn selectable_targets(&self) -> Vec<SelectableTarget> {
+    pub fn execution_targets(&self) -> Vec<ExecutionTarget> {
         self.targets
             .revisions()
             .filter(|target| target.is_active() && target.is_execution_enabled())
             .filter_map(|target| {
                 let key = target.target_key();
                 let scope = for_target(&key.provider, &key.adapter)?;
-                let execution_scope = SelectableExecutionScope {
+                let execution_scope = ExecutionTargetScope {
                     schema_version: scope.schema_version,
                     provider: scope.provider.id,
                     executor: scope.executor.id,
@@ -317,7 +317,7 @@ impl ValidatedProviderCatalog {
                     .pricing
                     .rules_for_target(&key)
                     .into_iter()
-                    .map(|rule| SelectablePricing {
+                    .map(|rule| ExecutionTargetPricing {
                         rule_id: rule.rule_id,
                         selector: rule.selector,
                         currency: rule.currency,
@@ -334,7 +334,7 @@ impl ValidatedProviderCatalog {
                     .collect::<Vec<_>>();
                 image_sizes.sort();
                 image_sizes.dedup();
-                Some(SelectableTarget {
+                Some(ExecutionTarget {
                     target_id: key.public_id(),
                     workload_type: key.workload_type,
                     provider: key.provider,
@@ -551,9 +551,9 @@ mod tests {
             let key = TargetKey::new("image_generation", provider, adapter, model).unwrap();
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
-        let selectable = catalog.selectable_targets();
-        assert_eq!(selectable.len(), 3);
-        let flux = selectable
+        let execution_targets = catalog.execution_targets();
+        assert_eq!(execution_targets.len(), 3);
+        let flux = execution_targets
             .iter()
             .find(|target| target.provider == "flux")
             .unwrap();

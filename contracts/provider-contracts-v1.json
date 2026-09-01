@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "profiles": [
+  "contracts": [
     {
       "contract": "hubu.flux-2-pro.text-to-image/v1",
       "pricing_version": "bfl-flux-2-pro-usd-2026-08-28-v1",
