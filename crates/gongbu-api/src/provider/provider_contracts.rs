@@ -268,7 +268,6 @@ fn validate_target(
         .filter(|candidate| {
             candidate.provider == contract_definition.target.provider
                 && candidate.adapter == contract_definition.target.adapter
-                && candidate.model == contract_definition.target.model
         })
         .count()
         != 1
@@ -567,6 +566,58 @@ mod tests {
         let targets: ProviderTargetConfig = serde_json::from_value(targets).unwrap();
         assert!(matches!(
             validate_and_project(&targets, &exact_pricing()),
+            Err(Error::TargetMismatch)
+        ));
+
+        let mut targets = serde_json::to_value(exact_targets()).unwrap();
+        targets["provider_configs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "provider_config_version":"flux-other-model-bypass",
+                "workload_type":"image_generation",
+                "provider":"flux",
+                "adapter":"flux2_api",
+                "model":"flux-other-model",
+                "secret_service":"gongbu.other",
+                "secret_account":"other",
+                "active":true,
+                "execution_enabled":true,
+                "settings":{"type":"flux2_api","config":{
+                    "endpoint":"https://api.bfl.ai","api_version":"v1",
+                    "timeout_ms":270000,"poll_interval_ms":500,"max_retries":0,
+                    "idempotency_header":null,"approved_artifact_hosts":[],"headers":{}
+                }}
+            }));
+        let targets: ProviderTargetConfig = serde_json::from_value(targets).unwrap();
+        let document: Value = serde_json::from_str(CONTRACT_DOCUMENT).unwrap();
+        let mut rules = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["contract"] == "hubu.flux-2-pro.text-to-image/v1")
+            .unwrap()["pricing_rules"]
+            .as_array()
+            .unwrap()
+            .clone();
+        rules.push(json!({
+            "rule_id":"flux-other-model-price",
+            "provider":"flux",
+            "model":"flux-other-model",
+            "currency":"USD",
+            "components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]
+        }));
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version":2,
+                "catalog_version":"contract-plus-bypass-v1",
+                "rules":rules
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_and_project(&targets, &pricing),
             Err(Error::TargetMismatch)
         ));
 
