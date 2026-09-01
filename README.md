@@ -17,6 +17,13 @@ systems keep separate processes, storage, credentials, and failure domains.
 
 ## Quick Start
 
+The recommended first-run path is hybrid: use the CLI for deterministic stack
+bootstrap and independent verification, then let Codex handle the administrative
+mechanics and governed workload while you review every policy, limit, and
+authority-changing operation before approving it.
+
+### 1. Install and verify the binaries
+
 For `v0.2.1` and later during the initial technical-user phase, build all four
 production binaries locally from one exact macOS source release. Choose an
 immutable `vX.Y.Z` tag and copy its published full source commit from the
@@ -40,63 +47,149 @@ for prerequisite, trust, custom-prefix, update, and uninstall details.
 These executables are compiled locally. They are not Developer ID-signed,
 Apple-notarized, or otherwise Apple-verified, and the supported flow does not
 ask you to bypass Gatekeeper. Ensure `~/.local/bin` is on your `PATH`, then
-create an operator-owned stack profile. Before testing, verify that
-`command -v hubu` resolves to this installation and that `hubu --version`
-reports the release you intended to build. This quick start uses the generated
-managed-Hubu endpoint and database; for an external Hubu or a custom database,
-follow the [local stack guide](docs/local-stack.md) and configure explicit
-external-service credential references.
+visually confirm that all four binaries resolve to the installation you just
+built and report the intended release:
 
-Initialize the profile, complete the non-secret topology and provider choices,
-and start the principal-neutral stack:
+```sh
+for binary in hubu hubu-server gongbu-server hubu-unified-mcp; do
+  command -v "$binary"
+  "$binary" --version
+done
+```
+
+### 2. Initialize the intended mode and configuration
+
+Choose `sandbox` for a complete non-billable first run, `local-stack` for
+operator-approved live provider targets, or `hubu-only` when you only need the
+governance service. This walkthrough uses sandbox mode; see the
+[local stack guide](docs/local-stack.md#choose-an-outcome-and-initialize) for
+the other modes and their configuration choices.
 
 ```sh
 profile=/absolute/path/to/profile
 hubu stack init --mode sandbox --install-temporal --profile "$profile"
 hubu stack select --profile "$profile"
-# Sandbox needs no provider edits or credentials. Local-stack mode accepts
-# operator-approved live targets and opaque provider references.
-hubu stack start
-hubu stack status
-hubu protocol agent-registration
-hubu register human --username alice-example --display-name "Alice Example"
-hubu register agent --name local-agent --version local-dev
+hubu stack doctor
 ```
 
-After `stack start`, ordinary server-bound CLI commands use the selected
-profile's authenticated client handoff, including its Hubu endpoint and
-authentication, approval, and reconciliation credential files. Stale
-`HUBU_URL` and token environment variables therefore cannot split a command
-across different profiles. An explicit global `--url` opts into manual mode
-and keeps the legacy environment/file credential behavior.
+After `stack select`, later stack and server-bound CLI commands use that
+profile's configuration and, once the stack is running, its authenticated
+client handoff. Sandbox needs no provider edits or credentials. Before starting
+a `local-stack` profile, follow its generated comments to configure approved
+targets and opaque credential references.
 
-Registration happens against the running Hubu service and does not require a
-new stack render, activation, stop, or restart. Replace `agt_...` below with the
-printed agent ID, then apply a starter policy and create the agent's active USD
-budget:
+### 3. Start the stack and verify its status
 
 ```sh
-hubu policy new-template --path "$profile/starter-policy.yaml"
-hubu policy validate --path "$profile/starter-policy.yaml"
-hubu policy apply --path "$profile/starter-policy.yaml"
-hubu budget create --agent-id agt_... --amount 25
+hubu stack start
+hubu stack status
 ```
 
 `stack start` validates and renders the profile, starts the final managed Hubu
 process, lets it create its private capabilities at profile-owned locations,
 completes Gongbu's internal credential handoff, and then starts Gongbu and, when
-configured, its managed Temporal runtime. Connect the running stack to Codex:
+configured, its managed Temporal runtime.
+
+### 4. Connect Codex
+
+Configure Codex from the active profile. The optional trust flag exposes setup
+and administration tools so the Codex walkthrough below can register identities,
+apply policies, and create budgets; Codex still asks for native confirmation
+before those tool calls.
 
 ```sh
-hubu init codex --stack-profile "$profile"
+hubu init codex --stack-profile "$profile" --trust-client-approval
 ```
 
-After restarting Codex, agents can request governed provider-backed work
-through Hubu's unified MCP tools: Hubu authorizes and reserves budget, Gongbu
-executes the work and stores its artifacts, and Hubu records the outcome. Live
-provider execution is experimental and can incur charges; use explicit targets
-and conservative spend ceilings. External operators should begin with the
-[live provider operations guide](docs/operations/live-providers.md).
+If you prefer to perform registration, policy, and budget administration in a
+terminal, omit `--trust-client-approval` and follow the
+[CLI administration reference](docs/cli.md) for example commands and detailed
+guidance. Governed workloads remain available through MCP.
+
+Restart Codex after the command completes.
+
+### 5. Verify Hubu in a new Codex thread
+
+Open a new Codex thread in any repository—the generated Hubu MCP configuration
+is available across projects. Use `/mcp`, or ask Codex:
+
+```text
+List the Hubu MCP tools. Call hubu_unified_capabilities to summarize the
+readiness of Hubu, Gongbu, and the operation registry, then call
+gongbu_list_execution_targets to summarize the configured execution targets.
+Do not make any changes yet.
+```
+
+The catalog should include registration, policy, budget, target-discovery, and
+`hubu_submit_governed_execution` tools. The exact available set reflects the
+selected profile and backend readiness.
+
+### 6. Try a governed workload from Codex
+
+Let Codex handle the mechanics while you review the proposed state at each
+checkpoint. First establish the owner and agent records:
+
+```text
+Read hubu_registration_guidance. Register the human Alice Example with username
+alice-example, then register two agents named image-researcher and
+image-designer with version local-dev. Show me the returned user, agent, agent
+account (`account_id`), version, and session IDs before continuing.
+```
+
+The returned `agent_id` identifies the agent for policy and budget assignment;
+the returned `account_id` identifies its spending account for governed work.
+Let Codex carry those exact values into later calls instead of replacing an
+unexplained `agt_...` placeholder by hand.
+
+Next ask Codex to read and follow the repository's
+[Hubu Policy Authoring skill](skills/hubu-policy-authoring/SKILL.md). Naming its
+absolute path makes it available without a separate skill installation, even
+when the Codex thread is in another repository:
+
+```text
+Read and follow /absolute/path/to/hubu/skills/hubu-policy-authoring/SKILL.md to
+draft a user-default policy for these agents: allow image generation only
+through the execution targets configured in this profile, cap each request at
+$0.10, and require approval for anything unmatched. Validate the policy, show
+me the assignment scope and rules, and wait for my approval before applying it.
+After I approve it, create a $1 USD budget for each exact agent ID.
+```
+
+Before running a workload, ask Codex to explain the resulting governance state
+and then verify it independently from the terminal:
+
+```text
+Using read-only Hubu MCP tools, show the registered agents, applied user-default
+policy, and active budgets. Confirm the 10-cent per-request cap and each exact
+agent's $1 total budget, then give me the equivalent read-only CLI commands.
+Do not make any changes.
+```
+
+```sh
+hubu agent list
+hubu policy show
+hubu budget list
+```
+
+The MCP and CLI views should report the same public IDs, policy assignment, and
+limits. Resolve any mismatch before submitting work.
+
+Finally, discover rather than guess the configured provider target:
+
+```text
+Call gongbu_list_execution_targets and show me the available image-generation
+targets and prices. Choose the sandbox fixture, or the configured Gemini or
+FLUX target I name, then use hubu_submit_governed_execution to generate one
+image within the policy and budget. Use the selected agent account ID and the
+target's returned execution scope. Show any approval request before asking me
+to approve or deny it, and return the resulting artifact.
+```
+
+Sandbox uses a deterministic, non-billable provider fixture. Gemini and FLUX
+require a `local-stack` profile with an approved live target and credential
+reference; live execution is experimental and can incur charges. Begin with
+the [live provider operations guide](docs/operations/live-providers.md), use a
+conservative budget, and inspect the discovered price before submitting work.
 
 ## Documentation
 
