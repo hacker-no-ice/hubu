@@ -204,6 +204,11 @@ test("publishes one live-provider operations entry point", async () => {
   assert.match(html, /FLUX\.2 Pro/);
   assert.match(html, /Submission, retry, and reconciliation/);
   assert.doesNotMatch(html, /Vertex AI/);
+
+  const compatibility = await render("/docs/operations/live-provider-testing");
+  assert.equal(compatibility.status, 200);
+  const compatibilityHtml = await compatibility.text();
+  assert.match(compatibilityHtml, /href="\/docs\/operations\/live-providers"/);
 });
 
 test("keeps managed credential locations out of the first-run profile", async () => {
