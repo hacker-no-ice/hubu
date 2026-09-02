@@ -23,8 +23,8 @@ use crate::{
     },
     secrets::{MacOsKeychain, SecretProvider},
     temporal::{
-        start_worker_with_config, worker_is_polling, DurableExecutionRunner, ExecutionScheduler,
-        PersistedExecutionRunner, StartedTemporalWorker, TemporalWorkerConfig,
+        start_worker_with_config, temporal_is_reachable, worker_is_polling, DurableExecutionRunner,
+        ExecutionScheduler, PersistedExecutionRunner, StartedTemporalWorker, TemporalWorkerConfig,
     },
     workflow::{
         ActivityError as WorkflowActivityError, ArtifactActivities, HubuActivities,
@@ -41,6 +41,7 @@ use axum::{
 use futures::future::{select, Either};
 use serde_json::{json, Value};
 use std::{
+    convert::Infallible,
     future::Future,
     net::SocketAddr,
     sync::{
@@ -689,7 +690,7 @@ async fn monitor_temporal(
     failure_grace: Duration,
     dependency_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ready: Arc<AtomicBool>,
-) -> LifecycleReason {
+) -> Infallible {
     // The listener is exposed only after both Temporal polling and Hubu
     // compatibility have been positively proved during startup. Seed those
     // proofs explicitly so an inconclusive runtime cancellation can preserve,
@@ -700,8 +701,8 @@ async fn monitor_temporal(
     loop {
         tokio::time::sleep(probe_interval).await;
         let (temporal_sample, grpc_code) =
-            temporal_probe_sample(worker_is_polling(&client, &namespace, &task_queue).await);
-        let temporal_shutdown = record_dependency_sample(
+            temporal_probe_sample(temporal_is_reachable(&client, &namespace, &task_queue).await);
+        record_dependency_sample(
             &mut temporal_health,
             DependencyName::Temporal,
             temporal_sample,
@@ -710,9 +711,6 @@ async fn monitor_temporal(
             failure_grace,
         );
         update_dependency_readiness(&ready, &temporal_health, &hubu_health);
-        if temporal_shutdown {
-            return LifecycleReason::DependencyHealthShutdown;
-        }
 
         let dependencies_ready = match dependency_checker.as_ref() {
             Some(checker) => {
@@ -723,7 +721,7 @@ async fn monitor_temporal(
             }
             None => true,
         };
-        let hubu_shutdown = record_dependency_sample(
+        record_dependency_sample(
             &mut hubu_health,
             DependencyName::Hubu,
             if dependencies_ready {
@@ -736,9 +734,6 @@ async fn monitor_temporal(
             failure_grace,
         );
         update_dependency_readiness(&ready, &temporal_health, &hubu_health);
-        if hubu_shutdown {
-            return LifecycleReason::DependencyHealthShutdown;
-        }
     }
 }
 
@@ -755,11 +750,10 @@ enum DependencySample {
 }
 
 fn temporal_probe_sample(
-    result: Result<bool, temporalio_client::tonic::Status>,
+    result: Result<(), temporalio_client::tonic::Status>,
 ) -> (DependencySample, Option<String>) {
     match result {
-        Ok(true) => (DependencySample::Healthy, None),
-        Ok(false) => (DependencySample::Unhealthy, None),
+        Ok(()) => (DependencySample::Healthy, None),
         Err(error) => {
             let code = error.code();
             (
@@ -782,9 +776,6 @@ enum DependencyHealthObservation {
         failures: u32,
     },
     Recovered {
-        failures: u32,
-    },
-    Shutdown {
         failures: u32,
     },
 }
@@ -846,25 +837,18 @@ impl DependencyHealthTracker {
         let was_ready = self.is_ready();
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let failure_started_at = *self.failure_started_at.get_or_insert(now);
-        if now.duration_since(failure_started_at) >= failure_grace {
+        // Only a transport cancellation may retain a prior positive proof for
+        // the bounded grace period. It never promotes unproven or withdrawn
+        // readiness. Confirmed dependency failures withdraw readiness at once.
+        if (sample != DependencySample::Cancelled
+            || now.duration_since(failure_started_at) >= failure_grace)
+            && self.readiness == DependencyReadiness::Ready
+        {
             self.readiness = DependencyReadiness::Withdrawn;
-            DependencyHealthObservation::Shutdown {
-                failures: self.consecutive_failures,
-            }
-        } else {
-            // Only a transport cancellation may retain a prior positive proof.
-            // It never promotes unproven or already-withdrawn readiness. Every
-            // proven no-poller result and every other transport error withdraws
-            // readiness immediately while retaining the original grace clock.
-            if sample != DependencySample::Cancelled && self.readiness == DependencyReadiness::Ready
-            {
-                self.readiness = DependencyReadiness::Withdrawn;
-            }
-            DependencyHealthObservation::Degraded {
-                report_transition: self.consecutive_failures == 1
-                    || (was_ready && !self.is_ready()),
-                failures: self.consecutive_failures,
-            }
+        }
+        DependencyHealthObservation::Degraded {
+            report_transition: self.consecutive_failures == 1 || (was_ready && !self.is_ready()),
+            failures: self.consecutive_failures,
         }
     }
 }
@@ -887,14 +871,14 @@ fn record_dependency_sample(
     grpc_code: Option<&str>,
     now: Instant,
     failure_grace: Duration,
-) -> bool {
+) {
     let observation = tracker.observe(sample, now, failure_grace);
     match observation {
         DependencyHealthObservation::Healthy
         | DependencyHealthObservation::Degraded {
             report_transition: false,
             ..
-        } => false,
+        } => {}
         DependencyHealthObservation::Degraded {
             report_transition: true,
             failures,
@@ -905,7 +889,6 @@ fn record_dependency_sample(
                 failures,
                 grpc_code,
             );
-            false
         }
         DependencyHealthObservation::Recovered { failures } => {
             crate::lifecycle::log_dependency_probe(
@@ -914,16 +897,6 @@ fn record_dependency_sample(
                 failures,
                 None,
             );
-            false
-        }
-        DependencyHealthObservation::Shutdown { failures } => {
-            crate::lifecycle::log_dependency_probe(
-                dependency,
-                probe_outcome(sample),
-                failures,
-                grpc_code,
-            );
-            true
         }
     }
 }
@@ -946,12 +919,12 @@ async fn wait_for_shutdown<F, H>(
 ) -> LifecycleReason
 where
     F: Future<Output = ()>,
-    H: Future<Output = LifecycleReason>,
+    H: Future<Output = Infallible>,
 {
     let worker_or_health = async {
         match select(Box::pin(completion), Box::pin(health)).await {
             Either::Left(_) => LifecycleReason::WorkerUnavailable,
-            Either::Right((reason, _)) => reason,
+            Either::Right((never, _)) => match never {},
         }
     };
     let reason = match select(Box::pin(shutdown), Box::pin(worker_or_health)).await {
@@ -1111,21 +1084,29 @@ mod tests {
     }
 
     #[test]
-    fn dependency_loss_removes_readiness_and_reports_shutdown_reason() {
+    fn dependency_loss_does_not_complete_the_process_supervisor() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let (_completion_tx, completion_rx) = futures::channel::oneshot::channel();
-        let ready = Arc::new(AtomicBool::new(true));
-        let reason = runtime.block_on(wait_for_shutdown(
-            futures::future::pending(),
-            completion_rx,
-            futures::future::ready(LifecycleReason::DependencyHealthShutdown),
-            ready.clone(),
-        ));
-        assert_eq!(reason, LifecycleReason::DependencyHealthShutdown);
-        assert!(!ready.load(Ordering::SeqCst));
+        runtime.block_on(async {
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            let (_completion_tx, completion_rx) = futures::channel::oneshot::channel();
+            let ready = Arc::new(AtomicBool::new(true));
+            let mut supervisor = Box::pin(wait_for_shutdown(
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+                completion_rx,
+                futures::future::pending::<Infallible>(),
+                ready.clone(),
+            ));
+
+            ready.store(false, Ordering::SeqCst);
+            assert!(futures::poll!(supervisor.as_mut()).is_pending());
+            shutdown_tx.send(()).unwrap();
+            assert_eq!(supervisor.await, LifecycleReason::OperatorSignal);
+        });
     }
 
     #[test]
@@ -1168,6 +1149,10 @@ mod tests {
 
     #[test]
     fn temporal_transport_errors_distinguish_cancelled_from_unavailable() {
+        assert_eq!(
+            temporal_probe_sample(Ok(())),
+            (DependencySample::Healthy, None)
+        );
         assert_eq!(
             temporal_probe_sample(Err(temporalio_client::tonic::Status::cancelled(
                 "connection rotation",
@@ -1223,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn sustained_cancelled_sequence_shuts_down_at_grace_boundary() {
+    fn sustained_cancelled_sequence_withdraws_readiness_at_grace_boundary() {
         let mut tracker = DependencyHealthTracker::from_positive_proof();
         let started = Instant::now();
         let grace = Duration::from_secs(30);
@@ -1247,13 +1232,27 @@ mod tests {
                 started + Duration::from_secs(30),
                 grace,
             ),
-            DependencyHealthObservation::Shutdown { failures: 3 }
+            DependencyHealthObservation::Degraded {
+                report_transition: true,
+                failures: 3,
+            }
         );
         assert!(!tracker.is_ready());
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Cancelled,
+                started + Duration::from_secs(31),
+                grace,
+            ),
+            DependencyHealthObservation::Degraded {
+                report_transition: false,
+                failures: 4,
+            }
+        );
     }
 
     #[test]
-    fn no_poller_and_non_cancelled_error_withdraw_readiness_immediately() {
+    fn confirmed_dependency_failure_withdraws_readiness_immediately() {
         let started = Instant::now();
         let grace = Duration::from_secs(30);
         for sample in [DependencySample::Unhealthy, DependencySample::Indeterminate] {
@@ -1268,6 +1267,39 @@ mod tests {
             assert!(!tracker.is_ready());
             assert_eq!(tracker.failure_started_at, Some(started));
         }
+    }
+
+    #[test]
+    fn sustained_temporal_failure_stays_withdrawn_until_recovery() {
+        let mut tracker = DependencyHealthTracker::from_positive_proof();
+        let started = Instant::now();
+        let grace = Duration::from_secs(30);
+        for (offset, failures) in [(0, 1), (30, 2), (60, 3)] {
+            assert_eq!(
+                tracker.observe(
+                    temporal_probe_sample(Err(temporalio_client::tonic::Status::unavailable(
+                        "dependency unavailable",
+                    )))
+                    .0,
+                    started + Duration::from_secs(offset),
+                    grace,
+                ),
+                DependencyHealthObservation::Degraded {
+                    report_transition: failures == 1,
+                    failures,
+                }
+            );
+            assert!(!tracker.is_ready());
+        }
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Healthy,
+                started + Duration::from_secs(61),
+                grace,
+            ),
+            DependencyHealthObservation::Recovered { failures: 3 }
+        );
+        assert!(tracker.is_ready());
     }
 
     #[test]
@@ -1308,7 +1340,10 @@ mod tests {
                 started + Duration::from_secs(30),
                 grace,
             ),
-            DependencyHealthObservation::Shutdown { failures: 4 }
+            DependencyHealthObservation::Degraded {
+                report_transition: false,
+                failures: 4,
+            }
         );
         assert!(!tracker.is_ready());
     }

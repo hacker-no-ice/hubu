@@ -14,7 +14,7 @@ use gongbu_api::{
     },
     redaction::Redactor,
     secrets::ProviderSecret,
-    temporal::ExecutionScheduler,
+    temporal::{ExecutionScheduler, ScheduleError},
     workflow::{
         ActivityError, ExecutionWorkflow, HubuActivities, OperatorReconciliationRequest,
         ProviderActivities, ProviderArtifact, ProviderSuccess,
@@ -697,11 +697,11 @@ impl ProviderAdapter for AdmissionAdapter {
 struct AdmissionScheduler;
 
 impl ExecutionScheduler for AdmissionScheduler {
-    fn schedule(&self, _: &str) -> Result<(), String> {
+    fn schedule(&self, _: &str) -> Result<(), ScheduleError> {
         Ok(())
     }
 
-    fn reconcile(&self, _: &str, _: OperatorReconciliationRequest) -> Result<(), String> {
+    fn reconcile(&self, _: &str, _: OperatorReconciliationRequest) -> Result<(), ScheduleError> {
         Ok(())
     }
 }

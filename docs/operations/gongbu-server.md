@@ -135,7 +135,12 @@ curl -fsS http://127.0.0.1:8788/version
 
 These GET endpoints expose safe status and compatibility metadata only. All
 execution and artifact endpoints require the caller capability. A 503 from
-`/readyz` means new admission is closed.
+`/readyz` means new admission is closed. Runtime Temporal or Hubu degradation
+withdraws `/readyz` without terminating Gongbu or its managed Temporal child;
+`/livez` remains successful while the HTTP process is functioning. Gongbu keeps
+probing withdrawn dependencies and restores readiness automatically after they
+recover. Existing execution and artifact reads remain available while readiness
+is withdrawn.
 
 An authenticated `GET /v1/provider-catalog` returns the sanitized schema-v1
 provider contract projection. For the shipped FLUX provider contract it includes the
@@ -187,6 +192,13 @@ Settlement and release use the persisted execution agent. On restart, Gongbu
 reschedules nonterminal executions at their stable workflow IDs and never
 creates a second provider or financial side effect merely to recover
 scheduling.
+
+New `POST /v2/executions` admission returns retryable `503 not_ready` while
+readiness is withdrawn. A Temporal scheduling failure that races with admission
+uses the same response after Gongbu has durably created the pending execution.
+Retry the identical request with the same spend-auth token: Gongbu reuses that
+pending execution locally and schedules its stable workflow ID instead of
+resolving the Hubu authorization or creating another execution.
 
 For asynchronous FLUX work, that stable workflow separates one
 patch-protected `submit_provider` activity from
