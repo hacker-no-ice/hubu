@@ -37,10 +37,10 @@ Future release template
 - Added three outcome-oriented `hubu stack init` modes: `sandbox` for the full
   stack with a non-billable provider fixture, `local-stack` for approved real
   provider targets, and `hubu-only` for governance without Gongbu or Temporal.
-- Added runtime provider selection and the supported
-  `hubu.flux-2-pro.text-to-image/v1` profile, with frozen dimension-qualified
-  prices, zero generation retries, no fallback, bounded artifacts, and durable
-  asynchronous recovery.
+- Added one immutable provider-contract framework for two Gemini Developer API
+  image models and FLUX.2 Pro. Agents select an opaque `target_id`; contracts
+  freeze capabilities, prices, retry and fallback policy, and transport and
+  recovery behavior.
 - Added a reusable Hubu policy-authoring skill and versioned language reference.
 
 ### Breaking or operational changes
@@ -48,16 +48,18 @@ Future release template
 - Unified MCP routing advances to revision 4. Budget replacement surfaces are
   removed; use approval-gated `hubu_update_budget` and read-only
   `hubu_budget_history`.
-- The Vertex AI Gemini adapter is removed. Gemini Developer API remains
-  available through its separate developer adapter and raw target
-  configuration. FLUX.2 Pro is the only packaged supported provider profile;
-  targets require explicit active revisions and pricing schema version 2.
-- Policy denials are terminal, corrected work uses a new logical operation, and
-  approval-required work resumes only by public operation handle.
+- Supported provider profiles are renamed to provider contracts. Configuration
+  must replace `[[supported_profiles]]` with `[[contract_bindings]]`; there are
+  no compatibility aliases.
+- The Vertex AI Gemini adapter is removed. Packaged contracts now cover Gemini
+  3.1 Flash Lite Image, Gemini 3.1 Flash Image, and FLUX.2 Pro. Public execution
+  uses discovered `target_id` values, and `POST /v1/executions` is retired.
+- In unified MCP, policy denials are terminal, corrected work uses a new logical
+  operation, and approval-required work resumes only by public operation handle.
 - Release publication is manual-only. Exact-tag source installation is the
   primary macOS path, but source-built binaries are not Apple-signed or
   notarized.
-- Live providers remain explicitly opt-in and billable. The FLUX profile stays
+- Live providers remain explicitly opt-in and billable. The FLUX contract stays
   `live_qualified = false` until guarded qualification is complete; CI, demos,
   and release validation remain provider-free.
 
