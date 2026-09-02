@@ -357,7 +357,7 @@ jobs:
           if [[ "${RELEASE_CHANNEL}" == "candidate" ]]; then
             channel_note="Versioned release candidate for validation before stable promotion. For initial technical users, the recommended macOS path is to clone this exact tag, verify the full source commit above, and run scripts/install-from-source.sh. Locally compiled binaries are not Developer ID-signed, notarized, or Apple-verified. Archives are secondary automation evidence. ${risk_note}"
           fi
-          notes=$(printf 'Hubu product version: `%s`\n\nSource commit: `%s`\n\nSupported agent surface: `hubu-unified-mcp`\n\nBinaries: `hubu`, `hubu-server`, `hubu-unified-mcp`, `gongbu-server`\n\nUnified MCP cutover: HUB-97; retired MCP source removal: HUB-98.\n\nExecutor contract: `hubu-spend-executor-v4.3`\n\n%s' "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${channel_note}")
+          notes=$(printf 'Hubu product version: `%s`\n\nSource commit: `%s`\n\nSupported agent surface: `hubu-unified-mcp`\n\nBinaries: `hubu`, `hubu-server`, `hubu-unified-mcp`, `gongbu-server`\n\nExecutor contract: `hubu-spend-executor-v4.3`\n\n%s' "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${channel_note}")
           gh release create "${RELEASE_TAG}" \
             dist/*.tar.gz dist/SHA256SUMS \
             --target "${SOURCE_COMMIT}" \
