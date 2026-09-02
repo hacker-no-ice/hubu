@@ -81,11 +81,11 @@ const components = {
   executor: {
     kind: "GONGBU EXECUTOR",
     title: "Execute only approved work",
-    copy: "Gemini Developer API and FLUX are frozen in one provider-contract framework and selected publicly only by opaque target IDs. They share Hubu governance, Gongbu credential isolation, exact pricing, claims, settlement, replay, redaction, and qualification gates while retaining synchronous Gemini and asynchronous submit/poll FLUX transports.",
+    copy: "Gemini Lite (1K), Gemini non-Lite (1K/2K/4K), and FLUX are frozen in one provider-contract framework and selected publicly only by opaque target IDs. They share Hubu governance, exact pricing, claims, settlement, replay, redaction, and qualification gates while retaining synchronous Gemini and asynchronous submit/poll FLUX transports.",
     diagram: [
       ["Unified MCP / caller", "opaque target_id only"],
       ["Scoped key record", "one exact trusted call"],
-      ["Provider contract validation", "Gemini + FLUX exact subset"],
+      ["Provider contract validation", "Gemini Lite/non-Lite + FLUX subset"],
       ["Hubu resolution", "exact-match authority"],
       ["Execution record", "persist before scheduling"],
       ["Temporal workflow", "claim authorization"],

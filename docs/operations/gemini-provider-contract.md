@@ -1,30 +1,35 @@
 # Gemini Developer API provider contract
 
-Hubu ships one deliberately narrow Gemini Developer API contract beside the
-FLUX contract. Operators select the contract and provide only an opaque
-Keychain credential reference; the renderer supplies the immutable target,
-transport, capability, policy, and price.
+Hubu ships two deliberately narrow Gemini Developer API contracts beside the
+FLUX contract. Operators select either or both contracts and provide only an
+opaque Keychain credential reference; the renderer supplies each immutable
+target, transport, capability, policy, and price.
 
 | Frozen field | Value |
 | --- | --- |
-| Contract | `hubu.gemini-3.1-flash-lite-image.text-to-image/v1` |
-| Target | `google` / `gemini_developer_image` / `gemini-3.1-flash-lite-image` |
+| Contracts | `hubu.gemini-3.1-flash-lite-image.text-to-image/v1`; `hubu.gemini-3.1-flash-image.text-to-image/v1` |
+| Targets | `google` / `gemini_developer_image` / `gemini-3.1-flash-lite-image`; `google` / `gemini_developer_image` / `gemini-3.1-flash-image` |
 | API | `https://generativelanguage.googleapis.com/` / `v1beta` |
-| Capability | one 1024×1024 (`1k`) PNG or JPEG image |
+| Lite capability | one 1024×1024 (`1k`) PNG or JPEG image |
+| Non-Lite capability | one 1024×1024 (`1k`), 2048×2048 (`2k`), or 4096×4096 (`4k`) PNG or JPEG image |
 | Price review | 2026-09-01 |
-| Standard image-output price | USD $0.0336, represented exactly as `336/100` cents per image |
+| Lite standard price | USD $0.0336 (`336/100` cents) at 1K |
+| Non-Lite standard prices | USD $0.067 (`67/10` cents) at 1K; $0.101 (`101/10` cents) at 2K; $0.151 (`151/10` cents) at 4K |
 | Retry and fallback | zero generation retries; no fallback |
 | Transport | synchronous inline response; no polling |
 
-The stable model, 1K-only output capability, and standard output price come
-from Google's [model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite-image)
+The stable models, resolution limits, and standard output prices come from
+Google's [Lite model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite-image),
+[non-Lite model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-image),
+[image generation guide](https://ai.google.dev/gemini-api/docs/image-generation),
 and [Developer API pricing](https://ai.google.dev/gemini-api/docs/pricing).
 Changing any frozen fact requires a new immutable contract and pricing version.
 
 ## Configure
 
-Use a distinct credential alias and an explicit composite catalog version when
-Gemini and FLUX are enabled together:
+Use an explicit composite catalog version when multiple contracts are enabled.
+Both Gemini contracts may use the same Google credential alias; FLUX must use
+an independently isolated credential:
 
 ```toml
 schema_version = 1
@@ -38,11 +43,15 @@ contract = "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
 credential = "google_gemini"
 
 [[contract_bindings]]
+contract = "hubu.gemini-3.1-flash-image.text-to-image/v1"
+credential = "google_gemini"
+
+[[contract_bindings]]
 contract = "hubu.flux-2-pro.text-to-image/v1"
 credential = "bfl_flux"
 ```
 
-The two aliases must resolve to independent opaque credential coordinates.
+Credential coordinates must remain independent across providers.
 Readiness checks report configuration presence, credential-reference presence,
 production validation, and live qualification independently and do not call a
 provider.
@@ -51,7 +60,8 @@ provider.
 
 Discover the target with `GET /v2/execution-targets` or
 `gongbu_list_execution_targets`, then submit only its opaque `target_id` plus
-the normalized 1K request. The default `ProviderAdapter` lifecycle performs one
+a normalized request. Use the Lite target only for `1k`; use the non-Lite target
+for `1k`, `2k`, or `4k`. The default `ProviderAdapter` lifecycle performs one
 synchronous submission. A successful response completes immediately; an
 ambiguous timeout has no pollable checkpoint and requires reconciliation, not
 automatic resubmission.

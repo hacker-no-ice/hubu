@@ -559,6 +559,7 @@ mod tests {
                 "gemini_developer_image",
                 "gemini-3.1-flash-lite-image",
             ),
+            ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
             ("ideogram", "ideogram_image", "ideogram-v3"),
             ("flux", "flux2_api", "flux-2-pro"),
         ] {
@@ -566,7 +567,12 @@ mod tests {
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 3);
+        assert_eq!(execution_targets.len(), 4);
+        let gemini_full = execution_targets
+            .iter()
+            .find(|target| target.model == "gemini-3.1-flash-image")
+            .unwrap();
+        assert_eq!(gemini_full.image_sizes, ["1k", "2k", "4k"]);
         let flux = execution_targets
             .iter()
             .find(|target| target.provider == "flux")

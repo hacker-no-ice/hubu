@@ -188,11 +188,9 @@ to approve or deny it, and return the resulting artifact.
 ```
 
 Sandbox uses a deterministic, non-billable provider fixture. Gemini and FLUX
-share one immutable provider-contract framework and are selected publicly only
-by an opaque discovered `target_id`. Gemini completes synchronously; FLUX
-checkpoints one asynchronous submission and resumes it by polling without
-resubmission. Live execution is experimental and can incur charges. Begin with
-the [live provider operations guide](docs/operations/live-providers.md), use a
+require a `local-stack` profile with an approved live target and credential
+reference; live execution is experimental and can incur charges. Begin with the
+[live provider operations guide](docs/operations/live-providers.md), use a
 conservative budget, and inspect the discovered price before submitting work.
 
 ## Documentation

@@ -182,9 +182,11 @@ facts without contacting BFL. `live_qualified` remains false with
 guide](../../../operations/live-providers.md), then follow the
 [FLUX.2 provider contract](../../../operations/flux-provider-contract.md).
 
-## Representative generic live-provider configuration
+## Representative provider-contract configuration
 
-This example is deliberately **not provider-ready**: `provider.example`, the model, version labels, Keychain coordinates, and illustrative one-cent price must be replaced with authoritative values. It demonstrates the complete schema without claiming current provider configuration or pricing.
+The shipped contracts supply authoritative targets and frozen prices. This
+example is deliberately **not credential-ready**: replace the Keychain
+coordinates and composite version label before activation.
 
 Live execution can incur charges after a verified configuration is rendered, activated, started, and used.
 
@@ -198,15 +200,19 @@ stack generation or Gongbu configuration.
 
 ### `credentials.toml`
 
-Add only the opaque provider reference needed by the live target:
+Add only opaque references; both Gemini targets can reuse the Google alias:
 
 ```toml
 schema_version = 1
 
-# Replace with the Keychain coordinates created for the selected provider.
-[opaque.provider_image]
-service = "gongbu.provider.REPLACE"
-account = "image-provider-credential"
+# Replace these with the operator-created Keychain coordinates.
+[opaque.google_gemini_developer]
+service = "operator.google.REPLACE"
+account = "gemini-image"
+
+[opaque.bfl_flux2_pro]
+service = "operator.bfl.REPLACE"
+account = "flux-image"
 ```
 
 ### `providers.toml`
@@ -215,7 +221,7 @@ account = "image-provider-credential"
 schema_version = 1
 mode = "live"
 
-# Required because this example combines two immutable contracts.
+# Required because this example combines multiple immutable contracts.
 catalog_version = "gemini-flux-composite-REPLACE_WITH_DATE_AND_REVISION"
 
 # Positive USD cents approved as this profile's explicit upper boundary.
@@ -224,6 +230,10 @@ live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
 
 [[contract_bindings]]
 contract = "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
+credential = "google_gemini_developer"
+
+[[contract_bindings]]
+contract = "hubu.gemini-3.1-flash-image.text-to-image/v1"
 credential = "google_gemini_developer"
 
 [[contract_bindings]]

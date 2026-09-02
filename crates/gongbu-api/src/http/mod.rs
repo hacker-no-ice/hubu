@@ -1503,6 +1503,70 @@ mod tests {
         catalog
     }
 
+    fn supported_shipped_catalog() -> ValidatedProviderCatalog {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let contracts = document["contracts"].as_array().unwrap();
+        let bindings = contracts
+            .iter()
+            .map(|contract| {
+                let policies = &contract["policies"];
+                json!({
+                    "contract":contract["contract"],
+                    "pricing_version":contract["pricing_version"],
+                    "poll_policy":policies["poll"],
+                    "artifact_delivery_policy":policies["artifact_delivery"],
+                    "recovery_policy":policies["recovery"],
+                    "generation_retries":policies["generation_retries"],
+                    "fallback":policies["fallback"]
+                })
+            })
+            .collect::<Vec<_>>();
+        let provider_configs = contracts
+            .iter()
+            .map(|contract| {
+                let mut target = contract["target"].clone();
+                let google = target["provider"] == "google";
+                target["secret_service"] = json!(if google {
+                    "operator.google"
+                } else {
+                    "operator.bfl"
+                });
+                target["secret_account"] = json!(if google { "gemini" } else { "flux" });
+                target
+            })
+            .collect::<Vec<_>>();
+        let rules = contracts
+            .iter()
+            .flat_map(|contract| contract["pricing_rules"].as_array().unwrap().clone())
+            .collect::<Vec<_>>();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version":3,
+            "contract_bindings":bindings,
+            "provider_configs":provider_configs
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version":2,
+                "catalog_version":"operator-shipped-composite-2026-09-01-v1",
+                "rules":rules
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut catalog = ValidatedProviderCatalog::bind(
+            targets,
+            pricing,
+            &ProviderRegistry::production(&ArtifactLimits::default()),
+        )
+        .unwrap();
+        catalog.mark_credential_references_present();
+        catalog
+    }
+
     fn flux_request(operation_key: &str, preset: Option<&str>, options: Option<Value>) -> Value {
         let mut input = json!({"prompt":"cat","image_count":1});
         if let Some(preset) = preset {
@@ -1995,7 +2059,7 @@ mod tests {
         let api = Api::new_with_authorization_resolver(
             fixture.repository.clone(),
             fixture.artifacts.clone(),
-            supported_flux_catalog(),
+            supported_shipped_catalog(),
             fixture.scheduler.clone(),
             i64::MAX,
             fixture.resolver.clone(),
@@ -2009,25 +2073,30 @@ mod tests {
         assert_eq!(response.status, 200);
         let value: Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema_version"], 1);
+        let contracts = value["contracts"].as_array().unwrap();
+        let ids = contracts
+            .iter()
+            .map(|contract| contract["contract"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            value["contracts"][0]["target"],
-            json!({
-                "workload_type":"image_generation","provider":"flux",
-                "adapter":"flux2_api","model":"flux-2-pro"
-            })
+            ids,
+            std::collections::BTreeSet::from([
+                "hubu.flux-2-pro.text-to-image/v1",
+                "hubu.gemini-3.1-flash-image.text-to-image/v1",
+                "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
+            ])
         );
-        assert_eq!(
-            value["contracts"][0]["capability"]["presets"][1]["width"],
-            1920
-        );
-        assert_eq!(
-            value["contracts"][0]["readiness"],
-            json!({
+        let gemini_full = contracts
+            .iter()
+            .find(|contract| contract["target"]["model"] == "gemini-3.1-flash-image")
+            .unwrap();
+        assert_eq!(gemini_full["capability"]["presets"][2]["width"], 4096);
+        assert!(contracts.iter().all(|contract| contract["readiness"]
+            == json!({
                 "configured":true,"credential_reference_present":true,
                 "production_validated":true,"live_qualified":false,
                 "live_qualification":"not_performed"
-            })
-        );
+            })));
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(!serialized.contains("secret_service"));
         assert!(!serialized.contains("secret_account"));

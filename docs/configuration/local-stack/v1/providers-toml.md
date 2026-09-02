@@ -117,15 +117,20 @@ credential = "bfl_flux2_pro"
 [[contract_bindings]]
 contract = "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
 credential = "google_gemini_developer"
+
+[[contract_bindings]]
+contract = "hubu.gemini-3.1-flash-image.text-to-image/v1"
+credential = "google_gemini_developer"
 ```
 
 `contract` must match a shipped contract exactly. `credential` names an opaque
 entry from `credentials.toml`; it never contains a key. Both fields are
 required and unknown fields are rejected.
 
-The Gemini contract pins the Developer API synchronous transport, exact
-`gemini-3.1-flash-lite-image` model, 1k output, zero retries, and its reviewed
-image-output pricing. See the [Gemini Developer API provider
+The Gemini contracts pin the Developer API synchronous transport and zero
+retries. The Lite target supports only 1k at `336/100` cents; the non-Lite
+target supports 1k, 2k, and 4k at `67/10`, `101/10`, and `151/10` cents.
+See the [Gemini Developer API provider
 contract](../../../operations/gemini-provider-contract.md).
 
 The FLUX contract pins provider `flux`, adapter `flux2_api`, non-preview model
@@ -140,9 +145,10 @@ guide](../../../operations/live-providers.md), then review the
 [FLUX.2 provider contract](../../../operations/flux-provider-contract.md) before
 activation.
 
-Raw targets cannot duplicate a contract-bound target, and raw pricing cannot
-override its provider/model rules. Multiple contract bindings must use
-distinct credential aliases.
+Raw targets cannot duplicate or parallel a contract-bound provider/adapter
+route, and raw pricing cannot override its provider/model rules. Contracts for
+the same provider may share one credential alias; different providers must use
+distinct credential aliases and coordinates.
 
 ## `[[targets]]`
 

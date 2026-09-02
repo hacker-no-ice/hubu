@@ -458,7 +458,7 @@ impl ProviderCatalogResponse {
     pub(super) fn validate(&self) -> Result<(), ToolError> {
         let mut ids = std::collections::BTreeSet::new();
         if self.schema_version != 1
-            || self.contracts.len() > 2
+            || self.contracts.len() > 3
             || self
                 .contracts
                 .iter()
@@ -641,6 +641,9 @@ struct ProviderCatalogReadiness {
 fn validate_provider_contract(contract: &ProviderCatalogContract) -> Result<(), ToolError> {
     match contract.contract.as_str() {
         "hubu.gemini-3.1-flash-lite-image.text-to-image/v1" => {
+            validate_gemini_lite_provider_contract(contract)
+        }
+        "hubu.gemini-3.1-flash-image.text-to-image/v1" => {
             validate_gemini_provider_contract(contract)
         }
         "hubu.flux-2-pro.text-to-image/v1" => validate_flux_provider_contract(contract),
@@ -648,7 +651,9 @@ fn validate_provider_contract(contract: &ProviderCatalogContract) -> Result<(), 
     }
 }
 
-fn validate_gemini_provider_contract(contract: &ProviderCatalogContract) -> Result<(), ToolError> {
+fn validate_gemini_lite_provider_contract(
+    contract: &ProviderCatalogContract,
+) -> Result<(), ToolError> {
     let exact_target = contract.target.workload_type == "image_generation"
         && contract.target.provider == "google"
         && contract.target.adapter == "gemini_developer_image"
@@ -663,6 +668,41 @@ fn validate_gemini_provider_contract(contract: &ProviderCatalogContract) -> Resu
         && contract.policies.artifact_delivery == "google-inline-image-v1"
         && contract.policies.recovery == "hubu-durable-synchronous-replay-v1";
     if contract.pricing_version != "google-gemini-3.1-flash-lite-image-usd-2026-09-01-v1"
+        || contract.pricing_reviewed_on != "2026-09-01"
+        || !exact_target
+        || !exact_capability
+        || !exact_policies
+        || !exact_provider_readiness(contract)
+    {
+        return Err(ToolError::invalid_response());
+    }
+    Ok(())
+}
+
+fn validate_gemini_provider_contract(contract: &ProviderCatalogContract) -> Result<(), ToolError> {
+    let exact_target = contract.target.workload_type == "image_generation"
+        && contract.target.provider == "google"
+        && contract.target.adapter == "gemini_developer_image"
+        && contract.target.model == "gemini-3.1-flash-image";
+    let expected = [
+        ("1k", 1024, 1024, 67, 10),
+        ("2k", 2048, 2048, 101, 10),
+        ("4k", 4096, 4096, 151, 10),
+    ];
+    let exact_capability = contract.capability.image_count == 1
+        && contract.capability.output_formats == ["png", "jpeg"]
+        && contract.capability.presets.len() == expected.len()
+        && contract.capability.presets.iter().zip(expected).all(
+            |(preset, (name, width, height, numerator, denominator))| {
+                exact_provider_preset(preset, name, width, height, numerator, denominator)
+            },
+        );
+    let exact_policies = contract.policies.generation_retries == 0
+        && !contract.policies.fallback
+        && contract.policies.poll == "synchronous-response-v1"
+        && contract.policies.artifact_delivery == "google-inline-image-v1"
+        && contract.policies.recovery == "hubu-durable-synchronous-replay-v1";
+    if contract.pricing_version != "google-gemini-3.1-flash-image-usd-2026-09-01-v1"
         || contract.pricing_reviewed_on != "2026-09-01"
         || !exact_target
         || !exact_capability

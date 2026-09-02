@@ -1,8 +1,8 @@
 # Live provider operations
 
 This is the external operator entry point for billable Gongbu provider work.
-Hubu currently ships two live provider contracts: Gemini Developer API and
-FLUX.2. Both use the same governance,
+Hubu currently ships three live provider contracts: Gemini Developer API Lite,
+Gemini Developer API non-Lite, and FLUX.2. All use the same governance,
 credential, pricing, spend, retry, reconciliation, artifact, and qualification
 boundaries described here. Provider-specific sections contain only the
 authentication, transport, sizing, artifact, and recovery differences.
@@ -13,7 +13,7 @@ and must not contact a provider.
 
 | Integration | Gongbu identity | Provider-specific behavior |
 | --- | --- | --- |
-| Gemini Developer API | `google` / `gemini_developer_image` through `hubu.gemini-3.1-flash-lite-image.text-to-image/v1` | AI Studio API key, synchronous inline response |
+| Gemini Developer API | `google` / `gemini_developer_image` through the Lite and non-Lite Gemini 3.1 Flash Image contracts | AI Studio API key, synchronous inline response; Lite is 1K-only, non-Lite supports 1K/2K/4K |
 | FLUX.2 Pro | `flux` / `flux2_api` through `hubu.flux-2-pro.text-to-image/v1` | Managed target and prices, asynchronous submit and polling, BFL artifact delivery and durable resume |
 
 Other adapter IDs can remain available for operator-managed configurations,
@@ -120,7 +120,8 @@ operator-owned output path. Never run live provider tests in CI.
 ## Gemini Developer API
 
 The [Gemini provider contract](gemini-provider-contract.md) freezes the stable
-1K model, Developer API transport, exact image-output price, zero retries, no
+Lite and non-Lite models, their resolution-specific prices, Developer API
+transport, zero retries, no
 fallback, and synchronous recovery policy. The adapter reads an AI Studio API key from
 Keychain and sends it only in the `x-goog-api-key` header to the configured
 Google API endpoint. The request returns synchronously; the focused test writes
@@ -133,6 +134,7 @@ run the single ignored test with absolute paths:
 ```sh
 GONGBU_PROVIDER_CONFIG=/absolute/path/provider-targets.json \
 GONGBU_PRICING_CATALOG=/absolute/path/pricing.json \
+GONGBU_LIVE_GEMINI_DEVELOPER_MODEL=gemini-3.1-flash-image \
 GONGBU_LIVE_GEMINI_DEVELOPER_MAX_MINOR=OPERATOR_CEILING \
 GONGBU_LIVE_GEMINI_DEVELOPER_IMAGE_SIZE=4k \
 GONGBU_LIVE_GEMINI_DEVELOPER_CONFIRM=I_ACCEPT_GOOGLE_CHARGES \
@@ -143,7 +145,8 @@ cargo test -p gongbu-api \
   -- --ignored --exact
 ```
 
-Normalized image sizes are `1k`, `2k`, and `4k`. The adapter verifies the
+The Lite model accepts only `1k`; the non-Lite model accepts `1k`, `2k`, and
+`4k`. The adapter verifies the
 selected size against the frozen schema-v2 pricing selector before calling the
 provider and never derives the authorized price from returned artifact
 dimensions. A synchronous timeout or ambiguous response has no pollable Gongbu

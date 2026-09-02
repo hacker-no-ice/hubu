@@ -11,7 +11,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "a8693c06ea5c593ab0fd6044b066aab87224bc4afd98c22e8d48a8ea8bb2999a";
+    "7fc57f137d4d55380820b3548af7f0fb289320079cd56275a40542d3c8db68ad";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -167,18 +167,34 @@ fn validate_and_project_with_mode(
         .map(|binding| binding.contract.as_str())
         .collect::<BTreeSet<_>>();
 
-    // Shipped provider identities are contract-only. A raw Gemini or FLUX row
-    // must never become a parallel route around the frozen target and price.
+    // Every target using a shipped provider/adapter pair must match one
+    // selected frozen contract. Multiple frozen models may share an adapter,
+    // but no raw target may become a parallel route around their contract.
+    if require_shipped_bindings
+        && targets.revisions().any(|target| {
+            let shipped_route = document.contracts.iter().any(|definition| {
+                target.provider == definition.target.provider
+                    && target.adapter == definition.target.adapter
+            });
+            let selected_exact_target = document.contracts.iter().any(|definition| {
+                selected.contains(definition.contract.as_str())
+                    && target.provider_config_version == definition.target.provider_config_version
+                    && target.workload_type == definition.target.workload_type
+                    && target.provider == definition.target.provider
+                    && target.adapter == definition.target.adapter
+                    && target.model == definition.target.model
+            });
+            shipped_route && !selected_exact_target
+        })
+    {
+        return Err(Error::UnknownContract);
+    }
     for definition in &document.contracts {
-        let known_target_present = targets.revisions().any(|target| {
-            target.provider == definition.target.provider
-                && target.adapter == definition.target.adapter
-        });
         let known_pricing_present = pricing.rules().iter().any(|rule| {
             rule.provider == definition.target.provider && rule.model == definition.target.model
         });
         if require_shipped_bindings
-            && (known_target_present || known_pricing_present)
+            && known_pricing_present
             && !selected.contains(definition.contract.as_str())
         {
             return Err(Error::UnknownContract);
@@ -263,17 +279,6 @@ fn validate_target(
         return Err(Error::TargetMismatch);
     }
     let target = matches[0];
-    if targets
-        .revisions()
-        .filter(|candidate| {
-            candidate.provider == contract_definition.target.provider
-                && candidate.adapter == contract_definition.target.adapter
-        })
-        .count()
-        != 1
-    {
-        return Err(Error::TargetMismatch);
-    }
     if target.is_active() != contract_definition.target.active
         || target.is_execution_enabled() != contract_definition.target.execution_enabled
         || target.settings() != &contract_definition.target.settings
@@ -500,10 +505,16 @@ mod tests {
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 2);
+        assert_eq!(projected.len(), 3);
         assert!(projected.iter().any(|contract| {
             contract.contract == "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
                 && contract.capability.presets[0].rate_numerator_minor == 336
+        }));
+        assert!(projected.iter().any(|contract| {
+            contract.contract == "hubu.gemini-3.1-flash-image.text-to-image/v1"
+                && contract.capability.presets[2].name == "4k"
+                && contract.capability.presets[2].width == 4096
+                && contract.capability.presets[2].rate_numerator_minor == 151
         }));
         assert!(projected
             .iter()
@@ -566,7 +577,7 @@ mod tests {
         let targets: ProviderTargetConfig = serde_json::from_value(targets).unwrap();
         assert!(matches!(
             validate_and_project(&targets, &exact_pricing()),
-            Err(Error::TargetMismatch)
+            Err(Error::UnknownContract)
         ));
 
         let mut targets = serde_json::to_value(exact_targets()).unwrap();
@@ -618,7 +629,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             validate_and_project(&targets, &pricing),
-            Err(Error::TargetMismatch)
+            Err(Error::UnknownContract)
         ));
 
         let mut targets = serde_json::to_value(exact_targets()).unwrap();

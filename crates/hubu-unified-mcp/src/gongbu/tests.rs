@@ -271,11 +271,27 @@ fn provider_catalog_accepts_order_independent_exact_subsets_and_rejects_bad_sets
         "policies":{"generation_retries":0,"fallback":false,"poll":"synchronous-response-v1","artifact_delivery":"google-inline-image-v1","recovery":"hubu-durable-synchronous-replay-v1"},
         "readiness":{"configured":true,"credential_reference_present":true,"production_validated":true,"live_qualified":false,"live_qualification":"not_performed"}
     });
+    let gemini_full = json!({
+        "contract":"hubu.gemini-3.1-flash-image.text-to-image/v1",
+        "pricing_version":"google-gemini-3.1-flash-image-usd-2026-09-01-v1",
+        "pricing_reviewed_on":"2026-09-01",
+        "target":{"workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-image"},
+        "capability":{"image_count":1,"output_formats":["png","jpeg"],"presets":[
+            {"name":"1k","width":1024,"height":1024,"currency":"USD","rate_numerator_minor":67,"rate_denominator":10},
+            {"name":"2k","width":2048,"height":2048,"currency":"USD","rate_numerator_minor":101,"rate_denominator":10},
+            {"name":"4k","width":4096,"height":4096,"currency":"USD","rate_numerator_minor":151,"rate_denominator":10}
+        ]},
+        "policies":{"generation_retries":0,"fallback":false,"poll":"synchronous-response-v1","artifact_delivery":"google-inline-image-v1","recovery":"hubu-durable-synchronous-replay-v1"},
+        "readiness":{"configured":true,"credential_reference_present":true,"production_validated":true,"live_qualified":false,"live_qualification":"not_performed"}
+    });
 
     for contracts in [
         vec![gemini.clone()],
+        vec![gemini_full.clone()],
         vec![flux.clone()],
-        vec![gemini.clone(), flux.clone()],
+        vec![gemini.clone(), gemini_full.clone()],
+        vec![gemini.clone(), gemini_full.clone(), flux.clone()],
+        vec![flux.clone(), gemini_full.clone(), gemini.clone()],
         vec![flux.clone(), gemini.clone()],
     ] {
         let response: ProviderCatalogResponse =

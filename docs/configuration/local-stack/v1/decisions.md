@@ -109,20 +109,19 @@ Do not use a mutable label such as `latest` and then replace its meaning. Gongbu
 ## Provider contract versus generic target
 
 Use `[[contract_bindings]]` when its named, versioned contract exactly matches
-the desired capability. The initial contract,
-`hubu.flux-2-pro.text-to-image/v1`, freezes the FLUX provider, adapter, model,
-three dimension presets, PNG/JPEG output, zero generation retries, no fallback,
-poll and artifact policies, durable recovery policy, and its dated rational USD
-pricing. The operator supplies only an opaque credential reference and the two
-explicit spend choices.
+the desired capability. Hubu ships contracts for Gemini 3.1 Flash Lite Image,
+Gemini 3.1 Flash Image, and FLUX.2 Pro. They freeze their provider, adapter,
+model, dimensions, PNG/JPEG output, zero generation retries, fallback policy,
+transport/recovery behavior, and dated rational USD pricing. The operator
+supplies only opaque credential references and the explicit spend choices.
 
-Use raw `[[targets]]` and `[[pricing_rules]]` for other providers such as the
-Gemini Developer API. A composite FLUX-plus-Gemini catalog requires a new immutable
-`catalog_version`, distinct credential aliases, and unambiguous target and
-pricing keys. Raw entries cannot override or duplicate a provider contract.
-Both providers stay inside Gongbu's execution boundary with separate targets,
-credentials, attempts, and artifacts; Hubu's governance database remains a
-separate process and failure domain.
+A multi-contract catalog requires a new immutable `catalog_version` and
+unambiguous target and pricing keys. The two Google contracts may share one
+credential alias; different providers require isolated aliases and coordinates.
+Raw entries cannot override or parallel a shipped provider-contract route.
+All providers stay inside Gongbu's execution boundary with separate targets,
+attempts, and artifacts; Hubu's governance database remains a separate process
+and failure domain.
 
 ### Readiness is not qualification
 

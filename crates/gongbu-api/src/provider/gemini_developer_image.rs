@@ -672,12 +672,21 @@ mod tests {
             &env::var("GONGBU_PROVIDER_CONFIG").expect("operator target config is required"),
         ))
         .unwrap();
+        let model = env::var("GONGBU_LIVE_GEMINI_DEVELOPER_MODEL")
+            .expect("exact Gemini image model is required");
+        assert!(matches!(
+            model.as_str(),
+            "gemini-3.1-flash-lite-image" | "gemini-3.1-flash-image"
+        ));
         let target = targets
             .revisions()
             .find(|target| {
-                target.provider == PROVIDER_ID && target.adapter == ADAPTER_ID && target.is_active()
+                target.provider == PROVIDER_ID
+                    && target.adapter == ADAPTER_ID
+                    && target.model == model
+                    && target.is_active()
             })
-            .expect("one enabled Developer API image target is required");
+            .expect("the selected enabled Developer API image target is required");
         let image_size = env::var("GONGBU_LIVE_GEMINI_DEVELOPER_IMAGE_SIZE").ok();
         let request = NormalizedRequest {
             provider: PROVIDER_ID.into(),
