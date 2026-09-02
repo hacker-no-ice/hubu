@@ -560,7 +560,11 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
                     .map_err(|_| invalid("provider credential reference is invalid"))?,
             )
             .map_err(|_| invalid("an enabled provider credential is unavailable"))?;
-        redaction_values.push(secret.expose().to_vec());
+        register_provider_secret_for_persistence_guard(
+            config.providers.mode,
+            &mut redaction_values,
+            &secret,
+        );
     }
     providers.mark_credential_references_present();
     let limits = config.artifacts.limits();
@@ -662,6 +666,25 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         crate::lifecycle::log(crate::lifecycle::LifecycleReason::WorkerUnavailable);
     }
     result.map(|_| ())
+}
+
+fn register_provider_secret_for_persistence_guard(
+    mode: ProviderMode,
+    redaction_values: &mut Vec<Vec<u8>>,
+    secret: &crate::secrets::ProviderSecret,
+) {
+    // SandboxFixtureSecrets returns public, built-in adapter material only to
+    // satisfy the common provider interface. It grants no external authority,
+    // and registering it as confidential would reject harmless sandbox inputs
+    // and metadata that contain the fixture token. Sandbox target validation
+    // separately guarantees that live adapters cannot use this exemption.
+    match mode {
+        ProviderMode::Live => redaction_values.push(secret.expose().to_vec()),
+        ProviderMode::Sandbox => {}
+        ProviderMode::Disabled => {
+            unreachable!("disabled provider mode has no enabled provider targets")
+        }
+    }
 }
 
 struct StartupLifecycleGuard {
@@ -1304,6 +1327,38 @@ mod tests {
 
         value.providers.live_spend_acknowledgement = Some(LIVE_SPEND_ACKNOWLEDGEMENT.into());
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn sandbox_fixture_material_is_not_registered_as_a_persistence_secret() {
+        let reference =
+            SecretReference::new("hubu.sandbox.fixture", "deterministic-provider").unwrap();
+        let fixture = SandboxFixtureSecrets.resolve(&reference).unwrap();
+        let protected_service_secrets = [
+            b"sandbox-caller-capability-181".to_vec(),
+            b"sandbox-hubu-capability-181".to_vec(),
+        ];
+
+        let mut sandbox_values = protected_service_secrets.to_vec();
+        register_provider_secret_for_persistence_guard(
+            ProviderMode::Sandbox,
+            &mut sandbox_values,
+            &fixture,
+        );
+        let sandbox_guard = Redactor::new(sandbox_values.iter().map(Vec::as_slice));
+        assert!(!sandbox_guard.contains_registered_secret("hubu-sandbox-fixture-v1"));
+        assert!(!sandbox_guard.contains_registered_secret("prompt mentions sandbox-fixture"));
+        assert!(sandbox_guard.contains_registered_secret("sandbox-caller-capability-181"));
+        assert!(sandbox_guard.contains_registered_secret("sandbox-hubu-capability-181"));
+
+        let mut live_values = protected_service_secrets.to_vec();
+        register_provider_secret_for_persistence_guard(
+            ProviderMode::Live,
+            &mut live_values,
+            &fixture,
+        );
+        let live_guard = Redactor::new(live_values.iter().map(Vec::as_slice));
+        assert!(live_guard.contains_registered_secret("hubu-sandbox-fixture-v1"));
     }
 
     #[test]

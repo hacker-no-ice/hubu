@@ -5481,6 +5481,10 @@ task_queue = "gongbu-local-executions"
         let generation = active_generation_path(&profile.join("generated"), &manifest).unwrap();
         let targets: Value = read_json(&generation.join("provider-targets.json")).unwrap();
         assert_eq!(
+            targets["provider_configs"][0]["provider_config_version"],
+            "hubu-sandbox-fixture-v1"
+        );
+        assert_eq!(
             targets["provider_configs"][0]["settings"]["type"],
             "fixture"
         );
