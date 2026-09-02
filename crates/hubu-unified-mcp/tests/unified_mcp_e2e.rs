@@ -30,10 +30,7 @@ fn execution_arguments_for(token: &str, prompt: &str) -> Value {
         "spend_auth_token_id":token,
         "input":{"prompt":prompt,"image_count":1},
         "input_schema_version":1,
-        "workload_type":"image_generation",
-        "provider":"fixture",
-        "adapter":"fixture",
-        "model":"fixture-v1"
+        "target_id":format!("gongbu:target:v1:{}", "a".repeat(64))
     })
 }
 
@@ -232,10 +229,7 @@ fn preallocated_operation_key_mismatch_stops_before_backend_traffic() {
                 "schema_version": 2,
                 "input": {"prompt": "fixed offline fixture", "image_count": 1},
                 "input_schema_version": 1,
-                "workload_type": "image_generation",
-                "provider": "fixture",
-                "adapter": "fixture",
-                "model": "fixture-v1"
+                "target_id": format!("gongbu:target:v1:{}", "a".repeat(64))
             },
             "max_inline_artifact_bytes": 1024
         }),
@@ -280,10 +274,7 @@ fn preallocated_operation_key_flows_once_through_governed_execution_and_restarts
             "schema_version": 2,
             "input": {"prompt": "fixed offline fixture", "image_count": 1},
             "input_schema_version": 1,
-            "workload_type": "image_generation",
-            "provider": "fixture",
-            "adapter": "fixture",
-            "model": "fixture-v1"
+            "target_id": format!("gongbu:target:v1:{}", "a".repeat(64))
         },
         "max_inline_artifact_bytes": 1024
     });
@@ -405,10 +396,7 @@ fn prebound_crash_gap_recovers_once_without_duplicate_backend_mutation() {
             "schema_version": 2,
             "input": {"prompt": "fixed prebound crash-gap fixture", "image_count": 1},
             "input_schema_version": 1,
-            "workload_type": "image_generation",
-            "provider": "fixture",
-            "adapter": "fixture",
-            "model": "fixture-v1"
+            "target_id": format!("gongbu:target:v1:{}", "a".repeat(64))
         },
         "max_inline_artifact_bytes": 1024
     });
@@ -1072,7 +1060,7 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
                 "code": "invalid_request",
                 "message": format!("{PRIVATE_DETAIL}: {operation_key}"),
                 "reason_code": "target_not_selectable",
-                "fields": ["workload_type", "provider", "adapter", "model"],
+                "fields": ["target_id"],
                 "private_detail": PRIVATE_DETAIL
             }
         }),
@@ -1095,7 +1083,7 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
         &failed,
         &handle,
         "target_not_selectable",
-        json!(["workload_type", "provider", "adapter", "model"]),
+        json!(["target_id"]),
     );
     for private in [
         PRIVATE_DETAIL,
@@ -1126,7 +1114,7 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
                 },
             )
             .unwrap();
-    assert_eq!(persisted.0, "execution_request_target_not_selectable");
+    assert_eq!(persisted.0, "execution_request_target_id_not_selectable");
     assert_eq!(persisted.1, None);
     assert_eq!(persisted.2, 0);
     assert_eq!(persisted.3, None);
@@ -1137,7 +1125,7 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
         &replay,
         &handle,
         "target_not_selectable",
-        json!(["workload_type", "provider", "adapter", "model"]),
+        json!(["target_id"]),
     );
     assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
     first.finish(&[
@@ -1163,14 +1151,14 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
         &recovered,
         &handle,
         "target_not_selectable",
-        json!(["workload_type", "provider", "adapter", "model"]),
+        json!(["target_id"]),
     );
     let replay_after_restart = restarted.call(57, "gongbu_create_execution", arguments);
     assert_terminal_admission_diagnostic(
         &replay_after_restart,
         &handle,
         "target_not_selectable",
-        json!(["workload_type", "provider", "adapter", "model"]),
+        json!(["target_id"]),
     );
     assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
     restarted.finish(&[
@@ -1473,7 +1461,7 @@ fn private_gongbu_continuation_binds_replays_restarts_and_redacts_recursively() 
     assert!(!terminal.to_string().contains(&operation_key));
 
     let mut changed = execution_arguments();
-    changed["model"] = json!("spoofed-model");
+    changed["target_id"] = json!(format!("gongbu:target:v1:{}", "b".repeat(64)));
     let conflict = first.call(6, "gongbu_create_execution", changed);
     assert!(conflict["error"]["message"]
         .as_str()

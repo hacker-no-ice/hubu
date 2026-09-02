@@ -82,7 +82,7 @@ choice is unclear:
 | --- | --- | --- |
 | `stack.toml` | Binaries, managed or external services, Temporal, and local paths | [`stack.toml`](https://hubustack.dev/configuration/local-stack/v1/stack-toml) |
 | `credentials.toml` | Provider references or advanced external-service overrides | [`credentials.toml`](https://hubustack.dev/configuration/local-stack/v1/credentials-toml) |
-| `providers.toml` | Disabled, sandbox, or live mode; provider contracts or raw targets, pricing, and live spend gate where applicable | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
+| `providers.toml` | Disabled, sandbox, or live mode; frozen provider-contract bindings, optional generic targets, pricing, and live spend gate where applicable | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
 
 For a first local evaluation, use sandbox mode. It exercises the governed
 execution path without contacting an external provider or incurring cost.

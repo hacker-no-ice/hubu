@@ -565,10 +565,7 @@ fn admit_execution_with_token(
         "spend_auth_token_id": spend_auth_token_id,
         "input": {"prompt":"deterministic blue pixel","image_count":1},
         "input_schema_version": 1,
-        "workload_type": "image_generation",
-        "provider": "mock",
-        "adapter": "deterministic",
-        "model": "pixel-v1"
+        "target_id": "gongbu:target:v1:af27a84c94f48f000bcb64cb0f432e2770aaca7e1293be76b29a8dc6185be0f8"
     }))
     .unwrap();
     let response = api.handle("POST", "/v2/executions", Some(owner), &body);

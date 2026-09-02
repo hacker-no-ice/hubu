@@ -538,10 +538,7 @@ def governed_arguments(label):
                 "image_size": "2k",
             },
             "input_schema_version": 1,
-            "workload_type": "default",
-            "provider": "example",
-            "adapter": "fixture",
-            "model": "image-v1",
+            "target_id": "gongbu:target:v1:05934e1fe9c59160d3c148fdc465ea37fb3ec3110ccd8456c10ed467cb56c9d9",
         },
     }
 
@@ -730,7 +727,7 @@ authorize_agent() {
 
 execution_body() {
   jq -n --arg token "$1" --arg label "$2" \
-    '{schema_version:2,spend_auth_token_id:$token,input:{prompt:("acceptance canary " + $label),image_count:1,image_size:"1k"},input_schema_version:1,workload_type:"default",provider:"example",adapter:"fixture",model:"image-v1"}'
+    '{schema_version:2,spend_auth_token_id:$token,input:{prompt:("acceptance canary " + $label),image_count:1,image_size:"1k"},input_schema_version:1,target_id:"gongbu:target:v1:05934e1fe9c59160d3c148fdc465ea37fb3ec3110ccd8456c10ed467cb56c9d9"}'
 }
 
 submit_execution() {

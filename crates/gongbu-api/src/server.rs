@@ -1325,52 +1325,35 @@ mod tests {
             "../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let contract_definition = &document["contracts"][0];
-        let policies = &contract_definition["policies"];
-        let mut flux_target = contract_definition["target"].clone();
-        flux_target["secret_service"] = serde_json::json!("operator.bfl");
-        flux_target["secret_account"] = serde_json::json!("flux");
+        let contracts = document["contracts"].as_array().unwrap();
+        let bindings = contracts.iter().map(|contract| {
+            let policies = &contract["policies"];
+            serde_json::json!({"contract":contract["contract"],"pricing_version":contract["pricing_version"],"poll_policy":policies["poll"],"artifact_delivery_policy":policies["artifact_delivery"],"recovery_policy":policies["recovery"],"generation_retries":policies["generation_retries"],"fallback":policies["fallback"]})
+        }).collect::<Vec<_>>();
+        let provider_configs = contracts
+            .iter()
+            .map(|contract| {
+                let mut target = contract["target"].clone();
+                let google = target["provider"] == "google";
+                target["secret_service"] = serde_json::json!(if google {
+                    "operator.google"
+                } else {
+                    "operator.bfl"
+                });
+                target["secret_account"] =
+                    serde_json::json!(if google { "gemini" } else { "flux" });
+                target
+            })
+            .collect::<Vec<_>>();
         let targets = serde_json::json!({
             "schema_version":3,
-            "contract_bindings":[{
-                "contract":contract_definition["contract"],
-                "pricing_version":contract_definition["pricing_version"],
-                "poll_policy":policies["poll"],
-                "artifact_delivery_policy":policies["artifact_delivery"],
-                "recovery_policy":policies["recovery"],
-                "generation_retries":policies["generation_retries"],
-                "fallback":policies["fallback"]
-            }],
-            "provider_configs":[
-                {
-                    "provider_config_version":"gemini-v1",
-                    "workload_type":"image_generation",
-                    "provider":"google",
-                    "adapter":"gemini_developer_image",
-                    "model":"gemini-image-v1",
-                    "secret_service":"operator.google",
-                    "secret_account":"gemini",
-                    "active":true,
-                    "execution_enabled":true,
-                    "settings":{"type":"gemini_developer_image","config":{
-                        "endpoint":"https://generativelanguage.googleapis.com",
-                        "api_version":"v1beta","timeout_ms":30000,
-                        "max_retries":0,"headers":{}
-                    }}
-                },
-                flux_target
-            ]
+            "contract_bindings":bindings,
+            "provider_configs":provider_configs
         });
-        let mut pricing_rules = contract_definition["pricing_rules"]
-            .as_array()
-            .unwrap()
-            .clone();
-        pricing_rules.push(serde_json::json!({
-            "rule_id":"gemini-v1","provider":"google","model":"gemini-image-v1",
-            "currency":"USD","components":[{
-                "unit":"image","rate_numerator_minor":4,"rate_denominator":1
-            }]
-        }));
+        let pricing_rules = contracts
+            .iter()
+            .flat_map(|contract| contract["pricing_rules"].as_array().unwrap().clone())
+            .collect::<Vec<_>>();
         let pricing = serde_json::json!({
             "schema_version":2,
             "catalog_version":"operator-mixed-2026-08-28-v1",
@@ -1391,8 +1374,8 @@ mod tests {
 
         let validated = validate_runtime_inputs(&path).unwrap();
         let catalog = validated_provider_catalog(&validated).unwrap();
-        assert_eq!(catalog.provider_contracts().len(), 1);
-        assert_eq!(catalog.targets().revisions().count(), 2);
+        assert_eq!(catalog.provider_contracts().len(), 3);
+        assert_eq!(catalog.targets().revisions().count(), 3);
         assert!(
             !catalog.provider_contracts()[0]
                 .readiness
@@ -1441,7 +1424,12 @@ mod tests {
             "../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let contract_definition = &document["contracts"][0];
+        let contract_definition = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["contract"] == "hubu.flux-2-pro.text-to-image/v1")
+            .unwrap();
         let policies = &contract_definition["policies"];
         let mut flux_target = contract_definition["target"].clone();
         flux_target["secret_service"] = serde_json::json!("gongbu.bfl.test");

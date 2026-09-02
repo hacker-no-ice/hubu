@@ -78,6 +78,7 @@ pub enum RegistryError {
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {
     factories: BTreeMap<(String, String), Arc<Factory>>,
+    require_shipped_contracts: bool,
 }
 
 impl ProviderRegistry {
@@ -88,6 +89,7 @@ impl ProviderRegistry {
     pub fn production(artifact_limits: &ArtifactLimits) -> Self {
         let max_artifact_bytes = artifact_limits.max_encoded_bytes;
         let mut registry = Self::new();
+        registry.require_shipped_contracts = true;
         registry.register(
             GEMINI_DEVELOPER_PROVIDER_ID,
             GEMINI_DEVELOPER_ADAPTER_ID,
@@ -122,6 +124,7 @@ impl ProviderRegistry {
 
     pub fn sandbox() -> Self {
         let mut registry = Self::new();
+        registry.require_shipped_contracts = true;
         registry.register("sandbox", "fixture", |_| {
             Ok(Arc::new(DeterministicFixtureAdapter))
         });
@@ -271,8 +274,12 @@ impl ValidatedProviderCatalog {
                 adapter,
             );
         }
-        let provider_contracts = provider_contracts::validate_and_project(&targets, &pricing)
-            .map_err(|error| RegistryError::InvalidProviderContract(error.to_string()))?;
+        let provider_contracts = if registry.require_shipped_contracts {
+            provider_contracts::validate_and_project(&targets, &pricing)
+        } else {
+            provider_contracts::validate_selected_and_project(&targets, &pricing)
+        }
+        .map_err(|error| RegistryError::InvalidProviderContract(error.to_string()))?;
         Ok(Self {
             targets,
             pricing,
@@ -513,26 +520,33 @@ mod tests {
 
     #[test]
     fn production_registry_binds_gemini_developer_ideogram_and_flux() {
-        let targets: ProviderTargetConfig = serde_json::from_value(json!({
-            "schema_version":2,"provider_configs":[
-                {"provider_config_version":"g-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000}}},
-                {"provider_config_version":"i-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}},
-                {"provider_config_version":"f-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["delivery.us.bfl.ai"]}}}
-            ]
-        })).unwrap();
-        let incomplete_pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2-incomplete","rules":[{"rule_id":"g","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":2,"rate_denominator":1}]}]}"#).unwrap();
-        assert_eq!(
-            ValidatedProviderCatalog::bind(
-                targets.clone(),
-                incomplete_pricing,
-                &ProviderRegistry::production(&ArtifactLimits::default()),
-            )
-            .err(),
-            Some(RegistryError::MissingPricing(
-                "image_generation/flux/flux2_api/flux-2-pro".into()
-            ))
-        );
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":2,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":4,"rate_denominator":1}]}]}"#).unwrap();
+        let document: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let contracts = document["contracts"].as_array().unwrap();
+        let bindings = contracts.iter().map(|contract| {
+            let policies = &contract["policies"];
+            json!({"contract":contract["contract"],"pricing_version":contract["pricing_version"],"poll_policy":policies["poll"],"artifact_delivery_policy":policies["artifact_delivery"],"recovery_policy":policies["recovery"],"generation_retries":0,"fallback":false})
+        }).collect::<Vec<_>>();
+        let mut provider_configs = contracts
+            .iter()
+            .map(|contract| {
+                let mut target = contract["target"].clone();
+                target["secret_service"] =
+                    json!(format!("gongbu.{}", target["provider"].as_str().unwrap()));
+                target["secret_account"] = json!("one");
+                target
+            })
+            .collect::<Vec<_>>();
+        provider_configs.push(json!({"provider_config_version":"i-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}}));
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({"schema_version":3,"contract_bindings":bindings,"provider_configs":provider_configs})).unwrap();
+        let mut rules = contracts
+            .iter()
+            .flat_map(|contract| contract["pricing_rules"].as_array().unwrap().clone())
+            .collect::<Vec<_>>();
+        rules.push(json!({"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]}));
+        let pricing = PricingCatalog::from_json(&serde_json::to_vec(&json!({"schema_version":2,"catalog_version":"provider-composite-v1","rules":rules})).unwrap()).unwrap();
         let catalog = ValidatedProviderCatalog::bind(
             targets,
             pricing,
@@ -545,6 +559,7 @@ mod tests {
                 "gemini_developer_image",
                 "gemini-3.1-flash-lite-image",
             ),
+            ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
             ("ideogram", "ideogram_image", "ideogram-v3"),
             ("flux", "flux2_api", "flux-2-pro"),
         ] {
@@ -552,7 +567,12 @@ mod tests {
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 3);
+        assert_eq!(execution_targets.len(), 4);
+        let gemini_full = execution_targets
+            .iter()
+            .find(|target| target.model == "gemini-3.1-flash-image")
+            .unwrap();
+        assert_eq!(gemini_full.image_sizes, ["1k", "2k", "4k"]);
         let flux = execution_targets
             .iter()
             .find(|target| target.provider == "flux")

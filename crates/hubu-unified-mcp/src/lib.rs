@@ -1791,9 +1791,9 @@ mod tests {
     fn durable_admission_diagnostics_project_static_public_fields() {
         let cases = [
             (
-                "execution_request_target_not_selectable",
+                "execution_request_target_id_not_selectable",
                 "target_not_selectable",
-                json!(["workload_type", "provider", "adapter", "model"]),
+                json!(["target_id"]),
             ),
             (
                 "execution_request_pricing_selector_not_matched",

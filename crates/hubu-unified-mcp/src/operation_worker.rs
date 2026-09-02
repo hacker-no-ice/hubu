@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn admission_diagnostics_map_only_invalid_dispatch_requests() {
         for diagnostic in [
-            gongbu::AdmissionDiagnostic::TargetNotSelectable,
+            gongbu::AdmissionDiagnostic::TargetIdNotSelectable,
             gongbu::AdmissionDiagnostic::PricingSelectorNotMatched,
         ] {
             assert_eq!(

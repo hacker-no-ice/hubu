@@ -189,8 +189,8 @@ to approve or deny it, and return the resulting artifact.
 
 Sandbox uses a deterministic, non-billable provider fixture. Gemini and FLUX
 require a `local-stack` profile with an approved live target and credential
-reference; live execution is experimental and can incur charges. Begin with
-the [live provider operations guide](docs/operations/live-providers.md), use a
+reference; live execution is experimental and can incur charges. Begin with the
+[live provider operations guide](docs/operations/live-providers.md), use a
 conservative budget, and inspect the discovered price before submitting work.
 
 ## Documentation

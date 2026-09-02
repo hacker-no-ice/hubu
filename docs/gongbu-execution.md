@@ -33,9 +33,10 @@ The components communicate over
 
 ## Admission and execution flow
 
-The canonical caller submits a Hubu spend-authorization token plus execution
-intent and either a `target_id` discovered from `GET /v2/execution-targets` or
-the legacy explicit target tuple to `POST /v2/executions`.
+The canonical caller submits a Hubu spend-authorization token, execution
+intent, and an opaque `target_id` discovered from `GET /v2/execution-targets`
+to `POST /v2/executions`. Gongbu resolves the internal target tuple from its
+operator-approved catalog.
 
 For a new execution, Gongbu then:
 
@@ -85,7 +86,7 @@ closed.
 
 Diagnostic admission failures remain HTTP 400 `invalid_request` errors and may
 add one bounded `reason_code`/`fields` pair. `target_not_selectable` identifies
-`workload_type`, `provider`, `adapter`, and `model`; alternatively,
+`target_id`; alternatively,
 `pricing_selector_not_matched` identifies `input.image_size`. The field names
 identify contract locations only: Gongbu never echoes their values. Other
 validation failures retain the generic error without diagnostic fields.
@@ -162,11 +163,13 @@ settings, credential references, endpoints, headers, configuration revisions,
 or configuration digests.
 
 The ID is stable across credential, endpoint, and provider-configuration
-revision rotation for the same workload/provider/adapter/model key. A changed
-model or adapter is a different logical target and therefore receives a new
-ID. New callers select that ID and runtime inputs such as `image_size`; the
-legacy raw tuple remains accepted for compatibility but cannot be combined
-with `target_id` in one request.
+revision rotation for the same internal target key. A changed model or adapter
+is a different logical target and therefore receives a new ID. Public callers
+select only that ID and runtime inputs such as `image_size`; internal immutable
+target keys remain persisted for durable replay.
+
+`POST /v1/executions` is retired. The v1 GET execution, status, artifact, and
+redaction-attestation routes remain observation surfaces.
 
 A production target binds:
 

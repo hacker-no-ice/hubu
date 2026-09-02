@@ -264,8 +264,9 @@ Discovery returns structured content containing only the opaque target ID,
 workload type, provider/model labels, authorization scope, supported
 `image_size` values, and exact configured price components. It omits adapter
 settings, endpoints, headers, credentials, and provider configuration
-revisions. The raw workload/provider/adapter/model tuple remains accepted for
-backward compatibility, but a request must use exactly one selector form.
+revisions. Execution tools accept only the discovered `target_id`; provider,
+adapter, model, and workload routing fields are rejected as caller-controlled
+selection.
 
 The router normalizes that complete request once and durably stores its bounded,
 validated intent before authorization dispatch. It performs the existing Hubu

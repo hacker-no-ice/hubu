@@ -31,7 +31,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "3e7a50e24a1b37c84582e07d44ab509c6bbde7c2081845ad475a4ea65b14bb6c";
+    "7fc57f137d4d55380820b3548af7f0fb289320079cd56275a40542d3c8db68ad";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -2397,14 +2397,41 @@ fn validate_provider_source(source: &ProvidersSource) -> Result<()> {
                 bail!("providers.toml live mode requires a positive maximum_spend_minor and the exact Gongbu live-spend acknowledgement");
             }
             let bound_contracts = selected_provider_contracts(source)?;
+            let shipped_contracts = provider_contracts_document()?.contracts;
+            for definition in &shipped_contracts {
+                let selected = bound_contracts
+                    .iter()
+                    .any(|(_, _, selected)| selected.contract == definition.contract);
+                let raw_target = source.targets.iter().any(|target| {
+                    target.provider.as_deref() == Some(definition.target.provider.as_str())
+                        && target.adapter.as_deref() == Some(definition.target.adapter.as_str())
+                });
+                let raw_price = source.pricing_rules.iter().any(|rule| {
+                    toml_to_json(rule).is_ok_and(|rule| {
+                        rule.get("provider").and_then(Value::as_str)
+                            == Some(definition.target.provider.as_str())
+                            && rule.get("model").and_then(Value::as_str)
+                                == Some(definition.target.model.as_str())
+                    })
+                });
+                if (raw_target || raw_price) && !selected {
+                    bail!(
+                        "providers.toml shipped Gemini and FLUX targets require their provider contract binding"
+                    );
+                }
+            }
             let mut contracts = BTreeSet::new();
-            let mut credentials = BTreeSet::new();
+            let mut provider_by_credential = BTreeMap::new();
             for (contract, credential, contract_definition) in &bound_contracts {
                 if !contracts.insert(contract) {
                     bail!("providers.toml contains a duplicate provider contract binding");
                 }
-                if !credentials.insert(credential) {
-                    bail!("providers.toml provider contracts must use distinct credential aliases");
+                if let Some(existing_provider) = provider_by_credential
+                    .insert(credential, contract_definition.target.provider.as_str())
+                {
+                    if existing_provider != contract_definition.target.provider {
+                        bail!("providers.toml provider contracts must use distinct credential aliases for different providers");
+                    }
                 }
                 if source.targets.iter().any(|target| {
                     target.provider_config_version.as_deref()
@@ -5008,7 +5035,7 @@ components = [{ unit = "image", rate_numerator_minor = 67, rate_denominator = 10
     }
 
     #[test]
-    fn flux_provider_contract_renders_exact_contract_and_composes_with_gemini() {
+    fn provider_contracts_render_one_composite_gemini_and_flux_catalog() {
         let providers: ProvidersSource = toml::from_str(&format!(
             r#"schema_version = 1
 mode = "live"
@@ -5020,30 +5047,13 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
 contract = "hubu.flux-2-pro.text-to-image/v1"
 credential = "bfl_flux2_pro"
 
-[[targets]]
-provider_config_version = "gemini-v1"
-workload_type = "image_generation"
-provider = "google"
-adapter = "gemini_developer_image"
-model = "gemini-image-v1"
+[[contract_bindings]]
+contract = "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
 credential = "gemini"
-active = true
-execution_enabled = true
-[targets.settings]
-type = "gemini_developer_image"
-[targets.settings.config]
-endpoint = "https://generativelanguage.googleapis.com"
-api_version = "v1beta"
-timeout_ms = 30000
-max_retries = 0
-headers = {{}}
 
-[[pricing_rules]]
-rule_id = "gemini-v1"
-provider = "google"
-model = "gemini-image-v1"
-currency = "USD"
-components = [{{ unit = "image", rate_numerator_minor = 4, rate_denominator = 1 }}]
+[[contract_bindings]]
+contract = "hubu.gemini-3.1-flash-image.text-to-image/v1"
+credential = "gemini"
 "#
         ))
         .unwrap();
@@ -5063,7 +5073,8 @@ account = "gemini"
         validate_provider_credential_isolation(&providers, &credentials).unwrap();
         let targets = render_targets(&providers, &credentials).unwrap();
         assert_eq!(targets["schema_version"], 3);
-        assert_eq!(targets["provider_configs"].as_array().unwrap().len(), 2);
+        assert_eq!(targets["provider_configs"].as_array().unwrap().len(), 3);
+        assert_eq!(targets["contract_bindings"].as_array().unwrap().len(), 3);
         assert_eq!(
             targets["contract_bindings"][0],
             json!({
@@ -5085,6 +5096,17 @@ account = "gemini"
         assert_eq!(flux["adapter"], "flux2_api");
         assert_eq!(flux["model"], "flux-2-pro");
         assert_eq!(flux["settings"]["config"]["poll_interval_ms"], 500);
+        let gemini_models = targets["provider_configs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|target| target["provider"] == "google")
+            .map(|target| target["model"].as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            gemini_models,
+            BTreeSet::from(["gemini-3.1-flash-image", "gemini-3.1-flash-lite-image"])
+        );
         assert_eq!(flux["settings"]["config"]["max_retries"], 0);
         assert_eq!(
             flux["settings"]["config"]["approved_artifact_hosts"],
@@ -5093,7 +5115,7 @@ account = "gemini"
 
         let pricing = render_pricing_catalog(&providers).unwrap();
         assert_eq!(pricing["catalog_version"], "operator-mixed-2026-08-28-v1");
-        assert_eq!(pricing["rules"].as_array().unwrap().len(), 4);
+        assert_eq!(pricing["rules"].as_array().unwrap().len(), 7);
         let flux_prices = pricing["rules"]
             .as_array()
             .unwrap()
@@ -5107,6 +5129,28 @@ account = "gemini"
         assert_eq!(flux_prices[1]["components"][0]["rate_denominator"], 10);
         assert_eq!(flux_prices[2]["components"][0]["rate_numerator_minor"], 75);
         assert_eq!(flux_prices[2]["components"][0]["rate_denominator"], 10);
+        let gemini_price = pricing["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["provider"] == "google")
+            .unwrap();
+        assert_eq!(gemini_price["selector"]["image_size"], "1k");
+        assert_eq!(gemini_price["components"][0]["rate_numerator_minor"], 336);
+        assert_eq!(gemini_price["components"][0]["rate_denominator"], 100);
+        let gemini_4k_price = pricing["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|rule| {
+                rule["model"] == "gemini-3.1-flash-image" && rule["selector"]["image_size"] == "4k"
+            })
+            .unwrap();
+        assert_eq!(
+            gemini_4k_price["components"][0]["rate_numerator_minor"],
+            151
+        );
+        assert_eq!(gemini_4k_price["components"][0]["rate_denominator"], 10);
 
         let catalog = ProviderCatalogReport {
             schema_version: 1,
@@ -5115,6 +5159,7 @@ account = "gemini"
         let sanitized = serde_json::to_string(&catalog).unwrap();
         assert!(sanitized.contains("1920"));
         assert!(sanitized.contains("USD"));
+        assert!(sanitized.contains("gemini-3.1-flash-lite-image"));
         assert!(!sanitized.contains("operator.bfl"));
         assert!(!sanitized.contains("credential_alias"));
 

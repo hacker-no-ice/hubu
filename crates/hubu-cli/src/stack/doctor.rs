@@ -2589,30 +2589,9 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
 contract = "hubu.flux-2-pro.text-to-image/v1"
 credential = "bfl_flux2_pro"
 
-[[targets]]
-provider_config_version = "gemini-v1"
-workload_type = "image_generation"
-provider = "google"
-adapter = "gemini_developer_image"
-model = "gemini-image-v1"
+[[contract_bindings]]
+contract = "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
 credential = "gemini"
-active = true
-execution_enabled = true
-[targets.settings]
-type = "gemini_developer_image"
-[targets.settings.config]
-endpoint = "https://generativelanguage.googleapis.com"
-api_version = "v1beta"
-timeout_ms = 30000
-max_retries = 0
-headers = {{}}
-
-[[pricing_rules]]
-rule_id = "gemini-v1"
-provider = "google"
-model = "gemini-image-v1"
-currency = "USD"
-components = [{{ unit = "image", rate_numerator_minor = 4, rate_denominator = 1 }}]
 "#
             ),
         )
@@ -2621,18 +2600,23 @@ components = [{{ unit = "image", rate_numerator_minor = 4, rate_denominator = 1 
         let present = inspect_profile_with(&profile, opaque_available, Some(&renderer));
         assert_eq!(present.classification, ProfileClassification::ReadyToRender);
         assert_eq!(present.provider_readiness, ProviderReadiness::Unknown);
-        assert_eq!(present.provider_contracts.len(), 1);
-        let readiness = &present.provider_contracts[0].readiness;
-        assert!(readiness.configured);
-        assert_eq!(readiness.credential_reference_present, Some(true));
-        assert!(!readiness.production_validated);
-        assert!(!readiness.live_qualified);
-        assert_eq!(readiness.live_qualification, "not_performed");
+        assert_eq!(present.provider_contracts.len(), 2);
+        for contract in &present.provider_contracts {
+            let readiness = &contract.readiness;
+            assert!(readiness.configured);
+            assert_eq!(readiness.credential_reference_present, Some(true));
+            assert!(!readiness.production_validated);
+            assert!(!readiness.live_qualified);
+            assert_eq!(readiness.live_qualification, "not_performed");
+        }
 
         render_profile_with_renderer(&profile, &renderer).unwrap();
         let validated = inspect_profile_with(&profile, opaque_available, Some(&renderer));
         assert_eq!(validated.provider_readiness, ProviderReadiness::Configured);
-        assert!(validated.provider_contracts[0].readiness.configured);
+        assert!(validated
+            .provider_contracts
+            .iter()
+            .all(|contract| contract.readiness.configured));
         assert!(
             validated.provider_contracts[0]
                 .readiness

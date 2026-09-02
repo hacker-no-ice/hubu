@@ -38,10 +38,7 @@ fn execution_arguments() -> Value {
         "spend_auth_token_id": "fixture-no-spend-token",
         "input": {"prompt": "deterministic no-spend fixture", "image_count": 1},
         "input_schema_version": 1,
-        "workload_type": "image_generation",
-        "provider": "fixture",
-        "adapter": "fixture",
-        "model": "fixture-v1"
+        "target_id": format!("gongbu:target:v1:{}", "a".repeat(64))
     })
 }
 

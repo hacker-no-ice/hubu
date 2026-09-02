@@ -162,10 +162,7 @@ execution intent selected from operator configuration:
   "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
   "input": {"prompt": "A small blue circle", "image_count": 1},
   "input_schema_version": 1,
-  "workload_type": "image_generation",
-  "provider": "google",
-  "adapter": "gemini_developer_image",
-  "model": "OPERATOR_APPROVED_MODEL"
+  "target_id": "gongbu:target:v1:DISCOVERED_OPAQUE_ID"
 }
 ```
 

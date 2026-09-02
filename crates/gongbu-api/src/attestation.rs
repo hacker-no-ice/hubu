@@ -296,9 +296,15 @@ fn exact_provider_contract(
     target: &crate::provider_targets::ProviderConfigVersion,
 ) -> bool {
     let contracts = providers.provider_contracts();
-    let Some(contract) = contracts.first().filter(|_| contracts.len() == 1) else {
+    let mut matching = contracts
+        .iter()
+        .filter(|contract| contract.contract == PROVIDER_CONTRACT_ID);
+    let Some(contract) = matching.next() else {
         return false;
     };
+    if matching.next().is_some() {
+        return false;
+    }
     let Ok(pricing): Result<PricingSnapshot, _> =
         serde_json::from_value(execution.pricing_snapshot.clone())
     else {

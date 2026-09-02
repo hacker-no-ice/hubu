@@ -41,42 +41,12 @@ impl AuthenticatedCaller {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CreateExecutionV1Request {
-    pub schema_version: u32,
-    pub operation_key: String,
-    /// Historical alias for the Hubu spend authorization token identifier.
-    pub hubu_authorization_id: String,
-    pub hubu_claim_id: Option<String>,
-    /// Historical alias for the same token identifier as `hubu_authorization_id`.
-    pub hubu_token_reference: String,
-    pub authorization: Money,
-    #[serde(default)]
-    pub execution_scope: Option<ExecutionScope>,
-    pub input: Value,
-    pub input_schema_version: i64,
-    pub workload_type: String,
-    pub provider: String,
-    pub adapter: String,
-    pub model: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct CreateExecutionV2Request {
     pub schema_version: u32,
     pub spend_auth_token_id: String,
     pub input: Value,
     pub input_schema_version: i64,
-    #[serde(default)]
-    pub target_id: Option<String>,
-    #[serde(default)]
-    pub workload_type: Option<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub adapter: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
+    pub target_id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -263,13 +233,6 @@ impl ApiError {
             ..Self::validation()
         }
     }
-    fn legacy_token_alias_mismatch() -> Self {
-        Self::new(
-            400,
-            "legacy_token_alias_mismatch",
-            "v1 Hubu token identifier aliases must be equal",
-        )
-    }
     fn not_found() -> Self {
         Self::new(404, "not_found", "resource not found")
     }
@@ -399,7 +362,6 @@ impl Api {
             .and_then(|caller| {
                 let segments: Vec<_> = path.trim_matches('/').split('/').collect();
                 match (method, segments.as_slice()) {
-                    ("POST", ["v1", "executions"]) => self.create_v1(caller, body),
                     ("POST", ["v2", "executions"]) => self.create_v2(caller, body),
                     ("GET", ["v2", "execution-targets"]) => self.list_execution_targets(caller),
                     ("GET", ["v1", "executions", execution_id]) => {
@@ -442,17 +404,6 @@ impl Api {
                 contracts: self.providers.provider_contracts().to_vec(),
             },
         ))
-    }
-
-    fn create_v1(
-        &self,
-        caller: &AuthenticatedCaller,
-        body: &[u8],
-    ) -> Result<HttpResponse, ApiError> {
-        let request: CreateExecutionV1Request =
-            serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
-        let request = translate_v1(request)?;
-        self.create(caller, request, V1_SCHEMA_VERSION)
     }
 
     fn create_v2(
@@ -541,10 +492,7 @@ impl Api {
         )
         .map_err(map_target_error)?;
         let resolved = self.providers.resolve_active(&target_key).map_err(|_| {
-            ApiError::validation_with_diagnostics(
-                "target_not_selectable",
-                &["workload_type", "provider", "adapter", "model"],
-            )
+            ApiError::validation_with_diagnostics("target_not_selectable", &["target_id"])
         })?;
         let image_count = input_quantity(&normalized_input, "image_count")?;
         if image_count.is_some_and(|count| {
@@ -919,71 +867,32 @@ fn immutable_params_match(execution: &Execution, params: &CreateExecutionParams)
         && execution.model == params.model
 }
 
-fn translate_v1(request: CreateExecutionV1Request) -> Result<CreateExecutionRequest, ApiError> {
-    let authorization_id = request.hubu_authorization_id.trim();
-    let token_reference = request.hubu_token_reference.trim();
-    if request.schema_version != V1_SCHEMA_VERSION || authorization_id.is_empty() {
-        return Err(ApiError::validation());
-    }
-    if authorization_id != token_reference {
-        return Err(ApiError::legacy_token_alias_mismatch());
-    }
-    Ok(CreateExecutionRequest {
-        spend_auth_token_id: authorization_id.to_owned(),
-        operation_key: Some(request.operation_key),
-        hubu_claim_id: request.hubu_claim_id,
-        authorization: Some(request.authorization),
-        execution_scope: request.execution_scope,
-        input: request.input,
-        input_schema_version: request.input_schema_version,
-        workload_type: request.workload_type,
-        provider: request.provider,
-        adapter: request.adapter,
-        model: request.model,
-    })
-}
-
 fn resolve_v2_target(
     request: &CreateExecutionV2Request,
     providers: &ValidatedProviderCatalog,
     repository: &Repository,
 ) -> Result<TargetKey, ApiError> {
-    let tuple = (
-        request.workload_type.as_deref(),
-        request.provider.as_deref(),
-        request.adapter.as_deref(),
-        request.model.as_deref(),
-    );
-    match (request.target_id.as_deref(), tuple) {
-        (Some(target_id), (None, None, None, None)) => {
-            match repository.get_execution_by_spend_auth_token(&request.spend_auth_token_id) {
-                Ok(existing) => {
-                    let persisted = TargetKey::new(
-                        existing.workload_type,
-                        existing.provider,
-                        existing.adapter,
-                        existing.model,
-                    )
-                    .map_err(map_target_error)?;
-                    if persisted.public_id() == target_id {
-                        return Ok(persisted);
-                    }
-                }
-                Err(PersistenceError::NotFound) => {}
-                Err(error) => return Err(map_persistence(error)),
+    let target_id = request.target_id.as_str();
+    match repository.get_execution_by_spend_auth_token(&request.spend_auth_token_id) {
+        Ok(existing) => {
+            let persisted = TargetKey::new(
+                existing.workload_type,
+                existing.provider,
+                existing.adapter,
+                existing.model,
+            )
+            .map_err(map_target_error)?;
+            if persisted.public_id() == target_id {
+                return Ok(persisted);
             }
-            providers
-                .resolve_target_id(target_id)
-                .map(ProviderConfigVersion::target_key)
-                .map_err(|_| {
-                    ApiError::validation_with_diagnostics("target_not_selectable", &["target_id"])
-                })
         }
-        (None, (Some(workload_type), Some(provider), Some(adapter), Some(model))) => {
-            TargetKey::new(workload_type, provider, adapter, model).map_err(map_target_error)
-        }
-        _ => Err(ApiError::validation()),
+        Err(PersistenceError::NotFound) => {}
+        Err(error) => return Err(map_persistence(error)),
     }
+    providers
+        .resolve_target_id(target_id)
+        .map(ProviderConfigVersion::target_key)
+        .map_err(|_| ApiError::validation_with_diagnostics("target_not_selectable", &["target_id"]))
 }
 
 fn translate_v2(
@@ -1447,6 +1356,18 @@ mod tests {
             }
             if spend_auth_token_id.starts_with("flux-") {
                 response.execution_scope = for_target("flux", "flux2_api");
+                let amount = if spend_auth_token_id.contains("4k") {
+                    8
+                } else if spend_auth_token_id.contains("2k")
+                    || spend_auth_token_id == "flux-restart-replay"
+                {
+                    5
+                } else {
+                    3
+                };
+                response.amount_cents = amount;
+                response.budget_hold.amount_cents = amount;
+                response.budget_hold.frozen_amount_cents = amount;
             }
             if spend_auth_token_id.starts_with("flux-managed-") {
                 response.amount_cents = 3;
@@ -1530,48 +1451,8 @@ mod tests {
     }
 
     fn flux_catalog(catalog_version: &str) -> ValidatedProviderCatalog {
-        let targets: ProviderTargetConfig = serde_json::from_value(json!({
-            "schema_version":2,
-            "provider_configs":[{
-                "provider_config_version":"flux-v1",
-                "workload_type":"image_generation",
-                "provider":"flux",
-                "adapter":"flux2_api",
-                "model":"flux-2-pro",
-                "secret_service":"gongbu.flux",
-                "secret_account":"test",
-                "active":true,
-                "execution_enabled":true,
-                "settings":{"type":"flux2_api","config":{
-                    "endpoint":"https://api.bfl.ai",
-                    "api_version":"v1",
-                    "timeout_ms":1000,
-                    "poll_interval_ms":10,
-                    "approved_artifact_hosts":["delivery.us.bfl.ai"]
-                }}
-            }]
-        }))
-        .unwrap();
-        let pricing = PricingCatalog::from_json(
-            serde_json::to_string(&json!({
-                "schema_version":2,
-                "catalog_version":catalog_version,
-                "rules":[
-                    {"rule_id":format!("flux-1k-{catalog_version}"),"provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1}]},
-                    {"rule_id":format!("flux-2k-{catalog_version}"),"provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1}]},
-                    {"rule_id":format!("flux-4k-{catalog_version}"),"provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1}]}
-                ]
-            }))
-            .unwrap()
-            .as_bytes(),
-        )
-        .unwrap();
-        ValidatedProviderCatalog::bind(
-            targets,
-            pricing,
-            &ProviderRegistry::production(&ArtifactLimits::default()),
-        )
-        .unwrap()
+        let _ = catalog_version;
+        supported_flux_catalog()
     }
 
     fn supported_flux_catalog() -> ValidatedProviderCatalog {
@@ -1579,7 +1460,12 @@ mod tests {
             "../../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let contract_definition = &document["contracts"][0];
+        let contract_definition = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["contract"] == "hubu.flux-2-pro.text-to-image/v1")
+            .unwrap();
         let mut target = contract_definition["target"].clone();
         target["secret_service"] = json!("gongbu.bfl.hubu-hub-172");
         target["secret_account"] = json!("pikachu-live-qualification-v1");
@@ -1617,6 +1503,70 @@ mod tests {
         catalog
     }
 
+    fn supported_shipped_catalog() -> ValidatedProviderCatalog {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let contracts = document["contracts"].as_array().unwrap();
+        let bindings = contracts
+            .iter()
+            .map(|contract| {
+                let policies = &contract["policies"];
+                json!({
+                    "contract":contract["contract"],
+                    "pricing_version":contract["pricing_version"],
+                    "poll_policy":policies["poll"],
+                    "artifact_delivery_policy":policies["artifact_delivery"],
+                    "recovery_policy":policies["recovery"],
+                    "generation_retries":policies["generation_retries"],
+                    "fallback":policies["fallback"]
+                })
+            })
+            .collect::<Vec<_>>();
+        let provider_configs = contracts
+            .iter()
+            .map(|contract| {
+                let mut target = contract["target"].clone();
+                let google = target["provider"] == "google";
+                target["secret_service"] = json!(if google {
+                    "operator.google"
+                } else {
+                    "operator.bfl"
+                });
+                target["secret_account"] = json!(if google { "gemini" } else { "flux" });
+                target
+            })
+            .collect::<Vec<_>>();
+        let rules = contracts
+            .iter()
+            .flat_map(|contract| contract["pricing_rules"].as_array().unwrap().clone())
+            .collect::<Vec<_>>();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version":3,
+            "contract_bindings":bindings,
+            "provider_configs":provider_configs
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version":2,
+                "catalog_version":"operator-shipped-composite-2026-09-01-v1",
+                "rules":rules
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut catalog = ValidatedProviderCatalog::bind(
+            targets,
+            pricing,
+            &ProviderRegistry::production(&ArtifactLimits::default()),
+        )
+        .unwrap();
+        catalog.mark_credential_references_present();
+        catalog
+    }
+
     fn flux_request(operation_key: &str, preset: Option<&str>, options: Option<Value>) -> Value {
         let mut input = json!({"prompt":"cat","image_count":1});
         if let Some(preset) = preset {
@@ -1630,10 +1580,9 @@ mod tests {
             "spend_auth_token_id":operation_key,
             "input":input,
             "input_schema_version":1,
-            "workload_type":"image_generation",
-            "provider":"flux",
-            "adapter":"flux2_api",
-            "model":"flux-2-pro"
+            "target_id":TargetKey::new("image_generation", "flux", "flux2_api", "flux-2-pro")
+                .unwrap()
+                .public_id()
         })
     }
 
@@ -1948,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn redaction_attestation_rejects_body_nonterminal_and_unfrozen_catalog() {
+    fn redaction_attestation_rejects_body_and_nonterminal_execution() {
         const CANARY: &str = "fixture-provider-secret-attestation-canary-9f83";
         let fixture = fixture();
         let api = supported_flux_attestation_api(&fixture, CANARY);
@@ -2021,7 +1970,7 @@ mod tests {
                     &[],
                 )
                 .status,
-            400
+            409
         );
     }
 
@@ -2110,7 +2059,7 @@ mod tests {
         let api = Api::new_with_authorization_resolver(
             fixture.repository.clone(),
             fixture.artifacts.clone(),
-            supported_flux_catalog(),
+            supported_shipped_catalog(),
             fixture.scheduler.clone(),
             i64::MAX,
             fixture.resolver.clone(),
@@ -2124,25 +2073,30 @@ mod tests {
         assert_eq!(response.status, 200);
         let value: Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema_version"], 1);
+        let contracts = value["contracts"].as_array().unwrap();
+        let ids = contracts
+            .iter()
+            .map(|contract| contract["contract"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            value["contracts"][0]["target"],
-            json!({
-                "workload_type":"image_generation","provider":"flux",
-                "adapter":"flux2_api","model":"flux-2-pro"
-            })
+            ids,
+            std::collections::BTreeSet::from([
+                "hubu.flux-2-pro.text-to-image/v1",
+                "hubu.gemini-3.1-flash-image.text-to-image/v1",
+                "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
+            ])
         );
-        assert_eq!(
-            value["contracts"][0]["capability"]["presets"][1]["width"],
-            1920
-        );
-        assert_eq!(
-            value["contracts"][0]["readiness"],
-            json!({
+        let gemini_full = contracts
+            .iter()
+            .find(|contract| contract["target"]["model"] == "gemini-3.1-flash-image")
+            .unwrap();
+        assert_eq!(gemini_full["capability"]["presets"][2]["width"], 4096);
+        assert!(contracts.iter().all(|contract| contract["readiness"]
+            == json!({
                 "configured":true,"credential_reference_present":true,
                 "production_validated":true,"live_qualified":false,
                 "live_qualification":"not_performed"
-            })
-        );
+            })));
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(!serialized.contains("secret_service"));
         assert!(!serialized.contains("secret_account"));
@@ -2161,10 +2115,9 @@ mod tests {
                 "options": {"height": 512, "width": 512}
             },
             "input_schema_version": 1,
-            "workload_type": "image_generation",
-            "provider": "example",
-            "adapter": "fixture",
-            "model": "image-v1"
+            "target_id": TargetKey::new("image_generation", "example", "fixture", "image-v1")
+                .unwrap()
+                .public_id()
         })
     }
 
@@ -2200,11 +2153,8 @@ mod tests {
     }
 
     #[test]
-    fn historical_create_fixture_matches_v1_schema() {
+    fn retired_v1_create_route_rejects_without_side_effects() {
         let raw = include_str!("../../../../fixtures/gongbu-create-execution-v1.json");
-        let request: CreateExecutionV1Request = serde_json::from_str(raw).unwrap();
-        assert_eq!(request.schema_version, 1);
-        assert_eq!(request.hubu_authorization_id, request.hubu_token_reference);
         let fixture = fixture();
         let response = fixture.api.handle(
             "POST",
@@ -2212,9 +2162,9 @@ mod tests {
             Some(&fixture.caller),
             raw.as_bytes(),
         );
-        assert_eq!(response.status, 200);
-        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 1);
+        assert_eq!(response.status, 404);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
     }
 
     fn call_create(fixture: &Fixture, request: &Value) -> HttpResponse {
@@ -2263,9 +2213,6 @@ mod tests {
         }
 
         let mut selected = request("target-id-selection");
-        for field in ["workload_type", "provider", "adapter", "model"] {
-            selected.as_object_mut().unwrap().remove(field);
-        }
         selected["target_id"] = json!(target_id);
         let created = call_create(&fixture, &selected);
         assert_eq!(created.status, 200);
@@ -2285,9 +2232,6 @@ mod tests {
             .target_id
             .clone();
         let mut selected = request("target-id-deactivation-replay");
-        for field in ["workload_type", "provider", "adapter", "model"] {
-            selected.as_object_mut().unwrap().remove(field);
-        }
         selected["target_id"] = json!(target_id);
         let created = execution(&call_create(&fixture, &selected));
 
@@ -2334,13 +2278,10 @@ mod tests {
     fn target_id_cannot_be_mixed_with_or_escape_the_operator_catalog() {
         let fixture = fixture();
         let mut mixed = request("mixed-target-selector");
-        mixed["target_id"] = json!(fixture.api.providers.execution_targets()[0].target_id);
+        mixed["provider"] = json!("example");
         assert_eq!(call_create(&fixture, &mixed).status, 400);
 
         let mut unknown = request("unknown-target-id");
-        for field in ["workload_type", "provider", "adapter", "model"] {
-            unknown.as_object_mut().unwrap().remove(field);
-        }
         unknown["target_id"] = json!(format!("gongbu:target:v1:{}", "0".repeat(64)));
         let response = call_create(&fixture, &unknown);
         assert_eq!(response.status, 400);
@@ -2552,27 +2493,15 @@ mod tests {
     }
 
     #[test]
-    fn v1_historical_envelope_translates_and_alias_mismatch_has_no_side_effects() {
+    fn v1_create_route_is_retired_without_side_effects() {
         let fixture = fixture();
         let legacy = legacy_request("legacy-token");
-        assert_eq!(call_create_v1(&fixture, &legacy).status, 200);
-        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
-        let schedules_before = fixture.scheduler.0.lock().unwrap().len();
-
-        let mut unequal = legacy_request("unequal-token");
-        unequal["hubu_authorization_id"] = json!("different-token");
-        let rejected = call_create_v1(&fixture, &unequal);
-        assert_eq!(rejected.status, 400);
-        let error: ErrorResponse = serde_json::from_slice(&rejected.body).unwrap();
-        assert_eq!(error.schema_version, 1);
-        assert_eq!(error.error.code, "legacy_token_alias_mismatch");
-        assert!(!error.error.message.contains("unequal-token"));
-        assert!(!error.error.message.contains("different-token"));
-        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), schedules_before);
+        assert_eq!(call_create_v1(&fixture, &legacy).status, 404);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
         assert!(fixture
             .repository
-            .get_execution_by_hubu_token("account-a", "unequal-token")
+            .get_execution_by_hubu_token("account-a", "legacy-token")
             .is_err());
     }
 
@@ -2594,7 +2523,7 @@ mod tests {
             let token = format!("legacy-{name}-mismatch");
             let mut request = legacy_request(&token);
             *request.pointer_mut(pointer).unwrap() = value;
-            assert_eq!(call_create_v1(&fixture, &request).status, 400, "{name}");
+            assert_eq!(call_create_v1(&fixture, &request).status, 404, "{name}");
             assert!(fixture
                 .repository
                 .get_execution_by_hubu_token("account-a", &token)
@@ -2714,43 +2643,10 @@ mod tests {
     }
 
     #[test]
-    fn historical_v1_envelope_replays_same_execution_after_restart() {
+    fn historical_v1_envelope_cannot_create_after_restart() {
         let fixture = fixture();
         let submitted = legacy_request("legacy-restart-token");
-        let created = execution(&call_create_v1(&fixture, &submitted));
-        let persisted = fixture
-            .repository
-            .get_execution(&created.execution_id)
-            .unwrap();
-        let preflighting = fixture
-            .repository
-            .update_execution(
-                &created.execution_id,
-                persisted.version,
-                &crate::execution::ExecutionUpdate {
-                    status: "preflighting".into(),
-                    outcome: None,
-                    started_at: None,
-                    completed_at: None,
-                    failure_code: None,
-                    failure_message_redacted: None,
-                    provider_outcome: None,
-                    artifact_outcome: None,
-                    settlement_outcome: None,
-                },
-                "2026-08-05T20:00:01Z",
-            )
-            .unwrap();
-        fixture
-            .repository
-            .set_claim(
-                &created.execution_id,
-                preflighting.version,
-                "persisted-claim",
-                "2026-08-05T20:00:02Z",
-            )
-            .unwrap();
-        let calls_before = fixture.resolver.calls.load(Ordering::SeqCst);
+        assert_eq!(call_create_v1(&fixture, &submitted).status, 404);
         let restarted_repository = Repository::open(
             fixture._root.path().join("gongbu.sqlite3"),
             crate::redaction::Redactor::default(),
@@ -2771,9 +2667,8 @@ mod tests {
             Some(&fixture.caller),
             &serde_json::to_vec(&submitted).unwrap(),
         );
-        assert_eq!(replay.status, 200);
-        assert_eq!(execution(&replay).execution_id, created.execution_id);
-        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), calls_before);
+        assert_eq!(replay.status, 404);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -2949,7 +2844,7 @@ mod tests {
         let fixture = fixture();
         let token = "unavailable-target";
         let mut unavailable = request(token);
-        unavailable["workload_type"] = json!("text_generation");
+        unavailable["target_id"] = json!(format!("gongbu:target:v1:{}", "0".repeat(64)));
 
         let response = call_create(&fixture, &unavailable);
 
@@ -2962,12 +2857,7 @@ mod tests {
                     code: "invalid_request".into(),
                     message: "request validation failed".into(),
                     reason_code: Some("target_not_selectable".into()),
-                    fields: Some(
-                        ["workload_type", "provider", "adapter", "model"]
-                            .into_iter()
-                            .map(str::to_owned)
-                            .collect(),
-                    ),
+                    fields: Some(["target_id"].into_iter().map(str::to_owned).collect()),
                 },
             }
         );
@@ -3078,7 +2968,7 @@ mod tests {
             );
             assert_eq!(
                 snapshot.pricing_rule_id,
-                format!("flux-{preset}-flux-prices-v1")
+                format!("bfl-flux-2-pro-{preset}-2026-08-28-v1")
             );
         }
         assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 3);
@@ -3183,8 +3073,8 @@ mod tests {
         assert_eq!(after.normalized_input["options"]["width"], 1920);
         assert_eq!(after.normalized_input["options"]["height"], 1088);
         let snapshot: PricingSnapshot = serde_json::from_value(after.pricing_snapshot).unwrap();
-        assert_eq!(snapshot.catalog_version, "flux-prices-v1");
-        assert_eq!(snapshot.pricing_rule_id, "flux-2k-flux-prices-v1");
+        assert_eq!(snapshot.catalog_version, "bfl-flux-2-pro-usd-2026-08-28-v1");
+        assert_eq!(snapshot.pricing_rule_id, "bfl-flux-2-pro-2k-2026-08-28-v1");
         assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
     }
 

@@ -6,8 +6,5 @@
     "image_count": 1
   },
   "input_schema_version": 1,
-  "workload_type": "image_generation",
-  "provider": "google",
-  "adapter": "gemini_developer_image",
-  "model": "gemini-3.1-flash-lite-image"
+  "target_id": "gongbu:target:v1:22bbe5d9d272af3d7146f88cdfe4dfe4affc77f72fe0a7cb0ac41a727cbd59a6"
 }
