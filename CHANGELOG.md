@@ -24,7 +24,7 @@ Future release template
 
 ## Unreleased
 
-<!-- Draft release target: v0.2.1. -->
+## v0.2.1-rc.1 — 2026-09-01
 
 ### Highlights
 

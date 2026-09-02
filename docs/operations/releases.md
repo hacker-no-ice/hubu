@@ -23,9 +23,9 @@ The distribution exposes two independent versions:
 Every release channel requires an explicit workflow dispatch. A manual canary
 dispatch publishes at most one prerelease for each exact `main` commit, tagged
 `main-<full-source-commit>`. There is no mutable latest-main artifact.
-Versioned release candidates use immutable `vX.Y.Z-rc.N` tags for human
-validation before stable promotion. No channel replaces an existing tag or
-asset.
+Versioned release candidates may use immutable `vX.Y.Z-rc.N` tags when a
+release needs prerelease testing before stable publication. No channel replaces
+an existing tag or asset.
 
 The changelog presents stable release history. While a release line is under
 validation, its top entry must use the active candidate version so the release
@@ -221,15 +221,15 @@ the request never moves the tag or replaces an asset.
 
 ## Publish a release candidate
 
-After validating a commit-addressed canary, publish a versioned candidate for
-human testing:
+When a release needs prerelease testing, publish a versioned candidate from a
+validated commit-addressed canary:
 
 ```sh
 gh workflow run release.yml \
   --repo hacker-no-ice/hubu \
   --ref main \
   -f channel=candidate \
-  -f version=v0.2.0-rc.2 \
+  -f version=v0.2.1-rc.1 \
   -f source_commit=FULL_40_CHARACTER_COMMIT_SHA
 ```
 
@@ -237,25 +237,25 @@ Release-candidate tags and assets are immutable. If testing finds a problem,
 publish the fix from a new `main` commit as the next candidate number. Never
 replace an existing candidate.
 
-## Promote a stable release
+## Publish a stable release
 
-Validate the candidate, both native source-install builds, and the secondary
-published-archive smoke jobs, then dispatch the stable promotion from the same
-source commit:
+Validate the intended source commit in CI and, when used, as a release
+candidate. Then dispatch the stable release from that exact source commit:
 
 ```sh
 gh workflow run release.yml \
   --repo hacker-no-ice/hubu \
   --ref main \
   -f channel=stable \
-  -f version=v0.2.0 \
+  -f version=v0.2.1 \
   -f source_commit=FULL_40_CHARACTER_COMMIT_SHA
 ```
 
-Promotion reruns formatting, Clippy, locked workspace tests, integration and
-packaging checks, the exact-tag source installer on Intel and Apple silicon,
-archive verification, and native published-asset smoke tests. Ordinary release
-validation never supplies provider credentials or enables provider spend.
+Stable publication reruns formatting, Clippy, locked workspace tests,
+integration and packaging checks, the exact-tag source installer on Intel and
+Apple silicon, archive verification, and native published-asset smoke tests.
+Ordinary release validation never supplies provider credentials or enables
+provider spend.
 
 ## Rollback and retention
 

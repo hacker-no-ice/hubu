@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "gongbu-api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "base64",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "gongbu-build-info"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
 ]
@@ -910,7 +910,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hubu-api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-bench"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-common"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "serde",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "hubu-common",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-unified-mcp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-wallet"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "hubu-common",
