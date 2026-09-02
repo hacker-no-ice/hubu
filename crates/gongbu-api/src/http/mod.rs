@@ -17,7 +17,7 @@ use crate::{
         registry::{ExecutionTarget, ValidatedProviderCatalog},
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, TargetKey},
-    temporal::ExecutionScheduler,
+    temporal::{ExecutionScheduler, ScheduleError},
     workflow::{OperatorReconciliationRequest, ReconciliationAction},
 };
 use chrono::DateTime;
@@ -250,6 +250,13 @@ impl ApiError {
             "execution is not ready for redaction attestation",
         )
     }
+    fn not_ready() -> Self {
+        Self::new(
+            503,
+            "not_ready",
+            "execution admission is temporarily unavailable",
+        )
+    }
     fn internal() -> Self {
         Self::new(500, "internal_error", "request could not be completed")
     }
@@ -456,7 +463,7 @@ impl Api {
                 if existing.status == "pending" {
                     self.scheduler
                         .schedule(&existing.execution_id)
-                        .map_err(|_| ApiError::internal())?;
+                        .map_err(map_schedule_error)?;
                 }
                 return Ok(json_response(
                     200,
@@ -477,7 +484,7 @@ impl Api {
             if existing.status == "pending" {
                 self.scheduler
                     .schedule(&existing.execution_id)
-                    .map_err(|_| ApiError::internal())?;
+                    .map_err(map_schedule_error)?;
             }
             return Ok(json_response(
                 200,
@@ -630,7 +637,7 @@ impl Api {
         }
         self.scheduler
             .schedule(&execution.execution_id)
-            .map_err(|_| ApiError::internal())?;
+            .map_err(map_schedule_error)?;
         Ok(json_response(
             200,
             &execution_response(&self.repository, execution, response_schema_version)?,
@@ -676,7 +683,7 @@ impl Api {
                     evidence: request.evidence,
                 },
             )
-            .map_err(|_| ApiError::internal())?;
+            .map_err(map_schedule_error)?;
         Ok(json_response(
             202,
             &execution_response(&self.repository, execution, V1_SCHEMA_VERSION)?,
@@ -1141,6 +1148,12 @@ fn map_persistence(error: PersistenceError) -> ApiError {
     }
 }
 
+fn map_schedule_error(error: ScheduleError) -> ApiError {
+    match error {
+        ScheduleError::Unavailable => ApiError::not_ready(),
+    }
+}
+
 fn map_attestation_error(error: AttestationError) -> ApiError {
     match error {
         AttestationError::NotFound => ApiError::not_found(),
@@ -1218,7 +1231,7 @@ mod tests {
     use std::{
         io::Cursor,
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Barrier,
         },
         thread,
@@ -1263,9 +1276,12 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Scheduler(std::sync::Mutex<Vec<String>>);
+    struct Scheduler(std::sync::Mutex<Vec<String>>, AtomicBool);
     impl ExecutionScheduler for Scheduler {
-        fn schedule(&self, execution_id: &str) -> Result<(), String> {
+        fn schedule(&self, execution_id: &str) -> Result<(), ScheduleError> {
+            if self.1.load(Ordering::SeqCst) {
+                return Err(ScheduleError::Unavailable);
+            }
             self.0.lock().unwrap().push(execution_id.into());
             Ok(())
         }
@@ -1273,7 +1289,10 @@ mod tests {
             &self,
             execution_id: &str,
             _: OperatorReconciliationRequest,
-        ) -> Result<(), String> {
+        ) -> Result<(), ScheduleError> {
+            if self.1.load(Ordering::SeqCst) {
+                return Err(ScheduleError::Unavailable);
+            }
             self.0
                 .lock()
                 .unwrap()
@@ -2339,6 +2358,46 @@ mod tests {
     }
 
     #[test]
+    fn scheduling_unavailability_preserves_pending_execution_for_retry() {
+        let fixture = fixture();
+        let submitted = request("temporal-unavailable-retry");
+        fixture.scheduler.1.store(true, Ordering::SeqCst);
+
+        let first = call_create(&fixture, &submitted);
+        assert_eq!(first.status, 503);
+        assert_eq!(error(&first).error.code, "not_ready");
+        let pending = fixture
+            .repository
+            .get_execution_by_spend_auth_token("temporal-unavailable-retry")
+            .unwrap();
+        assert_eq!(pending.status, "pending");
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
+
+        let retry_while_unavailable = call_create(&fixture, &submitted);
+        assert_eq!(retry_while_unavailable.status, 503);
+        assert_eq!(
+            fixture
+                .repository
+                .get_execution_by_spend_auth_token("temporal-unavailable-retry")
+                .unwrap()
+                .execution_id,
+            pending.execution_id
+        );
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+
+        fixture.scheduler.1.store(false, Ordering::SeqCst);
+        let recovered = call_create(&fixture, &submitted);
+        assert_eq!(recovered.status, 200);
+        assert_eq!(execution(&recovered).execution_id, pending.execution_id);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.scheduler.0.lock().unwrap().as_slice(),
+            [pending.execution_id.as_str()]
+        );
+    }
+
+    #[test]
     fn elapsed_timing_rejects_missing_malformed_and_negative_boundaries() {
         assert_eq!(
             elapsed_ms(
@@ -2754,6 +2813,17 @@ mod tests {
             )
             .unwrap();
         let body=serde_json::to_vec(&json!({"schema_version":1,"action_id":"op-1","action":"reinspect","evidence":{"source":"operator"}})).unwrap();
+        fixture.scheduler.1.store(true, Ordering::SeqCst);
+        let unavailable = fixture.api.handle(
+            "POST",
+            &format!("/v1/executions/{}/reconciliation", created.execution_id),
+            Some(&fixture.caller),
+            &body,
+        );
+        assert_eq!(unavailable.status, 503);
+        assert_eq!(error(&unavailable).error.code, "not_ready");
+
+        fixture.scheduler.1.store(false, Ordering::SeqCst);
         assert_eq!(
             fixture
                 .api

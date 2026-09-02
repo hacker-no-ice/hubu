@@ -24,6 +24,12 @@ Future release template
 
 ## Unreleased
 
+### Important fixes
+
+- Keep Gongbu live during runtime Temporal or Hubu degradation, withdraw and
+  automatically restore readiness, and preserve pending execution identity
+  across retryable scheduling failures.
+
 ## v0.2.1-rc.1 — 2026-09-01
 
 ### Highlights

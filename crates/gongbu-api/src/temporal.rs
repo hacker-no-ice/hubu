@@ -63,14 +63,30 @@ impl TemporalWorkerConfig {
 }
 
 /// Ask Temporal for the active workflow pollers on Gongbu's configured queue.
-/// This is used as both the startup polling proof and the runtime fail-closed
-/// dependency check.
+/// This is startup proof only; runtime health uses [`temporal_is_reachable`].
 pub async fn worker_is_polling(
     client: &Client,
     namespace: &str,
     task_queue: &str,
 ) -> Result<bool, temporalio_client::tonic::Status> {
     run_worker_poll_probe(|| describe_worker_pollers(client, namespace, task_queue)).await
+}
+
+/// Prove that Temporal remains reachable after startup. A successful task-queue
+/// description is reachability evidence even when its historical poller list is
+/// empty; only startup uses that list as proof that Gongbu's worker is polling.
+pub async fn temporal_is_reachable(
+    client: &Client,
+    namespace: &str,
+    task_queue: &str,
+) -> Result<(), temporalio_client::tonic::Status> {
+    runtime_reachability(worker_is_polling(client, namespace, task_queue).await)
+}
+
+fn runtime_reachability(
+    poller_probe: Result<bool, temporalio_client::tonic::Status>,
+) -> Result<(), temporalio_client::tonic::Status> {
+    poller_probe.map(|_| ())
 }
 
 async fn run_worker_poll_probe<F, Fut>(
@@ -752,13 +768,19 @@ pub async fn run_worker(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ScheduleError {
+    #[error("execution scheduler unavailable")]
+    Unavailable,
+}
+
 pub trait ExecutionScheduler: Send + Sync + 'static {
-    fn schedule(&self, execution_id: &str) -> Result<(), String>;
+    fn schedule(&self, execution_id: &str) -> Result<(), ScheduleError>;
     fn reconcile(
         &self,
         execution_id: &str,
         request: OperatorReconciliationRequest,
-    ) -> Result<(), String>;
+    ) -> Result<(), ScheduleError>;
 }
 
 #[derive(Clone)]
@@ -772,7 +794,7 @@ impl TemporalExecutionScheduler {
     }
 }
 
-type ScheduleResult = Result<(), String>;
+type ScheduleResult = Result<(), ScheduleError>;
 enum SchedulerCommand {
     Start(String),
     Reconcile(String, OperatorReconciliationRequest),
@@ -923,32 +945,29 @@ pub fn start_worker_with_config(
 }
 
 impl ExecutionScheduler for TemporalExecutionScheduler {
-    fn schedule(&self, execution_id: &str) -> Result<(), String> {
+    fn schedule(&self, execution_id: &str) -> Result<(), ScheduleError> {
         let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
         self.requests
             .send((
                 SchedulerCommand::Start(execution_id.to_owned()),
                 response_tx,
             ))
-            .map_err(|_| "Temporal scheduler stopped".to_owned())?;
-        response_rx
-            .recv()
-            .map_err(|_| "Temporal scheduler stopped".to_owned())?
+            .map_err(|_| ScheduleError::Unavailable)?;
+        response_rx.recv().map_err(|_| ScheduleError::Unavailable)?
     }
     fn reconcile(
         &self,
         execution_id: &str,
         request: OperatorReconciliationRequest,
-    ) -> Result<(), String> {
+    ) -> Result<(), ScheduleError> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.requests
             .send((
                 SchedulerCommand::Reconcile(execution_id.to_owned(), request),
                 tx,
             ))
-            .map_err(|_| "Temporal scheduler stopped".to_owned())?;
-        rx.recv()
-            .map_err(|_| "Temporal scheduler stopped".to_owned())?
+            .map_err(|_| ScheduleError::Unavailable)?;
+        rx.recv().map_err(|_| ScheduleError::Unavailable)?
     }
 }
 
@@ -969,7 +988,7 @@ async fn start_execution(
         )
         .await
         .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|_| ScheduleError::Unavailable)
 }
 
 fn execution_start_options(execution_id: &str, task_queue: &str) -> WorkflowStartOptions {
@@ -1005,7 +1024,7 @@ async fn signal_reconciliation(
             WorkflowSignalOptions::default(),
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|_| ScheduleError::Unavailable)
 }
 
 #[cfg(test)]
@@ -1056,6 +1075,12 @@ mod tests {
 
         assert!(result.unwrap());
         assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn empty_poller_list_is_runtime_reachability_evidence() {
+        assert!(runtime_reachability(Ok(false)).is_ok());
+        assert!(runtime_reachability(Ok(true)).is_ok());
     }
 
     #[tokio::test]
