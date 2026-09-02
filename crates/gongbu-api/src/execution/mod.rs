@@ -2965,6 +2965,38 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_fixture_metadata_persists_while_service_credentials_remain_guarded() {
+        const CALLER_SECRET: &str = "sandbox-caller-capability-181";
+        const HUBU_SECRET: &str = "sandbox-hubu-capability-181";
+        let repository = Repository::in_memory_with_redactor(Redactor::new([
+            CALLER_SECRET.as_bytes(),
+            HUBU_SECRET.as_bytes(),
+        ]))
+        .unwrap();
+        let mut request = new("sandbox-account", "sandbox-operation");
+        request.provider = "sandbox".into();
+        request.adapter = "fixture".into();
+        request.model = "deterministic-image-v1".into();
+        request.provider_config_version = "hubu-sandbox-fixture-v1".into();
+        request.normalized_input = json!({"prompt":"prompt mentions sandbox-fixture"});
+        request.pricing_snapshot["provider"] = json!("sandbox");
+        request.pricing_snapshot["model"] = json!("deterministic-image-v1");
+
+        let execution = repository.create_execution(&request).unwrap();
+        assert_eq!(execution.provider_config_version, "hubu-sandbox-fixture-v1");
+        assert_eq!(
+            execution.normalized_input,
+            json!({"prompt":"prompt mentions sandbox-fixture"})
+        );
+
+        request.operation_key = CALLER_SECRET.into();
+        assert!(matches!(
+            repository.create_execution(&request),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
+    }
+
+    #[test]
     fn canary_secret_is_redacted_from_failures_and_rejected_from_records() {
         const CANARY: &str = "gongbu-canary-provider-secret-7c91";
         let r = Repository::in_memory_with_redactor(Redactor::new([CANARY.as_bytes()])).unwrap();
