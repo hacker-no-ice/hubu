@@ -102,13 +102,15 @@ when it returns gRPC `Code::Cancelled`. If that confirmation is also cancelled,
 the monitor keeps tracking the failure count and original grace-window start,
 but preserves readiness only when startup already supplied the positive poller
 proof and only while the window remains strictly below 30 seconds. Cancellation
-never establishes or restores readiness. `Ok(false)`, every non-cancelled
-Temporal error, and any Hubu failure withdraw readiness and new execution
-admission immediately. A healthy sample restores readiness only after all
-dependencies are healthy and resets its own failure window; any uninterrupted
-failure sequence, including cancellations, withdraws readiness and shuts down
-at the grace boundary. Runtime probe intervals are capped at the grace duration
-so shutdown is re-evaluated within the documented bound.
+never establishes or restores readiness. Every successful Temporal task-queue
+RPC confirms runtime reachability, including a response with an empty historical
+poller list. Every non-cancelled Temporal error and any Hubu failure withdraw
+readiness and new execution admission immediately. A healthy sample restores
+readiness only after all dependencies are healthy and resets its own failure
+window. An uninterrupted cancellation sequence withdraws readiness at the
+grace boundary, but dependency observations never terminate Gongbu. Runtime
+probe intervals are capped at the grace duration so readiness is re-evaluated
+within the documented bound while recovery probing continues.
 
 The `gongbu_dependency_probe` log event records only the dependency, outcome,
 consecutive monitor-sample count, and a redacted gRPC status code when

@@ -683,7 +683,7 @@ impl Api {
                     evidence: request.evidence,
                 },
             )
-            .map_err(|_| ApiError::internal())?;
+            .map_err(map_schedule_error)?;
         Ok(json_response(
             202,
             &execution_response(&self.repository, execution, V1_SCHEMA_VERSION)?,
@@ -1290,6 +1290,9 @@ mod tests {
             execution_id: &str,
             _: OperatorReconciliationRequest,
         ) -> Result<(), ScheduleError> {
+            if self.1.load(Ordering::SeqCst) {
+                return Err(ScheduleError::Unavailable);
+            }
             self.0
                 .lock()
                 .unwrap()
@@ -2810,6 +2813,17 @@ mod tests {
             )
             .unwrap();
         let body=serde_json::to_vec(&json!({"schema_version":1,"action_id":"op-1","action":"reinspect","evidence":{"source":"operator"}})).unwrap();
+        fixture.scheduler.1.store(true, Ordering::SeqCst);
+        let unavailable = fixture.api.handle(
+            "POST",
+            &format!("/v1/executions/{}/reconciliation", created.execution_id),
+            Some(&fixture.caller),
+            &body,
+        );
+        assert_eq!(unavailable.status, 503);
+        assert_eq!(error(&unavailable).error.code, "not_ready");
+
+        fixture.scheduler.1.store(false, Ordering::SeqCst);
         assert_eq!(
             fixture
                 .api
