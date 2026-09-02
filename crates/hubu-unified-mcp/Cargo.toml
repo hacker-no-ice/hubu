@@ -1,6 +1,6 @@
 [package]
 name = "hubu-unified-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Unified Model Context Protocol router for Hubu and Gongbu"
 edition.workspace = true
 homepage.workspace = true

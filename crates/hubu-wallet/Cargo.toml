@@ -1,6 +1,6 @@
 [package]
 name = "hubu-wallet"
-version = "0.2.0"
+version = "0.2.1"
 description = "Payment orchestration, mock rails, and double-entry ledger for Hubu"
 edition.workspace = true
 homepage.workspace = true

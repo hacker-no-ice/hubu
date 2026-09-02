@@ -1,6 +1,6 @@
 [package]
 name = "hubu-common"
-version = "0.2.0"
+version = "0.2.1"
 description = "Shared identity, ownership, session, and account models for Hubu"
 edition.workspace = true
 homepage.workspace = true
