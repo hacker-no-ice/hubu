@@ -1709,9 +1709,13 @@ mod tests {
             "api.us1.bfl.ai",
         ] {
             let polling_url = format!("https://{host}/v1/get_result?id=op-1");
+            // The verified incident recovery used authenticated polling on
+            // api.us.bfl.ai and a separate credential-free signed artifact on
+            // delivery.us2.bfl.ai. SecurityFixture's artifact boundary accepts
+            // no credential argument, so this also guards against x-key reuse.
             let signed_artifact =
-                "https://delivery.us.bfl.ai/out.png?signature=artifact-url-canary";
-            let (adapter, traffic) = security_fixture(
+                "https://delivery.us2.bfl.ai/durable/sample.jpeg?sig=artifact-url-canary";
+            let (template, traffic) = security_fixture(
                 202,
                 json!({"id":"op-1","polling_url":polling_url.clone()}),
                 vec![(
@@ -1719,6 +1723,11 @@ mod tests {
                     json!({"id":"op-1","status":"Ready","result":{"sample":signed_artifact}}),
                 )],
             );
+            let mut regional_delivery = config();
+            regional_delivery.approved_artifact_hosts.clear();
+            let adapter =
+                Flux2ApiAdapter::new(regional_delivery, MODEL_ID.into(), template.transport)
+                    .unwrap();
             let outcome = adapter
                 .invoke(
                     &request(),
@@ -1737,7 +1746,7 @@ mod tests {
             );
             let persisted_shape = serde_json::to_string(&outcome).unwrap();
             assert!(!persisted_shape.contains("artifact-url-canary"));
-            assert!(!persisted_shape.contains("delivery.us.bfl.ai"));
+            assert!(!persisted_shape.contains("delivery.us2.bfl.ai"));
         }
     }
 
@@ -1974,6 +1983,7 @@ mod tests {
     fn bfl_delivery_host_policy_is_exactly_one_safe_region_label() {
         for host in [
             "delivery.us.bfl.ai",
+            "delivery.us2.bfl.ai",
             "delivery.eu-1.bfl.ai",
             "delivery.us1.bfl.ai",
         ] {

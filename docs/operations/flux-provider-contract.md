@@ -151,6 +151,15 @@ generation. If transmission may have happened but the checkpoint did not
 commit, preserve the execution for reconciliation instead of retrying or
 releasing the claim.
 
+For the HUB-200 incident, `api.us.bfl.ai` was a reconstructed documented
+endpoint that successfully returned the stored operation as `Ready`; the exact
+provider-returned polling URL had already been discarded and must not be
+inferred from that recovery. The resulting signed artifact used
+`delivery.us2.bfl.ai`. These are intentionally different trust classes:
+`x-key` is sent only to a literal approved API origin, while an HTTPS
+`delivery.<region>.bfl.ai` URL is fetched immediately without `x-key`, with the
+complete signed URL treated as ephemeral and never logged or persisted.
+
 If a returned polling origin is rejected after submission, the execution detail
 contains only the URL fingerprint, normalized origin fields, fixed path shape,
 query-key names, validation reason, policy version, operation/correlation IDs,

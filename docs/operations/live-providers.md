@@ -173,6 +173,12 @@ literal documented `api.us1.bfl.ai` cluster origin. A rejected post-submit URL
 is checkpointed only as sanitized recovery evidence, with recovery-first,
 do-not-resubmit guidance; explicit reconciliation can poll the same operation
 after an approved policy correction.
+HUB-200 recovery verified the stored operation as `Ready` through the
+documented `api.us.bfl.ai` router and returned a signed
+`delivery.us2.bfl.ai` artifact. The original provider-returned polling URL was
+not retained, so do not describe the reconstructed router as the observed
+origin. Polling receives `x-key`; delivery never does, and the signed artifact
+URL is fetched immediately without being logged or persisted.
 
 The shipped provider contract is production-validated but not live-qualified;
 its catalog reports `live_qualified = false` and
