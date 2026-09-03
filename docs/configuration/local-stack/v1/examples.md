@@ -1,285 +1,192 @@
-# Complete local stack configuration examples
+# Complete local stack examples
 
-These examples show the relationships among all three source files. Replace
-every active `/absolute/...` path and public ID with values from your
-installation. Managed service credential locations are not active fields in
-these examples; the launcher selects them internally.
+Use a separate profile directory for each outcome. `hubu stack init` writes the
+complete topology and source files for that outcome; do not copy a hand-written
+`stack.toml` between modes.
 
-## Sandbox outcome
+## Keep sandbox and live profiles separate
 
-This is the recommended first profile. Initialization writes the complete
-Hubu, Gongbu, and Temporal topology plus a deterministic fixture target and
-synthetic pricing:
+Do not switch one profile back and forth between `sandbox` and `live`. Separate
+profiles isolate provider credentials, spend acknowledgement, frozen catalogs,
+generated generations, runtime state, databases, artifacts, and logs. Each flow
+below explicitly selects its new profile immediately after initialization so
+later `hubu stack` commands use the intended configuration. Check the current
+selection at any time with:
 
 ```sh
-hubu stack init --mode sandbox --install-temporal --profile /absolute/path/to/profile
-hubu stack doctor --profile /absolute/path/to/profile
+hubu stack profiles
 ```
 
-Internal authentication, governance, authorization, execution submission,
-receipts, and settlement use the real stack boundaries. Only the external
-provider edge is replaced. Sandbox configuration contains no provider
-credential, live-spend ceiling, or acknowledgement and cannot contact or
-charge an external provider.
+This makes the non-billable default easy to recover, keeps live credentials out
+of sandbox state, and makes the active spend boundary visible in the selected
+profile path. Stop the active managed stack before selecting and starting
+another profile when their default local ports overlap.
 
-## Provider-disabled local-stack variation
+## Sandbox: complete stack without live spend
 
-This advanced variation manages Hubu, Gongbu, and local Temporal while
-omitting all provider targets. It is useful for dependency diagnostics but,
-unlike sandbox mode, cannot demonstrate governed provider execution.
+Sandbox is the recommended first profile and a zero-edit outcome. It runs the
+real Hubu, Gongbu, and Temporal boundaries but replaces the external provider
+edge with a deterministic, non-billable fixture:
 
-### `stack.toml`
-
-```toml
-schema_version = 1
-mode = "local-stack"
-allow_development_builds = false
-
-[binaries]
-hubu = "/absolute/path/to/hubu"
-hubu_server = "/absolute/path/to/hubu-server"
-gongbu_server = "/absolute/path/to/gongbu-server"
-hubu_unified_mcp = "/absolute/path/to/hubu-unified-mcp"
-
-[hubu]
-ownership = "managed"
-endpoint = "http://127.0.0.1:8787"
-listen = "127.0.0.1:8787"
-database_path = "/absolute/path/to/profile/state/hubu/hubu.sqlite3"
-log_file = "/absolute/path/to/profile/state/hubu/hubu.jsonl"
-
-[gongbu]
-ownership = "managed"
-endpoint = "http://127.0.0.1:8788"
-listen = "127.0.0.1:8788"
-database_path = "/absolute/path/to/profile/state/gongbu/gongbu.sqlite3"
-artifact_root = "/absolute/path/to/profile/state/gongbu/artifacts"
-log_file = "/absolute/path/to/profile/state/gongbu/gongbu.jsonl"
-
-[temporal]
-mode = "managed_local"
-binary_path = "/absolute/path/to/temporal"
-# Copy the exact version printed by the selected Temporal CLI.
-expected_cli_version = "REPLACE_WITH_EXACT_INSTALLED_VERSION"
-data_path = "/absolute/path/to/profile/state/temporal"
-rpc_port = 7233
-ui_port = 8233
-namespace = "default"
-task_queue = "gongbu-local-executions"
-ui_url = "http://127.0.0.1:8233"
-
-[runtime]
-hubu_startup_policy = "wait"
-hubu_startup_timeout_ms = 30000
-recovery_delays_seconds = [30, 120, 600]
-temporal_startup_timeout_ms = 30000
-dependency_check_interval_ms = 5000
-worker_drain_timeout_ms = 30000
-max_artifacts_per_execution = 4
-max_encoded_bytes = 20971520
-max_decoded_bytes = 104857600
-max_width = 16384
-max_height = 16384
-log_level = "info"
-log_format = "text"
+```sh
+hubu stack init --mode sandbox --install-temporal \
+  --profile /absolute/path/to/hubu-sandbox
+hubu stack select --profile /absolute/path/to/hubu-sandbox
+hubu stack doctor
 ```
 
-### `credentials.toml`
+Initialization writes the complete managed topology, fixture target, and
+synthetic frozen pricing. The generated profile contains no provider
+credential, live-spend ceiling, or live-spend acknowledgement. When doctor
+reports `ready_to_render`, the profile is ready for `hubu stack start` without
+an operator edit.
 
-Managed Hubu and Gongbu need no service credential references. The final Hubu
-process and the Gongbu-owned handoff provision them during `stack start`.
+## Hubu-only: governance without an execution plane
 
-```toml
-schema_version = 1
+Hubu-only is also a zero-edit outcome:
+
+```sh
+hubu stack init --mode hubu-only --profile /absolute/path/to/hubu-only
+hubu stack select --profile /absolute/path/to/hubu-only
+hubu stack doctor
 ```
 
-### `providers.toml`
-
-Disabled means every live-only field and table is absent.
+The generated `stack.toml` deliberately omits Gongbu and Temporal. Its
+`providers.toml` is:
 
 ```toml
 schema_version = 1
 mode = "disabled"
 ```
 
-### Validate the disabled profile
+Doctor reports Gongbu, Temporal, and provider execution as intentionally
+absent rather than unhealthy. This profile supports registration, policy,
+authorization, and budget administration without adopting provider execution.
+
+## Live: Gemini Developer API and FLUX.2
+
+Use live mode only in its own profile after the sandbox profile is healthy.
+With the four Hubu binaries and the Temporal CLI discoverable, initialization
+writes the complete managed `stack.toml`; the operator edits only the provider
+references and selections shown below:
 
 ```sh
-hubu stack doctor --profile /absolute/path/to/profile
+hubu stack init --mode local-stack --install-temporal \
+  --profile /absolute/path/to/hubu-live
+hubu stack select --profile /absolute/path/to/hubu-live
 ```
 
-Doctor should move from `incomplete` to `ready_to_render` after every topology
-path, port, version, and explicit reference is valid. Before first start it
-reports the derived managed credentials as pending managed work. Provider
-readiness is reported separately as disabled.
+This example enables both shipped Gemini Developer API image contracts and the
+FLUX.2 Pro contract. Live execution can incur provider charges after this
+profile is validated, rendered, activated, started, and selected for a governed
+request.
 
-## Hubu-only outcome
+### Store two provider credentials in macOS Keychain
 
-Hubu-only mode deliberately removes the execution plane:
+Create the Google AI Studio API key and BFL API key with **Keychain Access**.
+The two items must use different lookup coordinates. In Hubu configuration:
 
-```sh
-hubu stack init --mode hubu-only --profile /absolute/path/to/profile
-```
+- `service` maps to the Keychain Access **Where** field;
+- `account` maps to the Keychain Access **Account** field; and
+- a matching **Name** alone is insufficient because Gongbu looks up the exact
+  **Where** and **Account** pair.
 
-Its `stack.toml` contains `mode = "hubu-only"`, `[binaries]`, `[hubu]`, and
-`[runtime]`. It omits `[gongbu]`, `[temporal]`, and `binaries.gongbu_server`.
-Its provider source is intentionally minimal:
+Use the same non-secret **Where** and **Account** values below. Hubu and Gongbu
+must run as the macOS user allowed to access these Keychain items. Doctor checks
+that each exact reference exists without retrieving or printing its value.
 
-```toml
-schema_version = 1
-mode = "disabled"
-```
+### Edit credentials.toml
 
-The generated unified-MCP handoff contains only Hubu endpoint and credential
-references. Missing Gongbu and Temporal are reported as intentionally absent,
-not as unhealthy services. Operator-owned workflows may use Hubu registration,
-policy, authorization, and budget contracts without adopting Gongbu provider
-execution.
-
-## FLUX.2 provider contract
-
-This is the ready-to-render provider shape for
-`hubu.flux-2-pro.text-to-image/v1`. Use the complete managed `stack.toml` from
-the disabled example. The operator supplies only the non-secret Keychain
-coordinates and explicit spend choices; the target, policies, dimensions, and
-pricing come from the frozen contract.
-
-### `credentials.toml`
-
-Create and store the key yourself with macOS Keychain Access. Never put the key
-in this file, a terminal, environment variable, command, log, SQLite database,
-or documentation.
+`credentials.toml` contains lookup coordinates only, never credential values:
 
 ```toml
 schema_version = 1
 
-[opaque.bfl_flux2_pro]
-service = "operator-owned BFL Keychain service"
-account = "operator-owned BFL Keychain account"
-```
-
-### `providers.toml`
-
-```toml
-schema_version = 1
-mode = "live"
-
-# Example only: replace with the positive USD-cent ceiling you reviewed.
-maximum_spend_minor = 8
-live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
-
-[[contract_bindings]]
-contract = "hubu.flux-2-pro.text-to-image/v1"
-credential = "bfl_flux2_pro"
-```
-
-The contract-only catalog derives
-`bfl-flux-2-pro-usd-2026-08-28-v1`; do not copy the target or its three pricing
-rules into raw tables. Run `hubu stack catalog --json`, doctor, and render to
-review exact target, resolutions, rational USD rates, and independent readiness
-facts without contacting BFL. `live_qualified` remains false with
-`not_performed` in this release. Apply the shared [live provider operations
-guide](../../../operations/live-providers.md), then follow the
-[FLUX.2 provider contract](../../../operations/flux-provider-contract.md).
-
-## Representative provider-contract configuration
-
-The shipped contracts supply authoritative targets and frozen prices. This
-example is deliberately **not credential-ready**: replace the Keychain
-coordinates and composite version label before activation.
-
-Live execution can incur charges after a verified configuration is rendered, activated, started, and used.
-
-### `stack.toml`
-
-Use the same complete `stack.toml` from the
-[provider-disabled local-stack variation](#provider-disabled-local-stack-variation).
-Provider mode does not merge Hubu and Gongbu or change their topology. Register
-and fund each agent in Hubu after startup; registration does not change the
-stack generation or Gongbu configuration.
-
-### `credentials.toml`
-
-Add only opaque references; both Gemini targets can reuse the Google alias:
-
-```toml
-schema_version = 1
-
-# Replace these with the operator-created Keychain coordinates.
-[opaque.google_gemini_developer]
-service = "operator.google.REPLACE"
+[opaque.google_gemini]
+service = "operator.google.gemini"
 account = "gemini-image"
 
-[opaque.bfl_flux2_pro]
-service = "operator.bfl.REPLACE"
+[opaque.bfl_flux]
+service = "operator.bfl.flux"
 account = "flux-image"
 ```
 
-### `providers.toml`
+The opaque table names are local aliases. Both Gemini contracts intentionally
+share `google_gemini`; FLUX uses the separate `bfl_flux` alias and Keychain
+item.
+
+### Edit providers.toml
+
+All fields shown here are required for this three-contract live catalog. The
+catalog version is an immutable operator-owned label for this exact composite;
+use a new label if any selected contract or frozen price changes.
 
 ```toml
 schema_version = 1
 mode = "live"
+catalog_version = "operator-gemini-flux-2026-09-03-v1"
 
-# Required because this example combines multiple immutable contracts.
-catalog_version = "gemini-flux-composite-REPLACE_WITH_DATE_AND_REVISION"
-
-# Positive USD cents approved as this profile's explicit upper boundary.
+# Positive USD cents approved as this profile's local spend ceiling.
 maximum_spend_minor = 25
 live_spend_acknowledgement = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"
 
 [[contract_bindings]]
 contract = "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
-credential = "google_gemini_developer"
+credential = "google_gemini"
 
 [[contract_bindings]]
 contract = "hubu.gemini-3.1-flash-image.text-to-image/v1"
-credential = "google_gemini_developer"
+credential = "google_gemini"
 
 [[contract_bindings]]
 contract = "hubu.flux-2-pro.text-to-image/v1"
-credential = "bfl_flux2_pro"
+credential = "bfl_flux"
 ```
 
-The contracts supply immutable targets, adapter settings, capabilities, and
-pricing. Runtime callers discover the resulting opaque `target_id` values and
-never submit these provider details.
+Each versioned contract expands to an immutable target and its exact pricing;
+do not reproduce these shipped integrations as raw `[[targets]]` or
+`[[pricing_rules]]` tables:
 
-### Live-profile review checklist
+| Contract | Target | Frozen USD-cent pricing per image |
+| --- | --- | --- |
+| Gemini 3.1 Flash Lite Image | `google` / `gemini_developer_image` / `gemini-3.1-flash-lite-image` | `1k`: `336/100` |
+| Gemini 3.1 Flash Image | `google` / `gemini_developer_image` / `gemini-3.1-flash-image` | `1k`: `67/10`; `2k`: `101/10`; `4k`: `151/10` |
+| FLUX.2 Pro | `flux` / `flux2_api` / `flux-2-pro` | `1k`: `3/1`; `2k`: `45/10`; `4k`: `75/10` |
 
-- [ ] All four binaries share one verified Hubu release lineage.
-- [ ] Each agent that will request spend is registered in Hubu and has the intended policy and budget.
-- [ ] Managed service credentials are omitted; or every advanced/external file override is distinct, private, and owned by the selected service.
-- [ ] Provider opaque coordinates resolve under the Gongbu process identity without exposing values.
-- [ ] Provider, adapter, model, endpoint, API version, adapter settings, and artifact hosts are authoritative.
-- [ ] `provider_config_version` and `catalog_version` have never represented different content.
-- [ ] Every enabled request selector has exactly one matching pricing rule.
-- [ ] Every billable component is represented using exact minor-unit rational rates.
-- [ ] `maximum_spend_minor` is conservative and independently approved.
-- [ ] The exact live-spend acknowledgement was entered intentionally.
-- [ ] Doctor and both service-owned production validators pass.
-- [ ] The rendered generation ID, changed files, and affected components were reviewed before activation.
+These prices are frozen versioned configuration, not timeless provider price
+claims. The [Gemini contract](../../../operations/gemini-provider-contract.md)
+and [FLUX.2 contract](../../../operations/flux-provider-contract.md) document
+their source dates, capabilities, dimensions, transport, and recovery policy.
+If current provider terms no longer match, keep this profile inactive until a
+new contract is shipped.
 
-## External-service variations
+### Validate with doctor
 
-For external Hubu, retain `hubu.ownership` and `hubu.endpoint` but omit managed-only `hubu.listen`, `hubu.database_path`, and `binaries.hubu_server`. The endpoint remains an explicit loopback origin in schema version 1.
+`hubu stack doctor` is the authoritative validation path for the whole profile:
 
-For external Gongbu, retain `gongbu.ownership` and `gongbu.endpoint` but omit managed-only Gongbu binary, state, artifact, and local Temporal configuration. Provider readiness is owned by external Gongbu and reported as unknown by the local profile rather than certified from unused local provider inputs.
-
-External Hubu requires all three Hubu file references in `credentials.toml`.
-External Gongbu requires `files.gongbu_caller`. See the
-[`credentials.toml` reference](credentials-toml.md) for explicit managed-Gongbu
-override requirements.
-
-For external Temporal with managed Gongbu:
-
-```toml
-[temporal]
-mode = "external"
-address = "http://127.0.0.1:7233"
-namespace = "default"
-task_queue = "gongbu-local-executions"
-ui_url = "http://127.0.0.1:8233"
+```sh
+hubu stack doctor
 ```
 
-Omit managed-local Temporal binary, version, data path, and port fields. Gongbu still owns its worker; the external operator owns the Temporal service lifecycle.
+Follow its field-specific diagnostics until it reports `ready_to_render`.
+Doctor verifies the source shape, credential-reference existence, contract and
+target expansion, selector-complete rational pricing, and live-spend gate
+without printing a credential or contacting a provider. For a new profile,
+doctor reports `production_validated = false` until a generation has been
+rendered. Render it, then rerun doctor so its contract readiness report confirms
+the rendered generation passed production validation:
+
+```sh
+hubu stack render
+hubu stack doctor
+```
+
+Use `--json` for the same authoritative results in automation. Do not replace
+doctor with a manual live-profile checklist. Review the generation before
+activation as described in
+[Local stack quick start](../../../local-stack.md#apply-a-configuration-change).
+
+Advanced raw-provider configuration, external Hubu/Gongbu/Temporal ownership,
+and provider-specific recovery details remain available in the
+[configuration decisions](decisions.md), [provider reference](providers-toml.md),
+and [live provider operations](../../../operations/live-providers.md).

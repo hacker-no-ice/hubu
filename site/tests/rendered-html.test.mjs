@@ -225,6 +225,41 @@ test("keeps managed credential locations out of the first-run profile", async ()
   assert.match(credentials, /Gongbu-owned bootstrap/i);
 });
 
+test("promotes complete mode-specific stack examples", async () => {
+  const [examples, navigation, examplesResponse, credentialsResponse] = await Promise.all([
+    readFile(new URL("../../docs/configuration/local-stack/v1/examples.md", import.meta.url), "utf8"),
+    readFile(new URL("../app/lib/docs.ts", import.meta.url), "utf8"),
+    render("/configuration/local-stack/v1/examples"),
+    render("/configuration/local-stack/v1/credentials-toml"),
+  ]);
+  const [examplesHtml, credentialsHtml] = await Promise.all([
+    examplesResponse.text(),
+    credentialsResponse.text(),
+  ]);
+
+  assert.match(examples, /## Sandbox: complete stack without live spend/);
+  assert.match(examples, /## Hubu-only: governance without an execution plane/);
+  assert.match(examples, /## Live: Gemini Developer API and FLUX\.2/);
+  assert.match(examples, /service` maps to the Keychain Access \*\*Where\*\* field/);
+  assert.match(examples, /account` maps to the Keychain Access \*\*Account\*\* field/);
+  assert.match(examples, /matching \*\*Name\*\* alone is insufficient/);
+  assert.equal((examples.match(/hubu stack select --profile/g) ?? []).length, 3);
+  assert.doesNotMatch(examples, /security find-generic-password/);
+  assert.match(examples, /hubu\.gemini-3\.1-flash-lite-image\.text-to-image\/v1/);
+  assert.match(examples, /hubu\.gemini-3\.1-flash-image\.text-to-image\/v1/);
+  assert.match(examples, /hubu\.flux-2-pro\.text-to-image\/v1/);
+  assert.match(examples, /`hubu stack doctor` is the authoritative validation path/);
+  assert.match(examples, /production_validated = false` until a generation has been\s+rendered/);
+  assert.match(examples, /hubu stack render[\s\S]*hubu stack doctor/);
+  assert.match(examples, /## Keep sandbox and live profiles separate/);
+  assert.doesNotMatch(examples, /Provider-disabled local-stack variation/);
+  assert.doesNotMatch(examples, /Live-profile review checklist/);
+  assert.doesNotMatch(examples, /External-service variations/);
+  assert.match(navigation, /Start here[^\n]*Complete stack examples/);
+  assert.match(examplesHtml, /id="edit-credentials-toml"/);
+  assert.match(credentialsHtml, /href="\/configuration\/local-stack\/v1\/examples#edit-credentials-toml"/);
+});
+
 test("renders the concise canonical overview", async () => {
   const response = await render("/docs/overview");
   assert.equal(response.status, 200);
