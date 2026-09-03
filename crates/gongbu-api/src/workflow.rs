@@ -941,8 +941,12 @@ impl ExecutionWorkflow<'_> {
         if matches!(requested, Some(ReconciliationAction::Reinspect)) {
             if let Some(attempt) = attempt.as_ref().filter(|attempt| {
                 attempt.outcome == "ambiguous"
-                    && attempt.failure_code.as_deref() == Some("polling_origin_rejected")
-                    && attempt.provider_recovery_context.is_some()
+                    && attempt
+                        .provider_recovery_context
+                        .as_ref()
+                        .is_some_and(|context| {
+                            context.validation_reason.as_deref() == Some("host_not_allowlisted")
+                        })
             }) {
                 if self
                     .repository
@@ -3211,7 +3215,14 @@ mod tests {
             provider: &provider,
             artifacts: &artifacts,
         };
-        let recovered = workflow
+        provider
+            .poll_error
+            .replace(Some(ActivityError::AmbiguousWithEvidence {
+                code: "timeout_unknown_outcome".into(),
+                request_id: Some("request-200".into()),
+                operation_id: Some("operation-200".into()),
+            }));
+        let still_ambiguous = workflow
             .recover(
                 &execution_id,
                 "reinspect",
@@ -3222,9 +3233,32 @@ mod tests {
                 }),
             )
             .unwrap();
-        assert_eq!(recovered.status, "succeeded");
+        assert_eq!(still_ambiguous.status, "reconciliation_required");
         assert_eq!(provider.submits.get(), 1);
         assert_eq!(provider.polls.get(), 2);
+        assert_eq!(
+            restarted
+                .get_provider_attempt_for_execution(&execution_id)
+                .unwrap()
+                .failure_code
+                .as_deref(),
+            Some("timeout_unknown_outcome")
+        );
+
+        let recovered = workflow
+            .recover(
+                &execution_id,
+                "reinspect-again",
+                Some(&OperatorReconciliationRequest {
+                    action_id: "recover-operation-200-again".into(),
+                    action: ReconciliationAction::Reinspect,
+                    evidence: json!({"reason":"retry_same_operation_after_transient_poll"}),
+                }),
+            )
+            .unwrap();
+        assert_eq!(recovered.status, "succeeded");
+        assert_eq!(provider.submits.get(), 1);
+        assert_eq!(provider.polls.get(), 3);
         let attempt_count = rusqlite::Connection::open(&path)
             .unwrap()
             .query_row("SELECT count(*) FROM provider_attempts", [], |row| {

@@ -1009,8 +1009,10 @@ fn polling_checkpoint(
     };
 
     if let Some(url) = parsed.as_ref() {
-        scheme = Some(url.scheme().to_owned());
-        normalized_host = url.host_str().map(str::to_owned);
+        scheme = Some(sanitized_recovery_component(url.scheme(), 16, "other"));
+        normalized_host = url
+            .host_str()
+            .and_then(|host| sanitized_recovery_component_opt(host, 253));
         explicit_port = explicit_port_from_url(&value);
         endpoint_shape = if url.path() == expected_path {
             format!("{}/get_result", api_version.trim_matches('/'))
@@ -1096,6 +1098,21 @@ fn explicit_port_from_url(value: &str) -> Option<u16> {
     (!port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
         .then(|| port.parse().ok())
         .flatten()
+}
+
+fn sanitized_recovery_component(value: &str, max: usize, fallback: &str) -> String {
+    sanitized_recovery_component_opt(value, max).unwrap_or_else(|| fallback.to_owned())
+}
+
+fn sanitized_recovery_component_opt(value: &str, max: usize) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= max
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':')
+        }))
+    .then(|| value.to_owned())
 }
 
 fn operation_poll_url(config: &Flux2ApiConfig, operation: &AsyncProviderOperation) -> Result<Url> {
@@ -2344,6 +2361,16 @@ mod tests {
             (
                 "https://%61pi.bfl.ai/v1/get_result?id=op-1".to_owned(),
                 "encoded_host",
+                None,
+            ),
+            (
+                "git+ssh://api.bfl.ai/v1/get_result?id=op-1".to_owned(),
+                "scheme_not_https",
+                None,
+            ),
+            (
+                "https://[::1]/v1/get_result?id=op-1".to_owned(),
+                "host_not_allowlisted",
                 None,
             ),
             (oversized, "url_too_long", None),

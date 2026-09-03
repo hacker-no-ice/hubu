@@ -885,9 +885,11 @@ impl Repository {
         }
     }
 
-    /// Atomically reopen only a checkpointed, origin-rejected provider attempt
-    /// for an explicit same-operation reconciliation poll. No submission state
-    /// is cleared and no new provider attempt can be created by this path.
+    /// Atomically reopen only a checkpointed provider attempt whose original
+    /// origin rejection is durably recoverable. Later ambiguous GET failures
+    /// remain eligible because the immutable recovery reason, rather than the
+    /// most recent failure code, is the authority for this path. No submission
+    /// state is cleared and no new provider attempt can be created.
     pub fn begin_provider_reconciliation_poll(
         &self,
         execution_id: &str,
@@ -898,7 +900,7 @@ impl Repository {
         let mut connection = self.0.lock().unwrap();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let attempt_changed = transaction.execute(
-            "UPDATE provider_attempts SET outcome='started',completed_at=NULL,failure_code=NULL,failure_message_redacted=NULL WHERE provider_attempt_id=?1 AND execution_id=?2 AND outcome='ambiguous' AND completed_at IS NOT NULL AND failure_code='polling_origin_rejected' AND provider_operation_id IS NOT NULL AND provider_polling_host IS NOT NULL AND provider_deadline_unix_ms IS NOT NULL AND operation_checkpointed_at IS NOT NULL AND provider_recovery_context_json IS NOT NULL",
+            "UPDATE provider_attempts SET outcome='started',completed_at=NULL,failure_code=NULL,failure_message_redacted=NULL WHERE provider_attempt_id=?1 AND execution_id=?2 AND outcome='ambiguous' AND completed_at IS NOT NULL AND provider_operation_id IS NOT NULL AND provider_polling_host IS NOT NULL AND provider_deadline_unix_ms IS NOT NULL AND operation_checkpointed_at IS NOT NULL AND json_extract(provider_recovery_context_json,'$.validation_reason')='host_not_allowlisted'",
             params![attempt_id, execution_id],
         )?;
         if attempt_changed != 1 {
