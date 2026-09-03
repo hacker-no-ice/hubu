@@ -86,7 +86,7 @@ security find-generic-password \
 Do not add `-w`: that option prints the credential value. Hubu and Gongbu must
 run as the macOS user allowed to access these Keychain items.
 
-### Edit `credentials.toml`
+### Edit credentials.toml
 
 `credentials.toml` contains lookup coordinates only, never credential values:
 
@@ -106,7 +106,7 @@ The opaque table names are local aliases. Both Gemini contracts intentionally
 share `google_gemini`; FLUX uses the separate `bfl_flux` alias and Keychain
 item.
 
-### Edit `providers.toml`
+### Edit providers.toml
 
 All fields shown here are required for this three-contract live catalog. The
 catalog version is an immutable operator-owned label for this exact composite;

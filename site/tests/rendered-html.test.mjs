@@ -226,9 +226,15 @@ test("keeps managed credential locations out of the first-run profile", async ()
 });
 
 test("promotes complete mode-specific stack examples", async () => {
-  const [examples, navigation] = await Promise.all([
+  const [examples, navigation, examplesResponse, credentialsResponse] = await Promise.all([
     readFile(new URL("../../docs/configuration/local-stack/v1/examples.md", import.meta.url), "utf8"),
     readFile(new URL("../app/lib/docs.ts", import.meta.url), "utf8"),
+    render("/configuration/local-stack/v1/examples"),
+    render("/configuration/local-stack/v1/credentials-toml"),
+  ]);
+  const [examplesHtml, credentialsHtml] = await Promise.all([
+    examplesResponse.text(),
+    credentialsResponse.text(),
   ]);
 
   assert.match(examples, /## Sandbox: complete stack without live spend/);
@@ -247,6 +253,8 @@ test("promotes complete mode-specific stack examples", async () => {
   assert.doesNotMatch(examples, /Live-profile review checklist/);
   assert.doesNotMatch(examples, /External-service variations/);
   assert.match(navigation, /Start here[^\n]*Complete stack examples/);
+  assert.match(examplesHtml, /id="edit-credentials-toml"/);
+  assert.match(credentialsHtml, /href="\/configuration\/local-stack\/v1\/examples#edit-credentials-toml"/);
 });
 
 test("renders the concise canonical overview", async () => {

@@ -3,7 +3,7 @@
 `credentials.toml` never contains credential values. For the normal managed
 local stack it contains only the schema version plus any provider references:
 
-See the [complete Gemini + FLUX example](examples.md#edit-credentialstoml) for
+See the [complete Gemini + FLUX example](examples.md#edit-credentials-toml) for
 copyable provider references and the exact macOS Keychain **Where**/**Account**
 mapping.
 
