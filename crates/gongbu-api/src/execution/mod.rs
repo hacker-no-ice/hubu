@@ -816,6 +816,11 @@ impl Repository {
                 .unwrap_or(""),
             checkpointed_at,
         ])?;
+        if let Some(context) = operation.polling_recovery.as_ref() {
+            let context = serde_json::to_value(context)
+                .map_err(|_| Error::Invalid("provider operation checkpoint"))?;
+            self.reject_registered_json([&context])?;
+        }
         self.reject_registered_numbers([operation.deadline_unix_ms])?;
 
         let connection = self.0.lock().unwrap();

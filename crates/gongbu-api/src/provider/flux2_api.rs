@@ -444,6 +444,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             operation_id,
             &self.config.api_version,
             deadline.unix_millis(),
+            secret,
         )?;
         operation.validate().map_err(|_| {
             with_evidence(
@@ -967,6 +968,7 @@ fn polling_checkpoint(
     provider_operation_id: String,
     api_version: &str,
     deadline_unix_ms: i64,
+    secret: &ProviderSecret,
 ) -> Result<AsyncProviderOperation, ProviderFailure> {
     let value = string_at(body, &["polling_url", "pollingUrl"]).ok_or_else(|| {
         reconcile_with_evidence(
@@ -1019,6 +1021,7 @@ fn polling_checkpoint(
         } else {
             "unexpected".to_owned()
         };
+        let secret_redactor = Redactor::new([secret.expose()]);
         query_keys = url
             .query_pairs()
             .filter_map(|(key, _)| {
@@ -1028,7 +1031,14 @@ fn polling_checkpoint(
                             || byte.is_ascii_digit()
                             || matches!(byte, b'-' | b'_')
                     }))
-                .then(|| key.into_owned())
+                .then(|| {
+                    let key = key.into_owned();
+                    if secret_redactor.redact(&key) == key {
+                        key
+                    } else {
+                        "redacted".to_owned()
+                    }
+                })
             })
             .take(8)
             .collect();
@@ -2356,6 +2366,11 @@ mod tests {
             (
                 "https://api.future.bfl.ai/v1/get_result?id=op-1&token=credential-value".to_owned(),
                 "host_not_allowlisted",
+                None,
+            ),
+            (
+                "https://api.bfl.ai/v1/get_result?secret-canary=x&id=op-1".to_owned(),
+                "query_contract_mismatch",
                 None,
             ),
             (
