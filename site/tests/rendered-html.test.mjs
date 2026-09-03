@@ -243,7 +243,8 @@ test("promotes complete mode-specific stack examples", async () => {
   assert.match(examples, /service` maps to the Keychain Access \*\*Where\*\* field/);
   assert.match(examples, /account` maps to the Keychain Access \*\*Account\*\* field/);
   assert.match(examples, /matching \*\*Name\*\* alone is insufficient/);
-  assert.match(examples, /find-generic-password[\s\S]*>\/dev\/null 2>&1/);
+  assert.equal((examples.match(/hubu stack select --profile/g) ?? []).length, 3);
+  assert.doesNotMatch(examples, /security find-generic-password/);
   assert.match(examples, /hubu\.gemini-3\.1-flash-lite-image\.text-to-image\/v1/);
   assert.match(examples, /hubu\.gemini-3\.1-flash-image\.text-to-image\/v1/);
   assert.match(examples, /hubu\.flux-2-pro\.text-to-image\/v1/);

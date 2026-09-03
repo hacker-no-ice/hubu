@@ -4,6 +4,24 @@ Use a separate profile directory for each outcome. `hubu stack init` writes the
 complete topology and source files for that outcome; do not copy a hand-written
 `stack.toml` between modes.
 
+## Keep sandbox and live profiles separate
+
+Do not switch one profile back and forth between `sandbox` and `live`. Separate
+profiles isolate provider credentials, spend acknowledgement, frozen catalogs,
+generated generations, runtime state, databases, artifacts, and logs. Each flow
+below explicitly selects its new profile immediately after initialization so
+later `hubu stack` commands use the intended configuration. Check the current
+selection at any time with:
+
+```sh
+hubu stack profiles
+```
+
+This makes the non-billable default easy to recover, keeps live credentials out
+of sandbox state, and makes the active spend boundary visible in the selected
+profile path. Stop the active managed stack before selecting and starting
+another profile when their default local ports overlap.
+
 ## Sandbox: complete stack without live spend
 
 Sandbox is the recommended first profile and a zero-edit outcome. It runs the
@@ -13,7 +31,8 @@ edge with a deterministic, non-billable fixture:
 ```sh
 hubu stack init --mode sandbox --install-temporal \
   --profile /absolute/path/to/hubu-sandbox
-hubu stack doctor --profile /absolute/path/to/hubu-sandbox
+hubu stack select --profile /absolute/path/to/hubu-sandbox
+hubu stack doctor
 ```
 
 Initialization writes the complete managed topology, fixture target, and
@@ -28,7 +47,8 @@ Hubu-only is also a zero-edit outcome:
 
 ```sh
 hubu stack init --mode hubu-only --profile /absolute/path/to/hubu-only
-hubu stack doctor --profile /absolute/path/to/hubu-only
+hubu stack select --profile /absolute/path/to/hubu-only
+hubu stack doctor
 ```
 
 The generated `stack.toml` deliberately omits Gongbu and Temporal. Its
@@ -53,6 +73,7 @@ references and selections shown below:
 ```sh
 hubu stack init --mode local-stack --install-temporal \
   --profile /absolute/path/to/hubu-live
+hubu stack select --profile /absolute/path/to/hubu-live
 ```
 
 This example enables both shipped Gemini Developer API image contracts and the
@@ -70,21 +91,9 @@ The two items must use different lookup coordinates. In Hubu configuration:
 - a matching **Name** alone is insufficient because Gongbu looks up the exact
   **Where** and **Account** pair.
 
-You can verify only that each item exists without printing either credential.
-Replace the example coordinates with the same non-secret **Where** and
-**Account** values used below:
-
-```sh
-security find-generic-password \
-  -s 'operator.google.gemini' -a 'gemini-image' >/dev/null 2>&1 \
-  && echo 'Gemini credential reference exists'
-security find-generic-password \
-  -s 'operator.bfl.flux' -a 'flux-image' >/dev/null 2>&1 \
-  && echo 'FLUX credential reference exists'
-```
-
-Do not add `-w`: that option prints the credential value. Hubu and Gongbu must
-run as the macOS user allowed to access these Keychain items.
+Use the same non-secret **Where** and **Account** values below. Hubu and Gongbu
+must run as the macOS user allowed to access these Keychain items. Doctor checks
+that each exact reference exists without retrieving or printing its value.
 
 ### Edit credentials.toml
 
@@ -156,7 +165,7 @@ new contract is shipped.
 `hubu stack doctor` is the authoritative validation path for the whole profile:
 
 ```sh
-hubu stack doctor --profile /absolute/path/to/hubu-live
+hubu stack doctor
 ```
 
 Follow its field-specific diagnostics until it reports `ready_to_render`.
@@ -168,31 +177,14 @@ rendered. Render it, then rerun doctor so its contract readiness report confirms
 the rendered generation passed production validation:
 
 ```sh
-hubu stack render --profile /absolute/path/to/hubu-live
-hubu stack doctor --profile /absolute/path/to/hubu-live
+hubu stack render
+hubu stack doctor
 ```
 
 Use `--json` for the same authoritative results in automation. Do not replace
 doctor with a manual live-profile checklist. Review the generation before
 activation as described in
 [Local stack quick start](../../../local-stack.md#apply-a-configuration-change).
-
-## Keep sandbox and live profiles separate
-
-Do not switch one profile back and forth between `sandbox` and `live`. Separate
-profiles isolate provider credentials, spend acknowledgement, frozen catalogs,
-generated generations, runtime state, databases, artifacts, and logs. Switching
-is then an explicit profile selection instead of a risky source rewrite:
-
-```sh
-hubu stack select --profile /absolute/path/to/hubu-sandbox
-hubu stack select --profile /absolute/path/to/hubu-live
-```
-
-This makes the non-billable default easy to recover, keeps live credentials out
-of sandbox state, and makes the active spend boundary visible in the selected
-profile path. Stop the active managed stack before selecting and starting the
-other profile when their default local ports overlap.
 
 Advanced raw-provider configuration, external Hubu/Gongbu/Temporal ownership,
 and provider-specific recovery details remain available in the
