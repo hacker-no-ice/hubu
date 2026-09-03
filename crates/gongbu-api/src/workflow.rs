@@ -2898,6 +2898,11 @@ mod tests {
         assert!(evidence["provider_request_id"].is_null());
         assert!(evidence["provider_operation_id"].is_null());
         assert!(evidence["timestamps"]["transmission_started_at"].is_string());
+        assert_eq!(
+            evidence["recovery_guidance"]["provider_outcome_ambiguous"],
+            true
+        );
+        assert_eq!(evidence["recovery_guidance"]["do_not_resubmit"], true);
         let encoded = serde_json::to_string(&evidence).unwrap();
         assert!(!encoded.contains("signed_url"));
         assert!(!encoded.contains("storage_key"));

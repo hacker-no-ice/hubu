@@ -1442,9 +1442,14 @@ impl Repository {
             .ok();
         let receipt = self.get_receipt_for_execution(&execution.execution_id).ok();
         let artifacts = self.count_artifacts_for_execution(&execution.execution_id)?;
-        let provider_outcome_ambiguous = attempt
-            .as_ref()
-            .is_some_and(|attempt| attempt.outcome == "ambiguous");
+        let provider_outcome_ambiguous = execution.provider_outcome
+            == Some(LifecycleOutcome::Ambiguous)
+            || attempt.as_ref().is_some_and(|attempt| {
+                attempt.outcome == "ambiguous"
+                    || (attempt.outcome == "started"
+                        && attempt.transmission_started_at.is_some()
+                        && attempt.completed_at.is_none())
+            });
         let last_confirmed_step = if provider_outcome_ambiguous
             && attempt
                 .as_ref()
@@ -2946,6 +2951,23 @@ mod tests {
             .create_execution(&new("account", "downstream-reconciliation"))
             .unwrap();
         let attempt_id = attempt(&repository, &execution);
+        let interrupted = repository
+            .record_reconciliation(
+                &execution,
+                "executing",
+                Some("provider_submission_interrupted"),
+                "2026-09-03T21:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(interrupted.last_confirmed_step, "executing");
+        assert_eq!(
+            interrupted.evidence["recovery_guidance"]["provider_outcome_ambiguous"],
+            true
+        );
+        assert_eq!(
+            interrupted.evidence["recovery_guidance"]["do_not_resubmit"],
+            true
+        );
         repository
             .record_provider_operation(
                 &attempt_id,
