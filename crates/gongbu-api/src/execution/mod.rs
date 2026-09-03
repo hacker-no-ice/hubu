@@ -1442,15 +1442,27 @@ impl Repository {
             .ok();
         let receipt = self.get_receipt_for_execution(&execution.execution_id).ok();
         let artifacts = self.count_artifacts_for_execution(&execution.execution_id)?;
-        let last_confirmed_step = if attempt
+        let provider_outcome_ambiguous = attempt
             .as_ref()
-            .is_some_and(|attempt| attempt.operation_checkpointed_at.is_some())
+            .is_some_and(|attempt| attempt.outcome == "ambiguous");
+        let last_confirmed_step = if provider_outcome_ambiguous
+            && attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.operation_checkpointed_at.is_some())
         {
             "provider_operation_checkpointed"
         } else {
             last_confirmed_step
         };
-        let evidence = serde_json::json!({
+        let recovery_guidance = provider_outcome_ambiguous.then(|| serde_json::json!({
+            "provider_outcome_ambiguous": true,
+            "billing_may_have_occurred": true,
+            "do_not_resubmit": true,
+            "recover_first": true,
+            "artifact_recovery_time_sensitive": true,
+            "action": if attempt.as_ref().and_then(|a| a.provider_recovery_context.as_ref()).and_then(|context| context.validation_reason.as_deref()) == Some("host_not_allowlisted") { "update_policy_then_reinspect" } else { "contact_provider_support" }
+        }));
+        let mut evidence = serde_json::json!({
             "execution_id": execution.execution_id,
             "provider": execution.provider,
             "target": execution.target,
@@ -1470,15 +1482,14 @@ impl Repository {
             "usage": attempt.as_ref().and_then(|a| a.usage.as_ref()),
             "receipt": receipt.as_ref().map(|r| serde_json::json!({"receipt_id":r.receipt_id,"settlement_minor":r.settlement_minor,"currency":r.currency,"actual_vendor_cost":r.actual_vendor_cost,"provider_request_id":r.provider_request_id,"price_model_snapshot":r.price_model_snapshot,"transmission_started_at":r.transmission_started_at,"settled_at":r.settled_at,"hubu_settlement_id":r.hubu_settlement_id})),
             "artifact_count": artifacts,
-            "recovery_guidance": {
-                "provider_outcome_ambiguous": true,
-                "billing_may_have_occurred": true,
-                "do_not_resubmit": true,
-                "recover_first": true,
-                "artifact_recovery_time_sensitive": true,
-                "action": if attempt.as_ref().and_then(|a| a.provider_recovery_context.as_ref()).and_then(|context| context.validation_reason.as_deref()) == Some("host_not_allowlisted") { "update_policy_then_reinspect" } else { "contact_provider_support" }
-            }
+            "recovery_guidance": recovery_guidance
         });
+        if !provider_outcome_ambiguous {
+            evidence
+                .as_object_mut()
+                .expect("reconciliation evidence is an object")
+                .remove("recovery_guidance");
+        }
         self.reject_registered_json([&evidence])?;
         let c = self.0.lock().unwrap();
         c.execute("INSERT INTO reconciliation_records(execution_id,evidence_json,evidence_schema_version,last_confirmed_step,entered_at,updated_at) VALUES(?1,?2,3,?3,?4,?4) ON CONFLICT(execution_id) DO UPDATE SET evidence_json=excluded.evidence_json,evidence_schema_version=excluded.evidence_schema_version,last_confirmed_step=excluded.last_confirmed_step,updated_at=excluded.updated_at", params![execution.execution_id,j(&evidence),last_confirmed_step,at])?;
@@ -2926,6 +2937,58 @@ mod tests {
             Some(operation)
         );
         assert_eq!(restarted.count("provider_attempts"), 1);
+    }
+
+    #[test]
+    fn successful_checkpoint_preserves_downstream_reconciliation_progress() {
+        let repository = Repository::in_memory().unwrap();
+        let execution = repository
+            .create_execution(&new("account", "downstream-reconciliation"))
+            .unwrap();
+        let attempt_id = attempt(&repository, &execution);
+        repository
+            .record_provider_operation(
+                &attempt_id,
+                &AsyncProviderOperation {
+                    provider_request_id: Some("request-200".into()),
+                    provider_operation_id: "operation-200".into(),
+                    polling_host: "api.us.bfl.ai".into(),
+                    polling_recovery: Some(PollingRecoveryContext {
+                        schema_version: 1,
+                        policy_version: "bfl-polling-origin-v2".into(),
+                        scheme: Some("https".into()),
+                        normalized_host: Some("api.us.bfl.ai".into()),
+                        explicit_port: None,
+                        endpoint_shape: "v1/get_result".into(),
+                        query_keys: vec!["id".into()],
+                        url_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                        validation_reason: None,
+                    }),
+                    deadline_unix_ms: 1_799_999_999_000,
+                },
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap();
+        complete_success(&repository, &attempt_id);
+
+        for step in ["executing", "settling"] {
+            let record = repository
+                .record_reconciliation(
+                    &execution,
+                    step,
+                    Some("downstream_phase_failed"),
+                    "2026-09-03T21:00:02Z",
+                )
+                .unwrap();
+            assert_eq!(record.last_confirmed_step, step);
+            assert_eq!(record.evidence["last_confirmed_step"], step);
+            assert_eq!(record.evidence["provider_outcome"], "succeeded");
+            assert!(record.evidence.get("recovery_guidance").is_none());
+            assert_eq!(
+                record.evidence["polling_recovery"]["normalized_host"],
+                "api.us.bfl.ai"
+            );
+        }
     }
 
     #[test]
