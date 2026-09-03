@@ -1090,6 +1090,14 @@ fn execution_response(
     let recovery = (status == ExecutionStatus::ReconciliationRequired)
         .then(|| {
             let attempt = provider_attempt.as_ref()?;
+            // A durable polling context can outlive provider completion. Only
+            // project recovery-first guidance while the provider attempt itself
+            // is still ambiguous; artifact or settlement reconciliation after a
+            // successful provider result must not be described as a polling
+            // ambiguity.
+            if attempt.outcome != "ambiguous" {
+                return None;
+            }
             let context = attempt.provider_recovery_context.as_ref()?;
             Some(json!({
                 "schema_version": 1,
@@ -1256,7 +1264,8 @@ mod tests {
         provider::{
             contract::{
                 ActualVendorCost, AdapterCapabilities, AdapterOutcome, AsyncProviderOperation,
-                NormalizedUsage, PricingCatalog, ProviderAdapter, ProviderFailure,
+                NormalizedUsage, PollingRecoveryContext, PricingCatalog, ProviderAdapter,
+                ProviderFailure,
             },
             registry::ProviderRegistry,
         },
@@ -2565,6 +2574,125 @@ mod tests {
         assert_eq!(response.provider_transport.schema_version, 1);
         assert_eq!(response.provider_transport.poll_count, 2);
         assert_eq!(response.provider_transport.artifact_fetch_count, 1);
+    }
+
+    #[test]
+    fn successful_provider_attempt_does_not_project_polling_recovery() {
+        let fixture = fixture();
+        let created = execution(&call_create(&fixture, &request("artifact-reconciliation")));
+        let pending = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        let preflighting = fixture
+            .repository
+            .update_execution(
+                &pending.execution_id,
+                pending.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("2026-09-03T21:00:00Z".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-09-03T21:00:00Z",
+            )
+            .unwrap();
+        let claimed = fixture
+            .repository
+            .set_claim(
+                &preflighting.execution_id,
+                preflighting.version,
+                "claim-artifact-reconciliation",
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap();
+        let attempt = fixture
+            .repository
+            .start_provider_attempt(&claimed, "2026-09-03T21:00:02Z")
+            .unwrap();
+        fixture
+            .repository
+            .begin_provider_transmission(&attempt.provider_attempt_id, "2026-09-03T21:00:03Z")
+            .unwrap();
+        fixture
+            .repository
+            .record_provider_operation(
+                &attempt.provider_attempt_id,
+                &AsyncProviderOperation {
+                    provider_request_id: Some("request-artifact-reconciliation".into()),
+                    provider_operation_id: "operation-artifact-reconciliation".into(),
+                    polling_host: "api.us.bfl.ai".into(),
+                    polling_recovery: Some(PollingRecoveryContext {
+                        schema_version: 1,
+                        policy_version: "bfl-polling-origin-v2".into(),
+                        scheme: Some("https".into()),
+                        normalized_host: Some("api.us.bfl.ai".into()),
+                        explicit_port: None,
+                        endpoint_shape: "v1/get_result".into(),
+                        query_keys: vec!["id".into()],
+                        url_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                        validation_reason: None,
+                    }),
+                    deadline_unix_ms: 1_788_000_000_000,
+                },
+                "2026-09-03T21:00:04Z",
+            )
+            .unwrap();
+        fixture
+            .repository
+            .complete_provider_attempt(
+                &attempt.provider_attempt_id,
+                &AttemptResult {
+                    outcome: "succeeded".into(),
+                    completed_at: "2026-09-03T21:00:05Z".into(),
+                    usage: serde_json::to_value(NormalizedUsage {
+                        images: Some(1),
+                        input_tokens: None,
+                        output_tokens: None,
+                    })
+                    .unwrap(),
+                    usage_schema_version: 1,
+                    actual_vendor_cost: Some(ActualVendorCost::new(3, 2, "USD").unwrap()),
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_request_id: Some("request-artifact-reconciliation".into()),
+                    provider_operation_id: Some("operation-artifact-reconciliation".into()),
+                },
+            )
+            .unwrap();
+        let executing = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        let held = fixture
+            .repository
+            .update_execution(
+                &executing.execution_id,
+                executing.version,
+                &ExecutionUpdate {
+                    status: "reconciliation_required".into(),
+                    outcome: Some("ambiguous".into()),
+                    started_at: None,
+                    completed_at: None,
+                    failure_code: Some("artifact_persistence_failed".into()),
+                    failure_message_redacted: None,
+                    provider_outcome: Some(LifecycleOutcome::Succeeded),
+                    artifact_outcome: Some(LifecycleOutcome::Failed),
+                    settlement_outcome: None,
+                },
+                "2026-09-03T21:00:06Z",
+            )
+            .unwrap();
+
+        let response = execution_response(&fixture.repository, held, V1_SCHEMA_VERSION).unwrap();
+        assert_eq!(response.status, ExecutionStatus::ReconciliationRequired);
+        assert!(response.recovery.is_none());
     }
 
     #[test]

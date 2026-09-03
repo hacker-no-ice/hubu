@@ -305,7 +305,8 @@ pub(super) fn execution_result(
         || !valid_execution_id(&response.execution_id)
         || !valid_execution_status(&response.status)
         || response.recovery.as_ref().is_some_and(|value| {
-            response.status != "reconciliation_required" || !valid_recovery_projection(value)
+            response.status != "reconciliation_required"
+                || !valid_recovery_projection(value, &response.execution_id)
         })
     {
         return Err(ToolError::invalid_response());
@@ -340,9 +341,10 @@ pub(super) fn execution_result(
     Ok((text_result(&public), lifecycle))
 }
 
-fn valid_recovery_projection(value: &RecoveryProjection) -> bool {
+fn valid_recovery_projection(value: &RecoveryProjection, execution_id: &str) -> bool {
     value.schema_version == 1
         && valid_execution_id(&value.execution_id)
+        && value.execution_id == execution_id
         && valid_provider_evidence_id(&value.provider_attempt_id)
         && value
             .provider_request_id
@@ -1437,6 +1439,61 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<ExecutionResponse>(encoded).is_err());
+    }
+
+    #[test]
+    fn reconciliation_rejects_recovery_for_another_execution() {
+        let mut response = execution();
+        response.status = "reconciliation_required".into();
+        response.recovery = Some(
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "execution_id": "exec-other",
+                "provider_attempt_id": "attempt-1",
+                "provider_request_id": "request-1",
+                "provider_operation_id": "provider-op-1",
+                "hubu_claim_id": "claim-1",
+                "provider": "flux",
+                "target": "flux-2-pro",
+                "model": "flux-2-pro",
+                "credential_binding": {
+                    "provider_config_version": "v1",
+                    "provider_config_digest": format!("sha256:{}", "a".repeat(64))
+                },
+                "polling": {
+                    "schema_version": 1,
+                    "policy_version": "bfl-polling-origin-v2",
+                    "scheme": "https",
+                    "normalized_host": "api.future.bfl.ai",
+                    "explicit_port": null,
+                    "endpoint_shape": "v1/get_result",
+                    "query_keys": ["id"],
+                    "url_fingerprint": format!("sha256:{}", "b".repeat(64)),
+                    "validation_reason": "host_not_allowlisted"
+                },
+                "submitted_at": "2026-09-03T21:00:00Z",
+                "checkpointed_at": "2026-09-03T21:00:01Z",
+                "last_transition_at": "2026-09-03T21:00:02Z",
+                "last_confirmed_step": "provider_operation_checkpointed",
+                "guidance": {
+                    "provider_outcome_ambiguous": true,
+                    "billing_may_have_occurred": true,
+                    "do_not_resubmit": true,
+                    "recover_first": true,
+                    "artifact_urls_may_expire": true,
+                    "action": "update_policy_then_reinspect"
+                }
+            }))
+            .unwrap(),
+        );
+
+        let error = result_error(execution_result(
+            response,
+            Some(&continuation(None)),
+            None,
+            EXECUTION_V2_SCHEMA_VERSION,
+        ));
+        assert_eq!(error.code(), "invalid_response");
     }
 
     #[test]
