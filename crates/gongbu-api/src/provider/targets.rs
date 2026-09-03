@@ -16,6 +16,15 @@ use thiserror::Error;
 const PROVIDER_CONFIG_ENV: &str = "GONGBU_PROVIDER_CONFIG";
 const CURRENT_SCHEMA_VERSION: u32 = 3;
 const BFL_API_HOSTS: &[&str] = &["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"];
+// BFL's current API reference still documents this concrete cluster endpoint.
+// Keep cluster admission exact: a broad `api.*.bfl.ai` pattern would forward
+// credentials to origins outside the reviewed provider contract.
+const BFL_POLLING_HOSTS: &[&str] = &[
+    "api.bfl.ai",
+    "api.eu.bfl.ai",
+    "api.us.bfl.ai",
+    "api.us1.bfl.ai",
+];
 pub const LEGACY_UNRESOLVED_DIGEST: &str = "legacy-unresolved";
 
 #[derive(Debug, Error)]
@@ -746,6 +755,10 @@ pub(crate) fn valid_artifact_hosts(hosts: &[String], required: bool) -> bool {
 
 pub(crate) fn valid_bfl_api_host(host: Option<&str>) -> bool {
     host.is_some_and(|host| BFL_API_HOSTS.contains(&host))
+}
+
+pub(crate) fn valid_bfl_polling_host(host: Option<&str>) -> bool {
+    host.is_some_and(|host| BFL_POLLING_HOSTS.contains(&host))
 }
 
 /// FLUX artifacts use BFL's fixed provider-specific delivery family, not a

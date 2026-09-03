@@ -141,12 +141,30 @@ fixture-only and non-billable.
 ## FLUX transport, artifact, and recovery details
 
 FLUX submission and polling are separate durable activities. After a successful
-submit, Gongbu checkpoints the safe request ID, operation ID, validated polling
-host, and original deadline before long polling. A restart resumes GET polling
+submit, Gongbu checkpoints the safe request ID, operation ID, polling host,
+sanitized polling-policy evidence, and original deadline before long polling.
+The credentialed polling allowlist is exactly `api.bfl.ai`, `api.eu.bfl.ai`,
+`api.us.bfl.ai`, and BFL's currently documented cluster origin
+`api.us1.bfl.ai`; lookalikes and other cluster names remain denied. A restart resumes GET polling
 for that same operation and `ProviderAttempt`; it does not submit another
 generation. If transmission may have happened but the checkpoint did not
 commit, preserve the execution for reconciliation instead of retrying or
 releasing the claim.
+
+If a returned polling origin is rejected after submission, the execution detail
+contains only the URL fingerprint, normalized origin fields, fixed path shape,
+query-key names, validation reason, policy version, operation/correlation IDs,
+and frozen provider-binding reference. Treat this as urgent: do not resubmit.
+Update policy only after verifying a provider endpoint, then send an explicit
+`reinspect` reconciliation action to poll the same operation. BFL result URLs
+expire after 10 minutes, so artifact preservation precedes diagnosis.
+
+The credentialed live canary remains opt-in because it incurs a provider
+charge. With explicit approval, use the existing unified MCP governed-execution
+flow for one 1k PNG and verify one submit, at least one poll, one immediate
+artifact fetch, and normalized `gongbu_get_artifact` retrieval. Record the
+execution and operation IDs and transport counters; never run this canary from
+CI or as part of an unapproved release check.
 
 The artifact policy accepts only an HTTPS `delivery.<region>.bfl.ai` host with
 exactly one safe dot-separated region label, matching BFL's current

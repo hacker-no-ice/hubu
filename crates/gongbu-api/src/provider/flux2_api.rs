@@ -9,17 +9,17 @@ use super::{
     contract::{
         canonical_image_media_type, ActualVendorCost, AdapterCapabilities, AdapterOutcome,
         AdapterSubmission, AsyncProviderOperation, ContractError, NoopProviderTransportObserver,
-        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutputDimensions, ProviderAdapter,
-        ProviderFailure, ProviderPhase, ProviderTransportInteraction, ProviderTransportObserver,
-        Result, RetryPolicy,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutputDimensions,
+        PollingRecoveryContext, ProviderAdapter, ProviderFailure, ProviderPhase,
+        ProviderTransportInteraction, ProviderTransportObserver, Result, RetryPolicy,
     },
     http_kernel::{
         provider_request_id, read_bounded, shared_client, url_has_explicit_port,
         validate_https_origin, ArtifactDownloadPolicy, CredentialForwarding, InvocationDeadline,
     },
     targets::{
-        valid_artifact_hosts, valid_bfl_api_host, valid_bfl_delivery_host, Flux2ApiConfig,
-        ProviderConfigVersion,
+        valid_artifact_hosts, valid_bfl_api_host, valid_bfl_delivery_host, valid_bfl_polling_host,
+        Flux2ApiConfig, ProviderConfigVersion,
     },
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
@@ -28,6 +28,7 @@ use reqwest::{
     Url,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, error::Error as StdError, fmt, io::Read, thread, time::Duration};
 
 pub const PROVIDER_ID: &str = "flux";
@@ -42,6 +43,8 @@ const BFL_CREDIT_USD_SCALE: u32 = 2;
 #[cfg(test)]
 const MAX_ARTIFACT_BYTES: usize = crate::artifact::DEFAULT_MAX_ENCODED_BYTES as usize;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_POLLING_URL_BYTES: usize = 4096;
+const BFL_POLLING_POLICY_VERSION: &str = "bfl-polling-origin-v2";
 
 #[derive(Clone, Debug)]
 pub struct TransportResponse {
@@ -435,23 +438,13 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
 
         let operation_id = operation_id
             .ok_or_else(|| with_evidence("malformed_response", request_id.clone(), None))?;
-        let polling_host =
-            polling_checkpoint_host(&current, &operation_id, &self.config.api_version).map_err(
-                |error| {
-                    let code = match error {
-                        ContractError::Provider { code } => code,
-                        _ => "provider_contract_failure".into(),
-                    };
-                    ProviderFailure::reconcile(code, ProviderPhase::Processing)
-                        .with_evidence(request_id.clone(), Some(operation_id.clone()))
-                },
-            )?;
-        let operation = AsyncProviderOperation {
-            provider_request_id: request_id,
-            provider_operation_id: operation_id,
-            polling_host,
-            deadline_unix_ms: deadline.unix_millis(),
-        };
+        let operation = polling_checkpoint(
+            &current,
+            request_id,
+            operation_id,
+            &self.config.api_version,
+            deadline.unix_millis(),
+        )?;
         operation.validate().map_err(|_| {
             with_evidence(
                 "invalid_provider_operation",
@@ -489,9 +482,13 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
                 let (request_id, operation_id) = evidence();
                 with_evidence("timeout_unknown_outcome", request_id, operation_id)
             })?;
-        let poll_url = operation_poll_url(&self.config, operation).map_err(|_| {
+        let poll_url = operation_poll_url(&self.config, operation).map_err(|error| {
             let (request_id, operation_id) = evidence();
-            with_evidence("invalid_provider_operation", request_id, operation_id)
+            let code = match error {
+                ContractError::Provider { code } => code,
+                _ => "invalid_provider_operation".to_owned(),
+            };
+            with_evidence(&code, request_id, operation_id)
         })?;
         let operation_id = operation.provider_operation_id.clone();
         let mut request_id = operation.provider_request_id.clone();
@@ -964,41 +961,159 @@ fn submit_url(config: &Flux2ApiConfig, model: &str) -> Result<Url> {
     ));
     Ok(url)
 }
-fn poll_url(body: &Value) -> Result<Url> {
-    let value = string_at(body, &["polling_url", "pollingUrl"])
-        .ok_or_else(|| provider_error("malformed_response"))?;
-    let url = Url::parse(&value).map_err(|_| provider_error("malformed_response"))?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || url_has_explicit_port(&value)
-        || url.fragment().is_some()
-        || !valid_bfl_api_host(url.host_str())
-    {
-        return Err(provider_error("polling_origin_rejected"));
+fn polling_checkpoint(
+    body: &Value,
+    provider_request_id: Option<String>,
+    provider_operation_id: String,
+    api_version: &str,
+    deadline_unix_ms: i64,
+) -> Result<AsyncProviderOperation, ProviderFailure> {
+    let value = string_at(body, &["polling_url", "pollingUrl"]).ok_or_else(|| {
+        reconcile_with_evidence(
+            "malformed_response",
+            ProviderPhase::Processing,
+            provider_request_id.clone(),
+            Some(provider_operation_id.clone()),
+        )
+    })?;
+    let fingerprint = format!("sha256:{:x}", Sha256::digest(value.as_bytes()));
+    let expected_path = format!("/{}/get_result", api_version.trim_matches('/'));
+    let mut reason = None;
+    let mut scheme = None;
+    let mut normalized_host = None;
+    let mut explicit_port = None;
+    let mut endpoint_shape = "unparseable".to_owned();
+    let mut query_keys = Vec::new();
+
+    let parsed = if value.len() > MAX_POLLING_URL_BYTES {
+        reason = Some("url_too_long".to_owned());
+        None
+    } else if !value.is_ascii() {
+        reason = Some("non_ascii_url".to_owned());
+        None
+    } else {
+        if value
+            .split_once("://")
+            .and_then(|(_, remainder)| remainder.split(['/', '?', '#']).next())
+            .is_some_and(|authority| authority.contains('%'))
+        {
+            reason = Some("encoded_host".to_owned());
+        }
+        match Url::parse(&value) {
+            Ok(url) => Some(url),
+            Err(_) => {
+                reason = Some("malformed_url".to_owned());
+                None
+            }
+        }
+    };
+
+    if let Some(url) = parsed.as_ref() {
+        scheme = Some(url.scheme().to_owned());
+        normalized_host = url.host_str().map(str::to_owned);
+        explicit_port = explicit_port_from_url(&value);
+        endpoint_shape = if url.path() == expected_path {
+            format!("{}/get_result", api_version.trim_matches('/'))
+        } else {
+            "unexpected".to_owned()
+        };
+        query_keys = url
+            .query_pairs()
+            .filter_map(|(key, _)| {
+                (key.len() <= 64
+                    && key.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'-' | b'_')
+                    }))
+                .then(|| key.into_owned())
+            })
+            .take(8)
+            .collect();
+        let query = url.query_pairs().collect::<Vec<_>>();
+        reason = reason.or_else(|| {
+            if url.scheme() != "https" {
+                Some("scheme_not_https".to_owned())
+            } else if !url.username().is_empty() || url.password().is_some() {
+                Some("userinfo_present".to_owned())
+            } else if url.port().is_some() || url_has_explicit_port(&value) {
+                Some("explicit_port_present".to_owned())
+            } else if url.fragment().is_some() {
+                Some("fragment_present".to_owned())
+            } else if !valid_bfl_polling_host(url.host_str()) {
+                Some("host_not_allowlisted".to_owned())
+            } else if url.path() != expected_path {
+                Some("path_contract_mismatch".to_owned())
+            } else if query.len() != 1 || query[0].0 != "id" {
+                Some("query_contract_mismatch".to_owned())
+            } else if query[0].1 != provider_operation_id {
+                Some("operation_id_mismatch".to_owned())
+            } else {
+                None
+            }
+        });
     }
-    Ok(url)
+
+    let context = PollingRecoveryContext {
+        schema_version: 1,
+        policy_version: BFL_POLLING_POLICY_VERSION.to_owned(),
+        scheme,
+        normalized_host: normalized_host.clone(),
+        explicit_port,
+        endpoint_shape,
+        query_keys,
+        url_fingerprint: fingerprint,
+        validation_reason: reason,
+    };
+    context.validate().map_err(|_| {
+        reconcile_with_evidence(
+            "invalid_provider_operation",
+            ProviderPhase::Processing,
+            provider_request_id.clone(),
+            Some(provider_operation_id.clone()),
+        )
+    })?;
+    let checkpoint_host = normalized_host
+        .as_deref()
+        .filter(|host| {
+            !host.starts_with(['-', '.']) && !host.ends_with(['-', '.']) && !host.contains("..")
+        })
+        .unwrap_or("unavailable")
+        .to_owned();
+    Ok(AsyncProviderOperation {
+        provider_request_id,
+        provider_operation_id,
+        polling_host: checkpoint_host,
+        polling_recovery: Some(context),
+        deadline_unix_ms,
+    })
 }
 
-fn polling_checkpoint_host(body: &Value, operation_id: &str, api_version: &str) -> Result<String> {
-    let url = poll_url(body)?;
-    let expected_path = format!("/{}/get_result", api_version.trim_matches('/'));
-    let query = url.query_pairs().collect::<Vec<_>>();
-    if url.path() != expected_path
-        || query.len() != 1
-        || query[0].0 != "id"
-        || query[0].1 != operation_id
-    {
-        return Err(provider_error("malformed_response"));
-    }
-    url.host_str()
-        .map(str::to_owned)
-        .ok_or_else(|| provider_error("polling_origin_rejected"))
+fn explicit_port_from_url(value: &str) -> Option<u16> {
+    let (_, remainder) = value.split_once("://")?;
+    let authority = remainder.split(['/', '?', '#']).next()?;
+    let (_, port) = authority.rsplit_once(':')?;
+    (!port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| port.parse().ok())
+        .flatten()
 }
 
 fn operation_poll_url(config: &Flux2ApiConfig, operation: &AsyncProviderOperation) -> Result<Url> {
-    if !valid_bfl_api_host(Some(&operation.polling_host)) {
+    let expected_shape = format!("{}/get_result", config.api_version.trim_matches('/'));
+    if !valid_bfl_polling_host(Some(&operation.polling_host))
+        || operation.polling_recovery.as_ref().is_some_and(|context| {
+            context.endpoint_shape != expected_shape
+                || context.query_keys != ["id"]
+                || context
+                    .validation_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason != "host_not_allowlisted")
+                || context
+                    .normalized_host
+                    .as_deref()
+                    .is_some_and(|host| host != operation.polling_host)
+        })
+    {
         return Err(provider_error("polling_origin_rejected"));
     }
     let mut url = Url::parse(&format!("https://{}/", operation.polling_host))
@@ -1570,7 +1685,12 @@ mod tests {
 
     #[test]
     fn provider_returned_polling_urls_use_only_explicit_bfl_api_origins() {
-        for host in ["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"] {
+        for host in [
+            "api.bfl.ai",
+            "api.eu.bfl.ai",
+            "api.us.bfl.ai",
+            "api.us1.bfl.ai",
+        ] {
             let polling_url = format!("https://{host}/v1/get_result?id=op-1");
             let signed_artifact =
                 "https://delivery.us.bfl.ai/out.png?signature=artifact-url-canary";
@@ -1618,6 +1738,8 @@ mod tests {
             "https://api.bfl.ai/v1/get_result?id=op-1#fragment",
             "https://api.bfl.ai.evil.example/v1/get_result?id=op-1",
             "https://evil.api.bfl.ai/v1/get_result?id=op-1",
+            "https://api.us2.bfl.ai/v1/get_result?id=op-1",
+            "https://api.us1.bfl.ai.evil.example/v1/get_result?id=op-1",
             "https://api.bfl.ai./v1/get_result?id=op-1",
             "https://delivery.us.bfl.ai/v1/get_result?id=op-1",
         ] {
@@ -2161,16 +2283,27 @@ mod tests {
                 json!({"id":"op-1","polling_url":polling_url,"status":"Pending"}),
                 Vec::new(),
             );
-            let error = adapter
+            let submission = adapter
                 .submit(
                     &request(),
                     &input(),
                     &secret_for_test("secret-canary"),
                     Some("opaque-key"),
                 )
+                .unwrap();
+            let AdapterSubmission::Pending(operation) = submission else {
+                panic!("rejected polling evidence must be checkpointable");
+            };
+            let error = adapter
+                .poll(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    &operation,
+                )
                 .unwrap_err();
 
-            assert_eq!(error.code, "malformed_response", "{polling_url}");
+            assert_eq!(error.code, "polling_origin_rejected", "{polling_url}");
             assert_eq!(error.phase, ProviderPhase::Processing, "{polling_url}");
             assert_eq!(
                 error.spend_disposition,
@@ -2183,6 +2316,71 @@ mod tests {
                 traffic.artifacts.lock().unwrap().is_empty(),
                 "{polling_url}"
             );
+        }
+    }
+
+    #[test]
+    fn rejected_polling_checkpoint_is_versioned_sanitized_and_reasoned() {
+        let oversized = format!(
+            "https://api.bfl.ai/v1/get_result?id=op-1&padding={}",
+            "x".repeat(MAX_POLLING_URL_BYTES)
+        );
+        for (polling_url, expected_reason, expected_port) in [
+            (
+                "https://api.future.bfl.ai/v1/get_result?id=op-1&token=credential-value".to_owned(),
+                "host_not_allowlisted",
+                None,
+            ),
+            (
+                "https://api.bfl.ai:443/v1/get_result?id=op-1".to_owned(),
+                "explicit_port_present",
+                Some(443),
+            ),
+            (
+                "https://éxample.bfl.ai/v1/get_result?id=op-1".to_owned(),
+                "non_ascii_url",
+                None,
+            ),
+            (
+                "https://%61pi.bfl.ai/v1/get_result?id=op-1".to_owned(),
+                "encoded_host",
+                None,
+            ),
+            (oversized, "url_too_long", None),
+        ] {
+            let (adapter, traffic) = security_fixture(
+                202,
+                json!({"id":"op-1","polling_url":polling_url}),
+                Vec::new(),
+            );
+            let AdapterSubmission::Pending(operation) = adapter
+                .submit(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap()
+            else {
+                panic!("rejected polling evidence must be checkpointable");
+            };
+            let context = operation.polling_recovery.as_ref().unwrap();
+            assert_eq!(context.schema_version, 1);
+            assert_eq!(context.policy_version, BFL_POLLING_POLICY_VERSION);
+            assert_eq!(context.validation_reason.as_deref(), Some(expected_reason));
+            assert_eq!(context.explicit_port, expected_port);
+            assert!(context.url_fingerprint.starts_with("sha256:"));
+            let durable = serde_json::to_string(&operation).unwrap();
+            for forbidden in [
+                "credential-value",
+                "secret-canary",
+                "polling_url",
+                "https://",
+            ] {
+                assert!(!durable.contains(forbidden), "leaked {forbidden}");
+            }
+            assert!(traffic.polls.lock().unwrap().is_empty());
+            assert!(traffic.artifacts.lock().unwrap().is_empty());
         }
     }
 
@@ -2202,6 +2400,7 @@ mod tests {
             provider_request_id: Some("req-1".into()),
             provider_operation_id: "op-1".into(),
             polling_host: "api.us.bfl.ai".into(),
+            polling_recovery: None,
             deadline_unix_ms: expired_unix_ms,
         };
 
@@ -2239,6 +2438,7 @@ mod tests {
             provider_request_id: Some("req-1".into()),
             provider_operation_id: "op-1".into(),
             polling_host: "api.us.bfl.ai".into(),
+            polling_recovery: None,
             deadline_unix_ms,
         };
         let observer = RecordingObserver::default();
@@ -2286,6 +2486,7 @@ mod tests {
             provider_request_id: Some("req-1".into()),
             provider_operation_id: "op-1".into(),
             polling_host: "api.us.bfl.ai".into(),
+            polling_recovery: None,
             deadline_unix_ms,
         };
         let observer = RecordingObserver::default();

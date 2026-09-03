@@ -252,15 +252,22 @@ BFL's current
 requires clients to poll the URL returned by a generation request and notes
 that artifact delivery regions can change. Gongbu keeps those two network
 policies separate. A provider-returned polling URL may receive `x-key` only
-when it is an HTTPS URL on exactly `api.bfl.ai`, `api.eu.bfl.ai`, or
-`api.us.bfl.ai`. User information, explicit ports, fragments, redirects, and
+when it is an HTTPS URL on exactly `api.bfl.ai`, `api.eu.bfl.ai`,
+`api.us.bfl.ai`, or the currently documented cluster origin
+`api.us1.bfl.ai`. This is a literal allowlist, not an `api.*.bfl.ai` wildcard.
+User information, explicit ports, fragments, redirects, lookalikes, and
 all other origins are rejected before the credentialed request is sent.
 
 The generation POST is isolated in the patch-protected `submit_provider`
 activity and is never retried as provider generation work. A successful submit
 must be followed immediately by one atomic Gongbu SQLite checkpoint containing
-only the validated request ID when present, operation ID, polling hostname, and
-the absolute adapter deadline. The polling URL itself is not persisted.
+only the safe request ID when present, operation ID, normalized polling hostname, and
+the absolute adapter deadline. Before origin validation can terminate the
+execution, the same checkpoint also stores a versioned sanitized recovery
+record: normalized scheme/host/explicit port, fixed endpoint shape, query-key
+names, URL fingerprint, exact validation reason, and polling-policy version.
+It never stores the polling URL, arbitrary query values, userinfo, fragments,
+headers, credentials, provider bodies, signed artifact URLs, or storage paths.
 `poll_provider_operation` reconstructs the status request from frozen runtime
 configuration and that checkpoint, then issues only GET requests for the same
 operation. Worker restart and activity recovery reuse the checkpoint and its
@@ -288,7 +295,11 @@ If a generation request may have reached BFL but its operation ID cannot be
 durably established, the workflow also reconciles. It does not infer safety
 from a missing checkpoint, retry the POST, or release the Hubu claim. Once the
 checkpoint exists, subsequent polling ambiguity retains that same safe
-operation evidence for recovery or reconciliation.
+operation evidence for recovery or reconciliation. Execution detail tells the
+agent not to resubmit, to recover first, and that artifact retrieval is
+time-sensitive. After a policy update, an explicit `reinspect` reconciliation
+action may reopen only that same ambiguous attempt and enter the GET-only
+poll-existing path; the generation POST remains unreachable.
 
 Artifact URLs follow a different, credential-free path. Gongbu accepts only
 HTTPS `delivery.<region>.bfl.ai` hosts with exactly one safe region label,

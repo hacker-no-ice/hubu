@@ -168,6 +168,11 @@ FLUX submission is asynchronous. Gongbu sends one generation POST, checkpoints
 the safe request and operation identifiers, validated polling host, and original
 deadline, then performs bounded read-only polling. Restart resumes that same
 operation and never submits a replacement generation.
+The polling allowlist includes the three documented router origins and the
+literal documented `api.us1.bfl.ai` cluster origin. A rejected post-submit URL
+is checkpointed only as sanitized recovery evidence, with recovery-first,
+do-not-resubmit guidance; explicit reconciliation can poll the same operation
+after an approved policy correction.
 
 The shipped provider contract is production-validated but not live-qualified;
 its catalog reports `live_qualified = false` and

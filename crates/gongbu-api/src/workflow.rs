@@ -625,6 +625,23 @@ impl ExecutionWorkflow<'_> {
                 failure.provider_operation_id = operation_id;
                 self.repository
                     .complete_provider_attempt(attempt_id, &failure)?;
+                if code == "polling_origin_rejected" {
+                    let attempt = self.repository.get_provider_attempt(attempt_id)?;
+                    if let (Some(context), Some(operation_id)) = (
+                        attempt.provider_recovery_context,
+                        attempt.provider_operation_id.as_deref(),
+                    ) {
+                        crate::lifecycle::log_polling_origin_rejection(
+                            &attempt.provider,
+                            &execution.execution_id,
+                            attempt_id,
+                            attempt.provider_request_id.as_deref(),
+                            operation_id,
+                            &context.policy_version,
+                            &context.url_fingerprint,
+                        );
+                    }
+                }
                 let held = self.transition(
                     execution,
                     "reconciliation_required",
@@ -918,6 +935,51 @@ impl ExecutionWorkflow<'_> {
             }
         }
 
+        // Reinspect is the only action that may resume provider traffic. It
+        // reopens the same completed ambiguous attempt atomically, then enters
+        // the poll-existing path. The generation POST is unreachable here.
+        if matches!(requested, Some(ReconciliationAction::Reinspect)) {
+            if let Some(attempt) = attempt.as_ref().filter(|attempt| {
+                attempt.outcome == "ambiguous"
+                    && attempt.failure_code.as_deref() == Some("polling_origin_rejected")
+                    && attempt.provider_recovery_context.is_some()
+            }) {
+                if self
+                    .repository
+                    .begin_provider_reconciliation_poll(
+                        execution_id,
+                        &attempt.provider_attempt_id,
+                        execution.version,
+                        now,
+                    )
+                    .is_ok()
+                {
+                    let outcome = self.provider_poll_phase(execution_id, now)?;
+                    return match outcome {
+                        ProviderPhaseOutcome::PersistArtifacts => {
+                            let persisted = self.artifact_phase(execution_id, now)?;
+                            if persisted.status == "settling" {
+                                self.settlement_phase(execution_id, now)
+                            } else {
+                                Ok(persisted)
+                            }
+                        }
+                        ProviderPhaseOutcome::ReleaseAuthorization => {
+                            self.release_phase(execution_id, now)
+                        }
+                        ProviderPhaseOutcome::Complete(_) => self
+                            .repository
+                            .get_execution(execution_id)
+                            .map_err(Into::into),
+                        ProviderPhaseOutcome::PollExisting => self
+                            .repository
+                            .get_execution(execution_id)
+                            .map_err(Into::into),
+                    };
+                }
+            }
+        }
+
         // A durable succeeded attempt, durable artifacts, frozen usage/cost, and stable
         // receipt prove that replaying the same Hubu settlement cannot create provider work.
         if !matches!(requested, Some(ReconciliationAction::Release)) {
@@ -1169,6 +1231,7 @@ fn bind_poll_result_to_checkpoint(
                 provider_request_id: success.request_id.clone(),
                 provider_operation_id: success.operation_id.clone().unwrap_or_default(),
                 polling_host: operation.polling_host.clone(),
+                polling_recovery: operation.polling_recovery.clone(),
                 deadline_unix_ms: operation.deadline_unix_ms,
             };
             let request_matches = operation.provider_request_id.is_none()
@@ -1408,6 +1471,7 @@ mod tests {
         submits: Cell<u32>,
         polls: Cell<u32>,
         submit_error: RefCell<Option<ActivityError>>,
+        poll_error: RefCell<Option<ActivityError>>,
         operation: AsyncProviderOperation,
         last_polled_operation: RefCell<Option<AsyncProviderOperation>>,
     }
@@ -1417,10 +1481,12 @@ mod tests {
                 submits: Cell::new(0),
                 polls: Cell::new(0),
                 submit_error: RefCell::new(None),
+                poll_error: RefCell::new(None),
                 operation: AsyncProviderOperation {
                     provider_request_id: Some("request-170".into()),
                     provider_operation_id: "operation-170".into(),
                     polling_host: "api.bfl.ai".into(),
+                    polling_recovery: None,
                     deadline_unix_ms: 1_799_999_999_000,
                 },
                 last_polled_operation: RefCell::new(None),
@@ -1452,6 +1518,9 @@ mod tests {
         ) -> Result<ProviderSuccess, ActivityError> {
             self.polls.set(self.polls.get() + 1);
             self.last_polled_operation.replace(Some(operation.clone()));
+            if let Some(error) = self.poll_error.borrow_mut().take() {
+                return Err(error);
+            }
             Ok(ProviderSuccess {
                 request_id: operation.provider_request_id.clone(),
                 operation_id: Some(operation.provider_operation_id.clone()),
@@ -2837,6 +2906,7 @@ mod tests {
             provider_request_id: Some("request-170".into()),
             provider_operation_id: "operation-170".into(),
             polling_host: "api.bfl.ai".into(),
+            polling_recovery: None,
             deadline_unix_ms: 1_799_999_999_000,
         };
         let mismatched = ProviderSuccess {
@@ -3050,6 +3120,125 @@ mod tests {
         assert_eq!(hubu.settles.get(), 1);
         assert_eq!(hubu.releases.get(), 0);
         assert_eq!(artifacts.calls.get(), 1);
+    }
+
+    #[test]
+    fn explicit_reinspect_recovers_origin_rejection_after_restart_without_resubmission() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("origin-rejection-recovery.sqlite3");
+        let hubu = Hubu::default();
+        let provider = AsyncProvider {
+            operation: AsyncProviderOperation {
+                provider_request_id: Some("request-200".into()),
+                provider_operation_id: "operation-200".into(),
+                polling_host: "api.future.bfl.ai".into(),
+                polling_recovery: Some(crate::provider_contract::PollingRecoveryContext {
+                    schema_version: 1,
+                    policy_version: "bfl-polling-origin-v2".into(),
+                    scheme: Some("https".into()),
+                    normalized_host: Some("api.future.bfl.ai".into()),
+                    explicit_port: None,
+                    endpoint_shape: "v1/get_result".into(),
+                    query_keys: vec!["id".into()],
+                    url_fingerprint: format!("sha256:{}", "b".repeat(64)),
+                    validation_reason: Some("host_not_allowlisted".into()),
+                }),
+                deadline_unix_ms: 1_799_999_999_000,
+            },
+            ..Default::default()
+        };
+        provider
+            .poll_error
+            .replace(Some(ActivityError::AmbiguousWithEvidence {
+                code: "polling_origin_rejected".into(),
+                request_id: Some("request-200".into()),
+                operation_id: Some("operation-200".into()),
+            }));
+
+        let execution_id = {
+            let repository = Repository::open(&path, Redactor::default()).unwrap();
+            let execution = execution(&repository, "origin-rejection-recovery");
+            let artifacts = Artifacts {
+                repo: &repository,
+                calls: Cell::new(0),
+            };
+            let workflow = ExecutionWorkflow {
+                repository: &repository,
+                hubu: &hubu,
+                provider: &provider,
+                artifacts: &artifacts,
+            };
+            let held = workflow.run(&execution.execution_id, "initial").unwrap();
+            assert_eq!(held.status, "reconciliation_required");
+            assert_eq!(provider.submits.get(), 1);
+            assert_eq!(provider.polls.get(), 1);
+            let attempt = repository
+                .get_provider_attempt_for_execution(&execution.execution_id)
+                .unwrap();
+            assert_eq!(
+                attempt.provider_recovery_context,
+                provider.operation.polling_recovery
+            );
+            let evidence = repository
+                .get_reconciliation(&execution.execution_id)
+                .unwrap()
+                .evidence;
+            assert_eq!(
+                evidence["last_confirmed_step"],
+                "provider_operation_checkpointed"
+            );
+            assert_eq!(
+                evidence["polling_recovery"]["validation_reason"],
+                "host_not_allowlisted"
+            );
+            assert_eq!(evidence["recovery_guidance"]["do_not_resubmit"], true);
+            assert_eq!(evidence["provider_operation_id"], "operation-200");
+            let encoded = evidence.to_string();
+            for forbidden in ["https://", "signed_url", "storage_path", "raw_body"] {
+                assert!(!encoded.contains(forbidden));
+            }
+            execution.execution_id
+        };
+
+        let restarted = Repository::open(&path, Redactor::default()).unwrap();
+        let artifacts = Artifacts {
+            repo: &restarted,
+            calls: Cell::new(0),
+        };
+        let workflow = ExecutionWorkflow {
+            repository: &restarted,
+            hubu: &hubu,
+            provider: &provider,
+            artifacts: &artifacts,
+        };
+        let recovered = workflow
+            .recover(
+                &execution_id,
+                "reinspect",
+                Some(&OperatorReconciliationRequest {
+                    action_id: "recover-operation-200".into(),
+                    action: ReconciliationAction::Reinspect,
+                    evidence: json!({"reason":"polling_policy_updated"}),
+                }),
+            )
+            .unwrap();
+        assert_eq!(recovered.status, "succeeded");
+        assert_eq!(provider.submits.get(), 1);
+        assert_eq!(provider.polls.get(), 2);
+        let attempt_count = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM provider_attempts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(attempt_count, 1);
+        assert_eq!(
+            restarted
+                .count_artifacts_for_execution(&execution_id)
+                .unwrap(),
+            1
+        );
+        assert_eq!(hubu.settles.get(), 1);
     }
 
     #[test]

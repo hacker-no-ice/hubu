@@ -2872,6 +2872,7 @@ mod tests {
             provider_request_id: Some("https://storage.invalid/raw?signature=secret".into()),
             provider_operation_id: "https://provider.invalid/operation/1".into(),
             polling_host: "api.bfl.ai".into(),
+            polling_recovery: None,
             deadline_unix_ms: 1_800_000_000_000,
         });
         assert!(matches!(
@@ -2883,6 +2884,7 @@ mod tests {
             provider_request_id: Some("request-170".into()),
             provider_operation_id: "operation-170".into(),
             polling_host: "api.bfl.ai".into(),
+            polling_recovery: None,
             deadline_unix_ms: 1_800_000_000_000,
         };
         assert_eq!(

@@ -101,6 +101,8 @@ pub struct ExecutionResponse {
     pub completed_at: Option<String>,
     pub timing: ExecutionTimingResponse,
     pub provider_transport: ProviderTransportResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Value>,
 }
 
 /// Agent-safe durable counts of provider-boundary transport calls.
@@ -1085,6 +1087,40 @@ fn execution_response(
             .zip(provider_interaction_ms)
             .and_then(|(total, provider)| total.checked_sub(provider)),
     };
+    let recovery = (status == ExecutionStatus::ReconciliationRequired)
+        .then(|| {
+            let attempt = provider_attempt.as_ref()?;
+            let context = attempt.provider_recovery_context.as_ref()?;
+            Some(json!({
+                "schema_version": 1,
+                "execution_id": &execution.execution_id,
+                "provider_attempt_id": &attempt.provider_attempt_id,
+                "provider_request_id": &attempt.provider_request_id,
+                "provider_operation_id": &attempt.provider_operation_id,
+                "hubu_claim_id": &execution.hubu_claim_id,
+                "provider": &execution.provider,
+                "target": &execution.target,
+                "model": &execution.model,
+                "credential_binding": {
+                    "provider_config_version": &execution.provider_config_version,
+                    "provider_config_digest": &execution.provider_config_digest,
+                },
+                "polling": context,
+                "submitted_at": &attempt.transmission_started_at,
+                "checkpointed_at": &attempt.operation_checkpointed_at,
+                "last_transition_at": &execution.updated_at,
+                "last_confirmed_step": "provider_operation_checkpointed",
+                "guidance": {
+                    "provider_outcome_ambiguous": true,
+                    "billing_may_have_occurred": true,
+                    "do_not_resubmit": true,
+                    "recover_first": true,
+                    "artifact_urls_may_expire": true,
+                    "action": if context.validation_reason.as_deref() == Some("host_not_allowlisted") { "update_policy_then_reinspect" } else { "contact_provider_support" }
+                }
+            }))
+        })
+        .flatten();
     Ok(ExecutionResponse {
         schema_version,
         execution_id: execution.execution_id,
@@ -1110,6 +1146,7 @@ fn execution_response(
                 .as_ref()
                 .map_or(0, |attempt| attempt.artifact_fetch_count),
         },
+        recovery,
     })
 }
 
@@ -1680,6 +1717,7 @@ mod tests {
                     provider_request_id: Some(provider_request_id.into()),
                     provider_operation_id: "hub-172-provider-operation".into(),
                     polling_host: "api.bfl.ai".into(),
+                    polling_recovery: None,
                     deadline_unix_ms: 1_788_000_000_000,
                 },
                 "2026-08-28T20:00:05Z",

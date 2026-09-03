@@ -148,6 +148,19 @@ struct DependencyProbeEvent<'a> {
     grpc_code: Option<&'a str>,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct PollingOriginRejectionEvent<'a> {
+    event: &'static str,
+    failure_code: &'static str,
+    provider: &'a str,
+    policy_version: &'a str,
+    execution_id: &'a str,
+    provider_attempt_id: &'a str,
+    provider_request_id: Option<&'a str>,
+    provider_operation_id: &'a str,
+    url_fingerprint: &'a str,
+}
+
 /// Emit one stable JSON lifecycle event without request-scoped or secret data.
 pub fn log(reason: LifecycleReason) {
     let event = LifecycleEvent {
@@ -179,6 +192,36 @@ pub fn log_dependency_probe(
         "{}",
         serde_json::to_string(&event)
             .expect("the bounded Gongbu dependency event is always serializable")
+    );
+}
+
+/// Emit sanitized, durable-keyed evidence for a rejected post-submit polling
+/// origin. Callers pass only validated identifiers and the SHA-256 URL
+/// fingerprint; the raw URL and its query values never reach the log.
+pub(crate) fn log_polling_origin_rejection(
+    provider: &str,
+    execution_id: &str,
+    provider_attempt_id: &str,
+    provider_request_id: Option<&str>,
+    provider_operation_id: &str,
+    policy_version: &str,
+    url_fingerprint: &str,
+) {
+    let event = PollingOriginRejectionEvent {
+        event: "gongbu_polling_origin_rejected",
+        failure_code: "polling_origin_rejected",
+        provider,
+        policy_version,
+        execution_id,
+        provider_attempt_id,
+        provider_request_id,
+        provider_operation_id,
+        url_fingerprint,
+    };
+    eprintln!(
+        "{}",
+        serde_json::to_string(&event)
+            .expect("validated polling rejection evidence is always serializable")
     );
 }
 

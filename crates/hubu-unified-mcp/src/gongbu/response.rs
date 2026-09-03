@@ -304,6 +304,9 @@ pub(super) fn execution_result(
     if response.schema_version != expected_schema_version
         || !valid_execution_id(&response.execution_id)
         || !valid_execution_status(&response.status)
+        || response.recovery.as_ref().is_some_and(|value| {
+            response.status != "reconciliation_required" || !valid_recovery_projection(value)
+        })
     {
         return Err(ToolError::invalid_response());
     }
@@ -330,10 +333,58 @@ pub(super) fn execution_result(
         completed_at: response.completed_at,
         timing,
         provider_transport,
+        recovery: response.recovery,
     };
     let mut public = serde_json::to_value(public).expect("public execution response serializes");
     scrub_private_projection(&mut public, &private_operation_key);
     Ok((text_result(&public), lifecycle))
+}
+
+fn valid_recovery_projection(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || object
+            .get("provider_operation_id")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !valid_provider_evidence_id(value))
+        || object
+            .get("polling")
+            .and_then(Value::as_object)
+            .and_then(|polling| polling.get("url_fingerprint"))
+            .and_then(Value::as_str)
+            .is_none_or(|value| {
+                value.len() != 71
+                    || !value.starts_with("sha256:")
+                    || !value[7..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+        || object
+            .get("guidance")
+            .and_then(Value::as_object)
+            .and_then(|guidance| guidance.get("do_not_resubmit"))
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return false;
+    }
+    let serialized = value.to_string();
+    serialized.len() <= 8192
+        && !serialized.contains("https://")
+        && !serialized.contains("signed_url")
+        && !serialized.contains("storage_path")
+        && !serialized.contains("raw_body")
+}
+
+fn valid_provider_evidence_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 fn valid_execution_id(value: &str) -> bool {
@@ -801,6 +852,8 @@ pub(super) struct ExecutionResponse {
     timing: ExecutionTiming,
     #[serde(default)]
     provider_transport: Option<ProviderTransport>,
+    #[serde(default)]
+    recovery: Option<Value>,
 }
 
 impl ExecutionResponse {
@@ -853,6 +906,8 @@ struct PublicExecutionResponse {
     timing: ExecutionTiming,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_transport: Option<ProviderTransport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1031,6 +1086,7 @@ mod tests {
                 poll_count: 2,
                 artifact_fetch_count: 1,
             }),
+            recovery: None,
         }
     }
 
@@ -1149,6 +1205,69 @@ mod tests {
         assert_eq!(public["provider_transport"]["artifact_fetch_count"], 1);
         assert!(public["timing"].get("transmission_started_at").is_none());
         assert!(public.get("operation_key").is_none());
+    }
+
+    #[test]
+    fn reconciliation_projects_sanitized_recovery_first_guidance() {
+        let mut response = execution();
+        response.status = "reconciliation_required".into();
+        response.recovery = Some(json!({
+            "schema_version": 1,
+            "execution_id": "exec-1",
+            "provider_attempt_id": "attempt-1",
+            "provider_request_id": "request-1",
+            "provider_operation_id": "provider-op-1",
+            "hubu_claim_id": "claim-1",
+            "provider": "flux",
+            "target": "flux-2-pro",
+            "model": "flux-2-pro",
+            "credential_binding": {
+                "provider_config_version": "v1",
+                "provider_config_digest": format!("sha256:{}", "a".repeat(64))
+            },
+            "polling": {
+                "schema_version": 1,
+                "policy_version": "bfl-polling-origin-v2",
+                "scheme": "https",
+                "normalized_host": "api.future.bfl.ai",
+                "explicit_port": null,
+                "endpoint_shape": "v1/get_result",
+                "query_keys": ["id"],
+                "url_fingerprint": format!("sha256:{}", "b".repeat(64)),
+                "validation_reason": "host_not_allowlisted"
+            },
+            "submitted_at": "now",
+            "checkpointed_at": "now",
+            "last_transition_at": "now",
+            "last_confirmed_step": "provider_operation_checkpointed",
+            "guidance": {
+                "provider_outcome_ambiguous": true,
+                "billing_may_have_occurred": true,
+                "do_not_resubmit": true,
+                "recover_first": true,
+                "artifact_urls_may_expire": true,
+                "action": "update_policy_then_reinspect"
+            }
+        }));
+        let (result, _) = execution_result(
+            response,
+            Some(&continuation(None)),
+            None,
+            EXECUTION_V2_SCHEMA_VERSION,
+        )
+        .unwrap();
+        let public = result_json(result);
+        assert_eq!(public["recovery"]["provider_operation_id"], "provider-op-1");
+        assert_eq!(public["recovery"]["guidance"]["do_not_resubmit"], true);
+        assert_eq!(
+            public["recovery"]["polling"]["validation_reason"],
+            "host_not_allowlisted"
+        );
+        assert!(public.get("operation_key").is_none());
+        let encoded = public.to_string();
+        for forbidden in ["https://", "signed_url", "storage_path", "raw_body"] {
+            assert!(!encoded.contains(forbidden));
+        }
     }
 
     #[test]
