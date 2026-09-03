@@ -1099,9 +1099,30 @@ mod tests {
     use std::{
         io::{BufRead, BufReader, Read, Write},
         net::{TcpListener, TcpStream},
-        sync::{Arc, Mutex},
+        sync::{mpsc, Arc, Mutex},
         time::Instant,
     };
+
+    struct ResponseWriter {
+        pending: Vec<u8>,
+        responses: mpsc::Sender<Value>,
+    }
+
+    impl Write for ResponseWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.pending.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            let response = serde_json::from_slice(self.pending.as_slice())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            self.pending.clear();
+            self.responses.send(response).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "response receiver closed")
+            })
+        }
+    }
 
     fn composite_arguments() -> Value {
         json!({
@@ -1945,28 +1966,49 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut writer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (reader, _) = listener.accept().unwrap();
+        let (response_tx, response_rx) = mpsc::channel();
+        let response_writer = ResponseWriter {
+            pending: Vec::new(),
+            responses: response_tx,
+        };
+        let status_server = server.clone();
         let input_handle = thread::spawn(move || {
             writeln!(writer, "{first}").unwrap();
             writer.flush().unwrap();
-            thread::sleep(Duration::from_millis(250));
+            let first_response = response_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let operation_handle = first_response["result"]["structuredContent"]
+                ["operation_handle"]
+                .as_str()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while status_server
+                .durable_operation_status(operation_handle)
+                .unwrap()
+                .state
+                != "succeeded"
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "durable operation did not reach succeeded before replay"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
             writeln!(writer, "{second}").unwrap();
             writeln!(writer, "{third}").unwrap();
             writer.flush().unwrap();
+            vec![
+                first_response,
+                response_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                response_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            ]
         });
-        let mut output = Vec::new();
         server
             .clone()
-            .run(BufReader::new(reader), &mut output)
+            .run(BufReader::new(reader), response_writer)
             .unwrap();
-        input_handle.join().unwrap();
+        let responses = input_handle.join().unwrap();
         hubu_handle.join().unwrap();
         gongbu_handle.join().unwrap();
-
-        let responses = String::from_utf8(output)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .collect::<Vec<_>>();
         assert_eq!(responses.len(), 3);
         assert_eq!(
             responses[0]["result"]["structuredContent"]["outcome"],
