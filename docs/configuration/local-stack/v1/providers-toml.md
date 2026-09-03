@@ -8,6 +8,9 @@ live-spend boundary only where real provider work is possible. It does not
 choose one provider or image size for every request: agents discover active
 targets at runtime and select among only this approved set.
 
+For the primary operator flow, use the [complete sandbox, Hubu-only, and Gemini
+and FLUX examples](examples.md) before consulting this field-by-field reference.
+
 > **Potential charges:** setting `mode = "live"` does not by itself perform work, but it prepares Gongbu to send requests to configured providers after the reviewed generation is active. Verify every provider value and price against current authoritative provider documentation.
 
 ## Top-level fields

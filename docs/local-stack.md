@@ -3,6 +3,8 @@
 Use this guide to initialize, start, inspect, and connect a local Hubu stack.
 For configuration fields and design choices, use the public
 [schema-version-1 configuration reference](https://hubustack.dev/configuration/local-stack/v1/).
+For copyable sandbox, Hubu-only, and Gemini + FLUX live profiles, start with the
+[complete local stack examples](https://hubustack.dev/configuration/local-stack/v1/examples).
 
 ## Check the binaries
 
@@ -73,6 +75,12 @@ and Hubu-only profiles need no provider credential. Local-stack mode requires
 at least one approved real target and its opaque credential reference. Do not
 edit `generated/` or `state/`.
 
+Keep sandbox and live modes in separate profile directories. That isolates
+credentials, spend acknowledgement, generated state, databases, artifacts, and
+logs while making mode changes an explicit `hubu stack select` operation. See
+the [complete examples](https://hubustack.dev/configuration/local-stack/v1/examples#keep-sandbox-and-live-profiles-separate)
+for the recommended layout and switching flow.
+
 ## Complete and validate the profile
 
 Follow the comments in the starter files and use the detailed reference when a
@@ -91,6 +99,8 @@ files. Live provider execution can incur charges.
 
 For billable targets, start with [live provider
 operations](operations/live-providers.md). The
+[complete Gemini + FLUX example](https://hubustack.dev/configuration/local-stack/v1/examples#live-gemini-developer-api-and-flux2)
+shows the two Keychain references and the complete contract selection. The
 [FLUX.2 provider contract](operations/flux-provider-contract.md) documents its
 frozen recipe and asynchronous recovery details. Inspect the sanitized
 catalog with `hubu stack catalog --json`; catalog, doctor, and render never call

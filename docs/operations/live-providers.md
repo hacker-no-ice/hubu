@@ -7,6 +7,10 @@ credential, pricing, spend, retry, reconciliation, artifact, and qualification
 boundaries described here. Provider-specific sections contain only the
 authentication, transport, sizing, artifact, and recovery differences.
 
+Begin with the [complete Gemini + FLUX profile](../configuration/local-stack/v1/examples.md#live-gemini-developer-api-and-flux2)
+for the copyable `credentials.toml` and `providers.toml`, Keychain field
+mapping, frozen targets and pricing, and doctor-based validation flow.
+
 Live provider execution can incur charges. Ordinary tests, demos, CI, catalog
 inspection, doctor, render, and production validation must remain non-billable
 and must not contact a provider.
