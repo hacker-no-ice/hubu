@@ -248,6 +248,8 @@ test("promotes complete mode-specific stack examples", async () => {
   assert.match(examples, /hubu\.gemini-3\.1-flash-image\.text-to-image\/v1/);
   assert.match(examples, /hubu\.flux-2-pro\.text-to-image\/v1/);
   assert.match(examples, /`hubu stack doctor` is the authoritative validation path/);
+  assert.match(examples, /production_validated = false` until a generation has been\s+rendered/);
+  assert.match(examples, /hubu stack render[\s\S]*hubu stack doctor/);
   assert.match(examples, /## Keep sandbox and live profiles separate/);
   assert.doesNotMatch(examples, /Provider-disabled local-stack variation/);
   assert.doesNotMatch(examples, /Live-profile review checklist/);

@@ -161,13 +161,21 @@ hubu stack doctor --profile /absolute/path/to/hubu-live
 
 Follow its field-specific diagnostics until it reports `ready_to_render`.
 Doctor verifies the source shape, credential-reference existence, contract and
-target expansion, selector-complete rational pricing, production validation,
-and live-spend gate without printing a credential or contacting a provider.
-Use `--json` for the same authoritative result in automation. Do not replace
-doctor with a manual live-profile checklist.
+target expansion, selector-complete rational pricing, and live-spend gate
+without printing a credential or contacting a provider. For a new profile,
+doctor reports `production_validated = false` until a generation has been
+rendered. Render it, then rerun doctor so its contract readiness report confirms
+the rendered generation passed production validation:
 
-After doctor succeeds, render and review the generation before activation as
-described in [Local stack quick start](../../../local-stack.md#apply-a-configuration-change).
+```sh
+hubu stack render --profile /absolute/path/to/hubu-live
+hubu stack doctor --profile /absolute/path/to/hubu-live
+```
+
+Use `--json` for the same authoritative results in automation. Do not replace
+doctor with a manual live-profile checklist. Review the generation before
+activation as described in
+[Local stack quick start](../../../local-stack.md#apply-a-configuration-change).
 
 ## Keep sandbox and live profiles separate
 
