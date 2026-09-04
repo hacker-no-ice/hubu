@@ -12,7 +12,10 @@ use crate::{
         HubuAuthorizationSnapshot, HubuTokenReference, Repository,
     },
     provider::{
-        contract::{ContractError, NormalizedRequest, OutputDimensions, PricingSnapshot},
+        contract::{
+            polling_deadline_allows_reinspect, ContractError, NormalizedRequest, OutputDimensions,
+            PollingRecoveryContext, PricingSnapshot,
+        },
         flux2_api,
         registry::{ExecutionTarget, ValidatedProviderCatalog},
     },
@@ -101,6 +104,8 @@ pub struct ExecutionResponse {
     pub completed_at: Option<String>,
     pub timing: ExecutionTimingResponse,
     pub provider_transport: ProviderTransportResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Value>,
 }
 
 /// Agent-safe durable counts of provider-boundary transport calls.
@@ -467,11 +472,7 @@ impl Api {
                 }
                 return Ok(json_response(
                     200,
-                    &execution_response(
-                        &self.repository,
-                        existing.clone(),
-                        response_schema_version,
-                    )?,
+                    &self.execution_response(existing.clone(), response_schema_version)?,
                 ));
             }
         }
@@ -488,7 +489,7 @@ impl Api {
             }
             return Ok(json_response(
                 200,
-                &execution_response(&self.repository, existing, response_schema_version)?,
+                &self.execution_response(existing, response_schema_version)?,
             ));
         }
         let target_key = TargetKey::new(
@@ -640,7 +641,7 @@ impl Api {
             .map_err(map_schedule_error)?;
         Ok(json_response(
             200,
-            &execution_response(&self.repository, execution, response_schema_version)?,
+            &self.execution_response(execution, response_schema_version)?,
         ))
     }
 
@@ -654,6 +655,15 @@ impl Api {
             .get_execution(execution_id)
             .map_err(map_persistence)?;
         Ok(execution)
+    }
+
+    fn execution_response(
+        &self,
+        execution: Execution,
+        schema_version: u32,
+    ) -> Result<ExecutionResponse, ApiError> {
+        let now = (self.now)();
+        execution_response(&self.repository, execution, schema_version, &now)
     }
 
     fn reconcile(
@@ -686,7 +696,7 @@ impl Api {
             .map_err(map_schedule_error)?;
         Ok(json_response(
             202,
-            &execution_response(&self.repository, execution, V1_SCHEMA_VERSION)?,
+            &self.execution_response(execution, V1_SCHEMA_VERSION)?,
         ))
     }
 
@@ -697,8 +707,7 @@ impl Api {
     ) -> Result<HttpResponse, ApiError> {
         Ok(json_response(
             200,
-            &execution_response(
-                &self.repository,
+            &self.execution_response(
                 self.authorized_execution(caller, execution_id)?,
                 V1_SCHEMA_VERSION,
             )?,
@@ -739,8 +748,7 @@ impl Api {
             .artifacts
             .list_for_account(execution_id, &execution.account_id)
             .map_err(map_artifact_error)?;
-        let public_execution =
-            execution_response(&self.repository, execution.clone(), V1_SCHEMA_VERSION)?;
+        let public_execution = self.execution_response(execution.clone(), V1_SCHEMA_VERSION)?;
         // Scan a fixed allowlist of the public execution projection. The
         // general execution response intentionally contains the private,
         // caller-bound operation key; it must never become secret-comparison
@@ -1041,6 +1049,7 @@ fn execution_response(
     repository: &Repository,
     execution: Execution,
     schema_version: u32,
+    now: &str,
 ) -> Result<ExecutionResponse, ApiError> {
     let status = match execution.status.as_str() {
         "pending" => ExecutionStatus::Pending,
@@ -1085,6 +1094,53 @@ fn execution_response(
             .zip(provider_interaction_ms)
             .and_then(|(total, provider)| total.checked_sub(provider)),
     };
+    let recovery = (status == ExecutionStatus::ReconciliationRequired)
+        .then(|| {
+            let attempt = provider_attempt.as_ref()?;
+            // A durable polling context can outlive provider completion. Only
+            // project recovery-first guidance while the provider attempt itself
+            // is still ambiguous; artifact or settlement reconciliation after a
+            // successful provider result must not be described as a polling
+            // ambiguity.
+            if attempt.outcome != "ambiguous" {
+                return None;
+            }
+            let context = attempt.provider_recovery_context.as_ref()?;
+            Some(json!({
+                "schema_version": 1,
+                "execution_id": &execution.execution_id,
+                "provider_attempt_id": &attempt.provider_attempt_id,
+                "provider_request_id": &attempt.provider_request_id,
+                "provider_operation_id": &attempt.provider_operation_id,
+                "hubu_claim_id": &execution.hubu_claim_id,
+                "provider": &execution.provider,
+                "target": &execution.target,
+                "model": &execution.model,
+                "credential_binding": {
+                    "provider_config_version": &execution.provider_config_version,
+                    "provider_config_digest": &execution.provider_config_digest,
+                },
+                "polling": context,
+                "submitted_at": &attempt.transmission_started_at,
+                "checkpointed_at": &attempt.operation_checkpointed_at,
+                "last_transition_at": &execution.updated_at,
+                "last_confirmed_step": "provider_operation_checkpointed",
+                "guidance": {
+                    "provider_outcome_ambiguous": true,
+                    "billing_may_have_occurred": true,
+                    "do_not_resubmit": true,
+                    "recover_first": true,
+                    "artifact_urls_may_expire": true,
+                    "action": polling_recovery_action(
+                        context,
+                        attempt.provider_polling_host.as_deref(),
+                        attempt.provider_deadline_unix_ms,
+                        now,
+                    )
+                }
+            }))
+        })
+        .flatten();
     Ok(ExecutionResponse {
         schema_version,
         execution_id: execution.execution_id,
@@ -1110,7 +1166,33 @@ fn execution_response(
                 .as_ref()
                 .map_or(0, |attempt| attempt.artifact_fetch_count),
         },
+        recovery,
     })
+}
+
+fn polling_recovery_action(
+    context: &PollingRecoveryContext,
+    polling_host: Option<&str>,
+    deadline_unix_ms: Option<i64>,
+    now: &str,
+) -> &'static str {
+    let now_unix_ms = DateTime::parse_from_rfc3339(now)
+        .ok()
+        .map(|value| value.timestamp_millis());
+    if context.validation_reason.as_deref() == Some("host_not_allowlisted")
+        && context
+            .normalized_host
+            .as_deref()
+            .zip(polling_host)
+            .is_some_and(|(normalized, checkpointed)| normalized == checkpointed)
+        && deadline_unix_ms
+            .zip(now_unix_ms)
+            .is_some_and(|(deadline, now)| polling_deadline_allows_reinspect(deadline, now))
+    {
+        "update_policy_then_reinspect"
+    } else {
+        "contact_provider_support"
+    }
 }
 
 fn elapsed_ms(started_at: Option<&str>, completed_at: Option<&str>) -> Option<u64> {
@@ -1219,7 +1301,8 @@ mod tests {
         provider::{
             contract::{
                 ActualVendorCost, AdapterCapabilities, AdapterOutcome, AsyncProviderOperation,
-                NormalizedUsage, PricingCatalog, ProviderAdapter, ProviderFailure,
+                NormalizedUsage, PollingRecoveryContext, PricingCatalog, ProviderAdapter,
+                ProviderFailure,
             },
             registry::ProviderRegistry,
         },
@@ -1680,6 +1763,7 @@ mod tests {
                     provider_request_id: Some(provider_request_id.into()),
                     provider_operation_id: "hub-172-provider-operation".into(),
                     polling_host: "api.bfl.ai".into(),
+                    polling_recovery: None,
                     deadline_unix_ms: 1_788_000_000_000,
                 },
                 "2026-08-28T20:00:05Z",
@@ -2418,6 +2502,85 @@ mod tests {
     }
 
     #[test]
+    fn polling_recovery_action_requires_an_unexpired_deadline() {
+        let mut context = PollingRecoveryContext {
+            schema_version: 1,
+            policy_version: "bfl-polling-origin-v2".into(),
+            scheme: Some("https".into()),
+            normalized_host: Some("api.future.bfl.ai".into()),
+            explicit_port: None,
+            endpoint_shape: "v1/get_result".into(),
+            query_keys: vec!["id".into()],
+            url_fingerprint: format!("sha256:{}", "a".repeat(64)),
+            validation_reason: Some("host_not_allowlisted".into()),
+        };
+        let now = "2026-09-03T21:00:00Z";
+        let now_unix_ms = DateTime::parse_from_rfc3339(now)
+            .unwrap()
+            .timestamp_millis();
+
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms + 1_000),
+                now,
+            ),
+            "update_policy_then_reinspect"
+        );
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms + 999),
+                now,
+            ),
+            "contact_provider_support"
+        );
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms - 1),
+                now,
+            ),
+            "contact_provider_support"
+        );
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms + 1_000),
+                "invalid",
+            ),
+            "contact_provider_support"
+        );
+        assert_eq!(
+            polling_recovery_action(&context, Some("api.future.bfl.ai"), None, now),
+            "contact_provider_support"
+        );
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("unavailable"),
+                Some(now_unix_ms + 1_000),
+                now
+            ),
+            "contact_provider_support"
+        );
+        context.normalized_host = None;
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("unavailable"),
+                Some(now_unix_ms + 1_000),
+                now
+            ),
+            "contact_provider_support"
+        );
+    }
+
+    #[test]
     fn execution_response_projects_provider_and_non_provider_durations() {
         let fixture = fixture();
         let created = execution(&call_create(&fixture, &request("timed-execution")));
@@ -2527,6 +2690,131 @@ mod tests {
         assert_eq!(response.provider_transport.schema_version, 1);
         assert_eq!(response.provider_transport.poll_count, 2);
         assert_eq!(response.provider_transport.artifact_fetch_count, 1);
+    }
+
+    #[test]
+    fn successful_provider_attempt_does_not_project_polling_recovery() {
+        let fixture = fixture();
+        let created = execution(&call_create(&fixture, &request("artifact-reconciliation")));
+        let pending = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        let preflighting = fixture
+            .repository
+            .update_execution(
+                &pending.execution_id,
+                pending.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("2026-09-03T21:00:00Z".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-09-03T21:00:00Z",
+            )
+            .unwrap();
+        let claimed = fixture
+            .repository
+            .set_claim(
+                &preflighting.execution_id,
+                preflighting.version,
+                "claim-artifact-reconciliation",
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap();
+        let attempt = fixture
+            .repository
+            .start_provider_attempt(&claimed, "2026-09-03T21:00:02Z")
+            .unwrap();
+        fixture
+            .repository
+            .begin_provider_transmission(&attempt.provider_attempt_id, "2026-09-03T21:00:03Z")
+            .unwrap();
+        fixture
+            .repository
+            .record_provider_operation(
+                &attempt.provider_attempt_id,
+                &AsyncProviderOperation {
+                    provider_request_id: Some("request-artifact-reconciliation".into()),
+                    provider_operation_id: "operation-artifact-reconciliation".into(),
+                    polling_host: "api.us.bfl.ai".into(),
+                    polling_recovery: Some(PollingRecoveryContext {
+                        schema_version: 1,
+                        policy_version: "bfl-polling-origin-v2".into(),
+                        scheme: Some("https".into()),
+                        normalized_host: Some("api.us.bfl.ai".into()),
+                        explicit_port: None,
+                        endpoint_shape: "v1/get_result".into(),
+                        query_keys: vec!["id".into()],
+                        url_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                        validation_reason: None,
+                    }),
+                    deadline_unix_ms: 1_788_000_000_000,
+                },
+                "2026-09-03T21:00:04Z",
+            )
+            .unwrap();
+        fixture
+            .repository
+            .complete_provider_attempt(
+                &attempt.provider_attempt_id,
+                &AttemptResult {
+                    outcome: "succeeded".into(),
+                    completed_at: "2026-09-03T21:00:05Z".into(),
+                    usage: serde_json::to_value(NormalizedUsage {
+                        images: Some(1),
+                        input_tokens: None,
+                        output_tokens: None,
+                    })
+                    .unwrap(),
+                    usage_schema_version: 1,
+                    actual_vendor_cost: Some(ActualVendorCost::new(3, 2, "USD").unwrap()),
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_request_id: Some("request-artifact-reconciliation".into()),
+                    provider_operation_id: Some("operation-artifact-reconciliation".into()),
+                },
+            )
+            .unwrap();
+        let executing = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        let held = fixture
+            .repository
+            .update_execution(
+                &executing.execution_id,
+                executing.version,
+                &ExecutionUpdate {
+                    status: "reconciliation_required".into(),
+                    outcome: Some("ambiguous".into()),
+                    started_at: None,
+                    completed_at: None,
+                    failure_code: Some("artifact_persistence_failed".into()),
+                    failure_message_redacted: None,
+                    provider_outcome: Some(LifecycleOutcome::Succeeded),
+                    artifact_outcome: Some(LifecycleOutcome::Failed),
+                    settlement_outcome: None,
+                },
+                "2026-09-03T21:00:06Z",
+            )
+            .unwrap();
+
+        let response = execution_response(
+            &fixture.repository,
+            held,
+            V1_SCHEMA_VERSION,
+            "2026-09-03T21:00:06Z",
+        )
+        .unwrap();
+        assert_eq!(response.status, ExecutionStatus::ReconciliationRequired);
+        assert!(response.recovery.is_none());
     }
 
     #[test]

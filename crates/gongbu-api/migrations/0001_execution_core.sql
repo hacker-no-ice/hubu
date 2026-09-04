@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS provider_attempts(
  -- Safe asynchronous resume checkpoint. The raw polling URL is never stored;
  -- adapters persist only its validated host and reconstruct the documented path.
  provider_polling_host TEXT, provider_deadline_unix_ms INTEGER CHECK(provider_deadline_unix_ms IS NULL OR provider_deadline_unix_ms>0),
+ provider_recovery_context_json TEXT CHECK(provider_recovery_context_json IS NULL OR json_valid(provider_recovery_context_json)),
  operation_checkpointed_at TEXT,
  -- Monotonic provider-boundary call evidence. These counters are advanced
  -- durably before Gongbu enters the corresponding transport call.
