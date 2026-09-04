@@ -912,7 +912,7 @@ impl Repository {
         let mut connection = self.0.lock().unwrap();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let attempt_changed = transaction.execute(
-            "UPDATE provider_attempts SET outcome='started',completed_at=NULL,failure_code=NULL,failure_message_redacted=NULL WHERE provider_attempt_id=?1 AND execution_id=?2 AND outcome='ambiguous' AND completed_at IS NOT NULL AND provider_operation_id IS NOT NULL AND provider_polling_host IS NOT NULL AND provider_deadline_unix_ms>=?3 AND operation_checkpointed_at IS NOT NULL AND json_extract(provider_recovery_context_json,'$.validation_reason')='host_not_allowlisted'",
+            "UPDATE provider_attempts SET outcome='started',completed_at=NULL,failure_code=NULL,failure_message_redacted=NULL WHERE provider_attempt_id=?1 AND execution_id=?2 AND outcome='ambiguous' AND completed_at IS NOT NULL AND provider_operation_id IS NOT NULL AND provider_polling_host IS NOT NULL AND provider_deadline_unix_ms>=?3 AND operation_checkpointed_at IS NOT NULL AND json_extract(provider_recovery_context_json,'$.validation_reason')='host_not_allowlisted' AND json_extract(provider_recovery_context_json,'$.normalized_host')=provider_polling_host",
             params![attempt_id, execution_id, minimum_deadline_unix_ms],
         )?;
         if attempt_changed != 1 {
@@ -2106,6 +2106,12 @@ fn reconciliation_recovery_action(attempt: Option<&ProviderAttempt>, at: &str) -
             .as_ref()
             .and_then(|context| context.validation_reason.as_deref())
             == Some("host_not_allowlisted")
+            && attempt
+                .provider_recovery_context
+                .as_ref()
+                .and_then(|context| context.normalized_host.as_deref())
+                .zip(attempt.provider_polling_host.as_deref())
+                .is_some_and(|(normalized, checkpointed)| normalized == checkpointed)
             && attempt
                 .provider_deadline_unix_ms
                 .zip(now_unix_ms)

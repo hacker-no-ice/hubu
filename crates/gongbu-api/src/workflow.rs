@@ -5,7 +5,7 @@
 use crate::{
     execution::{
         AttemptResult, CreateReceiptParams, Error as PersistenceError, Execution, ExecutionUpdate,
-        Repository, StagedProviderArtifact,
+        LifecycleOutcome, Repository, StagedProviderArtifact,
     },
     provider_contract::{
         ActualVendorCost, AsyncProviderOperation, ContractError, NormalizedUsage, PricingSnapshot,
@@ -876,6 +876,32 @@ impl ExecutionWorkflow<'_> {
         operator: Option<&OperatorReconciliationRequest>,
     ) -> Result<Execution, WorkflowError> {
         let mut execution = self.repository.get_execution(execution_id)?;
+        // Reopening a rejected polling origin and the subsequent GET/artifact
+        // work share one Temporal activity. If that activity is retried after
+        // the durable reopen transaction, resume from the checkpointed
+        // operation or downstream durable phase; never re-enter submission.
+        if execution.status == "executing"
+            && execution.provider_outcome == Some(LifecycleOutcome::Ambiguous)
+        {
+            let attempt = self
+                .repository
+                .get_provider_attempt_for_execution(execution_id)?;
+            if attempt.operation_checkpointed_at.is_some()
+                && attempt
+                    .provider_recovery_context
+                    .as_ref()
+                    .is_some_and(|context| {
+                        context.validation_reason.as_deref() == Some("host_not_allowlisted")
+                    })
+            {
+                return self.resume_reopened_provider_poll(execution_id, now);
+            }
+        }
+        if execution.status == "settling"
+            && execution.provider_outcome == Some(LifecycleOutcome::Succeeded)
+        {
+            return self.settlement_phase(execution_id, now);
+        }
         if execution.status != "reconciliation_required" {
             return Ok(execution);
         }
@@ -958,28 +984,7 @@ impl ExecutionWorkflow<'_> {
                     )
                     .is_ok()
                 {
-                    let outcome = self.provider_poll_phase(execution_id, now)?;
-                    return match outcome {
-                        ProviderPhaseOutcome::PersistArtifacts => {
-                            let persisted = self.artifact_phase(execution_id, now)?;
-                            if persisted.status == "settling" {
-                                self.settlement_phase(execution_id, now)
-                            } else {
-                                Ok(persisted)
-                            }
-                        }
-                        ProviderPhaseOutcome::ReleaseAuthorization => {
-                            self.release_phase(execution_id, now)
-                        }
-                        ProviderPhaseOutcome::Complete(_) => self
-                            .repository
-                            .get_execution(execution_id)
-                            .map_err(Into::into),
-                        ProviderPhaseOutcome::PollExisting => self
-                            .repository
-                            .get_execution(execution_id)
-                            .map_err(Into::into),
-                    };
+                    return self.resume_reopened_provider_poll(execution_id, now);
                 }
             }
         }
@@ -1048,6 +1053,29 @@ impl ExecutionWorkflow<'_> {
             );
         }
         Ok(execution)
+    }
+
+    fn resume_reopened_provider_poll(
+        &self,
+        execution_id: &str,
+        now: &str,
+    ) -> Result<Execution, WorkflowError> {
+        let outcome = self.provider_poll_phase(execution_id, now)?;
+        match outcome {
+            ProviderPhaseOutcome::PersistArtifacts => {
+                let persisted = self.artifact_phase(execution_id, now)?;
+                if persisted.status == "settling" {
+                    self.settlement_phase(execution_id, now)
+                } else {
+                    Ok(persisted)
+                }
+            }
+            ProviderPhaseOutcome::ReleaseAuthorization => self.release_phase(execution_id, now),
+            ProviderPhaseOutcome::Complete(_) | ProviderPhaseOutcome::PollExisting => self
+                .repository
+                .get_execution(execution_id)
+                .map_err(Into::into),
+        }
     }
     fn preflight(&self, e: &Execution) -> Result<(), ActivityError> {
         self.hubu.preflight(e)?;
@@ -3233,15 +3261,40 @@ mod tests {
                 request_id: Some("request-200".into()),
                 operation_id: Some("operation-200".into()),
             }));
+        let held = restarted.get_execution(&execution_id).unwrap();
+        let attempt = restarted
+            .get_provider_attempt_for_execution(&execution_id)
+            .unwrap();
+        let first_reinspect = OperatorReconciliationRequest {
+            action_id: "recover-operation-200".into(),
+            action: ReconciliationAction::Reinspect,
+            evidence: json!({"reason":"polling_policy_updated"}),
+        };
+        assert!(restarted
+            .record_operator_action(
+                &execution_id,
+                &first_reinspect.action_id,
+                "reinspect",
+                &first_reinspect.evidence,
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap());
+        restarted
+            .begin_provider_reconciliation_poll(
+                &execution_id,
+                &attempt.provider_attempt_id,
+                held.version,
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap();
+        // Simulate activity loss immediately after the durable reopen. The
+        // redelivery must resume the checkpointed GET path, not finish the
+        // Temporal workflow in an orphaned `executing` state.
         let still_ambiguous = workflow
             .recover(
                 &execution_id,
                 "2026-09-03T21:00:01Z",
-                Some(&OperatorReconciliationRequest {
-                    action_id: "recover-operation-200".into(),
-                    action: ReconciliationAction::Reinspect,
-                    evidence: json!({"reason":"polling_policy_updated"}),
-                }),
+                Some(&first_reinspect),
             )
             .unwrap();
         assert_eq!(still_ambiguous.status, "reconciliation_required");

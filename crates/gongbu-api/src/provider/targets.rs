@@ -615,7 +615,8 @@ fn validate_settings(key: &TargetKey, settings: &AdapterSettings) -> Result<()> 
                 &c.headers,
                 &["authorization", "x-key"],
             )?;
-            if c.poll_interval_ms == 0
+            if c.api_version != "v1"
+                || c.poll_interval_ms == 0
                 || c.poll_interval_ms > c.timeout_ms
                 || url_has_explicit_port(&c.endpoint)
                 || Url::parse(&c.endpoint)
@@ -1013,6 +1014,20 @@ mod tests {
                 }}
             }]})
         };
+        // An empty operator narrowing list delegates only to the fixed BFL
+        // delivery-family predicate used by the FLUX adapter. In particular,
+        // the verified regional host is admitted without broadening the
+        // credentialed API-origin allowlist.
+        assert!(serde_json::from_value::<ProviderTargetConfig>(base()).is_ok());
+        assert!(valid_bfl_delivery_host("delivery.us2.bfl.ai"));
+        for host in [
+            "delivery.us2.bfl.ai.evil.example",
+            "evil.delivery.us2.bfl.ai",
+            "delivery.us2-bfl.ai",
+            "delivery.us2.bfl.ai.",
+        ] {
+            assert!(!valid_bfl_delivery_host(host), "{host}");
+        }
         for endpoint in [
             "https://api.bfl.ai",
             "https://api.eu.bfl.ai",
@@ -1036,6 +1051,7 @@ mod tests {
         }
         for hosts in [
             serde_json::json!(["delivery.us.bfl.ai"]),
+            serde_json::json!(["delivery.us2.bfl.ai"]),
             serde_json::json!(["delivery.eu-2.bfl.ai"]),
         ] {
             let mut value = base();

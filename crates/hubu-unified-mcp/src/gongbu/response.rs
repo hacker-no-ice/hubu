@@ -928,7 +928,8 @@ impl RecoveryPollingContext {
             && self.validation_reason.as_deref().is_none_or(|reason| {
                 matches!(
                     reason,
-                    "url_too_long"
+                    "polling_url_unavailable"
+                        | "url_too_long"
                         | "non_ascii_url"
                         | "encoded_host"
                         | "malformed_url"

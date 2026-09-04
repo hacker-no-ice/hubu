@@ -1131,7 +1131,12 @@ fn execution_response(
                     "do_not_resubmit": true,
                     "recover_first": true,
                     "artifact_urls_may_expire": true,
-                    "action": polling_recovery_action(context, attempt.provider_deadline_unix_ms, now)
+                    "action": polling_recovery_action(
+                        context,
+                        attempt.provider_polling_host.as_deref(),
+                        attempt.provider_deadline_unix_ms,
+                        now,
+                    )
                 }
             }))
         })
@@ -1167,6 +1172,7 @@ fn execution_response(
 
 fn polling_recovery_action(
     context: &PollingRecoveryContext,
+    polling_host: Option<&str>,
     deadline_unix_ms: Option<i64>,
     now: &str,
 ) -> &'static str {
@@ -1174,6 +1180,11 @@ fn polling_recovery_action(
         .ok()
         .map(|value| value.timestamp_millis());
     if context.validation_reason.as_deref() == Some("host_not_allowlisted")
+        && context
+            .normalized_host
+            .as_deref()
+            .zip(polling_host)
+            .is_some_and(|(normalized, checkpointed)| normalized == checkpointed)
         && deadline_unix_ms
             .zip(now_unix_ms)
             .is_some_and(|(deadline, now)| polling_deadline_allows_reinspect(deadline, now))
@@ -2492,7 +2503,7 @@ mod tests {
 
     #[test]
     fn polling_recovery_action_requires_an_unexpired_deadline() {
-        let context = PollingRecoveryContext {
+        let mut context = PollingRecoveryContext {
             schema_version: 1,
             policy_version: "bfl-polling-origin-v2".into(),
             scheme: Some("https".into()),
@@ -2509,23 +2520,62 @@ mod tests {
             .timestamp_millis();
 
         assert_eq!(
-            polling_recovery_action(&context, Some(now_unix_ms + 1_000), now),
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms + 1_000),
+                now,
+            ),
             "update_policy_then_reinspect"
         );
         assert_eq!(
-            polling_recovery_action(&context, Some(now_unix_ms + 999), now),
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms + 999),
+                now,
+            ),
             "contact_provider_support"
         );
         assert_eq!(
-            polling_recovery_action(&context, Some(now_unix_ms - 1), now),
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms - 1),
+                now,
+            ),
             "contact_provider_support"
         );
         assert_eq!(
-            polling_recovery_action(&context, Some(now_unix_ms + 1_000), "invalid"),
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms + 1_000),
+                "invalid",
+            ),
             "contact_provider_support"
         );
         assert_eq!(
-            polling_recovery_action(&context, None, now),
+            polling_recovery_action(&context, Some("api.future.bfl.ai"), None, now),
+            "contact_provider_support"
+        );
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("unavailable"),
+                Some(now_unix_ms + 1_000),
+                now
+            ),
+            "contact_provider_support"
+        );
+        context.normalized_host = None;
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("unavailable"),
+                Some(now_unix_ms + 1_000),
+                now
+            ),
             "contact_provider_support"
         );
     }

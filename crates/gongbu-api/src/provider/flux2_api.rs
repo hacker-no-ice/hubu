@@ -286,6 +286,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             vendor_enforced_idempotency: false,
         })?;
         if model != MODEL_ID
+            || config.api_version != "v1"
             || config.timeout_ms == 0
             || config.poll_interval_ms == 0
             || config.max_retries != 0
@@ -970,30 +971,38 @@ fn polling_checkpoint(
     deadline_unix_ms: i64,
     secret: &ProviderSecret,
 ) -> Result<AsyncProviderOperation, ProviderFailure> {
-    let value = string_at(body, &["polling_url", "pollingUrl"]).ok_or_else(|| {
-        reconcile_with_evidence(
-            "malformed_response",
-            ProviderPhase::Processing,
-            provider_request_id.clone(),
-            Some(provider_operation_id.clone()),
-        )
-    })?;
-    let fingerprint = format!("sha256:{:x}", Sha256::digest(value.as_bytes()));
+    let value = string_at(body, &["polling_url", "pollingUrl"]);
+    let fingerprint_input = value.as_deref().unwrap_or("polling-url-unavailable");
+    let fingerprint = format!("sha256:{:x}", Sha256::digest(fingerprint_input.as_bytes()));
     let expected_path = format!("/{}/get_result", api_version.trim_matches('/'));
-    let mut reason = None;
+    let mut reason = value
+        .is_none()
+        .then(|| "polling_url_unavailable".to_owned());
     let mut scheme = None;
     let mut normalized_host = None;
     let mut explicit_port = None;
     let mut endpoint_shape = "unparseable".to_owned();
     let mut query_keys = Vec::new();
+    // URL parsing lowercases DNS hosts. Register the ASCII-folded rendering as
+    // well so canonicalization cannot turn a credential-bearing authority into
+    // apparently safe durable evidence.
+    let folded_secret = secret
+        .expose()
+        .iter()
+        .map(u8::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let secret_redactor = Redactor::new([secret.expose(), folded_secret.as_slice()]);
 
-    let parsed = if value.len() > MAX_POLLING_URL_BYTES {
+    let parsed = if value
+        .as_deref()
+        .is_some_and(|value| value.len() > MAX_POLLING_URL_BYTES)
+    {
         reason = Some("url_too_long".to_owned());
         None
-    } else if !value.is_ascii() {
+    } else if value.as_deref().is_some_and(|value| !value.is_ascii()) {
         reason = Some("non_ascii_url".to_owned());
         None
-    } else {
+    } else if let Some(value) = value.as_deref() {
         if value
             .split_once("://")
             .and_then(|(_, remainder)| remainder.split(['/', '?', '#']).next())
@@ -1001,27 +1010,38 @@ fn polling_checkpoint(
         {
             reason = Some("encoded_host".to_owned());
         }
-        match Url::parse(&value) {
+        match Url::parse(value) {
             Ok(url) => Some(url),
             Err(_) => {
                 reason = Some("malformed_url".to_owned());
                 None
             }
         }
+    } else {
+        None
     };
 
-    if let Some(url) = parsed.as_ref() {
-        scheme = Some(sanitized_recovery_component(url.scheme(), 16, "other"));
+    if let (Some(url), Some(value)) = (parsed.as_ref(), value.as_deref()) {
+        // Exact rejected schemes do not aid recovery. Bucket every non-HTTPS
+        // value so a provider-controlled scheme can never carry credential
+        // material into the durable checkpoint.
+        scheme = Some(if url.scheme() == "https" {
+            "https".to_owned()
+        } else {
+            "other".to_owned()
+        });
         normalized_host = url
             .host_str()
-            .and_then(|host| sanitized_recovery_component_opt(host, 253));
-        explicit_port = explicit_port_from_url(&value);
+            .and_then(|host| sanitized_recovery_host(host, &secret_redactor));
+        explicit_port = explicit_port_from_url(value).filter(|port| {
+            let port = port.to_string();
+            secret_redactor.redact(&port) == port
+        });
         endpoint_shape = if url.path() == expected_path {
             format!("{}/get_result", api_version.trim_matches('/'))
         } else {
             "unexpected".to_owned()
         };
-        let secret_redactor = Redactor::new([secret.expose()]);
         query_keys = url
             .query_pairs()
             .filter_map(|(key, _)| {
@@ -1031,14 +1051,8 @@ fn polling_checkpoint(
                             || byte.is_ascii_digit()
                             || matches!(byte, b'-' | b'_')
                     }))
-                .then(|| {
-                    let key = key.into_owned();
-                    if secret_redactor.redact(&key) == key {
-                        key
-                    } else {
-                        "redacted".to_owned()
-                    }
-                })
+                .then(|| key.into_owned())
+                .filter(|key| secret_redactor.redact(key) == *key)
             })
             .take(8)
             .collect();
@@ -1048,7 +1062,7 @@ fn polling_checkpoint(
                 Some("scheme_not_https".to_owned())
             } else if !url.username().is_empty() || url.password().is_some() {
                 Some("userinfo_present".to_owned())
-            } else if url.port().is_some() || url_has_explicit_port(&value) {
+            } else if url.port().is_some() || url_has_explicit_port(value) {
                 Some("explicit_port_present".to_owned())
             } else if url.fragment().is_some() {
                 Some("fragment_present".to_owned())
@@ -1087,9 +1101,6 @@ fn polling_checkpoint(
     })?;
     let checkpoint_host = normalized_host
         .as_deref()
-        .filter(|host| {
-            !host.starts_with(['-', '.']) && !host.ends_with(['-', '.']) && !host.contains("..")
-        })
         .unwrap_or("unavailable")
         .to_owned();
     Ok(AsyncProviderOperation {
@@ -1110,10 +1121,6 @@ fn explicit_port_from_url(value: &str) -> Option<u16> {
         .flatten()
 }
 
-fn sanitized_recovery_component(value: &str, max: usize, fallback: &str) -> String {
-    sanitized_recovery_component_opt(value, max).unwrap_or_else(|| fallback.to_owned())
-}
-
 fn sanitized_recovery_component_opt(value: &str, max: usize) -> Option<String> {
     (!value.is_empty()
         && value.len() <= max
@@ -1123,6 +1130,16 @@ fn sanitized_recovery_component_opt(value: &str, max: usize) -> Option<String> {
                 || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':')
         }))
     .then(|| value.to_owned())
+}
+
+fn sanitized_recovery_host(value: &str, secret_redactor: &Redactor) -> Option<String> {
+    let value = sanitized_recovery_component_opt(value, 253)?;
+    let valid_checkpoint_shape = value.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+    }) && !value.starts_with(['-', '.'])
+        && !value.ends_with(['-', '.'])
+        && !value.contains("..");
+    (valid_checkpoint_shape && secret_redactor.redact(&value) == value).then_some(value)
 }
 
 fn operation_poll_url(config: &Flux2ApiConfig, operation: &AsyncProviderOperation) -> Result<Url> {
@@ -1135,10 +1152,7 @@ fn operation_poll_url(config: &Flux2ApiConfig, operation: &AsyncProviderOperatio
                     .validation_reason
                     .as_deref()
                     .is_some_and(|reason| reason != "host_not_allowlisted")
-                || context
-                    .normalized_host
-                    .as_deref()
-                    .is_some_and(|host| host != operation.polling_host)
+                || context.normalized_host.as_deref() != Some(operation.polling_host.as_str())
         })
     {
         return Err(provider_error("polling_origin_rejected"));
@@ -1344,6 +1358,9 @@ fn classify_transport(
 mod tests {
     use super::*;
     use crate::{
+        execution::{
+            CreateExecutionParams, CreateProviderAttemptParams, HubuTokenReference, Repository,
+        },
         provider::conformance::{
             assert_adapter_conformance, assert_body_and_artifact_bounds, assert_redirect_blocked,
             Case, Observation,
@@ -1559,6 +1576,56 @@ mod tests {
             Flux2ApiAdapter::new(config(), MODEL_ID.into(), transport).unwrap(),
             traffic,
         )
+    }
+
+    fn checkpoint_attempt(repository: &Repository) -> String {
+        let execution = repository
+            .create_execution(&CreateExecutionParams {
+                account_id: "account".into(),
+                operation_key: "host-checkpoint".into(),
+                hubu_authorization_id: "sha256:authorization".into(),
+                hubu_claim_id: Some("claim".into()),
+                hubu_token_reference: HubuTokenReference::new("sha256:authorization").unwrap(),
+                authorized_minor: 500,
+                authorization_currency: "USD".into(),
+                normalized_input: json!({"prompt":"cat"}),
+                input_hash: "sha256:input".into(),
+                input_schema_version: 1,
+                target: "flux/image".into(),
+                config_version: "cfg-v1".into(),
+                workload_type: "image_generation".into(),
+                provider: "flux".into(),
+                adapter: "flux2_api".into(),
+                model: MODEL_ID.into(),
+                provider_config_version: "flux-v1".into(),
+                provider_config_digest: format!("sha256:{}", "a".repeat(64)),
+                pricing_snapshot: json!({
+                    "schema_version":2,
+                    "provider":"flux","model":MODEL_ID,
+                    "catalog_version":"prices-v1",
+                    "catalog_digest":format!("sha256:{}", "b".repeat(64)),
+                    "pricing_rule_id":"flux-image","components":[{
+                        "unit":"image","rate_numerator_minor":3,
+                        "rate_denominator":1,"quantity":1
+                    }],
+                    "exact_estimate_numerator":"3","exact_estimate_denominator":"1",
+                    "estimated_amount_minor":3,"currency":"USD"
+                }),
+                pricing_schema_version: 2,
+                execution_scope: None,
+                created_at: "2026-09-03T21:00:00Z".into(),
+            })
+            .unwrap();
+        repository
+            .create_provider_attempt(&CreateProviderAttemptParams {
+                execution_id: execution.execution_id,
+                provider: "flux".into(),
+                provider_request_id: None,
+                provider_operation_id: None,
+                started_at: "2026-09-03T21:00:01Z".into(),
+            })
+            .unwrap()
+            .provider_attempt_id
     }
     fn request() -> NormalizedRequest {
         request_for("1k")
@@ -1805,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_non_string_polling_url_is_malformed_without_polling() {
+    fn missing_or_non_string_polling_url_is_checkpointed_without_polling() {
         for body in [
             json!({"id":"op-1"}),
             json!({"id":"op-1","polling_url":null}),
@@ -1820,7 +1887,7 @@ mod tests {
                     Some("opaque-key"),
                 )
                 .unwrap_err();
-            assert_eq!(error.code, "malformed_response");
+            assert_eq!(error.code, "polling_origin_rejected");
             assert_eq!(error.phase, ProviderPhase::Processing);
             assert_eq!(error.spend_disposition, SpendDisposition::Reconcile);
             assert_eq!(error.evidence.operation_id.as_deref(), Some("op-1"));
@@ -2374,6 +2441,26 @@ mod tests {
                 None,
             ),
             (
+                "secret-canary://api.bfl.ai/v1/get_result?id=op-1".to_owned(),
+                "scheme_not_https",
+                None,
+            ),
+            (
+                "https://secret-canary.example/v1/get_result?id=op-1".to_owned(),
+                "host_not_allowlisted",
+                None,
+            ),
+            (
+                "https://%73ecret-canary.example/v1/get_result?id=op-1".to_owned(),
+                "encoded_host",
+                None,
+            ),
+            (
+                "https://bad_host.bfl.ai/v1/get_result?id=op-1".to_owned(),
+                "host_not_allowlisted",
+                None,
+            ),
+            (
                 "https://api.bfl.ai:443/v1/get_result?id=op-1".to_owned(),
                 "explicit_port_present",
                 Some(443),
@@ -2402,7 +2489,7 @@ mod tests {
         ] {
             let (adapter, traffic) = security_fixture(
                 202,
-                json!({"id":"op-1","polling_url":polling_url}),
+                json!({"id":"op-1","polling_url":polling_url.clone()}),
                 Vec::new(),
             );
             let AdapterSubmission::Pending(operation) = adapter
@@ -2422,6 +2509,12 @@ mod tests {
             assert_eq!(context.validation_reason.as_deref(), Some(expected_reason));
             assert_eq!(context.explicit_port, expected_port);
             assert!(context.url_fingerprint.starts_with("sha256:"));
+            if polling_url.contains("secret-canary.example")
+                || polling_url.contains("bad_host.bfl.ai")
+            {
+                assert_eq!(context.normalized_host, None, "{polling_url}");
+                assert_eq!(operation.polling_host, "unavailable", "{polling_url}");
+            }
             let durable = serde_json::to_string(&operation).unwrap();
             for forbidden in [
                 "credential-value",
@@ -2433,6 +2526,156 @@ mod tests {
             }
             assert!(traffic.polls.lock().unwrap().is_empty());
             assert!(traffic.artifacts.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn unavailable_polling_url_still_returns_a_safe_operation_checkpoint() {
+        for body in [json!({"id":"op-1"}), json!({"id":"op-1","polling_url":7})] {
+            let (adapter, traffic) = security_fixture(202, body, Vec::new());
+            let AdapterSubmission::Pending(operation) = adapter
+                .submit(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    Some("opaque-key"),
+                )
+                .unwrap()
+            else {
+                panic!("accepted operation identity must remain checkpointable");
+            };
+            let context = operation.polling_recovery.as_ref().unwrap();
+            assert_eq!(operation.provider_operation_id, "op-1");
+            assert_eq!(operation.polling_host, "unavailable");
+            assert_eq!(context.normalized_host, None);
+            assert_eq!(
+                context.validation_reason.as_deref(),
+                Some("polling_url_unavailable")
+            );
+            assert!(traffic.polls.lock().unwrap().is_empty());
+            assert!(traffic.artifacts.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn credential_bearing_host_checkpoint_persists_with_registered_secret() {
+        let secret = secret_for_test("secret-canary");
+        let (adapter, traffic) = security_fixture(
+            202,
+            json!({
+                "id":"op-1",
+                "polling_url":"https://secret-canary.example/v1/get_result?id=op-1"
+            }),
+            Vec::new(),
+        );
+        let AdapterSubmission::Pending(operation) = adapter
+            .submit(&request(), &input(), &secret, Some("opaque-key"))
+            .unwrap()
+        else {
+            panic!("credential-bearing host must retain a safe checkpoint");
+        };
+        assert_eq!(operation.polling_host, "unavailable");
+        assert_eq!(
+            operation
+                .polling_recovery
+                .as_ref()
+                .and_then(|context| context.normalized_host.as_deref()),
+            None
+        );
+
+        let repository =
+            Repository::in_memory_with_redactor(Redactor::new([secret.expose()])).unwrap();
+        let attempt_id = checkpoint_attempt(&repository);
+        let stored = repository
+            .record_provider_operation(&attempt_id, &operation, "2026-09-03T21:00:02Z")
+            .unwrap();
+        assert_eq!(
+            repository.provider_operation(&stored).unwrap(),
+            Some(operation.clone())
+        );
+        assert_eq!(
+            repository
+                .record_provider_operation(&attempt_id, &operation, "2026-09-03T21:00:02Z",)
+                .unwrap(),
+            stored
+        );
+        assert!(!serde_json::to_string(&operation)
+            .unwrap()
+            .contains("secret-canary"));
+        let error = adapter
+            .poll(&request(), &input(), &secret, &operation)
+            .unwrap_err();
+        assert_eq!(error.code, "polling_origin_rejected");
+        assert_eq!(traffic.submissions.lock().unwrap().len(), 1);
+        assert!(traffic.polls.lock().unwrap().is_empty());
+        assert!(traffic.artifacts.lock().unwrap().is_empty());
+
+        let forged_authority = AsyncProviderOperation {
+            polling_host: "api.us.bfl.ai".into(),
+            ..operation
+        };
+        let error = adapter
+            .poll(&request(), &input(), &secret, &forged_authority)
+            .unwrap_err();
+        assert_eq!(error.code, "polling_origin_rejected");
+        assert!(traffic.polls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn credential_components_are_omitted_before_repository_checkpointing() {
+        for (credential, polling_url) in [
+            ("red", "https://api.bfl.ai/v1/get_result?red=x&id=op-1"),
+            ("65535", "https://api.bfl.ai:65535/v1/get_result?id=op-1"),
+            (
+                "SECRETCANARY",
+                "https://SECRETCANARY.example/v1/get_result?id=op-1",
+            ),
+        ] {
+            let secret = secret_for_test(credential);
+            let operation = polling_checkpoint(
+                &json!({"polling_url":polling_url}),
+                Some("req-1".into()),
+                "op-1".into(),
+                "v1",
+                1_800_000_000_000,
+                &secret,
+            )
+            .unwrap();
+            operation.validate().unwrap();
+            let durable = serde_json::to_string(&operation).unwrap();
+            assert!(!durable.contains(credential), "{polling_url}");
+            assert!(
+                !durable.contains(&credential.to_ascii_lowercase()),
+                "{polling_url}"
+            );
+            if credential == "red" {
+                assert_eq!(
+                    operation.polling_recovery.as_ref().unwrap().query_keys,
+                    ["id"]
+                );
+            } else if credential == "65535" {
+                assert_eq!(
+                    operation.polling_recovery.as_ref().unwrap().explicit_port,
+                    None
+                );
+            } else {
+                assert_eq!(operation.polling_host, "unavailable");
+                assert_eq!(
+                    operation.polling_recovery.as_ref().unwrap().normalized_host,
+                    None
+                );
+            }
+
+            let repository =
+                Repository::in_memory_with_redactor(Redactor::new([secret.expose()])).unwrap();
+            let attempt_id = checkpoint_attempt(&repository);
+            let stored = repository
+                .record_provider_operation(&attempt_id, &operation, "2026-09-03T21:00:02Z")
+                .unwrap();
+            assert_eq!(
+                repository.provider_operation(&stored).unwrap(),
+                Some(operation)
+            );
         }
     }
 
