@@ -3168,12 +3168,12 @@ mod tests {
             operation: AsyncProviderOperation {
                 provider_request_id: Some("request-200".into()),
                 provider_operation_id: "operation-200".into(),
-                polling_host: "api.future.bfl.ai".into(),
+                polling_host: "api.us7.bfl.ai".into(),
                 polling_recovery: Some(crate::provider_contract::PollingRecoveryContext {
                     schema_version: 1,
                     policy_version: "bfl-polling-origin-v2".into(),
                     scheme: Some("https".into()),
-                    normalized_host: Some("api.future.bfl.ai".into()),
+                    normalized_host: Some("api.us7.bfl.ai".into()),
                     explicit_port: None,
                     endpoint_shape: "v1/get_result".into(),
                     query_keys: vec!["id".into()],

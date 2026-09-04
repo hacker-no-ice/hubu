@@ -252,11 +252,14 @@ BFL's current
 requires clients to poll the URL returned by a generation request and notes
 that artifact delivery regions can change. Gongbu keeps those two network
 policies separate. A provider-returned polling URL may receive `x-key` only
-when it is an HTTPS URL on exactly `api.bfl.ai`, `api.eu.bfl.ai`,
-`api.us.bfl.ai`, or the currently documented cluster origin
-`api.us1.bfl.ai`. This is a literal allowlist, not an `api.*.bfl.ai` wildcard.
-User information, explicit ports, fragments, redirects, lookalikes, and
-all other origins are rejected before the credentialed request is sent.
+when it is an HTTPS URL on `api.bfl.ai` or exactly
+`api.<region-or-shard>.bfl.ai`, where the variable portion is one safe ASCII
+DNS label. BFL documents that clients must use the returned polling URL; live
+provider evidence shows those URLs can use a one-label shard such as
+`api.us7.bfl.ai`. This is a narrow polling namespace, not a `*.bfl.ai`
+credential wildcard. User information, explicit ports, fragments, redirects,
+extra labels, IDNA labels, lookalikes, and all other origins are rejected
+before the credentialed request is sent.
 
 The generation POST is isolated in the patch-protected `submit_provider`
 activity and is never retried as provider generation work. A successful submit

@@ -143,20 +143,20 @@ fixture-only and non-billable.
 FLUX submission and polling are separate durable activities. After a successful
 submit, Gongbu checkpoints the safe request ID, operation ID, polling host,
 sanitized polling-policy evidence, and original deadline before long polling.
-The credentialed polling allowlist is exactly `api.bfl.ai`, `api.eu.bfl.ai`,
-`api.us.bfl.ai`, and BFL's currently documented cluster origin
-`api.us1.bfl.ai`; lookalikes and other cluster names remain denied. A restart resumes GET polling
-for that same operation and `ProviderAttempt`; it does not submit another
-generation. If transmission may have happened but the checkpoint did not
-commit, preserve the execution for reconciliation instead of retrying or
+The credentialed polling policy accepts `api.bfl.ai` or exactly
+`api.<region-or-shard>.bfl.ai`, with one safe ASCII DNS label. BFL documents
+that clients must use the provider-returned polling URL; verified provider
+behavior shows that URL can use a shard such as `api.us7.bfl.ai`. Extra labels,
+IDNA labels, suffix confusion, and lookalikes remain denied. A restart resumes
+GET polling for that same operation and `ProviderAttempt`; it does not submit
+another generation. If transmission may have happened but the checkpoint did
+not commit, preserve the execution for reconciliation instead of retrying or
 releasing the claim.
 
-During recovery validation, `api.us.bfl.ai` was a reconstructed documented
-endpoint that successfully returned the stored operation as `Ready`; the exact
-provider-returned polling URL had already been discarded and must not be
-inferred from that validation. The resulting signed artifact used
-`delivery.us2.bfl.ai`. These are intentionally different trust classes:
-`x-key` is sent only to a literal approved API origin, while an HTTPS
+Live recovery validated a provider-returned `api.us7.bfl.ai` operation as
+`Ready`, and its signed artifact used `delivery.us7.bfl.ai`. These are
+intentionally different trust classes: `x-key` is sent only to the narrow API
+polling family, while an HTTPS
 `delivery.<region>.bfl.ai` URL is fetched immediately without `x-key`, with the
 complete signed URL treated as ephemeral and never logged or persisted.
 

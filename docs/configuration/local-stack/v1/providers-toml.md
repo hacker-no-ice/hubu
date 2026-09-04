@@ -255,6 +255,10 @@ For `flux2_api`, the endpoint must be one of BFL's current documented API
 origins: `https://api.bfl.ai`, `https://api.eu.bfl.ai`, or
 `https://api.us.bfl.ai`. Paths, query strings, fragments, user information,
 explicit ports, and other origins are rejected before execution is enabled.
+This literal list governs configured generation POST endpoints. It is separate
+from provider-returned polling URLs, which may use `api.bfl.ai` or exactly
+`api.<region-or-shard>.bfl.ai` with one safe ASCII DNS label while retaining
+the fixed HTTPS path, query, operation-ID, port, fragment, and redirect checks.
 
 ### `targets.settings.config.api_version`
 
@@ -287,12 +291,11 @@ Artifact-host allowlist for provider-referenced downloads. It defaults to empty
 when an adapter does not require it. It is required and must contain at least
 one host for `ideogram_image`.
 
-For `flux2_api`, this optional list can only narrow Gongbu's fixed BFL delivery
-policy. Each entry must be an exact `delivery.<region>.bfl.ai` hostname with one
-safe region label; wildcards, extra labels, lookalikes, URL syntax, and suffix
-matches are rejected. An empty list follows BFL's documented region-varying
-delivery host family while retaining that same one-label constraint. These
-artifact hosts never receive the BFL `x-key` credential.
+For `flux2_api`, this list must be empty. FLUX delivery regions are dynamic, so
+Gongbu always applies its built-in `delivery.<region>.bfl.ai` matcher with one
+safe ASCII DNS label instead of accepting static host pins or configurable
+wildcards. Extra labels, IDNA labels, lookalikes, URL syntax, and suffix matches
+are rejected. These artifact hosts never receive the BFL `x-key` credential.
 
 ### `targets.settings.config.poll_interval_ms`
 

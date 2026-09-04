@@ -168,17 +168,17 @@ FLUX submission is asynchronous. Gongbu sends one generation POST, checkpoints
 the safe request and operation identifiers, validated polling host, and original
 deadline, then performs bounded read-only polling. Restart resumes that same
 operation and never submits a replacement generation.
-The polling allowlist includes the three documented router origins and the
-literal documented `api.us1.bfl.ai` cluster origin. A rejected post-submit URL
-is checkpointed only as sanitized recovery evidence, with recovery-first,
+The polling policy accepts the documented `api.bfl.ai` router and exact
+`api.<region-or-shard>.bfl.ai` hosts with one safe ASCII DNS label. BFL
+requires clients to use its returned polling URL, and live provider evidence
+confirmed `api.us7.bfl.ai` as one such shard. A rejected post-submit URL is
+checkpointed only as sanitized recovery evidence, with recovery-first,
 do-not-resubmit guidance; explicit reconciliation can poll the same operation
 after an approved policy correction.
-Recovery validation verified the stored operation as `Ready` through the
-documented `api.us.bfl.ai` router and returned a signed
-`delivery.us2.bfl.ai` artifact. The original provider-returned polling URL was
-not retained, so do not describe the reconstructed router as the observed
-origin. Polling receives `x-key`; delivery never does, and the signed artifact
-URL is fetched immediately without being logged or persisted.
+That same live recovery reached `Ready` and returned a signed
+`delivery.us7.bfl.ai` artifact without another generation submission. Polling
+receives `x-key`; delivery never does, and the signed artifact URL is fetched
+immediately without being logged or persisted.
 
 The shipped provider contract is production-validated but not live-qualified;
 its catalog reports `live_qualified = false` and
