@@ -299,7 +299,11 @@ operation evidence for recovery or reconciliation. Execution detail tells the
 agent not to resubmit, to recover first, and that artifact retrieval is
 time-sensitive. After a policy update, an explicit `reinspect` reconciliation
 action may reopen only that same ambiguous attempt and enter the GET-only
-poll-existing path; the generation POST remains unreachable.
+poll-existing path while the original absolute polling deadline still leaves
+enough time to issue a status GET; the generation POST remains unreachable.
+Once that recovery window is exhausted, execution detail directs the operator
+to provider support instead, and Gongbu refuses to reopen polling or grant a
+fresh timeout budget.
 
 Artifact URLs follow a different, credential-free path. Gongbu accepts only
 HTTPS `delivery.<region>.bfl.ai` hosts with exactly one safe region label,

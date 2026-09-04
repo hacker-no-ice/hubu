@@ -222,8 +222,10 @@ Use these recovery dispositions when inspecting an interrupted execution:
   polling for that same operation under the original deadline, with the same
   `ProviderAttempt` and no second Hubu financial mutation.
 
-An expired original deadline is not refreshed by restart. Continue to inspect
-the existing execution and its reconciliation record instead of submitting a
+An expired original deadline is not refreshed by restart. Execution detail
+stops recommending `reinspect`, Gongbu refuses to reopen the poll-existing
+path, and the operator should contact provider support while continuing to
+inspect the existing execution and reconciliation record. Never submit a
 replacement operation.
 
 Agents normally use these routes through [Unified MCP](../unified-mcp.md).

@@ -3177,7 +3177,9 @@ mod tests {
                 provider: &provider,
                 artifacts: &artifacts,
             };
-            let held = workflow.run(&execution.execution_id, "initial").unwrap();
+            let held = workflow
+                .run(&execution.execution_id, "2026-09-03T21:00:00Z")
+                .unwrap();
             assert_eq!(held.status, "reconciliation_required");
             assert_eq!(provider.submits.get(), 1);
             assert_eq!(provider.polls.get(), 1);
@@ -3201,6 +3203,10 @@ mod tests {
                 "host_not_allowlisted"
             );
             assert_eq!(evidence["recovery_guidance"]["do_not_resubmit"], true);
+            assert_eq!(
+                evidence["recovery_guidance"]["action"],
+                "update_policy_then_reinspect"
+            );
             assert_eq!(evidence["provider_operation_id"], "operation-200");
             let encoded = evidence.to_string();
             for forbidden in ["https://", "signed_url", "storage_path", "raw_body"] {
@@ -3230,7 +3236,7 @@ mod tests {
         let still_ambiguous = workflow
             .recover(
                 &execution_id,
-                "reinspect",
+                "2026-09-03T21:00:01Z",
                 Some(&OperatorReconciliationRequest {
                     action_id: "recover-operation-200".into(),
                     action: ReconciliationAction::Reinspect,
@@ -3253,7 +3259,7 @@ mod tests {
         let recovered = workflow
             .recover(
                 &execution_id,
-                "reinspect-again",
+                "2026-09-03T21:00:02Z",
                 Some(&OperatorReconciliationRequest {
                     action_id: "recover-operation-200-again".into(),
                     action: ReconciliationAction::Reinspect,

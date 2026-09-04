@@ -165,8 +165,12 @@ contains only the URL fingerprint, normalized origin fields, fixed path shape,
 query-key names, validation reason, policy version, operation/correlation IDs,
 and frozen provider-binding reference. Treat this as urgent: do not resubmit.
 Update policy only after verifying a provider endpoint, then send an explicit
-`reinspect` reconciliation action to poll the same operation. BFL result URLs
-expire after 10 minutes, so artifact preservation precedes diagnosis.
+`reinspect` reconciliation action to poll the same operation only if execution
+detail still reports that action while the original absolute polling deadline
+leaves enough time for a status GET. After that recovery window, contact
+provider support; Gongbu rejects a stale reinspect instead of reopening polling
+or creating a fresh timeout budget. BFL result URLs expire after 10 minutes,
+so artifact preservation precedes diagnosis.
 
 The credentialed live canary remains opt-in because it incurs a provider
 charge. With explicit approval, use the existing unified MCP governed-execution

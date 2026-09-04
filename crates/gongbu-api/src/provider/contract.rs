@@ -1012,6 +1012,17 @@ pub struct PollingRecoveryContext {
     pub validation_reason: Option<String>,
 }
 
+/// Minimum remaining time required before recovery may reopen provider
+/// polling. FLUX sleeps before each status GET, so a shorter window is
+/// guaranteed to expire without observing the operation.
+pub const POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS: i64 = 1_000;
+
+pub fn polling_deadline_allows_reinspect(deadline_unix_ms: i64, now_unix_ms: i64) -> bool {
+    deadline_unix_ms
+        .checked_sub(now_unix_ms)
+        .is_some_and(|remaining| remaining >= POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS)
+}
+
 impl PollingRecoveryContext {
     pub fn validate(&self) -> Result<()> {
         let safe_token = |value: &str, max: usize| {

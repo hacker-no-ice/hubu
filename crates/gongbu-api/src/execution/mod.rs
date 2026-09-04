@@ -4,10 +4,12 @@ use crate::redaction::Redactor;
 use crate::{
     execution_scope::{for_target, ExecutionScope},
     provider_contract::{
-        ActualVendorCost, AsyncProviderOperation, NormalizedUsage, PollingRecoveryContext,
-        PricingSnapshot, PRICING_SNAPSHOT_SCHEMA_VERSION,
+        polling_deadline_allows_reinspect, ActualVendorCost, AsyncProviderOperation,
+        NormalizedUsage, PollingRecoveryContext, PricingSnapshot,
+        POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS, PRICING_SNAPSHOT_SCHEMA_VERSION,
     },
 };
+use chrono::DateTime;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::{
@@ -902,11 +904,16 @@ impl Repository {
         expected_execution_version: i64,
         at: &str,
     ) -> Result<Execution> {
+        let now_unix_ms =
+            rfc3339_unix_millis(at).ok_or(Error::Invalid("reconciliation timestamp"))?;
+        let minimum_deadline_unix_ms = now_unix_ms
+            .checked_add(POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS)
+            .ok_or(Error::Invalid("reconciliation timestamp"))?;
         let mut connection = self.0.lock().unwrap();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let attempt_changed = transaction.execute(
-            "UPDATE provider_attempts SET outcome='started',completed_at=NULL,failure_code=NULL,failure_message_redacted=NULL WHERE provider_attempt_id=?1 AND execution_id=?2 AND outcome='ambiguous' AND completed_at IS NOT NULL AND provider_operation_id IS NOT NULL AND provider_polling_host IS NOT NULL AND provider_deadline_unix_ms IS NOT NULL AND operation_checkpointed_at IS NOT NULL AND json_extract(provider_recovery_context_json,'$.validation_reason')='host_not_allowlisted'",
-            params![attempt_id, execution_id],
+            "UPDATE provider_attempts SET outcome='started',completed_at=NULL,failure_code=NULL,failure_message_redacted=NULL WHERE provider_attempt_id=?1 AND execution_id=?2 AND outcome='ambiguous' AND completed_at IS NOT NULL AND provider_operation_id IS NOT NULL AND provider_polling_host IS NOT NULL AND provider_deadline_unix_ms>=?3 AND operation_checkpointed_at IS NOT NULL AND json_extract(provider_recovery_context_json,'$.validation_reason')='host_not_allowlisted'",
+            params![attempt_id, execution_id, minimum_deadline_unix_ms],
         )?;
         if attempt_changed != 1 {
             return Err(Error::Stale);
@@ -1459,14 +1466,16 @@ impl Repository {
         } else {
             last_confirmed_step
         };
-        let recovery_guidance = provider_outcome_ambiguous.then(|| serde_json::json!({
-            "provider_outcome_ambiguous": true,
-            "billing_may_have_occurred": true,
-            "do_not_resubmit": true,
-            "recover_first": true,
-            "artifact_recovery_time_sensitive": true,
-            "action": if attempt.as_ref().and_then(|a| a.provider_recovery_context.as_ref()).and_then(|context| context.validation_reason.as_deref()) == Some("host_not_allowlisted") { "update_policy_then_reinspect" } else { "contact_provider_support" }
-        }));
+        let recovery_guidance = provider_outcome_ambiguous.then(|| {
+            serde_json::json!({
+                "provider_outcome_ambiguous": true,
+                "billing_may_have_occurred": true,
+                "do_not_resubmit": true,
+                "recover_first": true,
+                "artifact_recovery_time_sensitive": true,
+                "action": reconciliation_recovery_action(attempt.as_ref(), at)
+            })
+        });
         let mut evidence = serde_json::json!({
             "execution_id": execution.execution_id,
             "provider": execution.provider,
@@ -2082,6 +2091,32 @@ fn allowed_transition(from: &str, to: &str) -> bool {
             | ("reconciliation_required", "settling")
     )
 }
+
+fn rfc3339_unix_millis(value: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.timestamp_millis())
+}
+
+fn reconciliation_recovery_action(attempt: Option<&ProviderAttempt>, at: &str) -> &'static str {
+    let now_unix_ms = rfc3339_unix_millis(at);
+    if attempt.is_some_and(|attempt| {
+        attempt
+            .provider_recovery_context
+            .as_ref()
+            .and_then(|context| context.validation_reason.as_deref())
+            == Some("host_not_allowlisted")
+            && attempt
+                .provider_deadline_unix_ms
+                .zip(now_unix_ms)
+                .is_some_and(|(deadline, now)| polling_deadline_allows_reinspect(deadline, now))
+    }) {
+        "update_policy_then_reinspect"
+    } else {
+        "contact_provider_support"
+    }
+}
+
 fn j(v: &Value) -> String {
     serde_json::to_string(v).unwrap()
 }
@@ -3011,6 +3046,127 @@ mod tests {
                 "api.us.bfl.ai"
             );
         }
+    }
+
+    #[test]
+    fn expired_checkpoint_cannot_reopen_provider_polling() {
+        let repository = Repository::in_memory().unwrap();
+        let execution = repository
+            .create_execution(&new("account", "expired-reconciliation"))
+            .unwrap();
+        let attempt_id = attempt(&repository, &execution);
+        let deadline = rfc3339_unix_millis("2026-09-03T21:00:00Z").unwrap();
+        repository
+            .record_provider_operation(
+                &attempt_id,
+                &AsyncProviderOperation {
+                    provider_request_id: Some("request-expired".into()),
+                    provider_operation_id: "operation-expired".into(),
+                    polling_host: "api.future.bfl.ai".into(),
+                    polling_recovery: Some(PollingRecoveryContext {
+                        schema_version: 1,
+                        policy_version: "bfl-polling-origin-v2".into(),
+                        scheme: Some("https".into()),
+                        normalized_host: Some("api.future.bfl.ai".into()),
+                        explicit_port: None,
+                        endpoint_shape: "v1/get_result".into(),
+                        query_keys: vec!["id".into()],
+                        url_fingerprint: format!("sha256:{}", "b".repeat(64)),
+                        validation_reason: Some("host_not_allowlisted".into()),
+                    }),
+                    deadline_unix_ms: deadline,
+                },
+                "2026-09-03T20:59:59Z",
+            )
+            .unwrap();
+        repository
+            .complete_provider_attempt(
+                &attempt_id,
+                &AttemptResult {
+                    outcome: "ambiguous".into(),
+                    completed_at: "2026-09-03T21:00:00Z".into(),
+                    usage: json!({}),
+                    usage_schema_version: 1,
+                    actual_vendor_cost: None,
+                    failure_code: Some("polling_origin_rejected".into()),
+                    failure_message_redacted: None,
+                    provider_request_id: Some("request-expired".into()),
+                    provider_operation_id: Some("operation-expired".into()),
+                },
+            )
+            .unwrap();
+        let preflighting = repository
+            .update_execution(
+                &execution.execution_id,
+                execution.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("2026-09-03T20:59:58Z".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-09-03T20:59:58Z",
+            )
+            .unwrap();
+        let held = repository
+            .update_execution(
+                &execution.execution_id,
+                preflighting.version,
+                &ExecutionUpdate {
+                    status: "reconciliation_required".into(),
+                    outcome: Some("polling_origin_rejected".into()),
+                    started_at: None,
+                    completed_at: None,
+                    failure_code: Some("polling_origin_rejected".into()),
+                    failure_message_redacted: None,
+                    provider_outcome: Some(LifecycleOutcome::Ambiguous),
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap();
+        let evidence = repository
+            .record_reconciliation(
+                &held,
+                "executing",
+                Some("polling_origin_rejected"),
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap();
+        assert_eq!(
+            evidence.evidence["recovery_guidance"]["action"],
+            "contact_provider_support"
+        );
+
+        assert!(matches!(
+            repository.begin_provider_reconciliation_poll(
+                &execution.execution_id,
+                &attempt_id,
+                held.version,
+                "2026-09-03T21:00:01Z",
+            ),
+            Err(Error::Stale)
+        ));
+        assert_eq!(
+            repository
+                .get_provider_attempt(&attempt_id)
+                .unwrap()
+                .outcome,
+            "ambiguous"
+        );
+        assert_eq!(
+            repository
+                .get_execution(&execution.execution_id)
+                .unwrap()
+                .status,
+            "reconciliation_required"
+        );
     }
 
     #[test]
