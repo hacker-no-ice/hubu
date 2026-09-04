@@ -15,7 +15,7 @@ use thiserror::Error;
 
 const PROVIDER_CONFIG_ENV: &str = "GONGBU_PROVIDER_CONFIG";
 const CURRENT_SCHEMA_VERSION: u32 = 3;
-const BFL_API_HOSTS: &[&str] = &["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"];
+const BFL_SUBMISSION_HOSTS: &[&str] = &["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"];
 pub const LEGACY_UNRESOLVED_DIGEST: &str = "legacy-unresolved";
 
 #[derive(Debug, Error)]
@@ -612,12 +612,8 @@ fn validate_settings(key: &TargetKey, settings: &AdapterSettings) -> Result<()> 
                 || url_has_explicit_port(&c.endpoint)
                 || Url::parse(&c.endpoint)
                     .ok()
-                    .is_none_or(|url| !valid_bfl_api_host(url.host_str()))
-                || !valid_artifact_hosts(&c.approved_artifact_hosts, false)
-                || !c
-                    .approved_artifact_hosts
-                    .iter()
-                    .all(|host| valid_bfl_delivery_host(host))
+                    .is_none_or(|url| !valid_bfl_submission_host(url.host_str()))
+                || !c.approved_artifact_hosts.is_empty()
             {
                 return Err(Error::InvalidTransportSettings);
             }
@@ -745,8 +741,8 @@ pub(crate) fn valid_artifact_hosts(hosts: &[String], required: bool) -> bool {
     })
 }
 
-pub(crate) fn valid_bfl_api_host(host: Option<&str>) -> bool {
-    host.is_some_and(|host| BFL_API_HOSTS.contains(&host))
+pub(crate) fn valid_bfl_submission_host(host: Option<&str>) -> bool {
+    host.is_some_and(|host| BFL_SUBMISSION_HOSTS.contains(&host))
 }
 
 pub(crate) fn valid_bfl_polling_host(host: Option<&str>) -> bool {
@@ -1084,12 +1080,6 @@ mod tests {
             serde_json::json!(["delivery.us2.bfl.ai"]),
             serde_json::json!(["delivery.us7.bfl.ai"]),
             serde_json::json!(["delivery.eu-2.bfl.ai"]),
-        ] {
-            let mut value = base();
-            value["provider_configs"][0]["settings"]["config"]["approved_artifact_hosts"] = hosts;
-            assert!(serde_json::from_value::<ProviderTargetConfig>(value).is_ok());
-        }
-        for hosts in [
             serde_json::json!(["cdn.bfl.ai"]),
             serde_json::json!(["delivery.us.east.bfl.ai"]),
             serde_json::json!(["delivery.us.bfl.ai.evil.example"]),

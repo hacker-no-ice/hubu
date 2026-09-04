@@ -18,8 +18,8 @@ use super::{
         validate_https_origin, ArtifactDownloadPolicy, CredentialForwarding, InvocationDeadline,
     },
     targets::{
-        valid_artifact_hosts, valid_bfl_api_host, valid_bfl_delivery_host, valid_bfl_polling_host,
-        Flux2ApiConfig, ProviderConfigVersion,
+        valid_bfl_delivery_host, valid_bfl_polling_host, valid_bfl_submission_host, Flux2ApiConfig,
+        ProviderConfigVersion,
     },
 };
 use crate::{redaction::Redactor, secrets::ProviderSecret};
@@ -290,11 +290,7 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
             || config.timeout_ms == 0
             || config.poll_interval_ms == 0
             || config.max_retries != 0
-            || !valid_artifact_hosts(&config.approved_artifact_hosts, false)
-            || !config
-                .approved_artifact_hosts
-                .iter()
-                .all(|host| valid_bfl_delivery_host(host))
+            || !config.approved_artifact_hosts.is_empty()
             || max_artifact_bytes == 0
             || max_artifact_bytes > usize::MAX as u64
         {
@@ -618,14 +614,10 @@ impl<T: Flux2Transport> Flux2ApiAdapter<T> {
         {
             return Err(artifact_failure(request_id, operation_id));
         }
-        let policy_hosts = if self.config.approved_artifact_hosts.is_empty() {
-            vec![artifact_url
-                .host_str()
-                .expect("validated BFL delivery URL has a host")
-                .to_owned()]
-        } else {
-            self.config.approved_artifact_hosts.clone()
-        };
+        let policy_hosts = vec![artifact_url
+            .host_str()
+            .expect("validated BFL delivery URL has a host")
+            .to_owned()];
         let artifact_policy = ArtifactDownloadPolicy::new(
             &policy_hosts,
             self.max_artifact_bytes as u64,
@@ -952,7 +944,7 @@ fn submit_url(config: &Flux2ApiConfig, model: &str) -> Result<Url> {
     let mut url = Url::parse(&config.endpoint).map_err(|_| provider_error("config_invalid"))?;
     if validate_https_origin(&url, None).is_err()
         || url_has_explicit_port(&config.endpoint)
-        || !valid_bfl_api_host(url.host_str())
+        || !valid_bfl_submission_host(url.host_str())
     {
         return Err(provider_error("config_invalid"));
     }
@@ -1542,7 +1534,7 @@ mod tests {
             poll_interval_ms: 1,
             max_retries: 0,
             idempotency_header: Some("x-idempotency-key".into()),
-            approved_artifact_hosts: vec!["delivery.us.bfl.ai".into()],
+            approved_artifact_hosts: Vec::new(),
             headers: BTreeMap::new(),
         }
     }
@@ -1801,11 +1793,8 @@ mod tests {
                     json!({"id":"op-1","status":"Ready","result":{"sample":signed_artifact.clone()}}),
                 )],
             );
-            let mut regional_delivery = config();
-            regional_delivery.approved_artifact_hosts.clear();
             let adapter =
-                Flux2ApiAdapter::new(regional_delivery, MODEL_ID.into(), template.transport)
-                    .unwrap();
+                Flux2ApiAdapter::new(config(), MODEL_ID.into(), template.transport).unwrap();
             let outcome = adapter
                 .invoke(
                     &request(),
@@ -2283,10 +2272,7 @@ mod tests {
                 }),
             )],
         );
-        let mut regional_delivery = config();
-        regional_delivery.approved_artifact_hosts.clear();
-        let adapter =
-            Flux2ApiAdapter::new(regional_delivery, MODEL_ID.into(), template.transport).unwrap();
+        let adapter = Flux2ApiAdapter::new(config(), MODEL_ID.into(), template.transport).unwrap();
         let deadline_unix_ms = i64::try_from(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3072,8 +3058,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_artifact_pins_reject_adapter_before_submission() {
+    fn artifact_host_overrides_reject_adapter_before_submission() {
         for hosts in [
+            vec!["delivery.us.bfl.ai".into()],
             vec!["https://delivery.us.bfl.ai".into()],
             vec!["cdn.bfl.ai".into()],
             vec!["delivery.us.bfl.ai.evil.example".into()],
@@ -3110,9 +3097,7 @@ mod tests {
                 json!({"id":"op-1","status":"Ready","result":{"sample":signed_artifact}}),
             )],
         );
-        let mut unpinned = config();
-        unpinned.approved_artifact_hosts.clear();
-        let adapter = Flux2ApiAdapter::new(unpinned, MODEL_ID.into(), template.transport).unwrap();
+        let adapter = Flux2ApiAdapter::new(config(), MODEL_ID.into(), template.transport).unwrap();
         adapter
             .invoke(
                 &request(),
