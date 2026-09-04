@@ -16,15 +16,6 @@ use thiserror::Error;
 const PROVIDER_CONFIG_ENV: &str = "GONGBU_PROVIDER_CONFIG";
 const CURRENT_SCHEMA_VERSION: u32 = 3;
 const BFL_API_HOSTS: &[&str] = &["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"];
-// BFL's current API reference still documents this concrete cluster endpoint.
-// Keep cluster admission exact: a broad `api.*.bfl.ai` pattern would forward
-// credentials to origins outside the reviewed provider contract.
-const BFL_POLLING_HOSTS: &[&str] = &[
-    "api.bfl.ai",
-    "api.eu.bfl.ai",
-    "api.us.bfl.ai",
-    "api.us1.bfl.ai",
-];
 pub const LEGACY_UNRESOLVED_DIGEST: &str = "legacy-unresolved";
 
 #[derive(Debug, Error)]
@@ -759,7 +750,15 @@ pub(crate) fn valid_bfl_api_host(host: Option<&str>) -> bool {
 }
 
 pub(crate) fn valid_bfl_polling_host(host: Option<&str>) -> bool {
-    host.is_some_and(|host| BFL_POLLING_HOSTS.contains(&host))
+    let Some(host) = host else {
+        return false;
+    };
+    if host == "api.bfl.ai" {
+        return true;
+    }
+    host.strip_prefix("api.")
+        .and_then(|value| value.strip_suffix(".bfl.ai"))
+        .is_some_and(valid_bfl_region_label)
 }
 
 /// FLUX artifacts use BFL's fixed provider-specific delivery family, not a
@@ -771,9 +770,14 @@ pub(crate) fn valid_bfl_delivery_host(host: &str) -> bool {
     else {
         return false;
     };
+    valid_bfl_region_label(region)
+}
+
+fn valid_bfl_region_label(region: &str) -> bool {
     !region.is_empty()
         && region.len() <= 63
         && !region.contains('.')
+        && !region.starts_with("xn--")
         && region
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
@@ -1014,17 +1018,42 @@ mod tests {
                 }}
             }]})
         };
-        // An empty operator narrowing list delegates only to the fixed BFL
-        // delivery-family predicate used by the FLUX adapter. In particular,
-        // the verified regional host is admitted without broadening the
-        // credentialed API-origin allowlist.
+        // Submission endpoints remain literal routers. Provider-returned
+        // polling and delivery URLs use separate one-region-label families.
         assert!(serde_json::from_value::<ProviderTargetConfig>(base()).is_ok());
-        assert!(valid_bfl_delivery_host("delivery.us2.bfl.ai"));
+        for host in [
+            "api.bfl.ai",
+            "api.eu.bfl.ai",
+            "api.us.bfl.ai",
+            "api.us1.bfl.ai",
+            "api.us7.bfl.ai",
+            "api.eu-2.bfl.ai",
+        ] {
+            assert!(valid_bfl_polling_host(Some(host)), "{host}");
+        }
+        for host in [
+            "api.bfl.ai.evil.example",
+            "evil.api.us7.bfl.ai",
+            "api.us7.bfl.ai.",
+            "api.us7-bfl.ai",
+            "api.us.east.bfl.ai",
+            "api.-us7.bfl.ai",
+            "api.us7-.bfl.ai",
+            "api.xn--us7-9za.bfl.ai",
+            "delivery.us7.bfl.ai",
+        ] {
+            assert!(!valid_bfl_polling_host(Some(host)), "{host}");
+        }
+        assert!(!valid_bfl_polling_host(None));
+        for host in ["delivery.us2.bfl.ai", "delivery.us7.bfl.ai"] {
+            assert!(valid_bfl_delivery_host(host), "{host}");
+        }
         for host in [
             "delivery.us2.bfl.ai.evil.example",
             "evil.delivery.us2.bfl.ai",
             "delivery.us2-bfl.ai",
             "delivery.us2.bfl.ai.",
+            "delivery.xn--us7-9za.bfl.ai",
         ] {
             assert!(!valid_bfl_delivery_host(host), "{host}");
         }
@@ -1041,6 +1070,7 @@ mod tests {
         for endpoint in [
             "https://api.bfl.ai:443",
             "https://api.us1.bfl.ai",
+            "https://api.us7.bfl.ai",
             "https://api.bfl.ai.evil.example",
             "https://evil.api.bfl.ai",
         ] {
@@ -1052,6 +1082,7 @@ mod tests {
         for hosts in [
             serde_json::json!(["delivery.us.bfl.ai"]),
             serde_json::json!(["delivery.us2.bfl.ai"]),
+            serde_json::json!(["delivery.us7.bfl.ai"]),
             serde_json::json!(["delivery.eu-2.bfl.ai"]),
         ] {
             let mut value = base();

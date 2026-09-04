@@ -44,7 +44,7 @@ const BFL_CREDIT_USD_SCALE: u32 = 2;
 const MAX_ARTIFACT_BYTES: usize = crate::artifact::DEFAULT_MAX_ENCODED_BYTES as usize;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_POLLING_URL_BYTES: usize = 4096;
-const BFL_POLLING_POLICY_VERSION: &str = "bfl-polling-origin-v2";
+const BFL_POLLING_POLICY_VERSION: &str = "bfl-polling-origin-v3";
 
 #[derive(Clone, Debug)]
 pub struct TransportResponse {
@@ -1434,7 +1434,7 @@ mod tests {
             _: Duration,
             _: &BTreeMap<String, String>,
         ) -> std::result::Result<TransportResponse, Box<dyn StdError + Send + Sync>> {
-            assert!(valid_bfl_api_host(url.host_str()));
+            assert!(valid_bfl_polling_host(url.host_str()));
             assert_eq!(credential, b"secret-canary");
             if self.fail_poll.is_some() {
                 return Err(Box::new(HttpFailure::UnknownOutcome));
@@ -1778,26 +1778,27 @@ mod tests {
     }
 
     #[test]
-    fn provider_returned_polling_urls_use_only_explicit_bfl_api_origins() {
-        for host in [
-            "api.bfl.ai",
-            "api.eu.bfl.ai",
-            "api.us.bfl.ai",
-            "api.us1.bfl.ai",
+    fn provider_returned_polling_urls_use_only_the_narrow_bfl_api_family() {
+        for (polling_host, delivery_host) in [
+            ("api.bfl.ai", "delivery.us2.bfl.ai"),
+            ("api.eu.bfl.ai", "delivery.eu2.bfl.ai"),
+            ("api.us.bfl.ai", "delivery.us2.bfl.ai"),
+            ("api.us1.bfl.ai", "delivery.us1.bfl.ai"),
+            ("api.us7.bfl.ai", "delivery.us7.bfl.ai"),
         ] {
-            let polling_url = format!("https://{host}/v1/get_result?id=op-1");
-            // The verified incident recovery used authenticated polling on
-            // api.us.bfl.ai and a separate credential-free signed artifact on
-            // delivery.us2.bfl.ai. SecurityFixture's artifact boundary accepts
-            // no credential argument, so this also guards against x-key reuse.
+            let polling_url = format!("https://{polling_host}/v1/get_result?id=op-1");
+            // The verified provider response used authenticated polling on a
+            // one-label API shard and a separate credential-free signed
+            // artifact host. SecurityFixture's artifact boundary accepts no
+            // credential argument, guarding against x-key reuse.
             let signed_artifact =
-                "https://delivery.us2.bfl.ai/durable/sample.jpeg?sig=artifact-url-canary";
+                format!("https://{delivery_host}/durable/sample.jpeg?sig=artifact-url-canary");
             let (template, traffic) = security_fixture(
                 202,
                 json!({"id":"op-1","polling_url":polling_url.clone()}),
                 vec![(
                     200,
-                    json!({"id":"op-1","status":"Ready","result":{"sample":signed_artifact}}),
+                    json!({"id":"op-1","status":"Ready","result":{"sample":signed_artifact.clone()}}),
                 )],
             );
             let mut regional_delivery = config();
@@ -1819,11 +1820,11 @@ mod tests {
             );
             assert_eq!(
                 traffic.artifacts.lock().unwrap().as_slice(),
-                &[signed_artifact.to_owned()]
+                &[signed_artifact]
             );
             let persisted_shape = serde_json::to_string(&outcome).unwrap();
             assert!(!persisted_shape.contains("artifact-url-canary"));
-            assert!(!persisted_shape.contains("delivery.us2.bfl.ai"));
+            assert!(!persisted_shape.contains(delivery_host));
         }
     }
 
@@ -1841,10 +1842,22 @@ mod tests {
             "https://api.bfl.ai/v1/get_result?id=op-1#fragment",
             "https://api.bfl.ai.evil.example/v1/get_result?id=op-1",
             "https://evil.api.bfl.ai/v1/get_result?id=op-1",
-            "https://api.us2.bfl.ai/v1/get_result?id=op-1",
-            "https://api.us1.bfl.ai.evil.example/v1/get_result?id=op-1",
+            "https://user@api.us7.bfl.ai/v1/get_result?id=op-1",
+            "https://api.us7.bfl.ai:443/v1/get_result?id=op-1",
+            "https://api.us7.bfl.ai/v1/get_result?id=op-1#fragment",
+            "https://api.us7.bfl.ai/v1/other?id=op-1",
+            "https://api.us7.bfl.ai/v1/get_result?request_id=op-1",
+            "https://api.us7.bfl.ai/v1/get_result?id=op-other",
+            "https://api.us7.bfl.ai/v1/get_result?id=op-1&id=op-1",
+            "https://api.us7.bfl.ai.evil.example/v1/get_result?id=op-1",
+            "https://evil.api.us7.bfl.ai/v1/get_result?id=op-1",
+            "https://api.us.east.bfl.ai/v1/get_result?id=op-1",
+            "https://api.-us7.bfl.ai/v1/get_result?id=op-1",
+            "https://api.us7-.bfl.ai/v1/get_result?id=op-1",
+            "https://api.us7-bfl.ai/v1/get_result?id=op-1",
+            "https://api.xn--us7-9za.bfl.ai/v1/get_result?id=op-1",
             "https://api.bfl.ai./v1/get_result?id=op-1",
-            "https://delivery.us.bfl.ai/v1/get_result?id=op-1",
+            "https://delivery.us7.bfl.ai/v1/get_result?id=op-1",
         ] {
             let (adapter, traffic) = security_fixture(
                 202,
@@ -2061,6 +2074,7 @@ mod tests {
         for host in [
             "delivery.us.bfl.ai",
             "delivery.us2.bfl.ai",
+            "delivery.us7.bfl.ai",
             "delivery.eu-1.bfl.ai",
             "delivery.us1.bfl.ai",
         ] {
@@ -2075,6 +2089,7 @@ mod tests {
             "delivery.us.bfl.ai.evil.example",
             "evil.delivery.us.bfl.ai",
             "delivery-us.bfl.ai",
+            "delivery.xn--us7-9za.bfl.ai",
             "api.us.bfl.ai",
         ] {
             assert!(!valid_bfl_delivery_host(host), "{host}");
@@ -2095,6 +2110,8 @@ mod tests {
             "https://delivery.us.east.bfl.ai/out.png?signature=x",
             "https://delivery.us.bfl.ai.evil.example/out.png?signature=x",
             "https://evil.delivery.us.bfl.ai/out.png?signature=x",
+            "https://delivery.us7.bfl.ai.evil.example/out.png?signature=x",
+            "https://evil.delivery.us7.bfl.ai/out.png?signature=x",
             "https://api.bfl.ai/out.png?signature=x",
         ] {
             let (adapter, traffic) = security_fixture(
@@ -2248,6 +2265,75 @@ mod tests {
         assert_eq!(traffic.submissions.lock().unwrap().len(), 1);
         assert_eq!(traffic.polls.lock().unwrap().len(), 1);
         assert_eq!(traffic.artifacts.lock().unwrap().len(), 1);
+        assert_eq!(outcome.provider_operation_id.as_deref(), Some("op-1"));
+    }
+
+    #[test]
+    fn legacy_rejected_us7_checkpoint_resumes_without_a_submission() {
+        let signed_artifact = "https://delivery.us7.bfl.ai/out.jpeg?signature=short-lived";
+        let (template, traffic) = security_fixture(
+            202,
+            json!({"id":"unused"}),
+            vec![(
+                200,
+                json!({
+                    "id":"op-1",
+                    "status":"Ready",
+                    "result":{"sample":signed_artifact}
+                }),
+            )],
+        );
+        let mut regional_delivery = config();
+        regional_delivery.approved_artifact_hosts.clear();
+        let adapter =
+            Flux2ApiAdapter::new(regional_delivery, MODEL_ID.into(), template.transport).unwrap();
+        let deadline_unix_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 1_000;
+        let operation = AsyncProviderOperation {
+            provider_request_id: Some("req-1".into()),
+            provider_operation_id: "op-1".into(),
+            polling_host: "api.us7.bfl.ai".into(),
+            polling_recovery: Some(PollingRecoveryContext {
+                schema_version: 1,
+                policy_version: "bfl-polling-origin-v2".into(),
+                scheme: Some("https".into()),
+                normalized_host: Some("api.us7.bfl.ai".into()),
+                explicit_port: None,
+                endpoint_shape: "v1/get_result".into(),
+                query_keys: vec!["id".into()],
+                url_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                validation_reason: Some("host_not_allowlisted".into()),
+            }),
+            deadline_unix_ms,
+        };
+
+        let outcome = adapter
+            .poll(
+                &request(),
+                &input(),
+                &secret_for_test("secret-canary"),
+                &operation,
+            )
+            .unwrap();
+
+        assert!(traffic.submissions.lock().unwrap().is_empty());
+        assert_eq!(
+            traffic.polls.lock().unwrap().as_slice(),
+            &[(
+                "https://api.us7.bfl.ai/v1/get_result?id=op-1".into(),
+                b"secret-canary".to_vec()
+            )]
+        );
+        assert_eq!(
+            traffic.artifacts.lock().unwrap().as_slice(),
+            &[signed_artifact.to_owned()]
+        );
         assert_eq!(outcome.provider_operation_id.as_deref(), Some("op-1"));
     }
 
@@ -2431,7 +2517,8 @@ mod tests {
         );
         for (polling_url, expected_reason, expected_port) in [
             (
-                "https://api.future.bfl.ai/v1/get_result?id=op-1&token=credential-value".to_owned(),
+                "https://api.us.east.bfl.ai/v1/get_result?id=op-1&token=credential-value"
+                    .to_owned(),
                 "host_not_allowlisted",
                 None,
             ),
@@ -3067,6 +3154,7 @@ mod tests {
             "https://api.bfl.ai.evil.example",
             "https://evil.api.bfl.ai",
             "https://api.us1.bfl.ai",
+            "https://api.us7.bfl.ai",
         ] {
             let mut invalid = config();
             invalid.endpoint = endpoint.into();

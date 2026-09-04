@@ -255,6 +255,10 @@ For `flux2_api`, the endpoint must be one of BFL's current documented API
 origins: `https://api.bfl.ai`, `https://api.eu.bfl.ai`, or
 `https://api.us.bfl.ai`. Paths, query strings, fragments, user information,
 explicit ports, and other origins are rejected before execution is enabled.
+This literal list governs configured generation POST endpoints. It is separate
+from provider-returned polling URLs, which may use `api.bfl.ai` or exactly
+`api.<region-or-shard>.bfl.ai` with one safe ASCII DNS label while retaining
+the fixed HTTPS path, query, operation-ID, port, fragment, and redirect checks.
 
 ### `targets.settings.config.api_version`
 
