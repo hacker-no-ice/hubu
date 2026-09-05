@@ -3,6 +3,8 @@
 Use this guide to initialize, start, inspect, and connect a local Hubu stack.
 For configuration fields and design choices, use the public
 [schema-version-1 configuration reference](https://hubustack.dev/configuration/local-stack/v1/).
+For copyable sandbox, Hubu-only, and Gemini + FLUX live profiles, start with the
+[complete local stack examples](https://hubustack.dev/configuration/local-stack/v1/examples).
 
 ## Check the binaries
 
@@ -73,6 +75,12 @@ and Hubu-only profiles need no provider credential. Local-stack mode requires
 at least one approved real target and its opaque credential reference. Do not
 edit `generated/` or `state/`.
 
+Keep sandbox and live modes in separate profile directories. That isolates
+credentials, spend acknowledgement, generated state, databases, artifacts, and
+logs while making mode changes an explicit `hubu stack select` operation. See
+the [complete examples](https://hubustack.dev/configuration/local-stack/v1/examples#keep-sandbox-and-live-profiles-separate)
+for the recommended layout and switching flow.
+
 ## Complete and validate the profile
 
 Follow the comments in the starter files and use the detailed reference when a
@@ -82,7 +90,7 @@ choice is unclear:
 | --- | --- | --- |
 | `stack.toml` | Binaries, managed or external services, Temporal, and local paths | [`stack.toml`](https://hubustack.dev/configuration/local-stack/v1/stack-toml) |
 | `credentials.toml` | Provider references or advanced external-service overrides | [`credentials.toml`](https://hubustack.dev/configuration/local-stack/v1/credentials-toml) |
-| `providers.toml` | Disabled, sandbox, or live mode; supported profiles or raw targets, pricing, and live spend gate where applicable | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
+| `providers.toml` | Disabled, sandbox, or live mode; frozen provider-contract bindings, optional generic targets, pricing, and live spend gate where applicable | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
 
 For a first local evaluation, use sandbox mode. It exercises the governed
 execution path without contacting an external provider or incurring cost.
@@ -90,9 +98,11 @@ Never put bearer tokens, provider API keys, or other raw secrets in the TOML
 files. Live provider execution can incur charges.
 
 For billable targets, start with [live provider
-operations](operations/live-providers.md). The supported FLUX.2 integration has
-an additional [managed profile](operations/managed-flux-profile.md) for its
-frozen contract and asynchronous recovery details. Inspect the sanitized
+operations](operations/live-providers.md). The
+[complete Gemini + FLUX example](https://hubustack.dev/configuration/local-stack/v1/examples#live-gemini-developer-api-and-flux2)
+shows the two Keychain references and the complete contract selection. The
+[FLUX.2 provider contract](operations/flux-provider-contract.md) documents its
+frozen recipe and asynchronous recovery details. Inspect the sanitized
 catalog with `hubu stack catalog --json`; catalog, doctor, and render never call
 a provider or claim live qualification.
 
@@ -104,7 +114,7 @@ hubu stack doctor
 
 Doctor is read-only. An explicit `--profile "$profile"` can override the saved
 selection for any one stack command. `hubu stack doctor --json` emits the
-version-2 report contract, which adds the supported-profile catalog and keeps
+version-2 report contract, which adds the provider contract catalog and keeps
 configured, credential-reference-present, production-validated, and
 live-qualified state independent.
 

@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "contracts": [
+    {
+      "contract": "hubu.gemini-3.1-flash-lite-image.text-to-image/v1",
+      "pricing_version": "google-gemini-3.1-flash-lite-image-usd-2026-09-01-v1",
+      "pricing_reviewed_on": "2026-09-01",
+      "target": {
+        "provider_config_version": "hubu-gemini-3.1-flash-lite-image-t2i-2026-09-01-v1",
+        "workload_type": "image_generation",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-3.1-flash-lite-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "gemini_developer_image",
+          "config": {
+            "endpoint": "https://generativelanguage.googleapis.com/",
+            "api_version": "v1beta",
+            "timeout_ms": 30000,
+            "max_retries": 0,
+            "headers": {}
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": ["png", "jpeg"],
+        "presets": [
+          {"name": "1k", "width": 1024, "height": 1024}
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "google-gemini-3.1-flash-lite-image-1k-2026-09-01-v1",
+          "provider": "google",
+          "model": "gemini-3.1-flash-lite-image",
+          "currency": "USD",
+          "selector": {"image_size": "1k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 336, "rate_denominator": 100}
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.gemini-3.1-flash-image.text-to-image/v1",
+      "pricing_version": "google-gemini-3.1-flash-image-usd-2026-09-01-v1",
+      "pricing_reviewed_on": "2026-09-01",
+      "target": {
+        "provider_config_version": "hubu-gemini-3.1-flash-image-t2i-2026-09-01-v1",
+        "workload_type": "image_generation",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-3.1-flash-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "gemini_developer_image",
+          "config": {
+            "endpoint": "https://generativelanguage.googleapis.com/",
+            "api_version": "v1beta",
+            "timeout_ms": 30000,
+            "max_retries": 0,
+            "headers": {}
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": ["png", "jpeg"],
+        "presets": [
+          {"name": "1k", "width": 1024, "height": 1024},
+          {"name": "2k", "width": 2048, "height": 2048},
+          {"name": "4k", "width": 4096, "height": 4096}
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "google-gemini-3.1-flash-image-1k-2026-09-01-v1",
+          "provider": "google",
+          "model": "gemini-3.1-flash-image",
+          "currency": "USD",
+          "selector": {"image_size": "1k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 67, "rate_denominator": 10}
+          ]
+        },
+        {
+          "rule_id": "google-gemini-3.1-flash-image-2k-2026-09-01-v1",
+          "provider": "google",
+          "model": "gemini-3.1-flash-image",
+          "currency": "USD",
+          "selector": {"image_size": "2k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 101, "rate_denominator": 10}
+          ]
+        },
+        {
+          "rule_id": "google-gemini-3.1-flash-image-4k-2026-09-01-v1",
+          "provider": "google",
+          "model": "gemini-3.1-flash-image",
+          "currency": "USD",
+          "selector": {"image_size": "4k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 151, "rate_denominator": 10}
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-2-pro.text-to-image/v1",
+      "pricing_version": "bfl-flux-2-pro-usd-2026-08-28-v1",
+      "pricing_reviewed_on": "2026-08-28",
+      "target": {
+        "provider_config_version": "hubu-flux-2-pro-t2i-2026-08-28-v1",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-pro",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "flux2_api",
+          "config": {
+            "endpoint": "https://api.bfl.ai/",
+            "api_version": "v1",
+            "timeout_ms": 270000,
+            "poll_interval_ms": 500,
+            "max_retries": 0,
+            "idempotency_header": null,
+            "approved_artifact_hosts": [],
+            "headers": {}
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": ["png", "jpeg"],
+        "presets": [
+          {"name": "1k", "width": 1024, "height": 1024},
+          {"name": "2k", "width": 1920, "height": 1088},
+          {"name": "4k", "width": 2048, "height": 2048}
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-pro-1k-2026-08-28-v1",
+          "provider": "flux",
+          "model": "flux-2-pro",
+          "currency": "USD",
+          "selector": {"image_size": "1k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 3, "rate_denominator": 1}
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-2-pro-2k-2026-08-28-v1",
+          "provider": "flux",
+          "model": "flux-2-pro",
+          "currency": "USD",
+          "selector": {"image_size": "2k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 45, "rate_denominator": 10}
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-2-pro-4k-2026-08-28-v1",
+          "provider": "flux",
+          "model": "flux-2-pro",
+          "currency": "USD",
+          "selector": {"image_size": "4k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 75, "rate_denominator": 10}
+          ]
+        }
+      ]
+    }
+  ]
+}

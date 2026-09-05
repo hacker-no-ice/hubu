@@ -46,7 +46,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.3";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 7;
+pub const ROUTING_REVISION: u32 = 8;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -701,6 +701,9 @@ impl Server {
         if !call.arguments.is_object() {
             return error_response(id, -32602, "Invalid params");
         }
+        if let Some(response) = feedback_call(&id, &call) {
+            return response;
+        }
         if call.name == "hubu_unified_capabilities" {
             self.refresh_capabilities();
             if call
@@ -770,6 +773,9 @@ impl Server {
             Ok(call) if call.arguments.is_object() => call,
             _ => return error_response(id, -32602, "Invalid params"),
         };
+        if let Some(response) = feedback_call(&id, &call) {
+            return response;
+        }
         if call.name == "hubu_unified_capabilities" {
             if call
                 .arguments
@@ -891,6 +897,7 @@ impl Server {
     fn list_tools_for_snapshot(&self) -> Vec<Value> {
         let snapshot = self.snapshot();
         let mut tools = vec![capability_tool()];
+        tools.extend(hubu_feedback::tool_definitions());
         if self.operation_registry_available() {
             tools.push(gongbu::operation_status_definition());
             if tool_availability("hubu_authorize_spend", BackendOwner::Hubu, &snapshot).is_ok() {
@@ -1524,6 +1531,33 @@ fn report_unavailable(report: &capability::BackendReport) -> bool {
     matches!(report.state, capability::BackendState::Unavailable)
 }
 
+fn feedback_call(id: &Value, call: &ToolCall) -> Option<Value> {
+    let result = match call.name.as_str() {
+        hubu_feedback::GUIDANCE_TOOL
+            if call.arguments.as_object().is_some_and(|v| v.is_empty()) =>
+        {
+            Ok(hubu_feedback::guidance())
+        }
+        hubu_feedback::GUIDANCE_TOOL => Err("Feedback guidance takes no arguments."),
+        hubu_feedback::PREPARE_TOOL => hubu_feedback::prepare(
+            call.arguments.clone(),
+            product_version(),
+            &format!("{}-{}", env::consts::OS, env::consts::ARCH),
+        ),
+        _ => return None,
+    };
+    Some(match result {
+        Ok(value) => success_response(
+            id.clone(),
+            json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&value).expect("feedback serializes")}],"structuredContent":value}),
+        ),
+        Err(message) => success_response(
+            id.clone(),
+            json!({"isError":true,"content":[{"type":"text","text":message}]}),
+        ),
+    })
+}
+
 fn capability_tool() -> Value {
     json!({
         "name": "hubu_unified_capabilities",
@@ -1791,9 +1825,9 @@ mod tests {
     fn durable_admission_diagnostics_project_static_public_fields() {
         let cases = [
             (
-                "execution_request_target_not_selectable",
+                "execution_request_target_id_not_selectable",
                 "target_not_selectable",
-                json!(["workload_type", "provider", "adapter", "model"]),
+                json!(["target_id"]),
             ),
             (
                 "execution_request_pricing_selector_not_matched",
@@ -1857,7 +1891,7 @@ mod tests {
             capability["operation_registry"]["reason_code"],
             "configuration_missing"
         );
-        assert_eq!(server.list_tools_for_snapshot().len(), 1);
+        assert_eq!(server.list_tools_for_snapshot().len(), 3);
     }
 
     #[test]
@@ -2029,7 +2063,7 @@ mod tests {
             true
         );
         let tools = responses[1]["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 3);
         assert_eq!(tools[0]["name"], "hubu_unified_capabilities");
     }
 
@@ -2074,7 +2108,7 @@ mod tests {
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
         assert_eq!(capability["routing_revision"], ROUTING_REVISION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 42);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 44);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

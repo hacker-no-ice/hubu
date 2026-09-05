@@ -1,5 +1,8 @@
 # Hubu / 户部
 
+[Send feedback](docs/feedback.md) — report a bug, suggest an idea, or find private reporting guidance.
+
+
 Hubu is an open-source spending control plane for AI agents. Humans define
 policies and budgets; agents submit structured spend requests; and Hubu
 authorizes, executes, and records approved spending without giving agents
@@ -65,7 +68,10 @@ Choose `sandbox` for a complete non-billable first run, `local-stack` for
 operator-approved live provider targets, or `hubu-only` when you only need the
 governance service. This walkthrough uses sandbox mode; see the
 [local stack guide](docs/local-stack.md#choose-an-outcome-and-initialize) for
-the other modes and their configuration choices.
+the other modes and their configuration choices. The
+[complete local stack examples](docs/configuration/local-stack/v1/examples.md)
+show the zero-edit sandbox and Hubu-only outcomes plus one working Gemini +
+FLUX live profile.
 
 ```sh
 profile=/absolute/path/to/profile
@@ -189,8 +195,8 @@ to approve or deny it, and return the resulting artifact.
 
 Sandbox uses a deterministic, non-billable provider fixture. Gemini and FLUX
 require a `local-stack` profile with an approved live target and credential
-reference; live execution is experimental and can incur charges. Begin with
-the [live provider operations guide](docs/operations/live-providers.md), use a
+reference; live execution is experimental and can incur charges. Begin with the
+[live provider operations guide](docs/operations/live-providers.md), use a
 conservative budget, and inspect the discovered price before submitting work.
 
 ## Documentation

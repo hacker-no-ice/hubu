@@ -1973,19 +1973,20 @@ mod tests {
             br#"{
           "schema_version":2,
           "provider_configs":[{
-            "provider_config_version":"gemini-sandbox-v1",
+            "provider_config_version":"ideogram-sandbox-v1",
             "workload_type":"image_generation",
-            "provider":"google",
-            "adapter":"gemini_developer_image",
-            "model":"gemini-test",
-            "secret_service":"gongbu.google",
+            "provider":"ideogram",
+            "adapter":"ideogram_image",
+            "model":"ideogram-test",
+            "secret_service":"gongbu.ideogram",
             "secret_account":"sandbox",
             "active":true,
             "execution_enabled":true,
-            "settings":{"type":"gemini_developer_image","config":{
-              "endpoint":"https://generativelanguage.googleapis.com",
-              "api_version":"v1beta",
+            "settings":{"type":"ideogram_image","config":{
+              "endpoint":"https://api.ideogram.ai",
+              "api_version":"v1",
               "timeout_ms":1000,
+              "approved_artifact_hosts":["ideogram.ai"],
               "headers":{}
             }}
           }]
@@ -1998,9 +1999,9 @@ mod tests {
           "schema_version":2,
           "catalog_version":"sandbox-prices-v2",
           "rules":[{
-            "rule_id":"gemini-test-image",
-            "provider":"google",
-            "model":"gemini-test",
+            "rule_id":"ideogram-test-image",
+            "provider":"ideogram",
+            "model":"ideogram-test",
             "currency":"USD",
             "components":[{
               "unit":"image",
@@ -2028,11 +2029,11 @@ mod tests {
                 config.provider.pricing_catalog = Some(pricing.clone());
                 config.provider.target = Some(ProviderSelection {
                     workload_type: "image_generation".into(),
-                    provider: "google".into(),
-                    adapter: "gemini_developer_image".into(),
-                    model: "gemini-test".into(),
+                    provider: "ideogram".into(),
+                    adapter: "ideogram_image".into(),
+                    model: "ideogram-test".into(),
                 });
-                config.provider.credential_reference = Some("gongbu.google:sandbox".into());
+                config.provider.credential_reference = Some("gongbu.ideogram:sandbox".into());
                 config.provider.maximum_spend_minor = Some(10);
                 config.provider.live_spend_acknowledgement =
                     Some(LIVE_SPEND_ACKNOWLEDGEMENT.into());

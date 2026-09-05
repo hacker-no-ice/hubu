@@ -4,10 +4,12 @@ use crate::redaction::Redactor;
 use crate::{
     execution_scope::{for_target, ExecutionScope},
     provider_contract::{
-        ActualVendorCost, AsyncProviderOperation, NormalizedUsage, PricingSnapshot,
-        PRICING_SNAPSHOT_SCHEMA_VERSION,
+        polling_deadline_allows_reinspect, ActualVendorCost, AsyncProviderOperation,
+        NormalizedUsage, PollingRecoveryContext, PricingSnapshot,
+        POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS, PRICING_SNAPSHOT_SCHEMA_VERSION,
     },
 };
+use chrono::DateTime;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::{
@@ -219,6 +221,7 @@ pub struct ProviderAttempt {
     pub provider_request_id: Option<String>,
     pub provider_operation_id: Option<String>,
     pub provider_polling_host: Option<String>,
+    pub provider_recovery_context: Option<PollingRecoveryContext>,
     pub provider_deadline_unix_ms: Option<i64>,
     pub operation_checkpointed_at: Option<String>,
     pub provider_poll_count: u64,
@@ -702,6 +705,7 @@ impl Repository {
             provider_request_id: n.provider_request_id.clone(),
             provider_operation_id: n.provider_operation_id.clone(),
             provider_polling_host: None,
+            provider_recovery_context: None,
             provider_deadline_unix_ms: None,
             operation_checkpointed_at: None,
             provider_poll_count: 0,
@@ -807,19 +811,33 @@ impl Repository {
             operation.provider_request_id.as_deref().unwrap_or(""),
             operation.provider_operation_id.as_str(),
             operation.polling_host.as_str(),
+            operation
+                .polling_recovery
+                .as_ref()
+                .and_then(|context| context.normalized_host.as_deref())
+                .unwrap_or(""),
             checkpointed_at,
         ])?;
+        if let Some(context) = operation.polling_recovery.as_ref() {
+            let context = serde_json::to_value(context)
+                .map_err(|_| Error::Invalid("provider operation checkpoint"))?;
+            self.reject_registered_json([&context])?;
+        }
         self.reject_registered_numbers([operation.deadline_unix_ms])?;
 
         let connection = self.0.lock().unwrap();
         let changed = connection.execute(
-            "UPDATE provider_attempts SET provider_request_id=?1,provider_operation_id=?2,provider_polling_host=?3,provider_deadline_unix_ms=?4,operation_checkpointed_at=?5 WHERE provider_attempt_id=?6 AND outcome='started' AND completed_at IS NULL AND transmission_started_at IS NOT NULL AND provider_operation_id IS NULL AND provider_polling_host IS NULL AND provider_deadline_unix_ms IS NULL AND operation_checkpointed_at IS NULL",
+            "UPDATE provider_attempts SET provider_request_id=?1,provider_operation_id=?2,provider_polling_host=?3,provider_deadline_unix_ms=?4,operation_checkpointed_at=?5,provider_recovery_context_json=?6 WHERE provider_attempt_id=?7 AND outcome='started' AND completed_at IS NULL AND transmission_started_at IS NOT NULL AND provider_operation_id IS NULL AND provider_polling_host IS NULL AND provider_deadline_unix_ms IS NULL AND operation_checkpointed_at IS NULL",
             params![
                 operation.provider_request_id,
                 operation.provider_operation_id,
                 operation.polling_host,
                 operation.deadline_unix_ms,
                 checkpointed_at,
+                operation
+                    .polling_recovery
+                    .as_ref()
+                    .map(|context| serde_json::to_string(context).expect("validated recovery context serializes")),
                 attempt_id
             ],
         )?;
@@ -836,6 +854,7 @@ impl Repository {
             && existing.provider_operation_id.as_deref()
                 == Some(operation.provider_operation_id.as_str())
             && existing.provider_polling_host.as_deref() == Some(operation.polling_host.as_str())
+            && existing.provider_recovery_context == operation.polling_recovery
             && existing.provider_deadline_unix_ms == Some(operation.deadline_unix_ms)
             && existing.operation_checkpointed_at.as_deref() == Some(checkpointed_at)
         {
@@ -861,6 +880,7 @@ impl Repository {
                     provider_request_id: attempt.provider_request_id.clone(),
                     provider_operation_id: operation_id.clone(),
                     polling_host: polling_host.clone(),
+                    polling_recovery: attempt.provider_recovery_context.clone(),
                     deadline_unix_ms,
                 };
                 operation
@@ -870,6 +890,44 @@ impl Repository {
             }
             _ => Err(Error::Invalid("provider operation checkpoint")),
         }
+    }
+
+    /// Atomically reopen only a checkpointed provider attempt whose original
+    /// origin rejection is durably recoverable. Later ambiguous GET failures
+    /// remain eligible because the immutable recovery reason, rather than the
+    /// most recent failure code, is the authority for this path. No submission
+    /// state is cleared and no new provider attempt can be created.
+    pub fn begin_provider_reconciliation_poll(
+        &self,
+        execution_id: &str,
+        attempt_id: &str,
+        expected_execution_version: i64,
+        at: &str,
+    ) -> Result<Execution> {
+        let now_unix_ms =
+            rfc3339_unix_millis(at).ok_or(Error::Invalid("reconciliation timestamp"))?;
+        let minimum_deadline_unix_ms = now_unix_ms
+            .checked_add(POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS)
+            .ok_or(Error::Invalid("reconciliation timestamp"))?;
+        let mut connection = self.0.lock().unwrap();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let attempt_changed = transaction.execute(
+            "UPDATE provider_attempts SET outcome='started',completed_at=NULL,failure_code=NULL,failure_message_redacted=NULL WHERE provider_attempt_id=?1 AND execution_id=?2 AND outcome='ambiguous' AND completed_at IS NOT NULL AND provider_operation_id IS NOT NULL AND provider_polling_host IS NOT NULL AND provider_deadline_unix_ms>=?3 AND operation_checkpointed_at IS NOT NULL AND json_extract(provider_recovery_context_json,'$.validation_reason')='host_not_allowlisted' AND json_extract(provider_recovery_context_json,'$.normalized_host')=provider_polling_host",
+            params![attempt_id, execution_id, minimum_deadline_unix_ms],
+        )?;
+        if attempt_changed != 1 {
+            return Err(Error::Stale);
+        }
+        let execution_changed = transaction.execute(
+            "UPDATE executions SET status='executing',outcome=NULL,failure_code=NULL,failure_message_redacted=NULL,completed_at=NULL,updated_at=?1,version=version+1 WHERE execution_id=?2 AND version=?3 AND status='reconciliation_required'",
+            params![at, execution_id, expected_execution_version],
+        )?;
+        if execution_changed != 1 {
+            return Err(Error::Stale);
+        }
+        transaction.commit()?;
+        drop(connection);
+        self.get_execution(execution_id)
     }
     pub fn complete_provider_attempt(&self, id: &str, r: &AttemptResult) -> Result<()> {
         safe_usage_json(&r.usage)?;
@@ -1043,9 +1101,10 @@ impl Repository {
         &self,
         execution_id: &str,
     ) -> Result<ProviderAttempt> {
-        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,provider_polling_host,provider_deadline_unix_ms,operation_checkpointed_at,provider_poll_count,artifact_fetch_count,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
+        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,provider_polling_host,provider_deadline_unix_ms,operation_checkpointed_at,provider_poll_count,artifact_fetch_count,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at,provider_recovery_context_json FROM provider_attempts WHERE execution_id=?1", [execution_id], |r| {
             let usage: Option<String> = r.get(11)?;
-            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, provider_polling_host:r.get(5)?, provider_deadline_unix_ms:r.get(6)?, operation_checkpointed_at:r.get(7)?, provider_poll_count:r.get(8)?, artifact_fetch_count:r.get(9)?, outcome:r.get(10)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(12)?, actual_vendor_cost:actual_vendor_cost_from_row(r,13,14,15)?, failure_code:r.get(16)?, failure_message_redacted:r.get(17)?, started_at:r.get(18)?, transmission_started_at:r.get(19)?, completed_at:r.get(20)? })
+            let recovery:Option<String>=r.get(21)?;
+            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, provider_polling_host:r.get(5)?, provider_recovery_context:recovery.map(|value| serde_json::from_str(&value)).transpose().map_err(|error| rusqlite::Error::FromSqlConversionFailure(21,rusqlite::types::Type::Text,Box::new(error)))?, provider_deadline_unix_ms:r.get(6)?, operation_checkpointed_at:r.get(7)?, provider_poll_count:r.get(8)?, artifact_fetch_count:r.get(9)?, outcome:r.get(10)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(12)?, actual_vendor_cost:actual_vendor_cost_from_row(r,13,14,15)?, failure_code:r.get(16)?, failure_message_redacted:r.get(17)?, started_at:r.get(18)?, transmission_started_at:r.get(19)?, completed_at:r.get(20)? })
         }).optional()?.ok_or(Error::NotFound)
     }
     pub fn count_provider_attempts_for_execution(&self, execution_id: &str) -> Result<u64> {
@@ -1060,9 +1119,10 @@ impl Repository {
             .map_err(Into::into)
     }
     pub fn get_provider_attempt(&self, provider_attempt_id: &str) -> Result<ProviderAttempt> {
-        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,provider_polling_host,provider_deadline_unix_ms,operation_checkpointed_at,provider_poll_count,artifact_fetch_count,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at FROM provider_attempts WHERE provider_attempt_id=?1", [provider_attempt_id], |r| {
+        self.0.lock().unwrap().query_row("SELECT provider_attempt_id,execution_id,provider,provider_request_id,provider_operation_id,provider_polling_host,provider_deadline_unix_ms,operation_checkpointed_at,provider_poll_count,artifact_fetch_count,outcome,usage_json,usage_schema_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,failure_code,failure_message_redacted,started_at,transmission_started_at,completed_at,provider_recovery_context_json FROM provider_attempts WHERE provider_attempt_id=?1", [provider_attempt_id], |r| {
             let usage: Option<String> = r.get(11)?;
-            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, provider_polling_host:r.get(5)?, provider_deadline_unix_ms:r.get(6)?, operation_checkpointed_at:r.get(7)?, provider_poll_count:r.get(8)?, artifact_fetch_count:r.get(9)?, outcome:r.get(10)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(12)?, actual_vendor_cost:actual_vendor_cost_from_row(r,13,14,15)?, failure_code:r.get(16)?, failure_message_redacted:r.get(17)?, started_at:r.get(18)?, transmission_started_at:r.get(19)?, completed_at:r.get(20)? })
+            let recovery:Option<String>=r.get(21)?;
+            Ok(ProviderAttempt { provider_attempt_id:r.get(0)?, execution_id:r.get(1)?, provider:r.get(2)?, provider_request_id:r.get(3)?, provider_operation_id:r.get(4)?, provider_polling_host:r.get(5)?, provider_recovery_context:recovery.map(|value| serde_json::from_str(&value)).transpose().map_err(|error| rusqlite::Error::FromSqlConversionFailure(21,rusqlite::types::Type::Text,Box::new(error)))?, provider_deadline_unix_ms:r.get(6)?, operation_checkpointed_at:r.get(7)?, provider_poll_count:r.get(8)?, artifact_fetch_count:r.get(9)?, outcome:r.get(10)?, usage:usage.map(|v| serde_json::from_str(&v).unwrap()), usage_schema_version:r.get(12)?, actual_vendor_cost:actual_vendor_cost_from_row(r,13,14,15)?, failure_code:r.get(16)?, failure_message_redacted:r.get(17)?, started_at:r.get(18)?, transmission_started_at:r.get(19)?, completed_at:r.get(20)? })
         }).optional()?.ok_or(Error::NotFound)
     }
     pub fn create_artifact(&self, n: &CreateArtifactParams) -> Result<Artifact> {
@@ -1389,25 +1449,64 @@ impl Repository {
             .ok();
         let receipt = self.get_receipt_for_execution(&execution.execution_id).ok();
         let artifacts = self.count_artifacts_for_execution(&execution.execution_id)?;
-        let evidence = serde_json::json!({
+        let provider_outcome_ambiguous = execution.provider_outcome
+            == Some(LifecycleOutcome::Ambiguous)
+            || attempt.as_ref().is_some_and(|attempt| {
+                attempt.outcome == "ambiguous"
+                    || (attempt.outcome == "started"
+                        && attempt.transmission_started_at.is_some()
+                        && attempt.completed_at.is_none())
+            });
+        let last_confirmed_step = if provider_outcome_ambiguous
+            && attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.operation_checkpointed_at.is_some())
+        {
+            "provider_operation_checkpointed"
+        } else {
+            last_confirmed_step
+        };
+        let recovery_guidance = provider_outcome_ambiguous.then(|| {
+            serde_json::json!({
+                "provider_outcome_ambiguous": true,
+                "billing_may_have_occurred": true,
+                "do_not_resubmit": true,
+                "recover_first": true,
+                "artifact_recovery_time_sensitive": true,
+                "action": reconciliation_recovery_action(attempt.as_ref(), at)
+            })
+        });
+        let mut evidence = serde_json::json!({
             "execution_id": execution.execution_id,
+            "provider": execution.provider,
+            "target": execution.target,
+            "model": execution.model,
             "provider_attempt_id": attempt.as_ref().map(|a| &a.provider_attempt_id),
             "provider_request_id": attempt.as_ref().and_then(|a| a.provider_request_id.as_ref()),
             "provider_operation_id": attempt.as_ref().and_then(|a| a.provider_operation_id.as_ref()),
+            "polling_recovery": attempt.as_ref().and_then(|a| a.provider_recovery_context.as_ref()),
             "timestamps": {"created_at": execution.created_at, "updated_at": at, "started_at": execution.started_at, "attempt_started_at": attempt.as_ref().map(|a| &a.started_at), "transmission_started_at": attempt.as_ref().and_then(|a| a.transmission_started_at.as_ref()), "attempt_completed_at": attempt.as_ref().and_then(|a| a.completed_at.as_ref())},
             "last_confirmed_step": last_confirmed_step,
             "redacted_error": redacted_error.map(|v| self.1.redact(v)),
             "pricing_snapshot": execution.pricing_snapshot,
             "authorization": {"account_id": execution.account_id, "operation_key": execution.operation_key, "spend_auth_token_id": execution.hubu_token_reference.as_str(), "claim_id": execution.hubu_claim_id, "authorized_minor": execution.authorized_minor, "currency": execution.authorization_currency},
+            "credential_binding": {"provider_config_version": execution.provider_config_version, "provider_config_digest": execution.provider_config_digest},
             "provider_outcome": attempt.as_ref().map(|a| &a.outcome),
             "actual_vendor_cost": attempt.as_ref().and_then(|a| a.actual_vendor_cost.as_ref()),
             "usage": attempt.as_ref().and_then(|a| a.usage.as_ref()),
             "receipt": receipt.as_ref().map(|r| serde_json::json!({"receipt_id":r.receipt_id,"settlement_minor":r.settlement_minor,"currency":r.currency,"actual_vendor_cost":r.actual_vendor_cost,"provider_request_id":r.provider_request_id,"price_model_snapshot":r.price_model_snapshot,"transmission_started_at":r.transmission_started_at,"settled_at":r.settled_at,"hubu_settlement_id":r.hubu_settlement_id})),
-            "artifact_count": artifacts
+            "artifact_count": artifacts,
+            "recovery_guidance": recovery_guidance
         });
+        if !provider_outcome_ambiguous {
+            evidence
+                .as_object_mut()
+                .expect("reconciliation evidence is an object")
+                .remove("recovery_guidance");
+        }
         self.reject_registered_json([&evidence])?;
         let c = self.0.lock().unwrap();
-        c.execute("INSERT INTO reconciliation_records(execution_id,evidence_json,evidence_schema_version,last_confirmed_step,entered_at,updated_at) VALUES(?1,?2,2,?3,?4,?4) ON CONFLICT(execution_id) DO UPDATE SET evidence_json=excluded.evidence_json,evidence_schema_version=excluded.evidence_schema_version,last_confirmed_step=excluded.last_confirmed_step,updated_at=excluded.updated_at", params![execution.execution_id,j(&evidence),last_confirmed_step,at])?;
+        c.execute("INSERT INTO reconciliation_records(execution_id,evidence_json,evidence_schema_version,last_confirmed_step,entered_at,updated_at) VALUES(?1,?2,3,?3,?4,?4) ON CONFLICT(execution_id) DO UPDATE SET evidence_json=excluded.evidence_json,evidence_schema_version=excluded.evidence_schema_version,last_confirmed_step=excluded.last_confirmed_step,updated_at=excluded.updated_at", params![execution.execution_id,j(&evidence),last_confirmed_step,at])?;
         drop(c);
         self.get_reconciliation(&execution.execution_id)
     }
@@ -1668,6 +1767,7 @@ fn migrate_provider_operation_checkpoint_columns(c: &Connection) -> rusqlite::Re
         ("provider_polling_host", "TEXT"),
         ("provider_deadline_unix_ms", "INTEGER"),
         ("operation_checkpointed_at", "TEXT"),
+        ("provider_recovery_context_json", "TEXT"),
     ] {
         if !existing.contains(name) {
             c.execute(
@@ -1991,6 +2091,38 @@ fn allowed_transition(from: &str, to: &str) -> bool {
             | ("reconciliation_required", "settling")
     )
 }
+
+fn rfc3339_unix_millis(value: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.timestamp_millis())
+}
+
+fn reconciliation_recovery_action(attempt: Option<&ProviderAttempt>, at: &str) -> &'static str {
+    let now_unix_ms = rfc3339_unix_millis(at);
+    if attempt.is_some_and(|attempt| {
+        attempt
+            .provider_recovery_context
+            .as_ref()
+            .and_then(|context| context.validation_reason.as_deref())
+            == Some("host_not_allowlisted")
+            && attempt
+                .provider_recovery_context
+                .as_ref()
+                .and_then(|context| context.normalized_host.as_deref())
+                .zip(attempt.provider_polling_host.as_deref())
+                .is_some_and(|(normalized, checkpointed)| normalized == checkpointed)
+            && attempt
+                .provider_deadline_unix_ms
+                .zip(now_unix_ms)
+                .is_some_and(|(deadline, now)| polling_deadline_allows_reinspect(deadline, now))
+    }) {
+        "update_policy_then_reinspect"
+    } else {
+        "contact_provider_support"
+    }
+}
+
 fn j(v: &Value) -> String {
     serde_json::to_string(v).unwrap()
 }
@@ -2785,6 +2917,17 @@ mod tests {
             provider_request_id: Some("request-170".into()),
             provider_operation_id: "operation-170".into(),
             polling_host: "api.bfl.ai".into(),
+            polling_recovery: Some(PollingRecoveryContext {
+                schema_version: 1,
+                policy_version: "bfl-polling-origin-v2".into(),
+                scheme: Some("https".into()),
+                normalized_host: Some("api.bfl.ai".into()),
+                explicit_port: None,
+                endpoint_shape: "v1/get_result".into(),
+                query_keys: vec!["id".into()],
+                url_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                validation_reason: None,
+            }),
             deadline_unix_ms: 1_799_999_999_000,
         };
 
@@ -2840,6 +2983,196 @@ mod tests {
             Some(operation)
         );
         assert_eq!(restarted.count("provider_attempts"), 1);
+    }
+
+    #[test]
+    fn successful_checkpoint_preserves_downstream_reconciliation_progress() {
+        let repository = Repository::in_memory().unwrap();
+        let execution = repository
+            .create_execution(&new("account", "downstream-reconciliation"))
+            .unwrap();
+        let attempt_id = attempt(&repository, &execution);
+        let interrupted = repository
+            .record_reconciliation(
+                &execution,
+                "executing",
+                Some("provider_submission_interrupted"),
+                "2026-09-03T21:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(interrupted.last_confirmed_step, "executing");
+        assert_eq!(
+            interrupted.evidence["recovery_guidance"]["provider_outcome_ambiguous"],
+            true
+        );
+        assert_eq!(
+            interrupted.evidence["recovery_guidance"]["do_not_resubmit"],
+            true
+        );
+        repository
+            .record_provider_operation(
+                &attempt_id,
+                &AsyncProviderOperation {
+                    provider_request_id: Some("request-200".into()),
+                    provider_operation_id: "operation-200".into(),
+                    polling_host: "api.us.bfl.ai".into(),
+                    polling_recovery: Some(PollingRecoveryContext {
+                        schema_version: 1,
+                        policy_version: "bfl-polling-origin-v2".into(),
+                        scheme: Some("https".into()),
+                        normalized_host: Some("api.us.bfl.ai".into()),
+                        explicit_port: None,
+                        endpoint_shape: "v1/get_result".into(),
+                        query_keys: vec!["id".into()],
+                        url_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                        validation_reason: None,
+                    }),
+                    deadline_unix_ms: 1_799_999_999_000,
+                },
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap();
+        complete_success(&repository, &attempt_id);
+
+        for step in ["executing", "settling"] {
+            let record = repository
+                .record_reconciliation(
+                    &execution,
+                    step,
+                    Some("downstream_phase_failed"),
+                    "2026-09-03T21:00:02Z",
+                )
+                .unwrap();
+            assert_eq!(record.last_confirmed_step, step);
+            assert_eq!(record.evidence["last_confirmed_step"], step);
+            assert_eq!(record.evidence["provider_outcome"], "succeeded");
+            assert!(record.evidence.get("recovery_guidance").is_none());
+            assert_eq!(
+                record.evidence["polling_recovery"]["normalized_host"],
+                "api.us.bfl.ai"
+            );
+        }
+    }
+
+    #[test]
+    fn expired_checkpoint_cannot_reopen_provider_polling() {
+        let repository = Repository::in_memory().unwrap();
+        let execution = repository
+            .create_execution(&new("account", "expired-reconciliation"))
+            .unwrap();
+        let attempt_id = attempt(&repository, &execution);
+        let deadline = rfc3339_unix_millis("2026-09-03T21:00:00Z").unwrap();
+        repository
+            .record_provider_operation(
+                &attempt_id,
+                &AsyncProviderOperation {
+                    provider_request_id: Some("request-expired".into()),
+                    provider_operation_id: "operation-expired".into(),
+                    polling_host: "api.future.bfl.ai".into(),
+                    polling_recovery: Some(PollingRecoveryContext {
+                        schema_version: 1,
+                        policy_version: "bfl-polling-origin-v2".into(),
+                        scheme: Some("https".into()),
+                        normalized_host: Some("api.future.bfl.ai".into()),
+                        explicit_port: None,
+                        endpoint_shape: "v1/get_result".into(),
+                        query_keys: vec!["id".into()],
+                        url_fingerprint: format!("sha256:{}", "b".repeat(64)),
+                        validation_reason: Some("host_not_allowlisted".into()),
+                    }),
+                    deadline_unix_ms: deadline,
+                },
+                "2026-09-03T20:59:59Z",
+            )
+            .unwrap();
+        repository
+            .complete_provider_attempt(
+                &attempt_id,
+                &AttemptResult {
+                    outcome: "ambiguous".into(),
+                    completed_at: "2026-09-03T21:00:00Z".into(),
+                    usage: json!({}),
+                    usage_schema_version: 1,
+                    actual_vendor_cost: None,
+                    failure_code: Some("polling_origin_rejected".into()),
+                    failure_message_redacted: None,
+                    provider_request_id: Some("request-expired".into()),
+                    provider_operation_id: Some("operation-expired".into()),
+                },
+            )
+            .unwrap();
+        let preflighting = repository
+            .update_execution(
+                &execution.execution_id,
+                execution.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("2026-09-03T20:59:58Z".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-09-03T20:59:58Z",
+            )
+            .unwrap();
+        let held = repository
+            .update_execution(
+                &execution.execution_id,
+                preflighting.version,
+                &ExecutionUpdate {
+                    status: "reconciliation_required".into(),
+                    outcome: Some("polling_origin_rejected".into()),
+                    started_at: None,
+                    completed_at: None,
+                    failure_code: Some("polling_origin_rejected".into()),
+                    failure_message_redacted: None,
+                    provider_outcome: Some(LifecycleOutcome::Ambiguous),
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap();
+        let evidence = repository
+            .record_reconciliation(
+                &held,
+                "executing",
+                Some("polling_origin_rejected"),
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap();
+        assert_eq!(
+            evidence.evidence["recovery_guidance"]["action"],
+            "contact_provider_support"
+        );
+
+        assert!(matches!(
+            repository.begin_provider_reconciliation_poll(
+                &execution.execution_id,
+                &attempt_id,
+                held.version,
+                "2026-09-03T21:00:01Z",
+            ),
+            Err(Error::Stale)
+        ));
+        assert_eq!(
+            repository
+                .get_provider_attempt(&attempt_id)
+                .unwrap()
+                .outcome,
+            "ambiguous"
+        );
+        assert_eq!(
+            repository
+                .get_execution(&execution.execution_id)
+                .unwrap()
+                .status,
+            "reconciliation_required"
+        );
     }
 
     #[test]
@@ -2932,6 +3265,7 @@ mod tests {
             provider_request_id: Some(CANARY.into()),
             provider_operation_id: "operation-safe".into(),
             polling_host: "api.bfl.ai".into(),
+            polling_recovery: None,
             deadline_unix_ms: 1_799_999_999_000,
         };
 
@@ -2947,6 +3281,7 @@ mod tests {
             provider_request_id: Some("request-safe".into()),
             provider_operation_id: "https://example.invalid/result?token=signed".into(),
             polling_host: "api.bfl.ai".into(),
+            polling_recovery: None,
             deadline_unix_ms: 1_799_999_999_000,
         };
         assert!(matches!(
@@ -2962,6 +3297,38 @@ mod tests {
         assert_eq!(unchanged.provider_deadline_unix_ms, None);
         assert_eq!(unchanged.operation_checkpointed_at, None);
         assert_eq!(repository.count("provider_attempts"), 1);
+    }
+
+    #[test]
+    fn sandbox_fixture_metadata_persists_while_service_credentials_remain_guarded() {
+        const CALLER_SECRET: &str = "sandbox-caller-capability-181";
+        const HUBU_SECRET: &str = "sandbox-hubu-capability-181";
+        let repository = Repository::in_memory_with_redactor(Redactor::new([
+            CALLER_SECRET.as_bytes(),
+            HUBU_SECRET.as_bytes(),
+        ]))
+        .unwrap();
+        let mut request = new("sandbox-account", "sandbox-operation");
+        request.provider = "sandbox".into();
+        request.adapter = "fixture".into();
+        request.model = "deterministic-image-v1".into();
+        request.provider_config_version = "hubu-sandbox-fixture-v1".into();
+        request.normalized_input = json!({"prompt":"prompt mentions sandbox-fixture"});
+        request.pricing_snapshot["provider"] = json!("sandbox");
+        request.pricing_snapshot["model"] = json!("deterministic-image-v1");
+
+        let execution = repository.create_execution(&request).unwrap();
+        assert_eq!(execution.provider_config_version, "hubu-sandbox-fixture-v1");
+        assert_eq!(
+            execution.normalized_input,
+            json!({"prompt":"prompt mentions sandbox-fixture"})
+        );
+
+        request.operation_key = CALLER_SECRET.into();
+        assert!(matches!(
+            repository.create_execution(&request),
+            Err(Error::Invalid("secret-bearing persistence value"))
+        ));
     }
 
     #[test]

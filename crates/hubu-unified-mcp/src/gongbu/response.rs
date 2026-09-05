@@ -199,11 +199,6 @@ fn allowlisted_validation_diagnostic(
     };
     match reason_code {
         "target_not_selectable"
-            if exactly_matches(AdmissionDiagnostic::TargetNotSelectable.fields()) =>
-        {
-            Some(AdmissionDiagnostic::TargetNotSelectable)
-        }
-        "target_not_selectable"
             if exactly_matches(AdmissionDiagnostic::TargetIdNotSelectable.fields()) =>
         {
             Some(AdmissionDiagnostic::TargetIdNotSelectable)
@@ -309,6 +304,10 @@ pub(super) fn execution_result(
     if response.schema_version != expected_schema_version
         || !valid_execution_id(&response.execution_id)
         || !valid_execution_status(&response.status)
+        || response.recovery.as_ref().is_some_and(|value| {
+            response.status != "reconciliation_required"
+                || !valid_recovery_projection(value, &response.execution_id)
+        })
     {
         return Err(ToolError::invalid_response());
     }
@@ -335,10 +334,86 @@ pub(super) fn execution_result(
         completed_at: response.completed_at,
         timing,
         provider_transport,
+        recovery: response.recovery,
     };
     let mut public = serde_json::to_value(public).expect("public execution response serializes");
     scrub_private_projection(&mut public, &private_operation_key);
     Ok((text_result(&public), lifecycle))
+}
+
+fn valid_recovery_projection(value: &RecoveryProjection, execution_id: &str) -> bool {
+    value.schema_version == 1
+        && valid_execution_id(&value.execution_id)
+        && value.execution_id == execution_id
+        && valid_provider_evidence_id(&value.provider_attempt_id)
+        && value
+            .provider_request_id
+            .as_deref()
+            .is_none_or(valid_provider_evidence_id)
+        && valid_provider_evidence_id(&value.provider_operation_id)
+        && value
+            .hubu_claim_id
+            .as_deref()
+            .is_none_or(valid_provider_evidence_id)
+        && safe_recovery_token(&value.provider, 64)
+        && safe_recovery_token(&value.target, 128)
+        && safe_recovery_token(&value.model, 128)
+        && safe_recovery_token(&value.credential_binding.provider_config_version, 128)
+        && valid_sha256(&value.credential_binding.provider_config_digest)
+        && value.polling.validate()
+        && value
+            .submitted_at
+            .as_deref()
+            .is_none_or(valid_recovery_timestamp)
+        && value
+            .checkpointed_at
+            .as_deref()
+            .is_none_or(valid_recovery_timestamp)
+        && valid_recovery_timestamp(&value.last_transition_at)
+        && value.last_confirmed_step == "provider_operation_checkpointed"
+        && value.guidance.provider_outcome_ambiguous
+        && value.guidance.billing_may_have_occurred
+        && value.guidance.do_not_resubmit
+        && value.guidance.recover_first
+        && value.guidance.artifact_urls_may_expire
+        && matches!(
+            value.guidance.action.as_str(),
+            "update_policy_then_reinspect" | "contact_provider_support"
+        )
+}
+
+fn safe_recovery_token(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':')
+        })
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_recovery_timestamp(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.is_ascii()
+        && chrono::DateTime::parse_from_rfc3339(value).is_ok()
+}
+
+fn valid_provider_evidence_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 fn valid_execution_id(value: &str) -> bool {
@@ -456,15 +531,24 @@ fn scrub_private_projection(value: &mut Value, private_operation_key: &str) {
 #[serde(deny_unknown_fields)]
 pub(super) struct ProviderCatalogResponse {
     schema_version: u32,
-    profiles: Vec<ProviderCatalogProfile>,
+    contracts: Vec<ProviderCatalogContract>,
 }
 
 impl ProviderCatalogResponse {
     pub(super) fn validate(&self) -> Result<(), ToolError> {
-        if self.schema_version != 1 || self.profiles.len() > 1 {
+        let mut ids = std::collections::BTreeSet::new();
+        if self.schema_version != 1
+            || self.contracts.len() > 3
+            || self
+                .contracts
+                .iter()
+                .any(|contract| !ids.insert(contract.contract.as_str()))
+        {
             return Err(ToolError::invalid_response());
         }
-        self.profiles.iter().try_for_each(validate_provider_profile)
+        self.contracts
+            .iter()
+            .try_for_each(validate_provider_contract)
     }
 }
 
@@ -576,7 +660,7 @@ impl RedactionAttestationResponse {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ProviderCatalogProfile {
+struct ProviderCatalogContract {
     contract: String,
     pricing_version: String,
     pricing_reviewed_on: String,
@@ -634,34 +718,129 @@ struct ProviderCatalogReadiness {
     live_qualification: String,
 }
 
-fn validate_provider_profile(profile: &ProviderCatalogProfile) -> Result<(), ToolError> {
-    let exact_target = profile.target.workload_type == "image_generation"
-        && profile.target.provider == "flux"
-        && profile.target.adapter == "flux2_api"
-        && profile.target.model == "flux-2-pro";
-    let exact_capability = profile.capability.image_count == 1
-        && profile.capability.output_formats == ["png", "jpeg"]
-        && exact_provider_presets(&profile.capability.presets);
-    let exact_policies = profile.policies.generation_retries == 0
-        && !profile.policies.fallback
-        && profile.policies.poll == "bfl-async-status-poll-500ms-v1"
-        && profile.policies.artifact_delivery == "bfl-delivery-single-region-label-v1"
-        && profile.policies.recovery == "hubu-durable-async-resume-v1";
-    let exact_readiness = profile.readiness.configured
-        && profile.readiness.production_validated
-        && !profile.readiness.live_qualified
-        && profile.readiness.live_qualification == "not_performed";
-    if profile.contract != "hubu.flux-2-pro.text-to-image/v1"
-        || profile.pricing_version != "bfl-flux-2-pro-usd-2026-08-28-v1"
-        || profile.pricing_reviewed_on != "2026-08-28"
+fn validate_provider_contract(contract: &ProviderCatalogContract) -> Result<(), ToolError> {
+    match contract.contract.as_str() {
+        "hubu.gemini-3.1-flash-lite-image.text-to-image/v1" => {
+            validate_gemini_lite_provider_contract(contract)
+        }
+        "hubu.gemini-3.1-flash-image.text-to-image/v1" => {
+            validate_gemini_provider_contract(contract)
+        }
+        "hubu.flux-2-pro.text-to-image/v1" => validate_flux_provider_contract(contract),
+        _ => Err(ToolError::invalid_response()),
+    }
+}
+
+fn validate_gemini_lite_provider_contract(
+    contract: &ProviderCatalogContract,
+) -> Result<(), ToolError> {
+    let exact_target = contract.target.workload_type == "image_generation"
+        && contract.target.provider == "google"
+        && contract.target.adapter == "gemini_developer_image"
+        && contract.target.model == "gemini-3.1-flash-lite-image";
+    let exact_capability = contract.capability.image_count == 1
+        && contract.capability.output_formats == ["png", "jpeg"]
+        && contract.capability.presets.len() == 1
+        && exact_provider_preset(&contract.capability.presets[0], "1k", 1024, 1024, 336, 100);
+    let exact_policies = contract.policies.generation_retries == 0
+        && !contract.policies.fallback
+        && contract.policies.poll == "synchronous-response-v1"
+        && contract.policies.artifact_delivery == "google-inline-image-v1"
+        && contract.policies.recovery == "hubu-durable-synchronous-replay-v1";
+    if contract.pricing_version != "google-gemini-3.1-flash-lite-image-usd-2026-09-01-v1"
+        || contract.pricing_reviewed_on != "2026-09-01"
         || !exact_target
         || !exact_capability
         || !exact_policies
-        || !exact_readiness
+        || !exact_provider_readiness(contract)
     {
         return Err(ToolError::invalid_response());
     }
     Ok(())
+}
+
+fn validate_gemini_provider_contract(contract: &ProviderCatalogContract) -> Result<(), ToolError> {
+    let exact_target = contract.target.workload_type == "image_generation"
+        && contract.target.provider == "google"
+        && contract.target.adapter == "gemini_developer_image"
+        && contract.target.model == "gemini-3.1-flash-image";
+    let expected = [
+        ("1k", 1024, 1024, 67, 10),
+        ("2k", 2048, 2048, 101, 10),
+        ("4k", 4096, 4096, 151, 10),
+    ];
+    let exact_capability = contract.capability.image_count == 1
+        && contract.capability.output_formats == ["png", "jpeg"]
+        && contract.capability.presets.len() == expected.len()
+        && contract.capability.presets.iter().zip(expected).all(
+            |(preset, (name, width, height, numerator, denominator))| {
+                exact_provider_preset(preset, name, width, height, numerator, denominator)
+            },
+        );
+    let exact_policies = contract.policies.generation_retries == 0
+        && !contract.policies.fallback
+        && contract.policies.poll == "synchronous-response-v1"
+        && contract.policies.artifact_delivery == "google-inline-image-v1"
+        && contract.policies.recovery == "hubu-durable-synchronous-replay-v1";
+    if contract.pricing_version != "google-gemini-3.1-flash-image-usd-2026-09-01-v1"
+        || contract.pricing_reviewed_on != "2026-09-01"
+        || !exact_target
+        || !exact_capability
+        || !exact_policies
+        || !exact_provider_readiness(contract)
+    {
+        return Err(ToolError::invalid_response());
+    }
+    Ok(())
+}
+
+fn validate_flux_provider_contract(contract: &ProviderCatalogContract) -> Result<(), ToolError> {
+    let exact_target = contract.target.workload_type == "image_generation"
+        && contract.target.provider == "flux"
+        && contract.target.adapter == "flux2_api"
+        && contract.target.model == "flux-2-pro";
+    let exact_capability = contract.capability.image_count == 1
+        && contract.capability.output_formats == ["png", "jpeg"]
+        && exact_provider_presets(&contract.capability.presets);
+    let exact_policies = contract.policies.generation_retries == 0
+        && !contract.policies.fallback
+        && contract.policies.poll == "bfl-async-status-poll-500ms-v1"
+        && contract.policies.artifact_delivery == "bfl-delivery-single-region-label-v1"
+        && contract.policies.recovery == "hubu-durable-async-resume-v1";
+    if contract.pricing_version != "bfl-flux-2-pro-usd-2026-08-28-v1"
+        || contract.pricing_reviewed_on != "2026-08-28"
+        || !exact_target
+        || !exact_capability
+        || !exact_policies
+        || !exact_provider_readiness(contract)
+    {
+        return Err(ToolError::invalid_response());
+    }
+    Ok(())
+}
+
+fn exact_provider_readiness(contract: &ProviderCatalogContract) -> bool {
+    contract.readiness.configured
+        && contract.readiness.credential_reference_present
+        && contract.readiness.production_validated
+        && !contract.readiness.live_qualified
+        && contract.readiness.live_qualification == "not_performed"
+}
+
+fn exact_provider_preset(
+    preset: &ProviderCatalogPreset,
+    name: &str,
+    width: u32,
+    height: u32,
+    numerator: i64,
+    denominator: i64,
+) -> bool {
+    preset.name == name
+        && preset.width == width
+        && preset.height == height
+        && preset.currency == "USD"
+        && preset.rate_numerator_minor == numerator
+        && preset.rate_denominator == denominator
 }
 
 fn exact_provider_presets(presets: &[ProviderCatalogPreset]) -> bool {
@@ -673,12 +852,7 @@ fn exact_provider_presets(presets: &[ProviderCatalogPreset]) -> bool {
     presets.len() == expected.len()
         && presets.iter().zip(expected).all(
             |(preset, (name, width, height, numerator, denominator))| {
-                preset.name == name
-                    && preset.width == width
-                    && preset.height == height
-                    && preset.currency == "USD"
-                    && preset.rate_numerator_minor == numerator
-                    && preset.rate_denominator == denominator
+                exact_provider_preset(preset, name, width, height, numerator, denominator)
             },
         )
 }
@@ -688,6 +862,99 @@ fn exact_provider_presets(presets: &[ProviderCatalogPreset]) -> bool {
 struct Money {
     amount_minor: i64,
     currency: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryProjection {
+    schema_version: u32,
+    execution_id: String,
+    provider_attempt_id: String,
+    provider_request_id: Option<String>,
+    provider_operation_id: String,
+    hubu_claim_id: Option<String>,
+    provider: String,
+    target: String,
+    model: String,
+    credential_binding: RecoveryCredentialBinding,
+    polling: RecoveryPollingContext,
+    submitted_at: Option<String>,
+    checkpointed_at: Option<String>,
+    last_transition_at: String,
+    last_confirmed_step: String,
+    guidance: RecoveryGuidance,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryCredentialBinding {
+    provider_config_version: String,
+    provider_config_digest: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryPollingContext {
+    schema_version: u32,
+    policy_version: String,
+    scheme: Option<String>,
+    normalized_host: Option<String>,
+    explicit_port: Option<u16>,
+    endpoint_shape: String,
+    query_keys: Vec<String>,
+    url_fingerprint: String,
+    validation_reason: Option<String>,
+}
+
+impl RecoveryPollingContext {
+    fn validate(&self) -> bool {
+        self.schema_version == 1
+            && safe_recovery_token(&self.policy_version, 64)
+            && self
+                .scheme
+                .as_deref()
+                .is_none_or(|value| safe_recovery_token(value, 16))
+            && self
+                .normalized_host
+                .as_deref()
+                .is_none_or(|value| safe_recovery_token(value, 253))
+            && safe_recovery_token(&self.endpoint_shape, 64)
+            && self.query_keys.len() <= 8
+            && self
+                .query_keys
+                .iter()
+                .all(|value| safe_recovery_token(value, 64))
+            && valid_sha256(&self.url_fingerprint)
+            && self.validation_reason.as_deref().is_none_or(|reason| {
+                matches!(
+                    reason,
+                    "polling_url_unavailable"
+                        | "url_too_long"
+                        | "non_ascii_url"
+                        | "encoded_host"
+                        | "malformed_url"
+                        | "scheme_not_https"
+                        | "userinfo_present"
+                        | "explicit_port_present"
+                        | "fragment_present"
+                        | "host_not_allowlisted"
+                        | "path_contract_mismatch"
+                        | "query_contract_mismatch"
+                        | "operation_id_mismatch"
+                )
+            })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryGuidance {
+    provider_outcome_ambiguous: bool,
+    billing_may_have_occurred: bool,
+    do_not_resubmit: bool,
+    recover_first: bool,
+    artifact_urls_may_expire: bool,
+    action: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -707,6 +974,8 @@ pub(super) struct ExecutionResponse {
     timing: ExecutionTiming,
     #[serde(default)]
     provider_transport: Option<ProviderTransport>,
+    #[serde(default)]
+    recovery: Option<RecoveryProjection>,
 }
 
 impl ExecutionResponse {
@@ -759,6 +1028,8 @@ struct PublicExecutionResponse {
     timing: ExecutionTiming,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_transport: Option<ProviderTransport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery: Option<RecoveryProjection>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -937,6 +1208,7 @@ mod tests {
                 poll_count: 2,
                 artifact_fetch_count: 1,
             }),
+            recovery: None,
         }
     }
 
@@ -1055,6 +1327,174 @@ mod tests {
         assert_eq!(public["provider_transport"]["artifact_fetch_count"], 1);
         assert!(public["timing"].get("transmission_started_at").is_none());
         assert!(public.get("operation_key").is_none());
+    }
+
+    #[test]
+    fn reconciliation_projects_sanitized_recovery_first_guidance() {
+        let mut response = execution();
+        response.status = "reconciliation_required".into();
+        response.recovery = Some(
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "execution_id": "exec-1",
+                "provider_attempt_id": "attempt-1",
+                "provider_request_id": "request-1",
+                "provider_operation_id": "provider-op-1",
+                "hubu_claim_id": "claim-1",
+                "provider": "flux",
+                "target": "flux-2-pro",
+                "model": "flux-2-pro",
+                "credential_binding": {
+                    "provider_config_version": "v1",
+                    "provider_config_digest": format!("sha256:{}", "a".repeat(64))
+                },
+                "polling": {
+                    "schema_version": 1,
+                    "policy_version": "bfl-polling-origin-v2",
+                    "scheme": "https",
+                    "normalized_host": "api.future.bfl.ai",
+                    "explicit_port": null,
+                    "endpoint_shape": "v1/get_result",
+                    "query_keys": ["id"],
+                    "url_fingerprint": format!("sha256:{}", "b".repeat(64)),
+                    "validation_reason": "host_not_allowlisted"
+                },
+                "submitted_at": "2026-09-03T21:00:00Z",
+                "checkpointed_at": "2026-09-03T21:00:01Z",
+                "last_transition_at": "2026-09-03T21:00:02Z",
+                "last_confirmed_step": "provider_operation_checkpointed",
+                "guidance": {
+                    "provider_outcome_ambiguous": true,
+                    "billing_may_have_occurred": true,
+                    "do_not_resubmit": true,
+                    "recover_first": true,
+                    "artifact_urls_may_expire": true,
+                    "action": "update_policy_then_reinspect"
+                }
+            }))
+            .unwrap(),
+        );
+        let (result, _) = execution_result(
+            response,
+            Some(&continuation(None)),
+            None,
+            EXECUTION_V2_SCHEMA_VERSION,
+        )
+        .unwrap();
+        let public = result_json(result);
+        assert_eq!(public["recovery"]["provider_operation_id"], "provider-op-1");
+        assert_eq!(public["recovery"]["guidance"]["do_not_resubmit"], true);
+        assert_eq!(
+            public["recovery"]["polling"]["validation_reason"],
+            "host_not_allowlisted"
+        );
+        assert!(public.get("operation_key").is_none());
+        let encoded = public.to_string();
+        for forbidden in ["https://", "signed_url", "storage_path", "raw_body"] {
+            assert!(!encoded.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn reconciliation_rejects_unknown_recovery_fields() {
+        let mut encoded = serde_json::to_value(execution()).unwrap();
+        encoded["status"] = json!("reconciliation_required");
+        encoded["recovery"] = json!({
+            "schema_version": 1,
+            "execution_id": "exec-1",
+            "provider_attempt_id": "attempt-1",
+            "provider_request_id": "request-1",
+            "provider_operation_id": "provider-op-1",
+            "hubu_claim_id": "claim-1",
+            "provider": "flux",
+            "target": "flux-2-pro",
+            "model": "flux-2-pro",
+            "credential_binding": {
+                "provider_config_version": "v1",
+                "provider_config_digest": format!("sha256:{}", "a".repeat(64))
+            },
+            "polling": {
+                "schema_version": 1,
+                "policy_version": "bfl-polling-origin-v2",
+                "scheme": "https",
+                "normalized_host": "api.future.bfl.ai",
+                "explicit_port": null,
+                "endpoint_shape": "v1/get_result",
+                "query_keys": ["id"],
+                "url_fingerprint": format!("sha256:{}", "b".repeat(64)),
+                "validation_reason": "host_not_allowlisted"
+            },
+            "submitted_at": "2026-09-03T21:00:00Z",
+            "checkpointed_at": "2026-09-03T21:00:01Z",
+            "last_transition_at": "2026-09-03T21:00:02Z",
+            "last_confirmed_step": "provider_operation_checkpointed",
+            "guidance": {
+                "provider_outcome_ambiguous": true,
+                "billing_may_have_occurred": true,
+                "do_not_resubmit": true,
+                "recover_first": true,
+                "artifact_urls_may_expire": true,
+                "action": "update_policy_then_reinspect"
+            },
+            "debug": "x-key secret"
+        });
+
+        assert!(serde_json::from_value::<ExecutionResponse>(encoded).is_err());
+    }
+
+    #[test]
+    fn reconciliation_rejects_recovery_for_another_execution() {
+        let mut response = execution();
+        response.status = "reconciliation_required".into();
+        response.recovery = Some(
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "execution_id": "exec-other",
+                "provider_attempt_id": "attempt-1",
+                "provider_request_id": "request-1",
+                "provider_operation_id": "provider-op-1",
+                "hubu_claim_id": "claim-1",
+                "provider": "flux",
+                "target": "flux-2-pro",
+                "model": "flux-2-pro",
+                "credential_binding": {
+                    "provider_config_version": "v1",
+                    "provider_config_digest": format!("sha256:{}", "a".repeat(64))
+                },
+                "polling": {
+                    "schema_version": 1,
+                    "policy_version": "bfl-polling-origin-v2",
+                    "scheme": "https",
+                    "normalized_host": "api.future.bfl.ai",
+                    "explicit_port": null,
+                    "endpoint_shape": "v1/get_result",
+                    "query_keys": ["id"],
+                    "url_fingerprint": format!("sha256:{}", "b".repeat(64)),
+                    "validation_reason": "host_not_allowlisted"
+                },
+                "submitted_at": "2026-09-03T21:00:00Z",
+                "checkpointed_at": "2026-09-03T21:00:01Z",
+                "last_transition_at": "2026-09-03T21:00:02Z",
+                "last_confirmed_step": "provider_operation_checkpointed",
+                "guidance": {
+                    "provider_outcome_ambiguous": true,
+                    "billing_may_have_occurred": true,
+                    "do_not_resubmit": true,
+                    "recover_first": true,
+                    "artifact_urls_may_expire": true,
+                    "action": "update_policy_then_reinspect"
+                }
+            }))
+            .unwrap(),
+        );
+
+        let error = result_error(execution_result(
+            response,
+            Some(&continuation(None)),
+            None,
+            EXECUTION_V2_SCHEMA_VERSION,
+        ));
+        assert_eq!(error.code(), "invalid_response");
     }
 
     #[test]

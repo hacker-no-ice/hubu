@@ -297,18 +297,51 @@ async fn run() {
         }
     })
     .await
-    .expect("dependency degradation must withdraw readiness before shutdown");
+    .expect("dependency degradation must withdraw readiness");
     assert!(
         !server.is_finished(),
-        "the recovery grace must keep the server alive after withdrawing readiness"
+        "dependency degradation must not stop Gongbu"
     );
+    assert_eq!(live_status(&client, &base_url).await, StatusCode::OK);
+    let degraded_read = client
+        .get(format!("{base_url}/v1/executions/{}", valid.execution_id))
+        .bearer_auth(CALLER_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(degraded_read.status(), StatusCode::OK);
+    let rejected = client
+        .post(format!("{base_url}/v2/executions"))
+        .bearer_auth(CALLER_TOKEN)
+        .json(&request("rejected-while-not-ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        rejected.json::<Value>().await.unwrap()["error"]["code"],
+        "not_ready"
+    );
+
+    dependencies_healthy.store(true, Ordering::SeqCst);
+    wait_until_ready(&client, &base_url).await;
+    assert!(!server.is_finished(), "recovery must leave Gongbu running");
+    let recovered = submit(&client, &base_url, "valid-after-dependency-recovery").await;
+    let recovered = wait_for_terminal(&client, &base_url, &recovered.execution_id).await;
+    assert_eq!(
+        recovered.status,
+        ExecutionStatus::Succeeded,
+        "recovered execution: {recovered:?}"
+    );
+
+    shutdown_tx
+        .send(())
+        .expect("request graceful Gongbu shutdown");
     tokio::time::timeout(Duration::from_secs(15), server)
         .await
-        .expect("dependency loss must stop the persistent server")
+        .expect("operator shutdown must stop the persistent server")
         .unwrap()
         .unwrap();
-    drop(shutdown_tx);
-    assert_ne!(ready_status(&client, &base_url).await, StatusCode::OK);
 }
 
 struct TemporalChild(Child);
@@ -384,6 +417,13 @@ async fn ready_status(client: &reqwest::Client, base_url: &str) -> StatusCode {
     }
 }
 
+async fn live_status(client: &reqwest::Client, base_url: &str) -> StatusCode {
+    match client.get(format!("{base_url}/livez")).send().await {
+        Ok(response) => response.status(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
 async fn submit(
     client: &reqwest::Client,
     base_url: &str,
@@ -435,10 +475,7 @@ fn request(operation_key: &str) -> Value {
         "spend_auth_token_id": operation_key,
         "input": {"prompt": "cat", "image_count": 1},
         "input_schema_version": 1,
-        "workload_type": "image_generation",
-        "provider": "example",
-        "adapter": "fixture",
-        "model": "image-v1"
+        "target_id": "gongbu:target:v1:050acc365f58cc4d45a99e3c491925193d81e848452209ef5eba2d54b5550efa"
     })
 }
 
@@ -502,16 +539,16 @@ impl HubuActivities for ScenarioHubu {
         }
     }
 
-    fn claim(&self, _: &Execution) -> Result<String, ActivityError> {
-        Ok("claim-1".into())
+    fn claim(&self, execution: &Execution) -> Result<String, ActivityError> {
+        Ok(format!("claim-{}", execution.execution_id))
     }
 
     fn validate_claim(&self, _: &Execution) -> Result<(), ActivityError> {
         Ok(())
     }
 
-    fn settle(&self, _: &Execution, _: &str, _: i64) -> Result<String, ActivityError> {
-        Ok("settlement-1".into())
+    fn settle(&self, execution: &Execution, _: &str, _: i64) -> Result<String, ActivityError> {
+        Ok(format!("settlement-{}", execution.execution_id))
     }
 
     fn release(&self, _: &Execution) -> Result<(), ActivityError> {
@@ -564,7 +601,7 @@ impl ProviderActivities for ScenarioProvider {
             return Err(ActivityError::Proven("provider_rejected".into()));
         }
         Ok(ProviderSuccess {
-            request_id: Some("provider-request-1".into()),
+            request_id: Some(format!("provider-request-{}", execution.execution_id)),
             operation_id: None,
             usage: gongbu_api::provider_contract::NormalizedUsage {
                 images: Some(1),

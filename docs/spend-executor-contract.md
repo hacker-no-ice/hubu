@@ -372,21 +372,14 @@ guidance.
 
 2. The agent sends only `spend_auth_token_id` plus execution intent and target
    selection to canonical `POST /v2/executions` with `schema_version: 2`. New
-   callers select one opaque `target_id` from `GET /v2/execution-targets`;
-   legacy callers may continue to send the complete
-   workload/provider/adapter/model tuple, but the two selector forms cannot be
-   mixed. The request
+   callers select one opaque `target_id` from `GET /v2/execution-targets`.
+   Provider, adapter, model, and workload routing fields are not accepted from
+   the caller. The request
    does not repeat account, operation key, money, typed scope, task ID, reason,
    lease profile, or expiry.
 
-   Original v1 clients send `hubu_authorization_id` and
-   `hubu_token_reference` as equal historical aliases of the same spend-auth
-   token ID; neither field contains Hubu's decision ID. V1 also carries
-   `operation_key`, a null `hubu_claim_id`, `authorization`, and optional
-   `execution_scope` as compatibility assertions. Unequal token aliases fail
-   before Hubu resolution, and every other mismatch fails before persistence or
-   scheduling. V1 is supported through all `0.1.x` releases and removed in
-   `0.2.0`.
+   The v1 execution-creation route is retired. Existing v1 GET observation
+   routes remain available.
 
    On the unified MCP surface, the router first requires the continuation ID to
    match exactly one allowed normalized operation and binds the first canonical

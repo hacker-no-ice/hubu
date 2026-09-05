@@ -1,6 +1,6 @@
 [package]
 name = "gongbu-api"
-version = "0.2.0"
+version = "0.2.1"
 description = "Execution-plane API, provider orchestration, and recovery for Gongbu"
 edition.workspace = true
 homepage.workspace = true

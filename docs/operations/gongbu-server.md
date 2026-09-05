@@ -102,13 +102,15 @@ when it returns gRPC `Code::Cancelled`. If that confirmation is also cancelled,
 the monitor keeps tracking the failure count and original grace-window start,
 but preserves readiness only when startup already supplied the positive poller
 proof and only while the window remains strictly below 30 seconds. Cancellation
-never establishes or restores readiness. `Ok(false)`, every non-cancelled
-Temporal error, and any Hubu failure withdraw readiness and new execution
-admission immediately. A healthy sample restores readiness only after all
-dependencies are healthy and resets its own failure window; any uninterrupted
-failure sequence, including cancellations, withdraws readiness and shuts down
-at the grace boundary. Runtime probe intervals are capped at the grace duration
-so shutdown is re-evaluated within the documented bound.
+never establishes or restores readiness. Every successful Temporal task-queue
+RPC confirms runtime reachability, including a response with an empty historical
+poller list. Every non-cancelled Temporal error and any Hubu failure withdraw
+readiness and new execution admission immediately. A healthy sample restores
+readiness only after all dependencies are healthy and resets its own failure
+window. An uninterrupted cancellation sequence withdraws readiness at the
+grace boundary, but dependency observations never terminate Gongbu. Runtime
+probe intervals are capped at the grace duration so readiness is re-evaluated
+within the documented bound while recovery probing continues.
 
 The `gongbu_dependency_probe` log event records only the dependency, outcome,
 consecutive monitor-sample count, and a redacted gRPC status code when
@@ -135,10 +137,15 @@ curl -fsS http://127.0.0.1:8788/version
 
 These GET endpoints expose safe status and compatibility metadata only. All
 execution and artifact endpoints require the caller capability. A 503 from
-`/readyz` means new admission is closed.
+`/readyz` means new admission is closed. Runtime Temporal or Hubu degradation
+withdraws `/readyz` without terminating Gongbu or its managed Temporal child;
+`/livez` remains successful while the HTTP process is functioning. Gongbu keeps
+probing withdrawn dependencies and restores readiness automatically after they
+recover. Existing execution and artifact reads remain available while readiness
+is withdrawn.
 
 An authenticated `GET /v1/provider-catalog` returns the sanitized schema-v1
-supported-profile projection. For the managed FLUX profile it includes the
+provider contract projection. For the shipped FLUX provider contract it includes the
 exact target, model, presets, rational USD pricing, policy versions, and the
 separate configured, credential-reference-present, production-validated, and
 live-qualified facts. It never exposes Keychain coordinates or values and does
@@ -162,10 +169,7 @@ execution intent selected from operator configuration:
   "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
   "input": {"prompt": "A small blue circle", "image_count": 1},
   "input_schema_version": 1,
-  "workload_type": "image_generation",
-  "provider": "google",
-  "adapter": "gemini_developer_image",
-  "model": "OPERATOR_APPROVED_MODEL"
+  "target_id": "gongbu:target:v1:DISCOVERED_OPAQUE_ID"
 }
 ```
 
@@ -191,6 +195,13 @@ reschedules nonterminal executions at their stable workflow IDs and never
 creates a second provider or financial side effect merely to recover
 scheduling.
 
+New `POST /v2/executions` admission returns retryable `503 not_ready` while
+readiness is withdrawn. A Temporal scheduling failure that races with admission
+uses the same response after Gongbu has durably created the pending execution.
+Retry the identical request with the same spend-auth token: Gongbu reuses that
+pending execution locally and schedules its stable workflow ID instead of
+resolving the Hubu authorization or creating another execution.
+
 For asynchronous FLUX work, that stable workflow separates one
 patch-protected `submit_provider` activity from
 `poll_provider_operation`. A successful submit checkpoints only the safe
@@ -211,8 +222,10 @@ Use these recovery dispositions when inspecting an interrupted execution:
   polling for that same operation under the original deadline, with the same
   `ProviderAttempt` and no second Hubu financial mutation.
 
-An expired original deadline is not refreshed by restart. Continue to inspect
-the existing execution and its reconciliation record instead of submitting a
+An expired original deadline is not refreshed by restart. Execution detail
+stops recommending `reinspect`, Gongbu refuses to reopen the poll-existing
+path, and the operator should contact provider support while continuing to
+inspect the existing execution and reconciliation record. Never submit a
 replacement operation.
 
 Agents normally use these routes through [Unified MCP](../unified-mcp.md).

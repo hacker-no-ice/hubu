@@ -192,11 +192,12 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
     let server = server_with_backends("http://127.0.0.1:1", None, false, None);
     let actual = server.list_tools_for_snapshot();
     assert_eq!(actual[0], capability_tool());
-    assert_eq!(actual[1], gongbu::operation_status_definition());
-    assert_eq!(actual[2], crate::resume_operation::tool_definition());
+    assert_eq!(&actual[1..3], hubu_feedback::tool_definitions().as_slice());
+    assert_eq!(actual[3], gongbu::operation_status_definition());
+    assert_eq!(actual[4], crate::resume_operation::tool_definition());
 
     let expected = super::catalog::tool_definitions();
-    assert_eq!(&actual[3..], expected.as_slice());
+    assert_eq!(&actual[5..], expected.as_slice());
     assert_eq!(expected.len(), 31);
     assert!(!actual
         .iter()
@@ -291,7 +292,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 42);
+    assert_eq!(tools.len(), 44);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -309,7 +310,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 40);
+    assert_eq!(degraded.len(), 42);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -331,11 +332,19 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.hubu.reason_code = Some("health_unavailable");
     }
     let hubu_down = server.list_tools_for_snapshot();
-    assert_eq!(hubu_down.len(), 8);
-    assert!(!hubu_down.iter().any(|tool| tool["name"]
-        .as_str()
-        .is_some_and(|name| name.starts_with("hubu_")
-            && !matches!(name, "hubu_unified_capabilities" | "hubu_operation_status"))));
+    assert_eq!(hubu_down.len(), 10);
+    assert!(!hubu_down
+        .iter()
+        .any(|tool| tool["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("hubu_")
+                && !matches!(
+                    name,
+                    "hubu_unified_capabilities"
+                        | "hubu_operation_status"
+                        | "hubu_feedback_guidance"
+                        | "hubu_prepare_feedback"
+                ))));
     assert!(!hubu_down
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));

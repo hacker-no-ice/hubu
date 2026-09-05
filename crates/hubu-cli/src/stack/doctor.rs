@@ -83,7 +83,7 @@ pub(super) struct DoctorReport {
     schema_version: u32,
     pub(super) classification: ProfileClassification,
     pub(super) provider_readiness: ProviderReadiness,
-    pub(super) provider_profiles: Vec<ProviderProfileCatalogEntry>,
+    pub(super) provider_contracts: Vec<ProviderContractCatalogEntry>,
     checks: Vec<DoctorCheck>,
 }
 
@@ -162,7 +162,7 @@ fn inspect_profile_with(
         schema_version: REPORT_SCHEMA_VERSION,
         classification: ProfileClassification::Invalid,
         provider_readiness: ProviderReadiness::Unknown,
-        provider_profiles: Vec::new(),
+        provider_contracts: Vec::new(),
         checks: Vec::new(),
     };
 
@@ -184,10 +184,10 @@ fn inspect_profile_with(
         return report;
     };
     report.provider_readiness = provider_readiness(&providers);
-    report.provider_profiles = provider_profile_catalog_entries(&providers, false);
-    for profile in &mut report.provider_profiles {
-        if !credentials.opaque.contains_key(&profile.credential_alias) {
-            profile.readiness.credential_reference_present = Some(false);
+    report.provider_contracts = provider_contract_catalog_entries(&providers, false);
+    for contract in &mut report.provider_contracts {
+        if !credentials.opaque.contains_key(&contract.credential_alias) {
+            contract.readiness.credential_reference_present = Some(false);
         }
     }
 
@@ -271,8 +271,8 @@ fn inspect_profile_with(
             "provider mode, spend gates, and supplied provider fields are contradictory",
         ));
     } else {
-        for profile in &mut report.provider_profiles {
-            profile.readiness.configured = true;
+        for contract in &mut report.provider_contracts {
+            contract.readiness.configured = true;
         }
     }
     let fixture_only = providers.targets.iter().any(|target| {
@@ -627,9 +627,9 @@ fn inspect_profile_with(
             continue;
         };
         let reference_present = opaque_probe(reference);
-        for profile in &mut report.provider_profiles {
-            if profile.credential_alias == key {
-                profile.readiness.credential_reference_present = reference_present;
+        for contract in &mut report.provider_contracts {
+            if contract.credential_alias == key {
+                contract.readiness.credential_reference_present = reference_present;
             }
         }
         match reference_present {
@@ -724,8 +724,8 @@ fn inspect_profile_with(
     if gongbu_managed {
         if providers.mode == Some(ProviderMode::Live) {
             report.provider_readiness = ProviderReadiness::Configured;
-            for profile in &mut report.provider_profiles {
-                profile.readiness.production_validated = true;
+            for contract in &mut report.provider_contracts {
+                contract.readiness.production_validated = true;
             }
         }
         report.checks.push(check(
@@ -1563,9 +1563,9 @@ fn required_opaque_keys(
             );
             keys.extend(
                 providers
-                    .supported_profiles
+                    .contract_bindings
                     .iter()
-                    .filter_map(|profile| profile.credential.clone()),
+                    .filter_map(|binding| binding.credential.clone()),
             );
         }
     }
@@ -2003,7 +2003,7 @@ mod tests {
             schema_version: REPORT_SCHEMA_VERSION,
             classification: ProfileClassification::Incomplete,
             provider_readiness: ProviderReadiness::FixtureOnly,
-            provider_profiles: Vec::new(),
+            provider_contracts: Vec::new(),
             checks: vec![
                 check(
                     CheckLayer::SourceSyntax,
@@ -2042,11 +2042,11 @@ mod tests {
     }
 
     #[test]
-    fn report_schema_versions_the_supported_profile_readiness_contract() {
+    fn report_schema_versions_the_provider_contract_readiness_contract() {
         let value = serde_json::to_value(presentation_report()).unwrap();
         assert_eq!(value["schema_version"], REPORT_SCHEMA_VERSION);
         assert_eq!(value["schema_version"], 2);
-        assert!(value.get("provider_profiles").is_some());
+        assert!(value.get("provider_contracts").is_some());
     }
 
     #[test]
@@ -2569,7 +2569,7 @@ account = "gongbu-caller"
 
     #[cfg(unix)]
     #[test]
-    fn supported_profile_readiness_keeps_configuration_reference_and_live_qualification_separate() {
+    fn provider_contract_readiness_keeps_configuration_reference_and_live_qualification_separate() {
         let root = tempdir().unwrap();
         let (profile, renderer) = write_complete_managed_profile(root.path());
         let mut credentials = fs::read_to_string(profile.join("credentials.toml")).unwrap();
@@ -2585,34 +2585,13 @@ mode = "live"
 catalog_version = "operator-mixed-2026-08-28-v1"
 maximum_spend_minor = 25
 live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
-[[supported_profiles]]
+[[contract_bindings]]
 contract = "hubu.flux-2-pro.text-to-image/v1"
 credential = "bfl_flux2_pro"
 
-[[targets]]
-provider_config_version = "gemini-v1"
-workload_type = "image_generation"
-provider = "google"
-adapter = "gemini_developer_image"
-model = "gemini-image-v1"
+[[contract_bindings]]
+contract = "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
 credential = "gemini"
-active = true
-execution_enabled = true
-[targets.settings]
-type = "gemini_developer_image"
-[targets.settings.config]
-endpoint = "https://generativelanguage.googleapis.com"
-api_version = "v1beta"
-timeout_ms = 30000
-max_retries = 0
-headers = {{}}
-
-[[pricing_rules]]
-rule_id = "gemini-v1"
-provider = "google"
-model = "gemini-image-v1"
-currency = "USD"
-components = [{{ unit = "image", rate_numerator_minor = 4, rate_denominator = 1 }}]
 "#
             ),
         )
@@ -2621,39 +2600,44 @@ components = [{{ unit = "image", rate_numerator_minor = 4, rate_denominator = 1 
         let present = inspect_profile_with(&profile, opaque_available, Some(&renderer));
         assert_eq!(present.classification, ProfileClassification::ReadyToRender);
         assert_eq!(present.provider_readiness, ProviderReadiness::Unknown);
-        assert_eq!(present.provider_profiles.len(), 1);
-        let readiness = &present.provider_profiles[0].readiness;
-        assert!(readiness.configured);
-        assert_eq!(readiness.credential_reference_present, Some(true));
-        assert!(!readiness.production_validated);
-        assert!(!readiness.live_qualified);
-        assert_eq!(readiness.live_qualification, "not_performed");
+        assert_eq!(present.provider_contracts.len(), 2);
+        for contract in &present.provider_contracts {
+            let readiness = &contract.readiness;
+            assert!(readiness.configured);
+            assert_eq!(readiness.credential_reference_present, Some(true));
+            assert!(!readiness.production_validated);
+            assert!(!readiness.live_qualified);
+            assert_eq!(readiness.live_qualification, "not_performed");
+        }
 
         render_profile_with_renderer(&profile, &renderer).unwrap();
         let validated = inspect_profile_with(&profile, opaque_available, Some(&renderer));
         assert_eq!(validated.provider_readiness, ProviderReadiness::Configured);
-        assert!(validated.provider_profiles[0].readiness.configured);
+        assert!(validated
+            .provider_contracts
+            .iter()
+            .all(|contract| contract.readiness.configured));
         assert!(
-            validated.provider_profiles[0]
+            validated.provider_contracts[0]
                 .readiness
                 .production_validated
         );
         assert_eq!(
-            validated.provider_profiles[0]
+            validated.provider_contracts[0]
                 .readiness
                 .credential_reference_present,
             Some(true)
         );
-        assert!(!validated.provider_profiles[0].readiness.live_qualified);
+        assert!(!validated.provider_contracts[0].readiness.live_qualified);
 
         let absent = inspect_profile_with(&profile, opaque_unavailable, Some(&renderer));
         assert_eq!(
-            absent.provider_profiles[0]
+            absent.provider_contracts[0]
                 .readiness
                 .credential_reference_present,
             Some(false)
         );
-        assert!(!absent.provider_profiles[0].readiness.live_qualified);
+        assert!(!absent.provider_contracts[0].readiness.live_qualified);
         assert!(absent.checks.iter().all(|check| {
             !check.message.contains("api.bfl.ai") && !check.message.contains("provider call")
         }));
@@ -2661,7 +2645,7 @@ components = [{{ unit = "image", rate_numerator_minor = 4, rate_denominator = 1 
 
     #[cfg(unix)]
     #[test]
-    fn missing_supported_profile_reference_is_incomplete_before_render() {
+    fn missing_provider_contract_reference_is_incomplete_before_render() {
         let root = tempdir().unwrap();
         let (profile, renderer) = write_complete_managed_profile(root.path());
         fs::write(
@@ -2671,7 +2655,7 @@ components = [{{ unit = "image", rate_numerator_minor = 4, rate_denominator = 1 
 mode = "live"
 maximum_spend_minor = 25
 live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
-[[supported_profiles]]
+[[contract_bindings]]
 contract = "hubu.flux-2-pro.text-to-image/v1"
 credential = "bfl_flux2_pro"
 "#
@@ -2681,14 +2665,14 @@ credential = "bfl_flux2_pro"
 
         let report = inspect_profile_with(&profile, opaque_available, Some(&renderer));
         assert_eq!(report.classification, ProfileClassification::Incomplete);
-        assert_eq!(report.provider_profiles.len(), 1);
+        assert_eq!(report.provider_contracts.len(), 1);
         assert_eq!(
-            report.provider_profiles[0]
+            report.provider_contracts[0]
                 .readiness
                 .credential_reference_present,
             Some(false)
         );
-        assert!(!report.provider_profiles[0].readiness.live_qualified);
+        assert!(!report.provider_contracts[0].readiness.live_qualified);
         assert!(report.checks.iter().any(|check| {
             check.code == "required_decision_missing"
                 && check.field.as_deref() == Some("credentials.toml:opaque.bfl_flux2_pro")

@@ -22,6 +22,7 @@ export default function Home() {
         <nav aria-label="Primary navigation">
           <a href="/docs/overview">Documentation</a>
           <a href="/architecture/">Architecture</a>
+          <a href="/docs/feedback">Send feedback</a>
           <a href="https://github.com/hacker-no-ice/hubu">GitHub</a>
         </nav>
       </header>
@@ -53,6 +54,27 @@ export default function Home() {
               <ul><li>Provider credentials</li><li>Temporal workflows</li><li>Artifacts + retries</li></ul>
             </div>
           </div>
+        </section>
+
+        <section className="intro-video section-wrap" aria-labelledby="intro-video-title">
+          <div className="section-intro compact">
+            <p className="eyebrow"><span /> Watch the introduction</p>
+            <h2 id="intro-video-title">Meet Hubu in 3 min</h2>
+            <p>Give agents room to work, with spending boundaries you control.</p>
+          </div>
+          <div className="intro-video-player">
+            <iframe
+              src="https://www.youtube-nocookie.com/embed/ufEgYjmxKWM"
+              title="Introducing Hubu: bounded spending power for AI agents"
+              width="960"
+              height="540"
+              loading="lazy"
+              referrerPolicy="strict-origin-when-cross-origin"
+              allow="encrypted-media; picture-in-picture; fullscreen"
+              allowFullScreen
+            />
+          </div>
+          <p className="intro-video-link"><a href="https://youtu.be/ufEgYjmxKWM">Watch on YouTube ↗</a></p>
         </section>
 
         <section className="warning-band" aria-label="Project status warning">

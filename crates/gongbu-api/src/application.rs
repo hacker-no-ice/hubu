@@ -23,8 +23,8 @@ use crate::{
     },
     secrets::{MacOsKeychain, SecretProvider},
     temporal::{
-        start_worker_with_config, worker_is_polling, DurableExecutionRunner, ExecutionScheduler,
-        PersistedExecutionRunner, StartedTemporalWorker, TemporalWorkerConfig,
+        start_worker_with_config, temporal_is_reachable, worker_is_polling, DurableExecutionRunner,
+        ExecutionScheduler, PersistedExecutionRunner, StartedTemporalWorker, TemporalWorkerConfig,
     },
     workflow::{
         ActivityError as WorkflowActivityError, ArtifactActivities, HubuActivities,
@@ -41,6 +41,7 @@ use axum::{
 use futures::future::{select, Either};
 use serde_json::{json, Value};
 use std::{
+    convert::Infallible,
     future::Future,
     net::SocketAddr,
     sync::{
@@ -689,7 +690,7 @@ async fn monitor_temporal(
     failure_grace: Duration,
     dependency_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ready: Arc<AtomicBool>,
-) -> LifecycleReason {
+) -> Infallible {
     // The listener is exposed only after both Temporal polling and Hubu
     // compatibility have been positively proved during startup. Seed those
     // proofs explicitly so an inconclusive runtime cancellation can preserve,
@@ -700,8 +701,8 @@ async fn monitor_temporal(
     loop {
         tokio::time::sleep(probe_interval).await;
         let (temporal_sample, grpc_code) =
-            temporal_probe_sample(worker_is_polling(&client, &namespace, &task_queue).await);
-        let temporal_shutdown = record_dependency_sample(
+            temporal_probe_sample(temporal_is_reachable(&client, &namespace, &task_queue).await);
+        record_dependency_sample(
             &mut temporal_health,
             DependencyName::Temporal,
             temporal_sample,
@@ -710,9 +711,6 @@ async fn monitor_temporal(
             failure_grace,
         );
         update_dependency_readiness(&ready, &temporal_health, &hubu_health);
-        if temporal_shutdown {
-            return LifecycleReason::DependencyHealthShutdown;
-        }
 
         let dependencies_ready = match dependency_checker.as_ref() {
             Some(checker) => {
@@ -723,7 +721,7 @@ async fn monitor_temporal(
             }
             None => true,
         };
-        let hubu_shutdown = record_dependency_sample(
+        record_dependency_sample(
             &mut hubu_health,
             DependencyName::Hubu,
             if dependencies_ready {
@@ -736,9 +734,6 @@ async fn monitor_temporal(
             failure_grace,
         );
         update_dependency_readiness(&ready, &temporal_health, &hubu_health);
-        if hubu_shutdown {
-            return LifecycleReason::DependencyHealthShutdown;
-        }
     }
 }
 
@@ -755,11 +750,10 @@ enum DependencySample {
 }
 
 fn temporal_probe_sample(
-    result: Result<bool, temporalio_client::tonic::Status>,
+    result: Result<(), temporalio_client::tonic::Status>,
 ) -> (DependencySample, Option<String>) {
     match result {
-        Ok(true) => (DependencySample::Healthy, None),
-        Ok(false) => (DependencySample::Unhealthy, None),
+        Ok(()) => (DependencySample::Healthy, None),
         Err(error) => {
             let code = error.code();
             (
@@ -782,9 +776,6 @@ enum DependencyHealthObservation {
         failures: u32,
     },
     Recovered {
-        failures: u32,
-    },
-    Shutdown {
         failures: u32,
     },
 }
@@ -846,25 +837,18 @@ impl DependencyHealthTracker {
         let was_ready = self.is_ready();
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let failure_started_at = *self.failure_started_at.get_or_insert(now);
-        if now.duration_since(failure_started_at) >= failure_grace {
+        // Only a transport cancellation may retain a prior positive proof for
+        // the bounded grace period. It never promotes unproven or withdrawn
+        // readiness. Confirmed dependency failures withdraw readiness at once.
+        if (sample != DependencySample::Cancelled
+            || now.duration_since(failure_started_at) >= failure_grace)
+            && self.readiness == DependencyReadiness::Ready
+        {
             self.readiness = DependencyReadiness::Withdrawn;
-            DependencyHealthObservation::Shutdown {
-                failures: self.consecutive_failures,
-            }
-        } else {
-            // Only a transport cancellation may retain a prior positive proof.
-            // It never promotes unproven or already-withdrawn readiness. Every
-            // proven no-poller result and every other transport error withdraws
-            // readiness immediately while retaining the original grace clock.
-            if sample != DependencySample::Cancelled && self.readiness == DependencyReadiness::Ready
-            {
-                self.readiness = DependencyReadiness::Withdrawn;
-            }
-            DependencyHealthObservation::Degraded {
-                report_transition: self.consecutive_failures == 1
-                    || (was_ready && !self.is_ready()),
-                failures: self.consecutive_failures,
-            }
+        }
+        DependencyHealthObservation::Degraded {
+            report_transition: self.consecutive_failures == 1 || (was_ready && !self.is_ready()),
+            failures: self.consecutive_failures,
         }
     }
 }
@@ -887,14 +871,14 @@ fn record_dependency_sample(
     grpc_code: Option<&str>,
     now: Instant,
     failure_grace: Duration,
-) -> bool {
+) {
     let observation = tracker.observe(sample, now, failure_grace);
     match observation {
         DependencyHealthObservation::Healthy
         | DependencyHealthObservation::Degraded {
             report_transition: false,
             ..
-        } => false,
+        } => {}
         DependencyHealthObservation::Degraded {
             report_transition: true,
             failures,
@@ -905,7 +889,6 @@ fn record_dependency_sample(
                 failures,
                 grpc_code,
             );
-            false
         }
         DependencyHealthObservation::Recovered { failures } => {
             crate::lifecycle::log_dependency_probe(
@@ -914,16 +897,6 @@ fn record_dependency_sample(
                 failures,
                 None,
             );
-            false
-        }
-        DependencyHealthObservation::Shutdown { failures } => {
-            crate::lifecycle::log_dependency_probe(
-                dependency,
-                probe_outcome(sample),
-                failures,
-                grpc_code,
-            );
-            true
         }
     }
 }
@@ -946,12 +919,12 @@ async fn wait_for_shutdown<F, H>(
 ) -> LifecycleReason
 where
     F: Future<Output = ()>,
-    H: Future<Output = LifecycleReason>,
+    H: Future<Output = Infallible>,
 {
     let worker_or_health = async {
         match select(Box::pin(completion), Box::pin(health)).await {
             Either::Left(_) => LifecycleReason::WorkerUnavailable,
-            Either::Right((reason, _)) => reason,
+            Either::Right((never, _)) => match never {},
         }
     };
     let reason = match select(Box::pin(shutdown), Box::pin(worker_or_health)).await {
@@ -990,22 +963,14 @@ async fn dispatch(State(state): State<ApplicationState>, request: Request<Body>)
                 .unwrap_or_else(|_| json!({"status":"unavailable"})),
         );
     }
-    if method == "POST"
-        && matches!(path.as_str(), "/v1/executions" | "/v2/executions")
-        && !state.ready.load(Ordering::SeqCst)
-    {
-        let schema_version = if path == "/v1/executions" {
-            crate::http::V1_SCHEMA_VERSION
-        } else {
-            crate::http::SCHEMA_VERSION
-        };
+    if method == "POST" && path == "/v2/executions" && !state.ready.load(Ordering::SeqCst) {
+        let schema_version = crate::http::SCHEMA_VERSION;
         return json_transport(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"schema_version":schema_version,"error":{"code":"not_ready","message":"execution admission is temporarily unavailable"}}),
         );
     }
     let admission_route = match (method.as_str(), path.as_str()) {
-        ("POST", "/v1/executions") => Some(AdmissionRoute::CreateExecutionV1),
         ("POST", "/v2/executions") => Some(AdmissionRoute::CreateExecutionV2),
         _ => None,
     };
@@ -1119,21 +1084,29 @@ mod tests {
     }
 
     #[test]
-    fn dependency_loss_removes_readiness_and_reports_shutdown_reason() {
+    fn dependency_loss_does_not_complete_the_process_supervisor() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let (_completion_tx, completion_rx) = futures::channel::oneshot::channel();
-        let ready = Arc::new(AtomicBool::new(true));
-        let reason = runtime.block_on(wait_for_shutdown(
-            futures::future::pending(),
-            completion_rx,
-            futures::future::ready(LifecycleReason::DependencyHealthShutdown),
-            ready.clone(),
-        ));
-        assert_eq!(reason, LifecycleReason::DependencyHealthShutdown);
-        assert!(!ready.load(Ordering::SeqCst));
+        runtime.block_on(async {
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            let (_completion_tx, completion_rx) = futures::channel::oneshot::channel();
+            let ready = Arc::new(AtomicBool::new(true));
+            let mut supervisor = Box::pin(wait_for_shutdown(
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+                completion_rx,
+                futures::future::pending::<Infallible>(),
+                ready.clone(),
+            ));
+
+            ready.store(false, Ordering::SeqCst);
+            assert!(futures::poll!(supervisor.as_mut()).is_pending());
+            shutdown_tx.send(()).unwrap();
+            assert_eq!(supervisor.await, LifecycleReason::OperatorSignal);
+        });
     }
 
     #[test]
@@ -1176,6 +1149,10 @@ mod tests {
 
     #[test]
     fn temporal_transport_errors_distinguish_cancelled_from_unavailable() {
+        assert_eq!(
+            temporal_probe_sample(Ok(())),
+            (DependencySample::Healthy, None)
+        );
         assert_eq!(
             temporal_probe_sample(Err(temporalio_client::tonic::Status::cancelled(
                 "connection rotation",
@@ -1231,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn sustained_cancelled_sequence_shuts_down_at_grace_boundary() {
+    fn sustained_cancelled_sequence_withdraws_readiness_at_grace_boundary() {
         let mut tracker = DependencyHealthTracker::from_positive_proof();
         let started = Instant::now();
         let grace = Duration::from_secs(30);
@@ -1255,13 +1232,27 @@ mod tests {
                 started + Duration::from_secs(30),
                 grace,
             ),
-            DependencyHealthObservation::Shutdown { failures: 3 }
+            DependencyHealthObservation::Degraded {
+                report_transition: true,
+                failures: 3,
+            }
         );
         assert!(!tracker.is_ready());
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Cancelled,
+                started + Duration::from_secs(31),
+                grace,
+            ),
+            DependencyHealthObservation::Degraded {
+                report_transition: false,
+                failures: 4,
+            }
+        );
     }
 
     #[test]
-    fn no_poller_and_non_cancelled_error_withdraw_readiness_immediately() {
+    fn confirmed_dependency_failure_withdraws_readiness_immediately() {
         let started = Instant::now();
         let grace = Duration::from_secs(30);
         for sample in [DependencySample::Unhealthy, DependencySample::Indeterminate] {
@@ -1276,6 +1267,39 @@ mod tests {
             assert!(!tracker.is_ready());
             assert_eq!(tracker.failure_started_at, Some(started));
         }
+    }
+
+    #[test]
+    fn sustained_temporal_failure_stays_withdrawn_until_recovery() {
+        let mut tracker = DependencyHealthTracker::from_positive_proof();
+        let started = Instant::now();
+        let grace = Duration::from_secs(30);
+        for (offset, failures) in [(0, 1), (30, 2), (60, 3)] {
+            assert_eq!(
+                tracker.observe(
+                    temporal_probe_sample(Err(temporalio_client::tonic::Status::unavailable(
+                        "dependency unavailable",
+                    )))
+                    .0,
+                    started + Duration::from_secs(offset),
+                    grace,
+                ),
+                DependencyHealthObservation::Degraded {
+                    report_transition: failures == 1,
+                    failures,
+                }
+            );
+            assert!(!tracker.is_ready());
+        }
+        assert_eq!(
+            tracker.observe(
+                DependencySample::Healthy,
+                started + Duration::from_secs(61),
+                grace,
+            ),
+            DependencyHealthObservation::Recovered { failures: 3 }
+        );
+        assert!(tracker.is_ready());
     }
 
     #[test]
@@ -1316,7 +1340,10 @@ mod tests {
                 started + Duration::from_secs(30),
                 grace,
             ),
-            DependencyHealthObservation::Shutdown { failures: 4 }
+            DependencyHealthObservation::Degraded {
+                report_transition: false,
+                failures: 4,
+            }
         );
         assert!(!tracker.is_ready());
     }
@@ -1905,7 +1932,7 @@ mod tests {
                     "api_version":"v1",
                     "timeout_ms":1000,
                     "poll_interval_ms":10,
-                    "approved_artifact_hosts":["delivery.us.bfl.ai"]
+                    "approved_artifact_hosts":[]
                 }}
             }]
         }))
@@ -2187,19 +2214,25 @@ mod tests {
             }
         }
 
-        let document: Value =
-            serde_json::from_str(include_str!("../../../contracts/provider-profiles-v1.json"))
-                .unwrap();
-        let profile = &document["profiles"][0];
-        let policies = &profile["policies"];
-        let mut target_document = profile["target"].clone();
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let contract_definition = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["contract"] == "hubu.flux-2-pro.text-to-image/v1")
+            .unwrap();
+        let policies = &contract_definition["policies"];
+        let mut target_document = contract_definition["target"].clone();
         target_document["secret_service"] = json!("gongbu.bfl.test");
         target_document["secret_account"] = json!("hub-172-fixture");
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 3,
-            "supported_profiles": [{
-                "contract": profile["contract"],
-                "pricing_version": profile["pricing_version"],
+            "contract_bindings": [{
+                "contract": contract_definition["contract"],
+                "pricing_version": contract_definition["pricing_version"],
                 "poll_policy": policies["poll"],
                 "artifact_delivery_policy": policies["artifact_delivery"],
                 "recovery_policy": policies["recovery"],
@@ -2212,8 +2245,8 @@ mod tests {
         let pricing = PricingCatalog::from_json(
             &serde_json::to_vec(&json!({
                 "schema_version": 2,
-                "catalog_version": profile["pricing_version"],
-                "rules": profile["pricing_rules"]
+                "catalog_version": contract_definition["pricing_version"],
+                "rules": contract_definition["pricing_rules"]
             }))
             .unwrap(),
         )
@@ -2532,7 +2565,7 @@ mod tests {
             "provider_configs": [
                 {"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google","secret_account":"gemini","active":true,"execution_enabled":true,"settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000}}},
                 {"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"ideogram","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}},
-                {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"flux","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":["delivery.us.bfl.ai"]}}}
+                {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"flux","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":[]}}}
             ]
         })).unwrap();
         let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
@@ -2839,6 +2872,7 @@ mod tests {
             provider_request_id: Some("https://storage.invalid/raw?signature=secret".into()),
             provider_operation_id: "https://provider.invalid/operation/1".into(),
             polling_host: "api.bfl.ai".into(),
+            polling_recovery: None,
             deadline_unix_ms: 1_800_000_000_000,
         });
         assert!(matches!(
@@ -2850,6 +2884,7 @@ mod tests {
             provider_request_id: Some("request-170".into()),
             provider_operation_id: "operation-170".into(),
             polling_host: "api.bfl.ai".into(),
+            polling_recovery: None,
             deadline_unix_ms: 1_800_000_000_000,
         };
         assert_eq!(

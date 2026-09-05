@@ -28,7 +28,7 @@ use thiserror::Error;
 
 pub const CONTRACT: &str = "gongbu.flux-redaction-attestation/v1";
 pub const SCHEMA_VERSION: u32 = 1;
-const PROVIDER_PROFILE_CONTRACT: &str = "hubu.flux-2-pro.text-to-image/v1";
+const PROVIDER_CONTRACT_ID: &str = "hubu.flux-2-pro.text-to-image/v1";
 const PROVIDER_CONFIG_VERSION: &str = "hubu-flux-2-pro-t2i-2026-08-28-v1";
 const PRICING_VERSION: &str = "bfl-flux-2-pro-usd-2026-08-28-v1";
 const PRICING_RULE_ID: &str = "bfl-flux-2-pro-1k-2026-08-28-v1";
@@ -97,7 +97,7 @@ pub enum AttestationError {
     NotFound,
     #[error("execution is not ready for attestation")]
     NotReady,
-    #[error("execution is not the supported FLUX target")]
+    #[error("execution is not the contract-bound FLUX target")]
     UnsupportedTarget,
     #[error("registered provider credential is unavailable")]
     SecretUnavailable,
@@ -157,7 +157,7 @@ impl RedactionAttestor {
                 &execution.provider_config_digest,
             )
             .map_err(|_| AttestationError::UnsupportedTarget)?;
-        if !exact_supported_profile(&self.providers, execution, target) {
+        if !exact_provider_contract(&self.providers, execution, target) {
             return Err(AttestationError::UnsupportedTarget);
         }
         if execution.status != "succeeded" {
@@ -290,32 +290,38 @@ impl RedactionAttestor {
     }
 }
 
-fn exact_supported_profile(
+fn exact_provider_contract(
     providers: &ValidatedProviderCatalog,
     execution: &Execution,
     target: &crate::provider_targets::ProviderConfigVersion,
 ) -> bool {
-    let profiles = providers.supported_profiles();
-    let Some(profile) = profiles.first().filter(|_| profiles.len() == 1) else {
+    let contracts = providers.provider_contracts();
+    let mut matching = contracts
+        .iter()
+        .filter(|contract| contract.contract == PROVIDER_CONTRACT_ID);
+    let Some(contract) = matching.next() else {
         return false;
     };
+    if matching.next().is_some() {
+        return false;
+    }
     let Ok(pricing): Result<PricingSnapshot, _> =
         serde_json::from_value(execution.pricing_snapshot.clone())
     else {
         return false;
     };
-    profile.contract == PROVIDER_PROFILE_CONTRACT
-        && profile.pricing_version == PRICING_VERSION
-        && profile.target.workload_type == "image_generation"
-        && profile.target.provider == flux2_api::PROVIDER_ID
-        && profile.target.adapter == flux2_api::ADAPTER_ID
-        && profile.target.model == flux2_api::MODEL_ID
-        && profile.policies.generation_retries == 0
-        && !profile.policies.fallback
-        && profile.readiness.configured
-        && profile.readiness.credential_reference_present
-        && profile.readiness.production_validated
-        && !profile.readiness.live_qualified
+    contract.contract == PROVIDER_CONTRACT_ID
+        && contract.pricing_version == PRICING_VERSION
+        && contract.target.workload_type == "image_generation"
+        && contract.target.provider == flux2_api::PROVIDER_ID
+        && contract.target.adapter == flux2_api::ADAPTER_ID
+        && contract.target.model == flux2_api::MODEL_ID
+        && contract.policies.generation_retries == 0
+        && !contract.policies.fallback
+        && contract.readiness.configured
+        && contract.readiness.credential_reference_present
+        && contract.readiness.production_validated
+        && !contract.readiness.live_qualified
         && target.provider_config_version == PROVIDER_CONFIG_VERSION
         && target.digest() == execution.provider_config_digest
         && execution.target == "image_generation/flux/flux2_api/flux-2-pro"

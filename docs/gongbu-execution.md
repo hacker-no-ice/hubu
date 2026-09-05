@@ -33,9 +33,10 @@ The components communicate over
 
 ## Admission and execution flow
 
-The canonical caller submits a Hubu spend-authorization token plus execution
-intent and either a `target_id` discovered from `GET /v2/execution-targets` or
-the legacy explicit target tuple to `POST /v2/executions`.
+The canonical caller submits a Hubu spend-authorization token, execution
+intent, and an opaque `target_id` discovered from `GET /v2/execution-targets`
+to `POST /v2/executions`. Gongbu resolves the internal target tuple from its
+operator-approved catalog.
 
 For a new execution, Gongbu then:
 
@@ -85,7 +86,7 @@ closed.
 
 Diagnostic admission failures remain HTTP 400 `invalid_request` errors and may
 add one bounded `reason_code`/`fields` pair. `target_not_selectable` identifies
-`workload_type`, `provider`, `adapter`, and `model`; alternatively,
+`target_id`; alternatively,
 `pricing_selector_not_matched` identifies `input.image_size`. The field names
 identify contract locations only: Gongbu never echoes their values. Other
 validation failures retain the generic error without diagnostic fields.
@@ -162,11 +163,13 @@ settings, credential references, endpoints, headers, configuration revisions,
 or configuration digests.
 
 The ID is stable across credential, endpoint, and provider-configuration
-revision rotation for the same workload/provider/adapter/model key. A changed
-model or adapter is a different logical target and therefore receives a new
-ID. New callers select that ID and runtime inputs such as `image_size`; the
-legacy raw tuple remains accepted for compatibility but cannot be combined
-with `target_id` in one request.
+revision rotation for the same internal target key. A changed model or adapter
+is a different logical target and therefore receives a new ID. Public callers
+select only that ID and runtime inputs such as `image_size`; internal immutable
+target keys remain persisted for durable replay.
+
+`POST /v1/executions` is retired. The v1 GET execution, status, artifact, and
+redaction-attestation routes remain observation surfaces.
 
 A production target binds:
 
@@ -214,7 +217,7 @@ Gongbu's production validator compares the rendered schema-v3 binding, target,
 and pricing against that shipped contract before serving. The sanitized catalog
 reports validation and Keychain-reference presence separately from live
 qualification; validation never calls BFL. See the
-[managed FLUX.2 profile runbook](operations/managed-flux-profile.md).
+[FLUX.2 provider contract runbook](operations/flux-provider-contract.md).
 
 ### FLUX settled cost units
 
@@ -249,15 +252,25 @@ BFL's current
 requires clients to poll the URL returned by a generation request and notes
 that artifact delivery regions can change. Gongbu keeps those two network
 policies separate. A provider-returned polling URL may receive `x-key` only
-when it is an HTTPS URL on exactly `api.bfl.ai`, `api.eu.bfl.ai`, or
-`api.us.bfl.ai`. User information, explicit ports, fragments, redirects, and
-all other origins are rejected before the credentialed request is sent.
+when it is an HTTPS URL on `api.bfl.ai` or exactly
+`api.<region-or-shard>.bfl.ai`, where the variable portion is one safe ASCII
+DNS label. BFL documents that clients must use the returned polling URL; live
+provider evidence shows those URLs can use a one-label shard such as
+`api.us7.bfl.ai`. This is a narrow polling namespace, not a `*.bfl.ai`
+credential wildcard. User information, explicit ports, fragments, redirects,
+extra labels, IDNA labels, lookalikes, and all other origins are rejected
+before the credentialed request is sent.
 
 The generation POST is isolated in the patch-protected `submit_provider`
 activity and is never retried as provider generation work. A successful submit
 must be followed immediately by one atomic Gongbu SQLite checkpoint containing
-only the validated request ID when present, operation ID, polling hostname, and
-the absolute adapter deadline. The polling URL itself is not persisted.
+only the safe request ID when present, operation ID, normalized polling hostname, and
+the absolute adapter deadline. Before origin validation can terminate the
+execution, the same checkpoint also stores a versioned sanitized recovery
+record: normalized scheme/host/explicit port, fixed endpoint shape, query-key
+names, URL fingerprint, exact validation reason, and polling-policy version.
+It never stores the polling URL, arbitrary query values, userinfo, fragments,
+headers, credentials, provider bodies, signed artifact URLs, or storage paths.
 `poll_provider_operation` reconstructs the status request from frozen runtime
 configuration and that checkpoint, then issues only GET requests for the same
 operation. Worker restart and activity recovery reuse the checkpoint and its
@@ -285,7 +298,15 @@ If a generation request may have reached BFL but its operation ID cannot be
 durably established, the workflow also reconciles. It does not infer safety
 from a missing checkpoint, retry the POST, or release the Hubu claim. Once the
 checkpoint exists, subsequent polling ambiguity retains that same safe
-operation evidence for recovery or reconciliation.
+operation evidence for recovery or reconciliation. Execution detail tells the
+agent not to resubmit, to recover first, and that artifact retrieval is
+time-sensitive. After a policy update, an explicit `reinspect` reconciliation
+action may reopen only that same ambiguous attempt and enter the GET-only
+poll-existing path while the original absolute polling deadline still leaves
+enough time to issue a status GET; the generation POST remains unreachable.
+Once that recovery window is exhausted, execution detail directs the operator
+to provider support instead, and Gongbu refuses to reopen polling or grant a
+fresh timeout budget.
 
 Artifact URLs follow a different, credential-free path. Gongbu accepts only
 HTTPS `delivery.<region>.bfl.ai` hosts with exactly one safe region label,

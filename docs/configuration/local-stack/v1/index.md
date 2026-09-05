@@ -4,6 +4,10 @@ Schema version 1 is the operator-owned configuration contract for the local Hubu
 
 > **Start safely:** `hubu stack init --mode sandbox` creates the complete local ecosystem with real internal governance and execution communication while replacing only the external provider edge with a deterministic, non-billable fixture.
 
+Start with the [complete local stack examples](examples.md) for the generated
+sandbox and Hubu-only outcomes, one working Gemini + FLUX live profile, and the
+recommended separate-profile switching model.
+
 ## The three source files
 
 `hubu stack init` creates three TOML files for one selected outcome. They are the source of truth; generated runtime JSON is not an editing surface.
@@ -83,16 +87,17 @@ Keep Hubu and Gongbu separate even though the profile coordinates them. They ret
 
 ### Live provider preparation
 
-1. Complete and validate the local topology first.
-2. Follow the shared [live provider operations
+1. Create a separate live profile; do not convert the sandbox profile in place.
+2. Copy the operator-edited files from the [complete Gemini + FLUX
+   example](examples.md#live-gemini-developer-api-and-flux2).
+3. Follow the shared [live provider operations
    guide](../../../operations/live-providers.md) for credentials, governance,
    pricing, spend, retry, reconciliation, artifacts, and qualification.
-3. For the supported FLUX subset, follow the provider-specific
-   [managed FLUX.2 profile](../../../operations/managed-flux-profile.md).
-4. For a generic target, read [provider targets and adapter settings](decisions.md#provider-targets-and-adapter-settings).
-5. Read [pricing, authorization, holds, and settlement](decisions.md#pricing-authorization-holds-and-settlement).
-6. Verify provider identifiers, endpoints, supported models, prices, and billing units with the provider.
-7. Use the [live-provider examples](examples.md#supported-managed-flux2-profile) as version-matched structure, not as timeless current provider data.
+4. For the FLUX provider contract, follow the provider-specific
+   [FLUX.2 provider contract](../../../operations/flux-provider-contract.md).
+5. For a generic target, read [provider targets and adapter settings](decisions.md#provider-targets-and-adapter-settings).
+6. Read [pricing, authorization, holds, and settlement](decisions.md#pricing-authorization-holds-and-settlement).
+7. Verify provider identifiers, endpoints, supported models, prices, and billing units with the provider.
 
 ### External or customized topology
 
@@ -142,7 +147,7 @@ The opaque table name is a local reference key. Its `service` and `account` valu
 - [Decision guides](decisions.md)
 - [Complete annotated examples](examples.md)
 - [Live provider operations](../../../operations/live-providers.md)
-- [Managed FLUX.2 profile and recovery runbook](../../../operations/managed-flux-profile.md)
+- [FLUX.2 provider contract and recovery runbook](../../../operations/flux-provider-contract.md)
 - [Local stack quick start](../../../local-stack.md)
 
 ## Versioning

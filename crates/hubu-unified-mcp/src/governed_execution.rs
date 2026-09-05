@@ -123,22 +123,7 @@ pub(super) fn tool_definition() -> Value {
                     "type": "object",
                     "additionalProperties": false,
                     "required": [
-                        "schema_version", "input", "input_schema_version"
-                    ],
-                    "oneOf": [
-                        {
-                            "required": ["target_id"],
-                            "not": {"anyOf": [
-                                {"required": ["workload_type"]},
-                                {"required": ["provider"]},
-                                {"required": ["adapter"]},
-                                {"required": ["model"]}
-                            ]}
-                        },
-                        {
-                            "required": ["workload_type", "provider", "adapter", "model"],
-                            "not": {"required": ["target_id"]}
-                        }
+                        "schema_version", "input", "input_schema_version", "target_id"
                     ],
                     "properties": {
                         "schema_version": {"type": "integer", "const": 2},
@@ -148,10 +133,6 @@ pub(super) fn tool_definition() -> Value {
                             "type": "string",
                             "pattern": "^gongbu:target:v1:[a-f0-9]{64}$"
                         },
-                        "workload_type": {"type": "string", "minLength": 1},
-                        "provider": {"type": "string", "minLength": 1},
-                        "adapter": {"type": "string", "minLength": 1},
-                        "model": {"type": "string", "minLength": 1}
                     }
                 },
                 "max_inline_artifact_bytes": {
@@ -1118,9 +1099,30 @@ mod tests {
     use std::{
         io::{BufRead, BufReader, Read, Write},
         net::{TcpListener, TcpStream},
-        sync::{Arc, Mutex},
+        sync::{mpsc, Arc, Mutex},
         time::Instant,
     };
+
+    struct ResponseWriter {
+        pending: Vec<u8>,
+        responses: mpsc::Sender<Value>,
+    }
+
+    impl Write for ResponseWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.pending.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            let response = serde_json::from_slice(self.pending.as_slice())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            self.pending.clear();
+            self.responses.send(response).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "response receiver closed")
+            })
+        }
+    }
 
     fn composite_arguments() -> Value {
         json!({
@@ -1133,10 +1135,7 @@ mod tests {
                 "schema_version":2,
                 "input":{"prompt":"circle"},
                 "input_schema_version":1,
-                "workload_type":"image_generation",
-                "provider":"fixture",
-                "adapter":"fixture",
-                "model":"v1"
+                "target_id":format!("gongbu:target:v1:{}", "a".repeat(64))
             }
         })
     }
@@ -1174,26 +1173,20 @@ mod tests {
     }
 
     #[test]
-    fn governed_execution_schema_makes_target_id_and_raw_tuple_strictly_exclusive() {
+    fn governed_execution_schema_requires_only_target_id() {
         let definition = tool_definition();
         assert_eq!(
-            definition["inputSchema"]["properties"]["execution"]["oneOf"],
+            definition["inputSchema"]["properties"]["execution"]["required"],
             json!([
-                {
-                    "required":["target_id"],
-                    "not":{"anyOf":[
-                        {"required":["workload_type"]},
-                        {"required":["provider"]},
-                        {"required":["adapter"]},
-                        {"required":["model"]}
-                    ]}
-                },
-                {
-                    "required":["workload_type","provider","adapter","model"],
-                    "not":{"required":["target_id"]}
-                }
+                "schema_version",
+                "input",
+                "input_schema_version",
+                "target_id"
             ])
         );
+        assert!(definition["inputSchema"]["properties"]["execution"]
+            .get("oneOf")
+            .is_none());
     }
 
     #[test]
@@ -1973,28 +1966,49 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut writer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (reader, _) = listener.accept().unwrap();
+        let (response_tx, response_rx) = mpsc::channel();
+        let response_writer = ResponseWriter {
+            pending: Vec::new(),
+            responses: response_tx,
+        };
+        let status_server = server.clone();
         let input_handle = thread::spawn(move || {
             writeln!(writer, "{first}").unwrap();
             writer.flush().unwrap();
-            thread::sleep(Duration::from_millis(250));
+            let first_response = response_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let operation_handle = first_response["result"]["structuredContent"]
+                ["operation_handle"]
+                .as_str()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while status_server
+                .durable_operation_status(operation_handle)
+                .unwrap()
+                .state
+                != "succeeded"
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "durable operation did not reach succeeded before replay"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
             writeln!(writer, "{second}").unwrap();
             writeln!(writer, "{third}").unwrap();
             writer.flush().unwrap();
+            vec![
+                first_response,
+                response_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                response_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            ]
         });
-        let mut output = Vec::new();
         server
             .clone()
-            .run(BufReader::new(reader), &mut output)
+            .run(BufReader::new(reader), response_writer)
             .unwrap();
-        input_handle.join().unwrap();
+        let responses = input_handle.join().unwrap();
         hubu_handle.join().unwrap();
         gongbu_handle.join().unwrap();
-
-        let responses = String::from_utf8(output)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .collect::<Vec<_>>();
         assert_eq!(responses.len(), 3);
         assert_eq!(
             responses[0]["result"]["structuredContent"]["outcome"],

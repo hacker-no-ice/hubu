@@ -14,7 +14,7 @@ use gongbu_api::{
     },
     redaction::Redactor,
     secrets::ProviderSecret,
-    temporal::ExecutionScheduler,
+    temporal::{ExecutionScheduler, ScheduleError},
     workflow::{
         ActivityError, ExecutionWorkflow, HubuActivities, OperatorReconciliationRequest,
         ProviderActivities, ProviderArtifact, ProviderSuccess,
@@ -565,10 +565,7 @@ fn admit_execution_with_token(
         "spend_auth_token_id": spend_auth_token_id,
         "input": {"prompt":"deterministic blue pixel","image_count":1},
         "input_schema_version": 1,
-        "workload_type": "image_generation",
-        "provider": "mock",
-        "adapter": "deterministic",
-        "model": "pixel-v1"
+        "target_id": "gongbu:target:v1:af27a84c94f48f000bcb64cb0f432e2770aaca7e1293be76b29a8dc6185be0f8"
     }))
     .unwrap();
     let response = api.handle("POST", "/v2/executions", Some(owner), &body);
@@ -700,11 +697,11 @@ impl ProviderAdapter for AdmissionAdapter {
 struct AdmissionScheduler;
 
 impl ExecutionScheduler for AdmissionScheduler {
-    fn schedule(&self, _: &str) -> Result<(), String> {
+    fn schedule(&self, _: &str) -> Result<(), ScheduleError> {
         Ok(())
     }
 
-    fn reconcile(&self, _: &str, _: OperatorReconciliationRequest) -> Result<(), String> {
+    fn reconcile(&self, _: &str, _: OperatorReconciliationRequest) -> Result<(), ScheduleError> {
         Ok(())
     }
 }

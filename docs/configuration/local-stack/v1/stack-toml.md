@@ -241,7 +241,7 @@ The whole runtime section is optional because every field has a safe schema defa
 
 ### `runtime.hubu_startup_policy`
 
-String passed to Gongbu's Hubu dependency policy. Default: `"wait"`. Keep `wait` for the supported local profile so Gongbu bounds startup while Hubu becomes ready.
+String passed to Gongbu's Hubu dependency policy. Default: `"wait"`. Keep `wait` for the standard local stack profile so Gongbu bounds startup while Hubu becomes ready.
 
 ### `runtime.hubu_startup_timeout_ms`
 

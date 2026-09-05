@@ -1000,12 +1000,84 @@ impl ProviderTransportObserver for NoopProviderTransportObserver {
 /// have no representation here.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct PollingRecoveryContext {
+    pub schema_version: u32,
+    pub policy_version: String,
+    pub scheme: Option<String>,
+    pub normalized_host: Option<String>,
+    pub explicit_port: Option<u16>,
+    pub endpoint_shape: String,
+    pub query_keys: Vec<String>,
+    pub url_fingerprint: String,
+    pub validation_reason: Option<String>,
+}
+
+/// Minimum remaining time required before recovery may reopen provider
+/// polling. FLUX sleeps before each status GET, so a shorter window is
+/// guaranteed to expire without observing the operation.
+pub const POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS: i64 = 1_000;
+
+pub fn polling_deadline_allows_reinspect(deadline_unix_ms: i64, now_unix_ms: i64) -> bool {
+    deadline_unix_ms
+        .checked_sub(now_unix_ms)
+        .is_some_and(|remaining| remaining >= POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS)
+}
+
+impl PollingRecoveryContext {
+    pub fn validate(&self) -> Result<()> {
+        let safe_token = |value: &str, max: usize| {
+            !value.is_empty()
+                && value.len() <= max
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':')
+                })
+        };
+        if self.schema_version != 1
+            || !safe_token(&self.policy_version, 64)
+            || self
+                .scheme
+                .as_deref()
+                .is_some_and(|value| !safe_token(value, 16))
+            || self
+                .normalized_host
+                .as_deref()
+                .is_some_and(|value| !safe_token(value, 253))
+            || !safe_token(&self.endpoint_shape, 64)
+            || self.query_keys.len() > 8
+            || self.query_keys.iter().any(|value| !safe_token(value, 64))
+            || self.url_fingerprint.len() != 71
+            || !self.url_fingerprint.starts_with("sha256:")
+            || !self.url_fingerprint[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || self
+                .validation_reason
+                .as_deref()
+                .is_some_and(|value| !safe_token(value, 64))
+        {
+            return Err(ContractError::Provider {
+                code: "invalid_provider_operation".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AsyncProviderOperation {
     pub provider_request_id: Option<String>,
     pub provider_operation_id: String,
     /// Validated hostname only. The adapter reconstructs the documented poll
     /// endpoint from this host, its frozen API version, and the operation ID.
     pub polling_host: String,
+    /// Sanitized evidence about the provider-returned polling URL. This is
+    /// persisted even when the origin is rejected after a possibly billable
+    /// submission; it never grants authority to perform network access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polling_recovery: Option<PollingRecoveryContext>,
     /// Absolute Unix epoch deadline shared by submission, polling, and artifact
     /// download. Resuming an operation never resets this budget.
     pub deadline_unix_ms: i64,
@@ -1036,6 +1108,10 @@ impl AsyncProviderOperation {
             || self.polling_host.ends_with(['-', '.'])
             || self.polling_host.contains("..")
             || self.deadline_unix_ms <= 0
+            || self
+                .polling_recovery
+                .as_ref()
+                .is_some_and(|context| context.validate().is_err())
         {
             return Err(ContractError::Provider {
                 code: "invalid_provider_operation".into(),

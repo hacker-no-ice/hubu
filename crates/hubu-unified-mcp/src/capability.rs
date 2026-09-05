@@ -81,6 +81,10 @@ pub(super) fn capabilities_value(snapshot: &CapabilitySnapshot) -> Value {
         "available": true,
         "reason_code": null
     }));
+    for name in [hubu_feedback::GUIDANCE_TOOL, hubu_feedback::PREPARE_TOOL] {
+        tools
+            .push(json!({"name": name, "owner": "router", "available": true, "reason_code": null}));
+    }
     let governed_availability = governed_execution::backend_availability(snapshot);
     tools.push(json!({
         "name": governed_execution::TOOL_NAME,
@@ -168,8 +172,8 @@ mod tests {
             assert_eq!(capability["backends"]["hubu"]["state"], json!(hubu));
             assert_eq!(capability["backends"]["gongbu"]["state"], json!(gongbu));
             // The operation-registry-aware wrapper appends
-            // `hubu_operation_status`, bringing the public snapshot to 42.
-            assert_eq!(capability["tools"].as_array().unwrap().len(), 41);
+            // `hubu_operation_status`, bringing the public snapshot to 44.
+            assert_eq!(capability["tools"].as_array().unwrap().len(), 43);
             let names = capability["tools"]
                 .as_array()
                 .unwrap()

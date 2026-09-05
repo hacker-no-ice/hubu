@@ -1,8 +1,9 @@
 # Changelog
 
 This changelog records the key user-facing and operational changes in each
-stable Hubu release. It is intentionally curated rather than being a complete
-list of commits or pull requests.
+stable Hubu release. Candidate notes are folded into the corresponding stable
+entry. It is intentionally curated rather than being a complete list of commits
+or pull requests.
 
 <!--
 Future release template
@@ -24,39 +25,82 @@ Future release template
 
 ## Unreleased
 
-- Replaced forward-looking budget replacement with versioned updates on one
-  stable logical budget. Current budget responses now include public current
-  version identity and revision; update/history APIs and CLI commands preserve
-  cumulative consumed and frozen usage, expose immutable provenance, support
-  exact historical replay, and reject changed stale intent with typed errors.
-- Advanced unified MCP routing to revision 4, replacing
-  `hubu_replace_budget` with approval-gated idempotent `hubu_update_budget` and
-  adding read-only `hubu_budget_history`. These two tools validate safe dynamic
-  budget paths and return recursively redacted typed application errors as MCP
-  tool results. The retired `/budgets/replace` route and `hubu budget replace`
-  command are no longer available.
-- Made release publication operator-triggered only. The daily canary schedule
-  is removed while manual canary, candidate, and stable dispatches retain their
-  immutable source, tag, and asset validation.
-- Aligned agent-facing denial recovery across unified MCP spend, governed
-  execution, and public operation status. A definitive denial remains terminal,
-  exact redelivery recovers that denial, and corrected work is submitted as a
-  new logical operation without exposing or asking agents to reuse Hubu's
-  private backend operation key.
-- Fixed CLI authentication after local-stack startup by resolving the selected
-  profile's active endpoint and authentication, approval, and reconciliation
-  credential files as one handoff. Explicit `--url` remains the manual-mode
-  escape hatch, and legacy environment/file resolution remains unchanged when
-  no active selected/default profile exists.
-- Made exact-tag, full-commit source installation the primary macOS onboarding
-  path for initial technical users. The reviewed installer builds and stamps
-  the four production binaries together from the locked workspace without
-  requiring Apple signing credentials or Gatekeeper workarounds; the resulting
-  local binaries are not Developer ID-signed, notarized, or Apple-verified.
-- Made human-readable CLI diagnostics and status summaries easier to scan with
-  semantic terminal color, clearer sections, and consistent action styling.
-  Automatic TTY detection and `NO_COLOR` keep default redirected output plain,
-  while machine-readable output stays ANSI-free for every `--color` choice.
+## v0.2.1 — 2026-09-04
+
+### Highlights
+
+- Added a durable governed-execution path through unified MCP, including human
+  approval and exact-operation resume. Gongbu is now principal-neutral, so
+  multiple agents can use one runtime while logical budgets remain agent-scoped
+  and Hubu remains authoritative for each operation's identity and settlement.
+- Added versioned updates and history for stable logical budgets, preserving
+  cumulative usage, immutable provenance, and exact historical replay.
+- Added three outcome-oriented `hubu stack init` modes: `sandbox` for the full
+  stack with a non-billable provider fixture, `local-stack` for approved real
+  provider targets, and `hubu-only` for governance without Gongbu or Temporal.
+- Added one immutable provider-contract framework for two Gemini Developer API
+  image models and FLUX.2 Pro. Agents select an opaque `target_id`; contracts
+  freeze capabilities, prices, retry and fallback policy, and transport and
+  recovery behavior.
+- Added a reusable Hubu policy-authoring skill and versioned language reference.
+- Added complete, mode-specific stack configuration examples and an exact-tag,
+  source-SHA-verified macOS installation workflow for the four-binary cohort.
+- Added discoverable bug and idea reporting, private vulnerability reporting,
+  and offline feedback preparation through CLI and unified MCP. Reports expose
+  their destination and full content for review; preparation never submits them.
+
+### Breaking or operational changes
+
+- Unified MCP routing advances to revision 8. Budget replacement surfaces are
+  removed; use approval-gated `hubu_update_budget` and read-only
+  `hubu_budget_history`.
+- Supported provider profiles are renamed to provider contracts. Configuration
+  must replace `[[supported_profiles]]` with `[[contract_bindings]]`; there are
+  no compatibility aliases.
+- The Vertex AI Gemini adapter is removed. Packaged contracts now cover Gemini
+  3.1 Flash Lite Image, Gemini 3.1 Flash Image, and FLUX.2 Pro. Public execution
+  uses discovered `target_id` values, and `POST /v1/executions` is retired.
+- In unified MCP, policy denials are terminal, corrected work uses a new logical
+  operation, and approval-required work resumes only by public operation handle.
+- Release publication is manual-only. Exact-tag source installation is the
+  primary macOS path, but source-built binaries are not Apple-signed or
+  notarized.
+- Live providers remain explicitly opt-in and billable. The FLUX contract stays
+  `live_qualified = false` in the packaged catalog; successful live tests do not
+  automatically change that readiness declaration. CI, demos, and release
+  validation remain provider-free.
+- Install the four binaries from the same release and refresh generated Codex
+  MCP configuration to discover the updated tool surface. Use a separate
+  profile when changing stack modes; examples document the complete source
+  configuration for each mode.
+- Hubu remains experimental and local-first. The stable release tag does not
+  change the mock payment rail or qualify it for production money handling.
+
+### Important fixes
+
+- Preserved precise vendor costs and bound FLUX dimensions, target revision,
+  and pricing evidence before transmission.
+- Hardened FLUX polling, artifacts, redaction, deadlines, reconciliation,
+  replay, and restart recovery.
+- Fixed supported BFL polling and artifact-origin handling so accepted FLUX
+  requests can complete artifact retrieval. Preserved sanitized recovery
+  context for failures without exposing provider credentials or signed URLs.
+- Kept Gongbu live during runtime Temporal or Hubu degradation, automatically
+  withdrew and restored readiness, and preserved pending execution identity
+  across retryable scheduling failures.
+- Fixed selected-profile CLI authentication, reduced idle stack log and probe
+  load, and improved bounded diagnostics and terminal output.
+- Fixed sandbox secret validation rejecting generated provider version values.
+
+### Known limitations
+
+- Large image artifacts may not render inline in some MCP client display paths.
+  Generated originals remain retrievable through `gongbu_list_artifacts` and
+  `gongbu_get_artifact`; a missing preview does not require another billable
+  generation. The client rendering boundary is still under investigation.
+- Private billing/support intake is not yet configured. Keep sensitive drafts
+  private; the private vulnerability-reporting channel is for security reports
+  only. See [feedback guidance](docs/feedback.md).
 
 ## v0.2.0 — 2026-08-26
 

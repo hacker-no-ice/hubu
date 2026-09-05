@@ -1,5 +1,10 @@
 # CLI administration reference
 
+For bugs, ideas, billing or sensitive reports, use [Send feedback](feedback.md).
+`hubu feedback` and the unified `hubu_feedback_guidance` /
+`hubu_prepare_feedback` tools prepare local previews without sending reports.
+
+
 Use the `hubu` CLI when you prefer to keep human administration in a terminal,
 or to independently verify changes proposed and applied through MCP. With a
 selected, running stack profile, these commands automatically use that

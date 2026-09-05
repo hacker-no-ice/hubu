@@ -178,7 +178,11 @@ impl CatalogTracker {
 }
 
 fn callable_tools(snapshot: &CapabilitySnapshot) -> Vec<&'static str> {
-    let mut tools = vec!["hubu_unified_capabilities"];
+    let mut tools = vec![
+        "hubu_unified_capabilities",
+        hubu_feedback::GUIDANCE_TOOL,
+        hubu_feedback::PREPARE_TOOL,
+    ];
     tools.extend(DOMAIN_TOOLS.iter().filter_map(|(name, owner)| {
         tool_availability(name, *owner, snapshot)
             .is_ok()

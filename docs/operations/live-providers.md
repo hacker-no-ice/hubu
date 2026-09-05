@@ -1,11 +1,15 @@
 # Live provider operations
 
 This is the external operator entry point for billable Gongbu provider work.
-Hubu currently supports two documented live integrations: the Gemini Developer
-API image adapter and the managed FLUX.2 profile. Both use the same governance,
+Hubu currently ships three live provider contracts: Gemini Developer API Lite,
+Gemini Developer API non-Lite, and FLUX.2. All use the same governance,
 credential, pricing, spend, retry, reconciliation, artifact, and qualification
 boundaries described here. Provider-specific sections contain only the
 authentication, transport, sizing, artifact, and recovery differences.
+
+Begin with the [complete Gemini + FLUX profile](../configuration/local-stack/v1/examples.md#live-gemini-developer-api-and-flux2)
+for the copyable `credentials.toml` and `providers.toml`, Keychain field
+mapping, frozen targets and pricing, and doctor-based validation flow.
 
 Live provider execution can incur charges. Ordinary tests, demos, CI, catalog
 inspection, doctor, render, and production validation must remain non-billable
@@ -13,7 +17,7 @@ and must not contact a provider.
 
 | Integration | Gongbu identity | Provider-specific behavior |
 | --- | --- | --- |
-| Gemini Developer API | `google` / `gemini_developer_image` | AI Studio API key, synchronous response, one operator-owned output file |
+| Gemini Developer API | `google` / `gemini_developer_image` through the Lite and non-Lite Gemini 3.1 Flash Image contracts | AI Studio API key, synchronous inline response; Lite is 1K-only, non-Lite supports 1K/2K/4K |
 | FLUX.2 Pro | `flux` / `flux2_api` through `hubu.flux-2-pro.text-to-image/v1` | Managed target and prices, asynchronous submit and polling, BFL artifact delivery and durable resume |
 
 Other adapter IDs can remain available for operator-managed configurations,
@@ -45,7 +49,7 @@ the value.
 Use `mode = "live"` only after the topology is healthy in sandbox mode. Every
 live profile requires:
 
-- one exact active, execution-enabled provider target or supported contract;
+- one exact active, execution-enabled provider target or provider contract;
 - an opaque credential reference;
 - immutable target and catalog version labels;
 - schema-v2 pricing with exactly one matching rule for every enabled request
@@ -119,7 +123,10 @@ operator-owned output path. Never run live provider tests in CI.
 
 ## Gemini Developer API
 
-The `google` / `gemini_developer_image` adapter reads an AI Studio API key from
+The [Gemini provider contract](gemini-provider-contract.md) freezes the stable
+Lite and non-Lite models, their resolution-specific prices, Developer API
+transport, zero retries, no
+fallback, and synchronous recovery policy. The adapter reads an AI Studio API key from
 Keychain and sends it only in the `x-goog-api-key` header to the configured
 Google API endpoint. The request returns synchronously; the focused test writes
 one validated image to an absolute operator-owned path and refuses to overwrite
@@ -131,6 +138,7 @@ run the single ignored test with absolute paths:
 ```sh
 GONGBU_PROVIDER_CONFIG=/absolute/path/provider-targets.json \
 GONGBU_PRICING_CATALOG=/absolute/path/pricing.json \
+GONGBU_LIVE_GEMINI_DEVELOPER_MODEL=gemini-3.1-flash-image \
 GONGBU_LIVE_GEMINI_DEVELOPER_MAX_MINOR=OPERATOR_CEILING \
 GONGBU_LIVE_GEMINI_DEVELOPER_IMAGE_SIZE=4k \
 GONGBU_LIVE_GEMINI_DEVELOPER_CONFIRM=I_ACCEPT_GOOGLE_CHARGES \
@@ -141,7 +149,8 @@ cargo test -p gongbu-api \
   -- --ignored --exact
 ```
 
-Normalized image sizes are `1k`, `2k`, and `4k`. The adapter verifies the
+The Lite model accepts only `1k`; the non-Lite model accepts `1k`, `2k`, and
+`4k`. The adapter verifies the
 selected size against the frozen schema-v2 pricing selector before calling the
 provider and never derives the authorized price from returned artifact
 dimensions. A synchronous timeout or ambiguous response has no pollable Gongbu
@@ -149,7 +158,7 @@ checkpoint, so reconcile rather than rerun.
 
 ## FLUX.2 Pro
 
-The supported FLUX integration uses the managed
+The FLUX provider contract uses the managed
 `hubu.flux-2-pro.text-to-image/v1` contract. It freezes the BFL target, certified
 dimensions, dated rational prices, zero generation retries, no fallback,
 polling, artifact-delivery, and durable-recovery policies. The operator supplies
@@ -159,10 +168,21 @@ FLUX submission is asynchronous. Gongbu sends one generation POST, checkpoints
 the safe request and operation identifiers, validated polling host, and original
 deadline, then performs bounded read-only polling. Restart resumes that same
 operation and never submits a replacement generation.
+The polling policy accepts the documented `api.bfl.ai` router and exact
+`api.<region-or-shard>.bfl.ai` hosts with one safe ASCII DNS label. BFL
+requires clients to use its returned polling URL, and live provider evidence
+confirmed `api.us7.bfl.ai` as one such shard. A rejected post-submit URL is
+checkpointed only as sanitized recovery evidence, with recovery-first,
+do-not-resubmit guidance; explicit reconciliation can poll the same operation
+after an approved policy correction.
+That same live recovery reached `Ready` and returned a signed
+`delivery.us7.bfl.ai` artifact without another generation submission. Polling
+receives `x-key`; delivery never does, and the signed artifact URL is fetched
+immediately without being logged or persisted.
 
-The shipped managed profile is production-validated but not live-qualified;
+The shipped provider contract is production-validated but not live-qualified;
 its catalog reports `live_qualified = false` and
 `live_qualification = "not_performed"`. Ordinary demos and CI remain
 fixture-only. For BFL authentication, frozen dimensions and prices, settled
 cost conversion, delivery-host policy, activation, and recovery details, read
-the [managed FLUX.2 profile](managed-flux-profile.md).
+the [FLUX.2 provider contract](flux-provider-contract.md).

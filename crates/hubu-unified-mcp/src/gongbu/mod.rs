@@ -19,13 +19,11 @@ use crate::BackendClient;
 
 pub(crate) use transport::{CallOutcome, DurableCallError, DurableExecutionObservation};
 
-const TARGET_FIELDS: &[&str] = &["workload_type", "provider", "adapter", "model"];
 const TARGET_ID_FIELDS: &[&str] = &["target_id"];
 const PRICING_SELECTOR_FIELDS: &[&str] = &["input.image_size"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionDiagnostic {
-    TargetNotSelectable,
     TargetIdNotSelectable,
     PricingSelectorNotMatched,
 }
@@ -33,14 +31,13 @@ pub(crate) enum AdmissionDiagnostic {
 impl AdmissionDiagnostic {
     pub(crate) fn reason_code(self) -> &'static str {
         match self {
-            Self::TargetNotSelectable | Self::TargetIdNotSelectable => "target_not_selectable",
+            Self::TargetIdNotSelectable => "target_not_selectable",
             Self::PricingSelectorNotMatched => "pricing_selector_not_matched",
         }
     }
 
     pub(crate) fn fields(self) -> &'static [&'static str] {
         match self {
-            Self::TargetNotSelectable => TARGET_FIELDS,
             Self::TargetIdNotSelectable => TARGET_ID_FIELDS,
             Self::PricingSelectorNotMatched => PRICING_SELECTOR_FIELDS,
         }
@@ -48,7 +45,6 @@ impl AdmissionDiagnostic {
 
     pub(crate) fn durable_result_code(self) -> &'static str {
         match self {
-            Self::TargetNotSelectable => "execution_request_target_not_selectable",
             Self::TargetIdNotSelectable => "execution_request_target_id_not_selectable",
             Self::PricingSelectorNotMatched => "execution_request_pricing_selector_not_matched",
         }
@@ -56,7 +52,6 @@ impl AdmissionDiagnostic {
 
     pub(crate) fn from_durable_result_code(code: &str) -> Option<Self> {
         match code {
-            "execution_request_target_not_selectable" => Some(Self::TargetNotSelectable),
             "execution_request_target_id_not_selectable" => Some(Self::TargetIdNotSelectable),
             "execution_request_pricing_selector_not_matched" => {
                 Some(Self::PricingSelectorNotMatched)

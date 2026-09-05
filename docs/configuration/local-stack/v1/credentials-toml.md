@@ -3,6 +3,10 @@
 `credentials.toml` never contains credential values. For the normal managed
 local stack it contains only the schema version plus any provider references:
 
+See the [complete Gemini + FLUX example](examples.md#edit-credentials-toml) for
+copyable provider references and the exact macOS Keychain **Where**/**Account**
+mapping.
+
 ```toml
 schema_version = 1
 ```
@@ -168,7 +172,7 @@ Every referenced key must exist and contain non-empty `service` and `account`
 fields. Multiple targets may intentionally share a credential, but provider
 selection and revision semantics remain explicit in each target.
 
-### Supported FLUX profile credential
+### FLUX provider contract credential
 
 For `hubu.flux-2-pro.text-to-image/v1`, create the BFL API key yourself and
 store it with the macOS **Keychain Access** app. Never paste, print, export, or
@@ -182,12 +186,12 @@ service = "operator-owned BFL Keychain service"
 account = "operator-owned BFL Keychain account"
 ```
 
-The corresponding `[[supported_profiles]]` entry uses
+The corresponding `[[contract_bindings]]` entry uses
 `credential = "bfl_flux2_pro"`. Doctor asks Keychain only whether that item is
 present; it does not request or compare its value and it does not call BFL.
 Apply the shared [live provider operations
 guide](../../../operations/live-providers.md), then read the
-[managed FLUX.2 profile](../../../operations/managed-flux-profile.md) before
+[FLUX.2 provider contract](../../../operations/flux-provider-contract.md) before
 enabling live mode.
 
 ## Rotation

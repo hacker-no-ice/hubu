@@ -30,10 +30,7 @@ fn execution_arguments_for(token: &str, prompt: &str) -> Value {
         "spend_auth_token_id":token,
         "input":{"prompt":prompt,"image_count":1},
         "input_schema_version":1,
-        "workload_type":"image_generation",
-        "provider":"fixture",
-        "adapter":"fixture",
-        "model":"fixture-v1"
+        "target_id":format!("gongbu:target:v1:{}", "a".repeat(64))
     })
 }
 
@@ -232,10 +229,7 @@ fn preallocated_operation_key_mismatch_stops_before_backend_traffic() {
                 "schema_version": 2,
                 "input": {"prompt": "fixed offline fixture", "image_count": 1},
                 "input_schema_version": 1,
-                "workload_type": "image_generation",
-                "provider": "fixture",
-                "adapter": "fixture",
-                "model": "fixture-v1"
+                "target_id": format!("gongbu:target:v1:{}", "a".repeat(64))
             },
             "max_inline_artifact_bytes": 1024
         }),
@@ -280,10 +274,7 @@ fn preallocated_operation_key_flows_once_through_governed_execution_and_restarts
             "schema_version": 2,
             "input": {"prompt": "fixed offline fixture", "image_count": 1},
             "input_schema_version": 1,
-            "workload_type": "image_generation",
-            "provider": "fixture",
-            "adapter": "fixture",
-            "model": "fixture-v1"
+            "target_id": format!("gongbu:target:v1:{}", "a".repeat(64))
         },
         "max_inline_artifact_bytes": 1024
     });
@@ -405,10 +396,7 @@ fn prebound_crash_gap_recovers_once_without_duplicate_backend_mutation() {
             "schema_version": 2,
             "input": {"prompt": "fixed prebound crash-gap fixture", "image_count": 1},
             "input_schema_version": 1,
-            "workload_type": "image_generation",
-            "provider": "fixture",
-            "adapter": "fixture",
-            "model": "fixture-v1"
+            "target_id": format!("gongbu:target:v1:{}", "a".repeat(64))
         },
         "max_inline_artifact_bytes": 1024
     });
@@ -1072,7 +1060,7 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
                 "code": "invalid_request",
                 "message": format!("{PRIVATE_DETAIL}: {operation_key}"),
                 "reason_code": "target_not_selectable",
-                "fields": ["workload_type", "provider", "adapter", "model"],
+                "fields": ["target_id"],
                 "private_detail": PRIVATE_DETAIL
             }
         }),
@@ -1095,7 +1083,7 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
         &failed,
         &handle,
         "target_not_selectable",
-        json!(["workload_type", "provider", "adapter", "model"]),
+        json!(["target_id"]),
     );
     for private in [
         PRIVATE_DETAIL,
@@ -1126,7 +1114,7 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
                 },
             )
             .unwrap();
-    assert_eq!(persisted.0, "execution_request_target_not_selectable");
+    assert_eq!(persisted.0, "execution_request_target_id_not_selectable");
     assert_eq!(persisted.1, None);
     assert_eq!(persisted.2, 0);
     assert_eq!(persisted.3, None);
@@ -1137,7 +1125,7 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
         &replay,
         &handle,
         "target_not_selectable",
-        json!(["workload_type", "provider", "adapter", "model"]),
+        json!(["target_id"]),
     );
     assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
     first.finish(&[
@@ -1163,14 +1151,14 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
         &recovered,
         &handle,
         "target_not_selectable",
-        json!(["workload_type", "provider", "adapter", "model"]),
+        json!(["target_id"]),
     );
     let replay_after_restart = restarted.call(57, "gongbu_create_execution", arguments);
     assert_terminal_admission_diagnostic(
         &replay_after_restart,
         &handle,
         "target_not_selectable",
-        json!(["workload_type", "provider", "adapter", "model"]),
+        json!(["target_id"]),
     );
     assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
     restarted.finish(&[
@@ -1473,7 +1461,7 @@ fn private_gongbu_continuation_binds_replays_restarts_and_redacts_recursively() 
     assert!(!terminal.to_string().contains(&operation_key));
 
     let mut changed = execution_arguments();
-    changed["model"] = json!("spoofed-model");
+    changed["target_id"] = json!(format!("gongbu:target:v1:{}", "b".repeat(64)));
     let conflict = first.call(6, "gongbu_create_execution", changed);
     assert!(conflict["error"]["message"]
         .as_str()
@@ -2002,7 +1990,13 @@ fn gongbu_only_initialize_discovery_and_read_call() {
     assert!(names.contains(&"gongbu_get_execution"));
     assert!(!names.contains(&"gongbu_create_execution"));
     assert!(!names.iter().any(|name| name.starts_with("hubu_")
-        && !matches!(*name, "hubu_unified_capabilities" | "hubu_operation_status")));
+        && !matches!(
+            *name,
+            "hubu_unified_capabilities"
+                | "hubu_operation_status"
+                | "hubu_feedback_guidance"
+                | "hubu_prepare_feedback"
+        )));
 
     let response = mcp.call(3, "gongbu_get_execution", json!({"execution_id":"exec-93"}));
     let body: Value =
@@ -2042,7 +2036,7 @@ fn governed_hubu_to_gongbu_execution_fails_closed_without_hubu() {
     let listed = mcp.list_tools();
     assert_eq!(
         tool_names(&listed).len(),
-        42,
+        44,
         "unexpected catalog {listed}; Hubu requests: {:?}; Gongbu requests: {:?}",
         hubu.requests(),
         gongbu.requests()
@@ -2269,4 +2263,47 @@ fn malformed_probe_is_unavailable_without_corrupting_other_backend_state() {
         .unwrap()
         .contains("gongbu-state-marker"));
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
+#[test]
+fn feedback_is_discoverable_and_prepared_without_backends() {
+    let mut mcp = McpProcess::start(None, None);
+    mcp.initialize();
+    let listed = mcp.list_tools();
+    let names = tool_names(&listed);
+    assert!(names.contains(&"hubu_feedback_guidance"));
+    assert!(names.contains(&"hubu_prepare_feedback"));
+    let guidance = mcp.call(70, "hubu_feedback_guidance", json!({}));
+    assert_eq!(
+        guidance["result"]["structuredContent"]["input_schema"]["required"],
+        json!(["trying", "happened"])
+    );
+    let response = mcp.call(71, "hubu_prepare_feedback", json!({"trying":"Fetch output", "happened":"Image missing", "diagnostics":{"prompt":"excluded-prompt-canary", "raw_logs":"excluded-log-canary"}}));
+    let result = &response["result"]["structuredContent"];
+    assert_eq!(result["status"], "prepared_not_sent");
+    assert_eq!(result["destination"]["visibility"], "public");
+    assert_eq!(result["requires_user_authorization"], true);
+    let content: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(&content, result);
+    let invalid = mcp.call(
+        72,
+        "hubu_prepare_feedback",
+        json!({"trying":"", "happened":"input-error-canary"}),
+    );
+    assert_eq!(invalid["result"]["isError"], true);
+    let again = mcp.call(
+        73,
+        "hubu_prepare_feedback",
+        json!({"trying":"Suggest improvement", "happened":"Need search", "kind":"idea"}),
+    );
+    assert_eq!(
+        again["result"]["structuredContent"]["title"],
+        "Idea for Hubu"
+    );
+    mcp.finish(&[
+        "excluded-prompt-canary",
+        "excluded-log-canary",
+        "input-error-canary",
+    ]);
 }

@@ -12,12 +12,15 @@ use crate::{
         HubuAuthorizationSnapshot, HubuTokenReference, Repository,
     },
     provider::{
-        contract::{ContractError, NormalizedRequest, OutputDimensions, PricingSnapshot},
+        contract::{
+            polling_deadline_allows_reinspect, ContractError, NormalizedRequest, OutputDimensions,
+            PollingRecoveryContext, PricingSnapshot,
+        },
         flux2_api,
-        registry::{SelectableTarget, ValidatedProviderCatalog},
+        registry::{ExecutionTarget, ValidatedProviderCatalog},
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, TargetKey},
-    temporal::ExecutionScheduler,
+    temporal::{ExecutionScheduler, ScheduleError},
     workflow::{OperatorReconciliationRequest, ReconciliationAction},
 };
 use chrono::DateTime;
@@ -41,48 +44,18 @@ impl AuthenticatedCaller {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CreateExecutionV1Request {
-    pub schema_version: u32,
-    pub operation_key: String,
-    /// Historical alias for the Hubu spend authorization token identifier.
-    pub hubu_authorization_id: String,
-    pub hubu_claim_id: Option<String>,
-    /// Historical alias for the same token identifier as `hubu_authorization_id`.
-    pub hubu_token_reference: String,
-    pub authorization: Money,
-    #[serde(default)]
-    pub execution_scope: Option<ExecutionScope>,
-    pub input: Value,
-    pub input_schema_version: i64,
-    pub workload_type: String,
-    pub provider: String,
-    pub adapter: String,
-    pub model: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct CreateExecutionV2Request {
     pub schema_version: u32,
     pub spend_auth_token_id: String,
     pub input: Value,
     pub input_schema_version: i64,
-    #[serde(default)]
-    pub target_id: Option<String>,
-    #[serde(default)]
-    pub workload_type: Option<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub adapter: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
+    pub target_id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ExecutionTargetCatalogResponse {
     pub schema_version: u32,
-    pub targets: Vec<SelectableTarget>,
+    pub targets: Vec<ExecutionTarget>,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +104,8 @@ pub struct ExecutionResponse {
     pub completed_at: Option<String>,
     pub timing: ExecutionTimingResponse,
     pub provider_transport: ProviderTransportResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Value>,
 }
 
 /// Agent-safe durable counts of provider-boundary transport calls.
@@ -202,7 +177,7 @@ pub struct ArtifactResponse {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProviderCatalogResponse {
     pub schema_version: u32,
-    pub profiles: Vec<crate::provider::supported_profiles::CatalogProfile>,
+    pub contracts: Vec<crate::provider::provider_contracts::CatalogContract>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -263,13 +238,6 @@ impl ApiError {
             ..Self::validation()
         }
     }
-    fn legacy_token_alias_mismatch() -> Self {
-        Self::new(
-            400,
-            "legacy_token_alias_mismatch",
-            "v1 Hubu token identifier aliases must be equal",
-        )
-    }
     fn not_found() -> Self {
         Self::new(404, "not_found", "resource not found")
     }
@@ -285,6 +253,13 @@ impl ApiError {
             409,
             "attestation_not_ready",
             "execution is not ready for redaction attestation",
+        )
+    }
+    fn not_ready() -> Self {
+        Self::new(
+            503,
+            "not_ready",
+            "execution admission is temporarily unavailable",
         )
     }
     fn internal() -> Self {
@@ -399,7 +374,6 @@ impl Api {
             .and_then(|caller| {
                 let segments: Vec<_> = path.trim_matches('/').split('/').collect();
                 match (method, segments.as_slice()) {
-                    ("POST", ["v1", "executions"]) => self.create_v1(caller, body),
                     ("POST", ["v2", "executions"]) => self.create_v2(caller, body),
                     ("GET", ["v2", "execution-targets"]) => self.list_execution_targets(caller),
                     ("GET", ["v1", "executions", execution_id]) => {
@@ -439,20 +413,9 @@ impl Api {
             200,
             &ProviderCatalogResponse {
                 schema_version: 1,
-                profiles: self.providers.supported_profiles().to_vec(),
+                contracts: self.providers.provider_contracts().to_vec(),
             },
         ))
-    }
-
-    fn create_v1(
-        &self,
-        caller: &AuthenticatedCaller,
-        body: &[u8],
-    ) -> Result<HttpResponse, ApiError> {
-        let request: CreateExecutionV1Request =
-            serde_json::from_slice(body).map_err(|_| ApiError::validation())?;
-        let request = translate_v1(request)?;
-        self.create(caller, request, V1_SCHEMA_VERSION)
     }
 
     fn create_v2(
@@ -478,7 +441,7 @@ impl Api {
             200,
             &ExecutionTargetCatalogResponse {
                 schema_version: SCHEMA_VERSION,
-                targets: self.providers.selectable_targets(),
+                targets: self.providers.execution_targets(),
             },
         ))
     }
@@ -505,15 +468,11 @@ impl Api {
                 if existing.status == "pending" {
                     self.scheduler
                         .schedule(&existing.execution_id)
-                        .map_err(|_| ApiError::internal())?;
+                        .map_err(map_schedule_error)?;
                 }
                 return Ok(json_response(
                     200,
-                    &execution_response(
-                        &self.repository,
-                        existing.clone(),
-                        response_schema_version,
-                    )?,
+                    &self.execution_response(existing.clone(), response_schema_version)?,
                 ));
             }
         }
@@ -526,11 +485,11 @@ impl Api {
             if existing.status == "pending" {
                 self.scheduler
                     .schedule(&existing.execution_id)
-                    .map_err(|_| ApiError::internal())?;
+                    .map_err(map_schedule_error)?;
             }
             return Ok(json_response(
                 200,
-                &execution_response(&self.repository, existing, response_schema_version)?,
+                &self.execution_response(existing, response_schema_version)?,
             ));
         }
         let target_key = TargetKey::new(
@@ -541,10 +500,7 @@ impl Api {
         )
         .map_err(map_target_error)?;
         let resolved = self.providers.resolve_active(&target_key).map_err(|_| {
-            ApiError::validation_with_diagnostics(
-                "target_not_selectable",
-                &["workload_type", "provider", "adapter", "model"],
-            )
+            ApiError::validation_with_diagnostics("target_not_selectable", &["target_id"])
         })?;
         let image_count = input_quantity(&normalized_input, "image_count")?;
         if image_count.is_some_and(|count| {
@@ -682,10 +638,10 @@ impl Api {
         }
         self.scheduler
             .schedule(&execution.execution_id)
-            .map_err(|_| ApiError::internal())?;
+            .map_err(map_schedule_error)?;
         Ok(json_response(
             200,
-            &execution_response(&self.repository, execution, response_schema_version)?,
+            &self.execution_response(execution, response_schema_version)?,
         ))
     }
 
@@ -699,6 +655,15 @@ impl Api {
             .get_execution(execution_id)
             .map_err(map_persistence)?;
         Ok(execution)
+    }
+
+    fn execution_response(
+        &self,
+        execution: Execution,
+        schema_version: u32,
+    ) -> Result<ExecutionResponse, ApiError> {
+        let now = (self.now)();
+        execution_response(&self.repository, execution, schema_version, &now)
     }
 
     fn reconcile(
@@ -728,10 +693,10 @@ impl Api {
                     evidence: request.evidence,
                 },
             )
-            .map_err(|_| ApiError::internal())?;
+            .map_err(map_schedule_error)?;
         Ok(json_response(
             202,
-            &execution_response(&self.repository, execution, V1_SCHEMA_VERSION)?,
+            &self.execution_response(execution, V1_SCHEMA_VERSION)?,
         ))
     }
 
@@ -742,8 +707,7 @@ impl Api {
     ) -> Result<HttpResponse, ApiError> {
         Ok(json_response(
             200,
-            &execution_response(
-                &self.repository,
+            &self.execution_response(
                 self.authorized_execution(caller, execution_id)?,
                 V1_SCHEMA_VERSION,
             )?,
@@ -784,8 +748,7 @@ impl Api {
             .artifacts
             .list_for_account(execution_id, &execution.account_id)
             .map_err(map_artifact_error)?;
-        let public_execution =
-            execution_response(&self.repository, execution.clone(), V1_SCHEMA_VERSION)?;
+        let public_execution = self.execution_response(execution.clone(), V1_SCHEMA_VERSION)?;
         // Scan a fixed allowlist of the public execution projection. The
         // general execution response intentionally contains the private,
         // caller-bound operation key; it must never become secret-comparison
@@ -812,7 +775,7 @@ impl Api {
         .map_err(|_| ApiError::internal())?;
         let public_catalog = serde_json::to_value(ProviderCatalogResponse {
             schema_version: V1_SCHEMA_VERSION,
-            profiles: self.providers.supported_profiles().to_vec(),
+            contracts: self.providers.provider_contracts().to_vec(),
         })
         .map_err(|_| ApiError::internal())?;
         let attestation = attestor
@@ -919,71 +882,32 @@ fn immutable_params_match(execution: &Execution, params: &CreateExecutionParams)
         && execution.model == params.model
 }
 
-fn translate_v1(request: CreateExecutionV1Request) -> Result<CreateExecutionRequest, ApiError> {
-    let authorization_id = request.hubu_authorization_id.trim();
-    let token_reference = request.hubu_token_reference.trim();
-    if request.schema_version != V1_SCHEMA_VERSION || authorization_id.is_empty() {
-        return Err(ApiError::validation());
-    }
-    if authorization_id != token_reference {
-        return Err(ApiError::legacy_token_alias_mismatch());
-    }
-    Ok(CreateExecutionRequest {
-        spend_auth_token_id: authorization_id.to_owned(),
-        operation_key: Some(request.operation_key),
-        hubu_claim_id: request.hubu_claim_id,
-        authorization: Some(request.authorization),
-        execution_scope: request.execution_scope,
-        input: request.input,
-        input_schema_version: request.input_schema_version,
-        workload_type: request.workload_type,
-        provider: request.provider,
-        adapter: request.adapter,
-        model: request.model,
-    })
-}
-
 fn resolve_v2_target(
     request: &CreateExecutionV2Request,
     providers: &ValidatedProviderCatalog,
     repository: &Repository,
 ) -> Result<TargetKey, ApiError> {
-    let tuple = (
-        request.workload_type.as_deref(),
-        request.provider.as_deref(),
-        request.adapter.as_deref(),
-        request.model.as_deref(),
-    );
-    match (request.target_id.as_deref(), tuple) {
-        (Some(target_id), (None, None, None, None)) => {
-            match repository.get_execution_by_spend_auth_token(&request.spend_auth_token_id) {
-                Ok(existing) => {
-                    let persisted = TargetKey::new(
-                        existing.workload_type,
-                        existing.provider,
-                        existing.adapter,
-                        existing.model,
-                    )
-                    .map_err(map_target_error)?;
-                    if persisted.public_id() == target_id {
-                        return Ok(persisted);
-                    }
-                }
-                Err(PersistenceError::NotFound) => {}
-                Err(error) => return Err(map_persistence(error)),
+    let target_id = request.target_id.as_str();
+    match repository.get_execution_by_spend_auth_token(&request.spend_auth_token_id) {
+        Ok(existing) => {
+            let persisted = TargetKey::new(
+                existing.workload_type,
+                existing.provider,
+                existing.adapter,
+                existing.model,
+            )
+            .map_err(map_target_error)?;
+            if persisted.public_id() == target_id {
+                return Ok(persisted);
             }
-            providers
-                .resolve_target_id(target_id)
-                .map(ProviderConfigVersion::target_key)
-                .map_err(|_| {
-                    ApiError::validation_with_diagnostics("target_not_selectable", &["target_id"])
-                })
         }
-        (None, (Some(workload_type), Some(provider), Some(adapter), Some(model))) => {
-            TargetKey::new(workload_type, provider, adapter, model).map_err(map_target_error)
-        }
-        _ => Err(ApiError::validation()),
+        Err(PersistenceError::NotFound) => {}
+        Err(error) => return Err(map_persistence(error)),
     }
+    providers
+        .resolve_target_id(target_id)
+        .map(ProviderConfigVersion::target_key)
+        .map_err(|_| ApiError::validation_with_diagnostics("target_not_selectable", &["target_id"]))
 }
 
 fn translate_v2(
@@ -1125,6 +1049,7 @@ fn execution_response(
     repository: &Repository,
     execution: Execution,
     schema_version: u32,
+    now: &str,
 ) -> Result<ExecutionResponse, ApiError> {
     let status = match execution.status.as_str() {
         "pending" => ExecutionStatus::Pending,
@@ -1169,6 +1094,53 @@ fn execution_response(
             .zip(provider_interaction_ms)
             .and_then(|(total, provider)| total.checked_sub(provider)),
     };
+    let recovery = (status == ExecutionStatus::ReconciliationRequired)
+        .then(|| {
+            let attempt = provider_attempt.as_ref()?;
+            // A durable polling context can outlive provider completion. Only
+            // project recovery-first guidance while the provider attempt itself
+            // is still ambiguous; artifact or settlement reconciliation after a
+            // successful provider result must not be described as a polling
+            // ambiguity.
+            if attempt.outcome != "ambiguous" {
+                return None;
+            }
+            let context = attempt.provider_recovery_context.as_ref()?;
+            Some(json!({
+                "schema_version": 1,
+                "execution_id": &execution.execution_id,
+                "provider_attempt_id": &attempt.provider_attempt_id,
+                "provider_request_id": &attempt.provider_request_id,
+                "provider_operation_id": &attempt.provider_operation_id,
+                "hubu_claim_id": &execution.hubu_claim_id,
+                "provider": &execution.provider,
+                "target": &execution.target,
+                "model": &execution.model,
+                "credential_binding": {
+                    "provider_config_version": &execution.provider_config_version,
+                    "provider_config_digest": &execution.provider_config_digest,
+                },
+                "polling": context,
+                "submitted_at": &attempt.transmission_started_at,
+                "checkpointed_at": &attempt.operation_checkpointed_at,
+                "last_transition_at": &execution.updated_at,
+                "last_confirmed_step": "provider_operation_checkpointed",
+                "guidance": {
+                    "provider_outcome_ambiguous": true,
+                    "billing_may_have_occurred": true,
+                    "do_not_resubmit": true,
+                    "recover_first": true,
+                    "artifact_urls_may_expire": true,
+                    "action": polling_recovery_action(
+                        context,
+                        attempt.provider_polling_host.as_deref(),
+                        attempt.provider_deadline_unix_ms,
+                        now,
+                    )
+                }
+            }))
+        })
+        .flatten();
     Ok(ExecutionResponse {
         schema_version,
         execution_id: execution.execution_id,
@@ -1194,7 +1166,33 @@ fn execution_response(
                 .as_ref()
                 .map_or(0, |attempt| attempt.artifact_fetch_count),
         },
+        recovery,
     })
+}
+
+fn polling_recovery_action(
+    context: &PollingRecoveryContext,
+    polling_host: Option<&str>,
+    deadline_unix_ms: Option<i64>,
+    now: &str,
+) -> &'static str {
+    let now_unix_ms = DateTime::parse_from_rfc3339(now)
+        .ok()
+        .map(|value| value.timestamp_millis());
+    if context.validation_reason.as_deref() == Some("host_not_allowlisted")
+        && context
+            .normalized_host
+            .as_deref()
+            .zip(polling_host)
+            .is_some_and(|(normalized, checkpointed)| normalized == checkpointed)
+        && deadline_unix_ms
+            .zip(now_unix_ms)
+            .is_some_and(|(deadline, now)| polling_deadline_allows_reinspect(deadline, now))
+    {
+        "update_policy_then_reinspect"
+    } else {
+        "contact_provider_support"
+    }
 }
 
 fn elapsed_ms(started_at: Option<&str>, completed_at: Option<&str>) -> Option<u64> {
@@ -1229,6 +1227,12 @@ fn map_persistence(error: PersistenceError) -> ApiError {
             ApiError::validation()
         }
         _ => ApiError::internal(),
+    }
+}
+
+fn map_schedule_error(error: ScheduleError) -> ApiError {
+    match error {
+        ScheduleError::Unavailable => ApiError::not_ready(),
     }
 }
 
@@ -1297,7 +1301,8 @@ mod tests {
         provider::{
             contract::{
                 ActualVendorCost, AdapterCapabilities, AdapterOutcome, AsyncProviderOperation,
-                NormalizedUsage, PricingCatalog, ProviderAdapter, ProviderFailure,
+                NormalizedUsage, PollingRecoveryContext, PricingCatalog, ProviderAdapter,
+                ProviderFailure,
             },
             registry::ProviderRegistry,
         },
@@ -1309,7 +1314,7 @@ mod tests {
     use std::{
         io::Cursor,
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Barrier,
         },
         thread,
@@ -1354,9 +1359,12 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Scheduler(std::sync::Mutex<Vec<String>>);
+    struct Scheduler(std::sync::Mutex<Vec<String>>, AtomicBool);
     impl ExecutionScheduler for Scheduler {
-        fn schedule(&self, execution_id: &str) -> Result<(), String> {
+        fn schedule(&self, execution_id: &str) -> Result<(), ScheduleError> {
+            if self.1.load(Ordering::SeqCst) {
+                return Err(ScheduleError::Unavailable);
+            }
             self.0.lock().unwrap().push(execution_id.into());
             Ok(())
         }
@@ -1364,7 +1372,10 @@ mod tests {
             &self,
             execution_id: &str,
             _: OperatorReconciliationRequest,
-        ) -> Result<(), String> {
+        ) -> Result<(), ScheduleError> {
+            if self.1.load(Ordering::SeqCst) {
+                return Err(ScheduleError::Unavailable);
+            }
             self.0
                 .lock()
                 .unwrap()
@@ -1447,6 +1458,18 @@ mod tests {
             }
             if spend_auth_token_id.starts_with("flux-") {
                 response.execution_scope = for_target("flux", "flux2_api");
+                let amount = if spend_auth_token_id.contains("4k") {
+                    8
+                } else if spend_auth_token_id.contains("2k")
+                    || spend_auth_token_id == "flux-restart-replay"
+                {
+                    5
+                } else {
+                    3
+                };
+                response.amount_cents = amount;
+                response.budget_hold.amount_cents = amount;
+                response.budget_hold.frozen_amount_cents = amount;
             }
             if spend_auth_token_id.starts_with("flux-managed-") {
                 response.amount_cents = 3;
@@ -1530,65 +1553,30 @@ mod tests {
     }
 
     fn flux_catalog(catalog_version: &str) -> ValidatedProviderCatalog {
-        let targets: ProviderTargetConfig = serde_json::from_value(json!({
-            "schema_version":2,
-            "provider_configs":[{
-                "provider_config_version":"flux-v1",
-                "workload_type":"image_generation",
-                "provider":"flux",
-                "adapter":"flux2_api",
-                "model":"flux-2-pro",
-                "secret_service":"gongbu.flux",
-                "secret_account":"test",
-                "active":true,
-                "execution_enabled":true,
-                "settings":{"type":"flux2_api","config":{
-                    "endpoint":"https://api.bfl.ai",
-                    "api_version":"v1",
-                    "timeout_ms":1000,
-                    "poll_interval_ms":10,
-                    "approved_artifact_hosts":["delivery.us.bfl.ai"]
-                }}
-            }]
-        }))
-        .unwrap();
-        let pricing = PricingCatalog::from_json(
-            serde_json::to_string(&json!({
-                "schema_version":2,
-                "catalog_version":catalog_version,
-                "rules":[
-                    {"rule_id":format!("flux-1k-{catalog_version}"),"provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1}]},
-                    {"rule_id":format!("flux-2k-{catalog_version}"),"provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1}]},
-                    {"rule_id":format!("flux-4k-{catalog_version}"),"provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1}]}
-                ]
-            }))
-            .unwrap()
-            .as_bytes(),
-        )
-        .unwrap();
-        ValidatedProviderCatalog::bind(
-            targets,
-            pricing,
-            &ProviderRegistry::production(&ArtifactLimits::default()),
-        )
-        .unwrap()
+        let _ = catalog_version;
+        supported_flux_catalog()
     }
 
     fn supported_flux_catalog() -> ValidatedProviderCatalog {
         let document: Value = serde_json::from_str(include_str!(
-            "../../../../contracts/provider-profiles-v1.json"
+            "../../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let profile = &document["profiles"][0];
-        let mut target = profile["target"].clone();
+        let contract_definition = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["contract"] == "hubu.flux-2-pro.text-to-image/v1")
+            .unwrap();
+        let mut target = contract_definition["target"].clone();
         target["secret_service"] = json!("gongbu.bfl.hubu-hub-172");
         target["secret_account"] = json!("pikachu-live-qualification-v1");
-        let policies = &profile["policies"];
+        let policies = &contract_definition["policies"];
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 3,
-            "supported_profiles": [{
-                "contract": profile["contract"],
-                "pricing_version": profile["pricing_version"],
+            "contract_bindings": [{
+                "contract": contract_definition["contract"],
+                "pricing_version": contract_definition["pricing_version"],
                 "poll_policy": policies["poll"],
                 "artifact_delivery_policy": policies["artifact_delivery"],
                 "recovery_policy": policies["recovery"],
@@ -1601,8 +1589,72 @@ mod tests {
         let pricing = PricingCatalog::from_json(
             &serde_json::to_vec(&json!({
                 "schema_version": 2,
-                "catalog_version": profile["pricing_version"],
-                "rules": profile["pricing_rules"]
+                "catalog_version": contract_definition["pricing_version"],
+                "rules": contract_definition["pricing_rules"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut catalog = ValidatedProviderCatalog::bind(
+            targets,
+            pricing,
+            &ProviderRegistry::production(&ArtifactLimits::default()),
+        )
+        .unwrap();
+        catalog.mark_credential_references_present();
+        catalog
+    }
+
+    fn supported_shipped_catalog() -> ValidatedProviderCatalog {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let contracts = document["contracts"].as_array().unwrap();
+        let bindings = contracts
+            .iter()
+            .map(|contract| {
+                let policies = &contract["policies"];
+                json!({
+                    "contract":contract["contract"],
+                    "pricing_version":contract["pricing_version"],
+                    "poll_policy":policies["poll"],
+                    "artifact_delivery_policy":policies["artifact_delivery"],
+                    "recovery_policy":policies["recovery"],
+                    "generation_retries":policies["generation_retries"],
+                    "fallback":policies["fallback"]
+                })
+            })
+            .collect::<Vec<_>>();
+        let provider_configs = contracts
+            .iter()
+            .map(|contract| {
+                let mut target = contract["target"].clone();
+                let google = target["provider"] == "google";
+                target["secret_service"] = json!(if google {
+                    "operator.google"
+                } else {
+                    "operator.bfl"
+                });
+                target["secret_account"] = json!(if google { "gemini" } else { "flux" });
+                target
+            })
+            .collect::<Vec<_>>();
+        let rules = contracts
+            .iter()
+            .flat_map(|contract| contract["pricing_rules"].as_array().unwrap().clone())
+            .collect::<Vec<_>>();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version":3,
+            "contract_bindings":bindings,
+            "provider_configs":provider_configs
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version":2,
+                "catalog_version":"operator-shipped-composite-2026-09-01-v1",
+                "rules":rules
             }))
             .unwrap(),
         )
@@ -1630,10 +1682,9 @@ mod tests {
             "spend_auth_token_id":operation_key,
             "input":input,
             "input_schema_version":1,
-            "workload_type":"image_generation",
-            "provider":"flux",
-            "adapter":"flux2_api",
-            "model":"flux-2-pro"
+            "target_id":TargetKey::new("image_generation", "flux", "flux2_api", "flux-2-pro")
+                .unwrap()
+                .public_id()
         })
     }
 
@@ -1712,6 +1763,7 @@ mod tests {
                     provider_request_id: Some(provider_request_id.into()),
                     provider_operation_id: "hub-172-provider-operation".into(),
                     polling_host: "api.bfl.ai".into(),
+                    polling_recovery: None,
                     deadline_unix_ms: 1_788_000_000_000,
                 },
                 "2026-08-28T20:00:05Z",
@@ -1948,7 +2000,7 @@ mod tests {
     }
 
     #[test]
-    fn redaction_attestation_rejects_body_nonterminal_and_unfrozen_catalog() {
+    fn redaction_attestation_rejects_body_and_nonterminal_execution() {
         const CANARY: &str = "fixture-provider-secret-attestation-canary-9f83";
         let fixture = fixture();
         let api = supported_flux_attestation_api(&fixture, CANARY);
@@ -1981,12 +2033,15 @@ mod tests {
 
         let arbitrary = flux_api(&fixture, "prices-v2")
             .with_redaction_attestation_secrets(Arc::new(AttestationSecrets(CANARY)));
-        let created = execution(&arbitrary.handle(
-            "POST",
-            "/v2/executions",
-            Some(&fixture.caller),
-            &serde_json::to_vec(&flux_request("flux-arbitrary-profile", Some("1k"), None)).unwrap(),
-        ));
+        let created = execution(
+            &arbitrary.handle(
+                "POST",
+                "/v2/executions",
+                Some(&fixture.caller),
+                &serde_json::to_vec(&flux_request("flux-arbitrary-contract", Some("1k"), None))
+                    .unwrap(),
+            ),
+        );
         fixture
             .repository
             .update_execution(
@@ -2018,7 +2073,7 @@ mod tests {
                     &[],
                 )
                 .status,
-            400
+            409
         );
     }
 
@@ -2107,7 +2162,7 @@ mod tests {
         let api = Api::new_with_authorization_resolver(
             fixture.repository.clone(),
             fixture.artifacts.clone(),
-            supported_flux_catalog(),
+            supported_shipped_catalog(),
             fixture.scheduler.clone(),
             i64::MAX,
             fixture.resolver.clone(),
@@ -2121,25 +2176,30 @@ mod tests {
         assert_eq!(response.status, 200);
         let value: Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema_version"], 1);
+        let contracts = value["contracts"].as_array().unwrap();
+        let ids = contracts
+            .iter()
+            .map(|contract| contract["contract"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            value["profiles"][0]["target"],
-            json!({
-                "workload_type":"image_generation","provider":"flux",
-                "adapter":"flux2_api","model":"flux-2-pro"
-            })
+            ids,
+            std::collections::BTreeSet::from([
+                "hubu.flux-2-pro.text-to-image/v1",
+                "hubu.gemini-3.1-flash-image.text-to-image/v1",
+                "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
+            ])
         );
-        assert_eq!(
-            value["profiles"][0]["capability"]["presets"][1]["width"],
-            1920
-        );
-        assert_eq!(
-            value["profiles"][0]["readiness"],
-            json!({
+        let gemini_full = contracts
+            .iter()
+            .find(|contract| contract["target"]["model"] == "gemini-3.1-flash-image")
+            .unwrap();
+        assert_eq!(gemini_full["capability"]["presets"][2]["width"], 4096);
+        assert!(contracts.iter().all(|contract| contract["readiness"]
+            == json!({
                 "configured":true,"credential_reference_present":true,
                 "production_validated":true,"live_qualified":false,
                 "live_qualification":"not_performed"
-            })
-        );
+            })));
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(!serialized.contains("secret_service"));
         assert!(!serialized.contains("secret_account"));
@@ -2158,10 +2218,9 @@ mod tests {
                 "options": {"height": 512, "width": 512}
             },
             "input_schema_version": 1,
-            "workload_type": "image_generation",
-            "provider": "example",
-            "adapter": "fixture",
-            "model": "image-v1"
+            "target_id": TargetKey::new("image_generation", "example", "fixture", "image-v1")
+                .unwrap()
+                .public_id()
         })
     }
 
@@ -2197,11 +2256,8 @@ mod tests {
     }
 
     #[test]
-    fn historical_create_fixture_matches_v1_schema() {
+    fn retired_v1_create_route_rejects_without_side_effects() {
         let raw = include_str!("../../../../fixtures/gongbu-create-execution-v1.json");
-        let request: CreateExecutionV1Request = serde_json::from_str(raw).unwrap();
-        assert_eq!(request.schema_version, 1);
-        assert_eq!(request.hubu_authorization_id, request.hubu_token_reference);
         let fixture = fixture();
         let response = fixture.api.handle(
             "POST",
@@ -2209,9 +2265,9 @@ mod tests {
             Some(&fixture.caller),
             raw.as_bytes(),
         );
-        assert_eq!(response.status, 200);
-        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 1);
+        assert_eq!(response.status, 404);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
     }
 
     fn call_create(fixture: &Fixture, request: &Value) -> HttpResponse {
@@ -2233,7 +2289,7 @@ mod tests {
     }
 
     #[test]
-    fn selectable_targets_are_sanitized_and_target_id_creates_the_same_execution() {
+    fn execution_targets_are_sanitized_and_target_id_creates_the_same_execution() {
         let fixture = fixture();
         let catalog =
             fixture
@@ -2260,9 +2316,6 @@ mod tests {
         }
 
         let mut selected = request("target-id-selection");
-        for field in ["workload_type", "provider", "adapter", "model"] {
-            selected.as_object_mut().unwrap().remove(field);
-        }
         selected["target_id"] = json!(target_id);
         let created = call_create(&fixture, &selected);
         assert_eq!(created.status, 200);
@@ -2278,13 +2331,10 @@ mod tests {
     #[test]
     fn target_id_replay_recovers_persisted_execution_after_target_deactivation() {
         let fixture = fixture();
-        let target_id = fixture.api.providers.selectable_targets()[0]
+        let target_id = fixture.api.providers.execution_targets()[0]
             .target_id
             .clone();
         let mut selected = request("target-id-deactivation-replay");
-        for field in ["workload_type", "provider", "adapter", "model"] {
-            selected.as_object_mut().unwrap().remove(field);
-        }
         selected["target_id"] = json!(target_id);
         let created = execution(&call_create(&fixture, &selected));
 
@@ -2314,7 +2364,7 @@ mod tests {
             fixture.resolver.clone(),
             || "2026-08-05T20:00:00Z".into(),
         );
-        assert!(replay_api.providers.selectable_targets().is_empty());
+        assert!(replay_api.providers.execution_targets().is_empty());
 
         let replayed = replay_api.handle(
             "POST",
@@ -2331,13 +2381,10 @@ mod tests {
     fn target_id_cannot_be_mixed_with_or_escape_the_operator_catalog() {
         let fixture = fixture();
         let mut mixed = request("mixed-target-selector");
-        mixed["target_id"] = json!(fixture.api.providers.selectable_targets()[0].target_id);
+        mixed["provider"] = json!("example");
         assert_eq!(call_create(&fixture, &mixed).status, 400);
 
         let mut unknown = request("unknown-target-id");
-        for field in ["workload_type", "provider", "adapter", "model"] {
-            unknown.as_object_mut().unwrap().remove(field);
-        }
         unknown["target_id"] = json!(format!("gongbu:target:v1:{}", "0".repeat(64)));
         let response = call_create(&fixture, &unknown);
         assert_eq!(response.status, 400);
@@ -2395,6 +2442,46 @@ mod tests {
     }
 
     #[test]
+    fn scheduling_unavailability_preserves_pending_execution_for_retry() {
+        let fixture = fixture();
+        let submitted = request("temporal-unavailable-retry");
+        fixture.scheduler.1.store(true, Ordering::SeqCst);
+
+        let first = call_create(&fixture, &submitted);
+        assert_eq!(first.status, 503);
+        assert_eq!(error(&first).error.code, "not_ready");
+        let pending = fixture
+            .repository
+            .get_execution_by_spend_auth_token("temporal-unavailable-retry")
+            .unwrap();
+        assert_eq!(pending.status, "pending");
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
+
+        let retry_while_unavailable = call_create(&fixture, &submitted);
+        assert_eq!(retry_while_unavailable.status, 503);
+        assert_eq!(
+            fixture
+                .repository
+                .get_execution_by_spend_auth_token("temporal-unavailable-retry")
+                .unwrap()
+                .execution_id,
+            pending.execution_id
+        );
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+
+        fixture.scheduler.1.store(false, Ordering::SeqCst);
+        let recovered = call_create(&fixture, &submitted);
+        assert_eq!(recovered.status, 200);
+        assert_eq!(execution(&recovered).execution_id, pending.execution_id);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.scheduler.0.lock().unwrap().as_slice(),
+            [pending.execution_id.as_str()]
+        );
+    }
+
+    #[test]
     fn elapsed_timing_rejects_missing_malformed_and_negative_boundaries() {
         assert_eq!(
             elapsed_ms(
@@ -2412,6 +2499,85 @@ mod tests {
             None
         );
         assert_eq!(elapsed_ms(None, Some("2026-08-05T00:00:05Z")), None);
+    }
+
+    #[test]
+    fn polling_recovery_action_requires_an_unexpired_deadline() {
+        let mut context = PollingRecoveryContext {
+            schema_version: 1,
+            policy_version: "bfl-polling-origin-v2".into(),
+            scheme: Some("https".into()),
+            normalized_host: Some("api.future.bfl.ai".into()),
+            explicit_port: None,
+            endpoint_shape: "v1/get_result".into(),
+            query_keys: vec!["id".into()],
+            url_fingerprint: format!("sha256:{}", "a".repeat(64)),
+            validation_reason: Some("host_not_allowlisted".into()),
+        };
+        let now = "2026-09-03T21:00:00Z";
+        let now_unix_ms = DateTime::parse_from_rfc3339(now)
+            .unwrap()
+            .timestamp_millis();
+
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms + 1_000),
+                now,
+            ),
+            "update_policy_then_reinspect"
+        );
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms + 999),
+                now,
+            ),
+            "contact_provider_support"
+        );
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms - 1),
+                now,
+            ),
+            "contact_provider_support"
+        );
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("api.future.bfl.ai"),
+                Some(now_unix_ms + 1_000),
+                "invalid",
+            ),
+            "contact_provider_support"
+        );
+        assert_eq!(
+            polling_recovery_action(&context, Some("api.future.bfl.ai"), None, now),
+            "contact_provider_support"
+        );
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("unavailable"),
+                Some(now_unix_ms + 1_000),
+                now
+            ),
+            "contact_provider_support"
+        );
+        context.normalized_host = None;
+        assert_eq!(
+            polling_recovery_action(
+                &context,
+                Some("unavailable"),
+                Some(now_unix_ms + 1_000),
+                now
+            ),
+            "contact_provider_support"
+        );
     }
 
     #[test]
@@ -2527,6 +2693,131 @@ mod tests {
     }
 
     #[test]
+    fn successful_provider_attempt_does_not_project_polling_recovery() {
+        let fixture = fixture();
+        let created = execution(&call_create(&fixture, &request("artifact-reconciliation")));
+        let pending = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        let preflighting = fixture
+            .repository
+            .update_execution(
+                &pending.execution_id,
+                pending.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("2026-09-03T21:00:00Z".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "2026-09-03T21:00:00Z",
+            )
+            .unwrap();
+        let claimed = fixture
+            .repository
+            .set_claim(
+                &preflighting.execution_id,
+                preflighting.version,
+                "claim-artifact-reconciliation",
+                "2026-09-03T21:00:01Z",
+            )
+            .unwrap();
+        let attempt = fixture
+            .repository
+            .start_provider_attempt(&claimed, "2026-09-03T21:00:02Z")
+            .unwrap();
+        fixture
+            .repository
+            .begin_provider_transmission(&attempt.provider_attempt_id, "2026-09-03T21:00:03Z")
+            .unwrap();
+        fixture
+            .repository
+            .record_provider_operation(
+                &attempt.provider_attempt_id,
+                &AsyncProviderOperation {
+                    provider_request_id: Some("request-artifact-reconciliation".into()),
+                    provider_operation_id: "operation-artifact-reconciliation".into(),
+                    polling_host: "api.us.bfl.ai".into(),
+                    polling_recovery: Some(PollingRecoveryContext {
+                        schema_version: 1,
+                        policy_version: "bfl-polling-origin-v2".into(),
+                        scheme: Some("https".into()),
+                        normalized_host: Some("api.us.bfl.ai".into()),
+                        explicit_port: None,
+                        endpoint_shape: "v1/get_result".into(),
+                        query_keys: vec!["id".into()],
+                        url_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                        validation_reason: None,
+                    }),
+                    deadline_unix_ms: 1_788_000_000_000,
+                },
+                "2026-09-03T21:00:04Z",
+            )
+            .unwrap();
+        fixture
+            .repository
+            .complete_provider_attempt(
+                &attempt.provider_attempt_id,
+                &AttemptResult {
+                    outcome: "succeeded".into(),
+                    completed_at: "2026-09-03T21:00:05Z".into(),
+                    usage: serde_json::to_value(NormalizedUsage {
+                        images: Some(1),
+                        input_tokens: None,
+                        output_tokens: None,
+                    })
+                    .unwrap(),
+                    usage_schema_version: 1,
+                    actual_vendor_cost: Some(ActualVendorCost::new(3, 2, "USD").unwrap()),
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_request_id: Some("request-artifact-reconciliation".into()),
+                    provider_operation_id: Some("operation-artifact-reconciliation".into()),
+                },
+            )
+            .unwrap();
+        let executing = fixture
+            .repository
+            .get_execution(&created.execution_id)
+            .unwrap();
+        let held = fixture
+            .repository
+            .update_execution(
+                &executing.execution_id,
+                executing.version,
+                &ExecutionUpdate {
+                    status: "reconciliation_required".into(),
+                    outcome: Some("ambiguous".into()),
+                    started_at: None,
+                    completed_at: None,
+                    failure_code: Some("artifact_persistence_failed".into()),
+                    failure_message_redacted: None,
+                    provider_outcome: Some(LifecycleOutcome::Succeeded),
+                    artifact_outcome: Some(LifecycleOutcome::Failed),
+                    settlement_outcome: None,
+                },
+                "2026-09-03T21:00:06Z",
+            )
+            .unwrap();
+
+        let response = execution_response(
+            &fixture.repository,
+            held,
+            V1_SCHEMA_VERSION,
+            "2026-09-03T21:00:06Z",
+        )
+        .unwrap();
+        assert_eq!(response.status, ExecutionStatus::ReconciliationRequired);
+        assert!(response.recovery.is_none());
+    }
+
+    #[test]
     fn replay_with_gongbu_managed_claim_matches_after_claim_is_recorded() {
         let fixture = fixture();
         let submitted = request("managed-claim-replay");
@@ -2549,27 +2840,15 @@ mod tests {
     }
 
     #[test]
-    fn v1_historical_envelope_translates_and_alias_mismatch_has_no_side_effects() {
+    fn v1_create_route_is_retired_without_side_effects() {
         let fixture = fixture();
         let legacy = legacy_request("legacy-token");
-        assert_eq!(call_create_v1(&fixture, &legacy).status, 200);
-        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
-        let schedules_before = fixture.scheduler.0.lock().unwrap().len();
-
-        let mut unequal = legacy_request("unequal-token");
-        unequal["hubu_authorization_id"] = json!("different-token");
-        let rejected = call_create_v1(&fixture, &unequal);
-        assert_eq!(rejected.status, 400);
-        let error: ErrorResponse = serde_json::from_slice(&rejected.body).unwrap();
-        assert_eq!(error.schema_version, 1);
-        assert_eq!(error.error.code, "legacy_token_alias_mismatch");
-        assert!(!error.error.message.contains("unequal-token"));
-        assert!(!error.error.message.contains("different-token"));
-        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), schedules_before);
+        assert_eq!(call_create_v1(&fixture, &legacy).status, 404);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
         assert!(fixture
             .repository
-            .get_execution_by_hubu_token("account-a", "unequal-token")
+            .get_execution_by_hubu_token("account-a", "legacy-token")
             .is_err());
     }
 
@@ -2591,7 +2870,7 @@ mod tests {
             let token = format!("legacy-{name}-mismatch");
             let mut request = legacy_request(&token);
             *request.pointer_mut(pointer).unwrap() = value;
-            assert_eq!(call_create_v1(&fixture, &request).status, 400, "{name}");
+            assert_eq!(call_create_v1(&fixture, &request).status, 404, "{name}");
             assert!(fixture
                 .repository
                 .get_execution_by_hubu_token("account-a", &token)
@@ -2711,43 +2990,10 @@ mod tests {
     }
 
     #[test]
-    fn historical_v1_envelope_replays_same_execution_after_restart() {
+    fn historical_v1_envelope_cannot_create_after_restart() {
         let fixture = fixture();
         let submitted = legacy_request("legacy-restart-token");
-        let created = execution(&call_create_v1(&fixture, &submitted));
-        let persisted = fixture
-            .repository
-            .get_execution(&created.execution_id)
-            .unwrap();
-        let preflighting = fixture
-            .repository
-            .update_execution(
-                &created.execution_id,
-                persisted.version,
-                &crate::execution::ExecutionUpdate {
-                    status: "preflighting".into(),
-                    outcome: None,
-                    started_at: None,
-                    completed_at: None,
-                    failure_code: None,
-                    failure_message_redacted: None,
-                    provider_outcome: None,
-                    artifact_outcome: None,
-                    settlement_outcome: None,
-                },
-                "2026-08-05T20:00:01Z",
-            )
-            .unwrap();
-        fixture
-            .repository
-            .set_claim(
-                &created.execution_id,
-                preflighting.version,
-                "persisted-claim",
-                "2026-08-05T20:00:02Z",
-            )
-            .unwrap();
-        let calls_before = fixture.resolver.calls.load(Ordering::SeqCst);
+        assert_eq!(call_create_v1(&fixture, &submitted).status, 404);
         let restarted_repository = Repository::open(
             fixture._root.path().join("gongbu.sqlite3"),
             crate::redaction::Redactor::default(),
@@ -2768,9 +3014,8 @@ mod tests {
             Some(&fixture.caller),
             &serde_json::to_vec(&submitted).unwrap(),
         );
-        assert_eq!(replay.status, 200);
-        assert_eq!(execution(&replay).execution_id, created.execution_id);
-        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), calls_before);
+        assert_eq!(replay.status, 404);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -2856,6 +3101,17 @@ mod tests {
             )
             .unwrap();
         let body=serde_json::to_vec(&json!({"schema_version":1,"action_id":"op-1","action":"reinspect","evidence":{"source":"operator"}})).unwrap();
+        fixture.scheduler.1.store(true, Ordering::SeqCst);
+        let unavailable = fixture.api.handle(
+            "POST",
+            &format!("/v1/executions/{}/reconciliation", created.execution_id),
+            Some(&fixture.caller),
+            &body,
+        );
+        assert_eq!(unavailable.status, 503);
+        assert_eq!(error(&unavailable).error.code, "not_ready");
+
+        fixture.scheduler.1.store(false, Ordering::SeqCst);
         assert_eq!(
             fixture
                 .api
@@ -2946,7 +3202,7 @@ mod tests {
         let fixture = fixture();
         let token = "unavailable-target";
         let mut unavailable = request(token);
-        unavailable["workload_type"] = json!("text_generation");
+        unavailable["target_id"] = json!(format!("gongbu:target:v1:{}", "0".repeat(64)));
 
         let response = call_create(&fixture, &unavailable);
 
@@ -2959,12 +3215,7 @@ mod tests {
                     code: "invalid_request".into(),
                     message: "request validation failed".into(),
                     reason_code: Some("target_not_selectable".into()),
-                    fields: Some(
-                        ["workload_type", "provider", "adapter", "model"]
-                            .into_iter()
-                            .map(str::to_owned)
-                            .collect(),
-                    ),
+                    fields: Some(["target_id"].into_iter().map(str::to_owned).collect()),
                 },
             }
         );
@@ -3075,7 +3326,7 @@ mod tests {
             );
             assert_eq!(
                 snapshot.pricing_rule_id,
-                format!("flux-{preset}-flux-prices-v1")
+                format!("bfl-flux-2-pro-{preset}-2026-08-28-v1")
             );
         }
         assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 3);
@@ -3180,8 +3431,8 @@ mod tests {
         assert_eq!(after.normalized_input["options"]["width"], 1920);
         assert_eq!(after.normalized_input["options"]["height"], 1088);
         let snapshot: PricingSnapshot = serde_json::from_value(after.pricing_snapshot).unwrap();
-        assert_eq!(snapshot.catalog_version, "flux-prices-v1");
-        assert_eq!(snapshot.pricing_rule_id, "flux-2k-flux-prices-v1");
+        assert_eq!(snapshot.catalog_version, "bfl-flux-2-pro-usd-2026-08-28-v1");
+        assert_eq!(snapshot.pricing_rule_id, "bfl-flux-2-pro-2k-2026-08-28-v1");
         assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
     }
 

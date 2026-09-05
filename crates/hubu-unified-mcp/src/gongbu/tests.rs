@@ -21,7 +21,7 @@ use super::{
 };
 
 const EXECUTION: &str = r#"{"schema_version":2,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":"backend echoed op-1","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
-const PROVIDER_CATALOG: &str = r#"{"schema_version":1,"profiles":[{"contract":"hubu.flux-2-pro.text-to-image/v1","pricing_version":"bfl-flux-2-pro-usd-2026-08-28-v1","pricing_reviewed_on":"2026-08-28","target":{"workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro"},"capability":{"image_count":1,"output_formats":["png","jpeg"],"presets":[{"name":"1k","width":1024,"height":1024,"currency":"USD","rate_numerator_minor":3,"rate_denominator":1},{"name":"2k","width":1920,"height":1088,"currency":"USD","rate_numerator_minor":45,"rate_denominator":10},{"name":"4k","width":2048,"height":2048,"currency":"USD","rate_numerator_minor":75,"rate_denominator":10}]},"policies":{"generation_retries":0,"fallback":false,"poll":"bfl-async-status-poll-500ms-v1","artifact_delivery":"bfl-delivery-single-region-label-v1","recovery":"hubu-durable-async-resume-v1"},"readiness":{"configured":true,"credential_reference_present":true,"production_validated":true,"live_qualified":false,"live_qualification":"not_performed"}}]}"#;
+const PROVIDER_CATALOG: &str = r#"{"schema_version":1,"contracts":[{"contract":"hubu.flux-2-pro.text-to-image/v1","pricing_version":"bfl-flux-2-pro-usd-2026-08-28-v1","pricing_reviewed_on":"2026-08-28","target":{"workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro"},"capability":{"image_count":1,"output_formats":["png","jpeg"],"presets":[{"name":"1k","width":1024,"height":1024,"currency":"USD","rate_numerator_minor":3,"rate_denominator":1},{"name":"2k","width":1920,"height":1088,"currency":"USD","rate_numerator_minor":45,"rate_denominator":10},{"name":"4k","width":2048,"height":2048,"currency":"USD","rate_numerator_minor":75,"rate_denominator":10}]},"policies":{"generation_retries":0,"fallback":false,"poll":"bfl-async-status-poll-500ms-v1","artifact_delivery":"bfl-delivery-single-region-label-v1","recovery":"hubu-durable-async-resume-v1"},"readiness":{"configured":true,"credential_reference_present":true,"production_validated":true,"live_qualified":false,"live_qualification":"not_performed"}}]}"#;
 const TARGET_ID: &str =
     "gongbu:target:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -81,7 +81,7 @@ fn client(endpoint: &str, token: &str) -> BackendClient {
 }
 
 fn create_arguments() -> Value {
-    json!({"schema_version":2,"spend_auth_token_id":"hubu-token-1","input":{"prompt":"circle","image_count":1},"input_schema_version":1,"workload_type":"image_generation","provider":"example","adapter":"fixture","model":"v1"})
+    json!({"schema_version":2,"spend_auth_token_id":"hubu-token-1","input":{"prompt":"circle","image_count":1},"input_schema_version":1,"target_id":TARGET_ID})
 }
 
 fn continuation() -> GongbuContinuation {
@@ -115,9 +115,9 @@ fn provider_catalog_routes_read_only_and_returns_only_the_validated_contract() {
     let projected: Value =
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(projected["schema_version"], 1);
-    assert_eq!(projected["profiles"][0]["target"]["provider"], "flux");
+    assert_eq!(projected["contracts"][0]["target"]["provider"], "flux");
     assert_eq!(
-        projected["profiles"][0]["capability"]["presets"][1],
+        projected["contracts"][0]["capability"]["presets"][1],
         json!({
             "name": "2k",
             "width": 1920,
@@ -128,7 +128,7 @@ fn provider_catalog_routes_read_only_and_returns_only_the_validated_contract() {
         })
     );
     assert_eq!(
-        projected["profiles"][0]["readiness"]["live_qualified"],
+        projected["contracts"][0]["readiness"]["live_qualified"],
         false
     );
     let requests = requests.lock().unwrap();
@@ -140,29 +140,19 @@ fn provider_catalog_routes_read_only_and_returns_only_the_validated_contract() {
 }
 
 #[test]
-fn create_schema_makes_target_id_and_raw_tuple_strictly_exclusive() {
+fn create_schema_requires_only_an_opaque_target_id() {
     let create = tool_definitions()
         .into_iter()
         .find(|tool| tool["name"] == "gongbu_create_execution")
         .unwrap();
-    assert_eq!(
-        create["inputSchema"]["oneOf"],
-        json!([
-            {
-                "required":["target_id"],
-                "not":{"anyOf":[
-                    {"required":["workload_type"]},
-                    {"required":["provider"]},
-                    {"required":["adapter"]},
-                    {"required":["model"]}
-                ]}
-            },
-            {
-                "required":["workload_type","provider","adapter","model"],
-                "not":{"required":["target_id"]}
-            }
-        ])
-    );
+    assert!(create["inputSchema"].get("oneOf").is_none());
+    assert!(create["inputSchema"]["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("target_id")));
+    for field in ["workload_type", "provider", "adapter", "model"] {
+        assert!(create["inputSchema"]["properties"].get(field).is_none());
+    }
 }
 
 #[test]
@@ -213,7 +203,7 @@ fn provider_catalog_rejects_arguments_and_unsanitized_responses() {
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
     ));
 
-    let unsanitized = r#"{"schema_version":1,"profiles":[],"credential":"secret-canary"}"#;
+    let unsanitized = r#"{"schema_version":1,"contracts":[],"credential":"secret-canary"}"#;
     let (endpoint, _) = mock_server(vec![("200 OK", "application/json", unsanitized)]);
     let result = call_tool(
         &client(&endpoint, "secret"),
@@ -247,21 +237,76 @@ fn selectable_target_catalog_rejects_unapproved_backend_fields() {
 fn provider_catalog_rejects_contract_pricing_policy_and_readiness_drift() {
     let exact: Value = serde_json::from_str(PROVIDER_CATALOG).unwrap();
     for (pointer, changed) in [
-        ("/profiles/0/target/model", json!("flux-2-pro-preview")),
+        ("/contracts/0/target/model", json!("flux-2-pro-preview")),
         (
-            "/profiles/0/capability/presets/1/rate_numerator_minor",
+            "/contracts/0/capability/presets/1/rate_numerator_minor",
             json!(46),
         ),
         (
-            "/profiles/0/policies/poll",
+            "/contracts/0/policies/poll",
             json!("operator-selected-poll-policy"),
         ),
-        ("/profiles/0/readiness/live_qualified", json!(true)),
+        (
+            "/contracts/0/readiness/credential_reference_present",
+            json!(false),
+        ),
+        ("/contracts/0/readiness/live_qualified", json!(true)),
     ] {
         let mut mutated = exact.clone();
         *mutated.pointer_mut(pointer).unwrap() = changed;
         let response: ProviderCatalogResponse = serde_json::from_value(mutated).unwrap();
         assert_eq!(response.validate().unwrap_err().code(), "invalid_response");
+    }
+}
+
+#[test]
+fn provider_catalog_accepts_order_independent_exact_subsets_and_rejects_bad_sets() {
+    let flux = serde_json::from_str::<Value>(PROVIDER_CATALOG).unwrap()["contracts"][0].clone();
+    let gemini = json!({
+        "contract":"hubu.gemini-3.1-flash-lite-image.text-to-image/v1",
+        "pricing_version":"google-gemini-3.1-flash-lite-image-usd-2026-09-01-v1",
+        "pricing_reviewed_on":"2026-09-01",
+        "target":{"workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image"},
+        "capability":{"image_count":1,"output_formats":["png","jpeg"],"presets":[{"name":"1k","width":1024,"height":1024,"currency":"USD","rate_numerator_minor":336,"rate_denominator":100}]},
+        "policies":{"generation_retries":0,"fallback":false,"poll":"synchronous-response-v1","artifact_delivery":"google-inline-image-v1","recovery":"hubu-durable-synchronous-replay-v1"},
+        "readiness":{"configured":true,"credential_reference_present":true,"production_validated":true,"live_qualified":false,"live_qualification":"not_performed"}
+    });
+    let gemini_full = json!({
+        "contract":"hubu.gemini-3.1-flash-image.text-to-image/v1",
+        "pricing_version":"google-gemini-3.1-flash-image-usd-2026-09-01-v1",
+        "pricing_reviewed_on":"2026-09-01",
+        "target":{"workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-image"},
+        "capability":{"image_count":1,"output_formats":["png","jpeg"],"presets":[
+            {"name":"1k","width":1024,"height":1024,"currency":"USD","rate_numerator_minor":67,"rate_denominator":10},
+            {"name":"2k","width":2048,"height":2048,"currency":"USD","rate_numerator_minor":101,"rate_denominator":10},
+            {"name":"4k","width":4096,"height":4096,"currency":"USD","rate_numerator_minor":151,"rate_denominator":10}
+        ]},
+        "policies":{"generation_retries":0,"fallback":false,"poll":"synchronous-response-v1","artifact_delivery":"google-inline-image-v1","recovery":"hubu-durable-synchronous-replay-v1"},
+        "readiness":{"configured":true,"credential_reference_present":true,"production_validated":true,"live_qualified":false,"live_qualification":"not_performed"}
+    });
+
+    for contracts in [
+        vec![gemini.clone()],
+        vec![gemini_full.clone()],
+        vec![flux.clone()],
+        vec![gemini.clone(), gemini_full.clone()],
+        vec![gemini.clone(), gemini_full.clone(), flux.clone()],
+        vec![flux.clone(), gemini_full.clone(), gemini.clone()],
+        vec![flux.clone(), gemini.clone()],
+    ] {
+        let response: ProviderCatalogResponse =
+            serde_json::from_value(json!({"schema_version":1,"contracts":contracts})).unwrap();
+        response.validate().unwrap();
+    }
+
+    for contracts in [
+        vec![gemini.clone(), gemini],
+        vec![json!({"contract":"operator.unknown/v1"})],
+    ] {
+        let parsed = serde_json::from_value::<ProviderCatalogResponse>(
+            json!({"schema_version":1,"contracts":contracts}),
+        );
+        assert!(parsed.is_err() || parsed.unwrap().validate().is_err());
     }
 }
 
@@ -590,7 +635,7 @@ fn projected_api_error_with_context(body: &str, context: ApiErrorContext) -> Val
 #[test]
 fn validation_diagnostics_project_only_allowlisted_reason_and_fields() {
     let target = projected_api_error(
-        r#"{"schema_version":2,"error":{"code":"invalid_request","message":"target secret-canary","reason_code":"target_not_selectable","fields":["workload_type","provider","adapter","model"],"private_detail":"secret-canary"}}"#,
+        r#"{"schema_version":2,"error":{"code":"invalid_request","message":"target secret-canary","reason_code":"target_not_selectable","fields":["target_id"],"private_detail":"secret-canary"}}"#,
     );
     assert_eq!(
         target,
@@ -600,7 +645,7 @@ fn validation_diagnostics_project_only_allowlisted_reason_and_fields() {
                 "code": "invalid_request",
                 "message": "request validation failed",
                 "reason_code": "target_not_selectable",
-                "fields": ["workload_type", "provider", "adapter", "model"]
+                "fields": ["target_id"]
             }
         })
     );

@@ -37,6 +37,7 @@ pub enum DependencyProbeOutcome {
 /// Static admission routes that may emit a bounded rejection diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionRoute {
+    #[cfg(test)]
     CreateExecutionV1,
     CreateExecutionV2,
 }
@@ -44,6 +45,7 @@ pub(crate) enum AdmissionRoute {
 impl AdmissionRoute {
     fn version(self) -> u32 {
         match self {
+            #[cfg(test)]
             Self::CreateExecutionV1 => 1,
             Self::CreateExecutionV2 => 2,
         }
@@ -65,24 +67,13 @@ enum AdmissionReasonCode {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 enum AdmissionField {
-    #[serde(rename = "workload_type")]
-    WorkloadType,
-    #[serde(rename = "provider")]
-    Provider,
-    #[serde(rename = "adapter")]
-    Adapter,
-    #[serde(rename = "model")]
-    Model,
+    #[serde(rename = "target_id")]
+    TargetId,
     #[serde(rename = "input.image_size")]
     InputImageSize,
 }
 
-const TARGET_FIELDS: &[AdmissionField] = &[
-    AdmissionField::WorkloadType,
-    AdmissionField::Provider,
-    AdmissionField::Adapter,
-    AdmissionField::Model,
-];
+const TARGET_FIELDS: &[AdmissionField] = &[AdmissionField::TargetId];
 const PRICING_SELECTOR_FIELDS: &[AdmissionField] = &[AdmissionField::InputImageSize];
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +148,19 @@ struct DependencyProbeEvent<'a> {
     grpc_code: Option<&'a str>,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct PollingOriginRejectionEvent<'a> {
+    event: &'static str,
+    failure_code: &'static str,
+    provider: &'a str,
+    policy_version: &'a str,
+    execution_id: &'a str,
+    provider_attempt_id: &'a str,
+    provider_request_id: Option<&'a str>,
+    provider_operation_id: &'a str,
+    url_fingerprint: &'a str,
+}
+
 /// Emit one stable JSON lifecycle event without request-scoped or secret data.
 pub fn log(reason: LifecycleReason) {
     let event = LifecycleEvent {
@@ -188,6 +192,36 @@ pub fn log_dependency_probe(
         "{}",
         serde_json::to_string(&event)
             .expect("the bounded Gongbu dependency event is always serializable")
+    );
+}
+
+/// Emit sanitized, durable-keyed evidence for a rejected post-submit polling
+/// origin. Callers pass only validated identifiers and the SHA-256 URL
+/// fingerprint; the raw URL and its query values never reach the log.
+pub(crate) fn log_polling_origin_rejection(
+    provider: &str,
+    execution_id: &str,
+    provider_attempt_id: &str,
+    provider_request_id: Option<&str>,
+    provider_operation_id: &str,
+    policy_version: &str,
+    url_fingerprint: &str,
+) {
+    let event = PollingOriginRejectionEvent {
+        event: "gongbu_polling_origin_rejected",
+        failure_code: "polling_origin_rejected",
+        provider,
+        policy_version,
+        execution_id,
+        provider_attempt_id,
+        provider_request_id,
+        provider_operation_id,
+        url_fingerprint,
+    };
+    eprintln!(
+        "{}",
+        serde_json::to_string(&event)
+            .expect("validated polling rejection evidence is always serializable")
     );
 }
 
@@ -292,7 +326,7 @@ mod tests {
         let event = admission_rejection_event(
             AdmissionRoute::CreateExecutionV2,
             400,
-            br#"{"schema_version":2,"error":{"code":"invalid_request","message":"request validation failed","reason_code":"target_not_selectable","fields":["workload_type","provider","adapter","model"]}}"#,
+            br#"{"schema_version":2,"error":{"code":"invalid_request","message":"request validation failed","reason_code":"target_not_selectable","fields":["target_id"]}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -304,7 +338,7 @@ mod tests {
                 "status": 400,
                 "code": "invalid_request",
                 "reason_code": "target_not_selectable",
-                "fields": ["workload_type", "provider", "adapter", "model"]
+                "fields": ["target_id"]
             })
         );
 
@@ -356,7 +390,7 @@ mod tests {
         let target = admission_rejection_event(
             AdmissionRoute::CreateExecutionV2,
             400,
-            br#"{"schema_version":2,"error":{"code":"invalid_request","message":"generic","reason_code":"target_not_selectable","fields":["workload_type","provider","adapter","model"]}}"#,
+            br#"{"schema_version":2,"error":{"code":"invalid_request","message":"generic","reason_code":"target_not_selectable","fields":["target_id"]}}"#,
         )
         .unwrap();
         let selector = admission_rejection_event(
@@ -368,7 +402,7 @@ mod tests {
         let v1_target = admission_rejection_event(
             AdmissionRoute::CreateExecutionV1,
             400,
-            br#"{"schema_version":1,"error":{"code":"invalid_request","message":"generic","reason_code":"target_not_selectable","fields":["workload_type","provider","adapter","model"]}}"#,
+            br#"{"schema_version":1,"error":{"code":"invalid_request","message":"generic","reason_code":"target_not_selectable","fields":["target_id"]}}"#,
         )
         .unwrap();
 

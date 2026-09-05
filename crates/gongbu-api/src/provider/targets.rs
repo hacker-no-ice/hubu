@@ -15,7 +15,7 @@ use thiserror::Error;
 
 const PROVIDER_CONFIG_ENV: &str = "GONGBU_PROVIDER_CONFIG";
 const CURRENT_SCHEMA_VERSION: u32 = 3;
-const BFL_API_HOSTS: &[&str] = &["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"];
+const BFL_SUBMISSION_HOSTS: &[&str] = &["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"];
 pub const LEGACY_UNRESOLVED_DIGEST: &str = "legacy-unresolved";
 
 #[derive(Debug, Error)]
@@ -60,10 +60,10 @@ pub enum Error {
     NotConfigured,
     #[error("persisted provider configuration digest does not match")]
     DigestMismatch,
-    #[error("supported provider profile binding is invalid")]
-    InvalidSupportedProfile,
-    #[error("duplicate supported provider profile binding")]
-    DuplicateSupportedProfile,
+    #[error("provider contract binding is invalid")]
+    InvalidProviderContract,
+    #[error("duplicate provider contract binding")]
+    DuplicateProviderContract,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -249,12 +249,12 @@ impl ProviderConfigVersion {
 pub struct ProviderTargetConfig {
     revisions: BTreeMap<(TargetKey, String), ProviderConfigVersion>,
     active: BTreeMap<TargetKey, String>,
-    supported_profiles: Vec<SupportedProfileBinding>,
+    contract_bindings: Vec<ProviderContractBinding>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct SupportedProfileBinding {
+pub struct ProviderContractBinding {
     pub contract: String,
     pub pricing_version: String,
     pub poll_policy: String,
@@ -269,7 +269,7 @@ impl ProviderTargetConfig {
         Self {
             revisions: BTreeMap::new(),
             active: BTreeMap::new(),
-            supported_profiles: Vec::new(),
+            contract_bindings: Vec::new(),
         }
     }
 
@@ -294,8 +294,8 @@ impl ProviderTargetConfig {
     pub fn revisions(&self) -> impl Iterator<Item = &ProviderConfigVersion> {
         self.revisions.values()
     }
-    pub fn supported_profiles(&self) -> &[SupportedProfileBinding] {
-        &self.supported_profiles
+    pub fn contract_bindings(&self) -> &[ProviderContractBinding] {
+        &self.contract_bindings
     }
     pub fn resolve(
         &self,
@@ -377,7 +377,7 @@ struct RawCatalog {
     #[serde(default = "legacy_schema_version")]
     schema_version: u32,
     #[serde(default)]
-    supported_profiles: Vec<SupportedProfileBinding>,
+    contract_bindings: Vec<ProviderContractBinding>,
     provider_configs: Vec<RawRevision>,
 }
 fn legacy_schema_version() -> u32 {
@@ -416,33 +416,33 @@ impl TryFrom<RawCatalog> for ProviderTargetConfig {
         if !matches!(raw.schema_version, 1 | 2 | CURRENT_SCHEMA_VERSION) {
             return Err(Error::UnsupportedSchema);
         }
-        if raw.schema_version < 3 && !raw.supported_profiles.is_empty() {
+        if raw.schema_version < 3 && !raw.contract_bindings.is_empty() {
             return Err(Error::UnsupportedSchema);
         }
         if raw.provider_configs.is_empty() {
             return Err(Error::Empty);
         }
-        let mut profile_contracts = BTreeSet::new();
-        for profile in &raw.supported_profiles {
+        let mut bound_contracts = BTreeSet::new();
+        for binding in &raw.contract_bindings {
             if [
-                profile.contract.as_str(),
-                profile.pricing_version.as_str(),
-                profile.poll_policy.as_str(),
-                profile.artifact_delivery_policy.as_str(),
-                profile.recovery_policy.as_str(),
+                binding.contract.as_str(),
+                binding.pricing_version.as_str(),
+                binding.poll_policy.as_str(),
+                binding.artifact_delivery_policy.as_str(),
+                binding.recovery_policy.as_str(),
             ]
             .iter()
             .any(|value| value.is_empty() || value.trim() != *value || value.len() > 255)
-                || !profile_contracts.insert(profile.contract.clone())
+                || !bound_contracts.insert(binding.contract.clone())
             {
-                return Err(if profile_contracts.contains(&profile.contract) {
-                    Error::DuplicateSupportedProfile
+                return Err(if bound_contracts.contains(&binding.contract) {
+                    Error::DuplicateProviderContract
                 } else {
-                    Error::InvalidSupportedProfile
+                    Error::InvalidProviderContract
                 });
             }
         }
-        let supported_profiles = raw.supported_profiles;
+        let contract_bindings = raw.contract_bindings;
         let mut revisions = BTreeMap::new();
         let mut active = BTreeMap::new();
         let mut version_digests = BTreeMap::<String, String>::new();
@@ -470,7 +470,7 @@ impl TryFrom<RawCatalog> for ProviderTargetConfig {
         Ok(Self {
             revisions,
             active,
-            supported_profiles,
+            contract_bindings,
         })
     }
 }
@@ -506,12 +506,12 @@ impl Serialize for ProviderTargetConfig {
             })
             .collect();
         RawCatalog {
-            schema_version: if self.supported_profiles.is_empty() {
+            schema_version: if self.contract_bindings.is_empty() {
                 2
             } else {
                 CURRENT_SCHEMA_VERSION
             },
-            supported_profiles: self.supported_profiles.clone(),
+            contract_bindings: self.contract_bindings.clone(),
             provider_configs,
         }
         .serialize(serializer)
@@ -606,17 +606,14 @@ fn validate_settings(key: &TargetKey, settings: &AdapterSettings) -> Result<()> 
                 &c.headers,
                 &["authorization", "x-key"],
             )?;
-            if c.poll_interval_ms == 0
+            if c.api_version != "v1"
+                || c.poll_interval_ms == 0
                 || c.poll_interval_ms > c.timeout_ms
                 || url_has_explicit_port(&c.endpoint)
                 || Url::parse(&c.endpoint)
                     .ok()
-                    .is_none_or(|url| !valid_bfl_api_host(url.host_str()))
-                || !valid_artifact_hosts(&c.approved_artifact_hosts, false)
-                || !c
-                    .approved_artifact_hosts
-                    .iter()
-                    .all(|host| valid_bfl_delivery_host(host))
+                    .is_none_or(|url| !valid_bfl_submission_host(url.host_str()))
+                || !c.approved_artifact_hosts.is_empty()
             {
                 return Err(Error::InvalidTransportSettings);
             }
@@ -744,8 +741,20 @@ pub(crate) fn valid_artifact_hosts(hosts: &[String], required: bool) -> bool {
     })
 }
 
-pub(crate) fn valid_bfl_api_host(host: Option<&str>) -> bool {
-    host.is_some_and(|host| BFL_API_HOSTS.contains(&host))
+pub(crate) fn valid_bfl_submission_host(host: Option<&str>) -> bool {
+    host.is_some_and(|host| BFL_SUBMISSION_HOSTS.contains(&host))
+}
+
+pub(crate) fn valid_bfl_polling_host(host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    if host == "api.bfl.ai" {
+        return true;
+    }
+    host.strip_prefix("api.")
+        .and_then(|value| value.strip_suffix(".bfl.ai"))
+        .is_some_and(valid_bfl_region_label)
 }
 
 /// FLUX artifacts use BFL's fixed provider-specific delivery family, not a
@@ -757,9 +766,14 @@ pub(crate) fn valid_bfl_delivery_host(host: &str) -> bool {
     else {
         return false;
     };
+    valid_bfl_region_label(region)
+}
+
+fn valid_bfl_region_label(region: &str) -> bool {
     !region.is_empty()
         && region.len() <= 63
         && !region.contains('.')
+        && !region.starts_with("xn--")
         && region
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
@@ -824,6 +838,19 @@ mod tests {
 
     fn catalog(json: &str) -> ProviderTargetConfig {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn legacy_provider_binding_field_is_rejected() {
+        let legacy_field = concat!("supported_", "profiles");
+        let source = format!(
+            r#"{{"schema_version":3,"{legacy_field}":[],"provider_configs":[{{"provider_config_version":"v1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"gongbu.example","secret_account":"local","settings":{{"type":"fixture"}}}}]}}"#,
+        );
+        let result = serde_json::from_str::<ProviderTargetConfig>(&source);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains(&format!("unknown field `{legacy_field}`")));
     }
 
     #[test]
@@ -987,6 +1014,45 @@ mod tests {
                 }}
             }]})
         };
+        // Submission endpoints remain literal routers. Provider-returned
+        // polling and delivery URLs use separate one-region-label families.
+        assert!(serde_json::from_value::<ProviderTargetConfig>(base()).is_ok());
+        for host in [
+            "api.bfl.ai",
+            "api.eu.bfl.ai",
+            "api.us.bfl.ai",
+            "api.us1.bfl.ai",
+            "api.us7.bfl.ai",
+            "api.eu-2.bfl.ai",
+        ] {
+            assert!(valid_bfl_polling_host(Some(host)), "{host}");
+        }
+        for host in [
+            "api.bfl.ai.evil.example",
+            "evil.api.us7.bfl.ai",
+            "api.us7.bfl.ai.",
+            "api.us7-bfl.ai",
+            "api.us.east.bfl.ai",
+            "api.-us7.bfl.ai",
+            "api.us7-.bfl.ai",
+            "api.xn--us7-9za.bfl.ai",
+            "delivery.us7.bfl.ai",
+        ] {
+            assert!(!valid_bfl_polling_host(Some(host)), "{host}");
+        }
+        assert!(!valid_bfl_polling_host(None));
+        for host in ["delivery.us2.bfl.ai", "delivery.us7.bfl.ai"] {
+            assert!(valid_bfl_delivery_host(host), "{host}");
+        }
+        for host in [
+            "delivery.us2.bfl.ai.evil.example",
+            "evil.delivery.us2.bfl.ai",
+            "delivery.us2-bfl.ai",
+            "delivery.us2.bfl.ai.",
+            "delivery.xn--us7-9za.bfl.ai",
+        ] {
+            assert!(!valid_bfl_delivery_host(host), "{host}");
+        }
         for endpoint in [
             "https://api.bfl.ai",
             "https://api.eu.bfl.ai",
@@ -1000,6 +1066,7 @@ mod tests {
         for endpoint in [
             "https://api.bfl.ai:443",
             "https://api.us1.bfl.ai",
+            "https://api.us7.bfl.ai",
             "https://api.bfl.ai.evil.example",
             "https://evil.api.bfl.ai",
         ] {
@@ -1010,13 +1077,9 @@ mod tests {
         }
         for hosts in [
             serde_json::json!(["delivery.us.bfl.ai"]),
+            serde_json::json!(["delivery.us2.bfl.ai"]),
+            serde_json::json!(["delivery.us7.bfl.ai"]),
             serde_json::json!(["delivery.eu-2.bfl.ai"]),
-        ] {
-            let mut value = base();
-            value["provider_configs"][0]["settings"]["config"]["approved_artifact_hosts"] = hosts;
-            assert!(serde_json::from_value::<ProviderTargetConfig>(value).is_ok());
-        }
-        for hosts in [
             serde_json::json!(["cdn.bfl.ai"]),
             serde_json::json!(["delivery.us.east.bfl.ai"]),
             serde_json::json!(["delivery.us.bfl.ai.evil.example"]),

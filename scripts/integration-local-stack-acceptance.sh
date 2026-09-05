@@ -538,10 +538,7 @@ def governed_arguments(label):
                 "image_size": "2k",
             },
             "input_schema_version": 1,
-            "workload_type": "default",
-            "provider": "example",
-            "adapter": "fixture",
-            "model": "image-v1",
+            "target_id": "gongbu:target:v1:05934e1fe9c59160d3c148fdc465ea37fb3ec3110ccd8456c10ed467cb56c9d9",
         },
     }
 
@@ -580,6 +577,8 @@ try:
 
     expected_tools = {
         "hubu_budget_history",
+        "hubu_feedback_guidance",
+        "hubu_prepare_feedback",
         "gongbu_get_provider_catalog",
         "gongbu_list_execution_targets",
         "gongbu_get_redaction_attestation",
@@ -591,7 +590,7 @@ try:
     tools = request("tools/list").get("tools", [])
     tool_names = {tool.get("name") for tool in tools}
     if (
-        len(tool_names) != 42
+        len(tool_names) != 44
         or not expected_tools.issubset(tool_names)
         or "hubu_replace_budget" in tool_names
     ):
@@ -730,7 +729,7 @@ authorize_agent() {
 
 execution_body() {
   jq -n --arg token "$1" --arg label "$2" \
-    '{schema_version:2,spend_auth_token_id:$token,input:{prompt:("acceptance canary " + $label),image_count:1,image_size:"1k"},input_schema_version:1,workload_type:"default",provider:"example",adapter:"fixture",model:"image-v1"}'
+    '{schema_version:2,spend_auth_token_id:$token,input:{prompt:("acceptance canary " + $label),image_count:1,image_size:"1k"},input_schema_version:1,target_id:"gongbu:target:v1:05934e1fe9c59160d3c148fdc465ea37fb3ec3110ccd8456c10ed467cb56c9d9"}'
 }
 
 submit_execution() {

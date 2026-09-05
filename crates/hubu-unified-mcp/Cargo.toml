@@ -1,6 +1,6 @@
 [package]
 name = "hubu-unified-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Unified Model Context Protocol router for Hubu and Gongbu"
 edition.workspace = true
 homepage.workspace = true
@@ -17,6 +17,7 @@ name = "hubu-unified-mcp"
 path = "src/main.rs"
 
 [dependencies]
+hubu-feedback.workspace = true
 base64.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

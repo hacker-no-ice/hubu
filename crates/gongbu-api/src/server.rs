@@ -560,7 +560,11 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
                     .map_err(|_| invalid("provider credential reference is invalid"))?,
             )
             .map_err(|_| invalid("an enabled provider credential is unavailable"))?;
-        redaction_values.push(secret.expose().to_vec());
+        register_provider_secret_for_persistence_guard(
+            config.providers.mode,
+            &mut redaction_values,
+            &secret,
+        );
     }
     providers.mark_credential_references_present();
     let limits = config.artifacts.limits();
@@ -662,6 +666,25 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         crate::lifecycle::log(crate::lifecycle::LifecycleReason::WorkerUnavailable);
     }
     result.map(|_| ())
+}
+
+fn register_provider_secret_for_persistence_guard(
+    mode: ProviderMode,
+    redaction_values: &mut Vec<Vec<u8>>,
+    secret: &crate::secrets::ProviderSecret,
+) {
+    // SandboxFixtureSecrets returns public, built-in adapter material only to
+    // satisfy the common provider interface. It grants no external authority,
+    // and registering it as confidential would reject harmless sandbox inputs
+    // and metadata that contain the fixture token. Sandbox target validation
+    // separately guarantees that live adapters cannot use this exemption.
+    match mode {
+        ProviderMode::Live => redaction_values.push(secret.expose().to_vec()),
+        ProviderMode::Sandbox => {}
+        ProviderMode::Disabled => {
+            unreachable!("disabled provider mode has no enabled provider targets")
+        }
+    }
 }
 
 struct StartupLifecycleGuard {
@@ -1307,6 +1330,38 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_fixture_material_is_not_registered_as_a_persistence_secret() {
+        let reference =
+            SecretReference::new("hubu.sandbox.fixture", "deterministic-provider").unwrap();
+        let fixture = SandboxFixtureSecrets.resolve(&reference).unwrap();
+        let protected_service_secrets = [
+            b"sandbox-caller-capability-181".to_vec(),
+            b"sandbox-hubu-capability-181".to_vec(),
+        ];
+
+        let mut sandbox_values = protected_service_secrets.to_vec();
+        register_provider_secret_for_persistence_guard(
+            ProviderMode::Sandbox,
+            &mut sandbox_values,
+            &fixture,
+        );
+        let sandbox_guard = Redactor::new(sandbox_values.iter().map(Vec::as_slice));
+        assert!(!sandbox_guard.contains_registered_secret("hubu-sandbox-fixture-v1"));
+        assert!(!sandbox_guard.contains_registered_secret("prompt mentions sandbox-fixture"));
+        assert!(sandbox_guard.contains_registered_secret("sandbox-caller-capability-181"));
+        assert!(sandbox_guard.contains_registered_secret("sandbox-hubu-capability-181"));
+
+        let mut live_values = protected_service_secrets.to_vec();
+        register_provider_secret_for_persistence_guard(
+            ProviderMode::Live,
+            &mut live_values,
+            &fixture,
+        );
+        let live_guard = Redactor::new(live_values.iter().map(Vec::as_slice));
+        assert!(live_guard.contains_registered_secret("hubu-sandbox-fixture-v1"));
+    }
+
+    #[test]
     fn runtime_validator_rejects_unbound_live_catalog_without_side_effects() {
         let root = tempdir().unwrap();
         let value = config(root.path());
@@ -1321,52 +1376,39 @@ mod tests {
     fn runtime_validator_accepts_isolated_gemini_and_supported_flux_without_side_effects() {
         let root = tempdir().unwrap();
         let value = config(root.path());
-        let document: serde_json::Value =
-            serde_json::from_str(include_str!("../../../contracts/provider-profiles-v1.json"))
-                .unwrap();
-        let profile = &document["profiles"][0];
-        let policies = &profile["policies"];
-        let mut flux_target = profile["target"].clone();
-        flux_target["secret_service"] = serde_json::json!("operator.bfl");
-        flux_target["secret_account"] = serde_json::json!("flux");
+        let document: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let contracts = document["contracts"].as_array().unwrap();
+        let bindings = contracts.iter().map(|contract| {
+            let policies = &contract["policies"];
+            serde_json::json!({"contract":contract["contract"],"pricing_version":contract["pricing_version"],"poll_policy":policies["poll"],"artifact_delivery_policy":policies["artifact_delivery"],"recovery_policy":policies["recovery"],"generation_retries":policies["generation_retries"],"fallback":policies["fallback"]})
+        }).collect::<Vec<_>>();
+        let provider_configs = contracts
+            .iter()
+            .map(|contract| {
+                let mut target = contract["target"].clone();
+                let google = target["provider"] == "google";
+                target["secret_service"] = serde_json::json!(if google {
+                    "operator.google"
+                } else {
+                    "operator.bfl"
+                });
+                target["secret_account"] =
+                    serde_json::json!(if google { "gemini" } else { "flux" });
+                target
+            })
+            .collect::<Vec<_>>();
         let targets = serde_json::json!({
             "schema_version":3,
-            "supported_profiles":[{
-                "contract":profile["contract"],
-                "pricing_version":profile["pricing_version"],
-                "poll_policy":policies["poll"],
-                "artifact_delivery_policy":policies["artifact_delivery"],
-                "recovery_policy":policies["recovery"],
-                "generation_retries":policies["generation_retries"],
-                "fallback":policies["fallback"]
-            }],
-            "provider_configs":[
-                {
-                    "provider_config_version":"gemini-v1",
-                    "workload_type":"image_generation",
-                    "provider":"google",
-                    "adapter":"gemini_developer_image",
-                    "model":"gemini-image-v1",
-                    "secret_service":"operator.google",
-                    "secret_account":"gemini",
-                    "active":true,
-                    "execution_enabled":true,
-                    "settings":{"type":"gemini_developer_image","config":{
-                        "endpoint":"https://generativelanguage.googleapis.com",
-                        "api_version":"v1beta","timeout_ms":30000,
-                        "max_retries":0,"headers":{}
-                    }}
-                },
-                flux_target
-            ]
+            "contract_bindings":bindings,
+            "provider_configs":provider_configs
         });
-        let mut pricing_rules = profile["pricing_rules"].as_array().unwrap().clone();
-        pricing_rules.push(serde_json::json!({
-            "rule_id":"gemini-v1","provider":"google","model":"gemini-image-v1",
-            "currency":"USD","components":[{
-                "unit":"image","rate_numerator_minor":4,"rate_denominator":1
-            }]
-        }));
+        let pricing_rules = contracts
+            .iter()
+            .flat_map(|contract| contract["pricing_rules"].as_array().unwrap().clone())
+            .collect::<Vec<_>>();
         let pricing = serde_json::json!({
             "schema_version":2,
             "catalog_version":"operator-mixed-2026-08-28-v1",
@@ -1387,14 +1429,14 @@ mod tests {
 
         let validated = validate_runtime_inputs(&path).unwrap();
         let catalog = validated_provider_catalog(&validated).unwrap();
-        assert_eq!(catalog.supported_profiles().len(), 1);
-        assert_eq!(catalog.targets().revisions().count(), 2);
+        assert_eq!(catalog.provider_contracts().len(), 3);
+        assert_eq!(catalog.targets().revisions().count(), 3);
         assert!(
-            !catalog.supported_profiles()[0]
+            !catalog.provider_contracts()[0]
                 .readiness
                 .credential_reference_present
         );
-        assert!(!catalog.supported_profiles()[0].readiness.live_qualified);
+        assert!(!catalog.provider_contracts()[0].readiness.live_qualified);
         assert!(!root.path().join("state").exists());
         assert!(!root.path().join("artifacts").exists());
 
@@ -1433,19 +1475,25 @@ mod tests {
     fn managed_flux_invalid_reference_and_artifact_root_fail_before_runtime_state() {
         let root = tempdir().unwrap();
         let value = config(root.path());
-        let document: serde_json::Value =
-            serde_json::from_str(include_str!("../../../contracts/provider-profiles-v1.json"))
-                .unwrap();
-        let profile = &document["profiles"][0];
-        let policies = &profile["policies"];
-        let mut flux_target = profile["target"].clone();
+        let document: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let contract_definition = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["contract"] == "hubu.flux-2-pro.text-to-image/v1")
+            .unwrap();
+        let policies = &contract_definition["policies"];
+        let mut flux_target = contract_definition["target"].clone();
         flux_target["secret_service"] = serde_json::json!("gongbu.bfl.test");
         flux_target["secret_account"] = serde_json::json!("hub-172-fixture");
         let targets = serde_json::json!({
             "schema_version":3,
-            "supported_profiles":[{
-                "contract":profile["contract"],
-                "pricing_version":profile["pricing_version"],
+            "contract_bindings":[{
+                "contract":contract_definition["contract"],
+                "pricing_version":contract_definition["pricing_version"],
                 "poll_policy":policies["poll"],
                 "artifact_delivery_policy":policies["artifact_delivery"],
                 "recovery_policy":policies["recovery"],
@@ -1456,8 +1504,8 @@ mod tests {
         });
         let pricing = serde_json::json!({
             "schema_version":2,
-            "catalog_version":profile["pricing_version"],
-            "rules":profile["pricing_rules"]
+            "catalog_version":contract_definition["pricing_version"],
+            "rules":contract_definition["pricing_rules"]
         });
         fs::write(
             value.providers.pricing_catalog_path.as_ref().unwrap(),
