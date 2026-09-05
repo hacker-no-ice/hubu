@@ -533,7 +533,7 @@ const components = {
     ],
     links: [sharedLinks.feedback, sharedLinks.cli, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.stackLifecycle, sharedLinks.managedCredentialHandoff, sharedLinks.gongbuProviderContracts, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
-      { id: "commands", label: "Commands", sub: "init/admin/stack/catalog", x: 35, y: 95, w: 220, h: 92, tone: "human" },
+      { id: "commands", label: "Commands", sub: "init/admin/stack/feedback", x: 35, y: 95, w: 220, h: 92, tone: "human" },
       { id: "contract", label: "Provider contract source", sub: "FLUX contract + credential alias", x: 315, y: 70, w: 240, h: 92, tone: "data", path: "contracts/provider-contracts-v1.json" },
       { id: "doctor", label: "Source doctor", sub: "four independent readiness facts", x: 315, y: 220, w: 240, h: 92, tone: "core", path: "crates/hubu-cli/src/stack/doctor.rs" },
       { id: "render", label: "Immutable render", sub: "target + price + policies", x: 315, y: 370, w: 240, h: 92, tone: "core", path: "crates/hubu-cli/src/stack.rs" },
@@ -613,7 +613,7 @@ const components = {
     nodes: [
       { id: "agent", label: "Agent harness", sub: "one stdio connection", x: 30, y: 318, w: 210, h: 96, tone: "agent" },
       { id: "keyStore", label: "Scoped key store", sub: "operator-owned + private", x: 30, y: 566, w: 210, h: 96, tone: "data", path: "skills/generate-hubu-operation-key/scripts/operation_keys.py" },
-      { id: "tools", label: "Static router", sub: "42 tools; revision 7 + safe catalogs + attestation", x: 330, y: 92, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
+      { id: "tools", label: "Static router", sub: "44 tools; revision 8 + safe catalogs + attestation", x: 330, y: 92, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
       { id: "notifications", label: "Catalog monitor", sub: "deduped list_changed", x: 330, y: 262, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/notification.rs" },
       { id: "operationWorker", label: "Durable worker", sub: "safe replay + observe", x: 330, y: 422, w: 200, h: 96, tone: "executor", path: "crates/hubu-unified-mcp/src/operation_worker.rs" },
       { id: "capability", label: "Capability snapshot", sub: "isolated health + compatibility", x: 330, y: 578, w: 200, h: 96, tone: "core", path: "crates/hubu-unified-mcp/src/capability.rs" },
