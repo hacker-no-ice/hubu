@@ -1,8 +1,9 @@
 # Changelog
 
 This changelog records the key user-facing and operational changes in each
-stable Hubu release and versioned release candidate. It is intentionally
-curated rather than being a complete list of commits or pull requests.
+stable Hubu release. Candidate notes are folded into the corresponding stable
+entry. It is intentionally curated rather than being a complete list of commits
+or pull requests.
 
 <!--
 Future release template
@@ -24,13 +25,7 @@ Future release template
 
 ## Unreleased
 
-### Important fixes
-
-- Keep Gongbu live during runtime Temporal or Hubu degradation, withdraw and
-  automatically restore readiness, and preserve pending execution identity
-  across retryable scheduling failures.
-
-## v0.2.1-rc.1 — 2026-09-01
+## v0.2.1 — 2026-09-04
 
 ### Highlights
 
@@ -48,10 +43,15 @@ Future release template
   freeze capabilities, prices, retry and fallback policy, and transport and
   recovery behavior.
 - Added a reusable Hubu policy-authoring skill and versioned language reference.
+- Added complete, mode-specific stack configuration examples and an exact-tag,
+  source-SHA-verified macOS installation workflow for the four-binary cohort.
+- Added discoverable bug and idea reporting, private vulnerability reporting,
+  and offline feedback preparation through CLI and unified MCP. Reports expose
+  their destination and full content for review; preparation never submits them.
 
 ### Breaking or operational changes
 
-- Unified MCP routing advances to revision 4. Budget replacement surfaces are
+- Unified MCP routing advances to revision 8. Budget replacement surfaces are
   removed; use approval-gated `hubu_update_budget` and read-only
   `hubu_budget_history`.
 - Supported provider profiles are renamed to provider contracts. Configuration
@@ -66,8 +66,15 @@ Future release template
   primary macOS path, but source-built binaries are not Apple-signed or
   notarized.
 - Live providers remain explicitly opt-in and billable. The FLUX contract stays
-  `live_qualified = false` until guarded qualification is complete; CI, demos,
-  and release validation remain provider-free.
+  `live_qualified = false` in the packaged catalog; successful live tests do not
+  automatically change that readiness declaration. CI, demos, and release
+  validation remain provider-free.
+- Install the four binaries from the same release and refresh generated Codex
+  MCP configuration to discover the updated tool surface. Use a separate
+  profile when changing stack modes; examples document the complete source
+  configuration for each mode.
+- Hubu remains experimental and local-first. The stable release tag does not
+  change the mock payment rail or qualify it for production money handling.
 
 ### Important fixes
 
@@ -75,8 +82,25 @@ Future release template
   and pricing evidence before transmission.
 - Hardened FLUX polling, artifacts, redaction, deadlines, reconciliation,
   replay, and restart recovery.
+- Fixed supported BFL polling and artifact-origin handling so accepted FLUX
+  requests can complete artifact retrieval. Preserved sanitized recovery
+  context for failures without exposing provider credentials or signed URLs.
+- Kept Gongbu live during runtime Temporal or Hubu degradation, automatically
+  withdrew and restored readiness, and preserved pending execution identity
+  across retryable scheduling failures.
 - Fixed selected-profile CLI authentication, reduced idle stack log and probe
   load, and improved bounded diagnostics and terminal output.
+- Fixed sandbox secret validation rejecting generated provider version values.
+
+### Known limitations
+
+- Large image artifacts may not render inline in some MCP client display paths.
+  Generated originals remain retrievable through `gongbu_list_artifacts` and
+  `gongbu_get_artifact`; a missing preview does not require another billable
+  generation. The client rendering boundary is still under investigation.
+- Private billing/support intake is not yet configured. Keep sensitive drafts
+  private; the private vulnerability-reporting channel is for security reports
+  only. See [feedback guidance](docs/feedback.md).
 
 ## v0.2.0 — 2026-08-26
 
