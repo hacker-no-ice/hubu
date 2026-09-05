@@ -370,3 +370,16 @@ test("builds the direct hubustack.dev Cloudflare deployment target", async () =>
   assert.equal(config.assets.run_worker_first, undefined);
   assert.deepEqual(config.images, { binding: "IMAGES" });
 });
+
+test("feedback is discoverable and renders usable public intake links", async () => {
+  const home = await (await render()).text();
+  assert.match(home, /href="\/docs\/feedback">Send feedback/);
+  const response = await render("/docs/feedback");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /issues\/new\?template=bug.md/);
+  assert.match(html, /issues\/new\?template=idea.md/);
+  assert.match(html, /hubu_prepare_feedback/);
+  assert.match(html, /Manual fallback/);
+  assert.match(html, /explicit authorization/);
+});

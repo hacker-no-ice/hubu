@@ -944,6 +944,7 @@ dependencies = [
  "dirs",
  "hubu-common",
  "hubu-core",
+ "hubu-feedback",
  "libc",
  "reqwest",
  "rusqlite",
@@ -983,12 +984,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hubu-feedback"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hubu-unified-mcp"
 version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64",
  "chrono",
+ "hubu-feedback",
  "reqwest",
  "rusqlite",
  "serde",

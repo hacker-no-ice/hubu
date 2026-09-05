@@ -47,7 +47,20 @@ fn binary_initializes_lists_tools_and_exits_on_stdin_close() {
             ["operation_registry"]["state"],
         "unavailable"
     );
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 1);
+    let names = responses[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "hubu_unified_capabilities",
+            "hubu_feedback_guidance",
+            "hubu_prepare_feedback"
+        ]
+    );
 }
 
 #[test]

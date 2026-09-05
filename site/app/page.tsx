@@ -22,6 +22,7 @@ export default function Home() {
         <nav aria-label="Primary navigation">
           <a href="/docs/overview">Documentation</a>
           <a href="/architecture/">Architecture</a>
+          <a href="/docs/feedback">Send feedback</a>
           <a href="https://github.com/hacker-no-ice/hubu">GitHub</a>
         </nav>
       </header>

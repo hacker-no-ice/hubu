@@ -1,5 +1,10 @@
 # Unified MCP surface
 
+For bugs, ideas, billing or sensitive reports, use [Send feedback](feedback.md).
+`hubu feedback` and the unified `hubu_feedback_guidance` /
+`hubu_prepare_feedback` tools prepare local previews without sending reports.
+
+
 `hubu-unified-mcp` is Hubu's only supported agent-facing MCP server. It is a
 stdio adapter over the separate Hubu and Gongbu HTTP APIs. It owns only local
 harness-operation identity state; it does not own either backend's domain state
@@ -516,16 +521,16 @@ envelope without changing either backend's wire contract.
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 41 other tool names with owner
+state and compatible version metadata, and all 43 other tool names with owner
 and availability. Together with `hubu_unified_capabilities`, the stdio surface
-exposes 42 tools, 38 of which route to a backend.
+exposes 44 tools, 38 of which route to a backend.
 
 The version-1 compatibility boundary requires:
 
 | Surface | Required value |
 | --- | --- |
 | Unified contract | `hubu-gongbu-mcp-v1` |
-| Routing revision | `7` |
+| Routing revision | `8` |
 | MCP protocol | `2024-11-05` |
 | Hubu and Gongbu executor contract | `hubu-spend-executor-v4.3` |
 | Gongbu API schema | `2` |

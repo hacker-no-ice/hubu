@@ -1,5 +1,8 @@
 # Hubu / 户部
 
+[Send feedback](docs/feedback.md) — report a bug, suggest an idea, or find private reporting guidance.
+
+
 Hubu is an open-source spending control plane for AI agents. Humans define
 policies and budgets; agents submit structured spend requests; and Hubu
 authorizes, executes, and records approved spending without giving agents
