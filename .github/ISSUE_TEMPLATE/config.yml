@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Send feedback / private reporting guidance
+    url: https://github.com/hacker-no-ice/hubu/blob/main/docs/feedback.md
+    about: Choose public bug/idea reporting or private billing/sensitive reporting and review your report.

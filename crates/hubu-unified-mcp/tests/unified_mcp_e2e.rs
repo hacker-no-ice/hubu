@@ -1990,7 +1990,13 @@ fn gongbu_only_initialize_discovery_and_read_call() {
     assert!(names.contains(&"gongbu_get_execution"));
     assert!(!names.contains(&"gongbu_create_execution"));
     assert!(!names.iter().any(|name| name.starts_with("hubu_")
-        && !matches!(*name, "hubu_unified_capabilities" | "hubu_operation_status")));
+        && !matches!(
+            *name,
+            "hubu_unified_capabilities"
+                | "hubu_operation_status"
+                | "hubu_feedback_guidance"
+                | "hubu_prepare_feedback"
+        )));
 
     let response = mcp.call(3, "gongbu_get_execution", json!({"execution_id":"exec-93"}));
     let body: Value =
@@ -2030,7 +2036,7 @@ fn governed_hubu_to_gongbu_execution_fails_closed_without_hubu() {
     let listed = mcp.list_tools();
     assert_eq!(
         tool_names(&listed).len(),
-        42,
+        44,
         "unexpected catalog {listed}; Hubu requests: {:?}; Gongbu requests: {:?}",
         hubu.requests(),
         gongbu.requests()
@@ -2257,4 +2263,47 @@ fn malformed_probe_is_unavailable_without_corrupting_other_backend_state() {
         .unwrap()
         .contains("gongbu-state-marker"));
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
+}
+
+#[test]
+fn feedback_is_discoverable_and_prepared_without_backends() {
+    let mut mcp = McpProcess::start(None, None);
+    mcp.initialize();
+    let listed = mcp.list_tools();
+    let names = tool_names(&listed);
+    assert!(names.contains(&"hubu_feedback_guidance"));
+    assert!(names.contains(&"hubu_prepare_feedback"));
+    let guidance = mcp.call(70, "hubu_feedback_guidance", json!({}));
+    assert_eq!(
+        guidance["result"]["structuredContent"]["input_schema"]["required"],
+        json!(["trying", "happened"])
+    );
+    let response = mcp.call(71, "hubu_prepare_feedback", json!({"trying":"Fetch output", "happened":"Image missing", "diagnostics":{"prompt":"excluded-prompt-canary", "raw_logs":"excluded-log-canary"}}));
+    let result = &response["result"]["structuredContent"];
+    assert_eq!(result["status"], "prepared_not_sent");
+    assert_eq!(result["destination"]["visibility"], "public");
+    assert_eq!(result["requires_user_authorization"], true);
+    let content: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(&content, result);
+    let invalid = mcp.call(
+        72,
+        "hubu_prepare_feedback",
+        json!({"trying":"", "happened":"input-error-canary"}),
+    );
+    assert_eq!(invalid["result"]["isError"], true);
+    let again = mcp.call(
+        73,
+        "hubu_prepare_feedback",
+        json!({"trying":"Suggest improvement", "happened":"Need search", "kind":"idea"}),
+    );
+    assert_eq!(
+        again["result"]["structuredContent"]["title"],
+        "Idea for Hubu"
+    );
+    mcp.finish(&[
+        "excluded-prompt-canary",
+        "excluded-log-canary",
+        "input-error-canary",
+    ]);
 }

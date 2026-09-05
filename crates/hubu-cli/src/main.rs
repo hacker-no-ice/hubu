@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 mod codex_mcp;
+mod feedback;
 mod stack;
 mod terminal;
 
@@ -255,6 +256,7 @@ fn run() -> Result<()> {
         "spend" => spend(&client, args),
         "ledger" => ledger(&client, args),
         "health" => health(&client),
+        "feedback" => feedback::command(args),
         "version" | "--version" | "-V" => version(),
         "-h" | "--help" | "help" => {
             print_help();
@@ -3300,6 +3302,7 @@ Commands:
   budget     Create, review, update, and list agent budgets
   spend      Test spend and reconcile uncertain executor claims
   ledger     Read ledger transactions
+  feedback   Send feedback: guidance and local report preview (hubu feedback --help)
   health     Check the Hubu server
   version    Print product, source, and executor-contract versions
 

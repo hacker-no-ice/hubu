@@ -1,0 +1,17 @@
+[package]
+name = "hubu-feedback"
+version = "0.2.1"
+description = "Offline, reviewable feedback preparation for Hubu clients"
+edition.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+repository.workspace = true
+keywords = ["feedback", "mcp", "cli"]
+categories = ["development-tools"]
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

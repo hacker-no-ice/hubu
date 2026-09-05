@@ -7,6 +7,7 @@ members = [
     "crates/hubu-cli",
     "crates/hubu-common",
     "crates/hubu-core",
+    "crates/hubu-feedback",
     "crates/hubu-unified-mcp",
     "crates/hubu-wallet",
 ]
@@ -52,3 +53,5 @@ gongbu-build-info = { path = "crates/gongbu-build-info" }
 hubu-common = { path = "crates/hubu-common" }
 hubu-core = { path = "crates/hubu-core" }
 hubu-wallet = { path = "crates/hubu-wallet" }
+
+hubu-feedback = { path = "crates/hubu-feedback" }
