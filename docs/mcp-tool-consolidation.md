@@ -67,7 +67,8 @@ discovery prerequisites. A listed protected tool is not a promise that the
 client has configured its human gate.
 
 Standard tools are listed and callable in both modes. Advanced tools are listed
-and callable only in advanced mode. Compatibility tools are omitted from both
+and admit new work only in advanced mode; persisted mock-operation recovery has
+the narrow exception below. Compatibility tools are omitted from both
 lists but remain callable in both modes for the transition period, with their
 existing backend prerequisites and gates. Unknown/retired names stay rejected.
 
@@ -106,7 +107,7 @@ existing backend prerequisites and gates. Unknown/retired names stay rejected.
 | `hubu_register_human` | H | Standard | Onboard/select owner; human gate |
 | `hubu_registration_guidance` | H | Standard | Machine-readable registration protocol |
 | `hubu_resolve_spend_approval` | H | Standard | Explicit human approve/deny gate |
-| `hubu_resume_operation` | H+R (*) | Standard | Resume immutable origin, subject to origin exposure |
+| `hubu_resume_operation` | H+R (*) | Standard | Resume existing immutable intent, including legacy mock work |
 | `hubu_revoke_budget` | H | Standard | Emergency owner control; human gate |
 | `hubu_revoke_spending_target` | H | Standard | Advisory target administration; human gate |
 | `hubu_set_spending_target` | H | Standard | Advisory target administration; human gate |
@@ -118,8 +119,8 @@ existing backend prerequisites and gates. Unknown/retired names stay rejected.
 | `hubu_update_budget` | H | Standard | Version-pinned cap change; human gate |
 
 (*) Resume discovery requires H+R; resuming a stored governed-execution intent
-also requires ready G. Resuming an old `hubu_submit_spend` intent requires
-advanced exposure. Reading its status remains allowed in standard mode.
+also requires ready G. Existing `hubu_submit_spend` operations remain readable
+and recoverable in standard mode; the advanced restriction governs new admission.
 
 With all prerequisites satisfied: 34 standard names, six advanced additions
 (including the demo payment tool), and three callable-only compatibility names.
@@ -176,9 +177,11 @@ trusted operation identity, approval, ledger and hold semantics.
 
 No new mock-tool name, automatic replacement, or removal date is introduced.
 There is no equivalent migration to authorize/governed execution: users must
-choose the intended workflow. Existing calls fail with an exposure error in
-standard mode; opting into advanced restores them. Persisted mock operations
-remain readable everywhere and resumable in advanced mode.
+choose the intended workflow. New calls fail with an exposure error in standard
+mode; opting into advanced permits new admissions. Already-persisted mock
+operations remain readable and resumable in both modes. Exact redelivery after
+an ambiguous original result is also permitted under the recovery-only rule
+below, without requiring a connection restart or creating another hold.
 
 ### Timeline and notices
 
@@ -243,19 +246,30 @@ do not change runtime revisions in this design-only PR.
 
 1. `tools/list` returns exposure-listed names intersected with existing backend
    and registry availability rules.
-2. `tools/call` first resolves the name and exposure. Reject a known restricted
-   name before any operation allocation or backend call: JSON-RPC `-32011`,
+2. `tools/call` first resolves the name and exposure. Except for verified
+   recovery-only redelivery below, reject a known restricted name before any
+   operation allocation or backend call: JSON-RPC `-32011`,
    message "Tool is not enabled for this connection", data
    `{code:"tool_exposure_restricted",tool:NAME,required_exposure:"advanced",retryable:false}`.
    Unknown/retired tools retain the current unknown-tool error.
 3. Allowed names, including compatibility handlers, proceed through existing
    schema, operation identity, approval and backend guards. Do not replace
    their backend errors with exposure errors.
-4. Apply the same origin guard to `hubu_resume_operation` before approval
-   synchronization, dispatch or registry mutation for stored mock-spend
-   intents. Status remains read-only. Switching exposure must not cancel,
-   recreate or strand accepted durable operations; existing workers keep
-   completing accepted work.
+4. Grandfather already-persisted mock work across upgrade/exposure changes.
+   `hubu_resume_operation` remains available in standard mode for the original
+   immutable mock intent, after the existing approval and replay checks; it
+   cannot accept replacement arguments or allocate a new logical operation.
+   For an ambiguous original call without resumable intent, allow exact
+   `hubu_submit_spend` redelivery in standard mode only when a read-only lookup
+   finds its already-persisted normalized harness identity, exact tool name and
+   canonical argument hash. Never allocate on lookup miss, rebind a terminal
+   denial, infer identity from payload similarity, or permit changed scope.
+   After a verified match, use the existing retry/replay path and original
+   private operation key, preserving approval, hold and payment idempotency.
+   Unknown identities and changed requests are rejected before mutation.
+   Status remains read-only and must explain resume versus exact redelivery.
+   Existing workers keep completing accepted work; no restart into advanced
+   mode is needed to recover previously persisted work.
 5. Standard governed execution can internally compose authorization and
    execution even though the public primitive `gongbu_create_execution` is
    advanced. The restriction is on public tool invocation, not internal
@@ -268,7 +282,10 @@ Capabilities retain every recognized name and owner. Add top-level
 Here backend_available includes registry prerequisites but not client approval
 configuration. Preserve the same meaning for callable: router exposure and
 prerequisites allow dispatch, subject to existing credentials/approval/schema
-checks. Set legacy `available=callable`.
+checks for a new call. Set legacy `available=callable`. Add
+`recovery_only_callable` (false except for restricted mock spend with usable
+H+R) to describe conditional exact redelivery; it does not advertise general
+admission. The server must still verify each recovery-only call's durable match.
 
 Restricted names have callable/listed/available false and reason_code
 `tool_exposure_restricted`; backend availability remains separately visible.
@@ -331,8 +348,12 @@ new execution state machine inside the MCP router.
 Each implementation PR updates its own tests and fixtures. Final qualification
 must cover both exposure modes with Hubu-only, both backends, degraded/missing
 backends and unavailable registry; all compatibility names; unknown retired
-recurring-budget calls; mock direct/resume restrictions; unchanged human gates;
-and advanced-to-standard restart while accepted work exists.
+recurring-budget calls; blocked new mock admissions; unchanged human gates;
+and advanced-to-standard restart while accepted work exists. Specifically test
+pre-upgrade/advanced mock approval followed by approval and resume in standard,
+ambiguous original-result redelivery in standard, wrong identity/changed scope
+rejection, and terminal denial replay. Prove no duplicate payment/hold and no
+new operation allocation through either recovery exception.
 
 Validate policy YAML semantic equality, CAS/assignment preservation, health
 response compatibility, and no duplicate holds/consumption on recovery. Run
@@ -345,4 +366,3 @@ changes. Documentation edits require the link checker and retired-repository
 reference audit. No new provider work, cross-backend Rust dependencies, full
 onboarding redesign, v0.3 enforcement, or deferred budget lifecycle expansion
 is part of this contract.
-
