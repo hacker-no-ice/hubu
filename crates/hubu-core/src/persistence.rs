@@ -1,3 +1,5 @@
+pub mod accounting;
+
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration as StdDuration;
@@ -1009,6 +1011,7 @@ impl SqliteGovernanceRepository {
                     created_at: finalization_started_at,
                 };
                 save_executor_settlement_receipt(&sqlite_tx, &receipt_record)?;
+                accounting::post_settlement(&sqlite_tx, &claim, &hold, &receipt_record, false)?;
                 token.used_at = Some(finalization_started_at);
                 token.used_by_payment_id = Some(settlement_id.clone());
                 claim.status = SpendExecutorClaimStatus::Settled;
@@ -1344,6 +1347,7 @@ impl SqliteGovernanceRepository {
         self.enforce_executor_settlement_receipt_immutability()?;
         self.enforce_budget_version_immutability()?;
         self.enforce_one_budget_hold_per_spend_decision()?;
+        self.initialize_provider_accounting()?;
         Ok(())
     }
 
@@ -5128,6 +5132,8 @@ fn load_budget_state_from(
 
 #[cfg(test)]
 mod tests {
+    include!("persistence/accounting_tests.rs");
+
     use std::sync::{Arc, Barrier};
 
     use chrono::Duration;

@@ -264,3 +264,8 @@ retry behavior, and rollback requirements are defined by the
 Core spend and budget behavior lives in [`crates/hubu-core`](../crates/hubu-core),
 while payment and ledger behavior lives in
 [`crates/hubu-wallet`](../crates/hubu-wallet).
+
+Confirmed external-provider spends also create a balanced non-cash journal in
+the same Hubu transaction as receipt and budget settlement. See
+[provider accounting](provider-accounting.md) for posting semantics, corrections,
+legacy coverage and the distinction from wallet cash accounting.
