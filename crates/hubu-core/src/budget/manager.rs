@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Duration, Months, Utc};
+use chrono::{DateTime, Utc};
 use hubu_common::ids::{
     AgentId, BudgetHoldId, BudgetId, BudgetVersionId, SpendDecisionId, SpendExecutorClaimId,
 };
@@ -9,8 +9,7 @@ use hubu_common::time::TimePeriod;
 use serde_json::json;
 
 use crate::budget::dto::{
-    BudgetRecurrence, BudgetWithBalance, CreateBudgetSeriesRequest, CreateBudgetSeriesResponse,
-    CreateSingleBudgetRequest, CreateSingleBudgetResponse, EvaluatedBudget,
+    BudgetWithBalance, CreateSingleBudgetRequest, CreateSingleBudgetResponse, EvaluatedBudget,
     ExpireBudgetHoldResponse, ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse,
     SettleBudgetResponse,
 };
@@ -418,99 +417,6 @@ impl BudgetManager {
             request.period,
             &provenance,
         )
-    }
-
-    /// Create a finite recurring budget series.
-    ///
-    /// Each generated budget has its own balance. Consecutive periods use
-    /// half-open boundaries, so the end of one period is the start of the next.
-    /// The series is rejected if any generated period overlaps an existing
-    /// budget for the same agent and currency.
-    #[cfg(test)]
-    pub fn create_budget_series(
-        &mut self,
-        request: CreateBudgetSeriesRequest,
-    ) -> Result<CreateBudgetSeriesResponse, BudgetManagerError> {
-        self.create_budget_series_with_provenance(request, BudgetVersionProvenance::default())
-    }
-
-    /// Create a finite recurring series with an independently versioned logical
-    /// budget and balance for each period.
-    pub fn create_budget_series_with_provenance(
-        &mut self,
-        request: CreateBudgetSeriesRequest,
-        provenance: BudgetVersionProvenance,
-    ) -> Result<CreateBudgetSeriesResponse, BudgetManagerError> {
-        if request.period_count == 0 {
-            log_event(
-                "warn",
-                "budget_series_create_rejected",
-                json!({
-                    "reason": "empty_budget_series",
-                    "agent_id": request.agent_id.to_string(),
-                    "amount_limit_cents": request.amount_limit_cents,
-                    "currency": request.currency.to_string(),
-                }),
-            );
-            return Err(BudgetManagerError::EmptyBudgetSeries);
-        }
-
-        let mut periods = Vec::with_capacity(request.period_count);
-        let mut starting_at = request.starting_at;
-
-        for _ in 0..request.period_count {
-            let ending_before = next_period_boundary(starting_at, request.recurrence)?;
-            let period = TimePeriod::new(starting_at, Some(ending_before))
-                .expect("next period boundary should always be after period start");
-            periods.push(period);
-            starting_at = ending_before;
-        }
-
-        if periods
-            .iter()
-            .any(|period| self.has_overlapping_budget(&request.agent_id, request.currency, period))
-        {
-            log_event(
-                "warn",
-                "budget_series_create_rejected",
-                json!({
-                    "reason": "overlapping_budget_period",
-                    "agent_id": request.agent_id.to_string(),
-                    "amount_limit_cents": request.amount_limit_cents,
-                    "currency": request.currency.to_string(),
-                    "period_count": request.period_count,
-                }),
-            );
-            return Err(BudgetManagerError::OverlappingBudgetPeriod);
-        }
-
-        let mut budgets = Vec::with_capacity(request.period_count);
-        for period in periods {
-            let budget_with_balance = build_budget_for_period(
-                request.agent_id.clone(),
-                request.amount_limit_cents,
-                request.currency,
-                period,
-                &provenance,
-            )?;
-            budgets.push(budget_with_balance);
-        }
-
-        for budget_with_balance in &budgets {
-            self.insert_budget(budget_with_balance);
-        }
-
-        log_event(
-            "info",
-            "budget_series_created",
-            json!({
-                "agent_id": request.agent_id.to_string(),
-                "amount_limit_cents": request.amount_limit_cents,
-                "currency": request.currency.to_string(),
-                "period_count": budgets.len(),
-            }),
-        );
-        Ok(CreateBudgetSeriesResponse { budgets })
     }
 
     /// Reserve budget for an approved spend decision.
@@ -1167,23 +1073,6 @@ fn budget_with_balance(
     })
 }
 
-fn next_period_boundary(
-    starting_at: DateTime<Utc>,
-    recurrence: BudgetRecurrence,
-) -> Result<DateTime<Utc>, BudgetManagerError> {
-    match recurrence {
-        BudgetRecurrence::Daily => starting_at
-            .checked_add_signed(Duration::days(1))
-            .ok_or(BudgetManagerError::InvalidRecurrenceBoundary),
-        BudgetRecurrence::Monthly => starting_at
-            .checked_add_months(Months::new(1))
-            .ok_or(BudgetManagerError::InvalidRecurrenceBoundary),
-        BudgetRecurrence::Yearly => starting_at
-            .checked_add_months(Months::new(12))
-            .ok_or(BudgetManagerError::InvalidRecurrenceBoundary),
-    }
-}
-
 impl Default for BudgetManager {
     fn default() -> Self {
         Self::new()
@@ -1196,6 +1085,7 @@ fn invalid_persisted_budget_state(message: impl Into<String>) -> BudgetManagerEr
 
 #[cfg(test)]
 mod tests {
+    use chrono::Duration;
     use chrono::TimeZone;
 
     use super::*;
@@ -1593,30 +1483,6 @@ mod tests {
     }
 
     #[test]
-    fn create_budget_series_creates_adjacent_periods() {
-        let mut manager = BudgetManager::new();
-
-        let response = manager
-            .create_budget_series(CreateBudgetSeriesRequest {
-                agent_id: AgentId::new(),
-                amount_limit_cents: 25_000,
-                currency: Currency::Usd,
-                starting_at: timestamp(),
-                recurrence: BudgetRecurrence::Monthly,
-                period_count: 2,
-            })
-            .expect("budget series should be created");
-
-        assert_eq!(response.budgets.len(), 2);
-        assert_eq!(
-            response.budgets[0].budget.period.ending_before,
-            Some(response.budgets[1].budget.period.starting_at)
-        );
-        assert_eq!(response.budgets[0].balance.remaining_amount_cents, 25_000);
-        assert_eq!(response.budgets[1].balance.remaining_amount_cents, 25_000);
-    }
-
-    #[test]
     fn reservation_uses_effective_availability_at_exact_boundaries() {
         let start = timestamp();
         let end = start + Duration::hours(1);
@@ -1697,17 +1563,23 @@ mod tests {
     fn adjacent_period_selection_switches_exactly_at_the_shared_boundary() {
         let mut manager = BudgetManager::new();
         let agent_id = AgentId::new();
-        let series = manager
-            .create_budget_series(CreateBudgetSeriesRequest {
-                agent_id: agent_id.clone(),
-                amount_limit_cents: 1_000,
-                currency: Currency::Usd,
-                starting_at: timestamp(),
-                recurrence: BudgetRecurrence::Daily,
-                period_count: 2,
+        let budgets: Vec<_> = (0..2)
+            .map(|day| {
+                manager
+                    .create_single_budget(CreateSingleBudgetRequest {
+                        agent_id: agent_id.clone(),
+                        amount_limit_cents: 1_000,
+                        currency: Currency::Usd,
+                        period: TimePeriod::new(
+                            timestamp() + Duration::days(day),
+                            Some(timestamp() + Duration::days(day + 1)),
+                        )
+                        .unwrap(),
+                    })
+                    .unwrap()
             })
-            .unwrap();
-        let boundary = series.budgets[1].budget.period.starting_at;
+            .collect();
+        let boundary = budgets[1].budget.period.starting_at;
 
         assert_eq!(
             manager
@@ -1717,13 +1589,13 @@ mod tests {
                     boundary - Duration::nanoseconds(1),
                 )
                 .unwrap(),
-            Some(series.budgets[0].budget.id.clone())
+            Some(budgets[0].budget.id.clone())
         );
         assert_eq!(
             manager
                 .available_budget_id_for_agent_at(&agent_id, Currency::Usd, boundary)
                 .unwrap(),
-            Some(series.budgets[1].budget.id.clone())
+            Some(budgets[1].budget.id.clone())
         );
     }
 
@@ -1783,55 +1655,6 @@ mod tests {
             snapshot.availability_at(end).unwrap(),
             BudgetAvailability::Expired
         );
-    }
-
-    #[test]
-    fn create_budget_series_rejects_overlap_without_partial_creation() {
-        let mut manager = BudgetManager::new();
-        let agent_id = AgentId::new();
-
-        manager
-            .create_single_budget(CreateSingleBudgetRequest {
-                agent_id: agent_id.clone(),
-                amount_limit_cents: 10_000,
-                currency: Currency::Usd,
-                period: period(2026, 7, 15, 2026, 8, 15),
-            })
-            .expect("existing budget should be created");
-
-        let error = manager
-            .create_budget_series(CreateBudgetSeriesRequest {
-                agent_id: agent_id.clone(),
-                amount_limit_cents: 25_000,
-                currency: Currency::Usd,
-                starting_at: timestamp(),
-                recurrence: BudgetRecurrence::Monthly,
-                period_count: 2,
-            })
-            .expect_err("series should be rejected before creating any budget");
-
-        assert!(matches!(error, BudgetManagerError::OverlappingBudgetPeriod));
-        assert_eq!(manager.get_budgets_by_agent_id(&agent_id).len(), 1);
-    }
-
-    #[test]
-    fn create_budget_series_rejects_invalid_budget_without_partial_creation() {
-        let mut manager = BudgetManager::new();
-        let agent_id = AgentId::new();
-
-        let error = manager
-            .create_budget_series(CreateBudgetSeriesRequest {
-                agent_id: agent_id.clone(),
-                amount_limit_cents: 0,
-                currency: Currency::Usd,
-                starting_at: timestamp(),
-                recurrence: BudgetRecurrence::Monthly,
-                period_count: 2,
-            })
-            .expect_err("invalid series should be rejected before creating any budget");
-
-        assert!(matches!(error, BudgetManagerError::InvalidBudget(_)));
-        assert!(manager.get_budgets_by_agent_id(&agent_id).is_empty());
     }
 
     #[test]

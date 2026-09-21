@@ -143,14 +143,6 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
-            name: "hubu_create_recurring_budget",
-            owner: hubu,
-            method: "POST",
-            path: "/budgets/series",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
             name: "hubu_export_policy",
             owner: hubu,
             method: "GET",
@@ -374,8 +366,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        38,
-        "golden matrix must contain exactly 38 cases"
+        37,
+        "golden matrix must contain exactly 37 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -388,8 +380,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        38,
-        "routing fixture must map 38 tools"
+        37,
+        "routing fixture must map 37 tools"
     );
     assert_eq!(
         expected.len(),
@@ -405,7 +397,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Hubu)
             .count(),
-        31
+        30
     );
     assert_eq!(
         cases

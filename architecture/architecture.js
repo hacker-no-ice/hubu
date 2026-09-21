@@ -317,7 +317,7 @@ const components = {
     copy:
       "Agent budgets are stable logical allocations whose hard limit lives in an immutable, auditable current version. SQLite stores only active or revoked administrative state; scheduled, expired, exhausted, and effective active availability are derived at one instant. User spending targets remain separate advisory records.",
     responsibilities: [
-      "Creates single or finite recurring logical budgets owned by exactly one agent, with immutable currency and half-open period properties.",
+      "Creates individual logical budgets owned by exactly one agent, with immutable currency and half-open period properties.",
       "Creates immutable revision 1 records with effective time, actor, source, optional reason, canonical request fingerprint, and a same-budget current-version pointer.",
       "Appends total-limit changes as one immutable direct successor under BEGIN IMMEDIATE, checks the requested edge for exact replay before stale-head rejection, and compare-and-sets the current pointer with the logical balance in the same transaction.",
       "Applies the repository-authoritative current snapshot to the in-memory manager only after commit; historical exact retries return their stable successor while never rewinding a later head.",

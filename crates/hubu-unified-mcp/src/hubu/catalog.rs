@@ -122,20 +122,6 @@ fn all_tool_definitions() -> Vec<Value> {
             })),
         ),
         approval_tool(
-            "hubu_create_recurring_budget",
-            "Create a recurring budget series owned by one agent. Requires a human click.",
-            json_schema(json!({
-                "amount_cents": { "type": "integer" },
-                "agent_id": { "type": "string" },
-                "recurrence": {
-                    "type": "string",
-                    "enum": ["daily", "monthly", "yearly"]
-                },
-                "period_count": { "type": "integer" },
-                "starting_at": { "type": "string" }
-            })),
-        ),
-        approval_tool(
             "hubu_revoke_budget",
             "Administratively revoke a budget so it cannot reserve future spend. Requires a human click.",
             json_schema(json!({

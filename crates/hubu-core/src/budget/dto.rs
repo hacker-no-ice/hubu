@@ -24,28 +24,6 @@ pub struct CreateSingleBudgetResponse {
 }
 
 #[derive(Debug, Clone)]
-pub struct CreateBudgetSeriesRequest {
-    pub agent_id: AgentId,
-    pub amount_limit_cents: i64,
-    pub currency: Currency,
-    pub starting_at: DateTime<Utc>,
-    pub recurrence: BudgetRecurrence,
-    pub period_count: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreateBudgetSeriesResponse {
-    pub budgets: Vec<BudgetWithBalance>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum BudgetRecurrence {
-    Daily,
-    Monthly,
-    Yearly,
-}
-
-#[derive(Debug, Clone)]
 pub struct ReserveBudgetRequest {
     pub budget_id: BudgetId,
     pub spend_decision_id: SpendDecisionId,

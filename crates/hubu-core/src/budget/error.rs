@@ -40,12 +40,6 @@ pub enum BudgetManagerError {
     #[error("invalid budget hold transition: {0:?}")]
     InvalidBudgetHoldTransition(BudgetHoldError),
 
-    #[error("recurring budget series must create at least one period")]
-    EmptyBudgetSeries,
-
-    #[error("budget recurrence could not produce the next period boundary")]
-    InvalidRecurrenceBoundary,
-
     #[error("budget period overlaps an existing budget for the same agent and currency")]
     OverlappingBudgetPeriod,
 

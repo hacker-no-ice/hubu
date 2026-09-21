@@ -23,6 +23,18 @@ Future release template
 - Describe only fixes that materially affect users or operators.
 -->
 
+## v0.2.2 — Unreleased
+
+### Breaking or operational changes
+
+- Removed recurring-budget creation from core (`CreateBudgetSeriesRequest`,
+  `CreateBudgetSeriesResponse`, `BudgetRecurrence`, and the series creation
+  methods), HTTP (`POST /budgets/series`), CLI (`hubu budget create-recurring`),
+  and unified MCP (`hubu_create_recurring_budget`). Create individual budgets
+  with explicit periods instead. Existing budgets retain their IDs, versions,
+  balances, holds, and history and continue as independent budgets; no data
+  migration or recurring-series lifecycle is introduced.
+
 ## Unreleased
 
 ## v0.2.1 — 2026-09-04

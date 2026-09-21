@@ -8014,6 +8014,148 @@ mod tests {
     }
 
     #[test]
+    fn historical_period_budgets_reload_with_unchanged_identity_and_independent_lifecycle() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-historical-periods-{}.sqlite",
+            BudgetId::new()
+        ));
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        repo.conn
+            .execute_batch(include_str!("../../../fixtures/legacy-budget-periods.sql"))
+            .unwrap();
+        // Compare complete persisted rows, including IDs, version fingerprints,
+        // provenance and timestamps, rather than just counts after reopening.
+        let snapshot = |repo: &SqliteGovernanceRepository| {
+            [
+                "budgets",
+                "budget_versions",
+                "budget_current_versions",
+                "budget_balances",
+                "budget_holds",
+            ]
+            .map(|table| {
+                let mut statement = repo
+                    .conn
+                    .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
+                    .unwrap();
+                let columns = statement.column_count();
+                statement
+                    .query_map([], |row| {
+                        (0..columns)
+                            .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap()
+            })
+        };
+        let hydrate = |repo: &SqliteGovernanceRepository| {
+            BudgetManager::from_records(
+                repo.load_budgets().unwrap(),
+                repo.load_budget_versions().unwrap(),
+                repo.load_budget_balances().unwrap(),
+                repo.load_budget_holds().unwrap(),
+            )
+            .unwrap()
+        };
+        let mut manager = hydrate(&repo);
+        let mut budgets = repo.load_budgets().unwrap();
+        budgets.sort_by_key(|budget| budget.period.starting_at);
+        let first = &budgets[0];
+        let second = &budgets[1];
+        assert_eq!(first.agent_id, second.agent_id);
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.period.ending_before, Some(second.period.starting_at));
+        let decision = spend_decision();
+        repo.save_spend_decision(&decision).unwrap();
+        let reserved = manager
+            .reserve_budget_at(
+                ReserveBudgetRequest {
+                    budget_id: first.id.clone(),
+                    spend_decision_id: decision.id,
+                    amount_cents: 2_500,
+                    currency: Currency::Usd,
+                    expires_at: second.period.starting_at,
+                },
+                first.period.starting_at,
+            )
+            .unwrap();
+        repo.save_budget_hold(&reserved.hold, &reserved.balance)
+            .unwrap();
+        let before = snapshot(&repo);
+        drop(repo);
+
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        assert_eq!(snapshot(&repo), before);
+        let mut restarted = hydrate(&repo);
+        assert_eq!(
+            restarted
+                .available_budget_id_for_agent_at(
+                    &first.agent_id,
+                    Currency::Usd,
+                    first.period.starting_at
+                )
+                .unwrap(),
+            Some(first.id.clone())
+        );
+        assert_eq!(
+            restarted
+                .available_budget_id_for_agent_at(
+                    &first.agent_id,
+                    Currency::Usd,
+                    second.period.starting_at
+                )
+                .unwrap(),
+            Some(second.id.clone())
+        );
+        let settled = restarted.settle_budget(&reserved.hold.id).unwrap();
+        assert_eq!(settled.hold.budget_version_id, first.current_version_id);
+        assert_eq!(settled.balance.consumed_amount_cents, 2_500);
+        repo.update_budget_hold(&settled.hold, &settled.balance)
+            .unwrap();
+        let revoked = restarted
+            .revoke_budget_at(&first.id, second.period.starting_at)
+            .unwrap();
+        repo.save_budget_with_balance(&revoked.budget, &revoked.version, &revoked.balance)
+            .unwrap();
+        let untouched = restarted.get_budget_by_id(&second.id).unwrap();
+        assert_eq!(untouched.balance.remaining_amount_cents, 10_000);
+        assert_eq!(
+            untouched.budget.administrative_state,
+            BudgetAdministrativeState::Active
+        );
+        // Neither spending nor revocation rewrites either budget's version history.
+        assert_eq!(snapshot(&repo)[1], before[1]);
+        let after = snapshot(&repo);
+        drop(repo);
+        let reopened = SqliteGovernanceRepository::open(&path).unwrap();
+        assert_eq!(snapshot(&reopened), after);
+        let restarted = hydrate(&reopened);
+        assert_eq!(
+            restarted
+                .get_budget_by_id(&first.id)
+                .unwrap()
+                .budget
+                .administrative_state,
+            BudgetAdministrativeState::Revoked
+        );
+        assert_eq!(
+            restarted
+                .available_budget_id_for_agent_at(
+                    &second.agent_id,
+                    Currency::Usd,
+                    second.period.starting_at
+                )
+                .unwrap(),
+            Some(second.id.clone())
+        );
+        assert_eq!(reopened.load_budgets().unwrap().len(), 2);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn versioned_budget_hold_and_logical_balance_survive_restart_and_settlement() {
         let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
         let decision = spend_decision();

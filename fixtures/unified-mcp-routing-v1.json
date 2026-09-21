@@ -1,6 +1,6 @@
 {
   "contract_version": "hubu-gongbu-mcp-v1",
-  "routing_revision": 8,
+  "routing_revision": 9,
   "tools": [
     { "name": "gongbu_create_execution", "owner": "gongbu" },
     { "name": "gongbu_get_artifact", "owner": "gongbu" },
@@ -15,7 +15,6 @@
     { "name": "hubu_budget_history", "owner": "hubu" },
     { "name": "hubu_client_approval_profile", "owner": "hubu" },
     { "name": "hubu_create_budget", "owner": "hubu" },
-    { "name": "hubu_create_recurring_budget", "owner": "hubu" },
     { "name": "hubu_export_policy", "owner": "hubu" },
     { "name": "hubu_feedback_guidance", "owner": "router" },
     { "name": "hubu_get_executor_claim", "owner": "hubu" },

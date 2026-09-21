@@ -73,15 +73,9 @@ hubu budget create --agent-id agt_SECOND_AGENT_ID --amount 10
 hubu budget list
 ```
 
-Recurring, update, history, and revocation commands are also available:
+Update, history, and revocation commands are also available:
 
 ```sh
-hubu budget create-recurring \
-  --agent-id agt_EXACT_AGENT_ID \
-  --amount 25 \
-  --recurrence monthly \
-  --period-count 3
-
 hubu budget update \
   --budget-id bgt_EXACT_BUDGET_ID \
   --amount 50 \
