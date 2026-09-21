@@ -1,5 +1,10 @@
 # Unified MCP surface
 
+The v0.2.2 [MCP consolidation and default authority contract](mcp-tool-consolidation.md)
+defines planned tool exposure and migration. It is a design contract; the
+behavior documented below remains the implemented surface until its delivery
+tasks land.
+
 For bugs, ideas, billing or sensitive reports, use [Send feedback](feedback.md).
 `hubu feedback` and the unified `hubu_feedback_guidance` /
 `hubu_prepare_feedback` tools prepare local previews without sending reports.
