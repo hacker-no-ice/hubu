@@ -156,10 +156,6 @@ pub(super) fn route_tool_call_v1(
             require_trusted_client_approval(config, name)?;
             post_request("/budgets", arguments)
         }
-        "hubu_create_recurring_budget" => {
-            require_trusted_client_approval(config, name)?;
-            post_request("/budgets/series", arguments)
-        }
         "hubu_revoke_budget" => {
             require_trusted_client_approval(config, name)?;
             post_request("/budgets/revoke", arguments)

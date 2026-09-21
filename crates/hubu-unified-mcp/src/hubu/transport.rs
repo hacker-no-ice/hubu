@@ -196,7 +196,6 @@ pub(super) fn is_approved_http_route(method: &str, path: &str) -> bool {
                 | ("GET", "/policies/history")
                 | ("GET", "/policies/diff")
                 | ("POST", "/budgets")
-                | ("POST", "/budgets/series")
                 | ("POST", "/budgets/revoke")
                 | ("POST", "/user/spending-target")
                 | ("POST", "/user/spending-target/revoke")

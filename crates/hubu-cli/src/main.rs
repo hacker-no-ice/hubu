@@ -1588,7 +1588,6 @@ fn budget(base_url: &CliContext, args: Vec<String>) -> Result<()> {
 
     match command.as_str() {
         "create" => budget_create(base_url, args),
-        "create-recurring" => budget_create_recurring(base_url, args),
         "list" => budget_list(base_url, args),
         "update" => budget_update(base_url, args),
         "history" => budget_history(base_url, args),
@@ -1629,42 +1628,6 @@ fn budget_create(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
             .get("budget")
             .ok_or_else(|| anyhow!("server response missing `budget`"))?,
     )?;
-    print_spending_target_warnings(&response)?;
-    Ok(())
-}
-
-fn budget_create_recurring(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
-    if take_help(&mut args) {
-        print_budget_create_recurring_help();
-        return Ok(());
-    }
-
-    let amount = take_required(&mut args, "--amount")?;
-    let agent_id = take_required(&mut args, "--agent-id")
-        .with_context(|| "budget create-recurring requires --agent-id")?;
-    let recurrence = take_required(&mut args, "--recurrence")?;
-    let period_count = take_required(&mut args, "--period-count")?;
-    let starting_at = take_value(&mut args, "--starting-at");
-    ensure_no_args(args)?;
-
-    let mut body = json!({
-        "amount_cents": amount_to_cents(&amount)?,
-        "starting_at": starting_at,
-        "recurrence": recurrence,
-        "period_count": period_count.parse::<usize>()?,
-    });
-    body["agent_id"] = json!(agent_id);
-
-    let response = post_json(base_url, "/budgets/series", body)?;
-
-    println!("{}", terminal::stdout().success("Budget series created"));
-    for budget in response
-        .get("budgets")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("server response missing `budgets`"))?
-    {
-        print_budget(budget)?;
-    }
     print_spending_target_warnings(&response)?;
     Ok(())
 }
@@ -3606,7 +3569,6 @@ fn print_budget_help() {
 
 Usage:
   hubu budget create --amount AMOUNT --agent-id ID [--starting-at RFC3339] [--ending-before RFC3339]
-  hubu budget create-recurring --amount AMOUNT --agent-id ID --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
   hubu budget revoke --budget-id ID
   hubu budget update --budget-id ID --amount AMOUNT [--expected-revision N] [--reason TEXT] [--yes]
   hubu budget history --budget-id ID
@@ -3614,7 +3576,6 @@ Usage:
 
 Examples:
   hubu budget create --agent-id AGENT_ID --amount 25
-  hubu budget create-recurring --agent-id AGENT_ID --amount 25 --recurrence monthly --period-count 3
   hubu budget update --budget-id BUDGET_ID --amount 50 --reason \"Raise total cap\"
   hubu budget history --budget-id BUDGET_ID
   hubu budget revoke --budget-id BUDGET_ID
@@ -3634,21 +3595,6 @@ Options:
 
 Examples:
   hubu budget create --agent-id AGENT_ID --amount 25"
-    );
-}
-
-fn print_budget_create_recurring_help() {
-    println!(
-        "Create a recurring agent budget series
-
-Usage:
-  hubu budget create-recurring --amount AMOUNT --agent-id ID --recurrence daily|monthly|yearly --period-count N [--starting-at RFC3339]
-
-Options:
-  --agent-id ID  Agent this budget series applies to
-
-Examples:
-  hubu budget create-recurring --agent-id AGENT_ID --amount 25 --recurrence monthly --period-count 3"
     );
 }
 
@@ -3791,6 +3737,20 @@ Example:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_recurring_command_is_rejected_before_connecting() {
+        let client = CliContext::new(Some("http://127.0.0.1:1".to_string()), std::env::temp_dir());
+        let error = budget(
+            &client,
+            vec!["create-recurring".to_string(), "--help".to_string()],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "unknown budget command `create-recurring`"
+        );
+    }
 
     fn strip_ansi(value: &str) -> String {
         let mut output = String::new();

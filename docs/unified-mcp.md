@@ -71,7 +71,6 @@ hubu_authorize_spend
 hubu_budget_history
 hubu_client_approval_profile
 hubu_create_budget
-hubu_create_recurring_budget
 hubu_export_policy
 hubu_get_executor_claim
 hubu_get_spend_approval
@@ -521,9 +520,9 @@ envelope without changing either backend's wire contract.
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 43 other tool names with owner
+state and compatible version metadata, and all 42 other tool names with owner
 and availability. Together with `hubu_unified_capabilities`, the stdio surface
-exposes 44 tools, 38 of which route to a backend.
+exposes 43 tools, 37 of which route to a backend.
 
 The version-1 compatibility boundary requires:
 

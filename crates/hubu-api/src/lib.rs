@@ -15,7 +15,7 @@ use std::{
 use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Duration, Months, Utc};
+use chrono::{DateTime, Utc};
 use hubu_common::{
     build::{build_info, EXECUTOR_CONTRACT},
     execution_scope::{
@@ -45,9 +45,9 @@ use hubu_core::{
         UpdateBudgetLimitRequest,
     },
     budget::{
-        BudgetAdministrativeState, BudgetHold, BudgetHoldStatus, BudgetManager, BudgetRecurrence,
-        BudgetVersion, BudgetVersionProvenance, BudgetWithBalance, CreateBudgetSeriesRequest,
-        CreateSingleBudgetRequest, EvaluatedBudget, ReserveBudgetResponse,
+        BudgetAdministrativeState, BudgetHold, BudgetHoldStatus, BudgetManager, BudgetVersion,
+        BudgetVersionProvenance, BudgetWithBalance, CreateSingleBudgetRequest, EvaluatedBudget,
+        ReserveBudgetResponse,
     },
     persistence::{
         AppendBudgetVersionError, BudgetRepository, PolicyAssignmentScope, PolicyRepository,
@@ -1039,15 +1039,6 @@ struct CreateBudgetHttpRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct CreateBudgetSeriesHttpRequest {
-    amount_cents: i64,
-    agent_id: Option<String>,
-    starting_at: Option<String>,
-    recurrence: BudgetRecurrenceHttp,
-    period_count: usize,
-}
-
-#[derive(Debug, Deserialize)]
 struct BudgetIdHttpRequest {
     budget_id: String,
 }
@@ -1072,23 +1063,9 @@ struct SpendingTargetIdHttpRequest {
     target_id: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum BudgetRecurrenceHttp {
-    Daily,
-    Monthly,
-    Yearly,
-}
-
 #[derive(Debug, Serialize)]
 struct CreateBudgetHttpResponse {
     budget: BudgetHttpResponse,
-    spending_target_warnings: Vec<SpendingTargetWarningHttpResponse>,
-}
-
-#[derive(Debug, Serialize)]
-struct CreateBudgetSeriesHttpResponse {
-    budgets: Vec<BudgetHttpResponse>,
     spending_target_warnings: Vec<SpendingTargetWarningHttpResponse>,
 }
 
@@ -1735,9 +1712,6 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("GET", "/policies/diff") => policy_diff(&request, state),
         ("POST", "/policies") => add_policy(request.body, state).map(to_json),
         ("POST", "/budgets") => create_budget_at(request.body, state, request_now).map(to_json),
-        ("POST", "/budgets/series") => {
-            create_budget_series_at(request.body, state, request_now).map(to_json)
-        }
         ("POST", "/budgets/revoke") => revoke_budget(request.body, state).map(to_json),
         ("POST", _) if budget_versions_public_id.is_some() => update_budget_limit_at(
             budget_versions_public_id
@@ -3358,81 +3332,6 @@ fn create_budget_at(
     )?;
     Ok(CreateBudgetHttpResponse {
         budget: budget_response_at(budget, state, now)?,
-        spending_target_warnings,
-    })
-}
-
-fn create_budget_series_at(
-    body: String,
-    state: &ServerState,
-    now: DateTime<Utc>,
-) -> Result<CreateBudgetSeriesHttpResponse> {
-    let request: CreateBudgetSeriesHttpRequest = serde_json::from_str(&body)?;
-    if request.amount_cents <= 0 {
-        return Err(anyhow!("budget amount must be positive"));
-    }
-
-    let authenticated_user = authenticated_user(state)?;
-    let user = UserContext::new(authenticated_user.id.clone());
-    let agent_id = required_budget_agent_id(request.agent_id.as_deref(), &user, state)?;
-    let starting_at = parse_optional_datetime(request.starting_at)?.unwrap_or(now);
-    let recurrence = budget_recurrence(request.recurrence);
-    budget_series_periods(starting_at, recurrence, request.period_count)?;
-
-    let response = state
-        .budgets
-        .lock()
-        .map_err(|_| anyhow!("budget manager lock poisoned"))?
-        .create_budget_series_with_provenance(
-            CreateBudgetSeriesRequest {
-                agent_id: agent_id.clone(),
-                amount_limit_cents: request.amount_cents,
-                currency: Currency::Usd,
-                starting_at,
-                recurrence,
-                period_count: request.period_count,
-            },
-            BudgetVersionProvenance::new(
-                authenticated_user.pub_id,
-                "hubu-api:create-budget-series",
-            ),
-        )?;
-    {
-        let mut governance = state
-            .governance
-            .lock()
-            .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        for budget in &response.budgets {
-            governance.save_budget_with_balance(
-                &budget.budget,
-                &budget.version,
-                &budget.balance,
-            )?;
-        }
-    }
-
-    log_event(
-        "info",
-        "budget_series_created",
-        json!({
-            "user_id": user.user_id.to_string(),
-            "budget_count": response.budgets.len(),
-            "agent_id": agent_id.to_string(),
-        }),
-    );
-    let periods = response
-        .budgets
-        .iter()
-        .map(|budget| budget.budget.period.clone())
-        .collect::<Vec<_>>();
-    let spending_target_warnings =
-        spending_target_warnings_for_periods(&user, &periods, Currency::Usd, state)?;
-    Ok(CreateBudgetSeriesHttpResponse {
-        budgets: response
-            .budgets
-            .into_iter()
-            .map(|budget| budget_response_at(budget, state, now))
-            .collect::<Result<Vec<_>>>()?,
         spending_target_warnings,
     })
 }
@@ -5481,49 +5380,6 @@ fn reconcile_expired_budget_holds_at(state: &ServerState, now: DateTime<Utc>) ->
     Ok(())
 }
 
-fn budget_recurrence(recurrence: BudgetRecurrenceHttp) -> BudgetRecurrence {
-    match recurrence {
-        BudgetRecurrenceHttp::Daily => BudgetRecurrence::Daily,
-        BudgetRecurrenceHttp::Monthly => BudgetRecurrence::Monthly,
-        BudgetRecurrenceHttp::Yearly => BudgetRecurrence::Yearly,
-    }
-}
-
-fn budget_series_periods(
-    starting_at: DateTime<Utc>,
-    recurrence: BudgetRecurrence,
-    period_count: usize,
-) -> Result<Vec<TimePeriod>> {
-    let mut periods = Vec::with_capacity(period_count);
-    let mut cursor = starting_at;
-    for _ in 0..period_count {
-        let ending_before = next_budget_period_boundary(cursor, recurrence)?;
-        periods.push(
-            TimePeriod::new(cursor, Some(ending_before))
-                .map_err(|error| anyhow!("invalid budget period: {error:?}"))?,
-        );
-        cursor = ending_before;
-    }
-    Ok(periods)
-}
-
-fn next_budget_period_boundary(
-    starting_at: DateTime<Utc>,
-    recurrence: BudgetRecurrence,
-) -> Result<DateTime<Utc>> {
-    match recurrence {
-        BudgetRecurrence::Daily => starting_at
-            .checked_add_signed(Duration::days(1))
-            .ok_or_else(|| anyhow!("invalid recurring budget boundary")),
-        BudgetRecurrence::Monthly => starting_at
-            .checked_add_months(Months::new(1))
-            .ok_or_else(|| anyhow!("invalid recurring budget boundary")),
-        BudgetRecurrence::Yearly => starting_at
-            .checked_add_months(Months::new(12))
-            .ok_or_else(|| anyhow!("invalid recurring budget boundary")),
-    }
-}
-
 fn resolve_agent_account_for_spend(
     request: &SpendHttpRequest,
     user: &UserContext,
@@ -6102,6 +5958,7 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     #[cfg(unix)]
     #[test]
@@ -7127,7 +6984,31 @@ lease_profiles:
     }
 
     #[test]
-    fn budget_creation_uses_one_injected_snapshot_for_defaults_and_series_statuses() {
+    fn removed_budget_series_endpoint_has_no_route_or_side_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = ServerState::new_with_db_path(directory.path().join("hubu.sqlite")).unwrap();
+        let response = route(
+            authenticated_json_request(
+                "/budgets/series",
+                json!({
+                    "amount_cents": 1_000, "recurrence": "daily", "period_count": 2
+                }),
+            ),
+            &state,
+        );
+        assert_ne!(response.status, 200);
+        assert_eq!(response.body["error"], "no route for POST /budgets/series");
+        assert!(state
+            .governance
+            .lock()
+            .unwrap()
+            .load_budgets()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn budget_creation_uses_one_injected_snapshot_for_defaults_and_status() {
         let path = std::env::temp_dir().join(format!(
             "hubu-api-budget-create-snapshot-{}.sqlite",
             UserId::new()
@@ -7151,15 +7032,6 @@ lease_profiles:
             &state,
         )
         .expect("single-budget agent should register");
-        let series_agent = register_agent(
-            json!({
-                "name": "series-snapshot-budget-agent",
-                "version": "v1",
-            })
-            .to_string(),
-            &state,
-        )
-        .expect("series-budget agent should register");
         let request_now: DateTime<Utc> = "2030-01-01T00:00:00Z".parse().unwrap();
 
         let single = create_budget_at(
@@ -7175,26 +7047,6 @@ lease_profiles:
         assert_eq!(single.budget.starting_at, request_now.to_rfc3339());
         assert_eq!(single.budget.status, "active");
 
-        let series = create_budget_series_at(
-            json!({
-                "agent_id": series_agent.agent_id,
-                "amount_cents": 1_000,
-                "recurrence": "daily",
-                "period_count": 2,
-            })
-            .to_string(),
-            &state,
-            request_now,
-        )
-        .expect("series should use one injected default and response snapshot");
-        assert_eq!(series.budgets.len(), 2);
-        assert_eq!(series.budgets[0].starting_at, request_now.to_rfc3339());
-        assert_eq!(series.budgets[0].status, "active");
-        assert_eq!(series.budgets[1].status, "scheduled");
-        assert_eq!(
-            series.budgets[0].ending_before,
-            Some(series.budgets[1].starting_at.clone())
-        );
         std::fs::remove_file(path).ok();
     }
 

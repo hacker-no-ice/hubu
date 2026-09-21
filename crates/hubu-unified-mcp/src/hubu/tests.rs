@@ -198,7 +198,7 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
 
     let expected = super::catalog::tool_definitions();
     assert_eq!(&actual[5..], expected.as_slice());
-    assert_eq!(expected.len(), 31);
+    assert_eq!(expected.len(), 30);
     assert!(!actual
         .iter()
         .any(|tool| tool["name"] == "hubu_replace_budget"));
@@ -292,7 +292,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 44);
+    assert_eq!(tools.len(), 43);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -310,7 +310,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 42);
+    assert_eq!(degraded.len(), 41);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -511,13 +511,6 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::None,
         ),
         (
-            "hubu_create_recurring_budget",
-            empty.clone(),
-            "POST",
-            "/budgets/series",
-            HubuRequestCapabilityV1::None,
-        ),
-        (
             "hubu_revoke_budget",
             empty.clone(),
             "POST",
@@ -642,7 +635,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::Reconciliation,
         ),
     ];
-    assert_eq!(cases.len(), 30);
+    assert_eq!(cases.len(), 29);
     for (name, arguments, method, path, capability) in cases {
         let params = json!({
             "name": name,
@@ -1684,6 +1677,8 @@ fn protected_and_unapproved_hubu_tools_fail_before_network() {
         .as_str()
         .unwrap()
         .contains("trusted spend-approval client gate"));
+    let removed = tool_call(&server, "hubu_create_recurring_budget", json!({}), None);
+    assert_eq!(removed["error"]["code"], -32602);
     let unknown = tool_call(&server, "hubu_not_a_tool", json!({}), None);
     assert_eq!(unknown["error"]["code"], -32602);
     assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
