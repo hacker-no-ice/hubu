@@ -351,7 +351,7 @@ const components = {
       { id: "reconcile", label: "Human reconciliation", sub: "evidence + overrun", x: 780, y: 500, w: 230, h: 96, tone: "human", path: "crates/hubu-core/src/app/executor_claim.rs" },
     ],
     edges: [
-      ["create", "periods", "expand"],
+      ["create", "periods", "create / update"],
       ["periods", "advisory", "compare"],
       ["advisory", "store", "warn"],
       ["periods", "store", "v1 / append + CAS"],
