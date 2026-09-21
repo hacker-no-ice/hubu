@@ -1,123 +1,38 @@
-//! Hubu's non-cash provider subledger. A journal row is a balanced posting pair;
-//! the SQL view exposes its two lines without allowing partially written pairs.
+//! Governance adapter for the independent ledger domain. All postings use the
+//! canonical ledger transaction and entry tables shared with wallet payments.
 use super::*;
-use crate::spend::SpendExecutorVendorCost;
-use hubu_common::ids::AgentAccountId;
-
-const CENT_AT_SCALE_18: i128 = 10_000_000_000_000_000;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProviderAccountingRecord {
-    pub id: String,
-    pub original_entry_id: String,
-    pub previous_entry_id: Option<String>,
-    pub owner_user_id: UserId,
-    pub agent_id: AgentId,
-    pub agent_account_id: AgentAccountId,
-    pub operation_key: String,
-    pub budget_id: BudgetId,
-    pub budget_version_id: BudgetVersionId,
-    pub claim_id: SpendExecutorClaimId,
-    pub settlement_id: PaymentId,
-    pub provider: Option<String>,
-    pub billing_merchant: Option<String>,
-    pub purpose: Option<String>,
-    pub provider_request_id: String,
-    pub reconciliation_provider_reference: Option<String>,
-    pub reconciliation_evidence: Option<String>,
-    /// Immutable original receipt evidence, retained on every adjustment.
-    pub receipt: SpendExecutorSettlementReceipt,
-    /// Original exact cost, or corrected total cost after this adjustment.
-    pub effective_vendor_cost: SpendExecutorVendorCost,
-    /// Signed coefficient at scale 18, encoded as a string to preserve i128 precision.
-    pub expense_delta_amount: String,
-    pub budget_charge_delta_cents: i64,
-    /// Signed budget charge minus exact expense, also at scale 18.
-    pub rounding_delta_amount: String,
-    pub reason: Option<String>,
-    pub adjustment_evidence: Option<String>,
-    pub adjustment_operation_key: Option<String>,
-    pub legacy_backfill: bool,
-    pub missing_evidence: Vec<String>,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Human-authorized correction command for the BudgetManager facade.
-/// No executor or public transport endpoint accepts this command.
-#[derive(Debug, Clone)]
-pub struct ProviderAccountingAdjustment {
-    pub owner_user_id: UserId,
-    pub original_entry_id: String,
-    pub expected_previous_entry_id: String,
-    pub operation_key: String,
-    pub corrected_vendor_cost: SpendExecutorVendorCost,
-    pub reason: String,
-    pub evidence: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderBudgetReconciliation {
-    pub budget_id: BudgetId,
-    pub consumed_amount_cents: i64,
-    pub provider_budget_charges_cents: i64,
-    /// Wallet consumption and/or missing legacy evidence. Never silently treated
-    /// as provider expense or as proof that all consumption has ledger coverage.
-    pub other_or_unaccounted_consumption_cents: i64,
-}
+use crate::ledger::{AccountingAdjustment, BudgetLedgerQuery, BudgetLedgerReport};
+use hubu_common::ids::LedgerTransactionId;
+use hubu_ledger::{
+    domain as ledger, ExactMoney, GovernedSpendContext, LedgerAccountKind, TransactionKind,
+    TransactionMetadata, TransactionRecord, CENT_AT_SCALE_18,
+};
 
 fn invalid(message: &str) -> StorageError {
     StorageError::InvalidData(message.to_string())
 }
-
-fn exact_amount(cost: &SpendExecutorVendorCost) -> Result<i128, StorageError> {
-    cost.conservative_budget_charge_cents().map_err(invalid)?;
-    Ok(i128::from(cost.amount) * 10_i128.pow(18 - cost.scale))
+fn ledger_error(error: hubu_ledger::LedgerError) -> StorageError {
+    match error {
+        hubu_ledger::LedgerError::Sqlite { source } => StorageError::from(source),
+        hubu_ledger::LedgerError::Json(source) => StorageError::from(source),
+        error => invalid(&error.to_string()),
+    }
 }
-
-fn insert_record(conn: &Connection, record: &ProviderAccountingRecord) -> Result<(), StorageError> {
-    conn.execute(
-        "INSERT INTO provider_accounting_journal
-         (id, owner_user_id, budget_id, original_entry_id, previous_entry_id,
-          expense_delta_amount, budget_charge_delta_cents, currency, record_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![
-            record.id,
-            record.owner_user_id.to_string(),
-            record.budget_id.to_string(),
-            record.original_entry_id,
-            record.previous_entry_id,
-            record.expense_delta_amount,
-            record.budget_charge_delta_cents,
-            record.effective_vendor_cost.currency.to_string(),
-            serde_json::to_string(record)?
-        ],
-    )?;
-    Ok(())
-}
-
-fn load_record(
-    conn: &Connection,
-    id: &str,
-) -> Result<Option<ProviderAccountingRecord>, StorageError> {
-    let json: Option<String> = conn
-        .query_row(
-            "SELECT record_json FROM provider_accounting_journal WHERE id = ?1",
-            [id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    json.map(|value| serde_json::from_str(&value).map_err(Into::into))
-        .transpose()
+fn exact_cost(cost: &crate::spend::SpendExecutorVendorCost) -> ExactMoney {
+    ExactMoney {
+        amount: cost.amount.to_string(),
+        scale: cost.scale,
+        currency: cost.currency,
+    }
 }
 
 pub(super) fn post_settlement(
-    conn: &Connection,
+    conn: &rusqlite::Transaction<'_>,
     claim: &SpendExecutorClaimRecord,
     hold: &BudgetHold,
     receipt: &PersistedSpendExecutorSettlementReceipt,
     legacy_backfill: bool,
 ) -> Result<(), StorageError> {
-    let id = format!("settlement:{}", receipt.settlement_id);
     let json: Option<String> = conn
         .query_row(
             "SELECT d.request_json FROM spend_decisions d
@@ -173,8 +88,8 @@ pub(super) fn post_settlement(
         .execution_scope
         .as_ref()
         .map(|scope| scope.billing_merchant.id.clone())
-        .or(request.merchant);
-    let purpose = (!request.reason.trim().is_empty()).then_some(request.reason);
+        .or(request.merchant.clone());
+    let purpose = (!request.reason.trim().is_empty()).then_some(request.reason.clone());
     let mut missing_evidence = Vec::new();
     if provider.is_none() {
         missing_evidence.push("provider".to_string());
@@ -185,141 +100,113 @@ pub(super) fn post_settlement(
     if purpose.is_none() {
         missing_evidence.push("purpose".to_string());
     }
-    let expense = exact_amount(&receipt.receipt.actual_vendor_cost)?;
-    let record = ProviderAccountingRecord {
-        id: id.clone(),
-        original_entry_id: id,
-        previous_entry_id: None,
-        owner_user_id: claim.owner_user_id.clone(),
-        agent_id: claim.agent_id.clone(),
-        agent_account_id: request.agent_account_id,
-        operation_key: claim.operation_key.clone(),
-        budget_id: hold.budget_id.clone(),
-        budget_version_id: hold.budget_version_id.clone(),
-        claim_id: claim.id.clone(),
-        settlement_id: receipt.settlement_id.clone(),
+    let cost = exact_cost(&receipt.receipt.actual_vendor_cost);
+    let expense = cost.scaled().map_err(ledger_error)?;
+    let metadata = TransactionMetadata {
+        kind: TransactionKind::ExternalProvider,
+        source_key: format!("settlement:{}", receipt.settlement_id),
+        agent_id: Some(request.agent_id.clone()),
+        agent_account_id: Some(request.agent_account_id.clone()),
+        context: Some(GovernedSpendContext {
+            agent_id: claim.agent_id.clone(),
+            agent_account_id: request.agent_account_id,
+            budget_id: hold.budget_id.clone(),
+            budget_version_id: hold.budget_version_id.clone(),
+            spend_decision_id: hold.spend_decision_id.clone(),
+            operation_key: claim.operation_key.clone(),
+        }),
+        effective_cost: cost,
+        budget_charge_delta_cents: Some(receipt.budget_charge_cents),
+        rounding_delta_amount: Some(
+            (i128::from(receipt.budget_charge_cents) * CENT_AT_SCALE_18 - expense).to_string(),
+        ),
+        original_transaction_id: None,
+        previous_transaction_id: None,
         provider,
         billing_merchant,
         purpose,
-        provider_request_id: receipt.receipt.provider_request_id.clone(),
-        reconciliation_provider_reference: claim.provider_reference.clone(),
-        reconciliation_evidence: claim.reconciliation_evidence.clone(),
-        receipt: receipt.receipt.clone(),
-        effective_vendor_cost: receipt.receipt.actual_vendor_cost.clone(),
-        expense_delta_amount: expense.to_string(),
-        budget_charge_delta_cents: receipt.budget_charge_cents,
-        rounding_delta_amount: (i128::from(receipt.budget_charge_cents) * CENT_AT_SCALE_18
-            - expense)
-            .to_string(),
+        source_evidence: serde_json::json!({"claim_id": claim.id, "settlement_id": receipt.settlement_id,
+            "receipt": receipt.receipt, "reconciliation_provider_reference": claim.provider_reference,
+            "reconciliation_evidence": claim.reconciliation_evidence}),
         reason: None,
         adjustment_evidence: None,
-        adjustment_operation_key: None,
         legacy_backfill,
         missing_evidence,
-        created_at: receipt.created_at,
     };
-    insert_record(conn, &record)
+    ledger::post_pair(
+        conn,
+        ledger::PairPosting {
+            owner: &claim.owner_user_id,
+            debit_kind: LedgerAccountKind::AgentSpendExpense,
+            credit_kind: LedgerAccountKind::ExternallyBilledClearing,
+            signed_amount: expense,
+            metadata,
+            external_ref: Some(receipt.settlement_id.to_string()),
+            created_at: receipt.created_at,
+        },
+    )
+    .map_err(ledger_error)?;
+    Ok(())
 }
 
 impl SqliteGovernanceRepository {
     pub(super) fn initialize_provider_accounting(&mut self) -> Result<(), StorageError> {
+        ledger::initialize(&self.conn).map_err(ledger_error)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS provider_accounting_journal (
-                id TEXT PRIMARY KEY,
-                owner_user_id TEXT NOT NULL,
-                budget_id TEXT NOT NULL REFERENCES budgets(id),
-                original_entry_id TEXT NOT NULL REFERENCES provider_accounting_journal(id),
-                previous_entry_id TEXT UNIQUE REFERENCES provider_accounting_journal(id),
-                expense_delta_amount TEXT NOT NULL,
-                budget_charge_delta_cents INTEGER NOT NULL,
-                currency TEXT NOT NULL,
-                record_json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS provider_accounting_owner_budget
-                ON provider_accounting_journal(owner_user_id, budget_id);
-            CREATE TRIGGER IF NOT EXISTS provider_accounting_no_update
-                BEFORE UPDATE ON provider_accounting_journal BEGIN
-                SELECT RAISE(ABORT, 'provider accounting is immutable'); END;
-            CREATE TRIGGER IF NOT EXISTS provider_accounting_no_delete
-                BEFORE DELETE ON provider_accounting_journal BEGIN
-                SELECT RAISE(ABORT, 'provider accounting is immutable'); END;
-            CREATE TABLE IF NOT EXISTS provider_accounting_legacy_gaps (
-                claim_id TEXT PRIMARY KEY, reason TEXT NOT NULL
-            );
-            CREATE VIEW IF NOT EXISTS provider_accounting_lines AS
-                SELECT id AS transaction_id, owner_user_id, budget_id,
-                    'provider_spend_expense' AS account,
-                    CASE WHEN substr(expense_delta_amount, 1, 1) = '-' THEN 'credit' ELSE 'debit' END AS direction,
-                    ltrim(expense_delta_amount, '-') AS amount, 18 AS scale, currency
-                FROM provider_accounting_journal
-                UNION ALL
-                SELECT id, owner_user_id, budget_id, 'externally_billed_clearing',
-                    CASE WHEN substr(expense_delta_amount, 1, 1) = '-' THEN 'debit' ELSE 'credit' END,
-                    ltrim(expense_delta_amount, '-'), 18, currency
-                FROM provider_accounting_journal;"
-        )?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS ledger_legacy_gaps (source_key TEXT PRIMARY KEY, reason TEXT NOT NULL);")?;
         let ids = {
-            let mut stmt = tx.prepare("SELECT c.id FROM spend_executor_claims c
-                WHERE c.status = 'settled' AND NOT EXISTS
-                (SELECT 1 FROM provider_accounting_journal j WHERE j.id = 'settlement:' || c.settlement_id)
-                UNION SELECT r.claim_id FROM spend_executor_settlement_receipts r
-                LEFT JOIN spend_executor_claims c ON c.id = r.claim_id WHERE c.id IS NULL")?;
+            let mut stmt = tx.prepare("SELECT c.id FROM spend_executor_claims c WHERE c.status='settled'
+                AND NOT EXISTS (SELECT 1 FROM ledger_transaction_metadata m WHERE m.source_key='settlement:' || c.settlement_id)
+                UNION SELECT r.claim_id FROM spend_executor_settlement_receipts r LEFT JOIN spend_executor_claims c ON c.id=r.claim_id WHERE c.id IS NULL")?;
             let ids = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map([], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             ids
         };
         for id in ids {
-            let claim_id = SpendExecutorClaimId::from_str(&id)
-                .map_err(|_| invalid("invalid legacy claim id"))?;
-            let Some(claim) = load_executor_claim_by_id(&tx, &claim_id)? else {
-                tx.execute("INSERT OR IGNORE INTO provider_accounting_legacy_gaps (claim_id, reason) VALUES (?1, 'legacy receipt is missing its claim')", [&id])?;
-                continue;
-            };
+            let claim_id = id.parse().map_err(|_| invalid("invalid legacy claim id"))?;
+            let claim = load_executor_claim_by_id(&tx, &claim_id)?;
             let hold = load_budget_hold_by_claim_id(&tx, &claim_id)?;
             let receipt = load_executor_settlement_receipt_by_claim_id(&tx, &claim_id)?;
-            let gap = match (hold, receipt) {
-                (Some(hold), Some(receipt))
+            let gap = match (claim, hold, receipt) {
+                (Some(claim), Some(hold), Some(receipt))
                     if claim.settlement_id.as_ref() == Some(&receipt.settlement_id) =>
                 {
+                    tx.execute_batch("SAVEPOINT provider_backfill;")?;
                     match post_settlement(&tx, &claim, &hold, &receipt, true) {
-                        Ok(()) => None,
-                        Err(StorageError::InvalidData(_)) | Err(StorageError::Json { .. }) => {
-                            Some("legacy settlement evidence is incomplete or inconsistent")
+                        Ok(()) => {
+                            tx.execute_batch("RELEASE provider_backfill;")?;
+                            None
                         }
-                        Err(error) => return Err(error),
+                        Err(StorageError::InvalidData(_)) | Err(StorageError::Json(_)) => {
+                            tx.execute_batch(
+                                "ROLLBACK TO provider_backfill; RELEASE provider_backfill;",
+                            )?;
+                            Some("incomplete or inconsistent provider settlement evidence")
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
-                _ => Some("legacy settled claim is missing matching receipt or budget hold"),
+                _ => Some("missing matching provider claim, receipt or hold"),
             };
             if let Some(reason) = gap {
-                tx.execute("INSERT OR IGNORE INTO provider_accounting_legacy_gaps (claim_id, reason) VALUES (?1, ?2)", params![id, reason])?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO ledger_legacy_gaps VALUES (?1,?2)",
+                    params![format!("claim:{id}"), reason],
+                )?;
             }
         }
+        backfill_wallet_context(&tx)?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn provider_accounting_records(
-        &self,
-        owner_user_id: &UserId,
-    ) -> Result<Vec<ProviderAccountingRecord>, StorageError> {
-        let mut stmt = self.conn.prepare("SELECT record_json FROM provider_accounting_journal WHERE owner_user_id = ?1 ORDER BY rowid")?;
-        let rows = stmt.query_map([owner_user_id.to_string()], |row| row.get::<_, String>(0))?;
-        rows.map(|row| serde_json::from_str(&row?).map_err(Into::into))
-            .collect()
-    }
-
-    /// Append a correction to a settled provider expense. Positive corrections
-    /// record already-incurred cost even if the budget is exhausted or revoked.
-    /// Negative corrections can only refund this settlement's previous charge.
-    pub(crate) fn adjust_provider_accounting(
+    pub(crate) fn adjust_accounting(
         &mut self,
-        command: ProviderAccountingAdjustment,
-    ) -> Result<(ProviderAccountingRecord, crate::budget::state::BudgetState), StorageError> {
+        command: AccountingAdjustment,
+    ) -> Result<(TransactionRecord, crate::budget::state::BudgetState), StorageError> {
         if command.operation_key.trim().is_empty()
             || command.reason.trim().is_empty()
             || command.evidence.trim().is_empty()
@@ -328,8 +215,8 @@ impl SqliteGovernanceRepository {
                 "adjustment requires operation key, reason and evidence",
             ));
         }
-        let corrected_amount = exact_amount(&command.corrected_vendor_cost)?;
-        let id = format!(
+        let cost = command.corrected_cost.scaled().map_err(ledger_error)?;
+        let key = format!(
             "adjustment:{}:{:x}",
             command.owner_user_id,
             Sha256::digest(command.operation_key.as_bytes())
@@ -337,116 +224,318 @@ impl SqliteGovernanceRepository {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(existing) = load_record(&tx, &id)? {
-            if existing.original_entry_id != command.original_entry_id
-                || existing.previous_entry_id.as_deref()
-                    != Some(&command.expected_previous_entry_id)
-                || existing.effective_vendor_cost != command.corrected_vendor_cost
-                || existing.reason.as_deref() != Some(&command.reason)
-                || existing.adjustment_evidence.as_deref() != Some(&command.evidence)
+        if let Some(existing) = ledger::find_source(&tx, &key).map_err(ledger_error)? {
+            let meta = existing
+                .metadata
+                .as_ref()
+                .ok_or_else(|| invalid("missing adjustment metadata"))?;
+            if meta.original_transaction_id.as_ref() != Some(&command.original_transaction_id)
+                || meta.previous_transaction_id.as_ref()
+                    != Some(&command.expected_previous_transaction_id)
+                || meta.effective_cost != command.corrected_cost
+                || meta.reason.as_ref() != Some(&command.reason)
+                || meta.adjustment_evidence.as_ref() != Some(&command.evidence)
             {
-                return Err(invalid("conflicting provider accounting adjustment replay"));
+                return Err(invalid("conflicting accounting adjustment replay"));
             }
             let state = load_budget_state_from(&tx)?;
             tx.commit()?;
             return Ok((existing, state));
         }
-        let original = load_record(&tx, &command.original_entry_id)?
-            .ok_or_else(|| invalid("unknown original accounting entry"))?;
-        let previous = load_record(&tx, &command.expected_previous_entry_id)?
-            .ok_or_else(|| invalid("unknown previous accounting entry"))?;
+        let original = ledger::load_transaction(&tx, &command.original_transaction_id)
+            .map_err(ledger_error)?
+            .ok_or_else(|| invalid("unknown original transaction"))?;
+        let previous = ledger::load_transaction(&tx, &command.expected_previous_transaction_id)
+            .map_err(ledger_error)?
+            .ok_or_else(|| invalid("unknown previous transaction"))?;
+        let original_meta = original
+            .metadata
+            .as_ref()
+            .ok_or_else(|| invalid("legacy transaction lacks correction evidence"))?;
+        let previous_meta = previous
+            .metadata
+            .as_ref()
+            .ok_or_else(|| invalid("previous transaction lacks evidence"))?;
         if original.owner_user_id != command.owner_user_id
-            || original.previous_entry_id.is_some()
-            || previous.original_entry_id != original.id
             || previous.owner_user_id != command.owner_user_id
-            || command.corrected_vendor_cost.currency != original.effective_vendor_cost.currency
+            || original_meta.kind != TransactionKind::ExternalProvider
+            || (previous.id != original.id
+                && previous_meta.original_transaction_id.as_ref() != Some(&original.id))
+            || original_meta.effective_cost.currency != command.corrected_cost.currency
         {
-            return Err(invalid("adjustment owner, source or currency mismatch"));
+            return Err(invalid(
+                "adjustment requires an owned external-provider original with matching currency",
+            ));
         }
-        let has_successor: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM provider_accounting_journal WHERE previous_entry_id = ?1)",
-            [&previous.id],
-            |row| row.get(0),
-        )?;
+        let has_successor:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ledger_transaction_metadata WHERE previous_transaction_id=?1)",[previous.id.to_string()],|r|r.get(0))?;
         if has_successor {
             return Err(invalid("adjustment predecessor is stale"));
         }
-        let charge = command
-            .corrected_vendor_cost
-            .conservative_budget_charge_cents()
-            .map_err(invalid)?;
-        let old_charge = previous
-            .effective_vendor_cost
-            .conservative_budget_charge_cents()
-            .map_err(invalid)?;
-        let delta = charge - old_charge;
-        let expense_delta = corrected_amount - exact_amount(&previous.effective_vendor_cost)?;
-        let balance = load_budget_balance_by_id(&tx, &original.budget_id)?
-            .ok_or_else(|| invalid("missing adjustment budget"))?;
-        let consumed = balance
-            .consumed_amount_cents
-            .checked_add(delta)
-            .filter(|amount| *amount >= 0)
-            .ok_or_else(|| invalid("invalid adjusted consumption"))?;
-        let remaining = balance
-            .remaining_amount_cents
-            .checked_sub(delta)
-            .ok_or_else(|| invalid("adjusted remaining budget overflow"))?;
-        let now = Utc::now();
-        tx.execute("UPDATE budget_balances SET consumed_amount_cents = ?2, remaining_amount_cents = ?3, updated_at = ?4 WHERE budget_id = ?1", params![original.budget_id.to_string(), consumed, remaining, now.to_rfc3339()])?;
-        let record = ProviderAccountingRecord {
-            id,
-            previous_entry_id: Some(previous.id),
-            effective_vendor_cost: command.corrected_vendor_cost,
-            expense_delta_amount: expense_delta.to_string(),
-            budget_charge_delta_cents: delta,
-            rounding_delta_amount: (i128::from(delta) * CENT_AT_SCALE_18 - expense_delta)
-                .to_string(),
-            reason: Some(command.reason),
-            adjustment_evidence: Some(command.evidence),
-            adjustment_operation_key: Some(command.operation_key),
-            legacy_backfill: false,
-            created_at: now,
-            ..original
+        let old = previous_meta
+            .effective_cost
+            .scaled()
+            .map_err(ledger_error)?;
+        let delta = cost
+            .checked_sub(old)
+            .ok_or_else(|| invalid("correction delta overflow"))?;
+        let (charge, rounding) = if let Some(context) = &original_meta.context {
+            let amount = command
+                .corrected_cost
+                .budget_cents()
+                .map_err(ledger_error)?
+                - previous_meta
+                    .effective_cost
+                    .budget_cents()
+                    .map_err(ledger_error)?;
+            let balance = load_budget_balance_by_id(&tx, &context.budget_id)?
+                .ok_or_else(|| invalid("missing adjustment budget"))?;
+            let consumed = balance
+                .consumed_amount_cents
+                .checked_add(amount)
+                .filter(|v| *v >= 0)
+                .ok_or_else(|| invalid("invalid adjusted consumption"))?;
+            let remaining = balance
+                .remaining_amount_cents
+                .checked_sub(amount)
+                .ok_or_else(|| invalid("adjustment balance overflow"))?;
+            tx.execute("UPDATE budget_balances SET consumed_amount_cents=?2, remaining_amount_cents=?3, updated_at=?4 WHERE budget_id=?1",params![context.budget_id.to_string(),consumed,remaining,Utc::now().to_rfc3339()])?;
+            (
+                Some(amount),
+                Some((i128::from(amount) * CENT_AT_SCALE_18 - delta).to_string()),
+            )
+        } else {
+            (None, None)
         };
-        insert_record(&tx, &record)?;
+        let mut meta = original_meta.clone();
+        meta.kind = TransactionKind::Adjustment;
+        meta.source_key = key;
+        meta.effective_cost = command.corrected_cost;
+        meta.budget_charge_delta_cents = charge;
+        meta.rounding_delta_amount = rounding;
+        meta.original_transaction_id = Some(original.id.clone());
+        meta.previous_transaction_id = Some(previous.id);
+        meta.reason = Some(command.reason);
+        meta.adjustment_evidence = Some(command.evidence);
+        meta.legacy_backfill = false;
+        if original.entries.len() != 2 {
+            return Err(invalid(
+                "correction requires an evidenced two-account expense",
+            ));
+        }
+        let debit = original
+            .entries
+            .iter()
+            .find(|e| e.direction == hubu_ledger::LedgerDirection::Debit)
+            .ok_or_else(|| invalid("missing debit"))?;
+        let credit = original
+            .entries
+            .iter()
+            .find(|e| e.direction == hubu_ledger::LedgerDirection::Credit)
+            .ok_or_else(|| invalid("missing credit"))?;
+        let record = ledger::post_pair(
+            &tx,
+            ledger::PairPosting {
+                owner: &command.owner_user_id,
+                debit_kind: debit.account_kind,
+                credit_kind: credit.account_kind,
+                signed_amount: delta,
+                metadata: meta,
+                external_ref: original.external_ref,
+                created_at: Utc::now(),
+            },
+        )
+        .map_err(ledger_error)?;
         let state = load_budget_state_from(&tx)?;
         tx.commit()?;
         Ok((record, state))
     }
 
-    pub fn reconcile_provider_budget(
+    pub(crate) fn query_budget_ledger(
         &self,
-        owner_user_id: &UserId,
-        budget_id: &BudgetId,
-    ) -> Result<ProviderBudgetReconciliation, StorageError> {
-        // Both reads share a SQLite snapshot even while another connection settles.
+        query: BudgetLedgerQuery,
+    ) -> Result<BudgetLedgerReport, StorageError> {
         let tx = self.conn.unchecked_transaction()?;
-        let charges = {
-            let mut stmt = tx.prepare("SELECT budget_charge_delta_cents FROM provider_accounting_journal WHERE owner_user_id = ?1 AND budget_id = ?2")?;
-            let charges = stmt
-                .query_map(
-                    params![owner_user_id.to_string(), budget_id.to_string()],
-                    |row| row.get::<_, i64>(0),
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            charges
-        };
-        if charges.is_empty() {
-            return Err(invalid("unknown provider accounting budget"));
+        // Authorization is independent of the presence of accounting rows.
+        let owned:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM budgets b JOIN agent_accounts a ON a.agent_id=b.scope_id WHERE b.id=?1 AND b.scope_type='agent' AND a.agent_id=?2 AND a.owner_user_id=?3)",params![query.budget_id.to_string(),query.agent_id.to_string(),query.owner_user_id.to_string()],|r|r.get(0))?;
+        if !owned {
+            return Err(invalid("unknown owned agent budget"));
         }
-        let total: i128 = charges.into_iter().map(i128::from).sum();
-        let total = i64::try_from(total).map_err(|_| invalid("provider charge total overflow"))?;
-        let balance = load_budget_balance_by_id(&tx, budget_id)?
+        let all = ledger::owner_transactions(&tx, &query.owner_user_id).map_err(ledger_error)?;
+        let unlinked = all
+            .iter()
+            .filter(|r| {
+                r.metadata
+                    .as_ref()
+                    .and_then(|m| m.context.as_ref())
+                    .is_none()
+            })
+            .count();
+        let transactions: Vec<_> = all
+            .into_iter()
+            .filter(|r| {
+                r.metadata
+                    .as_ref()
+                    .and_then(|m| m.context.as_ref())
+                    .is_some_and(|c| c.agent_id == query.agent_id && c.budget_id == query.budget_id)
+            })
+            .collect();
+        let total: i128 = transactions
+            .iter()
+            .filter_map(|r| r.metadata.as_ref()?.budget_charge_delta_cents)
+            .map(i128::from)
+            .sum();
+        let total = i64::try_from(total).map_err(|_| invalid("charge total overflow"))?;
+        let balance = load_budget_balance_by_id(&tx, &query.budget_id)?
             .ok_or_else(|| invalid("missing accounting budget"))?;
-        Ok(ProviderBudgetReconciliation {
-            budget_id: budget_id.clone(),
+        let pending:i64=tx.query_row("SELECT COUNT(*) FROM budget_holds WHERE budget_id=?1 AND status IN ('frozen','claimed')",[query.budget_id.to_string()],|r|r.get(0))?;
+        Ok(BudgetLedgerReport {
+            budget_id: query.budget_id,
+            agent_id: query.agent_id,
+            transactions,
             consumed_amount_cents: balance.consumed_amount_cents,
-            provider_budget_charges_cents: total,
-            other_or_unaccounted_consumption_cents: balance
+            recorded_budget_charges_cents: total,
+            unaccounted_consumption_cents: balance
                 .consumed_amount_cents
                 .checked_sub(total)
-                .ok_or_else(|| invalid("reconciliation difference overflow"))?,
+                .ok_or_else(|| invalid("coverage difference overflow"))?,
+            owner_transactions_without_budget_context: unlinked,
+            pending_hold_count: pending,
         })
     }
+}
+
+fn backfill_wallet_context(tx: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+    if !table_has_column(tx, "payment_attempts", "ledger_transaction_id")? {
+        return Ok(());
+    }
+    let ids = {
+        let mut stmt=tx.prepare("SELECT t.id FROM ledger_transactions t LEFT JOIN ledger_transaction_metadata m ON m.transaction_id=t.id WHERE t.kind='wallet_payment' AND m.transaction_id IS NULL")?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+    for id in ids {
+        let transaction_id: LedgerTransactionId = id
+            .parse()
+            .map_err(|_| invalid("invalid legacy wallet transaction id"))?;
+        let record = ledger::load_transaction(tx, &transaction_id)
+            .map_err(ledger_error)?
+            .ok_or_else(|| invalid("missing wallet transaction"))?;
+        let matches = {
+            let mut stmt=tx.prepare("SELECT p.payment_id,p.spend_auth_token_id,p.agent_account_id,d.request_json,d.operation_key,d.id,h.budget_id,h.budget_version_id,p.amount_cents,p.rail_reference,d.agent_id
+            FROM payment_attempts p JOIN spend_auth_tokens t ON t.id=p.spend_auth_token_id
+            JOIN spend_decisions d ON d.id=t.spend_decision_id JOIN budget_holds h ON h.spend_decision_id=d.id
+            JOIN budgets b ON b.id=h.budget_id AND b.scope_type='agent' AND b.scope_id=d.agent_id
+            WHERE p.ledger_transaction_id=?1 AND p.owner_user_id=?2 AND p.status='succeeded'
+            AND p.payment_id=?3 AND t.used_by_payment_id=p.payment_id AND t.owner_user_id=p.owner_user_id
+            AND d.owner_user_id=p.owner_user_id AND d.agent_id=p.agent_id AND h.amount_cents=p.amount_cents AND h.currency=p.currency AND h.status='settled' AND h.executor_claim_id IS NULL")?;
+            let rows = stmt
+                .query_map(
+                    params![id, record.owner_user_id.to_string(), record.external_ref],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, String>(4)?,
+                            r.get::<_, String>(5)?,
+                            r.get::<_, String>(6)?,
+                            r.get::<_, String>(7)?,
+                            r.get::<_, i64>(8)?,
+                            r.get::<_, Option<String>>(9)?,
+                            r.get::<_, String>(10)?,
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        if matches.len() != 1 {
+            tx.execute("INSERT OR IGNORE INTO ledger_legacy_gaps VALUES (?1,'wallet transaction lacks unique consistent governed-spend evidence')",[format!("wallet:{id}")])?;
+            continue;
+        }
+        let (
+            payment_id,
+            token,
+            account,
+            json,
+            operation,
+            decision,
+            budget,
+            version,
+            amount,
+            rail_reference,
+            decision_agent_id,
+        ) = &matches[0];
+        let request: SpendRequest = serde_json::from_str(json)?;
+        let expected = ExactMoney {
+            amount: amount.to_string(),
+            scale: 2,
+            currency: request.currency,
+        };
+        let debits: Vec<_> = record
+            .entries
+            .iter()
+            .filter(|e| e.direction == hubu_ledger::LedgerDirection::Debit)
+            .collect();
+        let credits: Vec<_> = record
+            .entries
+            .iter()
+            .filter(|e| e.direction == hubu_ledger::LedgerDirection::Credit)
+            .collect();
+        let accounts_match: bool = tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM ledger_entries e JOIN ledger_accounts a ON a.id=e.account_id WHERE e.transaction_id=?1 AND (e.owner_user_id!=?2 OR a.owner_user_id!=?2 OR e.currency!=?3 OR a.currency!=?3))", params![id,record.owner_user_id.to_string(),request.currency.to_string()], |r|r.get(0))?;
+        if request.owner_user_id != record.owner_user_id
+            || request.agent_id.to_string() != *decision_agent_id
+            || request.agent_account_id.to_string() != *account
+            || request.amount_cents != *amount
+            || record.entries.len() != 2
+            || debits.len() != 1
+            || credits.len() != 1
+            || !accounts_match
+            || debits[0].account_kind != LedgerAccountKind::AgentSpendExpense
+            || credits[0].account_kind != LedgerAccountKind::UserWalletCash
+            || credits[0].amount.scaled().map_err(ledger_error)?
+                != expected.scaled().map_err(ledger_error)?
+            || debits[0].amount.currency != request.currency
+            || credits[0].amount.currency != request.currency
+            || debits[0].amount.scaled().map_err(ledger_error)?
+                != expected.scaled().map_err(ledger_error)?
+        {
+            tx.execute("INSERT OR IGNORE INTO ledger_legacy_gaps VALUES (?1,'wallet amount or account evidence is inconsistent')",[format!("wallet:{id}")])?;
+            continue;
+        }
+        let meta = TransactionMetadata {
+            kind: TransactionKind::WalletPayment,
+            source_key: format!("payment:{payment_id}"),
+            agent_id: Some(request.agent_id.clone()),
+            agent_account_id: Some(request.agent_account_id.clone()),
+            context: Some(GovernedSpendContext {
+                agent_id: request.agent_id,
+                agent_account_id: request.agent_account_id,
+                budget_id: budget.parse().map_err(|_| invalid("invalid budget"))?,
+                budget_version_id: version
+                    .parse()
+                    .map_err(|_| invalid("invalid budget version"))?,
+                spend_decision_id: decision.parse().map_err(|_| invalid("invalid decision"))?,
+                operation_key: operation.clone(),
+            }),
+            effective_cost: expected,
+            budget_charge_delta_cents: Some(*amount),
+            rounding_delta_amount: Some("0".into()),
+            original_transaction_id: None,
+            previous_transaction_id: None,
+            provider: None,
+            billing_merchant: request.merchant,
+            purpose: (!request.reason.is_empty()).then_some(request.reason),
+            source_evidence: serde_json::json!({"payment_id":payment_id,"spend_auth_token_id":token,"rail_reference":rail_reference}),
+            reason: None,
+            adjustment_evidence: None,
+            legacy_backfill: true,
+            missing_evidence: vec![],
+        };
+        ledger::attach_metadata(tx, &transaction_id, &meta).map_err(ledger_error)?;
+    }
+    Ok(())
 }

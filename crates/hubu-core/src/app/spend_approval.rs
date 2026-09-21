@@ -900,7 +900,26 @@ impl SpendApprovalService {
         };
 
         let payment_audit_request = payment_request.clone();
-        let payment = match payment_manager.submit_payment(payment_request) {
+        let payment = match payment_manager.submit_payment_with_context(
+            payment_request,
+            Some(hubu_ledger::GovernedSpendContext {
+                agent_id: authorization.agent_id.clone(),
+                agent_account_id: authorization.agent_account_id.clone(),
+                budget_id: authorization.budget_reservation.hold.budget_id.clone(),
+                budget_version_id: authorization
+                    .budget_reservation
+                    .hold
+                    .budget_version_id
+                    .clone(),
+                spend_decision_id: authorization
+                    .budget_reservation
+                    .hold
+                    .spend_decision_id
+                    .clone(),
+                operation_key: authorization.operation_key.clone(),
+            }),
+            Some(authorization.reason.clone()),
+        ) {
             Ok(payment) => payment,
             Err(error) => {
                 if !matches!(
@@ -1480,6 +1499,63 @@ mod tests {
                 .len(),
             1
         );
+        let records = harness
+            .payment_manager
+            .ledger()
+            .transactions_for_owner(&harness.user.user_id)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(
+            Some(&record.id),
+            settlement.payment.ledger_transaction_id.as_ref()
+        );
+        let metadata = record.metadata.as_ref().unwrap();
+        assert_eq!(metadata.kind, hubu_ledger::TransactionKind::WalletPayment);
+        assert_eq!(metadata.agent_id.as_ref(), Some(&authorization.agent_id));
+        let context = metadata.context.as_ref().unwrap();
+        assert_eq!(context.agent_account_id, authorization.agent_account_id);
+        assert_eq!(
+            context.budget_id,
+            authorization.budget_reservation.hold.budget_id
+        );
+        assert_eq!(
+            context.budget_version_id,
+            authorization.budget_reservation.hold.budget_version_id
+        );
+        assert_eq!(
+            context.spend_decision_id,
+            authorization.evaluation.decision_id
+        );
+        assert_eq!(context.operation_key, authorization.operation_key);
+        let request = harness.payment_attempts.list_payment_attempts().unwrap()[0].request();
+        let replay = harness
+            .payment_manager
+            .submit_payment_with_context(
+                request.clone(),
+                Some(context.clone()),
+                Some(authorization.reason.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            replay.ledger_transaction_id,
+            settlement.payment.ledger_transaction_id
+        );
+        assert_eq!(
+            harness
+                .payment_manager
+                .ledger()
+                .transactions_for_owner(&harness.user.user_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut wrong_context = context.clone();
+        wrong_context.budget_id = hubu_common::ids::BudgetId::new();
+        assert!(harness
+            .payment_manager
+            .submit_payment_with_context(request, Some(wrong_context), None)
+            .is_err());
     }
 
     #[test]

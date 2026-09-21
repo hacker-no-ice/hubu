@@ -10,6 +10,7 @@ members = [
     "crates/hubu-feedback",
     "crates/hubu-unified-mcp",
     "crates/hubu-wallet",
+    "crates/hubu-ledger",
 ]
 resolver = "2"
 
@@ -53,5 +54,6 @@ gongbu-build-info = { path = "crates/gongbu-build-info" }
 hubu-common = { path = "crates/hubu-common" }
 hubu-core = { path = "crates/hubu-core" }
 hubu-wallet = { path = "crates/hubu-wallet" }
+hubu-ledger = { path = "crates/hubu-ledger" }
 
 hubu-feedback = { path = "crates/hubu-feedback" }

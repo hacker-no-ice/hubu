@@ -44,18 +44,13 @@ pub struct BudgetManager {
 }
 
 impl BudgetManager {
-    /// Append a human-authorized correction and publish the committed budget
-    /// state while holding the repository lock. Positive deltas account for
-    /// incurred cost even when the logical budget has expired or been revoked.
-    pub fn adjust_provider_accounting(
-        &mut self,
-        command: crate::persistence::accounting::ProviderAccountingAdjustment,
+    pub(crate) fn accounting_repository(
+        &self,
     ) -> Result<
-        crate::persistence::accounting::ProviderAccountingRecord,
+        std::sync::Arc<std::sync::Mutex<crate::persistence::SqliteGovernanceRepository>>,
         crate::storage::StorageError,
     > {
-        self.coordinator()?
-            .adjust_provider_accounting(self, command)
+        Ok(self.coordinator()?.repository)
     }
 
     pub fn new() -> Self {
@@ -77,7 +72,7 @@ impl BudgetManager {
         })
     }
 
-    pub(super) fn apply_committed_state(&mut self, state: BudgetState) {
+    pub(crate) fn apply_committed_state(&mut self, state: BudgetState) {
         self.state = state;
     }
 

@@ -1,4 +1,4 @@
-pub mod accounting;
+mod accounting;
 
 use std::path::Path;
 use std::str::FromStr;
@@ -288,7 +288,7 @@ impl PolicyAssignmentScope {
         }
     }
 
-    fn agent_id(&self) -> Option<String> {
+    pub(super) fn agent_id(&self) -> Option<String> {
         match self {
             Self::UserDefault => None,
             Self::AgentOverride(agent_id) => Some(agent_id.to_string()),
@@ -5132,7 +5132,6 @@ fn load_budget_state_from(
 
 #[cfg(test)]
 mod tests {
-    include!("persistence/accounting_tests.rs");
 
     use std::sync::{Arc, Barrier};
 
@@ -5545,11 +5544,11 @@ mod tests {
         );
     }
 
-    fn user_id() -> UserId {
+    pub(super) fn user_id() -> UserId {
         "00000000-0000-4000-8000-000000000123".parse().unwrap()
     }
 
-    fn agent_id() -> AgentId {
+    pub(super) fn agent_id() -> AgentId {
         "00000000-0000-4000-8000-000000000456".parse().unwrap()
     }
 
@@ -5725,11 +5724,16 @@ mod tests {
         version_id
     }
 
-    fn settlement_receipt(actual_vendor_cost_cents: i64) -> SpendExecutorSettlementReceipt {
+    pub(super) fn settlement_receipt(
+        actual_vendor_cost_cents: i64,
+    ) -> SpendExecutorSettlementReceipt {
         precise_settlement_receipt(actual_vendor_cost_cents, 2)
     }
 
-    fn precise_settlement_receipt(amount: i64, scale: u32) -> SpendExecutorSettlementReceipt {
+    pub(super) fn precise_settlement_receipt(
+        amount: i64,
+        scale: u32,
+    ) -> SpendExecutorSettlementReceipt {
         SpendExecutorSettlementReceipt {
             actual_vendor_cost: SpendExecutorVendorCost {
                 amount,
@@ -5965,7 +5969,7 @@ mod tests {
         );
     }
 
-    fn persist_claimed_executor_spend(
+    pub(super) fn persist_claimed_executor_spend(
         repo: &mut SqliteGovernanceRepository,
         claim_expires_at: DateTime<Utc>,
     ) -> (SpendExecutorClaimRecord, SpendAuthTokenRecord, BudgetHold) {
@@ -5976,7 +5980,7 @@ mod tests {
         )
     }
 
-    fn persist_claimed_executor_spend_with_operation_key(
+    pub(super) fn persist_claimed_executor_spend_with_operation_key(
         repo: &mut SqliteGovernanceRepository,
         claim_expires_at: DateTime<Utc>,
         operation_key: &str,
@@ -9326,3 +9330,7 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 }
+
+#[cfg(test)]
+#[path = "persistence/accounting_tests.rs"]
+mod accounting_tests;

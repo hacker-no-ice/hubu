@@ -24,20 +24,6 @@ pub(crate) struct BudgetCoordinator {
 }
 
 impl BudgetCoordinator {
-    pub(super) fn adjust_provider_accounting(
-        &self,
-        manager: &mut BudgetManager,
-        command: crate::persistence::accounting::ProviderAccountingAdjustment,
-    ) -> Result<
-        crate::persistence::accounting::ProviderAccountingRecord,
-        crate::storage::StorageError,
-    > {
-        let mut repository = self.lock()?;
-        let (record, state) = repository.adjust_provider_accounting(command)?;
-        manager.apply_committed_state(state);
-        Ok(record)
-    }
-
     pub(super) fn create(
         &self,
         manager: &mut BudgetManager,

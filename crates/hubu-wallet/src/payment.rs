@@ -183,6 +183,24 @@ where
         &mut self,
         request: PaymentRequest,
     ) -> Result<PaymentResponse, PaymentError> {
+        self.submit_payment_with_context(request, None, None)
+    }
+
+    pub fn submit_payment_with_context(
+        &mut self,
+        request: PaymentRequest,
+        context: Option<hubu_ledger::GovernedSpendContext>,
+        purpose: Option<String>,
+    ) -> Result<PaymentResponse, PaymentError> {
+        if context.as_ref().is_some_and(|c| {
+            c.agent_id != request.agent_id
+                || c.agent_account_id != request.agent_account_id
+                || c.operation_key.trim().is_empty()
+        }) {
+            return Err(PaymentError::AuthorizationRejected {
+                reason: "governed ledger context does not match payment".into(),
+            });
+        }
         self.validate_request_shape(&request)?;
 
         if let Some(stored) = self
@@ -193,6 +211,23 @@ where
                 return Err(PaymentError::IdempotencyConflict);
             }
 
+            if let Some(context) = &context {
+                let record = self
+                    .ledger
+                    .transactions_for_owner(&request.owner_user_id)?
+                    .into_iter()
+                    .find(|record| {
+                        Some(&record.id) == stored.response.ledger_transaction_id.as_ref()
+                    });
+                if stored.response.status == PaymentStatus::Succeeded
+                    && record
+                        .as_ref()
+                        .and_then(|record| record.metadata.as_ref())
+                        .is_some_and(|metadata| metadata.context.as_ref() != Some(context))
+                {
+                    return Err(PaymentError::IdempotencyConflict);
+                }
+            }
             return Ok(stored.response.clone());
         }
 
@@ -208,7 +243,7 @@ where
                 &mut self.ledger_accounts_by_user,
                 &request.owner_user_id,
             )?;
-            let ledger_transaction = self.ledger.record_transaction(
+            let ledger_transaction = self.ledger.record_transaction_with_metadata(
                 request.owner_user_id.clone(),
                 Some(payment_id.to_string()),
                 format!("payment {} via {}", payment_id, request.rail.as_ref()),
@@ -228,6 +263,21 @@ where
                         currency: request.currency,
                     },
                 ],
+                Some(hubu_ledger::TransactionMetadata {
+                    kind: hubu_ledger::TransactionKind::WalletPayment,
+                    source_key: format!("payment:{payment_id}"),
+                    agent_id: Some(request.agent_id.clone()), agent_account_id: Some(request.agent_account_id.clone()),
+                    effective_cost: hubu_ledger::ExactMoney { amount: request.amount_cents.to_string(), scale: 2, currency: request.currency },
+                    budget_charge_delta_cents: context.as_ref().map(|_|request.amount_cents),
+                    rounding_delta_amount: context.as_ref().map(|_|"0".to_string()), context,
+                    original_transaction_id: None, previous_transaction_id: None,
+                    provider: request.execution_scope.as_ref().map(|scope|scope.provider.id.clone()),
+                    billing_merchant: request.execution_scope.as_ref().map(|scope|scope.billing_merchant.id.clone()).or_else(||request.merchant.clone()),
+                    purpose: purpose.or_else(||request.memo.clone()).or_else(||request.task_id.clone()),
+                    source_evidence: serde_json::json!({"payment_id": payment_id, "spend_auth_token_id": request.spend_auth_token_id,
+                        "rail": request.rail.as_ref(), "rail_reference": rail_result.rail_reference}),
+                    reason: None, adjustment_evidence: None, legacy_backfill: false, missing_evidence: vec![],
+                }),
             )?;
 
             self.authorizer
