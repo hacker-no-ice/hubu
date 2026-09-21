@@ -28,6 +28,7 @@ const sharedLinks = {
   executionScope: ["Spend lifecycle", "docs/spend-lifecycle.md"],
   scopeModel: ["Execution scope model", "crates/hubu-common/src/execution_scope.rs"],
   budget: ["Budget manager", "crates/hubu-core/src/budget/manager.rs"],
+  budgetState: ["Private budget state", "crates/hubu-core/src/budget/state.rs"],
   budgetModel: ["Budget model", "crates/hubu-core/src/budget/model.rs"],
   spendingTarget: ["Spending target model", "crates/hubu-core/src/spending_target.rs"],
   payment: ["Payment manager", "crates/hubu-wallet/src/payment.rs"],
@@ -317,6 +318,7 @@ const components = {
     copy:
       "Agent budgets are stable logical allocations whose hard limit lives in an immutable, auditable current version. SQLite stores only active or revoked administrative state; scheduled, expired, exhausted, and effective active availability are derived at one instant. User spending targets remain separate advisory records.",
     responsibilities: [
+      "BudgetManager exposes supported commands and queries while private BudgetState owns maps, owner indexes, hydration validation, evaluation, and hold accounting; only core application services may apply committed records.",
       "Creates individual logical budgets owned by exactly one agent, with immutable currency and half-open period properties.",
       "Creates immutable revision 1 records with effective time, actor, source, optional reason, canonical request fingerprint, and a same-budget current-version pointer.",
       "Appends total-limit changes as one immutable direct successor under BEGIN IMMEDIATE, checks the requested edge for exact replay before stale-head rejection, and compare-and-sets the current pointer with the logical balance in the same transaction.",
@@ -337,13 +339,13 @@ const components = {
       "Normal executor settlement ceiling-rounds final exact cost once, consumes no more than the authorized maximum, and returns the unused remainder; after the claim lease expires, a human-confirmed billed overrun consumes the full conservative charge and records the overrun; release returns the full hold.",
       "A future shared allocation would be an explicit budget pool with agent membership, not a task-scoped branch in the MVP budget model.",
     ],
-    links: [sharedLinks.budget, sharedLinks.budgetModel, sharedLinks.spendingTarget, sharedLinks.appBudgetUpdate, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
+    links: [sharedLinks.budget, sharedLinks.budgetState, sharedLinks.budgetModel, sharedLinks.spendingTarget, sharedLinks.appBudgetUpdate, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
     nodes: [
       { id: "create", label: "Create / update / inspect", sub: "hard + version history", x: 76, y: 76, w: 206, h: 92, tone: "human" },
-      { id: "periods", label: "Logical budget", sub: "stable id + CAS head", x: 420, y: 76, w: 210, h: 92, tone: "core" },
+      { id: "periods", label: "Logical budget", sub: "facade + private state", x: 420, y: 76, w: 210, h: 92, tone: "core", path: "crates/hubu-core/src/budget/manager.rs" },
       { id: "advisory", label: "Target advisory", sub: "max concurrent allocation", x: 780, y: 76, w: 230, h: 92, tone: "human", path: "crates/hubu-core/src/spending_target.rs" },
       { id: "agentSpend", label: "App service", sub: "authorize operation", x: 76, y: 248, w: 206, h: 92, tone: "core", path: "crates/hubu-core/src/app/spend_approval.rs" },
-      { id: "reserve", label: "Reserve hold", sub: "effective active + version", x: 420, y: 248, w: 210, h: 92, tone: "core" },
+      { id: "reserve", label: "Reserve hold", sub: "effective active + version", x: 420, y: 248, w: 210, h: 92, tone: "core", path: "crates/hubu-core/src/budget/state.rs" },
       { id: "payment", label: "Hubu payment", sub: "success/failure", x: 76, y: 414, w: 206, h: 92, tone: "wallet" },
       { id: "executor", label: "Claim service", sub: "same operation + lease", x: 76, y: 548, w: 238, h: 92, tone: "executor", path: "crates/hubu-core/src/app/executor_claim.rs" },
       { id: "settle", label: "Settle/release", sub: "ceil cents + remainder", x: 420, y: 480, w: 238, h: 92, tone: "core" },
