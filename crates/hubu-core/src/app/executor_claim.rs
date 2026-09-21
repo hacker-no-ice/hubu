@@ -539,7 +539,7 @@ mod tests {
             SpendAuthorizationOutcome,
         },
         budget::{BudgetHoldStatus, CreateSingleBudgetRequest},
-        persistence::{BudgetRepository, SpendRepository, SqliteGovernanceRepository},
+        persistence::{SpendRepository, SqliteGovernanceRepository},
         policy::{
             condition::{Condition, Field, PolicyValue},
             model::{Effect, Policy, Rule},

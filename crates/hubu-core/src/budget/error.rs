@@ -4,6 +4,8 @@ use crate::budget::model::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum BudgetManagerError {
+    #[error(transparent)]
+    Storage(#[from] crate::storage::StorageError),
     #[error("invalid budget: {0:?}")]
     InvalidBudget(BudgetError),
 
@@ -65,5 +67,55 @@ impl From<BudgetHoldError> for BudgetManagerError {
 impl From<BudgetEvaluationError> for BudgetManagerError {
     fn from(error: BudgetEvaluationError) -> Self {
         Self::InvalidPersistedState(error.to_string())
+    }
+}
+
+use crate::storage::StorageError;
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum BudgetUpdateError {
+    #[error("budget update amount must be positive")]
+    AmountLimitMustBePositive,
+
+    #[error("budget update expected_revision must be at least 1")]
+    ExpectedRevisionMustBePositive,
+
+    #[error("budget version actor is required")]
+    MissingActor,
+
+    #[error("budget version source is required")]
+    MissingSource,
+
+    #[error("budget not found")]
+    UnknownBudget,
+
+    #[error("revoked budget cannot be updated")]
+    BudgetRevoked,
+
+    #[error("expired budget cannot be updated")]
+    BudgetExpired,
+
+    #[error(
+        "budget limit {requested_amount_cents} is below committed usage {committed_amount_cents}"
+    )]
+    LimitBelowCommitted {
+        requested_amount_cents: i64,
+        committed_amount_cents: i64,
+    },
+
+    #[error(
+        "budget revision conflict: expected revision {expected_revision}, current revision is {current_revision}"
+    )]
+    RevisionConflict {
+        expected_revision: u64,
+        current_revision: u64,
+    },
+
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+impl From<rusqlite::Error> for BudgetUpdateError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
     }
 }

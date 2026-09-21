@@ -36,22 +36,22 @@ use hubu_common::{
 };
 use hubu_core::{
     app::{
-        ApprovedSpendAuthorization, AuthorizeSpendRequest, BudgetHoldUpdate, BudgetUpdateService,
-        BudgetUpdateServiceError, ClaimExecutorSpendRequest, ExecutorClaimReconciliationOutcome,
-        ExecutorClaimService, ExecutorClaimState, FailedPaymentHoldPolicy,
-        FinalizeExecutorClaimRequest, HumanApprovalDecision, ReconcileExecutorClaimRequest,
-        RejectedSpendAuthorization, SettleExecutorClaimRequest, SpendApprovalError,
-        SpendApprovalService, SpendAuthorizationOutcome, SpendPaymentSpec,
-        UpdateBudgetLimitRequest,
+        ApprovedSpendAuthorization, AuthorizeSpendRequest, BudgetHoldUpdate,
+        ClaimExecutorSpendRequest, ExecutorClaimReconciliationOutcome, ExecutorClaimService,
+        ExecutorClaimState, FailedPaymentHoldPolicy, FinalizeExecutorClaimRequest,
+        HumanApprovalDecision, ReconcileExecutorClaimRequest, RejectedSpendAuthorization,
+        SettleExecutorClaimRequest, SpendApprovalError, SpendApprovalService,
+        SpendAuthorizationOutcome, SpendPaymentSpec,
     },
     budget::{
-        BudgetAdministrativeState, BudgetHold, BudgetHoldStatus, BudgetManager, BudgetVersion,
-        BudgetVersionProvenance, BudgetWithBalance, CreateSingleBudgetRequest, EvaluatedBudget,
-        ReserveBudgetResponse,
+        BudgetAdministrativeState, BudgetHold, BudgetHoldStatus, BudgetLimitUpdateError,
+        BudgetManager, BudgetUpdateError, BudgetVersion, BudgetVersionProvenance,
+        BudgetWithBalance, CreateSingleBudgetRequest, EvaluatedBudget, ReserveBudgetResponse,
+        UpdateBudgetLimitRequest,
     },
     persistence::{
-        AppendBudgetVersionError, BudgetRepository, PolicyAssignmentScope, PolicyRepository,
-        SpendRepository, SpendingTargetRepository, SqliteGovernanceRepository,
+        BudgetRepository, PolicyAssignmentScope, PolicyRepository, SpendRepository,
+        SpendingTargetRepository, SqliteGovernanceRepository,
     },
     policy::{
         condition::{Condition, Field, PolicyValue},
@@ -189,7 +189,7 @@ struct ServerState {
     budgets: Mutex<BudgetManager>,
     spending_targets: Mutex<SpendingTargetManager>,
     policies: Mutex<HashMap<(UserId, PolicyAssignmentScope), Policy>>,
-    governance: Mutex<SqliteGovernanceRepository>,
+    governance: Arc<Mutex<SqliteGovernanceRepository>>,
     payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
     payments: Mutex<LocalPaymentManager>,
     lease_config: LeaseConfig,
@@ -301,6 +301,8 @@ impl ServerState {
                 .context("hydrate payment idempotency")?;
         }
 
+        let governance = Arc::new(Mutex::new(governance));
+        let budgets = budgets.with_repository(Arc::clone(&governance));
         let state = Self {
             auth,
             users: Mutex::new(users),
@@ -311,7 +313,7 @@ impl ServerState {
             budgets: Mutex::new(budgets),
             spending_targets: Mutex::new(spending_targets),
             policies: Mutex::new(policies),
-            governance: Mutex::new(governance),
+            governance,
             payment_attempts: Mutex::new(payment_attempts),
             payments: Mutex::new(payments),
             lease_config,
@@ -1148,7 +1150,7 @@ enum BudgetVersionHttpError {
     #[error("budget not found")]
     NotFound,
     #[error(transparent)]
-    Update(#[from] BudgetUpdateServiceError),
+    Update(#[from] BudgetLimitUpdateError),
     #[error("budget version history failed: {0}")]
     ReadInternal(#[source] anyhow::Error),
     #[error("budget update failed: {0}")]
@@ -1839,25 +1841,25 @@ fn budget_version_error_response(error: &anyhow::Error) -> Option<HttpResponse> 
         BudgetVersionHttpError::NotFound => {
             budget_error_response(404, "budget not found", "budget_not_found", None, None)
         }
-        BudgetVersionHttpError::Update(BudgetUpdateServiceError::Append(error)) => match error {
-            AppendBudgetVersionError::AmountLimitMustBePositive => budget_error_response(
+        BudgetVersionHttpError::Update(BudgetLimitUpdateError::Append(error)) => match error {
+            BudgetUpdateError::AmountLimitMustBePositive => budget_error_response(
                 400,
                 "budget update amount must be positive",
                 "budget_update_invalid_amount",
                 None,
                 None,
             ),
-            AppendBudgetVersionError::ExpectedRevisionMustBePositive => budget_error_response(
+            BudgetUpdateError::ExpectedRevisionMustBePositive => budget_error_response(
                 400,
                 "budget update expected_revision must be at least 1",
                 "budget_update_invalid_revision",
                 None,
                 None,
             ),
-            AppendBudgetVersionError::UnknownBudget => {
+            BudgetUpdateError::UnknownBudget => {
                 budget_error_response(404, "budget not found", "budget_not_found", None, None)
             }
-            AppendBudgetVersionError::RevisionConflict {
+            BudgetUpdateError::RevisionConflict {
                 expected_revision,
                 current_revision,
             } => budget_error_response(
@@ -1873,21 +1875,21 @@ fn budget_version_error_response(error: &anyhow::Error) -> Option<HttpResponse> 
                     "message": "fetch and review the current budget version history before issuing a new update intent"
                 })),
             ),
-            AppendBudgetVersionError::BudgetRevoked => budget_error_response(
+            BudgetUpdateError::BudgetRevoked => budget_error_response(
                 409,
                 "revoked budget cannot be updated",
                 "budget_revoked",
                 None,
                 None,
             ),
-            AppendBudgetVersionError::BudgetExpired => budget_error_response(
+            BudgetUpdateError::BudgetExpired => budget_error_response(
                 409,
                 "expired budget cannot be updated",
                 "budget_expired",
                 None,
                 None,
             ),
-            AppendBudgetVersionError::LimitBelowCommitted {
+            BudgetUpdateError::LimitBelowCommitted {
                 requested_amount_cents,
                 committed_amount_cents,
             } => budget_error_response(
@@ -1903,9 +1905,9 @@ fn budget_version_error_response(error: &anyhow::Error) -> Option<HttpResponse> 
                     "message": "choose a total budget limit at least as large as committed usage"
                 })),
             ),
-            AppendBudgetVersionError::MissingActor
-            | AppendBudgetVersionError::MissingSource
-            | AppendBudgetVersionError::Storage(_) => budget_update_storage_error_response(),
+            BudgetUpdateError::MissingActor
+            | BudgetUpdateError::MissingSource
+            | BudgetUpdateError::Storage(_) => budget_update_storage_error_response(),
         },
         BudgetVersionHttpError::ReadInternal(_) => budget_error_response(
             500,
@@ -3300,11 +3302,6 @@ fn create_budget_at(
             },
             BudgetVersionProvenance::new(authenticated_user.pub_id, "hubu-api:create-budget"),
         )?;
-    state
-        .governance
-        .lock()
-        .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .save_budget_with_balance(&response.budget, &response.version, &response.balance)?;
 
     log_event(
         "info",
@@ -3518,11 +3515,6 @@ fn revoke_budget(body: String, state: &ServerState) -> Result<RevokeBudgetHttpRe
             .map_err(|_| anyhow!("budget manager lock poisoned"))?;
         budgets.revoke_budget(&budget_id)?
     };
-    state
-        .governance
-        .lock()
-        .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .save_budget_with_balance(&revoked.budget, &revoked.version, &revoked.balance)?;
 
     Ok(RevokeBudgetHttpResponse {
         budget: budget_response(revoked, state)?,
@@ -3560,10 +3552,7 @@ fn update_budget_limit_at(
         let mut budgets = state.budgets.lock().map_err(|_| {
             BudgetVersionHttpError::UpdateInternal(anyhow!("budget manager lock poisoned"))
         })?;
-        let mut governance = state.governance.lock().map_err(|_| {
-            BudgetVersionHttpError::UpdateInternal(anyhow!("governance store lock poisoned"))
-        })?;
-        BudgetUpdateService.update_limit(
+        budgets.update_limit(
             UpdateBudgetLimitRequest {
                 budget_id,
                 expected_revision,
@@ -3573,8 +3562,6 @@ fn update_budget_limit_at(
                 reason: request.reason,
             },
             now,
-            &mut budgets,
-            &mut *governance,
         )?
     };
 
@@ -7008,6 +6995,88 @@ lease_profiles:
     }
 
     #[test]
+    fn budget_admin_routes_keep_memory_and_storage_unchanged_on_write_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("admin-failure.sqlite");
+        let state = ServerState::new_with_db_path(&path).unwrap();
+        init(
+            json!({"display_name":"Budget Owner", "email":"budget-owner@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name":"budget-failure-agent", "version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_budget_create BEFORE INSERT ON budget_balances BEGIN SELECT RAISE(ABORT, 'injected create failure'); END;").unwrap();
+        let create_body = json!({"agent_id":agent.agent_id,"amount_cents":1000});
+        let failed = route(
+            authenticated_json_request("/budgets", create_body.clone()),
+            &state,
+        );
+        assert_ne!(failed.status, 200);
+        assert!(list_budgets(&state, true).unwrap().budgets.is_empty());
+        assert!(state
+            .governance
+            .lock()
+            .unwrap()
+            .load_budgets()
+            .unwrap()
+            .is_empty());
+        connection
+            .execute_batch("DROP TRIGGER fail_budget_create")
+            .unwrap();
+        let created = route(authenticated_json_request("/budgets", create_body), &state);
+        assert_eq!(created.status, 200);
+        let budget_id = created.body["budget"]["budget_id"].as_str().unwrap();
+        let before = serde_json::to_value(list_budgets(&state, true).unwrap()).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_budget_mutation BEFORE UPDATE ON budgets BEGIN SELECT RAISE(ABORT, 'injected admin failure'); END;").unwrap();
+        for (path, body) in [
+            (
+                format!("/budgets/{budget_id}/versions"),
+                json!({"expected_revision":1,"amount_limit_cents":2000}),
+            ),
+            (
+                "/budgets/revoke".to_string(),
+                json!({"budget_id":budget_id}),
+            ),
+        ] {
+            let failed = route(authenticated_json_request(&path, body), &state);
+            assert_ne!(failed.status, 200);
+            assert_eq!(
+                before,
+                serde_json::to_value(list_budgets(&state, true).unwrap()).unwrap()
+            );
+            let repo = state.governance.lock().unwrap();
+            assert_eq!(repo.load_budget_versions().unwrap().len(), 1);
+            assert_eq!(
+                repo.load_budgets().unwrap()[0].administrative_state,
+                BudgetAdministrativeState::Active
+            );
+            assert_eq!(
+                repo.load_budget_balances().unwrap()[0].remaining_amount_cents,
+                1000
+            );
+        }
+        connection
+            .execute_batch("DROP TRIGGER fail_budget_mutation")
+            .unwrap();
+        let revoked = route(
+            authenticated_json_request("/budgets/revoke", json!({"budget_id":budget_id})),
+            &state,
+        );
+        assert_eq!(revoked.status, 200);
+        drop(state);
+        let reloaded = ServerState::new_with_db_path(&path).unwrap();
+        assert_eq!(
+            list_budgets(&reloaded, true).unwrap().budgets[0].status,
+            "revoked"
+        );
+    }
+
+    #[test]
     fn budget_creation_uses_one_injected_snapshot_for_defaults_and_status() {
         let path = std::env::temp_dir().join(format!(
             "hubu-api-budget-create-snapshot-{}.sqlite",
@@ -7289,12 +7358,7 @@ lease_profiles:
                 BudgetVersionProvenance::new(user.user_id.to_string(), "hubu-api:create-budget"),
             )
             .unwrap();
-        state
-            .governance
-            .lock()
-            .unwrap()
-            .save_budget_with_balance(&created.budget, &created.version, &created.balance)
-            .unwrap();
+
         let budget_id = public_budget_id(&created.budget.id);
         let raw_actor = user.user_id.to_string();
         drop(state);
@@ -7608,7 +7672,7 @@ lease_profiles:
         use hubu_core::storage::StorageError;
 
         let typed = anyhow::Error::new(BudgetVersionHttpError::Update(
-            BudgetUpdateServiceError::Append(AppendBudgetVersionError::BudgetRevoked),
+            BudgetLimitUpdateError::Append(BudgetUpdateError::BudgetRevoked),
         ));
         let response = budget_version_error_response(&typed).unwrap();
         assert_eq!(response.status, 409);
@@ -7618,9 +7682,9 @@ lease_profiles:
         assert!(budget_version_error_response(&lookalike).is_none());
 
         let storage = anyhow::Error::new(BudgetVersionHttpError::Update(
-            BudgetUpdateServiceError::Append(AppendBudgetVersionError::Storage(
-                StorageError::InvalidData("secret database detail".to_string()),
-            )),
+            BudgetLimitUpdateError::Append(BudgetUpdateError::Storage(StorageError::InvalidData(
+                "secret database detail".to_string(),
+            ))),
         ));
         let response = budget_version_error_response(&storage).unwrap();
         assert_eq!(response.status, 500);
@@ -7783,7 +7847,7 @@ lease_profiles:
             ),
         ];
         let mut snapshots = Vec::new();
-        let mut seed = BudgetManager::new();
+        let mut seed = BudgetManager::new().with_repository(Arc::clone(&state.governance));
         for (agent_id, (starting_at, ending_before, exhausted, revoked)) in
             agent_ids.into_iter().zip(cases)
         {
@@ -7811,12 +7875,11 @@ lease_profiles:
                 snapshot.budget.administrative_state = BudgetAdministrativeState::Revoked;
                 snapshot.budget.updated_at = now;
             }
-            state
-                .governance
-                .lock()
-                .unwrap()
-                .save_budget_with_balance(&snapshot.budget, &snapshot.version, &snapshot.balance)
-                .unwrap();
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("UPDATE budget_balances SET consumed_amount_cents = ?2, remaining_amount_cents = ?3 WHERE budget_id = ?1", rusqlite::params![snapshot.budget.id.to_string(), snapshot.balance.consumed_amount_cents, snapshot.balance.remaining_amount_cents]).unwrap();
+            if revoked {
+                conn.execute("UPDATE budgets SET administrative_state = 'revoked', updated_at = ?2 WHERE id = ?1", rusqlite::params![snapshot.budget.id.to_string(), now.to_rfc3339()]).unwrap();
+            }
             snapshots.push(snapshot);
         }
         *state.budgets.lock().unwrap() = BudgetManager::from_records(
