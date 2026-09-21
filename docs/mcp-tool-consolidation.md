@@ -15,8 +15,8 @@ Hubu-only identity and spending authority are a default workflow.
 budget and approval tools. Gongbu execution is optional; an external executor
 can consume the same authority without adopting Gongbu.
 
-Reduce discovery through three explicit categories: standard tools, advanced
-tools, and deprecated compatibility names. Advanced adds specialist controls
+Expose two categories: standard tools and advanced tools. Remove deprecated
+names outright in v0.2.2; do not retain callable aliases or a grace period. Advanced adds specialist controls
 to standard; it is not an owner privilege or a separate server. Keep claim
 inspection and reconciliation **standard in v0.2.2**: external settlement is
 not fully projected into router operation status, and hiding recovery now
@@ -53,8 +53,9 @@ Sources and known consumers:
   synchronous spend/approval behavior. [Current public documentation](unified-mcp.md)
   lists the old names, so absence of production telemetry is not proof of no users.
 
-No external usage telemetry was available. Preserve compatibility through the
-whole 0.2.x line rather than delete handlers based on repository usage alone.
+No external usage telemetry was available. The owner explicitly chose a breaking
+v0.2.2 cutover: update known callers and remove deprecated MCP handlers rather
+than retain backward compatibility. Release notes must identify the break.
 These inventory counts are baseline evidence, not permanent test constants.
 
 ## Complete v0.2.2 disposition
@@ -68,9 +69,9 @@ client has configured its human gate.
 
 Standard tools are listed and callable in both modes. Advanced tools are listed
 and admit new work only in advanced mode; persisted mock-operation recovery has
-the narrow exception below. Compatibility tools are omitted from both
-lists but remain callable in both modes for the transition period, with their
-existing backend prerequisites and gates. Unknown/retired names stay rejected.
+the narrow exception below. Removed tools are absent from discovery and
+capabilities and rejected by tools/call in both modes, using the existing
+unknown-tool error. There are no compatibility handlers.
 
 | Exact tool name | Prerequisites | Disposition | Purpose / replacement |
 | --- | --- | --- | --- |
@@ -81,17 +82,17 @@ existing backend prerequisites and gates. Unknown/retired names stay rejected.
 | `gongbu_get_redaction_attestation` | G | Advanced | Specialized FLUX evidence |
 | `gongbu_list_artifacts` | G | Standard | Recover output IDs |
 | `gongbu_list_execution_targets` | G | Standard | Approved targets, scope and pricing |
-| `hubu_add_policy` | H | Compatibility | Use hubu_apply_policy with explicit YAML |
+| `hubu_add_policy` | None (removed) | Remove | Use hubu_apply_policy with explicit YAML |
 | `hubu_apply_policy` | H | Standard | Canonical policy mutation; human gate |
 | `hubu_authorize_spend` | H+R | Standard | Reserve authority for external or managed execution |
 | `hubu_budget_history` | H | Standard | Inspect immutable revisions |
 | `hubu_client_approval_profile` | H | Advanced | Harness configuration; preserve current backend gate |
 | `hubu_create_budget` | H | Standard | Owner administration; human gate |
-| `hubu_export_policy` | H | Compatibility | Use hubu_show_policy with include_yaml=true |
+| `hubu_export_policy` | None (removed) | Remove | Use hubu_show_policy with include_yaml=true |
 | `hubu_feedback_guidance` | Local | Standard | Offline support discovery |
 | `hubu_get_executor_claim` | H | Standard | External executor settlement/recovery inspection |
 | `hubu_get_spend_approval` | H | Standard | Immutable approval review |
-| `hubu_health` | H | Compatibility | Use hubu_unified_capabilities; legacy response unchanged |
+| `hubu_health` | None (removed) | Remove | Use hubu_unified_capabilities |
 | `hubu_list_agents` | H | Standard | Identity discovery |
 | `hubu_list_budgets` | H | Standard | Budget visibility |
 | `hubu_list_claims_requiring_reconciliation` | H | Standard | Find frozen claims without retained IDs |
@@ -123,11 +124,12 @@ also requires ready G. Existing `hubu_submit_spend` operations remain readable
 and recoverable in standard mode; the advanced restriction governs new admission.
 
 With all prerequisites satisfied: 34 standard names, six advanced additions
-(including the demo payment tool), and three callable-only compatibility names.
-The removed recurring-budget name is historical and outside these 43 names.
+(including the demo payment tool): **40 supported names**. Three of the 43
+baseline names are removed. The previously removed recurring-budget name is
+historical and outside this baseline.
 Backend outages can reduce the actual lists.
 
-## Canonical schemas and compatibility rules
+## Canonical schemas and removal rules
 
 ### Policy application
 
@@ -136,10 +138,9 @@ optional `declarative_key`, `display_name`, `agent_id`,
 `expected_revision`, `expected_hash`; reject additional properties.
 Do not add `daily_limit_cents` to the canonical interface.
 
-Keep `hubu_add_policy` callable with its old schema and response through 0.2.x,
-including backend default/source behavior; do not silently substitute a
-different audit actor/source or CAS rule. New callers prepare YAML and use
-`hubu_apply_policy`. For old shortcut callers, migration exports/inspects the
+Remove the `hubu_add_policy` MCP definition, routing entry and handler.
+Callers prepare YAML and use `hubu_apply_policy`; no automatic translation
+or retained shortcut handler is provided. For old shortcut callers, migration exports/inspects the
 existing generated policy rather than guessing a daily allowance: the starter
 policy denies the blocked merchant, allows a **single spend** within the
 threshold, and defaults to needs_approval. Preserve those rules and identities;
@@ -155,8 +156,8 @@ keep existing default selection and reject unknown fields or non-boolean flags.
 - True: same metadata, policy and assignments, plus string `policy_yaml`;
   use the existing backend export route/serializer so YAML round-trips
   semantically to the same policy.
-- `hubu_export_policy` remains callable with its old selector-only schema and
-  old response through 0.2.x. Its replacement is show with `include_yaml=true`.
+- Remove `hubu_export_policy` from MCP definitions, routing and handlers in
+  the same change that adds show with `include_yaml=true`.
 
 The flag is router-owned: remove it before forwarding selectors. No new policy
 storage model or backend endpoint is necessary.
@@ -164,9 +165,9 @@ storage model or backend endpoint is necessary.
 ### Health
 
 New callers use `hubu_unified_capabilities` to inspect both backends and
-compatibility. Legacy `hubu_health({})` continues calling Hubu `GET /health`
-with its existing response/errors; it is not a response-compatible alias for
-the capabilities object. Keep HTTP health and readiness probes unchanged.
+compatibility. Remove `hubu_health` from MCP definitions, routing and handlers.
+Callers must adopt the capabilities response explicitly; it is not the old
+health response shape. Keep HTTP health and readiness probes unchanged.
 
 ### Mock payment
 
@@ -183,19 +184,23 @@ operations remain readable and resumable in both modes. Exact redelivery after
 an ambiguous original result is also permitted under the recovery-only rule
 below, without requiring a connection restart or creating another hold.
 
-### Timeline and notices
+### Cutover in v0.2.2
 
-In v0.2.2, hide the three compatibility names from discovery and retain their
-handlers. Add `annotations.x_hubu_deprecated=true` and
-`annotations.x_hubu_replacement` to their stored definitions, and describe the
-deprecation in capabilities/migration docs. Do not change legacy tool-result
-envelopes merely to append warnings.
+Remove `hubu_add_policy`, `hubu_export_policy` and `hubu_health` when their
+canonical replacements land. Delete their catalog definitions, ownership/routing
+entries, approval-profile entries and forwarding handlers. Update callers,
+fixtures and docs together; direct calls must fail as unknown tools before any
+backend request. Do not retain hidden aliases, deprecation annotations,
+compatibility adapters, warning-only handlers or a later removal deadline.
 
-No handler deletion in any 0.2.x release. Earliest removal is 0.3.0, **not an
-automatic deadline**: require an explicit release decision, migration notes,
-fixture/client migration evidence and a review of known consumers. Existing
-durable mock operations must remain recoverable even if that tool is retired
-in a separate future decision.
+Replace old positive routing cases with canonical-call coverage and explicit
+negative tests for removed names in both exposure modes. Document replacements
+and require clients to reconnect/refresh cached discovery. This removes MCP
+entry points, not existing policy records, HTTP APIs or unrelated CLI commands.
+
+`hubu_submit_spend` is retained as a supported advanced/demo tool, not deprecated.
+Its existing-operation recovery rules below protect durable financial state;
+they are not aliases for any of the three removed tools.
 
 ## Exposure and client configuration
 
@@ -226,8 +231,8 @@ distinction in help, keep --dry-run nonmutating, and keep the unmanaged-table
 Generate spend auto-approval entries only for exposure-enabled spend tools;
 omit `hubu_submit_spend` in standard mode. Preserve all human-prompt rules;
 choosing advanced must not set trust flags or grant credentials. The approval
-profile's recommendations must agree with effective exposure (including
-callable compatibility mutations), without changing backend permission checks.
+profile's recommendations must agree with effective exposure and omit removed
+names, without changing backend permission checks.
 
 Settings apply per configured connection, fixed at startup. Reconnect/restart
 to change them; no model-callable mode switch. A shared client connection does
@@ -252,7 +257,7 @@ do not change runtime revisions in this design-only PR.
    message "Tool is not enabled for this connection", data
    `{code:"tool_exposure_restricted",tool:NAME,required_exposure:"advanced",retryable:false}`.
    Unknown/retired tools retain the current unknown-tool error.
-3. Allowed names, including compatibility handlers, proceed through existing
+3. Allowed names proceed through existing
    schema, operation identity, approval and backend guards. Do not replace
    their backend errors with exposure errors.
 4. Grandfather already-persisted mock work across upgrade/exposure changes.
@@ -275,10 +280,11 @@ do not change runtime revisions in this design-only PR.
    advanced. The restriction is on public tool invocation, not internal
    backend calls under the validated immutable composite intent.
 
-Capabilities retain every recognized name and owner. Add top-level
+Capabilities retain every supported name and owner; removed names are absent. Add top-level
 `tool_exposure`, and per-tool fields `exposure`
-(`standard|advanced|compatibility`), `listed`, `callable`,
-`deprecated`, `replacement` (name or null), and `backend_available`.
+(`standard|advanced`), `listed`, `callable`, and `backend_available`.
+Do not introduce deprecated/replacement metadata for deleted definitions; the
+replacement map belongs in release documentation.
 Here backend_available includes registry prerequisites but not client approval
 configuration. Preserve the same meaning for callable: router exposure and
 prerequisites allow dispatch, subject to existing credentials/approval/schema
@@ -289,8 +295,7 @@ admission. The server must still verify each recovery-only call's durable match.
 
 Restricted names have callable/listed/available false and reason_code
 `tool_exposure_restricted`; backend availability remains separately visible.
-Compatibility names have listed=false, deprecated=true and callable based on
-prerequisites. Other unavailable names preserve existing reason codes.
+Other unavailable supported names preserve existing reason codes.
 
 Compute `notifications/tools/list_changed` from the effective listed catalog,
 including schemas/descriptions/annotations, not only backend health. Hidden-only
@@ -338,8 +343,8 @@ new execution state machine inside the MCP router.
 
 | Owner | Required deliverable |
 | --- | --- |
-| HUB-203 | This matrix, exact schema/config/error decisions and compatibility policy |
-| HUB-204 | Canonical show/YAML behavior, compatibility handlers, mock description and focused tests |
+| HUB-203 | This matrix, exact schema/config/error decisions and removal policy |
+| HUB-204 | Canonical show/YAML behavior, deprecated-handler removal, mock description and focused tests |
 | HUB-205 | Disposition map, list/call/resume guards, capabilities and effective-list notifications |
 | HUB-206 | Hubu-only external executor example and gap qualification, reusing HUB-36 |
 | HUB-207 | Minimal init/config persistence and exposure-aware client approval entries |
@@ -347,7 +352,7 @@ new execution state machine inside the MCP router.
 
 Each implementation PR updates its own tests and fixtures. Final qualification
 must cover both exposure modes with Hubu-only, both backends, degraded/missing
-backends and unavailable registry; all compatibility names; unknown retired
+backends and unavailable registry; rejection of all three removed names; unknown retired
 recurring-budget calls; blocked new mock admissions; unchanged human gates;
 and advanced-to-standard restart while accepted work exists. Specifically test
 pre-upgrade/advanced mock approval followed by approval and resume in standard,
@@ -355,8 +360,8 @@ ambiguous original-result redelivery in standard, wrong identity/changed scope
 rejection, and terminal denial replay. Prove no duplicate payment/hold and no
 new operation allocation through either recovery exception.
 
-Validate policy YAML semantic equality, CAS/assignment preservation, health
-response compatibility, and no duplicate holds/consumption on recovery. Run
+Validate policy YAML semantic equality, CAS/assignment preservation, unchanged
+HTTP health probes, and no duplicate holds/consumption on recovery. Run
 Cargo tests from the unified workspace root with package selectors and protoc
 installed when Gongbu/Temporal builds are involved.
 
