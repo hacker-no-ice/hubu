@@ -35,17 +35,19 @@ impl Default for BudgetVersionProvenance {
 }
 
 /// Public budget facade. Representation, hydration validation, and accounting
-/// rules are owned by the private state; persistence coordination remains with
-/// the existing application services and callers.
+/// rules are owned by private state. Administration commits through its private
+/// storage-first coordinator before changing memory.
 #[derive(Debug)]
 pub struct BudgetManager {
     state: BudgetState,
+    coordinator: Option<super::coordinator::BudgetCoordinator>,
 }
 
 impl BudgetManager {
     pub fn new() -> Self {
         Self {
             state: BudgetState::new(),
+            coordinator: None,
         }
     }
 
@@ -55,7 +57,14 @@ impl BudgetManager {
         balances: Vec<BudgetBalance>,
         holds: Vec<BudgetHold>,
     ) -> Result<Self, BudgetManagerError> {
-        BudgetState::from_records(budgets, versions, balances, holds).map(|state| Self { state })
+        BudgetState::from_records(budgets, versions, balances, holds).map(|state| Self {
+            state,
+            coordinator: None,
+        })
+    }
+
+    pub(super) fn apply_committed_state(&mut self, state: BudgetState) {
+        self.state = state;
     }
 
     pub(crate) fn apply_persisted_finalization(
@@ -66,47 +75,82 @@ impl BudgetManager {
         self.state.apply_persisted_finalization(hold, balance)
     }
 
-    /// Apply a repository-authoritative version append after its transaction
-    /// has committed.
-    ///
-    /// This operation is intentionally infallible: the SQLite repository has
-    /// already validated lineage, balance, and current-pointer ownership. An
-    /// exact retry may name an older `applied_version` while `current` points at
-    /// a later head, so the manager indexes the immutable applied successor but
-    /// never moves its logical head backward.
-    pub(crate) fn apply_persisted_budget_version_append(
-        &mut self,
-        applied_version: BudgetVersion,
-        current: BudgetWithBalance,
-    ) {
-        self.state
-            .apply_persisted_budget_version_append(applied_version, current)
+    /// Bind administration to the shared governance repository. All users must
+    /// acquire the manager before the repository; commands lock it internally.
+    pub fn with_repository(
+        mut self,
+        repository: std::sync::Arc<
+            std::sync::Mutex<crate::persistence::SqliteGovernanceRepository>,
+        >,
+    ) -> Self {
+        self.coordinator = Some(super::coordinator::BudgetCoordinator { repository });
+        self
     }
 
-    /// Create one budget and initialize its cached balance.
-    ///
-    /// An agent may only have one budget for a currency at any point in time.
-    /// Creation rejects periods that overlap an existing budget with the same
-    /// agent and currency.
+    fn coordinator(
+        &self,
+    ) -> Result<super::coordinator::BudgetCoordinator, crate::storage::StorageError> {
+        self.coordinator.clone().ok_or_else(|| {
+            crate::storage::StorageError::InvalidData(
+                "budget administration requires a configured repository".into(),
+            )
+        })
+    }
+
     #[cfg(test)]
-    pub fn create_single_budget(
+    pub(crate) fn create_single_budget(
         &mut self,
         request: CreateSingleBudgetRequest,
     ) -> Result<CreateSingleBudgetResponse, BudgetManagerError> {
         self.state.create_single_budget(request)
     }
 
-    /// Create one logical budget, its immutable revision 1, and logical balance.
-    ///
-    /// Production callers must provide authenticated actor and source
-    /// provenance for the version audit record.
-    pub fn create_single_budget_with_provenance(
+    #[cfg(test)]
+    pub(crate) fn create_single_budget_in_memory(
         &mut self,
         request: CreateSingleBudgetRequest,
         provenance: BudgetVersionProvenance,
     ) -> Result<CreateSingleBudgetResponse, BudgetManagerError> {
         self.state
             .create_single_budget_with_provenance(request, provenance)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn revoke_budget_in_memory(
+        &mut self,
+        budget_id: &BudgetId,
+    ) -> Result<BudgetWithBalance, BudgetManagerError> {
+        self.state.revoke_budget_at(budget_id, Utc::now())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn revoke_budget_at_in_memory(
+        &mut self,
+        budget_id: &BudgetId,
+        now: DateTime<Utc>,
+    ) -> Result<BudgetWithBalance, BudgetManagerError> {
+        self.state.revoke_budget_at(budget_id, now)
+    }
+
+    /// Commit the initial version, logical budget and balance before publishing
+    /// them to the manager. A missing repository is an explicit error.
+    pub fn create_single_budget_with_provenance(
+        &mut self,
+        request: CreateSingleBudgetRequest,
+        provenance: BudgetVersionProvenance,
+    ) -> Result<CreateSingleBudgetResponse, BudgetManagerError> {
+        self.coordinator()?.create(self, request, provenance)
+    }
+
+    /// Append or exactly replay a limit update under the shared repository lock.
+    pub fn update_limit(
+        &mut self,
+        request: super::UpdateBudgetLimitRequest,
+        effective_at: DateTime<Utc>,
+    ) -> Result<super::UpdateBudgetLimitResponse, super::BudgetLimitUpdateError> {
+        self.coordinator()
+            .map_err(super::BudgetUpdateError::from)?
+            .update(self, request, effective_at)
     }
 
     /// Reserve budget for an approved spend decision.
@@ -224,7 +268,7 @@ impl BudgetManager {
         &mut self,
         budget_id: &BudgetId,
     ) -> Result<BudgetWithBalance, BudgetManagerError> {
-        self.state.revoke_budget(budget_id)
+        self.revoke_budget_at(budget_id, Utc::now())
     }
 
     pub fn revoke_budget_at(
@@ -232,7 +276,7 @@ impl BudgetManager {
         budget_id: &BudgetId,
         now: DateTime<Utc>,
     ) -> Result<BudgetWithBalance, BudgetManagerError> {
-        self.state.revoke_budget_at(budget_id, now)
+        self.coordinator()?.revoke(self, budget_id, now)
     }
 }
 
@@ -292,7 +336,7 @@ mod tests {
         period: TimePeriod,
         provenance: &BudgetVersionProvenance,
     ) -> Result<BudgetWithBalance, BudgetManagerError> {
-        let created = BudgetManager::new().create_single_budget_with_provenance(
+        let created = BudgetManager::new().create_single_budget_in_memory(
             CreateSingleBudgetRequest {
                 agent_id,
                 amount_limit_cents,
@@ -589,7 +633,7 @@ mod tests {
         let created = create_agent_budget(&mut manager, 10_000);
 
         let revoked = manager
-            .revoke_budget(&created.budget.id)
+            .revoke_budget_in_memory(&created.budget.id)
             .expect("active budget without holds should revoke");
 
         assert_eq!(
@@ -621,7 +665,7 @@ mod tests {
             .expect("budget should reserve");
 
         let revoked = manager
-            .revoke_budget(&created.budget.id)
+            .revoke_budget_in_memory(&created.budget.id)
             .expect("budget with frozen holds may revoke");
         assert_eq!(
             revoked.budget.administrative_state,
@@ -656,7 +700,7 @@ mod tests {
             .expect("first budget should be created");
 
         manager
-            .revoke_budget(&created.budget.id)
+            .revoke_budget_in_memory(&created.budget.id)
             .expect("budget should revoke");
         manager
             .create_single_budget(CreateSingleBudgetRequest {
@@ -734,7 +778,7 @@ mod tests {
         ));
 
         scheduled_manager
-            .revoke_budget_at(&scheduled.budget.id, start + Duration::minutes(3))
+            .revoke_budget_at_in_memory(&scheduled.budget.id, start + Duration::minutes(3))
             .unwrap();
         assert!(matches!(
             scheduled_manager

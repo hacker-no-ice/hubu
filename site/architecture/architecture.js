@@ -56,6 +56,8 @@ const components = {
     title: "Version, reserve, then finalize",
     copy: "A logical budget keeps immutable limit versions and one cumulative balance. Allowed work freezes the authorized maximum; finalization settles actual cost, releases confirmed non-billing, or preserves uncertainty for reconciliation.",
     diagram: [
+      ["BudgetManager", "create · update · revoke"],
+      ["Private coordinator", "commit → publish state"],
       ["Logical budget", "stable bgt_ identity"],
       ["Immutable version", "limit + effective window"],
       ["Derived availability", "state + time + balance"],
@@ -65,6 +67,8 @@ const components = {
       ["Balance + audit", "consumed · released · evidence"],
     ],
     responsibilities: [
+      "BudgetManager is the sole public administration facade; its private coordinator commits before publishing validated budget state, history, and current holds.",
+      "Acquire the budget manager before the shared governance repository and SQLite transaction. Transports own authentication, ownership checks, and DTO mapping.",
       "Append limit changes with compare-and-set revision checks without resetting consumed or frozen usage.",
       "Derive availability by precedence—revoked, scheduled, expired, exhausted, then active—not as a transition sequence.",
       "Reserve capacity atomically only while the selected budget is effectively active.",
@@ -73,7 +77,9 @@ const components = {
     ],
     links: [
       ["Spend lifecycle", "docs/spend-lifecycle.md"],
+      ["Budget boundary and lock order", "docs/budget-architecture.md"],
       ["Budget manager", "crates/hubu-core/src/budget/manager.rs"],
+      ["Private coordinator", "crates/hubu-core/src/budget/coordinator.rs"],
       ["Budget model", "crates/hubu-core/src/budget/model.rs"],
       ["Executor claims", "crates/hubu-core/src/app/executor_claim.rs"],
     ],

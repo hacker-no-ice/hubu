@@ -34,6 +34,9 @@ credentials, storage, and failure boundaries.
 
 [Explore the interactive architecture →](../architecture/index.html)
 
+The [budget administration boundary](budget-architecture.md) documents the public
+manager, commit ordering, and shared lock policy.
+
 ## The core idea
 
 Agents can have budgets, but they should not hold private keys.

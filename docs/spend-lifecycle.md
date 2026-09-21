@@ -86,6 +86,12 @@ conflicting resolution is rejected.
 
 ## Budgets and spending targets
 
+Supported budget creation, total-limit updates, and revocation enter through
+`BudgetManager`. Its private coordinator commits storage before publishing private
+state; transports retain authentication, ownership checks, and DTO mapping. See the
+[budget administration boundary](budget-architecture.md) for transaction and lock
+ordering and failure/retry guarantees.
+
 An agent budget is a hard spending limit. A user spending target is advisory:
 it helps a human compare aggregate allocations with a preferred amount but does
 not block budget creation or spend.
