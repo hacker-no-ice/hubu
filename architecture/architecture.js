@@ -583,7 +583,7 @@ const components = {
       "Forwards only fixed relative Gongbu API routes and rejects caller attempts to override accounts, endpoints, credentials, retry controls, or artifact storage paths before network access.",
       "Fails closed on unknown or mismatched product, source-commit, executor-contract, MCP, and Gongbu schema versions while preserving healthy unrelated backend capabilities.",
       "Keeps compatible Gongbu target discovery, execution reads, and artifact capabilities available during degraded readiness, but blocks governed execution admission unless both required backend boundaries are safe.",
-      "Lists and routes exactly the 31 contract-approved Hubu tools with stable schemas, annotations, validation, trusted metadata, response shapes, and application errors.",
+      "Lists and routes exactly the 30 contract-approved Hubu tools with stable schemas, annotations, validation, trusted metadata, response shapes, and application errors.",
       "Uses fixed Hubu routes plus one strictly validated public budget-version path; the update strips budget_id from its POST body, and only update/history translate recursively redacted typed backend rejections into MCP isError results.",
       "Uses only the Hubu credential for ordinary routes, sends the separate approval capability only on protected approval resolution, and sends the separate reconciliation capability only on the two reconciliation mutations.",
       "Rejects unknown and out-of-map primitive calls before domain network access, never falls back across backends, never retries provider mutations, and limits cross-backend orchestration to the explicit governed-execution contract.",
@@ -613,7 +613,7 @@ const components = {
     nodes: [
       { id: "agent", label: "Agent harness", sub: "one stdio connection", x: 30, y: 318, w: 210, h: 96, tone: "agent" },
       { id: "keyStore", label: "Scoped key store", sub: "operator-owned + private", x: 30, y: 566, w: 210, h: 96, tone: "data", path: "skills/generate-hubu-operation-key/scripts/operation_keys.py" },
-      { id: "tools", label: "Static router", sub: "44 tools; revision 8 + safe catalogs + attestation", x: 330, y: 92, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
+      { id: "tools", label: "Static router", sub: "43 tools; revision 9 + safe catalogs + attestation", x: 330, y: 92, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
       { id: "notifications", label: "Catalog monitor", sub: "deduped list_changed", x: 330, y: 262, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/notification.rs" },
       { id: "operationWorker", label: "Durable worker", sub: "safe replay + observe", x: 330, y: 422, w: 200, h: 96, tone: "executor", path: "crates/hubu-unified-mcp/src/operation_worker.rs" },
       { id: "capability", label: "Capability snapshot", sub: "isolated health + compatibility", x: 330, y: 578, w: 200, h: 96, tone: "core", path: "crates/hubu-unified-mcp/src/capability.rs" },
