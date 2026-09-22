@@ -1,12 +1,7 @@
 # MCP consolidation and default authority contract
 
-Status: **HUB-203 design contract for v0.2.2; not implemented by this change.**
-Runtime implementation belongs to HUB-204, HUB-205 and HUB-207; qualification
-belongs to HUB-206/HUB-208. The [implemented surface](unified-mcp.md) remains
-authoritative until those changes land.
-
-[Linear HUB-203](https://linear.app/hubu/issue/HUB-203) ·
-[Product decision](https://app.notion.com/p/3e26b9239bee8105838add98b50bd19e)
+Status: **Planned v0.2.2 contract.** The [implemented surface](unified-mcp.md)
+remains authoritative until this contract is implemented.
 
 ## Decision
 
@@ -31,7 +26,7 @@ Inventory checked on 2026-09-21:
 | Shipped v0.2.1, source `13b14e191fdc6eb7853d40e4b1c02bc04f88d53b` | 8 | 44 |
 | Main `f027866f2dd968ef1c790d72a6314fbd760b0b2b` | 9 | 43 |
 
-The difference is `hubu_create_recurring_budget`, already removed by HUB-189.
+The difference is `hubu_create_recurring_budget`, already removed from main.
 It is not a new compatibility alias and must not be restored. Duplicate
 connector namespaces in a client are not additional server tools.
 
@@ -53,9 +48,9 @@ Sources and known consumers:
   synchronous spend/approval behavior. [Current public documentation](unified-mcp.md)
   lists the old names, so absence of production telemetry is not proof of no users.
 
-No external usage telemetry was available. The owner explicitly chose a breaking
-v0.2.2 cutover: update known callers and remove deprecated MCP handlers rather
-than retain backward compatibility. Release notes must identify the break.
+The v0.2.2 cutover is breaking: update known callers and remove deprecated MCP
+handlers without retaining backward compatibility. Release notes must identify
+the break.
 These inventory counts are baseline evidence, not permanent test constants.
 
 ## Complete v0.2.2 disposition
@@ -209,10 +204,10 @@ Use `HUBU_MCP_TOOL_EXPOSURE=standard|advanced`. Unset means standard; invalid
 or empty values fail startup with a configuration error rather than widening
 access. Both modes include authority; there is no required authority profile.
 
-HUB-207 adds `--tool-exposure standard|advanced` to the existing
+The target interface adds `--tool-exposure standard|advanced` to the existing
 `hubu init codex` command. It writes this variable in the managed
 `[mcp_servers.hubu.env]` block, alongside existing settings. These are target
-commands, not executable instructions until HUB-207 ships:
+commands, available once this contract is implemented:
 
 ```sh
 hubu init codex --tool-exposure standard
@@ -246,8 +241,7 @@ stdio launcher must set exposure out of band; model arguments cannot select it.
 Use one authoritative disposition map, independent of backend ownership.
 Keep `hubu-gongbu-mcp-v1` and add
 `tool_exposure_contract_version="hubu-mcp-tool-exposure-v1"` to capabilities.
-Implementation increments the current routing revision when the surface lands;
-do not change runtime revisions in this design-only PR.
+Increment the current routing revision when the surface is implemented.
 
 1. `tools/list` returns exposure-listed names intersected with existing backend
    and registry availability rules.
@@ -333,25 +327,14 @@ standard. Their mutating calls retain explicit human confirmation, separate
 reconciliation credentials and evidence requirements. CLI recovery also remains
 available via `hubu spend claim` and `hubu spend reconcile`.
 
-HUB-206 qualifies the external flow using HUB-36's conformance fixtures.
-Current scope catalogs and credential provisioning must be checked with that
-fixture; do not claim arbitrary executors are already drop-in compatible.
-HUB-34 owns broader workflow/receipt discovery. Neither is permission to build a
-new execution state machine inside the MCP router.
+External executors must validate their supported scopes and credential
+provisioning against the executor conformance fixtures; arbitrary executors
+are not necessarily drop-in compatible. The MCP router does not own a separate
+execution state machine.
 
-## Implementation ownership and release gates
+## Contract validation
 
-| Owner | Required deliverable |
-| --- | --- |
-| HUB-203 | This matrix, exact schema/config/error decisions and removal policy |
-| HUB-204 | Canonical show/YAML behavior, deprecated-handler removal, mock description and focused tests |
-| HUB-205 | Disposition map, list/call/resume guards, capabilities and effective-list notifications |
-| HUB-206 | Hubu-only external executor example and gap qualification, reusing HUB-36 |
-| HUB-207 | Minimal init/config persistence and exposure-aware client approval entries |
-| HUB-208 | Combined migration/E2E evidence and final user documentation/visualizer |
-
-Each implementation PR updates its own tests and fixtures. Final qualification
-must cover both exposure modes with Hubu-only, both backends, degraded/missing
+Validation must cover both exposure modes with Hubu-only, both backends, degraded/missing
 backends and unavailable registry; rejection of all three removed names; unknown retired
 recurring-budget calls; blocked new mock admissions; unchanged human gates;
 and advanced-to-standard restart while accepted work exists. Specifically test
@@ -361,13 +344,8 @@ rejection, and terminal denial replay. Prove no duplicate payment/hold and no
 new operation allocation through either recovery exception.
 
 Validate policy YAML semantic equality, CAS/assignment preservation, unchanged
-HTTP health probes, and no duplicate holds/consumption on recovery. Run
-Cargo tests from the unified workspace root with package selectors and protoc
-installed when Gongbu/Temporal builds are involved.
+HTTP health probes, and no duplicate holds/consumption on recovery.
 
-This PR intentionally leaves the architecture visualizer showing implemented
-behavior. HUB-205/HUB-208 update it when public routing/discovery actually
-changes. Documentation edits require the link checker and retired-repository
-reference audit. No new provider work, cross-backend Rust dependencies, full
-onboarding redesign, v0.3 enforcement, or deferred budget lifecycle expansion
-is part of this contract.
+Provider integrations, cross-backend Rust dependencies, onboarding redesign,
+identity enforcement redesign and budget lifecycle expansion are outside this
+contract.
