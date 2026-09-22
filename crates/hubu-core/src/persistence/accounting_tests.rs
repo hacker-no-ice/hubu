@@ -180,6 +180,48 @@ fn canonical_posting_failure_rolls_back_every_settlement_write() {
 }
 
 #[test]
+fn wrong_agent_budget_rolls_back_every_settlement_write() {
+    let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+    let now = Utc::now();
+    let (claim, token, hold) =
+        persist_claimed_executor_spend(&mut repo, now + Duration::minutes(15));
+    repo.conn.execute_batch("DROP TRIGGER budgets_logical_properties_immutable; UPDATE budgets SET scope_id='another-agent';").unwrap();
+    assert!(repo
+        .settle_executor_claim_transactionally(
+            &user_id(),
+            &agent_id(),
+            &claim.operation_key,
+            PaymentId::new(),
+            settlement_receipt(2000),
+            now
+        )
+        .is_err());
+    assert!(records(&repo).is_empty());
+    assert!(
+        load_executor_settlement_receipt_by_claim_id(&repo.conn, &claim.id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(load_spend_auth_token_by_id(&repo.conn, &token.id)
+        .unwrap()
+        .unwrap()
+        .used_at
+        .is_none());
+    assert_eq!(
+        load_executor_claim_by_id(&repo.conn, &claim.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        SpendExecutorClaimStatus::Claimed
+    );
+    let balance = load_budget_balance_by_id(&repo.conn, &hold.budget_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(balance.consumed_amount_cents, 0);
+    assert_eq!(balance.frozen_amount_cents, 2500);
+}
+
+#[test]
 fn canonical_postings_replay_after_restart_and_backfill_without_reconsuming() {
     let file = tempfile::NamedTempFile::new().unwrap();
     let mut repo = SqliteGovernanceRepository::open(file.path()).unwrap();
@@ -222,6 +264,8 @@ fn canonical_backfill_marks_incomplete_evidence_instead_of_inventing_postings() 
         "receipt",
         "hold_status",
         "token_link",
+        "budget_agent",
+        "budget_scope",
     ] {
         let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
         settle(&mut repo, 2000, 2);
@@ -245,6 +289,17 @@ fn canonical_backfill_marks_incomplete_evidence_instead_of_inventing_postings() 
             }
             "receipt" => {
                 repo.conn.execute_batch("DROP TRIGGER spend_executor_settlement_receipts_no_delete;DELETE FROM spend_executor_settlement_receipts;").unwrap();
+            }
+            "budget_agent" | "budget_scope" => {
+                repo.conn
+                    .execute_batch("DROP TRIGGER budgets_logical_properties_immutable;")
+                    .unwrap();
+                let sql = if missing == "budget_agent" {
+                    "UPDATE budgets SET scope_id='another-agent'"
+                } else {
+                    "UPDATE budgets SET scope_type='user'"
+                };
+                repo.conn.execute(sql, []).unwrap();
             }
             "hold_status" => {
                 repo.conn

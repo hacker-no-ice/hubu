@@ -39,6 +39,7 @@ pub(super) fn post_settlement(
              JOIN spend_auth_tokens t ON t.spend_decision_id = d.id
              JOIN spend_executor_claims c ON c.spend_auth_token_id = t.id
              JOIN budget_holds h ON h.spend_decision_id = d.id AND h.executor_claim_id = c.id
+             JOIN budgets b ON b.id = h.budget_id AND b.scope_type = 'agent' AND b.scope_id = c.agent_id
              WHERE c.id = ?1 AND h.id = ?2 AND c.status = 'settled' AND h.status = 'settled'
                AND c.settlement_id = ?3 AND t.used_by_payment_id = ?3 AND t.used_at IS NOT NULL
                AND d.operation_key = c.operation_key AND d.owner_user_id = c.owner_user_id
