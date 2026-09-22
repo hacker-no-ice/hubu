@@ -78,12 +78,14 @@ hubu_client_approval_profile
 hubu_create_budget
 hubu_export_policy
 hubu_get_executor_claim
+hubu_get_spend_workflow
 hubu_get_spend_approval
 hubu_health
 hubu_list_agents
 hubu_list_budgets
 hubu_list_claims_requiring_reconciliation
 hubu_list_ledger
+hubu_list_spend_workflows
 hubu_list_users
 hubu_policy_diff
 hubu_policy_history
@@ -527,7 +529,7 @@ Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
 state and compatible version metadata, and all 42 other tool names with owner
 and availability. Together with `hubu_unified_capabilities`, the stdio surface
-exposes 43 tools, 37 of which route to a backend.
+exposes 45 tools, 39 of which route to a backend.
 
 The version-1 compatibility boundary requires:
 
@@ -900,3 +902,12 @@ cannot offer public-handle continuation. The capability snapshot reports
 
 The router implementation and ownership map live in
 [`crates/hubu-unified-mcp`](../crates/hubu-unified-mcp).
+
+## Ledger and workflow history
+
+`hubu_list_ledger` reads canonical wallet/provider/adjustment postings with
+optional agent/account/budget filters and pagination. `hubu_list_spend_workflows`
+discovers owner-scoped authorization workflows; `hubu_get_spend_workflow` accepts
+only a public `workflow_id`, never a private operation key. Exact values,
+full-budget coverage and safe evidence references follow the
+[history contract](ledger-history.md).

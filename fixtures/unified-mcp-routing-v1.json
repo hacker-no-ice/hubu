@@ -1,6 +1,6 @@
 {
   "contract_version": "hubu-gongbu-mcp-v1",
-  "routing_revision": 9,
+  "routing_revision": 10,
   "tools": [
     { "name": "gongbu_create_execution", "owner": "gongbu" },
     { "name": "gongbu_get_artifact", "owner": "gongbu" },
@@ -19,11 +19,13 @@
     { "name": "hubu_feedback_guidance", "owner": "router" },
     { "name": "hubu_get_executor_claim", "owner": "hubu" },
     { "name": "hubu_get_spend_approval", "owner": "hubu" },
+    { "name": "hubu_get_spend_workflow", "owner": "hubu" },
     { "name": "hubu_health", "owner": "hubu" },
     { "name": "hubu_list_agents", "owner": "hubu" },
     { "name": "hubu_list_budgets", "owner": "hubu" },
     { "name": "hubu_list_claims_requiring_reconciliation", "owner": "hubu" },
     { "name": "hubu_list_ledger", "owner": "hubu" },
+    { "name": "hubu_list_spend_workflows", "owner": "hubu" },
     { "name": "hubu_list_users", "owner": "hubu" },
     { "name": "hubu_operation_status", "owner": "router" },
     { "name": "hubu_policy_diff", "owner": "hubu" },

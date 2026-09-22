@@ -91,12 +91,14 @@ unknown-tool error. There are no compatibility handlers.
 | `hubu_export_policy` | None (removed) | Remove | Use hubu_show_policy with include_yaml=true |
 | `hubu_feedback_guidance` | Local | Standard | Offline support discovery |
 | `hubu_get_executor_claim` | H | Standard | External executor settlement/recovery inspection |
+| `hubu_get_spend_workflow` | H | Standard | Owner-scoped public workflow inspection |
 | `hubu_get_spend_approval` | H | Standard | Immutable approval review |
 | `hubu_health` | None (removed) | Remove | Use hubu_unified_capabilities |
 | `hubu_list_agents` | H | Standard | Identity discovery |
 | `hubu_list_budgets` | H | Standard | Budget visibility |
 | `hubu_list_claims_requiring_reconciliation` | H | Standard | Find frozen claims without retained IDs |
-| `hubu_list_ledger` | H | Standard | Recorded spend visibility |
+| `hubu_list_ledger` | H | Standard | Canonical recorded spend, agent-budget filters and coverage |
+| `hubu_list_spend_workflows` | H | Standard | Paginated owner-scoped authorization discovery |
 | `hubu_list_users` | H | Standard | Human identity selection |
 | `hubu_operation_status` | S | Standard | Public-handle observation, not external settlement tracking |
 | `hubu_policy_diff` | H | Standard | Compare immutable revisions |
@@ -123,8 +125,9 @@ unknown-tool error. There are no compatibility handlers.
 also requires ready G. Existing `hubu_submit_spend` operations remain readable
 and recoverable in standard mode; the advanced restriction governs new admission.
 
-With all prerequisites satisfied: 34 standard names, six advanced additions
-(including the demo payment tool): **40 supported names**. Three of the 43
+With all prerequisites satisfied: 36 standard names, six advanced additions
+(including the demo payment tool): **42 supported names** after the two additive
+HUB-34 history reads. Three of the historical 43
 baseline names are removed. The previously removed recurring-budget name is
 historical and outside this baseline.
 Backend outages can reduce the actual lists.

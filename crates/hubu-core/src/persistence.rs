@@ -1,4 +1,6 @@
 mod accounting;
+mod history;
+pub use history::HistorySnapshot;
 
 use std::path::Path;
 use std::str::FromStr;

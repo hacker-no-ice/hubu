@@ -1868,6 +1868,15 @@ fn spend(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
         print_spend_help();
         return Ok(());
     }
+    if matches!(args.first().map(String::as_str), Some("history" | "show")) {
+        let command = args.remove(0);
+        let path = history_path(&format!("spend-{command}"), args)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&get_json(base_url, &path)?)?
+        );
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("authorize") {
         args.remove(0);
         return spend_authorize(base_url, args);
@@ -2509,60 +2518,99 @@ fn print_execution_scope(value: &Value) {
     }
 }
 
-fn ledger(base_url: &CliContext, args: Vec<String>) -> Result<()> {
-    match args.as_slice() {
-        [] => {
-            print_ledger_help();
-            Ok(())
-        }
-        [command] if command == "help" || command == "-h" || command == "--help" => {
-            print_ledger_help();
-            Ok(())
-        }
-        [command] if command == "list" => {
-            let response = get_json(base_url, "/ledger")?;
-            let transactions = response
-                .get("transactions")
-                .and_then(Value::as_array)
-                .ok_or_else(|| anyhow!("server response missing transactions"))?;
-
-            if transactions.is_empty() {
-                println!(
-                    "{}",
-                    terminal::stdout().muted("No ledger transactions recorded.")
-                );
-                return Ok(());
+fn history_path(command: &str, mut args: Vec<String>) -> Result<String> {
+    let endpoint = match command {
+        "ledger" => "/ledger/transactions",
+        "spend-history" => "/spend/workflows",
+        "spend-show" => "/spend/workflows/show",
+        _ => bail!("unknown history command"),
+    };
+    let mut url = reqwest::Url::parse(&format!("http://localhost{endpoint}"))?;
+    let flags: &[(&str, &str)] = match command {
+        "ledger" => &[
+            ("--agent-id", "agent_id"),
+            ("--account-id", "account_id"),
+            ("--budget-id", "budget_id"),
+            ("--limit", "limit"),
+            ("--cursor", "cursor"),
+        ],
+        "spend-history" => &[
+            ("--agent-id", "agent_id"),
+            ("--account-id", "account_id"),
+            ("--status", "status"),
+            ("--limit", "limit"),
+            ("--cursor", "cursor"),
+        ],
+        _ => &[
+            ("--workflow-id", "workflow_id"),
+            ("--agent-id", "agent_id"),
+            ("--operation-key", "operation_key"),
+        ],
+    };
+    let mut values = std::collections::BTreeMap::new();
+    for (flag, field) in flags {
+        if let Some(value) = take_value(&mut args, flag) {
+            if value.is_empty() {
+                bail!("{flag} cannot be empty");
             }
-
-            for transaction in transactions {
-                println!(
-                    "{}  {}  {}  owner: {} ({})",
-                    string_at(transaction, "created_at")?,
-                    string_at(transaction, "id")?,
-                    string_at(transaction, "description")?,
-                    string_at(transaction, "owner_user_name")?,
-                    string_at(transaction, "owner_user_id")?
-                );
-
-                for entry in transaction
-                    .get("entries")
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| anyhow!("ledger transaction missing entries"))?
-                {
-                    println!(
-                        "  {:<6} {:>10}  {}  owner: {} ({})",
-                        string_at(entry, "direction")?,
-                        money_at(entry, "amount_cents")?,
-                        string_at(entry, "account_id")?,
-                        string_at(entry, "owner_user_name")?,
-                        string_at(entry, "owner_user_id")?
-                    );
-                }
-            }
-            Ok(())
+            values.insert(*field, value);
         }
-        _ => bail!("usage: hubu ledger list"),
     }
+    ensure_no_args(args)?;
+    if values.contains_key("budget_id") && !values.contains_key("agent_id") {
+        bail!("--budget-id requires --agent-id");
+    }
+    if command == "spend-show" {
+        let public = values.contains_key("workflow_id");
+        let private = values.contains_key("agent_id") && values.contains_key("operation_key");
+        if !(public && values.len() == 1 || !public && private && values.len() == 2) {
+            bail!("provide --workflow-id OR --agent-id with --operation-key");
+        }
+    }
+    if let Some(limit) = values.get("limit") {
+        if !matches!(limit.parse::<u32>(), Ok(1..=100)) {
+            bail!("--limit must be between 1 and 100");
+        }
+    }
+    if let Some(status) = values.get("status") {
+        if !matches!(
+            status.as_str(),
+            "authorized"
+                | "unknown"
+                | "needs_approval"
+                | "claimed"
+                | "settled"
+                | "released"
+                | "expired"
+                | "reconciliation_required"
+        ) {
+            bail!("invalid workflow status");
+        }
+    }
+    if !values.is_empty() {
+        url.query_pairs_mut().extend_pairs(values);
+    }
+    Ok(format!(
+        "{}{}",
+        url.path(),
+        url.query().map(|q| format!("?{q}")).unwrap_or_default()
+    ))
+}
+
+fn ledger(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
+    if args.is_empty() || take_help(&mut args) || args == ["help"] {
+        print_ledger_help();
+        return Ok(());
+    }
+    if args.remove(0) != "list" {
+        bail!("usage: hubu ledger list [filters]");
+    }
+    let path = history_path("ledger", args)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&get_json(base_url, &path)?)?
+    );
+    Ok(())
 }
 
 fn print_budget(budget: &Value) -> Result<()> {
@@ -3649,6 +3697,11 @@ Usage:
 }
 
 fn print_spend_help() {
+    println!("Inspect spend workflow history (versioned JSON):
+  hubu spend history [--agent-id ID] [--account-id ID] [--status STATUS] [--limit 1..100] [--cursor CURSOR]
+  hubu spend show --workflow-id ID
+  hubu spend show --agent-id ID --operation-key KEY
+Statuses: authorized, unknown, needs_approval, claimed, settled, released, expired, reconciliation_required.");
     println!(
         "Test an agent spend request
 
@@ -3727,16 +3780,48 @@ fn print_ledger_help() {
         "Read ledger transactions
 
 Usage:
-  hubu ledger list
+  hubu ledger list [--agent-id ID] [--account-id ID] [--budget-id ID] [--limit 1..100] [--cursor CURSOR]
+
+Returns versioned JSON with exact costs, corrections, budget coverage, and next_cursor.
+--budget-id requires --agent-id.
 
 Example:
-  hubu ledger list"
+  hubu ledger list --agent-id AGENT --budget-id BUDGET"
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_queries_encode_keys_and_validate_scope() {
+        let args = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            history_path("ledger", vec![]).unwrap(),
+            "/ledger/transactions"
+        );
+        assert_eq!(
+            history_path("spend-history", args(&["--status", "unknown"])).unwrap(),
+            "/spend/workflows?status=unknown"
+        );
+        assert_eq!(
+            history_path(
+                "spend-show",
+                args(&["--agent-id", "agent", "--operation-key", "a+b&%雪"])
+            )
+            .unwrap(),
+            "/spend/workflows/show?agent_id=agent&operation_key=a%2Bb%26%25%E9%9B%AA"
+        );
+        assert!(history_path("ledger", args(&["--budget-id", "budget"])).is_err());
+        assert!(history_path(
+            "spend-show",
+            args(&["--workflow-id", "workflow", "--operation-key", "secret"])
+        )
+        .is_err());
+        assert!(history_path("ledger", args(&["--limit", "101"])).is_err());
+        assert!(history_path("spend-history", args(&["--status", "invalid"])).is_err());
+    }
 
     #[test]
     fn removed_recurring_command_is_rejected_before_connecting() {

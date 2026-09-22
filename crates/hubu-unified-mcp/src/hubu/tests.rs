@@ -198,7 +198,7 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
 
     let expected = super::catalog::tool_definitions();
     assert_eq!(&actual[5..], expected.as_slice());
-    assert_eq!(expected.len(), 30);
+    assert_eq!(expected.len(), 32);
     assert!(!actual
         .iter()
         .any(|tool| tool["name"] == "hubu_replace_budget"));
@@ -292,7 +292,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 43);
+    assert_eq!(tools.len(), 45);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -310,7 +310,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 41);
+    assert_eq!(degraded.len(), 43);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -600,10 +600,24 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::None,
         ),
         (
+            "hubu_list_spend_workflows",
+            empty.clone(),
+            "GET",
+            "/spend/workflows",
+            HubuRequestCapabilityV1::None,
+        ),
+        (
+            "hubu_get_spend_workflow",
+            json!({"workflow_id":"public-workflow"}),
+            "GET",
+            "/spend/workflows/show?workflow_id=public-workflow",
+            HubuRequestCapabilityV1::None,
+        ),
+        (
             "hubu_list_ledger",
             empty.clone(),
             "GET",
-            "/ledger",
+            "/ledger/transactions",
             HubuRequestCapabilityV1::None,
         ),
         (
@@ -635,7 +649,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::Reconciliation,
         ),
     ];
-    assert_eq!(cases.len(), 29);
+    assert_eq!(cases.len(), 31);
     for (name, arguments, method, path, capability) in cases {
         let params = json!({
             "name": name,
@@ -1812,5 +1826,105 @@ fn production_dependencies_exclude_backend_implementation_crates() {
     let unified_manifest = include_str!("../../Cargo.toml");
     for forbidden in ["hubu-api", "hubu-core", "hubu-wallet", "gongbu-api"] {
         assert!(!unified_manifest.contains(forbidden), "{forbidden}");
+    }
+}
+
+#[test]
+fn history_routes_filters_and_preserves_exact_values() {
+    let result = route_tool_call_v1(
+        json!({"name":"hubu_list_ledger","arguments":{"agent_id":"agent","budget_id":"budget","limit":2,"cursor":"a+b&%雪"}}),
+        false, false, None,
+        |request| {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/ledger/transactions?agent_id=agent&budget_id=budget&limit=2&cursor=a%2Bb%26%25%E9%9B%AA");
+            Ok(json!({"schema_version":"hubu-history-v1","transactions":[{"effective_cost":{"amount":"1","scale":3},"entries":[{"amount":{"amount":"170141183460469231731687303715884105","scale":3}}]}],"coverage":{"unaccounted_consumption_cents":1},"next_cursor":"next"}))
+        },
+    ).unwrap();
+    // Plain routing must not coerce exact decimal coefficients or lose coverage/cursors.
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(text.contains("170141183460469231731687303715884105"));
+    assert!(text.contains("unaccounted_consumption_cents"));
+    assert!(text.contains("next_cursor"));
+}
+
+#[test]
+fn history_rejects_private_keys_and_invalid_filters_before_http() {
+    for (name, args) in [
+        (
+            "hubu_get_spend_workflow",
+            json!({"operation_key":"secret","agent_id":"agent"}),
+        ),
+        (
+            "hubu_get_spend_workflow",
+            json!({"workflow_id":"public","operation_key":"secret"}),
+        ),
+        ("hubu_list_ledger", json!({"budget_id":"budget"})),
+        ("hubu_list_ledger", json!({"limit":101})),
+        ("hubu_list_spend_workflows", json!({"status":"invalid"})),
+    ] {
+        assert!(route_tool_call_v1(
+            json!({"name":name,"arguments":args}),
+            false,
+            false,
+            None,
+            |_| panic!("invalid query reached HTTP")
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn workflow_detail_preserves_public_ids_and_only_accepts_public_lookup() {
+    let payload = json!({"schema_version":"hubu-history-v1","workflow":{"id":"workflow-public","claim_id":"claim-public"}});
+    let response = route_tool_call_v1(
+        json!({"name":"hubu_get_spend_workflow","arguments":{"workflow_id":"workflow-public"}}),
+        false,
+        false,
+        None,
+        |request| {
+            assert_eq!(
+                request.path,
+                "/spend/workflows/show?workflow_id=workflow-public"
+            );
+            Ok(payload.clone())
+        },
+    )
+    .unwrap();
+    assert_eq!(response["structuredContent"], payload);
+    assert!(route_tool_call_v1(json!({"name":"hubu_get_spend_workflow","arguments":{"workflow_id":"workflow-public","agent_id":"agent"}}), false, false, None, |_| panic!("mixed selector reached HTTP")).is_err());
+}
+
+#[test]
+fn history_routes_pass_transport_allowlist_and_support_unknown_legacy_status() {
+    for (name, arguments) in [
+        (
+            "hubu_list_ledger",
+            json!({"agent_id":"agent","budget_id":"budget"}),
+        ),
+        ("hubu_list_spend_workflows", json!({"status":"unknown"})),
+        (
+            "hubu_get_spend_workflow",
+            json!({"workflow_id":"public-workflow"}),
+        ),
+    ] {
+        route_tool_call_v1(
+            json!({"name":name,"arguments":arguments}),
+            false,
+            false,
+            None,
+            |request| {
+                assert!(
+                    super::transport::is_approved_http_route(request.method, &request.path),
+                    "{}",
+                    request.path
+                );
+                assert!(!super::transport::is_approved_http_route(
+                    "POST",
+                    &request.path
+                ));
+                Ok(json!({}))
+            },
+        )
+        .unwrap();
     }
 }
