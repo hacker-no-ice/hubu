@@ -39,7 +39,8 @@ pub(super) fn post_settlement(
              JOIN spend_auth_tokens t ON t.spend_decision_id = d.id
              JOIN spend_executor_claims c ON c.spend_auth_token_id = t.id
              JOIN budget_holds h ON h.spend_decision_id = d.id AND h.executor_claim_id = c.id
-             JOIN budgets b ON b.id = h.budget_id AND b.scope_type = 'agent' AND b.scope_id = c.agent_id
+             JOIN budgets b ON b.id = h.budget_id AND b.scope_type = 'agent' AND b.scope_id = c.agent_id AND b.currency = h.currency
+             JOIN budget_versions v ON v.id = h.budget_version_id AND v.budget_id = b.id
              WHERE c.id = ?1 AND h.id = ?2 AND c.status = 'settled' AND h.status = 'settled'
                AND c.settlement_id = ?3 AND t.used_by_payment_id = ?3 AND t.used_at IS NOT NULL
                AND d.operation_key = c.operation_key AND d.owner_user_id = c.owner_user_id
@@ -427,7 +428,8 @@ fn backfill_wallet_context(tx: &rusqlite::Transaction<'_>) -> Result<(), Storage
             let mut stmt=tx.prepare("SELECT p.payment_id,p.spend_auth_token_id,p.agent_account_id,d.request_json,d.operation_key,d.id,h.budget_id,h.budget_version_id,p.amount_cents,p.rail_reference,d.agent_id
             FROM payment_attempts p JOIN spend_auth_tokens t ON t.id=p.spend_auth_token_id
             JOIN spend_decisions d ON d.id=t.spend_decision_id JOIN budget_holds h ON h.spend_decision_id=d.id
-            JOIN budgets b ON b.id=h.budget_id AND b.scope_type='agent' AND b.scope_id=d.agent_id
+            JOIN budgets b ON b.id=h.budget_id AND b.scope_type='agent' AND b.scope_id=d.agent_id AND b.currency=h.currency
+            JOIN budget_versions v ON v.id=h.budget_version_id AND v.budget_id=b.id
             WHERE p.ledger_transaction_id=?1 AND p.owner_user_id=?2 AND p.status='succeeded'
             AND p.payment_id=?3 AND t.used_by_payment_id=p.payment_id AND t.owner_user_id=p.owner_user_id
             AND d.owner_user_id=p.owner_user_id AND d.agent_id=p.agent_id AND h.amount_cents=p.amount_cents AND h.currency=p.currency AND h.status='settled' AND h.executor_claim_id IS NULL")?;
