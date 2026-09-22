@@ -199,10 +199,26 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
+            name: "hubu_list_spend_workflows",
+            owner: hubu,
+            method: "GET",
+            path: "/spend/workflows",
+            arguments: json!({}),
+            meta: None,
+        },
+        GoldenCase {
+            name: "hubu_get_spend_workflow",
+            owner: hubu,
+            method: "GET",
+            path: "/spend/workflows/show?workflow_id=11111111-1111-4111-8111-111111111111",
+            arguments: json!({"workflow_id":"11111111-1111-4111-8111-111111111111"}),
+            meta: None,
+        },
+        GoldenCase {
             name: "hubu_list_ledger",
             owner: hubu,
             method: "GET",
-            path: "/ledger",
+            path: "/ledger/transactions",
             arguments: json!({}),
             meta: None,
         },
@@ -366,8 +382,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        37,
-        "golden matrix must contain exactly 37 cases"
+        39,
+        "golden matrix must contain exactly 39 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -380,8 +396,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        37,
-        "routing fixture must map 37 tools"
+        39,
+        "routing fixture must map 39 tools"
     );
     assert_eq!(
         expected.len(),
@@ -397,7 +413,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Hubu)
             .count(),
-        30
+        32
     );
     assert_eq!(
         cases

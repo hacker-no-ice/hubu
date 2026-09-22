@@ -245,7 +245,30 @@ pub(super) fn route_tool_call_v1(
                 get_request("/budgets")
             }
         }
-        "hubu_list_ledger" => get_request("/ledger"),
+        "hubu_list_ledger" => get_request(history_path(
+            "/ledger/transactions",
+            &arguments,
+            &["agent_id", "account_id", "budget_id", "limit", "cursor"],
+        )?),
+        "hubu_list_spend_workflows" => get_request(history_path(
+            "/spend/workflows",
+            &arguments,
+            &["agent_id", "account_id", "status", "limit", "cursor"],
+        )?),
+        "hubu_get_spend_workflow" => {
+            if arguments
+                .get("workflow_id")
+                .and_then(Value::as_str)
+                .is_none()
+            {
+                bail!("hubu_get_spend_workflow requires workflow_id");
+            }
+            get_request(history_path(
+                "/spend/workflows/show",
+                &arguments,
+                &["workflow_id"],
+            )?)
+        }
         "hubu_get_executor_claim" => {
             let claim_id = arguments
                 .get("claim_id")
@@ -740,4 +763,55 @@ pub(super) fn tool_error_result_v1(value: Value) -> Value {
         "structuredContent": value,
         "isError": true
     })
+}
+
+fn history_path(endpoint: &str, arguments: &Value, allowed: &[&str]) -> Result<String> {
+    let args = arguments
+        .as_object()
+        .ok_or_else(|| anyhow!("history arguments must be an object"))?;
+    if args.keys().any(|key| !allowed.contains(&key.as_str())) {
+        bail!("unsupported history argument");
+    }
+    if args.contains_key("budget_id") && !args.contains_key("agent_id") {
+        bail!("budget_id requires agent_id");
+    }
+    let mut url = reqwest::Url::parse(&format!("http://localhost{endpoint}"))?;
+    for key in allowed {
+        if let Some(value) = args.get(*key) {
+            let value = if *key == "limit" {
+                value
+                    .as_u64()
+                    .filter(|n| (1..=100).contains(n))
+                    .ok_or_else(|| anyhow!("limit must be between 1 and 100"))?
+                    .to_string()
+            } else {
+                value
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("{key} must be a nonempty string"))?
+                    .to_string()
+            };
+            if *key == "status"
+                && !matches!(
+                    value.as_str(),
+                    "authorized"
+                        | "unknown"
+                        | "needs_approval"
+                        | "claimed"
+                        | "settled"
+                        | "released"
+                        | "expired"
+                        | "reconciliation_required"
+                )
+            {
+                bail!("invalid workflow status");
+            }
+            url.query_pairs_mut().append_pair(key, &value);
+        }
+    }
+    Ok(format!(
+        "{}{}",
+        url.path(),
+        url.query().map(|q| format!("?{q}")).unwrap_or_default()
+    ))
 }

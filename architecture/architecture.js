@@ -505,9 +505,9 @@ const components = {
       "Wallet postings require at least two positive entries, matching owner scope, and balanced debits/credits.",
       "Stores wallet and provider postings in the same immutable transaction and entry tables. Compatibility projections preserve wallet IDs and cents; canonical entries retain exact precision.",
       "LedgerService owns provider corrections and typed owner/agent/budget reads. Settlement coordinates atomic ledger and budget changes; BudgetManager publishes committed budget state. Evidence-only legacy enrichment never reposts wallet expenses.",
-      "Existing ledger-list still serves wallet entries; HUB-34 owns unified inspection. HUB-210 owns wallet payment/budget atomicity.",
+      "Canonical HTTP/CLI/unified-MCP history reads one owner snapshot, with agent/account/budget filters, full-budget coverage, exact costs, cursor paging and safe workflow/receipt evidence. Legacy GET /ledger remains wallet-only; HUB-210 wallet atomicity is deferred.",
     ],
-    links: [sharedLinks.ledger, sharedLinks.providerAccounting, sharedLinks.payment, ["Ledger accounting", "docs/ledger-accounting.md"], ["Wallet persistence", "crates/hubu-wallet/src/persistence.rs"]],
+    links: [sharedLinks.ledger, sharedLinks.providerAccounting, sharedLinks.payment, ["Ledger accounting", "docs/ledger-accounting.md"], ["History contract", "docs/ledger-history.md"], ["Read projections", "crates/hubu-api/src/history.rs"], ["Wallet persistence", "crates/hubu-wallet/src/persistence.rs"]],
     nodes: [
       { id: "providerJournal", label: "Canonical ledger", sub: "wallet + provider + adjustments", x: 70, y: 580, w: 290, h: 92, tone: "data", path: "crates/hubu-ledger/src/domain.rs" },
       { id: "providerBudget", label: "Atomic settlement", sub: "receipt + budget + posting", x: 420, y: 580, w: 260, h: 92, tone: "core", path: "crates/hubu-core/src/persistence.rs" },
@@ -515,6 +515,7 @@ const components = {
       { id: "accounts", label: "Accounts", sub: "cash + expense + clearing", x: 90, y: 126, w: 220, h: 92, tone: "wallet" },
       { id: "draft", label: "Entry drafts", sub: "debit + credit", x: 448, y: 126, w: 210, h: 92, tone: "core" },
       { id: "validate", label: "Validate", sub: "owner + balance", x: 804, y: 126, w: 210, h: 92, tone: "core" },
+      { id: "history", label: "History API / CLI / MCP", sub: "owner + filters + safe evidence", x: 70, y: 366, w: 290, h: 92, tone: "core", path: "crates/hubu-api/src/history.rs" },
       { id: "tx", label: "Transaction", sub: "external ref", x: 448, y: 366, w: 210, h: 92, tone: "data" },
       { id: "triggers", label: "Immutability", sub: "no update/delete", x: 804, y: 366, w: 210, h: 92, tone: "data" },
     ],
@@ -527,6 +528,7 @@ const components = {
       ["correction", "providerBudget", "adjust"],
       ["providerJournal", "triggers", "immutable"],
       ["tx", "providerJournal", "same store"],
+      ["providerJournal", "history", "read snapshot"],
     ],
   },
   cli: {

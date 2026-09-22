@@ -1,3 +1,4 @@
+mod history;
 use std::{
     collections::{BTreeMap, HashMap},
     env,
@@ -1775,6 +1776,9 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         }
         ("POST", "/spend") => spend_at(request.body, state, request_now).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
+        ("GET", "/ledger/transactions") => history::ledger(&request, state),
+        ("GET", "/spend/workflows") => history::workflows(&request, state, false),
+        ("GET", "/spend/workflows/show") => history::workflows(&request, state, true),
         _ => Err(anyhow!("no route for {} {}", request.method, request.path)),
     };
 
@@ -5875,6 +5879,24 @@ fn parse_request(raw: &str) -> Result<HttpRequest> {
         return Err(anyhow!("malformed HTTP request line"));
     }
     let (path, query) = split_path_and_query(target);
+    if matches!(
+        path.as_str(),
+        "/ledger/transactions" | "/spend/workflows" | "/spend/workflows/show"
+    ) {
+        let mut keys = std::collections::HashSet::new();
+        for pair in target
+            .split_once('?')
+            .map(|(_, q)| q)
+            .unwrap_or("")
+            .split('&')
+            .filter(|p| !p.is_empty())
+        {
+            let key = history::decode(pair.split_once('=').map(|(k, _)| k).unwrap_or(pair))?;
+            if !keys.insert(key) {
+                return Err(anyhow!("duplicate history query parameter"));
+            }
+        }
+    }
     let mut headers = HashMap::new();
     for line in head.split("\r\n").skip(1) {
         let (name, value) = line
@@ -5944,6 +5966,7 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
+    mod history;
     use super::*;
     use chrono::Duration;
 

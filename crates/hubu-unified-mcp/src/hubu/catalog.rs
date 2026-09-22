@@ -221,8 +221,26 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         read_tool(
             "hubu_list_ledger",
-            "List local ledger transactions.",
-            json_schema(json!({})),
+            "List the active user's ledger transactions with exact costs and corrections. A budget filter requires agent_id; coverage describes gaps across the complete budget, independent of pagination.",
+            json_schema(json!({
+                "agent_id": { "type": "string" }, "account_id": { "type": "string" },
+                "budget_id": { "type": "string" }, "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+                "cursor": { "type": "string" }
+            })),
+        ),
+        read_tool(
+            "hubu_list_spend_workflows",
+            "List authorized spend workflows and their current lifecycle state. Follow next_cursor to retrieve subsequent pages.",
+            json_schema(json!({
+                "agent_id": { "type": "string" }, "account_id": { "type": "string" },
+                "status": { "type": "string", "enum": ["authorized", "unknown", "needs_approval", "claimed", "settled", "released", "expired", "reconciliation_required"] },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100 }, "cursor": { "type": "string" }
+            })),
+        ),
+        read_tool(
+            "hubu_get_spend_workflow",
+            "Inspect one spend workflow by its public workflow_id, including safe lifecycle and accounting references.",
+            json_schema_required(json!({ "workflow_id": { "type": "string" } }), &["workflow_id"]),
         ),
         read_tool(
             "hubu_get_executor_claim",

@@ -132,9 +132,11 @@ in the same query with signed budget deltas.
 
 The old `hubu_wallet::LedgerTransaction` / `LedgerEntry` types are explicitly
 cent-only compatibility projections re-exported from the ledger crate. Existing
-`/ledger` behavior remains wallet-only. [HUB-34](https://linear.app/hubu/issue/HUB-34)
-owns exposing the full ledger and owner/agent/budget filters through API, CLI and
-MCP. The typed internal query is implemented here; those public filters are not.
+`/ledger` behavior remains wallet-only. The canonical `/ledger/transactions`
+read API, CLI `hubu ledger list`, and unified MCP `hubu_list_ledger` support
+owner-wide and agent/account/budget inspection. See [ledger and spend
+history](ledger-history.md) for pagination, exact-value semantics, coverage and
+safe workflow/receipt inspection.
 
 Implementation: [ledger domain](../crates/hubu-ledger/src/domain.rs),
 [ledger facade](../crates/hubu-core/src/ledger.rs),

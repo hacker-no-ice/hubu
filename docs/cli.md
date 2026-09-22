@@ -87,3 +87,11 @@ hubu budget revoke --budget-id bgt_EXACT_BUDGET_ID
 See [Spend lifecycle](spend-lifecycle.md) for reservation, settlement, and
 ledger behavior. Policies govern individual requests; budgets govern cumulative
 spending over their active period.
+
+## Ledger and workflow history
+
+`hubu ledger list` prints canonical JSON for wallet payments, provider expenses
+and corrections. Select an agent budget with `--agent-id` and `--budget-id`, and
+page with `--limit` and `--cursor`. `hubu spend history` lists workflows;
+`hubu spend show --workflow-id ID` inspects one public workflow. See
+[ledger and spend history](ledger-history.md) for examples and cost semantics.
