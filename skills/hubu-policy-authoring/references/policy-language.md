@@ -142,7 +142,7 @@ hubu policy apply --path policies/POLICY.yaml \
 
 Equivalent unified MCP operations are:
 
-- `hubu_show_policy`, `hubu_export_policy`, `hubu_policy_history`, and
+- `hubu_show_policy` (with `include_yaml: true` for YAML), `hubu_policy_history`, and
   `hubu_policy_diff` for read-only inspection;
 - `hubu_apply_policy` for reconciliation and assignment. It requires
   `policy_yaml`; optional fields are `declarative_key`, `display_name`,

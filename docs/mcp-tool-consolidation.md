@@ -1,7 +1,10 @@
 # MCP consolidation and default authority contract
 
-Status: **Planned v0.2.2 contract.** The [implemented surface](unified-mcp.md)
-remains authoritative until this contract is implemented.
+Status: **Historical proposal; exposure profiles are superseded.** The current
+direction is a single core tool set, with redundant tools removed outright and
+no exposure configuration. The policy/health removals and optional YAML
+inspection are implemented; see the authoritative [implemented surface](unified-mcp.md).
+The remaining profile-specific sections below are historical design context.
 
 ## Decision
 

@@ -46,7 +46,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.3";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 10;
+pub const ROUTING_REVISION: u32 = 11;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -86,17 +86,14 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("gongbu_get_redaction_attestation", BackendOwner::Gongbu),
     ("gongbu_list_artifacts", BackendOwner::Gongbu),
     ("gongbu_list_execution_targets", BackendOwner::Gongbu),
-    ("hubu_add_policy", BackendOwner::Hubu),
     ("hubu_apply_policy", BackendOwner::Hubu),
     ("hubu_authorize_spend", BackendOwner::Hubu),
     ("hubu_budget_history", BackendOwner::Hubu),
     ("hubu_client_approval_profile", BackendOwner::Hubu),
     ("hubu_create_budget", BackendOwner::Hubu),
-    ("hubu_export_policy", BackendOwner::Hubu),
     ("hubu_get_executor_claim", BackendOwner::Hubu),
     ("hubu_get_spend_approval", BackendOwner::Hubu),
     ("hubu_get_spend_workflow", BackendOwner::Hubu),
-    ("hubu_health", BackendOwner::Hubu),
     ("hubu_list_agents", BackendOwner::Hubu),
     ("hubu_list_budgets", BackendOwner::Hubu),
     (
@@ -908,7 +905,7 @@ impl Server {
                 tools.push(governed_execution::tool_definition());
             }
         }
-        if tool_availability("hubu_health", BackendOwner::Hubu, &snapshot).is_ok() {
+        if tool_availability("hubu_show_policy", BackendOwner::Hubu, &snapshot).is_ok() {
             tools.extend(hubu::tool_definitions().into_iter().filter(|tool| {
                 self.operation_registry_available()
                     || !matches!(
@@ -2109,7 +2106,7 @@ mod tests {
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
         assert_eq!(capability["routing_revision"], ROUTING_REVISION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 45);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 42);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

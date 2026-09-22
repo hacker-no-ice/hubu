@@ -198,7 +198,7 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
 
     let expected = super::catalog::tool_definitions();
     assert_eq!(&actual[5..], expected.as_slice());
-    assert_eq!(expected.len(), 32);
+    assert_eq!(expected.len(), 29);
     assert!(!actual
         .iter()
         .any(|tool| tool["name"] == "hubu_replace_budget"));
@@ -292,7 +292,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 45);
+    assert_eq!(tools.len(), 42);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -310,7 +310,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 43);
+    assert_eq!(degraded.len(), 40);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -427,13 +427,6 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
     });
     let cases = [
         (
-            "hubu_health",
-            empty.clone(),
-            "GET",
-            "/health",
-            HubuRequestCapabilityV1::None,
-        ),
-        (
             "hubu_registration_guidance",
             empty.clone(),
             "GET",
@@ -462,13 +455,6 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::None,
         ),
         (
-            "hubu_add_policy",
-            empty.clone(),
-            "POST",
-            "/policies",
-            HubuRequestCapabilityV1::None,
-        ),
-        (
             "hubu_apply_policy",
             json!({"policy_yaml":"version: 1"}),
             "POST",
@@ -483,8 +469,8 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::None,
         ),
         (
-            "hubu_export_policy",
-            empty.clone(),
+            "hubu_show_policy",
+            json!({"include_yaml":true}),
             "GET",
             "/policies/export",
             HubuRequestCapabilityV1::None,
@@ -649,7 +635,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::Reconciliation,
         ),
     ];
-    assert_eq!(cases.len(), 31);
+    assert_eq!(cases.len(), 29);
     for (name, arguments, method, path, capability) in cases {
         let params = json!({
             "name": name,
@@ -731,8 +717,8 @@ fn approved_query_variants_match_owned_routing_contract() {
             "/policies/show?policy_id=policy-1",
         ),
         (
-            "hubu_export_policy",
-            json!({"agent_id":"agent-1"}),
+            "hubu_show_policy",
+            json!({"agent_id":"agent-1","include_yaml":true}),
             "/policies/export?agent_id=agent-1",
         ),
         (
@@ -1524,7 +1510,7 @@ fn unavailable_registry_hides_and_rejects_only_billable_hubu_tools() {
         .into_iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
-    assert!(names.contains(&"hubu_health".to_owned()));
+    assert!(names.contains(&"hubu_registration_guidance".to_owned()));
     assert!(names.contains(&"gongbu_get_artifact".to_owned()));
     assert!(!names.contains(&"hubu_authorize_spend".to_owned()));
     assert!(!names.contains(&"hubu_submit_spend".to_owned()));
@@ -1708,7 +1694,7 @@ fn hubu_outage_is_sanitized_retryable_and_has_no_fallback() {
     let gongbu_endpoint = format!("http://{}", gongbu_listener.local_addr().unwrap());
     let server = server_with_backends(&hubu_endpoint, Some(&gongbu_endpoint), false, None);
 
-    let response = tool_call(&server, "hubu_health", json!({}), None);
+    let response = tool_call(&server, "hubu_registration_guidance", json!({}), None);
     assert_eq!(response["error"]["code"], -32010);
     assert_eq!(response["error"]["data"]["code"], "backend_unavailable");
     assert_eq!(response["error"]["data"]["owner"], "hubu");
@@ -1809,10 +1795,10 @@ fn connected_read_outage_is_retryable_and_never_reaches_gongbu() {
     let gongbu_endpoint = format!("http://{}", gongbu_listener.local_addr().unwrap());
     let server = server_with_backends(&hubu_endpoint, Some(&gongbu_endpoint), false, None);
 
-    let response = tool_call(&server, "hubu_health", json!({}), None);
+    let response = tool_call(&server, "hubu_registration_guidance", json!({}), None);
     let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
     handle.join().unwrap();
-    assert!(raw.starts_with("GET /health HTTP/1.1"));
+    assert!(raw.starts_with("GET /registration/guidance HTTP/1.1"));
     assert_eq!(response["error"]["code"], -32010);
     assert_eq!(response["error"]["data"]["code"], "backend_unavailable");
     assert_eq!(response["error"]["data"]["retryable"], true);
@@ -1927,4 +1913,149 @@ fn history_routes_pass_transport_allowlist_and_support_unknown_legacy_status() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn removed_policy_and_health_tools_are_unknown_before_network() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    for (trusted, available) in [(false, true), (true, true), (true, false)] {
+        let server = server_with_backends(&endpoint, Some(&endpoint), trusted, None);
+        if !available {
+            let mut snapshot = server.snapshot.lock().unwrap();
+            snapshot.hubu.state = BackendState::Unavailable;
+            snapshot.gongbu.state = BackendState::Unconfigured;
+        }
+        for name in ["hubu_add_policy", "hubu_export_policy", "hubu_health"] {
+            assert!(!server
+                .list_tools_for_snapshot()
+                .iter()
+                .any(|tool| tool["name"] == name));
+            assert!(!server.capabilities()["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == name));
+            assert!(!super::catalog::approval_profile()
+                .to_string()
+                .contains(name));
+            assert_eq!(
+                tool_call(&server, name, json!({}), None)["error"]["code"],
+                -32602
+            );
+            let error = route_tool_call_v1(
+                json!({"name":name,"arguments":{}}),
+                trusted,
+                trusted,
+                None,
+                |_| panic!("removed tool reached backend"),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("unknown Hubu MCP tool"));
+        }
+    }
+    assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+}
+
+#[test]
+fn show_policy_optional_yaml_preserves_response_and_selectors() {
+    let response = json!({"policy_id":"policy-1","revision":4,"payload_hash":"hash","policy":{"version":1},"assignments":[{"scope":"user_default"}],"policy_yaml":"version: 1\n"});
+    for (arguments, expected) in [
+        (json!({}), "/policies/show"),
+        (json!({"include_yaml":false}), "/policies/show"),
+        (json!({"include_yaml":true}), "/policies/export"),
+        (
+            json!({"include_yaml":true,"policy_id":"policy-1"}),
+            "/policies/export?policy_id=policy-1",
+        ),
+        (
+            json!({"include_yaml":true,"agent_id":"agent-1"}),
+            "/policies/export?agent_id=agent-1",
+        ),
+    ] {
+        let result = route_tool_call_v1(
+            json!({"name":"hubu_show_policy","arguments":arguments}),
+            false,
+            false,
+            None,
+            |request| {
+                assert_eq!(request.method, "GET");
+                assert_eq!(request.path, expected);
+                assert!(request.body.is_none());
+                Ok(response.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(result["structuredContent"], response);
+    }
+    for arguments in [
+        json!({"include_yaml":null}),
+        json!({"include_yaml":"true"}),
+        json!({"include_yaml":1}),
+        json!({"unexpected":true}),
+        json!({"include_yaml":true,"policy_id":"p","agent_id":"a"}),
+    ] {
+        assert!(route_tool_call_v1(
+            json!({"name":"hubu_show_policy","arguments":arguments}),
+            false,
+            false,
+            None,
+            |_| panic!("invalid request reached backend")
+        )
+        .is_err());
+    }
+    let schema = super::catalog::tool_definitions()
+        .into_iter()
+        .find(|tool| tool["name"] == "hubu_show_policy")
+        .unwrap();
+    assert_eq!(
+        schema["inputSchema"]["properties"]["include_yaml"],
+        json!({"type":"boolean","default":false})
+    );
+}
+
+#[test]
+fn canonical_apply_requires_yaml_and_preserves_assignment_and_cas() {
+    let arguments = json!({"policy_yaml":"version: 1","declarative_key":"policy","display_name":"Policy","agent_id":"agent-1","expected_revision":3,"expected_hash":"hash"});
+    let mut expected = arguments.clone();
+    expected["source"] = json!("mcp");
+    route_tool_call_v1(
+        json!({"name":"hubu_apply_policy","arguments":arguments}),
+        true,
+        false,
+        None,
+        |request| {
+            assert_eq!(request.path, "/policies");
+            assert_eq!(request.body, Some(expected));
+            Ok(json!({}))
+        },
+    )
+    .unwrap();
+    for arguments in [
+        json!({}),
+        json!({"policy_yaml":null}),
+        json!({"policy_yaml":" "}),
+        json!({"daily_limit_cents":100}),
+        json!({"policy_yaml":"version: 1","daily_limit_cents":100}),
+    ] {
+        assert!(route_tool_call_v1(
+            json!({"name":"hubu_apply_policy","arguments":arguments}),
+            true,
+            false,
+            None,
+            |_| panic!("shortcut reached backend")
+        )
+        .is_err());
+    }
+    assert!(route_tool_call_v1(
+        json!({"name":"hubu_apply_policy","arguments":{"policy_yaml":"version: 1"}}),
+        false,
+        false,
+        None,
+        |_| panic!("ungated policy write")
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("trusted MCP client approval gate"));
 }

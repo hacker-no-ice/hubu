@@ -240,7 +240,7 @@ With the client running:
 
 Use this first prompt:
 
-> Call hubu_health and hubu_unified_capabilities. Report backend availability
+> Call hubu_unified_capabilities. Report backend availability
 > and operation_registry state. Do not change configuration or submit spending.
 
 Look for both backends to be available and this capability object:

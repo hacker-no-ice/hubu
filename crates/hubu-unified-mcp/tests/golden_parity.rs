@@ -95,14 +95,6 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
-            name: "hubu_add_policy",
-            owner: hubu,
-            method: "POST",
-            path: "/policies",
-            arguments: json!({"policy_yaml":"fixture"}),
-            meta: None,
-        },
-        GoldenCase {
             name: "hubu_apply_policy",
             owner: hubu,
             method: "POST",
@@ -143,14 +135,6 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
-            name: "hubu_export_policy",
-            owner: hubu,
-            method: "GET",
-            path: "/policies/export",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
             name: "hubu_get_executor_claim",
             owner: hubu,
             method: "GET",
@@ -164,14 +148,6 @@ fn cases() -> Vec<GoldenCase> {
             method: "GET",
             path: "/spend/approval?approval_request_id=approval-107",
             arguments: json!({"approval_request_id":"approval-107"}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_health",
-            owner: hubu,
-            method: "GET",
-            path: "/health",
-            arguments: json!({}),
             meta: None,
         },
         GoldenCase {
@@ -382,8 +358,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        39,
-        "golden matrix must contain exactly 39 cases"
+        36,
+        "golden matrix must contain exactly 36 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -396,8 +372,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        39,
-        "routing fixture must map 39 tools"
+        36,
+        "routing fixture must map 36 tools"
     );
     assert_eq!(
         expected.len(),
@@ -413,7 +389,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Hubu)
             .count(),
-        32
+        29
     );
     assert_eq!(
         cases
