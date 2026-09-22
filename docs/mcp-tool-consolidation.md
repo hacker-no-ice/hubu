@@ -40,7 +40,7 @@ Sources and known consumers:
   assert forwarding and response behavior, including policy inspection.
 - [Generated Codex configuration](../crates/hubu-cli/src/codex_mcp.rs) includes
   an auto-approval entry for `hubu_submit_spend`; it must follow exposure.
-- [Durable operation registry](../crates/hubu-unified-mcp/src/operation_registry.rs)
+- [Persistent MCP operation store](../crates/hubu-unified-mcp/src/operation_registry.rs)
   and [approval resume](../crates/hubu-unified-mcp/src/resume_operation.rs)
   persist/dispatch the exact `hubu_submit_spend` origin. Renaming or translating
   it would risk old operation recovery.
@@ -56,11 +56,16 @@ These inventory counts are baseline evidence, not permanent test constants.
 ## Complete v0.2.2 disposition
 
 H = compatible, available Hubu; G = compatible Gongbu (degraded permits reads);
-R = available durable router operation registry; Local = no backend needed.
+S = available persistent MCP operation store; Local = no backend needed.
 Creation through Gongbu requires ready G and available H. Existing runtime
 credential, schema, ownership and approval checks apply in addition to these
 discovery prerequisites. A listed protected tool is not a promise that the
 client has configured its human gate.
+
+The persistent MCP operation store records operation identity and recovery state
+across server restarts. It supports retry deduplication, status lookup and
+approval resume. Hubu remains authoritative for financial state; Gongbu owns
+managed execution state.
 
 Standard tools are listed and callable in both modes. Advanced tools are listed
 and admit new work only in advanced mode; persisted mock-operation recovery has
@@ -70,7 +75,7 @@ unknown-tool error. There are no compatibility handlers.
 
 | Exact tool name | Prerequisites | Disposition | Purpose / replacement |
 | --- | --- | --- | --- |
-| `gongbu_create_execution` | G+H+R | Advanced | Continue authorization; no replacement for standalone authorize |
+| `gongbu_create_execution` | G+H+S | Advanced | Continue authorization; no replacement for standalone authorize |
 | `gongbu_get_artifact` | G | Standard | Retrieve original output |
 | `gongbu_get_execution` | G | Advanced | Execution-ID diagnostics; normal path uses operation status |
 | `gongbu_get_provider_catalog` | G | Advanced | Contract/readiness diagnostics |
@@ -79,7 +84,7 @@ unknown-tool error. There are no compatibility handlers.
 | `gongbu_list_execution_targets` | G | Standard | Approved targets, scope and pricing |
 | `hubu_add_policy` | None (removed) | Remove | Use hubu_apply_policy with explicit YAML |
 | `hubu_apply_policy` | H | Standard | Canonical policy mutation; human gate |
-| `hubu_authorize_spend` | H+R | Standard | Reserve authority for external or managed execution |
+| `hubu_authorize_spend` | H+S | Standard | Reserve authority for external or managed execution |
 | `hubu_budget_history` | H | Standard | Inspect immutable revisions |
 | `hubu_client_approval_profile` | H | Advanced | Harness configuration; preserve current backend gate |
 | `hubu_create_budget` | H | Standard | Owner administration; human gate |
@@ -93,7 +98,7 @@ unknown-tool error. There are no compatibility handlers.
 | `hubu_list_claims_requiring_reconciliation` | H | Standard | Find frozen claims without retained IDs |
 | `hubu_list_ledger` | H | Standard | Recorded spend visibility |
 | `hubu_list_users` | H | Standard | Human identity selection |
-| `hubu_operation_status` | R | Standard | Public-handle observation, not external settlement tracking |
+| `hubu_operation_status` | S | Standard | Public-handle observation, not external settlement tracking |
 | `hubu_policy_diff` | H | Standard | Compare immutable revisions |
 | `hubu_policy_history` | H | Standard | Policy audit |
 | `hubu_prepare_feedback` | Local | Standard | Offline reviewed preview; never submits |
@@ -103,18 +108,18 @@ unknown-tool error. There are no compatibility handlers.
 | `hubu_register_human` | H | Standard | Onboard/select owner; human gate |
 | `hubu_registration_guidance` | H | Standard | Machine-readable registration protocol |
 | `hubu_resolve_spend_approval` | H | Standard | Explicit human approve/deny gate |
-| `hubu_resume_operation` | H+R (*) | Standard | Resume existing immutable intent, including legacy mock work |
+| `hubu_resume_operation` | H+S (*) | Standard | Resume existing immutable intent, including legacy mock work |
 | `hubu_revoke_budget` | H | Standard | Emergency owner control; human gate |
 | `hubu_revoke_spending_target` | H | Standard | Advisory target administration; human gate |
 | `hubu_set_spending_target` | H | Standard | Advisory target administration; human gate |
 | `hubu_show_policy` | H | Standard | Canonical inspection; optional YAML |
 | `hubu_show_spending_targets` | H | Standard | Advisory targets and allocations |
-| `hubu_submit_governed_execution` | H+G+R | Standard | Optional managed execution; internally composes primitives |
-| `hubu_submit_spend` | H+R | Advanced/demo | Retain exact name and mock-payment semantics |
+| `hubu_submit_governed_execution` | H+G+S | Standard | Optional managed execution; internally composes primitives |
+| `hubu_submit_spend` | H+S | Advanced/demo | Retain exact name and mock-payment semantics |
 | `hubu_unified_capabilities` | Local | Standard | Health, compatibility and effective exposure |
 | `hubu_update_budget` | H | Standard | Version-pinned cap change; human gate |
 
-(*) Resume discovery requires H+R; resuming a stored governed-execution intent
+(*) Resume discovery requires H+S; resuming a stored governed-execution intent
 also requires ready G. Existing `hubu_submit_spend` operations remain readable
 and recoverable in standard mode; the advanced restriction governs new admission.
 
@@ -244,7 +249,7 @@ Keep `hubu-gongbu-mcp-v1` and add
 Increment the current routing revision when the surface is implemented.
 
 1. `tools/list` returns exposure-listed names intersected with existing backend
-   and registry availability rules.
+   and operation-store availability rules.
 2. `tools/call` first resolves the name and exposure. Except for verified
    recovery-only redelivery below, reject a known restricted name before any
    operation allocation or backend call: JSON-RPC `-32011`,
@@ -279,12 +284,12 @@ Capabilities retain every supported name and owner; removed names are absent. Ad
 (`standard|advanced`), `listed`, `callable`, and `backend_available`.
 Do not introduce deprecated/replacement metadata for deleted definitions; the
 replacement map belongs in release documentation.
-Here backend_available includes registry prerequisites but not client approval
+Here backend_available includes operation-store prerequisites but not client approval
 configuration. Preserve the same meaning for callable: router exposure and
 prerequisites allow dispatch, subject to existing credentials/approval/schema
 checks for a new call. Set legacy `available=callable`. Add
 `recovery_only_callable` (false except for restricted mock spend with usable
-H+R) to describe conditional exact redelivery; it does not advertise general
+H+S) to describe conditional exact redelivery; it does not advertise general
 admission. The server must still verify each recovery-only call's durable match.
 
 Restricted names have callable/listed/available false and reason_code
@@ -335,7 +340,7 @@ execution state machine.
 ## Contract validation
 
 Validation must cover both exposure modes with Hubu-only, both backends, degraded/missing
-backends and unavailable registry; rejection of all three removed names; unknown retired
+backends and unavailable operation store; rejection of all three removed names; unknown retired
 recurring-budget calls; blocked new mock admissions; unchanged human gates;
 and advanced-to-standard restart while accepted work exists. Specifically test
 pre-upgrade/advanced mock approval followed by approval and resume in standard,
