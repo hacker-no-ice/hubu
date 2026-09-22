@@ -1,5 +1,6 @@
 pub mod app;
 pub mod budget;
+pub mod ledger;
 pub mod persistence;
 pub mod policy;
 pub mod registration;

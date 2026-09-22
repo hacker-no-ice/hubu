@@ -262,5 +262,14 @@ retry behavior, and rollback requirements are defined by the
 [spend executor contract](spend-executor-contract.md#persistence-migration-and-v4-compatibility).
 
 Core spend and budget behavior lives in [`crates/hubu-core`](../crates/hubu-core),
-while payment and ledger behavior lives in
+while payment behavior lives in
 [`crates/hubu-wallet`](../crates/hubu-wallet).
+
+Confirmed external-provider spends also create a balanced non-cash ledger posting in
+the same Hubu transaction as receipt and budget settlement. See
+[ledger accounting](ledger-accounting.md) for posting semantics, corrections,
+legacy coverage and the distinction from wallet cash accounting.
+
+The first-class [`hubu-ledger`](../crates/hubu-ledger) domain owns canonical
+wallet and provider transactions and exact entries. Governed context links those
+transactions to agent budgets; budgets do not own the ledger.

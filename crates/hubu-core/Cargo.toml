@@ -15,6 +15,7 @@ publish = false
 [dependencies]
 chrono.workspace = true
 hubu-common.workspace = true
+hubu-ledger.workspace = true
 hubu-wallet.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

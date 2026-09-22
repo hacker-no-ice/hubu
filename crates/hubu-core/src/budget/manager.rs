@@ -44,6 +44,15 @@ pub struct BudgetManager {
 }
 
 impl BudgetManager {
+    pub(crate) fn accounting_repository(
+        &self,
+    ) -> Result<
+        std::sync::Arc<std::sync::Mutex<crate::persistence::SqliteGovernanceRepository>>,
+        crate::storage::StorageError,
+    > {
+        Ok(self.coordinator()?.repository)
+    }
+
     pub fn new() -> Self {
         Self {
             state: BudgetState::new(),
@@ -63,7 +72,7 @@ impl BudgetManager {
         })
     }
 
-    pub(super) fn apply_committed_state(&mut self, state: BudgetState) {
+    pub(crate) fn apply_committed_state(&mut self, state: BudgetState) {
         self.state = state;
     }
 

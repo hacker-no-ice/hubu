@@ -22,6 +22,7 @@ EXPECTED_PACKAGES = {
     "hubu-feedback",
     "hubu-unified-mcp",
     "hubu-wallet",
+    "hubu-ledger",
 }
 EXPECTED_RUST_VERSION = "1.88"
 
