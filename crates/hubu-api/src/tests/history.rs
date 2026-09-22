@@ -409,6 +409,17 @@ fn budget_denial_is_not_reported_as_authorized_and_expired_claim_requires_reconc
     assert_eq!(reconciliation["workflows"].as_array().unwrap().len(), 1);
     assert!(reconciliation["workflows"][0]["receipt"].is_null());
     assert_eq!(
+        read(
+            &state,
+            &format!(
+                "/ledger/transactions?agent_id={}&budget_id={}",
+                agent.agent_id,
+                auth.budget_hold.as_ref().unwrap().budget_id
+            )
+        )["coverage"]["pending_hold_count"],
+        1
+    );
+    assert_eq!(
         read(&state, "/ledger/transactions")["transactions"],
         json!([])
     );
@@ -548,5 +559,165 @@ fn two_providers_for_one_task_have_independent_receipts_and_postings() {
     assert_eq!(history["coverage"]["consumed_amount_cents"], 2);
     assert_eq!(history["coverage"]["recorded_budget_charges_cents"], 2);
     assert!(history["next_cursor"].is_string());
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn corrupt_workflow_agent_reference_never_discloses_foreign_public_identity() {
+    let (path, state, alice, auth) = setup_executor_authorization("history-foreign-decision");
+    let owner = authenticated_user_context(&state).unwrap().user_id;
+    init(json!({"username":"foreign-workflow-owner","display_name":"Foreign workflow owner","email":"foreign-workflow@example.com"}).to_string(),&state).unwrap();
+    let bob = register_agent(
+        json!({"name":"foreign-workflow-agent","version":"v1"}).to_string(),
+        &state,
+    )
+    .unwrap();
+    let bob_id = resolve_agent_id_for_user(
+        &bob.agent_id,
+        &authenticated_user_context(&state).unwrap(),
+        &state,
+    )
+    .unwrap();
+    let account = state
+        .registration
+        .lock()
+        .unwrap()
+        .account_for_agent(&bob_id)
+        .unwrap()
+        .unwrap()
+        .id;
+    state.auth.select_owner_user(&owner).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let raw: String = conn
+        .query_row(
+            "SELECT request_json FROM spend_decisions WHERE id=?1",
+            [&auth.decision_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut request: Value = serde_json::from_str(&raw).unwrap();
+    request["agent_id"] = json!(bob_id);
+    request["agent_account_id"] = json!(account);
+    conn.execute_batch("DROP TRIGGER spend_decisions_no_update")
+        .unwrap();
+    conn.execute(
+        "UPDATE spend_decisions SET agent_id=?1,request_json=?2 WHERE id=?3",
+        rusqlite::params![bob_id.to_string(), request.to_string(), auth.decision_id],
+    )
+    .unwrap();
+    assert_eq!(read(&state, "/spend/workflows")["workflows"], json!([]));
+    for path in [
+        format!("/spend/workflows/show?workflow_id={}", auth.decision_id),
+        format!(
+            "/spend/workflows/show?agent_id={}&operation_key={}",
+            alice.agent_id, auth.operation_key
+        ),
+    ] {
+        let response = route(authenticated_get_request(&path), &state);
+        assert_ne!(response.status, 200);
+        assert!(!response.body.to_string().contains(&bob.agent_id));
+        assert!(!response.body.to_string().contains(&bob.account_id));
+    }
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn ledger_context_requires_actual_hold_budget_and_version() {
+    let (path, state, agent, auth) = setup_executor_authorization("history-hold-linkage");
+    settle(&state, &agent, &auth, 1);
+    revoke_budget(
+        json!({"budget_id":auth.budget_hold.as_ref().unwrap().budget_id}).to_string(),
+        &state,
+    )
+    .unwrap();
+    let other = create_budget(
+        json!({"agent_id":agent.agent_id,"amount_cents":100,"starting_at":"2999-01-01T00:00:00Z"})
+            .to_string(),
+        &state,
+    )
+    .unwrap();
+    let user = authenticated_user_context(&state).unwrap();
+    let other_id = resolve_budget_id_for_user(&other.budget.budget_id, &user, &state).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let original: String = conn
+        .query_row(
+            "SELECT record_json FROM ledger_transaction_metadata",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute_batch("DROP TRIGGER ledger_metadata_no_update")
+        .unwrap();
+    for field in ["budget_id", "budget_version_id"] {
+        let mut metadata: Value = serde_json::from_str(&original).unwrap();
+        metadata["context"][field] = if field == "budget_id" {
+            json!(other_id)
+        } else {
+            json!(BudgetVersionId::new())
+        };
+        conn.execute(
+            "UPDATE ledger_transaction_metadata SET record_json=?1",
+            [metadata.to_string()],
+        )
+        .unwrap();
+        let ownerwide = read(&state, "/ledger/transactions");
+        assert!(ownerwide["transactions"][0]["budget_id"].is_null());
+        assert!(ownerwide["transactions"][0]["budget_version_id"].is_null());
+        assert_eq!(
+            ownerwide["transactions"][0]["coverage"]["missing_evidence_count"],
+            1
+        );
+        let old = read(
+            &state,
+            &format!(
+                "/ledger/transactions?agent_id={}&budget_id={}",
+                agent.agent_id,
+                auth.budget_hold.as_ref().unwrap().budget_id
+            ),
+        );
+        assert_eq!(old["coverage"]["unaccounted_consumption_cents"], 1);
+        let wrong = read(
+            &state,
+            &format!(
+                "/ledger/transactions?agent_id={}&budget_id={}",
+                agent.agent_id, other.budget.budget_id
+            ),
+        );
+        assert_eq!(wrong["transactions"], json!([]));
+        assert_eq!(wrong["coverage"]["recorded_budget_charges_cents"], 0);
+    }
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn read_only_history_projects_unclaimed_expiry_consistently() {
+    let config = LeaseConfig {
+        authorization_ttl_seconds: 1,
+        ..LeaseConfig::default()
+    };
+    let (path, state, agent, auth) =
+        setup_executor_authorization_with_lease_config("history-unclaimed-expiry", config);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let shown = read(
+        &state,
+        &format!("/spend/workflows/show?workflow_id={}", auth.decision_id),
+    );
+    assert_eq!(shown["workflow"]["status"], "expired");
+    assert_eq!(shown["workflow"]["budget_hold"]["status"], "expired");
+    let ledger = read(
+        &state,
+        &format!(
+            "/ledger/transactions?agent_id={}&budget_id={}",
+            agent.agent_id,
+            auth.budget_hold.as_ref().unwrap().budget_id
+        ),
+    );
+    assert_eq!(ledger["coverage"]["pending_hold_count"], 0);
+    // Reads project effective state without mutating the persisted hold.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let status: String = conn
+        .query_row("SELECT status FROM budget_holds", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(status, "frozen");
     std::fs::remove_file(path).ok();
 }

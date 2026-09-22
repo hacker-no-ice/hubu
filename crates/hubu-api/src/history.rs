@@ -218,6 +218,11 @@ fn linked_context<'a>(
                 .budgets
                 .iter()
                 .any(|b| b.id == c.budget_id && b.agent_id == c.agent_id)
+            && data.holds.iter().any(|h| {
+                h.spend_decision_id == c.spend_decision_id
+                    && h.budget_id == c.budget_id
+                    && h.budget_version_id == c.budget_version_id
+            })
             && data.decisions.iter().any(|d| {
                 d.id == c.spend_decision_id
                     && d.request.agent_id == c.agent_id
@@ -334,6 +339,7 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
     let selected = selection(&query, &user, state)?;
     let data = snapshot(state, &user.user_id)?;
     validate_budget(&selected, &data)?;
+    let now = Utc::now();
     let matching: Vec<_> = data
         .transactions
         .iter()
@@ -381,7 +387,7 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
         "consumed_amount_cents":balance.consumed_amount_cents,
         "recorded_budget_charges_cents":total,
         "unaccounted_consumption_cents":balance.consumed_amount_cents.checked_sub(total).ok_or_else(||anyhow!("coverage overflow"))?,
-        "pending_hold_count":data.holds.iter().filter(|h|&h.budget_id==id && matches!(h.status,BudgetHoldStatus::Frozen|BudgetHoldStatus::Claimed)).count(),
+        "pending_hold_count":data.holds.iter().filter(|h|&h.budget_id==id && (matches!(h.status,BudgetHoldStatus::Claimed) || (matches!(h.status,BudgetHoldStatus::Frozen) && h.expires_at>now))).count(),
         "owner_transactions_without_budget_context":data.transactions.iter().filter(|t|linked_context(t,&data).is_none()).count(),
         "historical_wallet_reconciliation_complete":false})
     } else {
@@ -398,12 +404,27 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
         "next_cursor":next_cursor}))
 }
 
+fn effective_hold_status(hold: &BudgetHold, now: DateTime<Utc>) -> &'static str {
+    if matches!(hold.status, BudgetHoldStatus::Frozen) && hold.expires_at <= now {
+        "expired"
+    } else {
+        budget_hold_status_name(&hold.status)
+    }
+}
+fn owned_decision(decision: &SpendDecisionRecord, data: &HistorySnapshot) -> bool {
+    data.owned_agent_accounts.get(&decision.request.agent_id)
+        == Some(&decision.request.agent_account_id)
+}
+
 fn workflow(
     decision: &SpendDecisionRecord,
     data: &HistorySnapshot,
     state: &ServerState,
     now: DateTime<Utc>,
 ) -> Result<Value> {
+    if !owned_decision(decision, data) {
+        return Err(anyhow!("unknown owned workflow"));
+    }
     let (account, agent) = public_ids_for_agent_account(
         &decision.request.agent_id,
         &decision.request.agent_account_id,
@@ -495,7 +516,7 @@ fn workflow(
         "budget_version_id":public_budget_version_id(&h.budget_version_id),
         "amount_cents":h.amount_cents,
         "currency":h.currency.to_string(),
-        "status":budget_hold_status_name(&h.status),
+        "status":effective_hold_status(h,now),
         "expires_at":h.expires_at.to_rfc3339()})),
         "claim":claim.map(|c|json!({"id":c.id,
         "status":match c.status {SpendExecutorClaimStatus::Claimed=>"claimed",SpendExecutorClaimStatus::Settled=>"settled",SpendExecutorClaimStatus::Released=>"released"},
@@ -574,6 +595,7 @@ pub(super) fn workflows(request: &HttpRequest, state: &ServerState, show: bool) 
     };
     let records = candidates
         .into_iter()
+        .filter(|d| owned_decision(d, &data))
         .filter(|d| {
             data.authorization_outcomes.get(&d.id) != Some(&SpendAuthorizationDecision::Denied)
         })

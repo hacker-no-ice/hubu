@@ -40,7 +40,11 @@ For a selected budget, `coverage` reports full-budget consumed cents, recorded
 signed charges, their difference (`unaccounted_consumption_cents`), pending-hold
 count, currency, and an owner-wide count of transactions lacking trustworthy
 budget context. These totals come from the **whole budget**, not the current
-page. A valid unused budget has an empty list and zero totals. Owner-wide and
+page. Budget attribution requires the decision’s actual hold to match both the
+budget and version; inconsistent historical links remain unassigned. Expired
+unclaimed holds are projected as expired and excluded from the pending count.
+Claimed holds remain pending until finalization, including expired claims that
+require reconciliation; history reads never mutate the stored hold. A valid unused budget has an empty list and zero totals. Owner-wide and
 agent-wide reads return `coverage: null` rather than adding unlike currencies or
 claiming aggregate reconciliation. Unknown historical attribution remains
 unassigned. Historical wallet reconciliation is explicitly incomplete; wallet

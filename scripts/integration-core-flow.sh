@@ -299,9 +299,46 @@ ALL_BUDGET_LIST_OUTPUT="$(hubu budget list --all)"
 assert_contains "all budget list" "${ALL_BUDGET_LIST_OUTPUT}" "status: revoked"
 
 LEDGER_OUTPUT="$(hubu ledger list)"
-assert_contains "ledger list" "${LEDGER_OUTPUT}" "via fiat_mock"
-assert_contains "ledger list" "${LEDGER_OUTPUT}" "owner: Alice Example (${USER_ID})"
-assert_contains "ledger list" "${LEDGER_OUTPUT}" 'debit      $20.00'
-assert_contains "ledger list" "${LEDGER_OUTPUT}" 'credit     $20.00'
+BUDGET_LEDGER_OUTPUT="$(hubu ledger list --agent-id "${AGENT_ID}" --budget-id "${ACTIVE_BUDGET_ID}" --limit 1)"
+LEGACY_LEDGER_OUTPUT="$(curl --fail --silent --show-error --header "Authorization: Bearer ${FLOW_AUTH_TOKEN}" "${FLOW_URL}/ledger")"
+python3 - "${USER_ID}" "${AGENT_ID}" "${ACCOUNT_ID}" "${ACTIVE_BUDGET_ID}" "${LEDGER_OUTPUT}" "${BUDGET_LEDGER_OUTPUT}" "${LEGACY_LEDGER_OUTPUT}" <<'PYTHON'
+import json
+import sys
+
+owner, agent, account, budget = sys.argv[1:5]
+ledger, scoped, legacy = map(json.loads, sys.argv[5:8])
+assert ledger["schema_version"] == "hubu-history-v1"
+assert len(ledger["transactions"]) == 1
+transaction = ledger["transactions"][0]
+assert transaction["kind"] == "wallet_payment"
+assert transaction["agent_id"] == agent
+assert transaction["account_id"] == account
+assert transaction["budget_id"] == budget
+assert transaction["budget_charge_delta_cents"] == 2000
+assert transaction["source_reference"]["redacted"] is True
+assert transaction["source_reference"]["digest"].startswith("sha256:")
+entries = transaction["entries"]
+assert len(entries) == 2
+assert {entry["direction"] for entry in entries} == {"debit", "credit"}
+for entry in entries:
+    amount = entry["amount"]
+    assert isinstance(amount["amount"], str)
+    assert amount["currency"].upper() == "USD"
+    assert int(amount["amount"]) * 10 ** (18 - amount["scale"]) == 20 * 10 ** 18
+assert scoped["transactions"] == ledger["transactions"]
+assert scoped["coverage"]["consumed_amount_cents"] == 2000
+assert scoped["coverage"]["recorded_budget_charges_cents"] == 2000
+assert scoped["coverage"]["unaccounted_consumption_cents"] == 0
+assert scoped["next_cursor"] is None
+# The compatibility route retains wallet identity, owner and rail provenance.
+assert len(legacy["transactions"]) == 1
+old = legacy["transactions"][0]
+assert old["id"] == transaction["id"]
+assert old["owner_user_id"] == owner
+assert old["owner_user_name"] == "Alice Example"
+assert "via fiat_mock" in old["description"]
+assert {entry["id"] for entry in old["entries"]} == {entry["id"] for entry in entries}
+assert all(entry["amount_cents"] == 2000 and entry["owner_user_id"] == owner for entry in old["entries"])
+PYTHON
 
 printf 'integration-core-flow passed\n'
