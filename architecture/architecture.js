@@ -222,6 +222,7 @@ const components = {
   top: {
     title: "Major Components",
     kind: "Overview",
+    summary: "Agents request paid work through one MCP connection. Hubu decides whether money may be spent; Gongbu, a separate process, does the provider work. The two never share credentials, storage, or failures.",
     viewBox: "0 0 1440 900",
     copy:
       "Agents use one default MCP surface. Its governed-execution tool can authorize, execute, observe, and deliver a normal auto-approved result in one bounded call; its router-owned resume workflow recovers approved primitive Hubu operations or continues stored governed intent by public handle. Gemini Developer API and FLUX are frozen in one provider-contract framework and selected publicly only by opaque target IDs, sharing one governance lifecycle while retaining synchronous Gemini and asynchronous FLUX transports. Hubu and Gongbu retain separate credentials, storage, provider work, artifacts, and failure domains.",
@@ -284,6 +285,7 @@ const components = {
   release: {
     title: "Immutable Releases",
     kind: "Component",
+    summary: "Every release is built from one exact main commit and tag. The source installer is validated on Intel and Apple silicon before anything is published.",
     copy:
       "The release workflow turns one exact main commit into an immutable tag, validates the recommended native source installation on both supported macOS architectures, and publishes secondary archives from the same four-binary workspace build.",
     responsibilities: [
@@ -315,6 +317,7 @@ const components = {
   api: {
     title: "Local HTTP API",
     kind: "Component",
+    summary: "A small local HTTP server that authenticates requests with a bearer token and routes them. Approval, payment, and claim logic lives in core app services, not here.",
     copy:
       "The local server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, resolves public IDs, and leaves spend approval, payment, and claim state transitions to core app services.",
     responsibilities: [
@@ -355,6 +358,7 @@ const components = {
   app: {
     title: "Core Governance",
     kind: "Component",
+    summary: "The core use-case layer. It runs spend approvals and executor claims across managers, while BudgetManager owns budget changes, all testable without HTTP.",
     copy:
       "BudgetManager owns budget administration through its private coordinator. The core app layer separately coordinates spend approval and executor claim lifecycles across managers and repositories. These use cases can be tested without HTTP routes.",
     responsibilities: [
@@ -390,6 +394,7 @@ const components = {
   registration: {
     title: "Registration",
     kind: "Component",
+    summary: "Humans set up the owner; agents register against that owner with structured identity and version payloads. The server recomputes fingerprints before creating or reusing an agent record.",
     viewBox: "0 0 1200 700",
     copy:
       "Registration has two paths: humans create the owner user context that Hubu selects as active, while agents prepare structured identity and version payloads against that owner. The server validates fingerprints before creating or reusing agent records.",
@@ -428,6 +433,7 @@ const components = {
   policy: {
     title: "Policy Resources & Engine",
     kind: "Component",
+    summary: "Owner policies become immutable, versioned revisions, assigned per user by default or per agent as an override. Evaluation is deterministic, and deny rules always win.",
     copy:
       "Hubu reconciles owner-scoped policy resources into immutable canonical revisions, assigns them by user default or agent override, and evaluates the selected current revision with deterministic deny-first precedence.",
     responsibilities: [
@@ -462,6 +468,7 @@ const components = {
   budget: {
     title: "Budgets & Spending Targets",
     kind: "Component",
+    summary: "Each agent budget is a hard spending limit with an auditable version history. Owner spending targets are separate and advisory only.",
     copy:
       "Agent budgets are stable logical allocations whose hard limit lives in an immutable, auditable current version. SQLite stores only active or revoked administrative state; scheduled, expired, exhausted, and effective active availability are derived at one instant. User spending targets remain separate advisory records.",
     responsibilities: [
@@ -522,6 +529,7 @@ const components = {
   payment: {
     title: "Payment Manager",
     kind: "Component",
+    summary: "After a spend is allowed, the wallet validates the request and spend token, runs the payment rail, and records only successful money movement. Identical retries never pay twice.",
     copy:
       "The wallet boundary receives an app-service-built payment request after allowed spend. It checks request shape and idempotency, validates the spend token through a trait boundary, executes the selected rail, records only successful money movement, and marks tokens used only after ledger success.",
     responsibilities: [
@@ -558,6 +566,7 @@ const components = {
   gongbu: {
     title: "Gongbu Execution Plane",
     kind: "Runtime component",
+    summary: "Gongbu runs authorized provider work in its own process, with its own database and credentials. Each Hubu authorization attributes the work, and asynchronous jobs checkpoint so they resume safely.",
     viewBox: "0 0 1340 900",
     copy:
       "Gongbu starts without an execution principal. Its installation caller authenticates the service, while each new Hubu authorization supplies the account and agent snapshot. At startup, Gongbu production-validates any versioned managed provider binding against its exact target, frozen pricing, capability, delivery, polling, and recovery contract. For asynchronous work, Gongbu submits once, checkpoints safe provider-operation evidence in its own SQLite database, and resumes read-only polling without moving credentials or provider payloads into Temporal or Hubu.",
@@ -641,6 +650,7 @@ const components = {
   ledger: {
     title: "Hubu Accounting",
     kind: "Component",
+    summary: "One double-entry ledger records wallet payments, provider expenses, and adjustments exactly. Budgets are linked for context but not required.",
     copy:
       "The first-class Hubu ledger owns one canonical transaction and exact-entry model for wallet payments, external-provider expenses and adjustments. Budgets are optional linked control context; governed spends retain agent and budget evidence.",
     responsibilities: [
@@ -677,6 +687,7 @@ const components = {
   cli: {
     title: "Hubu CLI",
     kind: "Interface",
+    summary: "The human's tool for setup, administration, and running the local stack. It validates provider contracts before activation and only manages services it launched.",
     viewBox: "0 0 1280 760",
     copy:
       "The CLI is the human developer surface and local-stack launcher. For the Gemini Lite, Gemini non-Lite, and FLUX provider contracts it renders one explicitly versioned composite catalog, reports independent non-network readiness facts, and invokes Gongbu's production validator before activation. It stages updates for explicit activation, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
@@ -727,6 +738,7 @@ const components = {
   mcp: {
     title: "Unified MCP Surface",
     kind: "Interface",
+    summary: "The single server agents connect to. It routes governance calls to Hubu and execution calls to Gongbu, and lets paused or approved operations resume by a public handle.",
     viewBox: "0 0 1280 760",
     copy:
       "The agent harness launches one default stdio server. The router offers bounded governed submission plus public-handle resume: primitive resume is Hubu-only, governed resume can continue stored Gongbu intent, and completed operations replay from the local registry. Agents discover selectable execution targets and pricing; provider-contract diagnostics and guarded-FLUX attestation remain authenticated operator HTTP endpoints. Governance, provider execution, backend storage, credentials, artifacts, and failures remain with their owners.",
@@ -805,6 +817,7 @@ const components = {
   agent: {
     title: "Agent Spend Path",
     kind: "Flow",
+    summary: "Agents submit a spend and execution request once and never see private backend keys. Auto-approved work proceeds right away; anything needing review pauses and resumes by handle.",
     copy:
       "Agents never hold private backend operation keys. They submit authorization and execution intent once; an auto-allow proceeds immediately, while a pending decision is reviewed, resolved, synchronized, and explicitly resumed by its durable public handle.",
     responsibilities: [
@@ -844,6 +857,7 @@ const components = {
   human: {
     title: "Human Owner Flow",
     kind: "Flow",
+    summary: "Humans set the financial boundaries: identity, policies, budgets, and approvals. The tools aim to keep each review small and explicit.",
     copy:
       "Humans set the financial boundaries. The CLI and MCP adapter aim to keep review small while making identity, policy, advisory target, and hard budget state explicit.",
     responsibilities: [
@@ -988,7 +1002,12 @@ const title = document.getElementById("diagram-title");
 const crumb = document.getElementById("diagram-crumb");
 const detailsTitle = document.getElementById("details-title");
 const detailsKind = document.getElementById("details-kind");
+const detailsPanel = document.getElementById("details-panel");
+const detailsSummary = document.getElementById("details-summary");
 const detailsCopy = document.getElementById("details-copy");
+const responsibilitiesCount = document.getElementById("responsibilities-count");
+const linksCount = document.getElementById("links-count");
+const detailSections = document.querySelectorAll(".detail-section");
 const highlights = document.getElementById("highlights");
 const responsibilities = document.getElementById("responsibilities");
 const sourceLinks = document.getElementById("source-links");
@@ -1060,10 +1079,14 @@ function showView(viewId) {
   crumb.textContent = view.kind;
   detailsTitle.textContent = view.title;
   detailsKind.textContent = view.kind;
+  detailsSummary.textContent = view.summary;
   detailsCopy.textContent = view.copy;
   renderList(highlights, sidebarHighlights[viewId]);
   renderList(responsibilities, view.responsibilities);
+  responsibilitiesCount.textContent = `(${view.responsibilities.length})`;
   renderSourceLinks(view.links);
+  linksCount.textContent = `(${view.links.length})`;
+  detailsPanel.scrollTop = 0;
   renderDiagram(view);
   renderTraceControls(view);
 }
@@ -1221,6 +1244,34 @@ function renderList(list, items) {
   });
 }
 
+// Collapsible sidebar sections keep their open state across views and, when
+// browser storage is available, across visits.
+const SECTION_STATE_KEY = "hubu-architecture-sections";
+
+function restoreSectionState() {
+  let saved = {};
+  try {
+    saved = JSON.parse(window.localStorage.getItem(SECTION_STATE_KEY)) || {};
+  } catch {
+    saved = {};
+  }
+  detailSections.forEach((section) => {
+    section.open = saved[section.dataset.section] === true;
+    section.addEventListener("toggle", saveSectionState);
+  });
+}
+
+function saveSectionState() {
+  const state = Object.fromEntries(
+    [...detailSections].map((section) => [section.dataset.section, section.open]),
+  );
+  try {
+    window.localStorage.setItem(SECTION_STATE_KEY, JSON.stringify(state));
+  } catch {
+    // Storage can be unavailable (private windows, blocked site data).
+  }
+}
+
 function renderSourceLinks(links) {
   sourceLinks.innerHTML = "";
   links.forEach(([label, path]) => {
@@ -1229,8 +1280,11 @@ function renderSourceLinks(links) {
     anchor.href = `https://github.com/hacker-no-ice/hubu/blob/main/${path}`;
     anchor.target = "_blank";
     anchor.rel = "noreferrer";
-    anchor.textContent = `${label} — ${path}`;
-    li.appendChild(anchor);
+    anchor.textContent = label;
+    const pathText = document.createElement("code");
+    pathText.className = "source-path";
+    pathText.textContent = path;
+    li.append(anchor, pathText);
     sourceLinks.appendChild(li);
   });
 }
@@ -1698,4 +1752,5 @@ function makeSvg(name, attrs = {}) {
   return element;
 }
 
+restoreSectionState();
 syncViewFromLocation();

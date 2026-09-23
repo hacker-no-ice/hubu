@@ -347,11 +347,93 @@ a {
   line-height: 1.4;
 }
 
+.details-panel .details-summary {
+  margin: 10px 0 20px;
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.detail-section {
+  margin-top: 16px;
+  border-top: 2px dashed rgba(31, 41, 51, 0.28);
+}
+
+.detail-section > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 12px 0 4px;
+  font-size: 16px;
+  font-weight: 800;
+  list-style: none;
+  cursor: pointer;
+}
+
+.detail-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.detail-section > summary::before {
+  content: "▸";
+  flex: 0 0 auto;
+  width: 14px;
+  color: var(--muted);
+  transition: transform 150ms ease;
+}
+
+.detail-section[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.detail-section > summary:focus-visible {
+  outline: 3px solid var(--line);
+  outline-offset: 2px;
+}
+
+.detail-count {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.detail-section > p,
+.detail-section > ul {
+  margin-top: 8px;
+}
+
+.detail-section > p {
+  margin-bottom: 8px;
+}
+
+.detail-list .source-links {
+  gap: 10px;
+}
+
+.source-links li {
+  display: grid;
+  gap: 2px;
+}
+
 .source-links a {
   font-weight: 800;
   overflow-wrap: anywhere;
   text-decoration-thickness: 2px;
   text-underline-offset: 2px;
+}
+
+.source-path {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .detail-section > summary::before {
+    transition: none;
+  }
 }
 
 .node {

@@ -87,21 +87,37 @@
         </p>
       </section>
 
-      <aside class="details-panel" aria-live="polite">
+      <aside class="details-panel" id="details-panel" aria-label="Component details">
         <button class="back-button" id="details-back-button" type="button">
           <span aria-hidden="true">←</span>
           Top level
         </button>
-        <p class="crumb" id="details-kind">Overview</p>
-        <h2 id="details-title">Major Components</h2>
-        <p id="details-copy"></p>
+        <div aria-live="polite">
+          <p class="crumb" id="details-kind">Overview</p>
+          <h2 id="details-title">Major Components</h2>
+          <p class="details-summary" id="details-summary"></p>
+        </div>
         <div class="detail-list">
           <h3>At a glance</h3>
           <ul id="highlights"></ul>
-          <h3>Responsibilities and boundaries</h3>
-          <ul id="responsibilities"></ul>
-          <h3>Source and runbooks</h3>
-          <ul id="source-links" class="source-links"></ul>
+          <details class="detail-section" data-section="copy">
+            <summary>How it works</summary>
+            <p id="details-copy"></p>
+          </details>
+          <details class="detail-section" data-section="responsibilities">
+            <summary>
+              Responsibilities and boundaries
+              <span class="detail-count" id="responsibilities-count"></span>
+            </summary>
+            <ul id="responsibilities"></ul>
+          </details>
+          <details class="detail-section" data-section="links">
+            <summary>
+              Source and runbooks
+              <span class="detail-count" id="links-count"></span>
+            </summary>
+            <ul id="source-links" class="source-links"></ul>
+          </details>
         </div>
       </aside>
     </main>
