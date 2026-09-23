@@ -76,6 +76,148 @@ const sharedLinks = {
   gongbuConfig: ["Gongbu server example", "examples/gongbu/gongbu.server.json"],
 };
 
+// Step-by-step walkthroughs of one spend request across the top-level diagram.
+// Each step lights the listed nodes and [from, to] edges; keep them aligned
+// with docs/spend-lifecycle.md and the top-level node and edge IDs.
+function spendTraces() {
+  const request = [
+    {
+      nodes: ["agent", "mcp"],
+      edges: [["agent", "mcp"]],
+      caption: "The agent calls the governed-execution tool on its single unified MCP connection.",
+    },
+    {
+      nodes: ["mcp", "api"],
+      edges: [["mcp", "api"]],
+      caption: "The router asks Hubu to authorize the spend. The agent never holds payment keys or provider credentials.",
+    },
+    {
+      nodes: ["api", "app"],
+      edges: [["api", "app"]],
+      caption: "Hubu resolves the trusted execution scope, then evaluates the owner's policy: allow, deny, or needs approval.",
+    },
+  ];
+  const reserve = {
+    nodes: ["app", "ledger"],
+    edges: [["app", "ledger"]],
+    caption: "Policy allows. Hubu freezes a budget hold for the authorized maximum and records the authorization in its own SQLite.",
+  };
+  const submit = {
+    nodes: ["mcp", "gongbu"],
+    edges: [["mcp", "gongbu"]],
+    caption: "The router submits the authorized work to Gongbu, a separate process with its own credentials and storage.",
+  };
+  const resolve = {
+    nodes: ["gongbu", "api"],
+    edges: [["gongbu", "api"]],
+    caption: "Gongbu resolves the authorization with Hubu and checks account, amount, and scope against its operator-approved target and price.",
+  };
+  const execute = {
+    nodes: ["gongbu", "workflow"],
+    edges: [["gongbu", "workflow"]],
+    caption: "Gongbu's durable workflow claims the authorization and calls the provider with credentials only Gongbu holds.",
+  };
+  return {
+    allow: {
+      label: "Allowed",
+      steps: [
+        ...request,
+        reserve,
+        submit,
+        resolve,
+        execute,
+        {
+          nodes: ["workflow", "gongbuData"],
+          edges: [["workflow", "gongbuData"]],
+          caption: "The exact provider cost, frozen pricing snapshot, and artifacts are checkpointed in Gongbu's own state.",
+        },
+        {
+          nodes: ["gongbu", "api", "app", "ledger"],
+          edges: [["gongbu", "api"], ["api", "app"], ["app", "ledger"]],
+          caption: "Gongbu settles with the exact receipt. Hubu charges the budget and releases the unused hold in one atomic commit.",
+        },
+        {
+          nodes: ["agent", "mcp"],
+          edges: [["agent", "mcp"]],
+          caption: "The auto-approved result and its artifact return to the agent in the same call.",
+        },
+      ],
+    },
+    deny: {
+      label: "Denied",
+      steps: [
+        ...request,
+        {
+          nodes: ["app", "ledger"],
+          edges: [["app", "ledger"]],
+          caption: "Policy denies. Nothing is reserved and no money moves; Hubu records the attempt and its outcome.",
+        },
+        {
+          nodes: ["agent", "mcp", "api"],
+          edges: [["mcp", "api"], ["agent", "mcp"]],
+          caption: "The denial and its reason return to the agent. Gongbu and the provider are never contacted.",
+        },
+      ],
+    },
+    approval: {
+      label: "Needs approval",
+      steps: [
+        ...request,
+        {
+          nodes: ["app", "ledger"],
+          edges: [["app", "ledger"]],
+          caption: "Policy needs approval. Hubu persists a pending decision on an immutable review snapshot.",
+        },
+        {
+          nodes: ["agent", "mcp"],
+          edges: [["agent", "mcp"]],
+          caption: "The call returns before any provider work, with a durable public operation handle.",
+        },
+        {
+          nodes: ["human", "cli", "api", "app"],
+          edges: [["human", "cli"], ["cli", "api"]],
+          caption: "The owner reviews the snapshot and approves; a denial would end the operation here. Approval alone never starts provider work.",
+        },
+        {
+          nodes: ["agent", "mcp", "api", "app"],
+          edges: [["agent", "mcp"], ["mcp", "api"], ["api", "app"]],
+          caption: "The agent resumes by public handle before the authorization expires, continuing the same operation.",
+        },
+        {
+          nodes: ["mcp", "gongbu", "workflow", "gongbuData", "api"],
+          edges: [["mcp", "gongbu"], ["gongbu", "workflow"], ["workflow", "gongbuData"], ["gongbu", "api"]],
+          caption: "From here the approved work runs as in the allowed path: Gongbu executes, then settles with Hubu.",
+        },
+      ],
+    },
+    reconcile: {
+      label: "Reconciled",
+      steps: [
+        ...request,
+        reserve,
+        submit,
+        resolve,
+        execute,
+        {
+          nodes: ["workflow", "gongbuData"],
+          edges: [["workflow", "gongbuData"]],
+          caption: "Billing is ambiguous, or the confirmed cost exceeds the authorized maximum. Gongbu preserves the provider evidence.",
+        },
+        {
+          nodes: ["gongbu", "api", "app", "ledger"],
+          edges: [["gongbu", "api"], ["api", "app"], ["app", "ledger"]],
+          caption: "Hubu keeps the hold claimed instead of releasing it. A timeout is never treated as a free outcome.",
+        },
+        {
+          nodes: ["human", "cli", "api", "app"],
+          edges: [["human", "cli"], ["cli", "api"]],
+          caption: "The owner reconciles the operation from the evidence using a separate reconciliation capability.",
+        },
+      ],
+    },
+  };
+}
+
 const components = {
   top: {
     title: "Major Components",
@@ -137,6 +279,7 @@ const components = {
       ["workflow", "gongbuData", "checkpoint + artifacts"],
       ["gongbu", "api", "resolve attribution + finalize", { fromSide: "top", toSide: "bottom", waypoints: [{ x: 819, y: 458 }, { x: 819, y: 430 }], labelSegment: 1, labelDx: 150 }],
     ],
+    traces: spendTraces(),
   },
   release: {
     title: "Immutable Releases",
@@ -831,7 +974,14 @@ const sidebarHighlights = {
   ],
 };
 
-let currentView = "top";
+const TRACE_STEP_MS = 2600;
+const defaultDocumentTitle = document.title;
+
+let currentView = null;
+let focusedNodeId = null;
+let layers = null;
+let labelPlacement = null;
+const trace = { id: null, step: 0, timer: null };
 
 const svg = document.getElementById("architecture-canvas");
 const title = document.getElementById("diagram-title");
@@ -847,11 +997,65 @@ const topButtons = [
   document.getElementById("details-back-button"),
 ];
 
-topButtons.forEach((button) => button.addEventListener("click", () => showView("top")));
+const traceBar = document.getElementById("trace-bar");
+const traceOutcomes = document.getElementById("trace-outcomes");
+const tracePlayer = document.getElementById("trace-player");
+const traceCaption = document.getElementById("trace-caption");
+const traceCount = document.getElementById("trace-count");
+const tracePrev = document.getElementById("trace-prev");
+const traceNext = document.getElementById("trace-next");
+const tracePlay = document.getElementById("trace-play");
+const traceExit = document.getElementById("trace-exit");
+
+topButtons.forEach((button) => button.addEventListener("click", () => navigateTo("top")));
+tracePrev.addEventListener("click", () => stepTrace(-1));
+traceNext.addEventListener("click", () => stepTrace(1));
+tracePlay.addEventListener("click", togglePlay);
+traceExit.addEventListener("click", stopTrace);
+window.addEventListener("popstate", syncViewFromLocation);
+window.addEventListener("hashchange", syncViewFromLocation);
+document.addEventListener("keydown", (event) => {
+  if (!trace.id || event.target.closest?.("input, textarea, select")) return;
+  if (event.key === "ArrowRight") stepTrace(1);
+  else if (event.key === "ArrowLeft") stepTrace(-1);
+  else if (event.key === "Escape") stopTrace();
+  else return;
+  event.preventDefault();
+});
+
+// Views are addressable as #<view-id> so drill-downs can be linked and the
+// browser Back button returns to the previous level.
+function viewIdFromLocation() {
+  let viewId = "";
+  try {
+    viewId = decodeURIComponent(window.location.hash.slice(1));
+  } catch {
+    viewId = "";
+  }
+  return Object.hasOwn(components, viewId) ? viewId : "top";
+}
+
+function syncViewFromLocation() {
+  const viewId = viewIdFromLocation();
+  if (viewId !== currentView) showView(viewId);
+}
+
+function navigateTo(viewId) {
+  if (viewId === currentView) return;
+  if (viewId === "top") {
+    history.pushState(null, "", window.location.pathname + window.location.search);
+  } else {
+    history.pushState(null, "", `#${encodeURIComponent(viewId)}`);
+  }
+  showView(viewId);
+}
 
 function showView(viewId) {
   currentView = viewId;
+  focusedNodeId = null;
+  resetTrace();
   const view = components[viewId];
+  document.title = viewId === "top" ? defaultDocumentTitle : `${view.title} · ${defaultDocumentTitle}`;
   title.textContent = view.title;
   crumb.textContent = view.kind;
   detailsTitle.textContent = view.title;
@@ -861,6 +1065,151 @@ function showView(viewId) {
   renderList(responsibilities, view.responsibilities);
   renderSourceLinks(view.links);
   renderDiagram(view);
+  renderTraceControls(view);
+}
+
+function renderTraceControls(view) {
+  traceOutcomes.innerHTML = "";
+  traceBar.hidden = !view.traces;
+  if (!view.traces) return;
+  Object.entries(view.traces).forEach(([traceId, { label }]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "trace-outcome";
+    button.dataset.traceId = traceId;
+    button.textContent = label;
+    button.setAttribute("aria-pressed", "false");
+    button.addEventListener("click", () => startTrace(traceId));
+    traceOutcomes.appendChild(button);
+  });
+  updateTraceControls();
+}
+
+function activeTrace() {
+  return trace.id ? components[currentView].traces[trace.id] : null;
+}
+
+function startTrace(traceId) {
+  resetTrace();
+  trace.id = traceId;
+  trace.step = 0;
+  updateTraceControls();
+  updateEmphasis();
+  startPlaying();
+}
+
+function stepTrace(delta) {
+  const active = activeTrace();
+  if (!active) return;
+  pausePlaying();
+  trace.step = Math.min(Math.max(trace.step + delta, 0), active.steps.length - 1);
+  updateTraceControls();
+  updateEmphasis();
+}
+
+function stopTrace() {
+  resetTrace();
+  updateTraceControls();
+  updateEmphasis();
+}
+
+function resetTrace() {
+  pausePlaying();
+  trace.id = null;
+  trace.step = 0;
+}
+
+function togglePlay() {
+  if (trace.timer) {
+    pausePlaying();
+    updateTraceControls();
+    return;
+  }
+  const active = activeTrace();
+  if (active && trace.step >= active.steps.length - 1) {
+    trace.step = 0;
+    updateEmphasis();
+  }
+  startPlaying();
+}
+
+function startPlaying() {
+  pausePlaying();
+  trace.timer = window.setInterval(() => {
+    const active = activeTrace();
+    if (!active || trace.step >= active.steps.length - 1) {
+      pausePlaying();
+    } else {
+      trace.step += 1;
+      updateEmphasis();
+    }
+    updateTraceControls();
+  }, TRACE_STEP_MS);
+  updateTraceControls();
+}
+
+function pausePlaying() {
+  window.clearInterval(trace.timer);
+  trace.timer = null;
+}
+
+function updateTraceControls() {
+  const active = activeTrace();
+  traceOutcomes.querySelectorAll(".trace-outcome").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.traceId === trace.id));
+  });
+  tracePlayer.hidden = !active;
+  if (!active) return;
+  const lastStep = active.steps.length - 1;
+  traceCount.textContent = `Step ${trace.step + 1} of ${active.steps.length}`;
+  traceCaption.textContent = active.steps[trace.step].caption;
+  tracePrev.disabled = trace.step === 0;
+  traceNext.disabled = trace.step === lastStep;
+  tracePlay.textContent = trace.timer ? "Pause" : trace.step === lastStep ? "Replay" : "Play";
+}
+
+// Dims everything except the lit subgraph: the current trace step when a
+// trace is active, otherwise the hovered or focused node and its neighbors.
+function updateEmphasis() {
+  const active = activeTrace();
+  let lit = null;
+  if (active) {
+    const step = active.steps[trace.step];
+    lit = { nodes: new Set(step.nodes), edges: new Set(step.edges.map(([from, to]) => edgeKey(from, to))) };
+  } else if (focusedNodeId) {
+    lit = neighborhood(focusedNodeId);
+  }
+  svg.classList.toggle("is-dimmed", Boolean(lit));
+  svg.classList.toggle("is-tracing", Boolean(active));
+  svg.querySelectorAll("[data-node-id]").forEach((element) => {
+    element.classList.toggle("is-lit", Boolean(lit?.nodes.has(element.dataset.nodeId)));
+  });
+  svg.querySelectorAll("[data-edge]").forEach((element) => {
+    element.classList.toggle("is-lit", Boolean(lit?.edges.has(element.dataset.edge)));
+  });
+}
+
+function neighborhood(nodeId) {
+  const nodes = new Set([nodeId]);
+  const edges = new Set();
+  components[currentView].edges.forEach(([from, to]) => {
+    if (from === nodeId || to === nodeId) {
+      nodes.add(from);
+      nodes.add(to);
+      edges.add(edgeKey(from, to));
+    }
+  });
+  return { nodes, edges };
+}
+
+function setFocusedNode(nodeId) {
+  if (focusedNodeId === nodeId) return;
+  focusedNodeId = nodeId;
+  if (!trace.id) updateEmphasis();
+}
+
+function edgeKey(from, to) {
+  return `${from}->${to}`;
 }
 
 function renderList(list, items) {
@@ -891,11 +1240,18 @@ function renderDiagram(view) {
   svg.setAttribute("viewBox", view.viewBox || "0 0 1200 700");
   addMarker();
   (view.zones || []).forEach(drawZone);
+  layers = {
+    edges: svg.appendChild(makeSvg("g", { class: "edge-layer" })),
+    labels: svg.appendChild(makeSvg("g", { class: "label-layer" })),
+    nodes: svg.appendChild(makeSvg("g", { class: "node-layer" })),
+  };
+  labelPlacement = createLabelPlacement(view);
   const nodesById = Object.fromEntries(view.nodes.map((node) => [node.id, node]));
   view.edges.forEach(([from, to, label, options = {}], index) => {
-    drawEdge(nodesById[from], nodesById[to], label, index, options);
+    drawEdge(nodesById[from], nodesById[to], label, index, { ...options, key: edgeKey(from, to) });
   });
   view.nodes.forEach(drawNode);
+  updateEmphasis();
 }
 
 function drawZone(zone) {
@@ -931,6 +1287,10 @@ function addMarker() {
   });
   marker.appendChild(makeSvg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "var(--line)" }));
   defs.appendChild(marker);
+  const traceMarker = marker.cloneNode(true);
+  traceMarker.id = "arrow-tip-trace";
+  traceMarker.firstChild.setAttribute("fill", "var(--trace)");
+  defs.appendChild(traceMarker);
   svg.appendChild(defs);
 }
 
@@ -983,8 +1343,9 @@ function drawPolylineEdge(points, label, options = {}) {
     class: "arrow-line",
     d: points.map((point, pointIndex) => `${pointIndex === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" "),
     "marker-end": "url(#arrow-tip)",
+    "data-edge": options.key,
   });
-  svg.appendChild(path);
+  layers.edges.appendChild(path);
 
   const segmentIndex = options.labelSegment == null
     ? longestSegmentIndex(points)
@@ -998,7 +1359,7 @@ function drawPolylineEdge(points, label, options = {}) {
   drawEdgeLabel(label, {
     x: labelPoint.x + (options.labelDx || 0),
     y: labelPoint.y - 8 + (options.labelDy || 0),
-  });
+  }, options.key);
 }
 
 function longestSegmentIndex(points) {
@@ -1015,14 +1376,25 @@ function longestSegmentIndex(points) {
   return longestIndex;
 }
 
-function drawEdgeLabel(label, point) {
+function drawEdgeLabel(label, anchor, key) {
   const labelWidth = Math.max(58, label.length * 8 + 18);
-  svg.appendChild(makeSvg("rect", {
+  const point = labelPlacement.place(anchor, labelWidth);
+  const group = makeSvg("g", { class: "edge-label", "data-edge": key });
+  if (Math.hypot(point.x - anchor.x, point.y - anchor.y) > LABEL_LEADER_MIN_SHIFT) {
+    group.appendChild(makeSvg("line", {
+      class: "arrow-label-leader",
+      x1: anchor.x,
+      y1: anchor.y - LABEL_HEIGHT / 2 + 6,
+      x2: point.x,
+      y2: point.y - LABEL_HEIGHT / 2 + 6,
+    }));
+  }
+  group.appendChild(makeSvg("rect", {
     class: "arrow-label-back",
     x: point.x - labelWidth / 2,
-    y: point.y - 17,
+    y: point.y - LABEL_BASELINE_OFFSET,
     width: labelWidth,
-    height: 23,
+    height: LABEL_HEIGHT,
     rx: "4",
   }));
   const text = makeSvg("text", {
@@ -1032,7 +1404,82 @@ function drawEdgeLabel(label, point) {
     "text-anchor": "middle",
   });
   text.textContent = label;
-  svg.appendChild(text);
+  group.appendChild(text);
+  layers.labels.appendChild(group);
+}
+
+const LABEL_HEIGHT = 23;
+const LABEL_BASELINE_OFFSET = 17;
+const LABEL_NODE_PADDING = 8;
+const LABEL_GAP = 4;
+const LABEL_SEARCH_STEP = 6;
+const LABEL_SEARCH_RADIUS = 150;
+const LABEL_SEARCH_DIRECTIONS = 16;
+const LABEL_LEADER_MIN_SHIFT = 22;
+
+// Edge labels start at their authored position and move to the nearest spot
+// that clears nodes, zone titles, and earlier labels, so a label in a narrow
+// gap is not hidden behind the shapes it connects. Falls back to the
+// least-overlapping candidate when no clear spot is within reach.
+function createLabelPlacement(view) {
+  const [minX, minY, width, height] = (view.viewBox || "0 0 1200 700").split(/\s+/).map(Number);
+  const bounds = { x: minX, y: minY, w: width, h: height };
+  const obstacles = view.nodes.map((node) => padRect(
+    { x: node.x, y: node.y, w: node.w, h: node.h },
+    LABEL_NODE_PADDING,
+  ));
+  svg.querySelectorAll(".zone-label").forEach((text) => {
+    const box = text.getBBox();
+    if (box.width > 0) obstacles.push(padRect({ x: box.x, y: box.y, w: box.width, h: box.height }, LABEL_GAP));
+  });
+  const offsets = labelSearchOffsets();
+
+  return {
+    place(anchor, labelWidth) {
+      let best = null;
+      for (const offset of offsets) {
+        const point = { x: anchor.x + offset.x, y: anchor.y + offset.y };
+        const rect = labelRect(point, labelWidth);
+        if (!containsRect(bounds, rect)) continue;
+        const overlap = obstacles.reduce((total, obstacle) => total + overlapArea(rect, obstacle), 0);
+        if (!best || overlap < best.overlap) best = { point, rect, overlap };
+        if (overlap === 0) break;
+      }
+      const chosen = best || { point: anchor, rect: labelRect(anchor, labelWidth) };
+      obstacles.push(padRect(chosen.rect, LABEL_GAP));
+      return chosen.point;
+    },
+  };
+}
+
+function labelSearchOffsets() {
+  const offsets = [{ x: 0, y: 0 }];
+  for (let radius = LABEL_SEARCH_STEP; radius <= LABEL_SEARCH_RADIUS; radius += LABEL_SEARCH_STEP) {
+    for (let index = 0; index < LABEL_SEARCH_DIRECTIONS; index += 1) {
+      const angle = (index / LABEL_SEARCH_DIRECTIONS) * Math.PI * 2 - Math.PI / 2;
+      offsets.push({ x: Math.round(Math.cos(angle) * radius), y: Math.round(Math.sin(angle) * radius) });
+    }
+  }
+  return offsets;
+}
+
+function labelRect(point, labelWidth) {
+  return { x: point.x - labelWidth / 2, y: point.y - LABEL_BASELINE_OFFSET, w: labelWidth, h: LABEL_HEIGHT };
+}
+
+function padRect(rect, padding) {
+  return { x: rect.x - padding, y: rect.y - padding, w: rect.w + padding * 2, h: rect.h + padding * 2 };
+}
+
+function containsRect(outer, inner) {
+  return inner.x >= outer.x && inner.y >= outer.y
+    && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h;
+}
+
+function overlapArea(a, b) {
+  const width = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const height = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  return width > 0 && height > 0 ? width * height : 0;
 }
 
 function drawNode(node) {
@@ -1070,6 +1517,11 @@ function drawNode(node) {
   sub.textContent = node.sub;
   group.appendChild(sub);
 
+  group.addEventListener("mouseenter", () => setFocusedNode(node.id));
+  group.addEventListener("mouseleave", () => setFocusedNode(null));
+  group.addEventListener("focus", () => setFocusedNode(node.id));
+  group.addEventListener("blur", () => setFocusedNode(null));
+
   if (drillable) {
     group.addEventListener("click", () => drill(node.id));
     group.addEventListener("keydown", (event) => {
@@ -1079,7 +1531,7 @@ function drawNode(node) {
       }
     });
   }
-  svg.appendChild(group);
+  layers.nodes.appendChild(group);
 }
 
 function nodeClass(node, drillable) {
@@ -1197,7 +1649,7 @@ function isActorNode(node) {
 
 function drill(nodeId) {
   if (components[nodeId]) {
-    showView(nodeId);
+    navigateTo(nodeId);
   }
 }
 
@@ -1246,4 +1698,4 @@ function makeSvg(name, attrs = {}) {
   return element;
 }
 
-showView("top");
+syncViewFromLocation();

@@ -59,6 +59,22 @@
             <span><i class="swatch vendor"></i>Vendor</span>
           </div>
         </div>
+        <div class="trace-bar" id="trace-bar" hidden>
+          <div class="trace-picker">
+            <span class="trace-heading">Trace a spend</span>
+            <div class="trace-outcomes" id="trace-outcomes" role="group" aria-label="Spend outcome to trace"></div>
+          </div>
+          <div class="trace-player" id="trace-player" hidden>
+            <div class="trace-buttons">
+              <button class="trace-step" id="trace-prev" type="button" aria-label="Previous step">←</button>
+              <span class="trace-count" id="trace-count"></span>
+              <button class="trace-step" id="trace-next" type="button" aria-label="Next step">→</button>
+              <button class="trace-play" id="trace-play" type="button">Play</button>
+              <button class="trace-exit" id="trace-exit" type="button">Exit</button>
+            </div>
+            <p class="trace-caption" id="trace-caption" aria-live="polite"></p>
+          </div>
+        </div>
         <svg
           id="architecture-canvas"
           class="architecture-canvas"
@@ -67,7 +83,7 @@
           aria-labelledby="diagram-title diagram-summary"
         ></svg>
         <p id="diagram-summary" class="diagram-summary">
-          Select a component to zoom into its subsystem and see how the internals interact.
+          Hover a component to see its connections; select one to zoom into its subsystem.
         </p>
       </section>
 
