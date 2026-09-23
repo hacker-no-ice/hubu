@@ -76,6 +76,38 @@ test("documentation code blocks carry progressive copy buttons", async () => {
   assert.match(overview, /id="project-status"/);
 });
 
+test("publishes per-page canonical and share metadata", async () => {
+  const home = await (await render()).text();
+  assert.match(home, /<link rel="canonical" href="https:\/\/hubustack.dev"/);
+  assert.match(home, /<meta property="og:title" content="Hubu Docs — Governed spend for AI agents"/);
+
+  const html = await (await render("/docs/local-stack")).text();
+  assert.match(html, /<link rel="canonical" href="https:\/\/hubustack.dev\/docs\/local-stack"/);
+  assert.match(html, /<meta property="og:title" content="Local stack quick start · Hubu Docs"/);
+  assert.match(html, /<meta property="og:url" content="https:\/\/hubustack.dev\/docs\/local-stack"/);
+  assert.match(html, /<meta name="twitter:title" content="Local stack quick start · Hubu Docs"/);
+  assert.match(html, /<meta property="og:image" content="https:\/\/hubustack.dev\/og-wordmark.png"/);
+  const description = html.match(/<meta name="description" content="([^"]*)"/)?.[1];
+  assert.ok(description && description.length <= 160);
+  assert.match(description, /\w…$/);
+  assert.match(html, /← Previous<\/small><strong>Overview<\/strong>/);
+
+  const missing = await render("/docs/nope");
+  assert.equal(missing.status, 404);
+  assert.match(await missing.text(), /<title>Page not found · Hubu Docs<\/title>/);
+});
+
+test("publishes a sitemap of every documentation route", async () => {
+  const [sitemap, robots] = await Promise.all([
+    readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8"),
+    readFile(new URL("../dist/client/robots.txt", import.meta.url), "utf8"),
+  ]);
+  assert.match(robots, /^Sitemap: https:\/\/hubustack.dev\/sitemap.xml$/m);
+  for (const pathname of ["/", "/architecture/", "/docs/overview", "/docs/local-stack", "/configuration/local-stack/v1", "/configuration/local-stack/v1/stack-toml"]) {
+    assert.ok(sitemap.includes(`<loc>https://hubustack.dev${pathname}</loc>`), pathname);
+  }
+});
+
 test("publishes the scalable Hubu wordmark", async () => {
   const svg = await readFile(new URL("../public/brand/hubu-wordmark.svg", import.meta.url), "utf8");
   assert.match(svg, /viewBox="269 286 1168 376"/);

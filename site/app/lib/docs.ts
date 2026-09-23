@@ -16,11 +16,18 @@ export function getDocument(slug: string) {
   return documents.find((doc) => doc.slug === slug);
 }
 
+// Pagination uses the curated navigation labels, which are shorter than some
+// document titles (the overview's title is the "Hubu / 户部" brand line).
 export function adjacentDocuments(slug: string) {
-  const order = navGroups.flatMap((group) => group.items.map(([, itemSlug]) => itemSlug));
-  const index = order.indexOf(slug as never);
+  const order: (readonly [string, string])[] = navGroups.flatMap((group): (readonly [string, string])[] => [...group.items]);
+  const index = order.findIndex(([, itemSlug]) => itemSlug === slug);
+  const link = (position: number) => {
+    const [label, itemSlug] = order[position];
+    const document = getDocument(itemSlug);
+    return document ? { href: document.href, label } : undefined;
+  };
   return {
-    previous: index > 0 ? getDocument(order[index - 1]) : undefined,
-    next: index >= 0 && index < order.length - 1 ? getDocument(order[index + 1]) : undefined,
+    previous: index > 0 ? link(index - 1) : undefined,
+    next: index >= 0 && index < order.length - 1 ? link(index + 1) : undefined,
   };
 }

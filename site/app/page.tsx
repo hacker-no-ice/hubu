@@ -1,6 +1,8 @@
+import type { Metadata } from "next";
 import { Search } from "./components/Search";
 import { HubuWordmark } from "./components/HubuWordmark";
 import { searchDocuments } from "./lib/docs";
+import { homeMetadata } from "./lib/metadata";
 
 const stackSteps = [
   ["01", "Initialize a profile", "hubu stack init --mode sandbox --profile \"$HOME/hubu-sandbox\"", "Create and register operator-owned starter files without starting services."],
@@ -17,6 +19,8 @@ const primaryLinks = [
   ["Send feedback", "/docs/feedback"],
   ["GitHub", "https://github.com/hacker-no-ice/hubu"],
 ] as const;
+
+export const metadata: Metadata = homeMetadata;
 
 export default function Home() {
   return (
