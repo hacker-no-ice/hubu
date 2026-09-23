@@ -176,7 +176,7 @@ function spendTraces() {
         {
           nodes: ["human", "cli", "api", "app"],
           edges: [["human", "cli"], ["cli", "api"]],
-          caption: "The owner reviews the snapshot and approves or denies. Approval alone never starts provider work.",
+          caption: "The owner reviews the snapshot and approves; a denial would end the operation here. Approval alone never starts provider work.",
         },
         {
           nodes: ["agent", "mcp", "api", "app"],
