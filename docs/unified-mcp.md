@@ -1,8 +1,8 @@
 # Unified MCP surface
 
-The surface below is the implemented contract. The earlier
-[MCP consolidation proposal](mcp-tool-consolidation.md) contains migration
-context; its exposure profiles are superseded by a single core tool set.
+The surface below is the implemented contract. The
+[core tool catalog](mcp-tool-consolidation.md) summarizes supported workflows,
+prerequisites, and removed-tool replacements.
 
 For bugs, ideas, billing or sensitive reports, use [Send feedback](feedback.md).
 `hubu feedback` and the unified `hubu_feedback_guidance` /
@@ -91,7 +91,6 @@ and reconciliation:
 hubu_apply_policy
 hubu_authorize_spend
 hubu_budget_history
-hubu_client_approval_profile
 hubu_create_budget
 hubu_get_executor_claim
 hubu_get_spend_workflow
@@ -119,35 +118,18 @@ hubu_submit_spend
 hubu_update_budget
 ```
 
-Gongbu-owned tools cover the provider contract catalog, configured-target
-discovery, execution, artifacts, and the narrowly scoped guarded-FLUX
-attestation:
+Gongbu-owned tools cover configured-target discovery, execution, and artifacts:
 
 ```text
 gongbu_list_execution_targets
 gongbu_create_execution
 gongbu_get_execution
-gongbu_get_provider_catalog
-gongbu_get_redaction_attestation
 gongbu_list_artifacts
 gongbu_get_artifact
 ```
 
-`gongbu_get_provider_catalog` has strict empty input and forwards only to
-Gongbu's authenticated `GET /v1/provider-catalog`. Its sanitized schema-v1
-result exposes exact contract-bound target/model, resolutions, currency, rational
-pricing, policy versions, and independent readiness facts. It does not expose
-credential coordinates or values, call BFL, or convert
-`live_qualified = false` into a readiness claim.
-
-`gongbu_get_redaction_attestation` accepts only one known execution ID and
-forwards to Gongbu's authenticated, bodyless
-`GET /v1/executions/{id}/redaction-attestation`. Gongbu allows it only for the
-exact successful managed-FLUX redaction-attestation tuple. Its response contains versioned
-safe facts, bounded scan counts, and canonical hashes; it never returns backend
-identifiers, credential coordinates or material, provider bodies, URLs, or
-storage locations. The endpoint resolves no credential until the fixed tuple
-and clean-success cardinalities pass, and a detected key match fails closed.
+Provider-contract diagnostics and guarded-FLUX attestation remain available
+through authenticated Gongbu operator endpoints.
 
 The static ownership table is authoritative; prefix inference is not a routing
 rule. Unknown names fail closed until a routing revision assigns them. Exact
@@ -196,9 +178,6 @@ trusted harness identity and a newly allocated private operation key.
   binds its stored execution intent and wakes the existing worker idempotently.
   It cannot change the approved scope or create a second logical operation.
 - `gongbu_get_artifact` returns safe metadata followed by PNG or JPEG content.
-- `gongbu_get_redaction_attestation` is read-only and does no provider work. It
-  revalidates the one normalized artifact from Gongbu-owned storage and reports
-  only the exact guarded-qualification projection.
 - Gongbu application errors remain `isError: true` with their sanitized error
   object.
 - Only `hubu_update_budget` and `hubu_budget_history` translate typed Hubu
@@ -542,9 +521,9 @@ envelope without changing either backend's wire contract.
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 41 other tool names with owner
+state and compatible version metadata, and all 38 other tool names with owner
 and availability. Together with `hubu_unified_capabilities`, the stdio surface
-exposes 42 tools, 36 of which route to a backend.
+exposes 39 tools, 33 of which route to a backend.
 
 The version-1 compatibility boundary requires:
 
@@ -705,7 +684,8 @@ capability model is not strong multi-user or per-agent isolation.
 ## Approval boundary
 
 The MCP catalog distinguishes reads, spend submission, and protected human
-actions through tool annotations and the `hubu_client_approval_profile` result.
+actions through tool annotations. Generated client configuration preserves
+the per-tool human prompts and separate trust/capability gates.
 
 Registration, policy mutation, spending-target changes, budget mutation, and
 claim reconciliation require a client-enforced human prompt. Those broad

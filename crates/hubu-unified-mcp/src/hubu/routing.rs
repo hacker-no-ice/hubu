@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
-use super::catalog::approval_profile;
 use crate::operation_registry::OperationResolution;
 
 pub(crate) const DENIED_OPERATION_GUIDANCE: &str = "This denied operation is terminal. Exact redelivery only recovers the same denial. Submit corrected work as a new tool call so the harness creates a new logical operation.";
@@ -43,7 +42,6 @@ enum HubuResponseTransformV1 {
 }
 
 enum PreparedHubuCallV1 {
-    Local(Value),
     Http(HubuHttpRequestV1, HubuResponseTransformV1),
 }
 
@@ -100,13 +98,6 @@ pub(super) fn route_tool_call_v1(
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    if name == "hubu_client_approval_profile"
-        && arguments
-            .as_object()
-            .is_none_or(|arguments| !arguments.is_empty())
-    {
-        bail!("hubu_client_approval_profile does not accept arguments");
-    }
 
     let config = McpConfig {
         protected_tools_enabled,
@@ -114,7 +105,6 @@ pub(super) fn route_tool_call_v1(
     };
     let prepared = match name {
         "hubu_registration_guidance" => get_request("/registration/guidance"),
-        "hubu_client_approval_profile" => PreparedHubuCallV1::Local(approval_profile()),
         "hubu_list_users" => get_request("/users"),
         "hubu_register_human" => {
             require_trusted_client_approval(config, name)?;
@@ -324,7 +314,6 @@ pub(super) fn route_tool_call_v1(
     };
 
     let response = match prepared {
-        PreparedHubuCallV1::Local(response) => response,
         PreparedHubuCallV1::Http(request, transform) => {
             let response = execute(request)?;
             match transform {

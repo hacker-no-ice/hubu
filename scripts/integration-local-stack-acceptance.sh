@@ -579,9 +579,7 @@ try:
         "hubu_budget_history",
         "hubu_feedback_guidance",
         "hubu_prepare_feedback",
-        "gongbu_get_provider_catalog",
         "gongbu_list_execution_targets",
-        "gongbu_get_redaction_attestation",
         "hubu_get_spend_approval",
         "hubu_resolve_spend_approval",
         "hubu_resume_operation",
@@ -590,9 +588,13 @@ try:
     tools = request("tools/list").get("tools", [])
     tool_names = {tool.get("name") for tool in tools}
     if (
-        len(tool_names) != 44
+        len(tool_names) != 39
         or not expected_tools.issubset(tool_names)
-        or "hubu_replace_budget" in tool_names
+        or tool_names.intersection({
+            "hubu_replace_budget", "hubu_add_policy", "hubu_export_policy",
+            "hubu_health", "hubu_client_approval_profile",
+            "gongbu_get_provider_catalog", "gongbu_get_redaction_attestation",
+        })
     ):
         fail(f"unexpected unified MCP tool catalog: {len(tool_names)} tools")
 

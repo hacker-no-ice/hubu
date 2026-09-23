@@ -2,8 +2,6 @@ use serde_json::{json, Value};
 
 use crate::{BackendOwner, DOMAIN_TOOLS};
 
-const HUBU_APPROVAL_PROFILE_VERSION: &str = "hubu-mcp-client-approval-v1";
-
 pub(crate) fn is_approved_tool(name: &str) -> bool {
     DOMAIN_TOOLS
         .iter()
@@ -22,11 +20,6 @@ fn all_tool_definitions() -> Vec<Value> {
         read_tool(
             "hubu_registration_guidance",
             "Read compact agent registration guidance.",
-            json_schema(json!({})),
-        ),
-        read_tool(
-            "hubu_client_approval_profile",
-            "Read Hubu's generic MCP client approval profile for configuring agent harnesses.",
             json_schema(json!({})),
         ),
         read_tool(
@@ -150,7 +143,7 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "hubu_submit_spend",
-            "Submit an agent spend request. Trusted harness metadata supplies normalized operation and optional task identity outside model arguments. Returns a public operation handle and decision-aware recovery guidance; a definitive denial is terminal and corrected work requires a new tool call. Human approval is only required when the decision is needs_approval.",
+            "Submit a mock-only spend request for demos and recover exact retries of that mock operation. Does not execute a real provider payment. Trusted harness metadata supplies normalized operation and optional task identity outside model arguments. Returns a public operation handle and decision-aware recovery guidance; a definitive denial is terminal and corrected work requires a new tool call. Human approval is only required when the decision is needs_approval.",
             json_schema_required(json!({
                 "account_id": { "type": "string" },
                 "amount_cents": { "type": "integer" },
@@ -415,58 +408,5 @@ fn tool(name: &str, description: &str, input_schema: Value, annotations: ToolAnn
             "x_hubu_client_approval_mode": annotations.client_approval_mode,
             "x_hubu_runtime_approval": annotations.runtime_approval
         }
-    })
-}
-
-pub(super) fn approval_profile() -> Value {
-    let mut definitions = tool_definitions();
-    definitions.push(crate::governed_execution::tool_definition());
-    let names_matching = |client_mode: &str, runtime_approval: Option<&str>| {
-        definitions
-            .iter()
-            .filter(|tool| {
-                tool["annotations"]["x_hubu_client_approval_mode"] == client_mode
-                    && runtime_approval.is_none_or(|runtime| {
-                        tool["annotations"]["x_hubu_runtime_approval"] == runtime
-                    })
-            })
-            .map(|tool| tool["name"].clone())
-            .collect::<Vec<_>>()
-    };
-    json!({
-        "protocol_version": HUBU_APPROVAL_PROFILE_VERSION,
-        "summary": "Configure agent harnesses to auto-call Hubu read and spend tools, prompt before protected human actions, and rely on Hubu policy for needs_approval spend outcomes.",
-        "client_policy": {
-            "auto_approve_tools": names_matching("auto", None),
-            "prompt_before_call_tools": names_matching("prompt_before_call", None),
-            "hubu_policy_conditional_tools": names_matching("auto", Some("hubu_policy_needs_approval"))
-        },
-        "response_contract": {
-            "needs_approval_field": "requires_human_approval",
-            "needs_approval_meaning": "Hubu policy required human review and no payment was executed.",
-            "agent_action": "Show approval.review to the human, wait for an explicit approve or deny answer in chat, then call hubu_resolve_spend_approval with approval_request_id and that decision. The native client prompt confirms or cancels the formed call; cancelling does not submit a denial."
-        },
-        "annotation_fields": {
-            "client_pre_call": "x_hubu_client_approval_mode",
-            "runtime_policy": "x_hubu_runtime_approval",
-            "legacy_hubu_field": "x_hubu_human_approval"
-        },
-        "tools": [
-            {
-                "names": names_matching("auto", Some("none")),
-                "x_hubu_client_approval_mode": "auto",
-                "x_hubu_runtime_approval": "none"
-            },
-            {
-                "names": names_matching("auto", Some("hubu_policy_needs_approval")),
-                "x_hubu_client_approval_mode": "auto",
-                "x_hubu_runtime_approval": "hubu_policy_needs_approval"
-            },
-            {
-                "names": names_matching("prompt_before_call", Some("client_human_approval_required")),
-                "x_hubu_client_approval_mode": "prompt_before_call",
-                "x_hubu_runtime_approval": "client_human_approval_required"
-            }
-        ]
     })
 }

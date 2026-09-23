@@ -123,8 +123,8 @@ The catalog reports independent facts:
 
 Neither catalog inspection, doctor, render, nor production validation calls
 BFL. The running Gongbu service exposes the same sanitized schema-v1 projection
-through authenticated `GET /v1/provider-catalog`; agents use the read-only
-`gongbu_get_provider_catalog` unified-MCP tool with an empty input. Neither
+through authenticated `GET /v1/provider-catalog` for operators. Agents use
+`gongbu_list_execution_targets` for selectable targets and pricing. Neither
 surface exposes Keychain coordinates or secret values.
 
 An unknown contract, missing credential reference, missing or changed pricing
