@@ -42,6 +42,10 @@ shape makes v4.3 intentionally startup-incompatible with v4.2.
 V4.2 introduced the read-only `POST /spend/executor/resolve` capability used
 for token-only executor admission.
 
+Executors can check their lifecycle handling against the black-box
+[executor conformance suite](executor-conformance.md), which replays a
+versioned v4.3 fixture corpus against a real `hubu-server`.
+
 The unified MCP continuation binding remains independent of
 the v4.3 cost fields. It makes the existing `auth_token_id` /
 `spend_auth_token_id` the agent-visible continuation identifier for one private

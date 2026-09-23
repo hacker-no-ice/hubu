@@ -25,6 +25,16 @@ Future release template
 
 ## v0.2.2 — Unreleased
 
+### Highlights
+
+- Added an executor-neutral, black-box conformance suite for the
+  `hubu-spend-executor-v4.3` contract: a versioned fixture corpus of
+  requests, responses, error codes and retry decisions, and a
+  standard-library runner that targets any Hubu base URL with a pluggable
+  executor side. It covers authorization, claims, settlement, release, lease
+  expiry, human reconciliation, restart recovery and budget limits, including
+  exactly-once ledger postings. See `docs/executor-conformance.md`.
+
 ### Breaking or operational changes
 
 - Removed recurring-budget creation from core (`CreateBudgetSeriesRequest`,
@@ -34,6 +44,12 @@ Future release template
   with explicit periods instead. Existing budgets retain their IDs, versions,
   balances, holds, and history and continue as independent budgets; no data
   migration or recurring-series lifecycle is introduced.
+
+### Important fixes
+
+- `hubu-server` no longer fails to start with `UNIQUE constraint failed:
+  spend_decisions.agent_id, spend_decisions.operation_key` after an agent
+  corrected a denied authorization under the same operation key.
 
 ## Unreleased
 

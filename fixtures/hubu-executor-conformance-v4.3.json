@@ -1,0 +1,1697 @@
+{
+  "schema": "hubu-executor-conformance-v1",
+  "corpus_version": "2026-09-23.1",
+  "protocol_version": "hubu-spend-executor-v4.3",
+  "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value.",
+  "server_profile": {
+    "lease_config_yaml": "authorization_ttl_seconds: 300\ndefault_lease_profile: default\nlease_profiles:\n  default:\n    claim_ttl_seconds: 900\n  conformance_short:\n    claim_ttl_seconds: 1\n",
+    "required_lease_profiles": {
+      "default": 900,
+      "conformance_short": 1
+    },
+    "credentials": {
+      "normal_bearer": "HUBU_AUTH_TOKEN; shared by agent-side, observer and executor-side requests",
+      "human_reconciliation_capability": "HUBU_RECONCILIATION_TOKEN; sent only by human reconciliation steps in the X-Hubu-Reconciliation-Capability header"
+    }
+  },
+  "setup": {
+    "owner": {
+      "username": "executor-conformance",
+      "display_name": "Executor Conformance",
+      "email": "executor-conformance@example.invalid"
+    },
+    "policy_yaml": "id: executor_conformance\nversion: v1\ndefault_effect: deny\nrules:\n  - id: allow_local_fixture_provider\n    effect: allow\n    reason: executor conformance fixture provider\n    when:\n      op: eq\n      field: provider\n      value:\n        string: provider:local:fixture\n",
+    "budget_ending_before": "2999-01-01T00:00:00Z",
+    "per_scenario": "The runner registers one fresh agent and one agent budget per scenario and exposes them as ${agent.agent_id}, ${agent.account_id} and ${budget.budget_id}."
+  },
+  "operations": {
+    "authorize": {"actor": "agent", "method": "POST", "path": "/spend/authorize"},
+    "resolve": {"actor": "executor", "method": "POST", "path": "/spend/executor/resolve"},
+    "claim": {"actor": "executor", "method": "POST", "path": "/spend/executor/claim"},
+    "inspect_claim": {"actor": "executor", "method": "GET", "path": "/spend/executor/claim"},
+    "settle": {"actor": "executor", "method": "POST", "path": "/spend/executor/settle"},
+    "release": {"actor": "executor", "method": "POST", "path": "/spend/executor/release"},
+    "reconcile_billed": {"actor": "human", "method": "POST", "path": "/spend/executor/settle"},
+    "reconcile_not_billed": {"actor": "human", "method": "POST", "path": "/spend/executor/release"},
+    "reconciliation_queue": {"actor": "observer", "method": "GET", "path": "/spend/executor/reconciliation"},
+    "budgets": {"actor": "observer", "method": "GET", "path": "/budgets"},
+    "ledger": {"actor": "observer", "method": "GET", "path": "/ledger/transactions"},
+    "workflows": {"actor": "observer", "method": "GET", "path": "/spend/workflows"}
+  },
+  "retry_decisions": {
+    "replay_exactly": {
+      "trigger": "No HTTP response was observed (dropped response, timeout, connection loss, process restart) or Hubu returned 5xx.",
+      "executor_action": "Retry the identical request with the same operation_key. Hubu returns the stored authorization, claim, settlement or release without a second hold, consumption or ledger posting.",
+      "gongbu_activity_class": "ambiguous"
+    },
+    "create_new_operation": {
+      "trigger": "An authorization retry changed immutable scope after an allowed, pending or side-effect-capable attempt.",
+      "observed": {
+        "status": 409,
+        "error_contains": "changed scope retry is unsafe",
+        "match": {"retry_guidance.action": "create_new_operation"}
+      },
+      "executor_action": "Do not reuse the operation key for different work; the platform starts a new logical operation.",
+      "gongbu_activity_class": "proven"
+    },
+    "reuse_operation_key_after_denial": {
+      "trigger": "Policy or budget denied the attempt without creating a token or hold.",
+      "observed": {
+        "status": 200,
+        "match": {
+          "decision": "deny",
+          "auth_token_id": null,
+          "budget_hold": null,
+          "retry_guidance.action": "reuse_operation_key"
+        }
+      },
+      "executor_action": "No executor work may start. The platform may reuse the key with corrected scope, which appends a new revision.",
+      "gongbu_activity_class": "not_applicable"
+    },
+    "stop_claim_mismatch": {
+      "trigger": "A claim presented an amount, account or scope that differs from the stored authorization.",
+      "observed": {"status": 400, "error_contains": "payment request does not match authorized spend"},
+      "executor_action": "Stop. Never perform provider work; the hold stays with the unclaimed authorization.",
+      "gongbu_activity_class": "proven"
+    },
+    "stop_claim_operation_mismatch": {
+      "trigger": "A claim presented a token under an operation key other than the one it was authorized for.",
+      "observed": {"status": 400, "error_contains": "operation key was already authorized with different spend scope"},
+      "executor_action": "Stop. Carry the immutable operation_key resolved from Hubu; never substitute another key.",
+      "gongbu_activity_class": "proven"
+    },
+    "await_human_reconciliation_expired": {
+      "trigger": "Normal settle or release reached a claim whose lease expired.",
+      "observed": {"status": 400, "error_contains": "executor claim expired and requires reconciliation"},
+      "executor_action": "Keep the claim, provider evidence and exact cost. Do not release or repeat provider work; a human resolves the claim.",
+      "gongbu_activity_class": "proven"
+    },
+    "await_human_reconciliation_overrun": {
+      "trigger": "Normal settlement reported a conservative budget charge above the authorized maximum.",
+      "observed": {"status": 400, "error_contains": "actual vendor cost exceeds the authorized maximum"},
+      "executor_action": "Keep the claimed hold and exact evidence and route to human reconciliation after lease expiry. Never release billed work.",
+      "gongbu_activity_class": "proven"
+    },
+    "stop_receipt_conflict": {
+      "trigger": "A settlement retry changed any exact-cost, provider, snapshot or artifact field.",
+      "observed": {"status": 400, "error_contains": "settlement receipt does not match the original settlement"},
+      "executor_action": "Stop. Replay only the original immutable receipt.",
+      "gongbu_activity_class": "proven"
+    },
+    "terminal_already_settled": {
+      "trigger": "Release was attempted after settlement committed.",
+      "observed": {"status": 400, "error_contains": "executor claim has already been settled"},
+      "executor_action": "Inspect the claim and treat the operation as settled; replay the identical settlement to recover the stored result.",
+      "gongbu_activity_class": "proven"
+    },
+    "terminal_already_released": {
+      "trigger": "Settlement was attempted after release committed.",
+      "observed": {"status": 400, "error_contains": "executor claim has already been released"},
+      "executor_action": "Inspect the claim and treat the operation as released.",
+      "gongbu_activity_class": "proven"
+    },
+    "human_capability_missing": {
+      "trigger": "A reconciliation-shaped request carried only the normal bearer.",
+      "observed": {"status": 400, "error_contains": "missing human reconciliation capability"},
+      "executor_action": "Executors never reconcile; surface the claim to a human.",
+      "gongbu_activity_class": "proven"
+    },
+    "human_capability_invalid": {
+      "trigger": "A reconciliation-shaped request presented the normal bearer as the human capability.",
+      "observed": {"status": 400, "error_contains": "invalid human reconciliation capability"},
+      "executor_action": "Executors never reconcile; surface the claim to a human.",
+      "gongbu_activity_class": "proven"
+    },
+    "stop_reconciliation_conflict": {
+      "trigger": "A reconciliation retry changed its evidence after the outcome was stored.",
+      "observed": {"status": 400, "error_contains": "reconciled with different evidence"},
+      "executor_action": "Stop. The first recorded human outcome is terminal.",
+      "gongbu_activity_class": "proven"
+    }
+  },
+  "definitions": {
+    "scope": {
+      "schema_version": 1,
+      "provider": "provider:local:fixture",
+      "executor": "executor:gongbu:image",
+      "capability": "capability:image:generate",
+      "billing_merchant": "merchant:local"
+    },
+    "scope_other_provider": {
+      "schema_version": 1,
+      "provider": "provider:google:gemini-developer",
+      "executor": "executor:gongbu:image",
+      "capability": "capability:image:generate",
+      "billing_merchant": "merchant:google"
+    },
+    "expanded_scope_other_provider": {
+      "schema_version": 1,
+      "provider": {"id": "provider:google:gemini-developer", "display_name": "Google Gemini Developer API"},
+      "executor": {"id": "executor:gongbu:image", "display_name": "Gongbu image executor"},
+      "capability": {"id": "capability:image:generate", "display_name": "Generate image"},
+      "billing_merchant": {"id": "merchant:google", "display_name": "Google"}
+    },
+    "exact_cost": {
+      "op_a": {"amount": 3500001, "scale": 6, "currency": "usd"},
+      "op_b": {"amount": 25001, "scale": 4, "currency": "usd"},
+      "reconciled": {"amount": 2500001, "scale": 6, "currency": "usd"},
+      "at_max_600": {"amount": 6000000, "scale": 6, "currency": "usd"},
+      "over_max_600": {"amount": 6000001, "scale": 6, "currency": "usd"}
+    },
+    "receipts": {
+      "op_a": {
+        "actual_vendor_cost": {"amount": 3500001, "scale": 6, "currency": "usd"},
+        "provider_request_id": "fixture-provider-request:op-a",
+        "price_model_snapshot": {
+          "schema_version": 2,
+          "provider": "fixture-image-provider",
+          "model": "fixture-image-model-v1",
+          "catalog_version": "conformance-prices-v4.3",
+          "catalog_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "pricing_rule_id": "fixture-image-model-v1",
+          "components": [{"unit": "image", "rate_numerator_minor": 3500001, "rate_denominator": 10000, "quantity": 1}],
+          "exact_estimate_numerator": "3500001",
+          "exact_estimate_denominator": "10000",
+          "estimated_amount_minor": 351,
+          "currency": "USD"
+        },
+        "artifact_reference": "artifact://conformance/op-a.png"
+      },
+      "op_b": {
+        "actual_vendor_cost": {"amount": 25001, "scale": 4, "currency": "usd"},
+        "provider_request_id": "fixture-provider-request:op-b",
+        "price_model_snapshot": {
+          "schema_version": 2,
+          "provider": "fixture-text-provider",
+          "model": "fixture-text-model-v1",
+          "catalog_version": "conformance-prices-v4.3",
+          "catalog_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "pricing_rule_id": "fixture-text-model-v1",
+          "components": [{"unit": "request", "rate_numerator_minor": 25001, "rate_denominator": 100, "quantity": 1}],
+          "exact_estimate_numerator": "25001",
+          "exact_estimate_denominator": "100",
+          "estimated_amount_minor": 251,
+          "currency": "USD"
+        },
+        "artifact_reference": "artifact://conformance/op-b.txt"
+      },
+      "reconciled": {
+        "actual_vendor_cost": {"amount": 2500001, "scale": 6, "currency": "usd"},
+        "provider_request_id": "fixture-vendor-request:reconciled",
+        "price_model_snapshot": {
+          "schema_version": 2,
+          "provider": "fixture-image-provider",
+          "model": "fixture-image-model-v1",
+          "catalog_version": "conformance-prices-v4.3",
+          "catalog_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "pricing_rule_id": "fixture-image-model-v1",
+          "components": [{"unit": "image", "rate_numerator_minor": 2500001, "rate_denominator": 10000, "quantity": 1}],
+          "exact_estimate_numerator": "2500001",
+          "exact_estimate_denominator": "10000",
+          "estimated_amount_minor": 251,
+          "currency": "USD"
+        },
+        "artifact_reference": "artifact://conformance/reconciled.png"
+      },
+      "at_max_600": {
+        "actual_vendor_cost": {"amount": 6000000, "scale": 6, "currency": "usd"},
+        "provider_request_id": "fixture-provider-request:at-max",
+        "price_model_snapshot": {
+          "schema_version": 2,
+          "provider": "fixture-image-provider",
+          "model": "fixture-image-model-v1",
+          "catalog_version": "conformance-prices-v4.3",
+          "catalog_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "pricing_rule_id": "fixture-image-model-v1",
+          "components": [{"unit": "image", "rate_numerator_minor": 600, "rate_denominator": 1, "quantity": 1}],
+          "exact_estimate_numerator": "600",
+          "exact_estimate_denominator": "1",
+          "estimated_amount_minor": 600,
+          "currency": "USD"
+        },
+        "artifact_reference": "artifact://conformance/at-max.png"
+      },
+      "over_max_600": {
+        "actual_vendor_cost": {"amount": 6000001, "scale": 6, "currency": "usd"},
+        "provider_request_id": "fixture-provider-request:over-max",
+        "price_model_snapshot": {
+          "schema_version": 2,
+          "provider": "fixture-image-provider",
+          "model": "fixture-image-model-v1",
+          "catalog_version": "conformance-prices-v4.3",
+          "catalog_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "pricing_rule_id": "fixture-image-model-v1",
+          "components": [{"unit": "image", "rate_numerator_minor": 6000001, "rate_denominator": 10000, "quantity": 1}],
+          "exact_estimate_numerator": "6000001",
+          "exact_estimate_denominator": "10000",
+          "estimated_amount_minor": 601,
+          "currency": "USD"
+        },
+        "artifact_reference": "artifact://conformance/over-max.png"
+      }
+    }
+  },
+  "scenarios": [
+    {
+      "id": "S01",
+      "title": "authorize and claim two independent provider operations under one agent budget",
+      "setup": {"budget_cents": 1000},
+      "steps": [
+        {
+          "id": "authorize-op-a",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s01:op-a",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 400,
+            "task_id": "conformance:v4.3:shared-task",
+            "reason": "Conformance provider operation A",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {
+            "status": 200,
+            "match": {
+              "decision": "allow",
+              "operation_key": "conformance:v4.3:s01:op-a",
+              "agent_id": "${agent.agent_id}",
+              "account_id": "${agent.account_id}",
+              "revision": 1,
+              "idempotent_replay": false,
+              "lease_profile": "default",
+              "payment": null,
+              "budget_hold.status": "frozen",
+              "budget_hold.amount_cents": 400,
+              "budget_hold.budget_id": "${budget.budget_id}"
+            },
+            "capture": {
+              "token_a": "auth_token_id",
+              "hold_a": "budget_hold.hold_id",
+              "decision_a": "decision_id",
+              "expanded_scope": "execution_scope"
+            },
+            "relations": [["non_null", "${token_a}", ""], ["before", "@attempt_history[0].submitted_at", "@authorization_expires_at"]]
+          }
+        },
+        {
+          "id": "authorize-op-b",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s01:op-b",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 300,
+            "task_id": "conformance:v4.3:shared-task",
+            "reason": "Conformance provider operation B",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {
+            "status": 200,
+            "match": {
+              "decision": "allow",
+              "operation_key": "conformance:v4.3:s01:op-b",
+              "revision": 1,
+              "idempotent_replay": false,
+              "budget_hold.status": "frozen",
+              "budget_hold.amount_cents": 300,
+              "budget_hold.budget_id": "${budget.budget_id}"
+            },
+            "capture": {"token_b": "auth_token_id", "hold_b": "budget_hold.hold_id", "decision_b": "decision_id"},
+            "relations": [
+              ["different", "${token_b}", "${token_a}"],
+              ["different", "${hold_b}", "${hold_a}"],
+              ["different", "${decision_b}", "${decision_a}"]
+            ]
+          }
+        },
+        {
+          "id": "budget-after-two-holds",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {
+              "budgets[agent_id=${agent.agent_id}].budget_id": "${budget.budget_id}",
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 700,
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0,
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 300
+            }
+          }
+        },
+        {
+          "id": "resolve-op-a",
+          "operation": "resolve",
+          "body": {"spend_auth_token_id": "${token_a}"},
+          "expect": {
+            "status": 200,
+            "match": {
+              "status": "available",
+              "operation_key": "conformance:v4.3:s01:op-a",
+              "agent_id": "${agent.agent_id}",
+              "account_id": "${agent.account_id}",
+              "amount_cents": 400,
+              "currency": "usd",
+              "lease_profile": "default",
+              "execution_scope": "${expanded_scope}",
+              "budget_hold.hold_id": "${hold_a}"
+            }
+          }
+        },
+        {
+          "id": "resolve-op-b",
+          "operation": "resolve",
+          "body": {"spend_auth_token_id": "${token_b}"},
+          "expect": {
+            "status": 200,
+            "match": {"status": "available", "operation_key": "conformance:v4.3:s01:op-b", "amount_cents": 300, "budget_hold.hold_id": "${hold_b}"}
+          }
+        },
+        {
+          "id": "claim-op-a",
+          "operation": "claim",
+          "body": {
+            "operation_key": "conformance:v4.3:s01:op-a",
+            "spend_auth_token_id": "${token_a}",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 400,
+            "execution_scope": "${expanded_scope}"
+          },
+          "expect": {
+            "status": 200,
+            "match": {
+              "status": "claimed",
+              "operation_key": "conformance:v4.3:s01:op-a",
+              "lease_profile": "default",
+              "settlement_id": null,
+              "finalized_at": null,
+              "reconciliation_required": false,
+              "spend.spend_auth_token_id": "${token_a}",
+              "spend.decision_id": "${decision_a}",
+              "spend.task_id": "conformance:v4.3:shared-task",
+              "spend.budget_hold.hold_id": "${hold_a}",
+              "spend.budget_hold.status": "claimed"
+            },
+            "capture": {"claim_a": "claim_id", "claim_a_claimed_at": "claimed_at", "claim_a_expires_at": "claim_expires_at"},
+            "relations": [["before", "${claim_a_claimed_at}", "${claim_a_expires_at}"]]
+          }
+        },
+        {
+          "id": "claim-op-b",
+          "operation": "claim",
+          "body": {
+            "operation_key": "conformance:v4.3:s01:op-b",
+            "spend_auth_token_id": "${token_b}",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 300,
+            "execution_scope": "${expanded_scope}"
+          },
+          "expect": {
+            "status": 200,
+            "match": {"status": "claimed", "spend.budget_hold.hold_id": "${hold_b}", "spend.budget_hold.status": "claimed"},
+            "capture": {"claim_b": "claim_id"},
+            "relations": [["different", "${claim_b}", "${claim_a}"]]
+          }
+        },
+        {
+          "id": "budget-after-two-claims",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 700,
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0,
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 300
+            }
+          }
+        },
+        {
+          "id": "two-claimed-workflows",
+          "operation": "workflows",
+          "query": {"agent_id": "${agent.agent_id}"},
+          "expect": {
+            "status": 200,
+            "match": {"schema_version": "hubu-history-v1"},
+            "counts": [
+              {"path": "workflows", "equals": 2},
+              {"path": "workflows", "where": {"status": "claimed"}, "equals": 2}
+            ],
+            "relations": [["same", "@workflows[0].task_reference", "@workflows[1].task_reference"]]
+          }
+        },
+        {
+          "id": "no-postings-while-claimed",
+          "operation": "ledger",
+          "query": {"agent_id": "${agent.agent_id}", "budget_id": "${budget.budget_id}"},
+          "expect": {
+            "status": 200,
+            "match": {"coverage.pending_hold_count": 2, "coverage.consumed_amount_cents": 0, "coverage.recorded_budget_charges_cents": 0},
+            "counts": [{"path": "transactions", "equals": 0}]
+          }
+        }
+      ]
+    },
+    {
+      "id": "S02",
+      "title": "settle both operations with precise actual costs and immutable provider/artifact references",
+      "setup": {"budget_cents": 1000},
+      "includes": ["S01"],
+      "steps": [
+        {
+          "id": "settle-op-a",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s01:op-a", "receipt": "${defs.receipts.op_a}"},
+          "expect": {
+            "status": 200,
+            "match": {
+              "status": "settled",
+              "claim_id": "${claim_a}",
+              "operation_key": "conformance:v4.3:s01:op-a",
+              "receipt.actual_vendor_cost": "${defs.exact_cost.op_a}",
+              "receipt.authorized_max_cents": 400,
+              "receipt.budget_charge_cents": 351,
+              "receipt.actual_vendor_cost_cents": 351,
+              "receipt.released_amount_cents": 49,
+              "receipt.overrun_amount_cents": 0,
+              "receipt.currency": "usd",
+              "receipt.provider_request_id": "fixture-provider-request:op-a",
+              "receipt.artifact_reference": "artifact://conformance/op-a.png",
+              "receipt.price_model_snapshot": "${defs.receipts.op_a.price_model_snapshot}",
+              "spend.budget_hold.status": "settled"
+            },
+            "capture": {"settlement_a": "settlement_id", "receipt_a_created_at": "receipt.created_at"},
+            "relations": [["not_after", "${claim_a_claimed_at}", "${receipt_a_created_at}"]]
+          }
+        },
+        {
+          "id": "settle-op-b",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s01:op-b", "receipt": "${defs.receipts.op_b}"},
+          "expect": {
+            "status": 200,
+            "match": {
+              "status": "settled",
+              "claim_id": "${claim_b}",
+              "receipt.actual_vendor_cost": "${defs.exact_cost.op_b}",
+              "receipt.authorized_max_cents": 300,
+              "receipt.budget_charge_cents": 251,
+              "receipt.released_amount_cents": 49,
+              "receipt.overrun_amount_cents": 0,
+              "receipt.provider_request_id": "fixture-provider-request:op-b",
+              "receipt.artifact_reference": "artifact://conformance/op-b.txt",
+              "receipt.price_model_snapshot": "${defs.receipts.op_b.price_model_snapshot}"
+            },
+            "capture": {"settlement_b": "settlement_id"},
+            "relations": [["different", "${settlement_b}", "${settlement_a}"]]
+          }
+        },
+        {
+          "id": "changed-provider-reference-rejected",
+          "operation": "settle",
+          "body": {
+            "agent_id": "${agent.agent_id}",
+            "operation_key": "conformance:v4.3:s01:op-a",
+            "receipt": {"$merge": "${defs.receipts.op_a}", "provider_request_id": "fixture-provider-request:rewritten"}
+          },
+          "expect": {"retry_decision": "stop_receipt_conflict"}
+        },
+        {
+          "id": "changed-artifact-reference-rejected",
+          "operation": "settle",
+          "body": {
+            "agent_id": "${agent.agent_id}",
+            "operation_key": "conformance:v4.3:s01:op-a",
+            "receipt": {"$merge": "${defs.receipts.op_a}", "artifact_reference": "artifact://conformance/rewritten.png"}
+          },
+          "expect": {"retry_decision": "stop_receipt_conflict"}
+        },
+        {
+          "id": "numerically-equal-rescaled-cost-rejected",
+          "operation": "settle",
+          "body": {
+            "agent_id": "${agent.agent_id}",
+            "operation_key": "conformance:v4.3:s01:op-b",
+            "receipt": {"$merge": "${defs.receipts.op_b}", "actual_vendor_cost": {"amount": 250010, "scale": 5, "currency": "usd"}}
+          },
+          "expect": {"retry_decision": "stop_receipt_conflict"}
+        },
+        {
+          "id": "inspect-settled-op-a",
+          "operation": "inspect_claim",
+          "query": {"claim_id": "${claim_a}"},
+          "expect": {
+            "status": 200,
+            "match": {
+              "status": "settled",
+              "settlement_id": "${settlement_a}",
+              "claimed_at": "${claim_a_claimed_at}",
+              "reconciliation_required": false,
+              "spend.budget_hold.status": "settled"
+            },
+            "relations": [["not_after", "${claim_a_claimed_at}", "@finalized_at"]]
+          }
+        },
+        {
+          "id": "identical-replay-returns-original-receipt",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s01:op-a", "receipt": "${defs.receipts.op_a}"},
+          "expect": {
+            "status": 200,
+            "match": {
+              "settlement_id": "${settlement_a}",
+              "receipt.created_at": "${receipt_a_created_at}",
+              "receipt.provider_request_id": "fixture-provider-request:op-a",
+              "receipt.artifact_reference": "artifact://conformance/op-a.png",
+              "receipt.budget_charge_cents": 351
+            }
+          }
+        },
+        {
+          "id": "budget-after-two-settlements",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 602,
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 398
+            }
+          }
+        },
+        {
+          "id": "exactly-once-ledger-postings",
+          "operation": "ledger",
+          "query": {"agent_id": "${agent.agent_id}", "budget_id": "${budget.budget_id}"},
+          "expect": {
+            "status": 200,
+            "match": {
+              "schema_version": "hubu-history-v1",
+              "transactions[settlement_id=${settlement_a}].kind": "external_provider",
+              "transactions[settlement_id=${settlement_a}].claim_id": "${claim_a}",
+              "transactions[settlement_id=${settlement_a}].workflow_id": "${decision_a}",
+              "transactions[settlement_id=${settlement_a}].budget_id": "${budget.budget_id}",
+              "transactions[settlement_id=${settlement_a}].budget_charge_delta_cents": 351,
+              "transactions[settlement_id=${settlement_a}].effective_cost": {"amount": "3500001", "scale": 6, "currency": "usd"},
+              "transactions[settlement_id=${settlement_a}].entries[direction=debit].account_kind": "AgentSpendExpense",
+              "transactions[settlement_id=${settlement_a}].entries[direction=debit].amount": {"amount": "3500001000000000000", "scale": 18, "currency": "usd"},
+              "transactions[settlement_id=${settlement_a}].entries[direction=credit].amount": {"amount": "3500001000000000000", "scale": 18, "currency": "usd"},
+              "transactions[settlement_id=${settlement_b}].claim_id": "${claim_b}",
+              "transactions[settlement_id=${settlement_b}].workflow_id": "${decision_b}",
+              "transactions[settlement_id=${settlement_b}].budget_charge_delta_cents": 251,
+              "transactions[settlement_id=${settlement_b}].effective_cost": {"amount": "25001", "scale": 4, "currency": "usd"},
+              "coverage.consumed_amount_cents": 602,
+              "coverage.recorded_budget_charges_cents": 602,
+              "coverage.unaccounted_consumption_cents": 0,
+              "coverage.pending_hold_count": 0
+            },
+            "counts": [
+              {"path": "transactions", "equals": 2},
+              {"path": "transactions", "where": {"settlement_id": "${settlement_a}"}, "equals": 1},
+              {"path": "transactions", "where": {"settlement_id": "${settlement_b}"}, "equals": 1},
+              {"path": "transactions[settlement_id=${settlement_a}].entries", "equals": 2}
+            ],
+            "capture": {"ledger_a": "transactions[settlement_id=${settlement_a}].id", "ledger_b": "transactions[settlement_id=${settlement_b}].id"}
+          }
+        },
+        {
+          "id": "workflows-link-receipts-and-postings",
+          "operation": "workflows",
+          "query": {"agent_id": "${agent.agent_id}"},
+          "expect": {
+            "status": 200,
+            "match": {
+              "workflows[decision_id=${decision_a}].status": "settled",
+              "workflows[decision_id=${decision_a}].ledger_transaction_ids": ["${ledger_a}"],
+              "workflows[decision_id=${decision_a}].receipt.settlement_id": "${settlement_a}",
+              "workflows[decision_id=${decision_a}].receipt.budget_charge_cents": 351,
+              "workflows[decision_id=${decision_a}].receipt.actual_vendor_cost": {"amount": "3500001", "scale": 6, "currency": "usd"},
+              "workflows[decision_id=${decision_b}].status": "settled",
+              "workflows[decision_id=${decision_b}].ledger_transaction_ids": ["${ledger_b}"],
+              "workflows[decision_id=${decision_b}].receipt.budget_charge_cents": 251
+            },
+            "counts": [{"path": "workflows", "equals": 2}],
+            "relations": [
+              ["different", "@workflows[decision_id=${decision_a}].receipt.artifact_reference", "@workflows[decision_id=${decision_b}].receipt.artifact_reference"],
+              ["different", "@workflows[decision_id=${decision_a}].receipt.provider_request_reference", "@workflows[decision_id=${decision_b}].receipt.provider_request_reference"]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "S03",
+      "title": "retry authorization, claim, and finalization after ambiguous responses without duplicate holds or consumption",
+      "setup": {"budget_cents": 1000},
+      "steps": [
+        {
+          "id": "authorize-response-dropped",
+          "operation": "authorize",
+          "fault": "drop_response",
+          "body": {
+            "operation_key": "conformance:v4.3:s03:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 500,
+            "task_id": "conformance:v4.3:s03",
+            "reason": "Conformance ambiguous retry",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          }
+        },
+        {
+          "id": "authorize-retry",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s03:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 500,
+            "task_id": "conformance:v4.3:s03",
+            "reason": "Conformance ambiguous retry",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {
+            "status": 200,
+            "match": {"decision": "allow", "revision": 1, "idempotent_replay": true, "retry_guidance.action": "replay_exactly", "budget_hold.status": "frozen"},
+            "counts": [{"path": "attempt_history", "equals": 1}],
+            "capture": {"token": "auth_token_id", "hold": "budget_hold.hold_id", "expanded_scope": "execution_scope"}
+          }
+        },
+        {
+          "id": "authorize-second-retry",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s03:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 500,
+            "task_id": "conformance:v4.3:s03",
+            "reason": "Conformance ambiguous retry",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"auth_token_id": "${token}", "budget_hold.hold_id": "${hold}", "idempotent_replay": true}}
+        },
+        {
+          "id": "single-hold-after-authorize-retries",
+          "operation": "budgets",
+          "expect": {"status": 200, "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 500, "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 500}}
+        },
+        {
+          "id": "claim-response-dropped",
+          "operation": "claim",
+          "fault": "drop_response",
+          "body": {"operation_key": "conformance:v4.3:s03:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 500, "execution_scope": "${expanded_scope}"}
+        },
+        {
+          "id": "claim-retry",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s03:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 500, "execution_scope": "${expanded_scope}"},
+          "expect": {
+            "status": 200,
+            "match": {"status": "claimed", "spend.budget_hold.hold_id": "${hold}"},
+            "capture": {"claim": "claim_id", "claimed_at": "claimed_at", "claim_expires_at": "claim_expires_at"}
+          }
+        },
+        {
+          "id": "claim-second-retry",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s03:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 500, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "match": {"claim_id": "${claim}", "claimed_at": "${claimed_at}", "claim_expires_at": "${claim_expires_at}", "status": "claimed"}}
+        },
+        {
+          "id": "single-hold-after-claim-retries",
+          "operation": "budgets",
+          "expect": {"status": 200, "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 500, "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0}}
+        },
+        {
+          "id": "settle-response-dropped",
+          "operation": "settle",
+          "fault": "drop_response",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s03:op", "receipt": "${defs.receipts.op_a}"}
+        },
+        {
+          "id": "settle-retry",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s03:op", "receipt": "${defs.receipts.op_a}"},
+          "expect": {
+            "status": 200,
+            "match": {"status": "settled", "claim_id": "${claim}", "receipt.budget_charge_cents": 351, "receipt.released_amount_cents": 149},
+            "capture": {"settlement": "settlement_id", "receipt_created_at": "receipt.created_at"}
+          }
+        },
+        {
+          "id": "settle-second-retry",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s03:op", "receipt": "${defs.receipts.op_a}"},
+          "expect": {"status": 200, "match": {"settlement_id": "${settlement}", "receipt.created_at": "${receipt_created_at}"}}
+        },
+        {
+          "id": "single-consumption",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 351,
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 649
+            }
+          }
+        },
+        {
+          "id": "single-posting",
+          "operation": "ledger",
+          "query": {"agent_id": "${agent.agent_id}", "budget_id": "${budget.budget_id}"},
+          "expect": {
+            "status": 200,
+            "match": {"transactions[0].settlement_id": "${settlement}", "transactions[0].budget_charge_delta_cents": 351, "coverage.consumed_amount_cents": 351, "coverage.recorded_budget_charges_cents": 351, "coverage.unaccounted_consumption_cents": 0},
+            "counts": [{"path": "transactions", "equals": 1}]
+          }
+        },
+        {
+          "id": "single-workflow",
+          "operation": "workflows",
+          "query": {"agent_id": "${agent.agent_id}"},
+          "expect": {"status": 200, "match": {"workflows[0].status": "settled", "workflows[0].revision": 1}, "counts": [{"path": "workflows", "equals": 1}]}
+        }
+      ]
+    },
+    {
+      "id": "S04",
+      "title": "reject operation-key reuse with changed spend scope",
+      "setup": {"budget_cents": 1000},
+      "steps": [
+        {
+          "id": "authorize-original",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s04:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 300,
+            "task_id": "conformance:v4.3:s04",
+            "reason": "Conformance immutable scope",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {
+            "status": 200,
+            "match": {"decision": "allow", "revision": 1},
+            "capture": {"token": "auth_token_id", "hold": "budget_hold.hold_id", "expanded_scope": "execution_scope"}
+          }
+        },
+        {
+          "id": "changed-amount-rejected",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s04:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 301,
+            "task_id": "conformance:v4.3:s04",
+            "reason": "Conformance immutable scope",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"retry_decision": "create_new_operation", "match": {"retry_guidance.operation_key": "conformance:v4.3:s04:op"}}
+        },
+        {
+          "id": "changed-provider-scope-rejected",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s04:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 300,
+            "task_id": "conformance:v4.3:s04",
+            "reason": "Conformance immutable scope",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope_other_provider}"
+          },
+          "expect": {"retry_decision": "create_new_operation"}
+        },
+        {
+          "id": "changed-lease-profile-rejected",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s04:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 300,
+            "task_id": "conformance:v4.3:s04",
+            "reason": "Conformance immutable scope",
+            "lease_profile": "conformance_short",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"retry_decision": "create_new_operation"}
+        },
+        {
+          "id": "no-extra-hold-from-rejected-scopes",
+          "operation": "budgets",
+          "expect": {"status": 200, "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 300, "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 700}}
+        },
+        {
+          "id": "claim-with-changed-amount-rejected",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s04:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 301, "execution_scope": "${expanded_scope}"},
+          "expect": {"retry_decision": "stop_claim_mismatch"}
+        },
+        {
+          "id": "claim-with-changed-scope-rejected",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s04:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 300, "execution_scope": "${defs.expanded_scope_other_provider}"},
+          "expect": {"retry_decision": "stop_claim_mismatch"}
+        },
+        {
+          "id": "claim-with-changed-operation-key-rejected",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s04:other-op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 300, "execution_scope": "${expanded_scope}"},
+          "expect": {"retry_decision": "stop_claim_operation_mismatch"}
+        },
+        {
+          "id": "exact-replay-still-recovers-original",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s04:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 300,
+            "task_id": "conformance:v4.3:s04",
+            "reason": "Conformance immutable scope",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"auth_token_id": "${token}", "budget_hold.hold_id": "${hold}", "revision": 1, "idempotent_replay": true}, "counts": [{"path": "attempt_history", "equals": 1}]}
+        },
+        {
+          "id": "exact-claim-succeeds",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s04:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 300, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "match": {"status": "claimed", "spend.amount_cents": 300, "spend.budget_hold.hold_id": "${hold}"}}
+        },
+        {
+          "id": "changed-scope-after-claim-rejected",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s04:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 200,
+            "task_id": "conformance:v4.3:s04",
+            "reason": "Conformance immutable scope",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"retry_decision": "create_new_operation"}
+        },
+        {
+          "id": "single-hold-remains",
+          "operation": "budgets",
+          "expect": {"status": 200, "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 300, "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0}}
+        }
+      ]
+    },
+    {
+      "id": "S05",
+      "title": "release cleanly when failure occurs before billable provider work",
+      "setup": {"budget_cents": 1000},
+      "steps": [
+        {
+          "id": "authorize",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s05:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 300,
+            "task_id": "conformance:v4.3:s05",
+            "reason": "Conformance pre-billing failure",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"decision": "allow"}, "capture": {"token": "auth_token_id", "hold": "budget_hold.hold_id", "decision": "decision_id", "expanded_scope": "execution_scope"}}
+        },
+        {
+          "id": "claim",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s05:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 300, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "match": {"status": "claimed"}, "capture": {"claim": "claim_id"}}
+        },
+        {
+          "id": "release",
+          "operation": "release",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s05:op"},
+          "expect": {
+            "status": 200,
+            "match": {"claim_id": "${claim}", "status": "released", "settlement_id": null, "reconciliation_outcome": null, "spend.budget_hold.hold_id": "${hold}", "spend.budget_hold.status": "released"},
+            "capture": {"finalized_at": "finalized_at"},
+            "relations": [["non_null", "${finalized_at}", ""]]
+          }
+        },
+        {
+          "id": "release-replay",
+          "operation": "release",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s05:op"},
+          "expect": {"status": 200, "match": {"claim_id": "${claim}", "status": "released", "finalized_at": "${finalized_at}"}}
+        },
+        {
+          "id": "hold-returned-once",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0,
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 1000
+            }
+          }
+        },
+        {
+          "id": "settle-after-release-rejected",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s05:op", "receipt": "${defs.receipts.op_b}"},
+          "expect": {"retry_decision": "terminal_already_released"}
+        },
+        {
+          "id": "claim-replay-reports-released",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s05:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 300, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "match": {"claim_id": "${claim}", "status": "released", "finalized_at": "${finalized_at}"}}
+        },
+        {
+          "id": "no-expense-posting",
+          "operation": "ledger",
+          "query": {"agent_id": "${agent.agent_id}", "budget_id": "${budget.budget_id}"},
+          "expect": {
+            "status": 200,
+            "match": {"coverage.consumed_amount_cents": 0, "coverage.recorded_budget_charges_cents": 0, "coverage.unaccounted_consumption_cents": 0, "coverage.pending_hold_count": 0},
+            "counts": [{"path": "transactions", "equals": 0}]
+          }
+        },
+        {
+          "id": "released-workflow-has-no-receipt",
+          "operation": "workflows",
+          "query": {"agent_id": "${agent.agent_id}"},
+          "expect": {
+            "status": 200,
+            "match": {"workflows[decision_id=${decision}].status": "released", "workflows[decision_id=${decision}].receipt": null, "workflows[decision_id=${decision}].ledger_transaction_ids": []}
+          }
+        }
+      ]
+    },
+    {
+      "id": "S06",
+      "title": "preserve billed work after settlement response loss and return the stored terminal result",
+      "setup": {"budget_cents": 1000},
+      "steps": [
+        {
+          "id": "authorize",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s06:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 500,
+            "task_id": "conformance:v4.3:s06",
+            "reason": "Conformance settlement response loss",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"decision": "allow"}, "capture": {"token": "auth_token_id", "decision": "decision_id", "expanded_scope": "execution_scope"}}
+        },
+        {
+          "id": "claim",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s06:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 500, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "match": {"status": "claimed"}, "capture": {"claim": "claim_id"}}
+        },
+        {
+          "id": "settle-response-lost",
+          "operation": "settle",
+          "fault": "drop_response",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s06:op", "receipt": "${defs.receipts.op_a}"}
+        },
+        {
+          "id": "inspect-shows-committed-settlement",
+          "operation": "inspect_claim",
+          "query": {"claim_id": "${claim}"},
+          "expect": {
+            "status": 200,
+            "match": {"status": "settled", "reconciliation_required": false, "spend.budget_hold.status": "settled"},
+            "capture": {"settlement": "settlement_id", "finalized_at": "finalized_at"},
+            "relations": [["non_null", "${settlement}", ""]]
+          }
+        },
+        {
+          "id": "release-cannot-erase-billed-work",
+          "operation": "release",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s06:op"},
+          "expect": {"retry_decision": "terminal_already_settled"}
+        },
+        {
+          "id": "identical-settlement-returns-stored-result",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s06:op", "receipt": "${defs.receipts.op_a}"},
+          "expect": {
+            "status": 200,
+            "match": {
+              "settlement_id": "${settlement}",
+              "status": "settled",
+              "receipt.actual_vendor_cost": "${defs.exact_cost.op_a}",
+              "receipt.budget_charge_cents": 351,
+              "receipt.released_amount_cents": 149,
+              "receipt.provider_request_id": "fixture-provider-request:op-a",
+              "receipt.artifact_reference": "artifact://conformance/op-a.png",
+              "receipt.price_model_snapshot": "${defs.receipts.op_a.price_model_snapshot}"
+            }
+          }
+        },
+        {
+          "id": "changed-cost-after-loss-rejected",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s06:op", "receipt": {"$merge": "${defs.receipts.op_a}", "actual_vendor_cost": "${defs.exact_cost.reconciled}"}},
+          "expect": {"retry_decision": "stop_receipt_conflict"}
+        },
+        {
+          "id": "billed-work-consumed-once",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0, "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 351, "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 649}
+          }
+        },
+        {
+          "id": "billed-work-posted-once",
+          "operation": "ledger",
+          "query": {"agent_id": "${agent.agent_id}", "budget_id": "${budget.budget_id}"},
+          "expect": {
+            "status": 200,
+            "match": {"transactions[settlement_id=${settlement}].claim_id": "${claim}", "transactions[settlement_id=${settlement}].budget_charge_delta_cents": 351, "coverage.recorded_budget_charges_cents": 351, "coverage.unaccounted_consumption_cents": 0},
+            "counts": [{"path": "transactions", "equals": 1}]
+          }
+        },
+        {
+          "id": "workflow-settled",
+          "operation": "workflows",
+          "query": {"agent_id": "${agent.agent_id}"},
+          "expect": {"status": 200, "match": {"workflows[decision_id=${decision}].status": "settled", "workflows[decision_id=${decision}].receipt.settlement_id": "${settlement}", "workflows[decision_id=${decision}].claim.finalized_at": "${finalized_at}"}}
+        }
+      ]
+    },
+    {
+      "id": "S07",
+      "title": "expire a claimed lease into the reconciliation queue without automatically releasing its hold",
+      "setup": {"budget_cents": 1000},
+      "steps": [
+        {
+          "id": "authorize-short-lease",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s07:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 300,
+            "task_id": "conformance:v4.3:s07",
+            "reason": "Conformance lease expiry",
+            "lease_profile": "conformance_short",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"decision": "allow", "lease_profile": "conformance_short"}, "capture": {"token": "auth_token_id", "hold": "budget_hold.hold_id", "decision": "decision_id", "expanded_scope": "execution_scope"}}
+        },
+        {
+          "id": "claim",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s07:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 300, "execution_scope": "${expanded_scope}"},
+          "expect": {
+            "status": 200,
+            "match": {"status": "claimed", "lease_profile": "conformance_short", "reconciliation_required": false},
+            "capture": {"claim": "claim_id", "claimed_at": "claimed_at", "claim_expires_at": "claim_expires_at"},
+            "relations": [["before", "${claimed_at}", "${claim_expires_at}"]]
+          }
+        },
+        {"id": "lease-expires", "control": "await_reconciliation_required", "claim_id": "${claim}"},
+        {
+          "id": "expired-claim-keeps-hold",
+          "operation": "inspect_claim",
+          "query": {"claim_id": "${claim}"},
+          "expect": {
+            "status": 200,
+            "match": {"status": "claimed", "reconciliation_required": true, "finalized_at": null, "settlement_id": null, "claim_expires_at": "${claim_expires_at}", "spend.budget_hold.hold_id": "${hold}", "spend.budget_hold.status": "claimed"}
+          }
+        },
+        {
+          "id": "normal-settle-rejected",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s07:op", "receipt": "${defs.receipts.op_b}"},
+          "expect": {"retry_decision": "await_human_reconciliation_expired"}
+        },
+        {
+          "id": "normal-release-rejected",
+          "operation": "release",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s07:op"},
+          "expect": {"retry_decision": "await_human_reconciliation_expired"}
+        },
+        {
+          "id": "claim-in-reconciliation-queue",
+          "operation": "reconciliation_queue",
+          "expect": {
+            "status": 200,
+            "match": {
+              "claims[claim_id=${claim}].reconciliation_required": true,
+              "claims[claim_id=${claim}].status": "claimed",
+              "claims[claim_id=${claim}].spend.budget_hold.amount_cents": 300,
+              "claims[claim_id=${claim}].spend.budget_hold.status": "claimed"
+            },
+            "counts": [{"path": "claims", "where": {"claim_id": "${claim}"}, "equals": 1}]
+          }
+        },
+        {
+          "id": "hold-still-frozen",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 300, "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0, "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 700}
+          }
+        },
+        {
+          "id": "no-posting-pending-hold",
+          "operation": "ledger",
+          "query": {"agent_id": "${agent.agent_id}", "budget_id": "${budget.budget_id}"},
+          "expect": {"status": 200, "match": {"coverage.pending_hold_count": 1, "coverage.consumed_amount_cents": 0}, "counts": [{"path": "transactions", "equals": 0}]}
+        },
+        {
+          "id": "workflow-requires-reconciliation",
+          "operation": "workflows",
+          "query": {"agent_id": "${agent.agent_id}"},
+          "expect": {"status": 200, "match": {"workflows[decision_id=${decision}].status": "reconciliation_required", "workflows[decision_id=${decision}].claim.reconciliation_required": true}}
+        }
+      ]
+    },
+    {
+      "id": "S08",
+      "title": "reconcile vendor-billed and vendor-did-not-bill outcomes with the separate human capability",
+      "setup": {"budget_cents": 1000},
+      "steps": [
+        {
+          "id": "authorize-billed",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s08:billed",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 300,
+            "task_id": "conformance:v4.3:s08",
+            "reason": "Conformance reconciliation billed",
+            "lease_profile": "conformance_short",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"decision": "allow"}, "capture": {"token_billed": "auth_token_id", "decision_billed": "decision_id", "expanded_scope": "execution_scope"}}
+        },
+        {
+          "id": "authorize-not-billed",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s08:not-billed",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 200,
+            "task_id": "conformance:v4.3:s08",
+            "reason": "Conformance reconciliation not billed",
+            "lease_profile": "conformance_short",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"decision": "allow"}, "capture": {"token_not_billed": "auth_token_id", "decision_not_billed": "decision_id"}}
+        },
+        {
+          "id": "claim-billed",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s08:billed", "spend_auth_token_id": "${token_billed}", "account_id": "${agent.account_id}", "amount_cents": 300, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "capture": {"claim_billed": "claim_id"}}
+        },
+        {
+          "id": "claim-not-billed",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s08:not-billed", "spend_auth_token_id": "${token_not_billed}", "account_id": "${agent.account_id}", "amount_cents": 200, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "capture": {"claim_not_billed": "claim_id"}}
+        },
+        {"id": "billed-lease-expires", "control": "await_reconciliation_required", "claim_id": "${claim_billed}"},
+        {"id": "not-billed-lease-expires", "control": "await_reconciliation_required", "claim_id": "${claim_not_billed}"},
+        {
+          "id": "executor-bearer-only-billed-rejected",
+          "operation": "reconcile_billed",
+          "actor": "executor",
+          "body": {
+            "claim_id": "${claim_billed}",
+            "provider_reference": "fixture-vendor-request:reconciled",
+            "evidence": "Fixture usage export confirms the billed request.",
+            "receipt": "${defs.receipts.reconciled}"
+          },
+          "expect": {"retry_decision": "human_capability_missing"}
+        },
+        {
+          "id": "executor-bearer-as-capability-billed-rejected",
+          "operation": "reconcile_billed",
+          "actor": "executor",
+          "reconciliation_capability": "executor_bearer",
+          "body": {
+            "claim_id": "${claim_billed}",
+            "provider_reference": "fixture-vendor-request:reconciled",
+            "evidence": "Fixture usage export confirms the billed request.",
+            "receipt": "${defs.receipts.reconciled}"
+          },
+          "expect": {"retry_decision": "human_capability_invalid"}
+        },
+        {
+          "id": "executor-bearer-only-not-billed-rejected",
+          "operation": "reconcile_not_billed",
+          "actor": "executor",
+          "body": {"claim_id": "${claim_not_billed}", "provider_reference": "fixture-vendor-request:not-billed", "evidence": "Fixture billing search found no charge."},
+          "expect": {"retry_decision": "human_capability_missing"}
+        },
+        {
+          "id": "executor-bearer-as-capability-not-billed-rejected",
+          "operation": "reconcile_not_billed",
+          "actor": "executor",
+          "reconciliation_capability": "executor_bearer",
+          "body": {"claim_id": "${claim_not_billed}", "provider_reference": "fixture-vendor-request:not-billed", "evidence": "Fixture billing search found no charge."},
+          "expect": {"retry_decision": "human_capability_invalid"}
+        },
+        {
+          "id": "rejected-attempts-left-queue-intact",
+          "operation": "reconciliation_queue",
+          "expect": {
+            "status": 200,
+            "counts": [
+              {"path": "claims", "where": {"claim_id": "${claim_billed}"}, "equals": 1},
+              {"path": "claims", "where": {"claim_id": "${claim_not_billed}"}, "equals": 1}
+            ]
+          }
+        },
+        {
+          "id": "both-holds-frozen",
+          "operation": "budgets",
+          "expect": {"status": 200, "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 500, "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0}}
+        },
+        {
+          "id": "human-reconciles-billed",
+          "operation": "reconcile_billed",
+          "body": {
+            "claim_id": "${claim_billed}",
+            "provider_reference": "fixture-vendor-request:reconciled",
+            "evidence": "Fixture usage export confirms the billed request.",
+            "receipt": "${defs.receipts.reconciled}"
+          },
+          "expect": {
+            "status": 200,
+            "match": {
+              "claim_id": "${claim_billed}",
+              "status": "settled",
+              "reconciliation_required": false,
+              "reconciliation_outcome": "vendor_billed",
+              "provider_reference": "fixture-vendor-request:reconciled",
+              "evidence": "Fixture usage export confirms the billed request.",
+              "spend.budget_hold.status": "settled"
+            },
+            "capture": {"settlement_billed": "settlement_id", "reconciled_at_billed": "reconciled_at", "reconciled_by": "reconciled_by_user_id"},
+            "relations": [["non_null", "${settlement_billed}", ""], ["non_null", "${reconciled_by}", ""], ["not_after", "@claim_expires_at", "${reconciled_at_billed}"]]
+          }
+        },
+        {
+          "id": "human-billed-replay",
+          "operation": "reconcile_billed",
+          "body": {
+            "claim_id": "${claim_billed}",
+            "provider_reference": "fixture-vendor-request:reconciled",
+            "evidence": "Fixture usage export confirms the billed request.",
+            "receipt": "${defs.receipts.reconciled}"
+          },
+          "expect": {"status": 200, "match": {"settlement_id": "${settlement_billed}", "reconciled_at": "${reconciled_at_billed}", "reconciliation_outcome": "vendor_billed"}}
+        },
+        {
+          "id": "human-billed-changed-evidence-rejected",
+          "operation": "reconcile_billed",
+          "body": {
+            "claim_id": "${claim_billed}",
+            "provider_reference": "fixture-vendor-request:reconciled",
+            "evidence": "Rewritten evidence.",
+            "receipt": "${defs.receipts.reconciled}"
+          },
+          "expect": {"retry_decision": "stop_reconciliation_conflict"}
+        },
+        {
+          "id": "human-reconciles-not-billed",
+          "operation": "reconcile_not_billed",
+          "body": {"claim_id": "${claim_not_billed}", "provider_reference": "fixture-vendor-request:not-billed", "evidence": "Fixture billing search found no charge."},
+          "expect": {
+            "status": 200,
+            "match": {
+              "claim_id": "${claim_not_billed}",
+              "status": "released",
+              "settlement_id": null,
+              "reconciliation_outcome": "vendor_did_not_bill",
+              "provider_reference": "fixture-vendor-request:not-billed",
+              "reconciled_by_user_id": "${reconciled_by}",
+              "spend.budget_hold.status": "released"
+            },
+            "capture": {"reconciled_at_not_billed": "reconciled_at"}
+          }
+        },
+        {
+          "id": "human-not-billed-replay",
+          "operation": "reconcile_not_billed",
+          "body": {"claim_id": "${claim_not_billed}", "provider_reference": "fixture-vendor-request:not-billed", "evidence": "Fixture billing search found no charge."},
+          "expect": {"status": 200, "match": {"status": "released", "reconciled_at": "${reconciled_at_not_billed}"}}
+        },
+        {
+          "id": "queue-drained",
+          "operation": "reconciliation_queue",
+          "expect": {
+            "status": 200,
+            "counts": [
+              {"path": "claims", "where": {"claim_id": "${claim_billed}"}, "equals": 0},
+              {"path": "claims", "where": {"claim_id": "${claim_not_billed}"}, "equals": 0}
+            ]
+          }
+        },
+        {
+          "id": "budget-after-reconciliation",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0, "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 251, "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 749}
+          }
+        },
+        {
+          "id": "billed-posted-once-not-billed-never",
+          "operation": "ledger",
+          "query": {"agent_id": "${agent.agent_id}", "budget_id": "${budget.budget_id}"},
+          "expect": {
+            "status": 200,
+            "match": {
+              "transactions[claim_id=${claim_billed}].settlement_id": "${settlement_billed}",
+              "transactions[claim_id=${claim_billed}].budget_charge_delta_cents": 251,
+              "transactions[claim_id=${claim_billed}].effective_cost": {"amount": "2500001", "scale": 6, "currency": "usd"},
+              "coverage.consumed_amount_cents": 251,
+              "coverage.recorded_budget_charges_cents": 251,
+              "coverage.unaccounted_consumption_cents": 0,
+              "coverage.pending_hold_count": 0
+            },
+            "counts": [
+              {"path": "transactions", "equals": 1},
+              {"path": "transactions", "where": {"claim_id": "${claim_not_billed}"}, "equals": 0}
+            ]
+          }
+        },
+        {
+          "id": "workflows-record-outcomes",
+          "operation": "workflows",
+          "query": {"agent_id": "${agent.agent_id}"},
+          "expect": {
+            "status": 200,
+            "match": {
+              "workflows[decision_id=${decision_billed}].status": "settled",
+              "workflows[decision_id=${decision_billed}].claim.reconciliation_outcome": "vendor_billed",
+              "workflows[decision_id=${decision_billed}].receipt.budget_charge_cents": 251,
+              "workflows[decision_id=${decision_not_billed}].status": "released",
+              "workflows[decision_id=${decision_not_billed}].claim.reconciliation_outcome": "vendor_did_not_bill",
+              "workflows[decision_id=${decision_not_billed}].receipt": null,
+              "workflows[decision_id=${decision_not_billed}].ledger_transaction_ids": []
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "S09",
+      "title": "restart Hubu between stages and recover the same durable state",
+      "setup": {"budget_cents": 1000},
+      "steps": [
+        {
+          "id": "authorize",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s09:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 400,
+            "task_id": "conformance:v4.3:s09",
+            "reason": "Conformance restart recovery",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"decision": "allow", "idempotent_replay": false}, "capture": {"token": "auth_token_id", "hold": "budget_hold.hold_id", "decision": "decision_id", "authorization_expires_at": "authorization_expires_at", "expanded_scope": "execution_scope"}}
+        },
+        {"id": "denied-revision", "operation": "authorize", "body": {"operation_key": "conformance:v4.3:s09:corrected", "account_id": "${agent.account_id}", "amount_cents": 1001, "task_id": "conformance:v4.3:s09", "reason": "Conformance corrected retry across restart", "lease_profile": "default", "execution_scope": "${defs.scope}"}, "expect": {"retry_decision": "reuse_operation_key_after_denial"}},
+        {"id": "corrected-revision", "operation": "authorize", "body": {"operation_key": "conformance:v4.3:s09:corrected", "account_id": "${agent.account_id}", "amount_cents": 100, "task_id": "conformance:v4.3:s09", "reason": "Conformance corrected retry across restart", "lease_profile": "default", "execution_scope": "${defs.scope}"}, "expect": {"status": 200, "match": {"decision": "allow", "revision": 2}, "capture": {"corrected_token": "auth_token_id"}}},
+        {"id": "restart-after-authorize", "control": "restart_hubu"},
+        {"id": "corrected-replay-after-restart", "operation": "authorize", "body": {"operation_key": "conformance:v4.3:s09:corrected", "account_id": "${agent.account_id}", "amount_cents": 100, "task_id": "conformance:v4.3:s09", "reason": "Conformance corrected retry across restart", "lease_profile": "default", "execution_scope": "${defs.scope}"}, "expect": {"status": 200, "match": {"auth_token_id": "${corrected_token}", "revision": 2, "idempotent_replay": true}, "counts": [{"path": "attempt_history", "equals": 2}]}},
+        {
+          "id": "authorize-replay-after-restart",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s09:op",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 400,
+            "task_id": "conformance:v4.3:s09",
+            "reason": "Conformance restart recovery",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {
+            "status": 200,
+            "match": {"auth_token_id": "${token}", "decision_id": "${decision}", "budget_hold.hold_id": "${hold}", "authorization_expires_at": "${authorization_expires_at}", "idempotent_replay": true, "revision": 1}
+          }
+        },
+        {
+          "id": "resolve-after-restart",
+          "operation": "resolve",
+          "body": {"spend_auth_token_id": "${token}"},
+          "expect": {"status": 200, "match": {"status": "available", "operation_key": "conformance:v4.3:s09:op", "budget_hold.hold_id": "${hold}"}}
+        },
+        {
+          "id": "claim",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s09:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 400, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "match": {"status": "claimed"}, "capture": {"claim": "claim_id", "claimed_at": "claimed_at", "claim_expires_at": "claim_expires_at"}}
+        },
+        {"id": "restart-after-claim", "control": "restart_hubu"},
+        {
+          "id": "claim-replay-after-restart",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s09:op", "spend_auth_token_id": "${token}", "account_id": "${agent.account_id}", "amount_cents": 400, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "match": {"claim_id": "${claim}", "claimed_at": "${claimed_at}", "claim_expires_at": "${claim_expires_at}", "status": "claimed"}}
+        },
+        {
+          "id": "hold-survives-restart",
+          "operation": "budgets",
+          "expect": {"status": 200, "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 500, "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 500}}
+        },
+        {
+          "id": "settle-response-lost",
+          "operation": "settle",
+          "fault": "drop_response",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s09:op", "receipt": "${defs.receipts.op_a}"}
+        },
+        {"id": "restart-after-settle", "control": "restart_hubu"},
+        {
+          "id": "inspect-after-restart",
+          "operation": "inspect_claim",
+          "query": {"claim_id": "${claim}"},
+          "expect": {"status": 200, "match": {"status": "settled", "claimed_at": "${claimed_at}"}, "capture": {"settlement": "settlement_id"}}
+        },
+        {
+          "id": "settle-replay-after-restart",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s09:op", "receipt": "${defs.receipts.op_a}"},
+          "expect": {"status": 200, "match": {"settlement_id": "${settlement}", "claim_id": "${claim}", "receipt.budget_charge_cents": 351, "receipt.released_amount_cents": 49}}
+        },
+        {
+          "id": "budget-consistent-after-restarts",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 100, "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 351, "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 549}
+          }
+        },
+        {
+          "id": "single-posting-after-restarts",
+          "operation": "ledger",
+          "query": {"agent_id": "${agent.agent_id}", "budget_id": "${budget.budget_id}"},
+          "expect": {
+            "status": 200,
+            "match": {"transactions[0].settlement_id": "${settlement}", "transactions[0].workflow_id": "${decision}", "coverage.recorded_budget_charges_cents": 351, "coverage.unaccounted_consumption_cents": 0},
+            "counts": [{"path": "transactions", "equals": 1}]
+          }
+        }
+      ]
+    },
+    {
+      "id": "S10",
+      "title": "reject every attempt to exceed either operation maximum or the agent budget",
+      "setup": {"budget_cents": 1000},
+      "steps": [
+        {
+          "id": "over-budget-authorization-denied",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s10:over-budget",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 1001,
+            "task_id": "conformance:v4.3:s10",
+            "reason": "Conformance over budget",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"retry_decision": "reuse_operation_key_after_denial", "match": {"reasons": ["budget does not have enough remaining balance"]}}
+        },
+        {
+          "id": "denial-created-no-hold",
+          "operation": "budgets",
+          "expect": {"status": 200, "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0, "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 1000}}
+        },
+        {
+          "id": "authorize-op-a",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s10:op-a",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 600,
+            "task_id": "conformance:v4.3:s10",
+            "reason": "Conformance limit A",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"decision": "allow"}, "capture": {"token_a": "auth_token_id", "expanded_scope": "execution_scope"}}
+        },
+        {
+          "id": "second-operation-exceeding-remaining-denied",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s10:op-b",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 500,
+            "task_id": "conformance:v4.3:s10",
+            "reason": "Conformance limit B",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"retry_decision": "reuse_operation_key_after_denial"}
+        },
+        {
+          "id": "authorize-exact-remaining",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s10:op-c",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 400,
+            "task_id": "conformance:v4.3:s10",
+            "reason": "Conformance limit C",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"decision": "allow"}, "capture": {"token_c": "auth_token_id"}}
+        },
+        {
+          "id": "exhausted-budget-denies-one-cent",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s10:op-d",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 1,
+            "task_id": "conformance:v4.3:s10",
+            "reason": "Conformance limit D",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"retry_decision": "reuse_operation_key_after_denial"}
+        },
+        {
+          "id": "budget-fully-held",
+          "operation": "budgets",
+          "expect": {"status": 200, "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 1000, "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 0}}
+        },
+        {
+          "id": "claim-above-operation-maximum-rejected",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s10:op-a", "spend_auth_token_id": "${token_a}", "account_id": "${agent.account_id}", "amount_cents": 601, "execution_scope": "${expanded_scope}"},
+          "expect": {"retry_decision": "stop_claim_mismatch"}
+        },
+        {
+          "id": "claim-op-a",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s10:op-a", "spend_auth_token_id": "${token_a}", "account_id": "${agent.account_id}", "amount_cents": 600, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "match": {"status": "claimed"}, "capture": {"claim_a": "claim_id"}}
+        },
+        {
+          "id": "settle-one-cent-over-maximum-rejected",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s10:op-a", "receipt": "${defs.receipts.over_max_600}"},
+          "expect": {"retry_decision": "await_human_reconciliation_overrun"}
+        },
+        {
+          "id": "overrun-rejection-keeps-claimed-hold",
+          "operation": "inspect_claim",
+          "query": {"claim_id": "${claim_a}"},
+          "expect": {"status": 200, "match": {"status": "claimed", "settlement_id": null, "spend.budget_hold.status": "claimed"}}
+        },
+        {
+          "id": "nothing-consumed-by-rejected-overrun",
+          "operation": "budgets",
+          "expect": {"status": 200, "match": {"budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 1000, "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0}}
+        },
+        {
+          "id": "settle-at-exact-maximum",
+          "operation": "settle",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s10:op-a", "receipt": "${defs.receipts.at_max_600}"},
+          "expect": {
+            "status": 200,
+            "match": {"status": "settled", "receipt.budget_charge_cents": 600, "receipt.authorized_max_cents": 600, "receipt.released_amount_cents": 0, "receipt.overrun_amount_cents": 0},
+            "capture": {"settlement_a": "settlement_id"}
+          }
+        },
+        {
+          "id": "claim-op-c",
+          "operation": "claim",
+          "body": {"operation_key": "conformance:v4.3:s10:op-c", "spend_auth_token_id": "${token_c}", "account_id": "${agent.account_id}", "amount_cents": 400, "execution_scope": "${expanded_scope}"},
+          "expect": {"status": 200, "match": {"status": "claimed"}}
+        },
+        {
+          "id": "release-op-c",
+          "operation": "release",
+          "body": {"agent_id": "${agent.agent_id}", "operation_key": "conformance:v4.3:s10:op-c"},
+          "expect": {"status": 200, "match": {"status": "released"}}
+        },
+        {
+          "id": "corrected-retry-of-denied-key-within-remaining",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s10:op-b",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 400,
+            "task_id": "conformance:v4.3:s10",
+            "reason": "Conformance limit B",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"status": 200, "match": {"decision": "allow", "revision": 2, "budget_hold.amount_cents": 400}, "counts": [{"path": "attempt_history", "equals": 2}]}
+        },
+        {
+          "id": "remaining-exhausted-again",
+          "operation": "authorize",
+          "body": {
+            "operation_key": "conformance:v4.3:s10:op-e",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 1,
+            "task_id": "conformance:v4.3:s10",
+            "reason": "Conformance limit E",
+            "lease_profile": "default",
+            "execution_scope": "${defs.scope}"
+          },
+          "expect": {"retry_decision": "reuse_operation_key_after_denial"}
+        },
+        {
+          "id": "final-budget",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {"budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 600, "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 400, "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 0}
+          }
+        },
+        {
+          "id": "only-settled-operation-posted",
+          "operation": "ledger",
+          "query": {"agent_id": "${agent.agent_id}", "budget_id": "${budget.budget_id}"},
+          "expect": {
+            "status": 200,
+            "match": {"transactions[0].settlement_id": "${settlement_a}", "transactions[0].budget_charge_delta_cents": 600, "coverage.consumed_amount_cents": 600, "coverage.recorded_budget_charges_cents": 600, "coverage.pending_hold_count": 1},
+            "counts": [{"path": "transactions", "equals": 1}]
+          }
+        }
+      ]
+    }
+  ]
+}
