@@ -426,6 +426,12 @@ a {
   stroke-width: 1.5;
 }
 
+.arrow-label-leader {
+  stroke: rgba(31, 41, 51, 0.45);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 3;
+}
+
 .zone-fill {
   fill: rgba(216, 210, 196, 0.28);
   stroke: rgba(31, 41, 51, 0.55);

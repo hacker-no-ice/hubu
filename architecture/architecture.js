@@ -980,6 +980,7 @@ const defaultDocumentTitle = document.title;
 let currentView = null;
 let focusedNodeId = null;
 let layers = null;
+let labelPlacement = null;
 const trace = { id: null, step: 0, timer: null };
 
 const svg = document.getElementById("architecture-canvas");
@@ -1244,6 +1245,7 @@ function renderDiagram(view) {
     labels: svg.appendChild(makeSvg("g", { class: "label-layer" })),
     nodes: svg.appendChild(makeSvg("g", { class: "node-layer" })),
   };
+  labelPlacement = createLabelPlacement(view);
   const nodesById = Object.fromEntries(view.nodes.map((node) => [node.id, node]));
   view.edges.forEach(([from, to, label, options = {}], index) => {
     drawEdge(nodesById[from], nodesById[to], label, index, { ...options, key: edgeKey(from, to) });
@@ -1374,15 +1376,25 @@ function longestSegmentIndex(points) {
   return longestIndex;
 }
 
-function drawEdgeLabel(label, point, key) {
+function drawEdgeLabel(label, anchor, key) {
   const labelWidth = Math.max(58, label.length * 8 + 18);
+  const point = labelPlacement.place(anchor, labelWidth);
   const group = makeSvg("g", { class: "edge-label", "data-edge": key });
+  if (Math.hypot(point.x - anchor.x, point.y - anchor.y) > LABEL_LEADER_MIN_SHIFT) {
+    group.appendChild(makeSvg("line", {
+      class: "arrow-label-leader",
+      x1: anchor.x,
+      y1: anchor.y - LABEL_HEIGHT / 2 + 6,
+      x2: point.x,
+      y2: point.y - LABEL_HEIGHT / 2 + 6,
+    }));
+  }
   group.appendChild(makeSvg("rect", {
     class: "arrow-label-back",
     x: point.x - labelWidth / 2,
-    y: point.y - 17,
+    y: point.y - LABEL_BASELINE_OFFSET,
     width: labelWidth,
-    height: 23,
+    height: LABEL_HEIGHT,
     rx: "4",
   }));
   const text = makeSvg("text", {
@@ -1394,6 +1406,80 @@ function drawEdgeLabel(label, point, key) {
   text.textContent = label;
   group.appendChild(text);
   layers.labels.appendChild(group);
+}
+
+const LABEL_HEIGHT = 23;
+const LABEL_BASELINE_OFFSET = 17;
+const LABEL_NODE_PADDING = 8;
+const LABEL_GAP = 4;
+const LABEL_SEARCH_STEP = 6;
+const LABEL_SEARCH_RADIUS = 150;
+const LABEL_SEARCH_DIRECTIONS = 16;
+const LABEL_LEADER_MIN_SHIFT = 22;
+
+// Edge labels start at their authored position and move to the nearest spot
+// that clears nodes, zone titles, and earlier labels, so a label in a narrow
+// gap is not hidden behind the shapes it connects. Falls back to the
+// least-overlapping candidate when no clear spot is within reach.
+function createLabelPlacement(view) {
+  const [minX, minY, width, height] = (view.viewBox || "0 0 1200 700").split(/\s+/).map(Number);
+  const bounds = { x: minX, y: minY, w: width, h: height };
+  const obstacles = view.nodes.map((node) => padRect(
+    { x: node.x, y: node.y, w: node.w, h: node.h },
+    LABEL_NODE_PADDING,
+  ));
+  svg.querySelectorAll(".zone-label").forEach((text) => {
+    const box = text.getBBox();
+    if (box.width > 0) obstacles.push(padRect({ x: box.x, y: box.y, w: box.width, h: box.height }, LABEL_GAP));
+  });
+  const offsets = labelSearchOffsets();
+
+  return {
+    place(anchor, labelWidth) {
+      let best = null;
+      for (const offset of offsets) {
+        const point = { x: anchor.x + offset.x, y: anchor.y + offset.y };
+        const rect = labelRect(point, labelWidth);
+        if (!containsRect(bounds, rect)) continue;
+        const overlap = obstacles.reduce((total, obstacle) => total + overlapArea(rect, obstacle), 0);
+        if (!best || overlap < best.overlap) best = { point, rect, overlap };
+        if (overlap === 0) break;
+      }
+      const chosen = best || { point: anchor, rect: labelRect(anchor, labelWidth) };
+      obstacles.push(padRect(chosen.rect, LABEL_GAP));
+      return chosen.point;
+    },
+  };
+}
+
+function labelSearchOffsets() {
+  const offsets = [{ x: 0, y: 0 }];
+  for (let radius = LABEL_SEARCH_STEP; radius <= LABEL_SEARCH_RADIUS; radius += LABEL_SEARCH_STEP) {
+    for (let index = 0; index < LABEL_SEARCH_DIRECTIONS; index += 1) {
+      const angle = (index / LABEL_SEARCH_DIRECTIONS) * Math.PI * 2 - Math.PI / 2;
+      offsets.push({ x: Math.round(Math.cos(angle) * radius), y: Math.round(Math.sin(angle) * radius) });
+    }
+  }
+  return offsets;
+}
+
+function labelRect(point, labelWidth) {
+  return { x: point.x - labelWidth / 2, y: point.y - LABEL_BASELINE_OFFSET, w: labelWidth, h: LABEL_HEIGHT };
+}
+
+function padRect(rect, padding) {
+  return { x: rect.x - padding, y: rect.y - padding, w: rect.w + padding * 2, h: rect.h + padding * 2 };
+}
+
+function containsRect(outer, inner) {
+  return inner.x >= outer.x && inner.y >= outer.y
+    && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h;
+}
+
+function overlapArea(a, b) {
+  const width = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const height = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  return width > 0 && height > 0 ? width * height : 0;
 }
 
 function drawNode(node) {
