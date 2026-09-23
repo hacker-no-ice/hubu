@@ -172,8 +172,8 @@ mod tests {
             assert_eq!(capability["backends"]["hubu"]["state"], json!(hubu));
             assert_eq!(capability["backends"]["gongbu"]["state"], json!(gongbu));
             // The operation-registry-aware wrapper appends
-            // `hubu_operation_status`, bringing the public snapshot to 42.
-            assert_eq!(capability["tools"].as_array().unwrap().len(), 41);
+            // `hubu_operation_status`, bringing the public snapshot to 39.
+            assert_eq!(capability["tools"].as_array().unwrap().len(), 38);
             let names = capability["tools"]
                 .as_array()
                 .unwrap()

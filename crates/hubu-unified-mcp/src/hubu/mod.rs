@@ -171,14 +171,6 @@ fn call_tool_with_operation_identity(
     };
     let name = call.name;
     let public_name = operation_identity.map_or(name.as_str(), |(name, _)| name);
-    if name == "hubu_client_approval_profile"
-        && call
-            .arguments
-            .as_object()
-            .is_some_and(serde_json::Map::is_empty)
-    {
-        return success_response(id, tool_result_v1(catalog::approval_profile()));
-    }
     let operation = if matches!(name.as_str(), "hubu_submit_spend" | "hubu_authorize_spend") {
         if let Err(error) = validate_model_spend_arguments(&call.arguments) {
             return error_response(id, -32000, &error.to_string());

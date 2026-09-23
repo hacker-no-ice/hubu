@@ -198,7 +198,7 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
 
     let expected = super::catalog::tool_definitions();
     assert_eq!(&actual[5..], expected.as_slice());
-    assert_eq!(expected.len(), 29);
+    assert_eq!(expected.len(), 28);
     assert!(!actual
         .iter()
         .any(|tool| tool["name"] == "hubu_replace_budget"));
@@ -292,7 +292,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 42);
+    assert_eq!(tools.len(), 39);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -310,7 +310,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 40);
+    assert_eq!(degraded.len(), 37);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -332,7 +332,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.hubu.reason_code = Some("health_unavailable");
     }
     let hubu_down = server.list_tools_for_snapshot();
-    assert_eq!(hubu_down.len(), 10);
+    assert_eq!(hubu_down.len(), 8);
     assert!(!hubu_down
         .iter()
         .any(|tool| tool["name"]
@@ -348,71 +348,6 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
     assert!(!hubu_down
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
-}
-
-#[test]
-fn unified_approval_profile_contains_only_callable_continuations() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let server = server_with_backends(&endpoint, Some(&endpoint), false, None);
-
-    let response = tool_call(&server, "hubu_client_approval_profile", json!({}), None);
-    let profile = &response["result"]["structuredContent"];
-    assert!(profile["client_policy"]["auto_approve_tools"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("hubu_get_spend_approval")));
-    assert!(profile["client_policy"]["prompt_before_call_tools"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("hubu_resolve_spend_approval")));
-    assert!(profile["client_policy"]["auto_approve_tools"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("hubu_budget_history")));
-    assert!(profile["client_policy"]["prompt_before_call_tools"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("hubu_update_budget")));
-    assert!(!profile.to_string().contains("hubu_replace_budget"));
-    assert!(profile["client_policy"]["auto_approve_tools"]
-        .as_array()
-        .unwrap()
-        .contains(&json!(crate::governed_execution::TOOL_NAME)));
-    assert!(profile["client_policy"]["hubu_policy_conditional_tools"]
-        .as_array()
-        .unwrap()
-        .contains(&json!(crate::governed_execution::TOOL_NAME)));
-    assert_eq!(
-        profile["response_contract"]["agent_action"],
-        "Show approval.review to the human, wait for an explicit approve or deny answer in chat, then call hubu_resolve_spend_approval with approval_request_id and that decision. The native client prompt confirms or cancels the formed call; cancelling does not submit a denial."
-    );
-    assert_eq!(
-        response["result"]["content"][0]["text"],
-        serde_json::to_string_pretty(profile).unwrap()
-    );
-    let callable = server
-        .list_tools_for_snapshot()
-        .into_iter()
-        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
-        .collect::<std::collections::BTreeSet<_>>();
-    for names in [
-        &profile["client_policy"]["auto_approve_tools"],
-        &profile["client_policy"]["hubu_policy_conditional_tools"],
-        &profile["client_policy"]["prompt_before_call_tools"],
-        &profile["tools"][0]["names"],
-        &profile["tools"][1]["names"],
-        &profile["tools"][2]["names"],
-    ] {
-        for name in names.as_array().unwrap() {
-            assert!(
-                callable.contains(name.as_str().unwrap()),
-                "approval profile advertises unavailable tool {name}"
-            );
-        }
-    }
-    assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
 }
 
 #[test]
@@ -688,24 +623,6 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
         }
         assert_eq!(result["structuredContent"]["status"], "ok");
     }
-
-    let mut called = false;
-    let local = route_tool_call_v1(
-        json!({"name":"hubu_client_approval_profile","arguments":{}}),
-        true,
-        true,
-        None,
-        |_| {
-            called = true;
-            Ok(json!({}))
-        },
-    )
-    .unwrap();
-    assert!(!called);
-    assert_eq!(
-        local["structuredContent"],
-        super::catalog::approval_profile()
-    );
 }
 
 #[test]
@@ -1916,7 +1833,7 @@ fn history_routes_pass_transport_allowlist_and_support_unknown_legacy_status() {
 }
 
 #[test]
-fn removed_policy_and_health_tools_are_unknown_before_network() {
+fn removed_tools_are_unknown_before_network() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -1927,7 +1844,14 @@ fn removed_policy_and_health_tools_are_unknown_before_network() {
             snapshot.hubu.state = BackendState::Unavailable;
             snapshot.gongbu.state = BackendState::Unconfigured;
         }
-        for name in ["hubu_add_policy", "hubu_export_policy", "hubu_health"] {
+        for name in [
+            "hubu_add_policy",
+            "hubu_export_policy",
+            "hubu_health",
+            "gongbu_get_provider_catalog",
+            "gongbu_get_redaction_attestation",
+            "hubu_client_approval_profile",
+        ] {
             assert!(!server
                 .list_tools_for_snapshot()
                 .iter()
@@ -1937,9 +1861,6 @@ fn removed_policy_and_health_tools_are_unknown_before_network() {
                 .unwrap()
                 .iter()
                 .any(|tool| tool["name"] == name));
-            assert!(!super::catalog::approval_profile()
-                .to_string()
-                .contains(name));
             assert_eq!(
                 tool_call(&server, name, json!({}), None)["error"]["code"],
                 -32602
@@ -2058,4 +1979,36 @@ fn canonical_apply_requires_yaml_and_preserves_assignment_and_cas() {
     .unwrap_err()
     .to_string()
     .contains("trusted MCP client approval gate"));
+}
+
+#[test]
+fn execution_lookup_survives_unavailable_operation_store() {
+    let (endpoint, requests, worker) = one_shot_http_server(
+        200,
+        r#"{"schema_version":1,"execution_id":"exec-recovery","operation_key":"private-operation","status":"pending","outcome":"waiting","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#,
+    );
+    let mut server = server_with_backends(&endpoint, Some(&endpoint), false, None);
+    server.operation_registry = Arc::new(OperationRegistryCapability::Unavailable {
+        reason_code: "configuration_missing",
+    });
+    assert!(server
+        .list_tools_for_snapshot()
+        .iter()
+        .any(|tool| tool["name"] == "gongbu_get_execution"));
+    let result = tool_call(
+        &server,
+        "gongbu_get_execution",
+        json!({"execution_id":"exec-recovery"}),
+        None,
+    );
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let body: Value =
+        serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(body["execution_id"], "exec-recovery");
+    assert!(!body.to_string().contains("private-operation"));
+    assert!(requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .starts_with("GET /v1/executions/exec-recovery "));
+    worker.join().unwrap();
 }

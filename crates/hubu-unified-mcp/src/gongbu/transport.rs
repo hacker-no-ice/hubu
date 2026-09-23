@@ -11,8 +11,7 @@ use super::{
     response::{
         api_error, artifact_result, execution_result, execution_target_catalog_result,
         scrub_artifact_metadata, text_result, ApiErrorContext, ArtifactListResponse,
-        ExecutionResponse, ExecutionTargetCatalogResponse, ProviderCatalogResponse,
-        RedactionAttestationResponse, ToolError, ToolErrorClass, ToolResult,
+        ExecutionResponse, ExecutionTargetCatalogResponse, ToolError, ToolErrorClass, ToolResult,
         EXECUTION_V1_SCHEMA_VERSION, EXECUTION_V2_SCHEMA_VERSION,
     },
     AdmissionDiagnostic,
@@ -173,12 +172,6 @@ fn execute(
                 execution_result(response, Some(expected), None, EXECUTION_V2_SCHEMA_VERSION)?;
             Ok((result, Some(lifecycle)))
         }
-        PreparedCall::GetProviderCatalog => {
-            let response: ProviderCatalogResponse =
-                json_request::<Value, _>(client, Method::GET, "v1/provider-catalog", None)?;
-            response.validate()?;
-            Ok((text_result(&response), None))
-        }
         PreparedCall::GetExecution(execution_id) => {
             let response: ExecutionResponse = json_request::<Value, _>(
                 client,
@@ -193,16 +186,6 @@ fn execute(
                 EXECUTION_V1_SCHEMA_VERSION,
             )?;
             Ok((result, expected.map(|_| lifecycle)))
-        }
-        PreparedCall::GetRedactionAttestation(execution_id) => {
-            let response: RedactionAttestationResponse = json_request::<Value, _>(
-                client,
-                Method::GET,
-                &format!("v1/executions/{execution_id}/redaction-attestation"),
-                None,
-            )?;
-            response.validate()?;
-            Ok((text_result(&response), None))
         }
         PreparedCall::ListArtifacts(execution_id) => {
             let mut response: ArtifactListResponse = json_request::<Value, _>(

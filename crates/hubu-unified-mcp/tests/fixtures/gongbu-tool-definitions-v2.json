@@ -40,21 +40,6 @@
     }
   },
   {
-    "name": "gongbu_get_provider_catalog",
-    "description": "Get the production-validated provider contract catalog, including frozen pricing, capability policies, and non-network readiness evidence.",
-    "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {}
-    },
-    "annotations": {
-      "readOnlyHint": true,
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": false
-    }
-  },
-  {
     "name": "gongbu_get_execution",
     "description": "Get coarse status and redacted outcome for an execution.",
     "inputSchema": {
@@ -69,29 +54,6 @@
           "pattern": "^[A-Za-z0-9_-]+$"
         }
       }
-    }
-  },
-  {
-    "name": "gongbu_get_redaction_attestation",
-    "description": "Get Gongbu's execution-bound FLUX redaction attestation containing only versioned safe fingerprints, booleans, and counters.",
-    "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["execution_id"],
-      "properties": {
-        "execution_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 255,
-          "pattern": "^[A-Za-z0-9_-]+$"
-        }
-      }
-    },
-    "annotations": {
-      "readOnlyHint": true,
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": false
     }
   },
   {
