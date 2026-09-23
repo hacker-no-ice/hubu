@@ -633,7 +633,7 @@ const components = {
     nodes: [
       { id: "agent", label: "Agent harness", sub: "one stdio connection", x: 30, y: 318, w: 210, h: 96, tone: "agent" },
       { id: "keyStore", label: "Scoped key store", sub: "operator-owned + private", x: 30, y: 566, w: 210, h: 96, tone: "data", path: "skills/generate-hubu-operation-key/scripts/operation_keys.py" },
-      { id: "tools", label: "Static router", sub: "43 tools; revision 9 + safe catalogs + attestation", x: 330, y: 92, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
+      { id: "tools", label: "Static router", sub: "42 tools; revision 11 + safe catalogs + attestation", x: 330, y: 92, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
       { id: "notifications", label: "Catalog monitor", sub: "deduped list_changed", x: 330, y: 262, w: 200, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/notification.rs" },
       { id: "operationWorker", label: "Durable worker", sub: "safe replay + observe", x: 330, y: 422, w: 200, h: 96, tone: "executor", path: "crates/hubu-unified-mcp/src/operation_worker.rs" },
       { id: "capability", label: "Capability snapshot", sub: "isolated health + compatibility", x: 330, y: 578, w: 200, h: 96, tone: "core", path: "crates/hubu-unified-mcp/src/capability.rs" },

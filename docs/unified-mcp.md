@@ -1,9 +1,8 @@
 # Unified MCP surface
 
-The v0.2.2 [MCP consolidation and default authority contract](mcp-tool-consolidation.md)
-defines planned tool exposure and migration. It is a design contract; the
-behavior documented below remains the implemented surface until that contract
-is implemented.
+The surface below is the implemented contract. The earlier
+[MCP consolidation proposal](mcp-tool-consolidation.md) contains migration
+context; its exposure profiles are superseded by a single core tool set.
 
 For bugs, ideas, billing or sensitive reports, use [Send feedback](feedback.md).
 `hubu feedback` and the unified `hubu_feedback_guidance` /
@@ -18,6 +17,25 @@ or merge the backends.
 The implemented public contract is `hubu-gongbu-mcp-v1`. The server reports
 `serverInfo.name = "hubu-unified-mcp"` and implements MCP protocol version
 `2024-11-05`.
+
+## Policy and health tool migration
+
+The v0.2.2 surface removes `hubu_add_policy`, `hubu_export_policy` and
+`hubu_health` outright. They are unknown tools, with no aliases or grace period.
+
+- Apply policy YAML with `hubu_apply_policy`. Human approval and optional
+  revision/hash compare-and-set checks still apply. For the old
+  `daily_limit_cents` shortcut, inspect the existing policy before migrating:
+  it encoded a **single-spend** threshold, a blocked-merchant denial and a
+  needs-approval fallback, not a cumulative daily budget.
+- Inspect with `hubu_show_policy`. Set `include_yaml: true` to also return
+  `policy_yaml` from the backend's canonical serializer, alongside the same
+  policy, metadata and assignments. False or omitted retains the existing
+  show response. Optional `policy_id` and `agent_id` are mutually exclusive;
+  omit both for the existing default selection. Non-boolean flags and unknown
+  fields are rejected before dispatch.
+- Inspect backend availability with `hubu_unified_capabilities`. Its structured
+  response differs from the removed health tool. HTTP health probes remain.
 
 ## Ownership boundary
 
@@ -70,17 +88,14 @@ targets, spend authorization and submission, ledger reads, executor claims,
 and reconciliation:
 
 ```text
-hubu_add_policy
 hubu_apply_policy
 hubu_authorize_spend
 hubu_budget_history
 hubu_client_approval_profile
 hubu_create_budget
-hubu_export_policy
 hubu_get_executor_claim
 hubu_get_spend_workflow
 hubu_get_spend_approval
-hubu_health
 hubu_list_agents
 hubu_list_budgets
 hubu_list_claims_requiring_reconciliation
@@ -527,9 +542,9 @@ envelope without changing either backend's wire contract.
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
 snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 42 other tool names with owner
+state and compatible version metadata, and all 41 other tool names with owner
 and availability. Together with `hubu_unified_capabilities`, the stdio surface
-exposes 45 tools, 39 of which route to a backend.
+exposes 42 tools, 36 of which route to a backend.
 
 The version-1 compatibility boundary requires:
 

@@ -164,7 +164,7 @@ jq -s -e \
   --arg product_version "${product_version}" \
   '.[0].result.serverInfo.name == "hubu-unified-mcp" and
    .[0].result.serverInfo.version == $product_version and
-   (.[1].result.tools | map(.name) | contains(["hubu_health", "hubu_unified_capabilities"])) and
+   (.[1].result.tools | map(.name) | contains(["hubu_registration_guidance", "hubu_unified_capabilities"])) and
    (.[1].result.tools | map(.name) | any(startswith("gongbu_")) | not)' \
   <<<"${unified_mcp_response}" >/dev/null
 

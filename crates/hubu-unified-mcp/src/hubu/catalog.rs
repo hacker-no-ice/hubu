@@ -20,11 +20,6 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
 fn all_tool_definitions() -> Vec<Value> {
     vec![
         read_tool(
-            "hubu_health",
-            "Check whether the local Hubu server is reachable.",
-            json_schema(json!({})),
-        ),
-        read_tool(
             "hubu_registration_guidance",
             "Read compact agent registration guidance.",
             json_schema(json!({})),
@@ -58,14 +53,6 @@ fn all_tool_definitions() -> Vec<Value> {
             })),
         ),
         approval_tool(
-            "hubu_add_policy",
-            "Compatibility alias that declaratively applies and assigns a spending policy. Requires a human click.",
-            json_schema(json!({
-                "policy_yaml": { "type": "string" },
-                "daily_limit_cents": { "type": "integer" }
-            })),
-        ),
-        approval_tool(
             "hubu_apply_policy",
             "Declaratively reconcile a policy resource and assignment with optional compare-and-set. Requires a human click.",
             json_schema_required(json!({
@@ -79,16 +66,9 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         read_tool(
             "hubu_show_policy",
-            "Show complete current policy content and every assignment without database access.",
+            "Show complete current policy content and every assignment; optionally include canonical YAML.",
             json_schema(json!({
-                "policy_id": { "type": "string" },
-                "agent_id": { "type": "string" }
-            })),
-        ),
-        read_tool(
-            "hubu_export_policy",
-            "Export the complete current policy as YAML with resource metadata and assignments.",
-            json_schema(json!({
+                "include_yaml": { "type": "boolean", "default": false },
                 "policy_id": { "type": "string" },
                 "agent_id": { "type": "string" }
             })),

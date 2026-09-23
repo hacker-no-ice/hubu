@@ -113,7 +113,6 @@ pub(super) fn route_tool_call_v1(
         spend_approval_tools_enabled,
     };
     let prepared = match name {
-        "hubu_health" => get_request("/health"),
         "hubu_registration_guidance" => get_request("/registration/guidance"),
         "hubu_client_approval_profile" => PreparedHubuCallV1::Local(approval_profile()),
         "hubu_list_users" => get_request("/users"),
@@ -125,18 +124,42 @@ pub(super) fn route_tool_call_v1(
             require_trusted_client_approval(config, name)?;
             post_request("/agents/register", arguments)
         }
-        "hubu_add_policy" => {
-            require_trusted_client_approval(config, name)?;
-            post_request("/policies", arguments)
-        }
         "hubu_apply_policy" => {
             require_trusted_client_approval(config, name)?;
+            if arguments
+                .get("policy_yaml")
+                .and_then(Value::as_str)
+                .is_none_or(|yaml| yaml.trim().is_empty())
+            {
+                bail!("hubu_apply_policy requires explicit policy_yaml");
+            }
+            if arguments.get("daily_limit_cents").is_some() {
+                bail!("hubu_apply_policy does not accept daily_limit_cents; provide explicit policy_yaml");
+            }
             let mut arguments = arguments;
             arguments["source"] = json!("mcp");
             post_request("/policies", arguments)
         }
-        "hubu_show_policy" => get_request(policy_inspection_path("show", &arguments)?),
-        "hubu_export_policy" => get_request(policy_inspection_path("export", &arguments)?),
+        "hubu_show_policy" => {
+            let fields = arguments
+                .as_object()
+                .ok_or_else(|| anyhow!("hubu_show_policy requires an object"))?;
+            if fields
+                .keys()
+                .any(|key| !matches!(key.as_str(), "policy_id" | "agent_id" | "include_yaml"))
+            {
+                bail!("hubu_show_policy received an unknown field");
+            }
+            let include_yaml = match arguments.get("include_yaml") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => bail!("hubu_show_policy include_yaml must be a boolean"),
+            };
+            get_request(policy_inspection_path(
+                if include_yaml { "export" } else { "show" },
+                &arguments,
+            )?)
+        }
         "hubu_policy_history" => get_request(policy_inspection_path("history", &arguments)?),
         "hubu_policy_diff" => {
             let mut path = policy_inspection_path("diff", &arguments)?;
