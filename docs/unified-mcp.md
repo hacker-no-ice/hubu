@@ -530,7 +530,7 @@ The version-1 compatibility boundary requires:
 | Surface | Required value |
 | --- | --- |
 | Unified contract | `hubu-gongbu-mcp-v1` |
-| Routing revision | `8` |
+| Routing revision | `12` |
 | MCP protocol | `2024-11-05` |
 | Hubu and Gongbu executor contract | `hubu-spend-executor-v4.3` |
 | Gongbu API schema | `2` |
@@ -634,8 +634,8 @@ authorization gate.
 With `--stack-profile`, the command consumes the verified handoff from an
 already running stack and writes the managed MCP entry; managed startup has
 already created the required capabilities. The non-stack setup form may create
-or reuse its manual local defaults. Both forms render Hubu's approval profile
-into client tool settings. The resolver is rendered with
+or reuse its manual local defaults. Both forms generate per-tool approval
+settings alongside Hubu's tool approval annotations. The resolver is rendered with
 `approval_mode = "prompt"`; spend submission and public-handle resume retain
 their non-interactive client policy because Hubu's durable decision remains the
 authority. Restart Codex after changing the generated configuration.
