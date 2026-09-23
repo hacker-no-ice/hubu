@@ -82,14 +82,24 @@ stdin/stdout, one JSON object per line
    `{"type":"hello","protocol":"hubu-executor-conformance-plugin-v1","base_url":…,"executor_contract":"hubu-spend-executor-v4.3"}`.
    The executor answers `{"type":"ready","executor":"<name>"}`.
 2. For each executor step, the runner sends
-   `{"type":"invoke","scenario","step","operation","method","path","body","query","fault","reconciliation_capability"}`.
+   `{"type":"invoke","scenario","step","operation","method","path","body","query","reconciliation_capability"}`.
    The executor performs the operation with its **own** normal Hubu bearer.
    It answers with Hubu's observed `{"status":…,"body":…}`, or
    `{"transport_error":"…"}` if it saw no response.
+   The executor must reply within 30 seconds, or the runner kills it and
+   fails the run.
 3. When `reconciliation_capability` is `"executor_bearer"`, the executor sends
    its own normal bearer in `X-Hubu-Reconciliation-Capability`. Hubu must
    reject this probe. Executors never receive the human capability.
 4. At the end, the runner sends `{"type":"shutdown"}`.
+
+The `base_url` in `hello` is the runner's loopback **fault proxy**, not Hubu
+itself. For a dropped-response step, the proxy forwards the request so Hubu
+commits it. It then closes the executor's connection without writing a
+response. The executor's own HTTP client therefore sees a real transport loss,
+and it must answer with `transport_error`. The step fails if the executor
+reports an HTTP response it could not have received, or if the request never
+reached Hubu. Invoke messages don't say which steps drop the response.
 
 A real executor maps each `operation` onto its own Hubu client and returns what
 Hubu answered. `method`, `path`, and `body` give the canonical v4.3 request
@@ -116,8 +126,10 @@ into this protocol.
   `capture` them and assert them by relation: `same`, `different`, `before`,
   `not_after`, `non_null`.
 - Fault injection is part of the fixture:
-  - `"fault": "drop_response"` sends the request to Hubu and discards the
-    response, so the caller sees only an ambiguous outcome.
+  - `"fault": "drop_response"` routes the request through the fault proxy.
+    Hubu commits the request, but the proxy closes the caller's connection
+    before any response, so the caller (including an external executor's HTTP
+    client) sees only an ambiguous outcome.
   - `{"control": "restart_hubu"}` SIGKILLs and restarts `hubu-server` on the
     same database.
   - `{"control": "await_reconciliation_required"}` polls the public claim until

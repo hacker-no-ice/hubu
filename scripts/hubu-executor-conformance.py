@@ -29,7 +29,9 @@ import argparse
 import copy
 import datetime as dt
 import json
+import http.server
 import os
+import queue
 import re
 import shlex
 import shutil
@@ -37,6 +39,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -49,6 +52,7 @@ DEFAULT_CORPUS = ROOT / "fixtures" / "hubu-executor-conformance-v4.3.json"
 CORPUS_SCHEMA = "hubu-executor-conformance-v1"
 PLUGIN_PROTOCOL = "hubu-executor-conformance-plugin-v1"
 RECONCILIATION_HEADER = "X-Hubu-Reconciliation-Capability"
+PLUGIN_REPLY_TIMEOUT_SECONDS = 30.0
 TEMPLATE = re.compile(r"\$\{([A-Za-z0-9_.\-]+)\}")
 SEGMENT = re.compile(r"^([A-Za-z0-9_\-]*)(?:\[(.+)\])?$")
 
@@ -315,6 +319,91 @@ class AttachedServer(Target):
 
 
 # ---------------------------------------------------------------------------
+# Fault injection at the executor's HTTP boundary
+
+
+class FaultProxy:
+    """Loopback proxy between the executor side and Hubu.
+
+    Executor sides talk to Hubu only through this proxy. When armed for a
+    ``drop_response`` step, the proxy forwards the request so Hubu commits it,
+    then closes the executor's connection without writing any response. The
+    executor's own HTTP client therefore observes a genuine transport loss and
+    must use its recovery path; it never sees the successful response.
+    """
+
+    def __init__(self, target: "Target"):
+        self.target = target
+        self.lock = threading.Lock()
+        self.armed = False
+        self.dropped = 0
+        proxy = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def log_message(self, *_args: Any) -> None:
+                pass
+
+            def forward(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                data = self.rfile.read(length) if length else None
+                headers = {
+                    name: value
+                    for name, value in self.headers.items()
+                    if name.lower() not in ("host", "content-length", "connection")
+                }
+                request = urllib.request.Request(
+                    proxy.target.base_url + self.path, method=self.command, data=data, headers=headers
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=10) as response:
+                        status, raw, content_type = response.status, response.read(), response.headers.get("Content-Type")
+                except urllib.error.HTTPError as error:
+                    status, raw, content_type = error.code, error.read(), error.headers.get("Content-Type")
+                except (urllib.error.URLError, OSError):
+                    self.close_connection = True
+                    return
+                with proxy.lock:
+                    drop, proxy.armed = proxy.armed, False
+                    if drop:
+                        proxy.dropped += 1
+                if drop:
+                    # Hubu processed the request; the executor gets nothing.
+                    self.close_connection = True
+                    return
+                self.send_response(status)
+                self.send_header("Content-Type", content_type or "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            do_GET = forward
+            do_POST = forward
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def arm_drop(self) -> int:
+        with self.lock:
+            self.armed = True
+            return self.dropped
+
+    def disarm(self, dropped_before: int) -> bool:
+        """Disarm and report whether exactly one response was dropped."""
+        with self.lock:
+            self.armed = False
+            return self.dropped == dropped_before + 1
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+# ---------------------------------------------------------------------------
 # Executor sides
 
 
@@ -363,6 +452,8 @@ class PluginExecutor(ExecutorSide):
             text=True,
             bufsize=1,
         )
+        self.replies: queue.Queue[str] = queue.Queue()
+        threading.Thread(target=self._read_replies, daemon=True).start()
         ready = self._exchange(
             {"type": "hello", "protocol": PLUGIN_PROTOCOL, "base_url": base_url, "executor_contract": contract}
         )
@@ -370,14 +461,31 @@ class PluginExecutor(ExecutorSide):
             raise ConformanceFailure(f"executor plugin did not report ready: {ready}")
         self.name = f"plugin:{ready.get('executor', 'unnamed')}"
 
+    def _read_replies(self) -> None:
+        assert self.process.stdout
+        for line in self.process.stdout:
+            self.replies.put(line)
+        self.replies.put("")
+
     def _exchange(self, message: dict[str, Any]) -> dict[str, Any]:
-        assert self.process.stdin and self.process.stdout
-        self.process.stdin.write(json.dumps(message) + "\n")
-        self.process.stdin.flush()
-        line = self.process.stdout.readline()
+        assert self.process.stdin
+        try:
+            self.process.stdin.write(json.dumps(message) + "\n")
+            self.process.stdin.flush()
+            line = self.replies.get(timeout=PLUGIN_REPLY_TIMEOUT_SECONDS)
+        except queue.Empty:
+            self.process.kill()
+            raise ConformanceFailure(
+                f"executor plugin did not reply to {message.get('type')} within {PLUGIN_REPLY_TIMEOUT_SECONDS:.0f}s"
+            ) from None
+        except OSError as error:
+            raise ConformanceFailure(f"executor plugin pipe failed: {error}") from None
         if not line:
             raise ConformanceFailure("executor plugin exited unexpectedly")
-        return json.loads(line)
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            raise ConformanceFailure(f"executor plugin sent invalid JSON: {line[:200]!r}") from None
 
     def invoke(self, message: dict[str, Any]) -> tuple[int, Any]:
         reply = self._exchange(dict(message, type="invoke"))
@@ -389,7 +497,7 @@ class PluginExecutor(ExecutorSide):
         if self.process.poll() is None:
             try:
                 self._exchange({"type": "shutdown"})
-            except (ConformanceFailure, OSError, json.JSONDecodeError):
+            except ConformanceFailure:
                 pass
             try:
                 self.process.wait(timeout=5)
@@ -402,9 +510,17 @@ class PluginExecutor(ExecutorSide):
 
 
 class Runner:
-    def __init__(self, corpus: dict[str, Any], target: Target, executor: ExecutorSide, args: argparse.Namespace):
+    def __init__(
+        self,
+        corpus: dict[str, Any],
+        target: Target,
+        proxy: FaultProxy,
+        executor: ExecutorSide,
+        args: argparse.Namespace,
+    ):
         self.corpus = corpus
         self.target = target
+        self.proxy = proxy
         self.executor = executor
         self.auth = args.auth_token
         self.reconciliation = args.reconciliation_token
@@ -526,43 +642,65 @@ class Runner:
                 "path": operation["path"],
                 "body": context.render(step["body"]) if "body" in step else None,
                 "query": context.render(step["query"]) if "query" in step else None,
-                "fault": step.get("fault"),
                 "reconciliation_capability": step.get("reconciliation_capability"),
             }
+            if step.get("fault") == "drop_response":
+                self.send_with_dropped_response(actor, message)
+                self.transcript.append({"step": step["id"], "request": message, "status": None, "body": None})
+                return
             status, body = self.send(actor, message)
             self.transcript.append({"step": step["id"], "request": message, "status": status, "body": body})
             if self.verbose:
                 print(f"  {scenario['id']}/{step['id']} -> {status}")
-            if step.get("fault") == "drop_response":
-                # The request reached Hubu, but the caller observes only an
-                # ambiguous outcome. The corpus follows with a retry step.
-                return
             self.check_expectations(step.get("expect", {}), status, body, context)
         except ConformanceFailure as failure:
             raise ConformanceFailure(f"{where}: {failure}") from None
 
-    def send(self, actor: str, message: dict[str, Any]) -> tuple[int, Any]:
+    def send(self, actor: str, message: dict[str, Any], base_url: str | None = None) -> tuple[int, Any]:
         try:
-            if actor == "executor":
-                return self.executor.invoke(message)
-            headers = {}
-            if actor == "human":
-                headers[RECONCILIATION_HEADER] = self.reconciliation
-            elif actor not in ("agent", "observer"):
-                raise ConformanceFailure(f"unknown actor {actor!r}")
-            return http_request(
-                self.target.base_url,
-                message["method"],
-                message["path"],
-                bearer=self.auth,
-                body=message["body"],
-                query=message["query"],
-                headers=headers,
-            )
+            return self.dispatch(actor, message, base_url or self.target.base_url)
         except TransportLost as lost:
-            if message.get("fault") == "drop_response":
-                return 0, None
             raise ConformanceFailure(f"transport failure: {lost}") from None
+
+    def dispatch(self, actor: str, message: dict[str, Any], base_url: str) -> tuple[int, Any]:
+        # Executor sides always reach Hubu through the fault proxy.
+        if actor == "executor":
+            return self.executor.invoke(message)
+        headers = {}
+        if actor == "human":
+            headers[RECONCILIATION_HEADER] = self.reconciliation
+        elif actor not in ("agent", "observer"):
+            raise ConformanceFailure(f"unknown actor {actor!r}")
+        return http_request(
+            base_url,
+            message["method"],
+            message["path"],
+            bearer=self.auth,
+            body=message["body"],
+            query=message["query"],
+            headers=headers,
+        )
+
+    def send_with_dropped_response(self, actor: str, message: dict[str, Any]) -> None:
+        """Deliver the request to Hubu but withhold the response from the caller.
+
+        The fault proxy closes the caller's connection after Hubu answered, so
+        an executor side must observe and report a transport loss. Reporting an
+        HTTP response here means the executor saw data it could not have seen.
+        """
+        dropped_before = self.proxy.arm_drop()
+        try:
+            status, body = self.dispatch(actor, message, self.proxy.base_url)
+        except TransportLost:
+            status = None
+        finally:
+            delivered = self.proxy.disarm(dropped_before)
+        if status is not None:
+            raise ConformanceFailure(
+                f"caller reported HTTP {status} although the fault proxy withheld the response"
+            )
+        if not delivered:
+            raise ConformanceFailure("the request never reached Hubu through the fault proxy")
 
     def run_control(self, step: dict[str, Any], context: Context) -> None:
         control = step["control"]
@@ -725,13 +863,14 @@ def main() -> int:
     else:
         hubu = AttachedServer(args.base_url, args.restart_command)
 
+    proxy = FaultProxy(hubu)
     executor: ExecutorSide
     if args.executor_command:
-        executor = PluginExecutor(args.executor_command, hubu.base_url, corpus["protocol_version"])
+        executor = PluginExecutor(args.executor_command, proxy.base_url, corpus["protocol_version"])
     else:
-        executor = BuiltinHttpExecutor(hubu.base_url, args.auth_token)
+        executor = BuiltinHttpExecutor(proxy.base_url, args.auth_token)
 
-    runner = Runner(corpus, hubu, executor, args)
+    runner = Runner(corpus, hubu, proxy, executor, args)
     success = False
     try:
         print(
@@ -748,6 +887,7 @@ def main() -> int:
             print("\nHubu server log tail:\n" + hubu.diagnostics(), file=sys.stderr)
     finally:
         executor.close()
+        proxy.close()
         hubu.stop()
         if args.transcript:
             args.transcript.write_text(json.dumps(runner.transcript, indent=2))
