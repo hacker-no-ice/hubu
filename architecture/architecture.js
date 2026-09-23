@@ -954,17 +954,9 @@ const sidebarHighlights = {
     "Triggers prevent updates and deletes.",
   ],
   cli: [
-    "Humans use the CLI for setup, administration, and local stack lifecycle.",
-    "Doctor and catalog report four independent readiness facts without reading secrets or calling BFL.",
-    "Render expands the exact provider contract and requires Gongbu production validation before activation.",
-    "Humans select sandbox, local-stack, or Hubu-only outcomes before field-level configuration.",
-    "The generated topology includes only components required by the selected outcome.",
-    "Validated updates stage first and activate only while the owned stack is stopped.",
-    "The launcher signals only processes whose recorded start identity still matches.",
-    "The acceptance canary proves the real process lifecycle plus deterministic workflow and artifact recovery without billable provider spend.",
-    "Agent registration after startup needs no render or restart.",
-    "It configures agent-facing MCP access.",
-    "It exposes policy, budget, spend, ledger, and health workflows.",
+    "Checks the product version with `hubu version`; no backend needs to be running.",
+    "Manages the local stack: create and validate configuration (`stack init`, `stack doctor`), then start, stop, and check status of the servers.",
+    "Runs human admin operations: register user and agent identities, draft, apply, and update policies, and create and list budgets.",
   ],
   mcp: [
     "The agent harness starts one default unified MCP process.",
@@ -1079,8 +1071,8 @@ function showView(viewId) {
   crumb.textContent = view.kind;
   detailsTitle.textContent = view.title;
   detailsKind.textContent = view.kind;
-  detailsSummary.textContent = view.summary;
-  detailsCopy.textContent = view.copy;
+  setInlineText(detailsSummary, view.summary);
+  setInlineText(detailsCopy, view.copy);
   renderList(highlights, sidebarHighlights[viewId]);
   renderList(responsibilities, view.responsibilities);
   responsibilitiesCount.textContent = `(${view.responsibilities.length})`;
@@ -1239,9 +1231,19 @@ function renderList(list, items) {
   list.innerHTML = "";
   items.forEach((item) => {
     const li = document.createElement("li");
-    li.textContent = item;
+    setInlineText(li, item);
     list.appendChild(li);
   });
+}
+
+// Renders `backtick` spans as inline code without interpreting any markup.
+function setInlineText(element, text) {
+  element.replaceChildren(...text.split("`").map((part, index) => {
+    if (index % 2 === 0) return document.createTextNode(part);
+    const code = document.createElement("code");
+    code.textContent = part;
+    return code;
+  }));
 }
 
 // Collapsible sidebar sections keep their open state across views and, when

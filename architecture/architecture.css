@@ -423,6 +423,16 @@ a {
   text-underline-offset: 2px;
 }
 
+.details-panel li code:not(.source-path),
+.details-panel p code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(31, 41, 51, 0.08);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+  overflow-wrap: anywhere;
+}
+
 .source-path {
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
