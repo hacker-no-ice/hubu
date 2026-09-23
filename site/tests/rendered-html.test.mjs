@@ -56,6 +56,26 @@ test("embeds the introduction below the hero without autoplay", async () => {
   assert.ok(html.indexOf('id="intro-video-title"') < html.indexOf('class="warning-band"'));
 });
 
+test("home page offers copyable commands, a mobile menu, and anchored warning", async () => {
+  const html = await (await render()).text();
+  assert.doesNotMatch(html, /--profile …|--stack-profile …/);
+  assert.match(html, /hubu stack init --mode sandbox --profile &quot;\$HOME\/hubu-sandbox&quot;/);
+  assert.equal(html.match(/<button class="copy-code"/g)?.length, 5);
+  assert.match(html, /<details class="site-menu"><summary>Menu<\/summary>/);
+  assert.match(html, /href="\/docs\/overview#project-status"/);
+  assert.match(html, /<link rel="icon" href="\/favicon.svg" type="image\/svg\+xml"/);
+  const favicon = await readFile(new URL("../public/favicon.svg", import.meta.url), "utf8");
+  assert.match(favicon, /linearGradient id="hubu-icon-gradient"/);
+});
+
+test("documentation code blocks carry progressive copy buttons", async () => {
+  const html = await (await render("/docs/local-stack")).text();
+  assert.match(html, /<div class="code-block"><pre><code[^>]*>[\s\S]*?<\/code><\/pre>\s*<button class="copy-code" type="button" data-copy-code hidden>Copy<\/button><\/div>/);
+  assert.match(html, /GitHub repository/);
+  const overview = await (await render("/docs/overview")).text();
+  assert.match(overview, /id="project-status"/);
+});
+
 test("publishes the scalable Hubu wordmark", async () => {
   const svg = await readFile(new URL("../public/brand/hubu-wordmark.svg", import.meta.url), "utf8");
   assert.match(svg, /viewBox="269 286 1168 376"/);

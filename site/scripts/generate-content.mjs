@@ -62,6 +62,10 @@ function renderMarkdown(markdown, sourcePath) {
     const id = count ? `${base}-${count + 1}` : base;
     return `<h${depth} id="${id}">${inner}<a class="heading-anchor" href="#${id}" aria-label="Link to ${escapeAttribute(plainText(inner))}">#</a></h${depth}>`;
   };
+  renderer.code = function (token) {
+    const block = Renderer.prototype.code.call(this, token);
+    return `<div class="code-block">${block}<button class="copy-code" type="button" data-copy-code hidden>Copy</button></div>`;
+  };
   renderer.link = function ({ href, title, tokens }) {
     const text = this.parser.parseInline(tokens);
     let resolved = href;
