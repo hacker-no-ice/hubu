@@ -196,6 +196,7 @@ function spendTraces() {
         ...request,
         reserve,
         submit,
+        resolve,
         execute,
         {
           nodes: ["workflow", "gongbuData"],
