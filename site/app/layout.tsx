@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { CopyCode } from "./components/CopyCode";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -19,6 +20,7 @@ export const metadata: Metadata = {
   metadataBase,
   title: { default: "Hubu Docs — Governed spend for AI agents", template: "%s · Hubu Docs" },
   description: "Documentation for Hubu's local-first agent spend control plane and the Gongbu execution plane.",
+  icons: { icon: { url: "/favicon.svg", type: "image/svg+xml" } },
   openGraph: {
     title: "Hubu / 户部",
     description: "Architecture in service of trust · Hubu governs · Gongbu executes",
@@ -45,6 +47,7 @@ export default function RootLayout({
       >
         <a className="skip-link" href="#main-content">Skip to content</a>
         {children}
+        <CopyCode />
       </body>
     </html>
   );

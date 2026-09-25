@@ -5,6 +5,8 @@ Hubu is an open-source spending control plane for AI agents.
 It gives agents permission to use paid services without giving them direct
 control of payment keys, provider credentials, or unrestricted budgets.
 
+## Project status
+
 > **Experimental and local-first**
 >
 > Hubu provides a complete managed local stack for governed agent workloads,

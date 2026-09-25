@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="238 277 410 410">
+  <defs>
+    <linearGradient id="hubu-icon-gradient" x1="278" y1="0" x2="608" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9697ff" />
+      <stop offset="1" stop-color="#71d7e8" />
+    </linearGradient>
+  </defs>
+  <rect x="238" y="277" width="410" height="410" rx="84" fill="#0a0b0d" />
+  <path fill="url(#hubu-icon-gradient)" d="M278 325h76v107h178V325h76v303h-76V502H354v76l-76 61V325Z" />
+</svg>
