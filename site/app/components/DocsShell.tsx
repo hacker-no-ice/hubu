@@ -2,7 +2,7 @@ import { Search } from "./Search";
 import { HubuWordmark } from "./HubuWordmark";
 import { adjacentDocuments, navGroups, searchDocuments, type Doc } from "../lib/docs";
 
-function Navigation({ current }: { current: string }) {
+function Navigation({ current, compact = false }: { current: string; compact?: boolean }) {
   return (
     <nav className="docs-nav" aria-label="Documentation">
       {navGroups.map((group) => (
@@ -14,6 +14,7 @@ function Navigation({ current }: { current: string }) {
         </section>
       ))}
       <section><h2>Visual guide</h2><a href="/architecture/">Interactive architecture <span>↗</span></a></section>
+      {compact ? <section><h2>Project</h2><a href="https://github.com/hacker-no-ice/hubu">GitHub repository <span>↗</span></a></section> : null}
     </nav>
   );
 }
@@ -31,15 +32,15 @@ export function DocsShell({ document }: { document: Doc }) {
         <Search documents={searchDocuments} />
         <a className="github-compact" href="https://github.com/hacker-no-ice/hubu">GitHub ↗</a>
       </header>
-      <details className="mobile-nav"><summary>Browse documentation</summary><Navigation current={document.slug} /></details>
+      <details className="mobile-nav"><summary>Browse documentation</summary><Navigation current={document.slug} compact /></details>
       <aside className="sidebar"><Navigation current={document.slug} /></aside>
       <main className="doc-main" id="main-content">
         <div className="doc-status"><span>EXPERIMENTAL · LOCAL-FIRST</span><p>Evaluate carefully. Live-provider paths are experimental and are not money-grade production infrastructure.</p></div>
         <article className="markdown-body" dangerouslySetInnerHTML={{ __html: document.html }} />
         <div className="source-row"><a href={document.sourceUrl}>Edit this page on GitHub ↗</a><span>Canonical source: {document.sourcePath}</span></div>
         <nav className="doc-pagination" aria-label="Previous and next pages">
-          {previous ? <a href={previous.href}><small>← Previous</small><strong>{previous.title}</strong></a> : <span />}
-          {next ? <a href={next.href}><small>Next →</small><strong>{next.title}</strong></a> : <span />}
+          {previous ? <a href={previous.href}><small>← Previous</small><strong>{previous.label}</strong></a> : <span />}
+          {next ? <a href={next.href}><small>Next →</small><strong>{next.label}</strong></a> : <span />}
         </nav>
       </main>
       <aside className="toc" aria-label="On this page">

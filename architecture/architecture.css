@@ -13,6 +13,7 @@
   --executor: #d8d2c4;
   --vendor: #fffdf7;
   --line: #2b3340;
+  --trace: #c2410c;
   --shadow: rgba(31, 41, 51, 0.14);
 }
 
@@ -346,11 +347,111 @@ a {
   line-height: 1.4;
 }
 
+.details-panel .details-summary {
+  margin: 10px 0 20px;
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.detail-section {
+  margin-top: 16px;
+  border-top: 2px dashed rgba(31, 41, 51, 0.28);
+}
+
+.detail-section > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 12px 0 4px;
+  font-size: 16px;
+  font-weight: 800;
+  list-style: none;
+  cursor: pointer;
+}
+
+.detail-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.detail-section > summary::before {
+  content: "▸";
+  flex: 0 0 auto;
+  width: 14px;
+  color: var(--muted);
+  transition: transform 150ms ease;
+}
+
+.detail-section[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.detail-section > summary:focus-visible {
+  outline: 3px solid var(--line);
+  outline-offset: 2px;
+}
+
+.detail-count {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.detail-list li strong {
+  color: var(--ink);
+}
+
+.detail-list li strong::after {
+  content: ".";
+}
+
+.detail-section > p,
+.detail-section > ul {
+  margin-top: 8px;
+}
+
+.detail-section > p {
+  margin-bottom: 8px;
+}
+
+.detail-list .source-links {
+  gap: 10px;
+}
+
+.source-links li {
+  display: grid;
+  gap: 2px;
+}
+
 .source-links a {
   font-weight: 800;
   overflow-wrap: anywhere;
   text-decoration-thickness: 2px;
   text-underline-offset: 2px;
+}
+
+.details-panel li code:not(.source-path),
+.details-panel p code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(31, 41, 51, 0.08);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+  overflow-wrap: anywhere;
+}
+
+.source-path {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .detail-section > summary::before {
+    transition: none;
+  }
 }
 
 .node {
@@ -425,6 +526,12 @@ a {
   stroke-width: 1.5;
 }
 
+.arrow-label-leader {
+  stroke: rgba(31, 41, 51, 0.45);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 3;
+}
+
 .zone-fill {
   fill: rgba(216, 210, 196, 0.28);
   stroke: rgba(31, 41, 51, 0.55);
@@ -441,6 +548,155 @@ a {
 
 .vendor-node .node-fill {
   stroke-linecap: round;
+}
+
+.architecture-canvas .node,
+.architecture-canvas .arrow-line,
+.architecture-canvas .edge-label {
+  transition: opacity 180ms ease;
+}
+
+.architecture-canvas.is-dimmed .node:not(.is-lit),
+.architecture-canvas.is-dimmed .arrow-line:not(.is-lit),
+.architecture-canvas.is-dimmed .edge-label:not(.is-lit) {
+  opacity: 0.16;
+}
+
+.architecture-canvas.is-dimmed .arrow-line.is-lit {
+  stroke-width: 4;
+}
+
+.architecture-canvas.is-tracing .arrow-line.is-lit {
+  stroke: var(--trace);
+  stroke-dasharray: 10 8;
+  marker-end: url(#arrow-tip-trace);
+  animation: trace-flow 0.9s linear infinite;
+}
+
+.architecture-canvas.is-tracing .node.is-lit .node-fill {
+  stroke: var(--trace);
+  stroke-width: 5;
+}
+
+.architecture-canvas.is-tracing .edge-label.is-lit .arrow-label-back {
+  stroke: var(--trace);
+  stroke-width: 2;
+}
+
+.architecture-canvas.is-tracing .edge-label.is-lit .arrow-label {
+  fill: var(--ink);
+}
+
+@keyframes trace-flow {
+  to {
+    stroke-dashoffset: -18;
+  }
+}
+
+.trace-bar {
+  display: grid;
+  gap: 10px;
+  padding: 4px 20px 14px;
+}
+
+.trace-bar[hidden],
+.trace-player[hidden] {
+  display: none;
+}
+
+.trace-picker,
+.trace-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.trace-heading {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.trace-outcomes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.trace-outcome,
+.trace-step,
+.trace-play,
+.trace-exit {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 2px solid var(--line);
+  color: var(--ink);
+  background: #fffdf7;
+  box-shadow: 2px 3px 0 var(--line);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.trace-outcome[aria-pressed="true"] {
+  color: #fffdf7;
+  background: var(--trace);
+}
+
+.trace-outcome:active,
+.trace-step:active:not(:disabled),
+.trace-play:active,
+.trace-exit:active {
+  transform: translate(2px, 3px);
+  box-shadow: none;
+}
+
+.trace-step {
+  min-width: 40px;
+  padding: 0 8px;
+}
+
+.trace-step:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.trace-count {
+  min-width: 92px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.trace-exit {
+  margin-left: auto;
+}
+
+.trace-caption {
+  margin: 0;
+  padding: 10px 14px;
+  border-left: 5px solid var(--trace);
+  background: rgba(194, 65, 12, 0.07);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .architecture-canvas .node,
+  .architecture-canvas .arrow-line,
+  .architecture-canvas .edge-label {
+    transition: none;
+  }
+
+  .architecture-canvas.is-tracing .arrow-line.is-lit {
+    animation: none;
+  }
 }
 
 .sr-only {

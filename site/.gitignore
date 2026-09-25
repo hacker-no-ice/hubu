@@ -40,3 +40,4 @@ yarn-error.log*
 /work/
 /app/generated-docs.ts
 /public/architecture/
+/public/sitemap.xml

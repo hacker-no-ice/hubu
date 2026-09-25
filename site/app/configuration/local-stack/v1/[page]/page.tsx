@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { DocsShell } from "../../../../components/DocsShell";
 import { getDocument } from "../../../../lib/docs";
+import { documentMetadata } from "../../../../lib/metadata";
 
 type Props = { params: Promise<{ page: string }> };
 
@@ -12,7 +13,7 @@ function documentSlug(page: string) {
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { page } = await params;
   const document = getDocument(documentSlug(page));
-  return document ? { title: document.title, description: document.excerpt } : {};
+  return documentMetadata(document);
 }
 
 export default async function LocalStackConfigurationPage({ params }: Props) {

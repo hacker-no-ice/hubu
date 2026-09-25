@@ -18,10 +18,17 @@
           <h1>Agent Spend Control Plane</h1>
           <p class="snapshot-record">
             Architecture snapshot
-            <time datetime="2026-08-28">2026-08-28</time>
+            <time datetime="2026-09-23">2026-09-23</time>
             <span aria-hidden="true">·</span>
             <span>source</span>
-            <code>c04cecfc2383b41fcf215201ca23a1838d311105</code>
+            <code>0252f8d0c4bc9e221344ec910e466c9df293be1e</code>
+            <span aria-hidden="true">·</span>
+            <span>after
+              <a
+                href="https://github.com/hacker-no-ice/hubu/releases/tag/v0.2.1"
+                target="_blank"
+                rel="noreferrer"
+              >v0.2.1</a></span>
           </p>
         </div>
       </div>
@@ -59,6 +66,22 @@
             <span><i class="swatch vendor"></i>Vendor</span>
           </div>
         </div>
+        <div class="trace-bar" id="trace-bar" hidden>
+          <div class="trace-picker">
+            <span class="trace-heading">Trace a spend</span>
+            <div class="trace-outcomes" id="trace-outcomes" role="group" aria-label="Spend outcome to trace"></div>
+          </div>
+          <div class="trace-player" id="trace-player" hidden>
+            <div class="trace-buttons">
+              <button class="trace-step" id="trace-prev" type="button" aria-label="Previous step">←</button>
+              <span class="trace-count" id="trace-count"></span>
+              <button class="trace-step" id="trace-next" type="button" aria-label="Next step">→</button>
+              <button class="trace-play" id="trace-play" type="button">Play</button>
+              <button class="trace-exit" id="trace-exit" type="button">Exit</button>
+            </div>
+            <p class="trace-caption" id="trace-caption" aria-live="polite"></p>
+          </div>
+        </div>
         <svg
           id="architecture-canvas"
           class="architecture-canvas"
@@ -67,25 +90,41 @@
           aria-labelledby="diagram-title diagram-summary"
         ></svg>
         <p id="diagram-summary" class="diagram-summary">
-          Select a component to zoom into its subsystem and see how the internals interact.
+          Hover a component to see its connections; select one to zoom into its subsystem.
         </p>
       </section>
 
-      <aside class="details-panel" aria-live="polite">
+      <aside class="details-panel" id="details-panel" aria-label="Component details">
         <button class="back-button" id="details-back-button" type="button">
           <span aria-hidden="true">←</span>
           Top level
         </button>
-        <p class="crumb" id="details-kind">Overview</p>
-        <h2 id="details-title">Major Components</h2>
-        <p id="details-copy"></p>
+        <div aria-live="polite">
+          <p class="crumb" id="details-kind">Overview</p>
+          <h2 id="details-title">Major Components</h2>
+          <p class="details-summary" id="details-summary"></p>
+        </div>
         <div class="detail-list">
           <h3>At a glance</h3>
           <ul id="highlights"></ul>
-          <h3>Responsibilities and boundaries</h3>
-          <ul id="responsibilities"></ul>
-          <h3>Source and runbooks</h3>
-          <ul id="source-links" class="source-links"></ul>
+          <details class="detail-section" data-section="copy">
+            <summary>How it works</summary>
+            <p id="details-copy"></p>
+          </details>
+          <details class="detail-section" data-section="responsibilities">
+            <summary>
+              Responsibilities and boundaries
+              <span class="detail-count" id="responsibilities-count"></span>
+            </summary>
+            <ul id="responsibilities"></ul>
+          </details>
+          <details class="detail-section" data-section="links">
+            <summary>
+              Source and runbooks
+              <span class="detail-count" id="links-count"></span>
+            </summary>
+            <ul id="source-links" class="source-links"></ul>
+          </details>
         </div>
       </aside>
     </main>

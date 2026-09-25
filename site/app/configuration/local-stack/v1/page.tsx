@@ -2,12 +2,13 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { DocsShell } from "../../../components/DocsShell";
 import { getDocument } from "../../../lib/docs";
+import { documentMetadata } from "../../../lib/metadata";
 
 const documentSlug = "configuration/local-stack/v1";
 
 export function generateMetadata(): Metadata {
   const document = getDocument(documentSlug);
-  return document ? { title: document.title, description: document.excerpt } : {};
+  return documentMetadata(document);
 }
 
 export default function LocalStackConfigurationReference() {

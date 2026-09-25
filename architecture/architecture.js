@@ -77,38 +77,167 @@ const sharedLinks = {
   gongbuConfig: ["Gongbu server example", "examples/gongbu/gongbu.server.json"],
 };
 
+// Step-by-step walkthroughs of one spend request across the top-level diagram.
+// Each step lights the listed nodes and [from, to] edges; keep them aligned
+// with docs/spend-lifecycle.md and the top-level node and edge IDs.
+function spendTraces() {
+  const request = [
+    {
+      nodes: ["agent", "mcp"],
+      edges: [["agent", "mcp"]],
+      caption: "The agent calls the governed-execution tool on its single unified MCP connection.",
+    },
+    {
+      nodes: ["mcp", "api"],
+      edges: [["mcp", "api"]],
+      caption: "The router asks Hubu to authorize the spend. The agent never holds payment keys or provider credentials.",
+    },
+    {
+      nodes: ["api", "app"],
+      edges: [["api", "app"]],
+      caption: "Hubu resolves the trusted execution scope, then evaluates the owner's policy: allow, deny, or needs approval.",
+    },
+  ];
+  const reserve = {
+    nodes: ["app", "ledger"],
+    edges: [["app", "ledger"]],
+    caption: "Policy allows. Hubu freezes a budget hold for the authorized maximum and records the authorization in its own SQLite.",
+  };
+  const submit = {
+    nodes: ["mcp", "gongbu"],
+    edges: [["mcp", "gongbu"]],
+    caption: "The router submits the authorized work to Gongbu, a separate process with its own credentials and storage.",
+  };
+  const resolve = {
+    nodes: ["gongbu", "api"],
+    edges: [["gongbu", "api"]],
+    caption: "Gongbu resolves the authorization with Hubu and checks account, amount, and scope against its operator-approved target and price.",
+  };
+  const execute = {
+    nodes: ["gongbu", "workflow"],
+    edges: [["gongbu", "workflow"]],
+    caption: "Gongbu's durable workflow claims the authorization and calls the provider with credentials only Gongbu holds.",
+  };
+  return {
+    allow: {
+      label: "Allowed",
+      steps: [
+        ...request,
+        reserve,
+        submit,
+        resolve,
+        execute,
+        {
+          nodes: ["workflow", "gongbuData"],
+          edges: [["workflow", "gongbuData"]],
+          caption: "The exact provider cost, frozen pricing snapshot, and artifacts are checkpointed in Gongbu's own state.",
+        },
+        {
+          nodes: ["gongbu", "api", "app", "ledger"],
+          edges: [["gongbu", "api"], ["api", "app"], ["app", "ledger"]],
+          caption: "Gongbu settles with the exact receipt. Hubu charges the budget and releases the unused hold in one atomic commit.",
+        },
+        {
+          nodes: ["agent", "mcp"],
+          edges: [["agent", "mcp"]],
+          caption: "The auto-approved result and its artifact return to the agent in the same call.",
+        },
+      ],
+    },
+    deny: {
+      label: "Denied",
+      steps: [
+        ...request,
+        {
+          nodes: ["app", "ledger"],
+          edges: [["app", "ledger"]],
+          caption: "Policy denies. Nothing is reserved and no money moves; Hubu records the attempt and its outcome.",
+        },
+        {
+          nodes: ["agent", "mcp", "api"],
+          edges: [["mcp", "api"], ["agent", "mcp"]],
+          caption: "The denial and its reason return to the agent. Gongbu and the provider are never contacted.",
+        },
+      ],
+    },
+    approval: {
+      label: "Needs approval",
+      steps: [
+        ...request,
+        {
+          nodes: ["app", "ledger"],
+          edges: [["app", "ledger"]],
+          caption: "Policy needs approval. Hubu persists a pending decision on an immutable review snapshot.",
+        },
+        {
+          nodes: ["agent", "mcp"],
+          edges: [["agent", "mcp"]],
+          caption: "The call returns before any provider work, with a durable public operation handle.",
+        },
+        {
+          nodes: ["human", "cli", "api", "app"],
+          edges: [["human", "cli"], ["cli", "api"]],
+          caption: "The owner reviews the snapshot and approves; a denial would end the operation here. Approval alone never starts provider work.",
+        },
+        {
+          nodes: ["agent", "mcp", "api", "app"],
+          edges: [["agent", "mcp"], ["mcp", "api"], ["api", "app"]],
+          caption: "The agent resumes by public handle before the authorization expires, continuing the same operation.",
+        },
+        {
+          nodes: ["mcp", "gongbu", "workflow", "gongbuData", "api"],
+          edges: [["mcp", "gongbu"], ["gongbu", "workflow"], ["workflow", "gongbuData"], ["gongbu", "api"]],
+          caption: "From here the approved work runs as in the allowed path: Gongbu executes, then settles with Hubu.",
+        },
+      ],
+    },
+    reconcile: {
+      label: "Reconciled",
+      steps: [
+        ...request,
+        reserve,
+        submit,
+        resolve,
+        execute,
+        {
+          nodes: ["workflow", "gongbuData"],
+          edges: [["workflow", "gongbuData"]],
+          caption: "Billing is ambiguous, or the confirmed cost exceeds the authorized maximum. Gongbu preserves the provider evidence.",
+        },
+        {
+          nodes: ["gongbu", "api", "app", "ledger"],
+          edges: [["gongbu", "api"], ["api", "app"], ["app", "ledger"]],
+          caption: "Hubu keeps the hold claimed instead of releasing it. A timeout is never treated as a free outcome.",
+        },
+        {
+          nodes: ["human", "cli", "api", "app"],
+          edges: [["human", "cli"], ["cli", "api"]],
+          caption: "The owner reconciles the operation from the evidence using a separate reconciliation capability.",
+        },
+      ],
+    },
+  };
+}
+
 const components = {
   top: {
     title: "Major Components",
     kind: "Overview",
+    summary: "Agents request paid work through one MCP connection. Hubu decides whether money may be spent; Gongbu, a separate process, does the provider work. The two never share credentials, storage, or failures.",
     viewBox: "0 0 1440 900",
     copy:
-      "Agents use one default MCP surface. Its governed-execution tool can authorize, execute, observe, and deliver a normal auto-approved result in one bounded call; its router-owned resume workflow recovers approved primitive Hubu operations or continues stored governed intent by public handle. Gemini Developer API and FLUX are frozen in one provider-contract framework and selected publicly only by opaque target IDs, sharing one governance lifecycle while retaining synchronous Gemini and asynchronous FLUX transports. Hubu and Gongbu retain separate credentials, storage, provider work, artifacts, and failure domains.",
+      "Agents use one default MCP surface. Its governed-execution tool can authorize, execute, observe, and deliver a normal auto-approved result in one bounded call; its router-owned resume workflow recovers approved primitive Hubu operations or continues stored governed intent by public handle. Provider integrations are frozen in versioned provider contracts and selected publicly only by opaque target IDs, sharing one governance lifecycle across synchronous and asynchronous provider transports. Hubu and Gongbu retain separate credentials, storage, provider work, artifacts, and failure domains.",
     responsibilities: [
-      "Humans register, attach user-level policies, optionally set advisory spending targets, create agent budgets, approve or deny pending spend, review protected actions, and reconcile uncertain expired claims.",
-      "BudgetManager owns supported budget administration through a private storage-first coordinator; SQLite commits precede private state publication and transports never assemble budget repository writes.",
-      "Agents discover Hubu governance plus Gongbu's operator-approved execution targets, exact pricing, runtime image options, execution/artifact primitives, and one router-owned `hubu_submit_governed_execution` composite through `hubu-unified-mcp`; trusted client metadata supplies operation and optional task identity outside model-authored arguments.",
-      "For guarded local dogfooding, a repository Codex skill allocates one key only after human authorization, binds it to the exact canonical unified-MCP call, and persists recovery state outside the Hubu server; the router reads that key privately while trusted callId remains the operation identity.",
-      "Outcome-oriented initialization offers sandbox, local-stack, and Hubu-only modes. Sandbox and local-stack coordinate the complete Hubu, Gongbu, and Temporal ecosystem; Hubu-only deliberately omits the execution plane and exposes governance without reporting absent backends as failures.",
-      "The CLI derives private managed credential locations, starts the final Hubu once, and, when the selected mode includes Gongbu, waits for protected readiness, invokes Gongbu's credential handoff, and only then starts Gongbu; server-bound CLI calls consume the active profile's endpoint and capability paths as one authenticated client context.",
-      "The FLUX provider contract freezes provider `flux`, adapter `flux2_api`, model `flux-2-pro`, one-image PNG/JPEG capability, the certified 1k/2k/4k dimensions and reviewed USD pricing, zero generation retries, no fallback, polling, artifact delivery, and durable recovery as one versioned contract.",
-      "CLI catalog and doctor report configured, credential-reference-present, production-validated, and live-qualified as independent facts. These checks inspect only local source, validators, Keychain item existence, and local service state; readiness never calls BFL and remains not live-qualified until a separate qualification records evidence.",
-      "For that exact successful tuple, Gongbu durably counts poll/fetch transport entries and exposes one bodyless read-only attestation that revalidates the normalized artifact and returns only safe cardinalities and canonical projection hashes; it never moves credential comparison into Hubu or the MCP router.",
-      "Stack startup is principal-neutral: registration after startup needs no render, activation, stop, or restart, and each new Gongbu execution persists the account and agent resolved from Hubu authorization.",
-      "The clean-environment canary proves one launcher-owned final Hubu process, private credential materialization and reuse without leaks, then starts the real Gongbu, worker, and managed Temporal processes. Release binaries expose the deterministic fixture only behind Gongbu's explicit sandbox provider mode.",
-      "Local HTTP callers reach the API with the Hubu bearer token before protected routes resolve user authority.",
-      "Hubu resolves typed provider, executor, capability, and billing identities against its trusted catalog before policy evaluation and binds the canonical scope to authorization.",
-      "The recommended initial-user install pins an exact release tag and full source commit, then builds and verifies four production binaries under one product version and provenance identity.",
-      "Gongbu exclusively claims, preserves exact integer vendor cost and its frozen pricing snapshot, then Hubu charges budget cents with checked ceiling or releases active authorized spend; uncertainty and overruns return to a human decision.",
-      "Exact token replay is resolved against Gongbu's persisted immutable request before Hubu, and settlement or release uses the persisted execution agent.",
-      "The API handles local HTTP concerns and delegates spend approval, payment, and executor claim lifecycle orchestration to core app services.",
-      "Gongbu owns its process, database, Temporal workflow state, vendor credentials, provider adapters, model calls, artifacts, and recovery. Asynchronous generation submits once, checkpoints a safe provider operation in Gongbu SQLite, and resumes read-only polling without moving that state into Hubu.",
-      "A mixed catalog can expose both frozen Gemini targets—Lite at 1K and non-Lite at 1K/2K/4K—beside FLUX while keeping provider targets, opaque Keychain coordinates, execution attempts, and execution-bound artifacts distinct inside Gongbu.",
-      "Separate Hubu and Gongbu SQLite records preserve exact receipt amount, scale, currency, frozen pricing evidence, conservative budget charge, overrun, claims, and replay identity alongside their independently owned governance and execution state.",
-      "CLI feedback and the router-owned hubu_feedback_guidance / hubu_prepare_feedback tools share offline report preparation, with safe diagnostic selection and human review before external submission. No backend or database access is needed.",
-      "The unified MCP surface is the only agent-facing surface; its composite reuses Hubu authorization and the durable Gongbu worker, while public-handle resume replays primitive Hubu intent without Gongbu and binds execution only for governed work. Neither creates a second state machine or collapses independently configured backend clients.",
+      ["Humans set the boundaries", "Owners register, attach policies, create agent budgets, approve or deny pending spend, and reconcile uncertain outcomes."],
+      ["One agent surface", "Agents use only the unified MCP server; one governed call can authorize, execute, and return the result."],
+      ["Hubu governs money", "Hubu resolves the trusted scope, evaluates policy, reserves budget, then settles or releases it. It holds no provider credentials."],
+      ["Gongbu does the work", "Gongbu runs provider calls, retries, artifacts, and recovery in its own process, database, and credential store."],
+      ["Separate failure domains", "Hubu and Gongbu share source and releases, but never a process, database, credential, or backend client."],
+      ["Exact, replay-safe accounting", "Gongbu reports the exact cost and Hubu charges within the authorized maximum. Retries return stored state; overruns go to a human."],
+      ["Provider contracts", "Each provider target is a frozen, versioned contract covering model, pricing, retries, and polling. Agents select it only by opaque ID."],
+      ["Three stack modes", "Sandbox and local-stack run Hubu, Gongbu, and Temporal together; Hubu-only runs governance without the execution plane."],
     ],
-    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.stackConfiguration, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.gongbuAttestation, sharedLinks.gongbuProviderContracts, sharedLinks.unifiedMcp, sharedLinks.unifiedMcpContract, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.scopeModel],
+    links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.stackConfiguration, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.liveProviders, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.gongbuProviderContracts, sharedLinks.unifiedMcp, sharedLinks.unifiedMcpContract, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.scopeModel],
     zones: [
       { label: "Hubu control-plane process + owned state", x: 650, y: 48, w: 730, h: 366, labelX: 682, labelY: 84 },
       { label: "Gongbu execution plane — sandbox + local-stack modes", x: 650, y: 484, w: 730, h: 366, labelX: 682, labelY: 520 },
@@ -138,20 +267,21 @@ const components = {
       ["workflow", "gongbuData", "checkpoint + artifacts"],
       ["gongbu", "api", "resolve attribution + finalize", { fromSide: "top", toSide: "bottom", waypoints: [{ x: 819, y: 458 }, { x: 819, y: 430 }], labelSegment: 1, labelDx: 150 }],
     ],
+    traces: spendTraces(),
   },
   release: {
     title: "Immutable Releases",
     kind: "Component",
+    summary: "Every release is built from one exact main commit and tag. The source installer is validated on Intel and Apple silicon before anything is published.",
     copy:
       "The release workflow turns one exact main commit into an immutable tag, validates the recommended native source installation on both supported macOS architectures, and publishes secondary archives from the same four-binary workspace build.",
     responsibilities: [
-      "Publishes only after an explicit operator dispatch: a commit-addressed canary, a versioned candidate, or a stable SemVer release for an exact main revision.",
-      "Runs formatting, Clippy, workspace tests, the core integration flow, and source-installer contract tests before publication.",
-      "Exercises the exact-tag, full-commit source installer natively on Intel and Apple silicon; one locked build produces only hubu, hubu-server, hubu-unified-mcp, and gongbu-server with non-development version and provenance metadata.",
-      "Stages and verifies all four binaries before installing them into the chosen prefix, without relying on Apple signing or notarization.",
-      "Preserves separate Hubu and Gongbu runtime boundaries while sharing one product version and source provenance identity.",
-      "Keeps target archives as secondary convenience artifacts with licenses, notices, lockfile, manifest, provenance, and SHA-256 checksums, then smoke-tests their download, startup, unified MCP initialization, and version surfaces.",
-      "Keeps the Hubu product version separate from the hubu-spend-executor-v4.3 contract identifier so consumers can negotiate compatibility explicitly.",
+      ["Operator-triggered", "Publishes only on explicit dispatch: a canary, a release candidate, or a stable SemVer release of an exact main commit."],
+      ["Gated", "Formatting, Clippy, workspace tests, the core integration flow, and installer tests must pass first."],
+      ["Source install first", "The installer builds four binaries from an exact tag and full commit, validated on Intel and Apple silicon."],
+      ["Not Apple-signed", "Binaries are staged and verified before install, but are not Developer ID-signed or notarized."],
+      ["Archives are secondary", "Archives include licenses, lockfile, provenance, and SHA-256 checksums, and are smoke-tested after download."],
+      ["Versions stay separate", "The product version is distinct from the executor contract version, so compatibility is negotiated explicitly."],
     ],
     links: [sharedLinks.sourceInstaller, sharedLinks.releaseWorkflow, sharedLinks.releases, sharedLinks.common, sharedLinks.api, sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.gongbuApplication],
     nodes: [
@@ -173,21 +303,18 @@ const components = {
   api: {
     title: "Local HTTP API",
     kind: "Component",
+    summary: "A small local HTTP server that authenticates requests with a bearer token and routes them. Approval, payment, and claim logic lives in core app services, not here.",
     copy:
       "The local server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, resolves public IDs, and leaves spend approval, payment, and claim state transitions to core app services.",
     responsibilities: [
-      "Frames each request at CRLF-CRLF, validates Content-Length, reads exactly the declared body, and bounds header size, body size, and socket read time.",
-      "Keeps health and guidance public while requiring a local bearer token for protected routes plus distinct human capabilities for approval and reconciliation mutations.",
-      "Uses the local token and current user context for protected workflow authority, while refusing to treat executor possession of that token as human approval or reconciliation authority.",
-      "Exposes owner-scoped approval lookup and resolve routes; approve and deny are idempotent, while conflicting resolutions are rejected.",
-      "Hydrates state from the configured SQLite path and reconciles expired budget holds at startup.",
-      "Calls typed BudgetManager administration methods after authentication, ownership checks, and public-ID parsing. The facade owns the shared repository lock and commits before publishing memory.",
-      "Delegates authorize/payment to `SpendApprovalService` and claim, lookup, queue selection, settle/release, and reconciliation to `ExecutorClaimService` so both workflows are testable without HTTP.",
-      "Bridges wallet payment authorization and durable external executor claims through shared spend and budget state.",
-      "Uses one stable platform operation key as the agent-scoped workflow identity, with immutable authorization revisions for safe scope correction after terminal denial.",
-      "Returns immutable attempt audit and structured retry guidance, while SQLite atomically admits corrected revisions and rejects unsafe changed scope with conflict status.",
-      "Uses SQLite as the finalization authority so exact receipt, canonical non-cash ledger posting, conservative budget charge, overrun, claim, token, hold, and balance commit atomically, settle serializes against release, and identical executor or human reconciliation retries return stored state.",
-      "Writes managed structured events through one bounded JSONL sink, rotates four 10 MiB generations, keeps launcher stderr in a distinct per-start capture, suppresses successful liveness, version, and explicitly marked protected-readiness request noise, and retains unmarked reads plus failed probe diagnostics.",
+      ["Bounded HTTP", "Strictly frames each request and caps header size, body size, and read time."],
+      ["Authentication", "Health and guidance are public. Other routes need the bearer token; approval and reconciliation also need separate human capabilities."],
+      ["Executors are not humans", "Holding the bearer token never grants approval or reconciliation authority."],
+      ["Thin transport", "Parses public IDs and checks ownership, then delegates to `SpendApprovalService`, `ExecutorClaimService`, and `BudgetManager`."],
+      ["Idempotent approvals", "Approve and deny are safe to repeat; a conflicting resolution is rejected."],
+      ["Atomic finalization", "Receipt, ledger posting, budget charge, claim, and hold commit in one SQLite transaction; identical retries return stored state."],
+      ["Startup recovery", "Loads state from SQLite and reconciles expired budget holds on start."],
+      ["Bounded logs", "Writes structured JSONL events with fixed-size rotation and skips successful health-probe noise."],
     ],
     links: [sharedLinks.api, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.persistence, sharedLinks.telemetry],
     nodes: [
@@ -213,18 +340,17 @@ const components = {
   app: {
     title: "Core Governance",
     kind: "Component",
+    summary: "The core use-case layer. It runs spend approvals and executor claims across managers, while BudgetManager owns budget changes, all testable without HTTP.",
     copy:
       "BudgetManager owns budget administration through its private coordinator. The core app layer separately coordinates spend approval and executor claim lifecycles across managers and repositories. These use cases can be tested without HTTP routes.",
     responsibilities: [
-      "Routes create, limit update, and revoke directly through BudgetManager, which owns persistence coordination and the budget-before-governance lock order.",
-      "Atomically admits an immutable spend-attempt revision before evaluation; only all-denied, side-effect-free history permits corrected scope.",
-      "Evaluates a spend request against the selected policy and records allow or deny as final while preserving needs_approval as a durable pending decision.",
-      "Resolves pending spend exactly once: approval issues the scoped token and budget hold, while denial creates neither.",
-      "Evaluates budget availability at the request's captured instant and reserves exactly one effectively active agent budget for an allowed spend decision.",
-      "Persists the spend auth token and frozen budget hold after the budget accepts the request.",
-      "Submits wallet payments, persists payment attempts, marks successful tokens used, and settles, releases, or keeps the hold frozen according to the failed-payment retry policy.",
-      "Creates and looks up executor claims, derives the reconciliation queue, and coordinates exact-receipt executor or human finalization with checked ceiling, immutable replay, and overrun accounting through one atomic repository boundary.",
-      "Returns domain-shaped approval, rejection, payment, and claim state while the API owns authentication, public IDs, and JSON response shape.",
+      ["Spend approval", "Records each attempt, evaluates policy, and stores allow or deny as final; needs_approval stays pending."],
+      ["Resolve once", "Approval issues the scoped token and budget hold; denial creates neither."],
+      ["Budget reservation", "Reserves exactly one active agent budget at the request's captured time, then persists the token and hold."],
+      ["Payments", "Submits wallet payments, records attempts, and settles, releases, or keeps the hold according to the retry policy."],
+      ["Executor claims", "Creates claims, lists work needing reconciliation, and finalizes exact receipts atomically, capped at the authorized maximum."],
+      ["Budget administration", "Create, update, and revoke go straight to `BudgetManager`."],
+      ["No HTTP concerns", "Returns domain results; the API owns authentication, public IDs, and JSON shape."],
     ],
     links: [sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spend, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.persistence, sharedLinks.payment, sharedLinks.paymentAttempt],
     nodes: [
@@ -248,15 +374,16 @@ const components = {
   registration: {
     title: "Registration",
     kind: "Component",
+    summary: "Humans set up the owner; agents register against that owner with structured identity and version payloads. The server recomputes fingerprints before creating or reusing an agent record.",
     viewBox: "0 0 1200 700",
     copy:
       "Registration has two paths: humans create the owner user context that Hubu selects as active, while agents prepare structured identity and version payloads against that owner. The server validates fingerprints before creating or reusing agent records.",
     responsibilities: [
-      "Creates human owner users from a small username, display name, and optional email request, then selects that user as the active owner.",
-      "Publishes compact agent registration guidance so agents can build envelopes for the current Hubu user context.",
-      "Accepts simple agent requests or full envelopes, resolves the owner public id, and rejects mismatched fingerprints.",
-      "Creates or reuses agent identity, version, and account records, plus a fresh session per agent registration.",
-      "Registration after stack startup changes Hubu state only; it does not rerender, activate, stop, restart, or bind Gongbu startup to that agent.",
+      ["Human owner", "Created from a username, display name, and optional email, then selected as the active owner."],
+      ["Guidance for agents", "Hubu publishes compact guidance so agents build registration envelopes instead of guessing fields."],
+      ["Fingerprint check", "The server recomputes fingerprints and rejects mismatches before creating anything."],
+      ["Records", "Creates or reuses agent identity, version, and account records, with a fresh session per registration."],
+      ["No restarts", "Registering after the stack starts changes only Hubu state; Gongbu needs no rerender or restart."],
     ],
     links: [sharedLinks.user, sharedLinks.registration, sharedLinks.registrationModel, sharedLinks.registrationProtocol, sharedLinks.common],
     zones: [
@@ -286,17 +413,16 @@ const components = {
   policy: {
     title: "Policy Resources & Engine",
     kind: "Component",
+    summary: "Owner policies become immutable, versioned revisions, assigned per user by default or per agent as an override. Evaluation is deterministic, and deny rules always win.",
     copy:
       "Hubu reconciles owner-scoped policy resources into immutable canonical revisions, assigns them by user default or agent override, and evaluates the selected current revision with deterministic deny-first precedence.",
     responsibilities: [
-      "Gives each policy a stable opaque pol_ public id, immutable declarative key, mutable display name, and atomic current-revision pointer.",
-      "Canonicalizes and hashes immutable revisions; identical apply is a no-op and optional revision/hash compare-and-set rejects stale writes.",
-      "Stores assignments as separate references and migrates embedded legacy assignments without changing their effective content.",
-      "Records actor, source, timestamp, old/new hashes, and affected assignments for every mutation.",
-      "Validates policy shape before condition evaluation.",
-      "Resolves provider, executor, capability, and billing-merchant selectors against a versioned trusted catalog; unknown or ambiguous combinations fail closed.",
-      "Evaluates typed condition trees over amount, currency, agent, provider, executor, capability, billing merchant, legacy merchant, and category fields.",
-      "Merges matched effects as deny > needs_approval > allow > default.",
+      ["Stable resources", "Each policy has an opaque `pol_` ID, a fixed key, a display name, and a pointer to its current revision."],
+      ["Immutable revisions", "Revisions are canonicalized and hashed. Re-applying the same policy is a no-op, and stale writes are rejected."],
+      ["Assignments", "A user default applies unless an agent-level override is assigned."],
+      ["Audit trail", "Every change records actor, source, time, old and new hashes, and affected assignments."],
+      ["Trusted scope", "Provider, executor, capability, and merchant selectors resolve against a versioned catalog; unknown combinations fail closed."],
+      ["Deterministic evaluation", "Typed conditions cover amount, currency, agent, provider, and more. Effects merge as deny > needs_approval > allow > default."],
     ],
     links: [sharedLinks.persistence, sharedLinks.api, sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.executionScope, sharedLinks.scopeModel, sharedLinks.policyEngine, sharedLinks.policyModel, sharedLinks.policyCondition, ["Policy doc", "docs/policy-engine.md"]],
     nodes: [
@@ -320,31 +446,19 @@ const components = {
   budget: {
     title: "Budgets & Spending Targets",
     kind: "Component",
+    summary: "Each agent budget is a hard spending limit with an auditable version history. Owner spending targets are separate and advisory only.",
     copy:
       "Agent budgets are stable logical allocations whose hard limit lives in an immutable, auditable current version. SQLite stores only active or revoked administrative state; scheduled, expired, exhausted, and effective active availability are derived at one instant. User spending targets remain separate advisory records.",
     responsibilities: [
-      "BudgetManager is the sole public service for create, limit update, revoke, and budget queries. Its private coordinator commits storage before publishing validated private state; transports keep authentication, ownership, ID parsing, and DTO mapping.",
-      "Uses the existing budget-manager mutex → shared governance mutex → SQLite transaction order. Commands acquire the repository internally; callers must never hold it while entering the facade.",
-      "Unconfigured managers reject administration. Repository append types, raw record application, and the coordinator are internal to core; no public update service remains.",
-      "Creates individual logical budgets owned by exactly one agent, with immutable currency and half-open period properties.",
-      "Creates immutable revision 1 records with effective time, actor, source, optional reason, canonical request fingerprint, and a same-budget current-version pointer.",
-      "Appends total-limit changes as one immutable direct successor under BEGIN IMMEDIATE, checks the requested edge for exact replay before stale-head rejection, and compare-and-sets the current pointer with the logical balance in the same transaction.",
-      "Publishes complete validated budget state, history, and holds captured inside the transaction only after commit. Create checks durable overlap constraints; revoke changes only logical fields; every admin failure leaves memory unchanged.",
-      "Keeps consumed and frozen usage on one logical balance, derives remaining from the current version limit, and attributes every hold to both the logical budget and authorizing version.",
-      "Derives availability with fixed precedence revoked, scheduled, expired, exhausted, active; half-open periods are eligible at their start and unavailable at their end.",
-      "Allows reservations only while effectively active, while existing version-attributed holds may settle, release, expire, or reconcile after exhaustion, expiry, or revocation without rewriting administrative state.",
-          "Treats every non-revoked budget as overlap-blocking for the same agent and currency, allows revocation with outstanding holds, and appends total-cap updates under the same stable logical budget without resetting consumed or frozen usage.",
-      "Projects public bgt_ and bgv_ identities through strict GET and POST /budgets/{budget_id}/versions routes; history reports the mutable logical snapshot once and immutable versions in ascending revision order.",
-      "Persists user spending targets separately and compares them with the maximum concurrent allocation of overlapping agent budgets.",
-      "Returns structured advisory warnings without blocking budget creation or spend.",
-      "Keys authorization, claim, and finalization by agent and platform operation key while returning stored state for identical retries.",
-      "Stores monotonic immutable authorization attempts and append-only outcomes so exact historical replay and corrected-denial audit survive restart.",
-      "Binds the complete canonical provider, executor, capability, and billing-merchant scope through the immutable decision referenced by the authorization token.",
-      "Uses one global authorization start window, snapshots the selected Hubu lease profile, and moves executor work from frozen to exclusively claimed for that profile's claim TTL.",
-      "Enforces unique agent-scoped operation ownership and finalizes exact receipt, canonical provider ledger entries, conservative cent charge, claim, token, hold, and budget balance in one immediate SQLite transaction while leaving expired or executor-overrun claims frozen for reconciliation.",
-      "Lists expired claimed leases requiring reconciliation for the owning user and requires a server-verified human capability before recording exact cost, frozen pricing snapshot, provider evidence, outcome, actor, and timestamp.",
-      "Normal executor settlement ceiling-rounds final exact cost once, consumes no more than the authorized maximum, and returns the unused remainder; after the claim lease expires, a human-confirmed billed overrun consumes the full conservative charge and records the overrun; release returns the full hold.",
-      "A future shared allocation would be an explicit budget pool with agent membership, not a task-scoped branch in the MVP budget model.",
+      ["One owner of budgets", "`BudgetManager` is the only public way to create, update, revoke, or query budgets."],
+      ["Commit, then publish", "Changes commit to SQLite before in-memory state updates, so a failed change leaves memory untouched."],
+      ["Hard limits per agent", "Each budget belongs to one agent with a fixed currency and period. Overlapping budgets for the same agent and currency are blocked."],
+      ["Versioned limits", "Limit changes append immutable versions. Usage carries over, and every hold records the version that authorized it."],
+      ["Availability", "Status is derived at request time: revoked, scheduled, expired, exhausted, or active. Only active budgets accept new holds."],
+      ["Settlement", "Charges the exact cost rounded up to cents, capped at the hold, and returns the rest. Release returns the full hold."],
+      ["Overruns need a human", "Ambiguous or over-limit outcomes stay frozen until a human with the reconciliation capability records the real cost."],
+      ["Replay-safe", "Authorizations, claims, and settlements are keyed by agent and operation; identical retries return stored state."],
+      ["Advisory targets", "Owner spending targets are separate records. Exceeding one produces a warning, never a block."],
     ],
     links: [["Budget boundary and lock order", "docs/budget-architecture.md"], sharedLinks.budget, sharedLinks.budgetState, sharedLinks.budgetModel, sharedLinks.spendingTarget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
     nodes: [
@@ -380,15 +494,16 @@ const components = {
   payment: {
     title: "Payment Manager",
     kind: "Component",
+    summary: "After a spend is allowed, the wallet validates the request and spend token, runs the payment rail, and records only successful money movement. Identical retries never pay twice.",
     copy:
       "The wallet boundary receives an app-service-built payment request after allowed spend. It checks request shape and idempotency, validates the spend token through a trait boundary, executes the selected rail, records only successful money movement, and marks tokens used only after ledger success.",
     responsibilities: [
-      "Rejects malformed amounts, empty idempotency keys, and conflicting idempotency-key replays.",
-      "Returns the original response for an identical idempotency replay without revalidating, rerunning the rail, or writing another ledger transaction.",
-      "Validates token, owner, amount, agent, account, complete canonical execution scope, legacy merchant, and currency before rail execution, then resolves task ID and reason from the stored authorization snapshot.",
-      "Persists canonical scope JSON with payment attempts so replay remains exact after restart while legacy rows migrate as nullable scope.",
-      "Records successful payments in the immutable double-entry ledger, then marks the spend token used.",
-      "Returns failed rail responses without ledger writes or token use; the app service persists attempts and decides whether to release holds or keep them frozen for retry.",
+      ["Input checks", "Rejects malformed amounts, empty idempotency keys, and conflicting replays."],
+      ["Idempotent", "An identical replay returns the original response without paying or writing to the ledger again."],
+      ["Token validation", "Checks token, owner, amount, agent, account, scope, and currency before running the rail."],
+      ["Ledger on success only", "Successful payments are written to the double-entry ledger, then the token is marked used."],
+      ["Failures move no money", "A failed payment skips the ledger write and token use; the app service records the attempt and releases the hold or keeps it for retry."],
+      ["Restart-safe", "Payment attempts store their full scope, so replay stays exact after a restart."],
     ],
     links: [sharedLinks.payment, sharedLinks.paymentAttempt, sharedLinks.rail, sharedLinks.ledger, ["Spend lifecycle", "docs/spend-lifecycle.md"]],
     nodes: [
@@ -416,40 +531,23 @@ const components = {
   gongbu: {
     title: "Gongbu Execution Plane",
     kind: "Runtime component",
+    summary: "Gongbu runs authorized provider work in its own process, with its own database and credentials. Each Hubu authorization attributes the work, and asynchronous jobs checkpoint so they resume safely.",
     viewBox: "0 0 1340 900",
     copy:
       "Gongbu starts without an execution principal. Its installation caller authenticates the service, while each new Hubu authorization supplies the account and agent snapshot. At startup, Gongbu production-validates any versioned managed provider binding against its exact target, frozen pricing, capability, delivery, polling, and recovery contract. For asynchronous work, Gongbu submits once, checkpoints safe provider-operation evidence in its own SQLite database, and resumes read-only polling without moving credentials or provider payloads into Temporal or Hubu.",
     responsibilities: [
-      "Projects active operator-configured targets as opaque stable target IDs with safe provider/model labels, compact Hubu authorization scopes, runtime image-size choices, and exact pricing components; it never returns credentials, endpoints, headers, adapter settings, or configuration revisions.",
-      "Accepts one opaque Hubu spend-auth token ID plus execution intent and either a discovered target ID or the legacy explicit tuple through canonical HTTP v2; callers cannot override account, operation identity, money, scope, task metadata, endpoint, or credentials.",
-      "Production-validates the managed FLUX binding as provider `flux`, adapter `flux2_api`, pinned non-preview model `flux-2-pro`, exactly one image, PNG/JPEG, certified 1k/2k/4k dimensions, frozen USD prices of 3/1, 45/10, and 75/10 minor units per image, zero generation retries, no fallback, and the fixed polling, artifact-delivery, and durable-recovery policies.",
-      "Exposes an authenticated, sanitized provider catalog whose readiness keeps configured, credential-reference-present, production-validated, and live-qualified independent. Catalog reads never resolve secret bytes or call BFL, and the shipped contract remains explicitly not live-qualified pending separate evidence.",
-      "For the exact successful managed-FLUX redaction-attestation tuple only, exposes a bodyless authenticated attestation that revalidates one normalized artifact, scans fixed Gongbu-owned projections with the currently registered key, and returns only versioned safe facts and hashes; it never reads Hubu storage or calls the provider.",
-      "Rejects unknown or mixed target selectors, incomplete FLUX pricing sets, unmatched image-size selectors, and arbitrary or conflicting FLUX dimensions before Hubu resolution, persistence, provider-attempt creation, or provider network activity.",
-      "Authenticates one installation/service caller with no account or agent claim; that caller may access known execution IDs and artifacts across the owner's agents, without an owner-wide browse API or strong multi-user/per-agent isolation.",
-      "Translates deprecated HTTP v1 only at admission: its two historical token aliases must be equal, never mean decision ID, and cannot broaden any resolved authority.",
-      "For new work, first derives and freezes the provider target, normalized input, selector-qualified catalog price, and provider-specific billable dimensions; it then resolves Hubu's authorization snapshot read-only, takes its account and agent as authoritative, exact-matches scope and price, and persists the immutable snapshot before scheduling.",
-      "For replay, checks the persisted token and immutable request locally before Hubu resolution, so a claimed or settled token remains replayable without reopening authorization.",
-      "Keeps runtime dependency health separate from process lifetime: confirmed Temporal or Hubu degradation withdraws readiness and new execution admission while liveness, execution reads, artifact reads, and recovery probing continue; readiness restores after recovery, and only operator shutdown or definitive local worker failure ends the process.",
-      "Owns workload types for execution classification and target resolution while accepting Hubu's independently selected lease profile and claim deadline.",
-      "Accepts only schema-v2 pricing catalogs and freezes the complete exact rational snapshot plus normalized image-size selectors; the pinned non-preview flux-2-pro provider contract additionally freezes 1k as 1024×1024, 2k as 1920×1088 landscape, or 4k as 2048×2048 before Hubu resolution, and the retired flat pricing shape is rejected.",
-      "Persists an immutable execution before scheduling and creates exactly one ProviderAttempt only after preflight and Hubu claim but before provider transmission; replay, worker restart, and activity recovery reuse that attempt and one Hubu financial mutation.",
-      "Maps Temporal scheduling unavailability to retryable `503 not_ready`; an identical retry reuses the already-persisted pending execution and stable workflow ID without resolving Hubu authorization again.",
-      "Uses a Temporal patch to preserve deterministic old histories while new asynchronous histories run `submit_provider` followed by `poll_provider_operation`; synchronous adapters retain their existing one-activity behavior.",
-      "Sends the FLUX generation POST only from `submit_provider`. A successful submit atomically checkpoints the safe request ID, operation ID, original absolute deadline, and versioned sanitized polling evidence before origin rejection can enter reconciliation; authenticated polling accepts only `api.bfl.ai` or exact `api.<one-safe-label>.bfl.ai`, never a broad `*.bfl.ai` credential wildcard.",
-      "Durably increments poll and artifact-fetch counters before the corresponding transport boundary; failure to record prevents the call, and restart preserves the conservative cumulative evidence.",
-      "If transmission may have succeeded but interruption occurs before the checkpoint commits, retains compact safe reconciliation evidence and neither resubmits nor releases; a proven pre-transmission failure remains releasable.",
-      "After the checkpoint, `poll_provider_operation` reconstructs status GETs for the same operation and resumes under the original deadline. Restart never sends another generation POST or grants a fresh deadline; explicit `reinspect` can reopen only an origin-rejected attempt after policy correction while enough of that deadline remains for a status GET, and exhausted operations are directed to provider support without reopening this GET-only path.",
-      "Carries only execution ID and phase enum through Temporal. Credentials, raw provider bodies, complete polling URLs, arbitrary query values, signed artifact URLs, and storage paths remain outside workflow payloads; recovery retains only normalized origin fields, safe path/query shape, a URL fingerprint, exact reason, and policy version.",
-      "Separates authenticated polling from delivery: only the narrow BFL API polling family receives `x-key`, while ephemeral HTTPS `delivery.<region>.bfl.ai` links—including verified `delivery.us7.bfl.ai`—are fetched immediately without provider credentials and are never logged or persisted.",
-      "Claims the Hubu authorization before provider work and validates the claim again immediately before the call.",
-      "Derives the version-1 canonical execution scope from the agent-selected target in the operator-approved provider catalog and exact-matches it across the Hubu trust boundary.",
-      "Resolves Gongbu-held credentials and invokes exactly the agent-selected target from the operator-approved catalog without arbitrary routing or fallback.",
-      "A simultaneous Gemini+FLUX contract catalog preserves separate target revisions and opaque Keychain coordinates; callers select only a discovered target ID and each execution persists the resolved internal target for replay.",
-      "Stores normalized artifacts under the Gongbu artifact root and persists metadata in the Gongbu database, never in Hubu storage.",
-      "Sends final exact cost and the full frozen snapshot to Hubu, which recomputes budget cents with checked ceiling and settles only within the normal authorization; ambiguous or over-limit outcomes retain exact attempt evidence and stay in reconciliation instead of causing blind provider resubmission.",
-      "Migrates legacy minor-unit attempts and receipts to scale-2 exact values without changing execution, provider-request, pricing-snapshot, or settlement identity; Hubu migrates its own database independently.",
-      "Keeps the Hubu and Gongbu processes, databases, credentials, provider work, artifacts, backend interfaces, and failure domains separate despite shared source and release identity.",
+      ["Safe target catalog", "Lists operator-approved targets by opaque ID with labels, pricing, and output options, never credentials or endpoints."],
+      ["Narrow requests", "Callers send a Hubu authorization and a target ID; they cannot override account, money, scope, endpoint, or credentials."],
+      ["Hubu decides attribution", "Gongbu starts with no account or agent. Each Hubu authorization supplies them, and scope and price must match exactly."],
+      ["Validated contracts", "Each managed provider binding is checked against its frozen contract at startup; unknown targets or prices are rejected early."],
+      ["Exactly one provider attempt", "Created after the Hubu claim and before transmission; restarts and retries reuse it."],
+      ["Durable async work", "Asynchronous jobs are submitted once, checkpointed, and resumed by polling, never resubmitted or given a fresh deadline."],
+      ["Uncertain means reconcile", "If a submission may have gone through, Gongbu keeps the evidence and neither resubmits nor releases the budget."],
+      ["Secrets stay out of workflows", "Temporal carries only execution ID and phase; credentials, raw provider bodies, and signed URLs never enter it."],
+      ["Own storage", "Artifacts and their metadata live in Gongbu's artifact root and database, never in Hubu."],
+      ["Exact settlement", "Reports the exact cost and frozen price to Hubu, which settles within the authorization."],
+      ["Degrades gracefully", "If Temporal or Hubu is unhealthy, new work is refused while reads and recovery continue."],
+      ["Installation-level caller", "One service caller can read known executions across the owner's agents; there is no per-agent isolation."],
     ],
     links: [sharedLinks.gongbuOverview, sharedLinks.gongbuServer, sharedLinks.liveProviders, sharedLinks.gongbuProviderConfig, sharedLinks.fluxProviderContract, sharedLinks.stackProviderContract, sharedLinks.gongbuServerConfig, sharedLinks.gongbuApplication, sharedLinks.gongbuWorkflow, sharedLinks.gongbuTemporal, sharedLinks.gongbuExecution, sharedLinks.gongbuArtifact, sharedLinks.gongbuAttestation, sharedLinks.gongbuProvider, sharedLinks.gongbuPricing, sharedLinks.gongbuProviderContracts, sharedLinks.gongbuFlux, sharedLinks.gongbuHubu, sharedLinks.unifiedMcp, sharedLinks.gongbuConfig, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.executionScope, sharedLinks.api],
     zones: [
@@ -499,14 +597,15 @@ const components = {
   ledger: {
     title: "Hubu Accounting",
     kind: "Component",
+    summary: "One double-entry ledger records wallet payments, provider expenses, and adjustments exactly. Budgets are linked for context but not required.",
     copy:
       "The first-class Hubu ledger owns one canonical transaction and exact-entry model for wallet payments, external-provider expenses and adjustments. Budgets are optional linked control context; governed spends retain agent and budget evidence.",
     responsibilities: [
-      "Owns wallet cash, agent spend expense and externally billed clearing accounts.",
-      "Wallet postings require at least two positive entries, matching owner scope, and balanced debits/credits.",
-      "Stores wallet and provider postings in the same immutable transaction and entry tables. Compatibility projections preserve wallet IDs and cents; canonical entries retain exact precision.",
-      "LedgerService owns provider corrections and typed owner/agent/budget reads. Settlement coordinates atomic ledger and budget changes; BudgetManager publishes committed budget state. Evidence-only legacy enrichment never reposts wallet expenses.",
-      "Canonical HTTP/CLI/unified-MCP history reads one owner snapshot, with agent/account/budget filters, full-budget coverage, exact costs, cursor paging and safe workflow/receipt evidence. Legacy GET /ledger remains wallet-only; HUB-210 wallet atomicity is deferred.",
+      ["Accounts", "Wallet cash, agent spend expense, and externally billed clearing accounts."],
+      ["Balanced postings", "Every transaction has at least two entries, one owner scope, and balanced debits and credits."],
+      ["One ledger", "Wallet and provider postings share the same immutable tables, keeping exact precision with cent views for compatibility."],
+      ["Clear ownership", "`LedgerService` owns corrections and reads; settlement changes the ledger and budget atomically."],
+      ["History", "HTTP, CLI, and MCP read one owner snapshot with agent, account, and budget filters and cursor paging."],
     ],
     links: [sharedLinks.ledger, sharedLinks.providerAccounting, sharedLinks.payment, ["Ledger accounting", "docs/ledger-accounting.md"], ["History contract", "docs/ledger-history.md"], ["Read projections", "crates/hubu-api/src/history.rs"], ["Wallet persistence", "crates/hubu-wallet/src/persistence.rs"]],
     nodes: [
@@ -535,22 +634,19 @@ const components = {
   cli: {
     title: "Hubu CLI",
     kind: "Interface",
+    summary: "The human's tool for setup, administration, and running the local stack. It validates provider contracts before activation and only manages services it launched.",
     viewBox: "0 0 1280 760",
     copy:
       "The CLI is the human developer surface and local-stack launcher. For the Gemini Lite, Gemini non-Lite, and FLUX provider contracts it renders one explicitly versioned composite catalog, reports independent non-network readiness facts, and invokes Gongbu's production validator before activation. It stages updates for explicit activation, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
     responsibilities: [
-      "Supports profile init, a sanitized provider catalog, doctor, render, generation listing, explicit activation and source-matched rollback, dependency-aware start, component status and logs, and graceful reverse-order whole-stack stop alongside the existing administration commands.",
-      "Expands the versioned FLUX contract into the exact `flux`/`flux2_api`/`flux-2-pro` target, one-image PNG/JPEG capability, and 1024×1024, 1920×1088, and 2048×2048 presets frozen at 3/1, 45/10, and 75/10 USD minor units per image, with fixed retry, fallback, poll, artifact, and recovery policies.",
-      "Allows both Gemini contracts to share one Google credential alias, requires isolation between different providers, and requires explicit maximum-spend, live-spend acknowledgement, and an immutable composite catalog version.",
-      "Reports configured, credential-reference-present, production-validated, and live-qualified separately. Doctor and catalog may inspect Keychain item existence without reading it, but never call BFL; the shipped contract remains not live-qualified until a later qualification supplies evidence.",
-      "Keeps operator TOML authoritative, stages validated updates without replacing the active manifest, reports redacted affected-component plans, and requires whole-stack stop/activate/start rather than selective restart or repair.",
-      "Persists redacted process ownership metadata, validates the recorded start identity before every signal, and never signals external, compatible unowned, or client-owned MCP processes.",
-      "Starts the final Hubu once, lets Hubu create its private capabilities, invokes the Gongbu-owned protected handoff, and starts Gongbu only after that succeeds; rollback touches only new child processes and preserves credential state for safe retry.",
-      "Renders principal-neutral Gongbu schema v3 without account, agent, or caller-account fields; agent registration after startup requires no lifecycle action.",
-      "Ships a one-command acceptance canary that proves no temporary Hubu process or credential leak, then verifies governed deterministic execution, Temporal workflow discovery, artifact retrieval, restart persistence, and graceful shutdown without billable provider spend.",
-      "Writes a managed Codex config block that lets agents in other projects discover Hubu MCP tools without reading the Hubu repo.",
-      "Builds canonical registration envelopes with the current owner context and fingerprints from server guidance.",
-      "Resolves the selected profile's authenticated client handoff lazily and atomically for server-bound commands, while explicit `--url` or the absence of an active profile preserves manual environment/file credential resolution; approval and reconciliation capabilities are sent only on their human mutations.",
+      ["Stack lifecycle", "`init`, `doctor`, `render`, `activate`, `rollback`, `start`, `status`, `logs`, and `stop`, in dependency order."],
+      ["Configuration safety", "Operator TOML is authoritative. Updates are staged and activated only while the stack is stopped."],
+      ["Readiness facts", "Reports configured, credential present, validated, and live-qualified separately, without reading secrets or calling providers."],
+      ["Live-spend guardrails", "Live provider use requires an explicit spending maximum and acknowledgement."],
+      ["Safe process control", "Only signals processes it started, after checking their recorded identity."],
+      ["Credential handoff", "Starts Hubu first, hands credentials to Gongbu through a protected step, then starts Gongbu."],
+      ["Agent setup", "Writes the Codex MCP configuration and builds registration envelopes from server guidance."],
+      ["Acceptance canary", "One command verifies the full stack end to end without billable provider spend."],
     ],
     links: [sharedLinks.feedback, sharedLinks.cli, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.stackLifecycle, sharedLinks.managedCredentialHandoff, sharedLinks.gongbuProviderContracts, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
@@ -585,43 +681,22 @@ const components = {
   mcp: {
     title: "Unified MCP Surface",
     kind: "Interface",
+    summary: "The single server agents connect to. It routes governance calls to Hubu and execution calls to Gongbu, and lets paused or approved operations resume by a public handle.",
     viewBox: "0 0 1280 760",
     copy:
       "The agent harness launches one default stdio server. The router offers bounded governed submission plus public-handle resume: primitive resume is Hubu-only, governed resume can continue stored Gongbu intent, and completed operations replay from the local registry. Agents discover selectable execution targets and pricing; provider-contract diagnostics and guarded-FLUX attestation remain authenticated operator HTTP endpoints. Governance, provider execution, backend storage, credentials, artifacts, and failures remain with their owners.",
     responsibilities: [
-      "The unified server implements initialize, ping, tools/list, tools/call, startup validation, machine-readable capability snapshots, redacted backend-state errors, serialized list-changed notifications, and bounded monitor shutdown over JSON-RPC stdio.",
-      "Starts independent jittered 30-second backend probes only after the initialize/initialized handshake, shares each backend's outage deadline with request refreshes, wakes the monitor when forced recovery shortens a deadline, reuses fresh snapshots for routine calls, and emits exactly one payload-free tools/list_changed event per effective callable-catalog transition.",
-      "Configures separate Hubu and Gongbu endpoints, bearer credentials, bounded HTTP clients, and independently probed versioned adapter boundaries without cross-domain Cargo dependencies.",
-      "Uses one installation-scoped Gongbu bearer without an account or agent claim; Hubu authorization remains the only source of new-execution attribution.",
-      "Coalesces concurrent monitor and request refreshes with independent per-backend single-flight gates whose bookkeeping locks are released before network I/O.",
-      "Publishes the accepted gongbu_* catalog, target-discovery, execution, and artifact primitives, local hubu_operation_status, and router-owned hubu_submit_governed_execution and hubu_resume_operation with stable schemas, private continuation binding, public-handle correlation, and recursive redaction.",
-      "Routes `gongbu_list_execution_targets` as a sanitized read of the active operator-configured targets, safe authorization scopes, runtime image-size options, and exact pricing components without credential or endpoint data.",
-      "For the normal auto-approved path, authorizes with Hubu, binds the immutable execution intent to the same normalized operation, wakes the existing durable worker, and gives the full workflow—including artifact work where possible—a 45-second production response target without implementing another state machine.",
-      "Returns approval_required immediately without Gongbu or provider work, persists the bounded immutable intent, synchronizes MCP- or CLI-submitted decisions into status, and requires explicit idempotent public-handle resume before an approval can start execution.",
-      "On success, delivers only PNG/JPEG artifacts within an 8 MiB aggregate raw-byte cap (about 10.7 MiB base64) and reports a router envelope alongside overlapping nullable Gongbu execution, provider, and non-provider intervals; it never adds the views together or labels router polling as provider-only time.",
-      "Forwards only fixed relative Gongbu API routes and rejects caller attempts to override accounts, endpoints, credentials, retry controls, or artifact storage paths before network access.",
-      "Fails closed on unknown or mismatched product, source-commit, executor-contract, MCP, and Gongbu schema versions while preserving healthy unrelated backend capabilities.",
-      "Keeps compatible Gongbu target discovery, execution reads, and artifact capabilities available during degraded readiness, but blocks governed execution admission unless both required backend boundaries are safe.",
-      "Lists and routes exactly the 30 contract-approved Hubu tools with stable schemas, annotations, validation, trusted metadata, response shapes, and application errors.",
-      "Uses fixed Hubu routes plus one strictly validated public budget-version path; the update strips budget_id from its POST body, and only update/history translate recursively redacted typed backend rejections into MCP isError results.",
-      "Uses only the Hubu credential for ordinary routes, sends the separate approval capability only on protected approval resolution, and sends the separate reconciliation capability only on the two reconciliation mutations.",
-      "Rejects unknown and out-of-map primitive calls before domain network access, never falls back across backends, never retries provider mutations, and limits cross-backend orchestration to the explicit governed-execution contract.",
-      "Runs an adapter-owned durable worker that advances accepted, queued, dispatching, reconciling, succeeded, and failed states; it retries only exact idempotent Gongbu create replay and read-only status observation with bounded exponential backoff.",
-      "Permits known-ID execution and artifact reads across the owner's agents through that installation caller, but promises neither owner-wide browsing nor strong multi-user/per-agent isolation.",
-      "Is the only agent-facing surface written by `hubu init codex` and the only MCP server included in release packaging.",
-      "Publishes a generic client approval profile so any harness can auto-approve reads, spend submission, governed submission, and idempotent handle resume but prompt before resolving a needs_approval decision.",
-      "Uses Codex per-tool approval overrides as one rendering of that profile: the human first says approve or deny in chat, then the native resolver prompt confirms the call; cancel submits nothing and leaves Hubu pending.",
-      "Annotates tools with read-only, destructive, idempotent, open-world, and Hubu approval hints.",
-      "Keeps operation_key and task_id out of model-authored spend schemas, normalizes bounded Codex, Claude Code, or controlled Hubu metadata, and injects resolved identities into the HTTP request; trusted task_id remains visible as non-authoritative correlation in sanitized results.",
-      "Persists one stable local installation identity and an immutable public operation_handle alongside a canonical tool-and-argument request hash and bounded immutable request intent. By default it allocates a private backend operation key; when the guarded preallocation store is configured, it instead requires exactly one active record for that canonical request, binds that record once, and fails closed before backend access on absence, mismatch, reuse, or store failure.",
-      "Keeps trusted Codex callId as operation identity while atomically claiming exact-scope preallocated key material in the owner-only operator SQLite store. The claim binds one stable router registry, call identity, and request hash before backend access. No model-authored argument, MCP response, log, or evidence carries the key or store location, and exact redelivery or restart reuses the durable router binding without reallocating the helper record.",
-      "Marks dispatch before Hubu mutation, stores monotonic results, approval status, and sanitized replay state separately from decision and continuation columns, synchronizes external decisions from authoritative Hubu reads, and retains private keys only inside trusted adapter state.",
-      "Binds each allowed auth_token_id to exactly one canonical Gongbu create intent before backend access, temporarily persists the validated request for restart-safe replay until durable execution identity is recovered, then deletes the request while retaining Gongbu execution identity and lifecycle state; changed intent, spoofed protected controls, or mismatched returned identity fail closed.",
-      "Accepts only the public operation handle through hubu_operation_status and hubu_resume_operation; pending stays approval_required, external approval becomes resume_required, denial is terminal, primitive resume recovers its scoped Hubu outcome, governed resume can only bind the already stored execution intent, and completed outcomes replay from sanitized registry state without backend access.",
-      "Recursively removes operation_key fields and private-key text from Gongbu content, structured content, errors, failure messages, artifact metadata, and status projections; allowlisted admission diagnostics survive durable terminal projection and restart, while private operation identity is replaced only by the non-authoritative public handle.",
-      "Returns the stable public handle with decision-aware guidance: approved pending work resumes by handle without the original call identity, while a definitive denial translates backend key-reuse guidance into a new harness call and logical operation for corrected work. Migrated v4 pending rows without stored intent require exact original-call backfill before resume or become terminal resume_intent_unavailable.",
-      "Treats the registry as an independent billable-operation capability: missing or broken state hides and rejects new Hubu spend calls without stopping the router or affecting Hubu reads, gongbu_get_execution, or artifact access.",
-      "Loads the local Hubu bearer and owner capability tokens, returns durable approval status, withholds authorization continuations from resolution responses, and protects approve-or-deny with both the narrow spend-approval client gate and server-verified approval capability without enabling the broader administrative gate.",
+      ["The only agent surface", "Written by `hubu init codex`, it is the only MCP server in releases and speaks JSON-RPC over stdio."],
+      ["Separate backends", "Hubu and Gongbu have separate endpoints, credentials, clients, and health probes, with no fallback between them."],
+      ["Live tool catalog", "Probes backends every 30 seconds and notifies clients once when the callable tool set changes."],
+      ["Governed execution", "One call authorizes with Hubu, starts Gongbu work, and aims to return the result within 45 seconds."],
+      ["Approvals pause", "`approval_required` returns before any provider work; execution starts only after an explicit resume."],
+      ["Operation handles", "Each operation gets a public handle for status and resume. Private operation keys never reach the model, logs, or responses."],
+      ["Trusted identity", "Operation and task IDs come from client metadata, not model-written arguments."],
+      ["Durable worker", "Advances operations through their states, retrying only idempotent Gongbu creates and read-only status checks."],
+      ["Fails closed", "Rejects unknown tools, attempts to override accounts, endpoints, or credentials, and mismatched backend versions."],
+      ["Human gates", "Approval and reconciliation capabilities are sent only on those mutations, and tools carry approval annotations."],
+      ["Result delivery", "Returns PNG or JPEG artifacts up to 8 MiB, with timing that never labels waiting as provider time."],
     ],
     links: [sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.unifiedGovernedExecution, sharedLinks.unifiedResumeOperation, sharedLinks.unifiedMcpStdio, sharedLinks.unifiedMcpNotifications, sharedLinks.unifiedHubuCatalog, sharedLinks.unifiedHubuRouting, sharedLinks.unifiedOperationRegistry, sharedLinks.unifiedOperationWorker, sharedLinks.unifiedGongbuCatalog, sharedLinks.unifiedGongbuFixture, sharedLinks.unifiedMcpContract, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.gongbuProviderContracts, sharedLinks.api, sharedLinks.gongbuApplication],
     zones: [
@@ -663,21 +738,18 @@ const components = {
   agent: {
     title: "Agent Spend Path",
     kind: "Flow",
+    summary: "Agents submit a spend and execution request once and never see private backend keys. Auto-approved work proceeds right away; anything needing review pauses and resumes by handle.",
     copy:
       "Agents never hold private backend operation keys. They submit authorization and execution intent once; an auto-allow proceeds immediately, while a pending decision is reviewed, resolved, synchronized, and explicitly resumed by its durable public handle.",
     responsibilities: [
-      "Consumes registration guidance instead of guessing protocol fields from prose.",
-      "Uses the unified MCP registry for harness spend calls. After an exact human gate, the repository skill may allocate one key-redacted record for the canonical call; the router consumes it privately while the agent keeps the same trusted call identity for replay and restart. Other direct diagnostic CLI flows may still use the skill's separate explicit-key registry.",
-      "Lists operator-approved targets, chooses one opaque target ID and an advertised runtime image option, then calls hubu_submit_governed_execution with the returned compact authorization scope and target-bound structured execution intent; optional business task correlation remains trusted client metadata rather than a protected model argument.",
-      "Uses the returned public operation handle for status and approved continuation; exact harness-call redelivery also recovers the same normalized operation, while a distinct call ID always allocates a different operation. A migrated pending row without stored intent must be backfilled by that exact redelivery before handle resume or becomes terminal.",
-      "If a result is ambiguous, redelivers the exact call with the same harness identity and never submits a replacement spend call.",
-      "If authorization is definitively denied, treats that operation as terminal; exact redelivery only recovers the denial, while corrected work is submitted as a new call and receives a new private operation key.",
-      "On approval_required, receives an immediate response with no provider work, reads the immutable review, and asks the human to say approve or deny in chat before the native resolver prompt confirms the call.",
-      "Treats a canceled native prompt as no submitted decision: Hubu remains pending and the agent never reports cancellation as a denial.",
-      "Synchronizes decisions submitted through unified MCP or the CLI; approved work becomes resume_required and only hubu_resume_operation may advance the sticky needs_approval result, replaying stored Hubu intent and binding stored execution intent only for governed work, while original-call redelivery remains replay-only.",
-      "Makes an authorization that expires before approved resume terminal and replacement-safe with create-new-operation guidance, without Gongbu or provider work; unrelated or ambiguous Hubu failures keep the same handle resumable.",
-      "On in_progress because execution is nonterminal when the total internal budget expires, observes the same durable handle while the existing worker continues; it does not submit a replacement.",
-      "On success, receives only eligible bounded PNG/JPEG artifacts plus server-observed timing whose execution wait is not misrepresented as provider-only time.",
+      ["Follows guidance", "Registers from Hubu's guidance object instead of guessing fields."],
+      ["Picks a target", "Lists approved targets, chooses one by ID, and submits one governed call with the returned scope."],
+      ["Uses the handle", "Tracks status and resumes approved work by public handle; it never sees private operation keys."],
+      ["Never double-spends", "On an ambiguous result it redelivers the same call and never submits a replacement."],
+      ["Denial is final", "Corrected work goes in as a new call and a new operation."],
+      ["Asks the human", "On `approval_required`, it shows the review and asks the human to approve or deny. A canceled prompt is not a denial."],
+      ["Expiry ends the operation", "If authorization expires before resume, no provider work runs and a new operation is needed."],
+      ["Long jobs keep running", "If the wait budget runs out, it keeps watching the same handle while the worker continues."],
     ],
     links: [sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.cli, sharedLinks.spend, sharedLinks.registrationProtocol, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper],
     nodes: [
@@ -702,14 +774,15 @@ const components = {
   human: {
     title: "Human Owner Flow",
     kind: "Flow",
+    summary: "Humans set the financial boundaries: identity, policies, budgets, and approvals. The tools aim to keep each review small and explicit.",
     copy:
       "Humans set the financial boundaries. The CLI and MCP adapter aim to keep review small while making identity, policy, advisory target, and hard budget state explicit.",
     responsibilities: [
-      "Registers humans with separate username and display name fields.",
-      "Reviews current owner context, agent name/version, and protected setup actions.",
-      "Funds governance by creating a user-level policy and agent budget before agent spending, with an optional advisory spending target for aggregate allocations.",
-      "Reviews every material field, says approve or deny in chat, then confirms the native MCP resolver prompt; cancel leaves the durable request pending rather than recording a denial.",
-      "Resolves pending spend explicitly as approve or deny; repeated matching decisions are safe, conflicts are rejected, and resolution itself never invokes a provider.",
+      ["Identity", "Registers with a username and a separate display name."],
+      ["Funding", "Creates a policy and an agent budget before any spending; spending targets are optional and advisory."],
+      ["Review", "Checks owner context, agent name and version, and every material field before protected actions."],
+      ["Decide explicitly", "Says approve or deny in chat, then confirms the prompt; canceling leaves the request pending."],
+      ["Safe decisions", "Repeating a decision is harmless, conflicting decisions are rejected, and approval never calls a provider by itself."],
     ],
     links: [sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.registrationProtocol, sharedLinks.budget],
     nodes: [
@@ -745,7 +818,7 @@ const sidebarHighlights = {
   top: [
     "Owners set budgets, policies, and approvals.",
     "One governed call can authorize, execute, and deliver an auto-approved result.",
-    "A versioned FLUX provider contract is source-checked, rendered, production-validated, and exposed through sanitized CLI/MCP catalogs without calling BFL.",
+    "Versioned provider contracts are source-checked, rendered, production-validated, and exposed through sanitized CLI/MCP catalogs without calling the provider.",
     "Hubu authorizes spend; Gongbu executes provider work.",
     "Runtime, data, credential, and failure boundaries stay separate.",
   ],
@@ -798,17 +871,9 @@ const sidebarHighlights = {
     "Triggers prevent updates and deletes.",
   ],
   cli: [
-    "Humans use the CLI for setup, administration, and local stack lifecycle.",
-    "Doctor and catalog report four independent readiness facts without reading secrets or calling BFL.",
-    "Render expands the exact provider contract and requires Gongbu production validation before activation.",
-    "Humans select sandbox, local-stack, or Hubu-only outcomes before field-level configuration.",
-    "The generated topology includes only components required by the selected outcome.",
-    "Validated updates stage first and activate only while the owned stack is stopped.",
-    "The launcher signals only processes whose recorded start identity still matches.",
-    "The acceptance canary proves the real process lifecycle plus deterministic workflow and artifact recovery without billable provider spend.",
-    "Agent registration after startup needs no render or restart.",
-    "It configures agent-facing MCP access.",
-    "It exposes policy, budget, spend, ledger, and health workflows.",
+    "Checks the product version with `hubu version`; no backend needs to be running.",
+    "Manages the local stack: create and validate configuration (`stack init`, `stack doctor`), then start, stop, and check status of the servers.",
+    "Runs human admin operations: register user and agent identities, draft, apply, and update policies, and create and list budgets.",
   ],
   mcp: [
     "The agent harness starts one default unified MCP process.",
@@ -832,14 +897,26 @@ const sidebarHighlights = {
   ],
 };
 
-let currentView = "top";
+const TRACE_STEP_MS = 2600;
+const defaultDocumentTitle = document.title;
+
+let currentView = null;
+let focusedNodeId = null;
+let layers = null;
+let labelPlacement = null;
+const trace = { id: null, step: 0, timer: null };
 
 const svg = document.getElementById("architecture-canvas");
 const title = document.getElementById("diagram-title");
 const crumb = document.getElementById("diagram-crumb");
 const detailsTitle = document.getElementById("details-title");
 const detailsKind = document.getElementById("details-kind");
+const detailsPanel = document.getElementById("details-panel");
+const detailsSummary = document.getElementById("details-summary");
 const detailsCopy = document.getElementById("details-copy");
+const responsibilitiesCount = document.getElementById("responsibilities-count");
+const linksCount = document.getElementById("links-count");
+const detailSections = document.querySelectorAll(".detail-section");
 const highlights = document.getElementById("highlights");
 const responsibilities = document.getElementById("responsibilities");
 const sourceLinks = document.getElementById("source-links");
@@ -848,29 +925,280 @@ const topButtons = [
   document.getElementById("details-back-button"),
 ];
 
-topButtons.forEach((button) => button.addEventListener("click", () => showView("top")));
+const traceBar = document.getElementById("trace-bar");
+const traceOutcomes = document.getElementById("trace-outcomes");
+const tracePlayer = document.getElementById("trace-player");
+const traceCaption = document.getElementById("trace-caption");
+const traceCount = document.getElementById("trace-count");
+const tracePrev = document.getElementById("trace-prev");
+const traceNext = document.getElementById("trace-next");
+const tracePlay = document.getElementById("trace-play");
+const traceExit = document.getElementById("trace-exit");
+
+topButtons.forEach((button) => button.addEventListener("click", () => navigateTo("top")));
+tracePrev.addEventListener("click", () => stepTrace(-1));
+traceNext.addEventListener("click", () => stepTrace(1));
+tracePlay.addEventListener("click", togglePlay);
+traceExit.addEventListener("click", stopTrace);
+window.addEventListener("popstate", syncViewFromLocation);
+window.addEventListener("hashchange", syncViewFromLocation);
+document.addEventListener("keydown", (event) => {
+  if (!trace.id || event.target.closest?.("input, textarea, select")) return;
+  if (event.key === "ArrowRight") stepTrace(1);
+  else if (event.key === "ArrowLeft") stepTrace(-1);
+  else if (event.key === "Escape") stopTrace();
+  else return;
+  event.preventDefault();
+});
+
+// Views are addressable as #<view-id> so drill-downs can be linked and the
+// browser Back button returns to the previous level.
+function viewIdFromLocation() {
+  let viewId = "";
+  try {
+    viewId = decodeURIComponent(window.location.hash.slice(1));
+  } catch {
+    viewId = "";
+  }
+  return Object.hasOwn(components, viewId) ? viewId : "top";
+}
+
+function syncViewFromLocation() {
+  const viewId = viewIdFromLocation();
+  if (viewId !== currentView) showView(viewId);
+}
+
+function navigateTo(viewId) {
+  if (viewId === currentView) return;
+  if (viewId === "top") {
+    history.pushState(null, "", window.location.pathname + window.location.search);
+  } else {
+    history.pushState(null, "", `#${encodeURIComponent(viewId)}`);
+  }
+  showView(viewId);
+}
 
 function showView(viewId) {
   currentView = viewId;
+  focusedNodeId = null;
+  resetTrace();
   const view = components[viewId];
+  document.title = viewId === "top" ? defaultDocumentTitle : `${view.title} · ${defaultDocumentTitle}`;
   title.textContent = view.title;
   crumb.textContent = view.kind;
   detailsTitle.textContent = view.title;
   detailsKind.textContent = view.kind;
-  detailsCopy.textContent = view.copy;
+  setInlineText(detailsSummary, view.summary);
+  setInlineText(detailsCopy, view.copy);
   renderList(highlights, sidebarHighlights[viewId]);
   renderList(responsibilities, view.responsibilities);
+  responsibilitiesCount.textContent = `(${view.responsibilities.length})`;
   renderSourceLinks(view.links);
+  linksCount.textContent = `(${view.links.length})`;
+  detailsPanel.scrollTop = 0;
   renderDiagram(view);
+  renderTraceControls(view);
+}
+
+function renderTraceControls(view) {
+  traceOutcomes.innerHTML = "";
+  traceBar.hidden = !view.traces;
+  if (!view.traces) return;
+  Object.entries(view.traces).forEach(([traceId, { label }]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "trace-outcome";
+    button.dataset.traceId = traceId;
+    button.textContent = label;
+    button.setAttribute("aria-pressed", "false");
+    button.addEventListener("click", () => startTrace(traceId));
+    traceOutcomes.appendChild(button);
+  });
+  updateTraceControls();
+}
+
+function activeTrace() {
+  return trace.id ? components[currentView].traces[trace.id] : null;
+}
+
+function startTrace(traceId) {
+  resetTrace();
+  trace.id = traceId;
+  trace.step = 0;
+  updateTraceControls();
+  updateEmphasis();
+  startPlaying();
+}
+
+function stepTrace(delta) {
+  const active = activeTrace();
+  if (!active) return;
+  pausePlaying();
+  trace.step = Math.min(Math.max(trace.step + delta, 0), active.steps.length - 1);
+  updateTraceControls();
+  updateEmphasis();
+}
+
+function stopTrace() {
+  resetTrace();
+  updateTraceControls();
+  updateEmphasis();
+}
+
+function resetTrace() {
+  pausePlaying();
+  trace.id = null;
+  trace.step = 0;
+}
+
+function togglePlay() {
+  if (trace.timer) {
+    pausePlaying();
+    updateTraceControls();
+    return;
+  }
+  const active = activeTrace();
+  if (active && trace.step >= active.steps.length - 1) {
+    trace.step = 0;
+    updateEmphasis();
+  }
+  startPlaying();
+}
+
+function startPlaying() {
+  pausePlaying();
+  trace.timer = window.setInterval(() => {
+    const active = activeTrace();
+    if (!active || trace.step >= active.steps.length - 1) {
+      pausePlaying();
+    } else {
+      trace.step += 1;
+      updateEmphasis();
+    }
+    updateTraceControls();
+  }, TRACE_STEP_MS);
+  updateTraceControls();
+}
+
+function pausePlaying() {
+  window.clearInterval(trace.timer);
+  trace.timer = null;
+}
+
+function updateTraceControls() {
+  const active = activeTrace();
+  traceOutcomes.querySelectorAll(".trace-outcome").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.traceId === trace.id));
+  });
+  tracePlayer.hidden = !active;
+  if (!active) return;
+  const lastStep = active.steps.length - 1;
+  traceCount.textContent = `Step ${trace.step + 1} of ${active.steps.length}`;
+  traceCaption.textContent = active.steps[trace.step].caption;
+  tracePrev.disabled = trace.step === 0;
+  traceNext.disabled = trace.step === lastStep;
+  tracePlay.textContent = trace.timer ? "Pause" : trace.step === lastStep ? "Replay" : "Play";
+}
+
+// Dims everything except the lit subgraph: the current trace step when a
+// trace is active, otherwise the hovered or focused node and its neighbors.
+function updateEmphasis() {
+  const active = activeTrace();
+  let lit = null;
+  if (active) {
+    const step = active.steps[trace.step];
+    lit = { nodes: new Set(step.nodes), edges: new Set(step.edges.map(([from, to]) => edgeKey(from, to))) };
+  } else if (focusedNodeId) {
+    lit = neighborhood(focusedNodeId);
+  }
+  svg.classList.toggle("is-dimmed", Boolean(lit));
+  svg.classList.toggle("is-tracing", Boolean(active));
+  svg.querySelectorAll("[data-node-id]").forEach((element) => {
+    element.classList.toggle("is-lit", Boolean(lit?.nodes.has(element.dataset.nodeId)));
+  });
+  svg.querySelectorAll("[data-edge]").forEach((element) => {
+    element.classList.toggle("is-lit", Boolean(lit?.edges.has(element.dataset.edge)));
+  });
+}
+
+function neighborhood(nodeId) {
+  const nodes = new Set([nodeId]);
+  const edges = new Set();
+  components[currentView].edges.forEach(([from, to]) => {
+    if (from === nodeId || to === nodeId) {
+      nodes.add(from);
+      nodes.add(to);
+      edges.add(edgeKey(from, to));
+    }
+  });
+  return { nodes, edges };
+}
+
+function setFocusedNode(nodeId) {
+  if (focusedNodeId === nodeId) return;
+  focusedNodeId = nodeId;
+  if (!trace.id) updateEmphasis();
+}
+
+function edgeKey(from, to) {
+  return `${from}->${to}`;
 }
 
 function renderList(list, items) {
   list.innerHTML = "";
   items.forEach((item) => {
     const li = document.createElement("li");
-    li.textContent = item;
+    if (Array.isArray(item)) {
+      // [lead, detail] items render as a bold lead followed by one sentence.
+      const [lead, detail] = item;
+      const strong = document.createElement("strong");
+      setInlineText(strong, lead);
+      const text = document.createElement("span");
+      setInlineText(text, detail);
+      li.append(strong, " ", text);
+    } else {
+      setInlineText(li, item);
+    }
     list.appendChild(li);
   });
+}
+
+// Renders `backtick` spans as inline code without interpreting any markup.
+function setInlineText(element, text) {
+  element.replaceChildren(...text.split("`").map((part, index) => {
+    if (index % 2 === 0) return document.createTextNode(part);
+    const code = document.createElement("code");
+    code.textContent = part;
+    return code;
+  }));
+}
+
+// Collapsible sidebar sections keep their open state across views and, when
+// browser storage is available, across visits.
+const SECTION_STATE_KEY = "hubu-architecture-sections";
+
+function restoreSectionState() {
+  let saved = {};
+  try {
+    saved = JSON.parse(window.localStorage.getItem(SECTION_STATE_KEY)) || {};
+  } catch {
+    saved = {};
+  }
+  detailSections.forEach((section) => {
+    section.open = saved[section.dataset.section] === true;
+    section.addEventListener("toggle", saveSectionState);
+  });
+}
+
+function saveSectionState() {
+  const state = Object.fromEntries(
+    [...detailSections].map((section) => [section.dataset.section, section.open]),
+  );
+  try {
+    window.localStorage.setItem(SECTION_STATE_KEY, JSON.stringify(state));
+  } catch {
+    // Storage can be unavailable (private windows, blocked site data).
+  }
 }
 
 function renderSourceLinks(links) {
@@ -881,8 +1209,11 @@ function renderSourceLinks(links) {
     anchor.href = `https://github.com/hacker-no-ice/hubu/blob/main/${path}`;
     anchor.target = "_blank";
     anchor.rel = "noreferrer";
-    anchor.textContent = `${label} — ${path}`;
-    li.appendChild(anchor);
+    anchor.textContent = label;
+    const pathText = document.createElement("code");
+    pathText.className = "source-path";
+    pathText.textContent = path;
+    li.append(anchor, pathText);
     sourceLinks.appendChild(li);
   });
 }
@@ -892,11 +1223,18 @@ function renderDiagram(view) {
   svg.setAttribute("viewBox", view.viewBox || "0 0 1200 700");
   addMarker();
   (view.zones || []).forEach(drawZone);
+  layers = {
+    edges: svg.appendChild(makeSvg("g", { class: "edge-layer" })),
+    labels: svg.appendChild(makeSvg("g", { class: "label-layer" })),
+    nodes: svg.appendChild(makeSvg("g", { class: "node-layer" })),
+  };
+  labelPlacement = createLabelPlacement(view);
   const nodesById = Object.fromEntries(view.nodes.map((node) => [node.id, node]));
   view.edges.forEach(([from, to, label, options = {}], index) => {
-    drawEdge(nodesById[from], nodesById[to], label, index, options);
+    drawEdge(nodesById[from], nodesById[to], label, index, { ...options, key: edgeKey(from, to) });
   });
   view.nodes.forEach(drawNode);
+  updateEmphasis();
 }
 
 function drawZone(zone) {
@@ -932,6 +1270,10 @@ function addMarker() {
   });
   marker.appendChild(makeSvg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "var(--line)" }));
   defs.appendChild(marker);
+  const traceMarker = marker.cloneNode(true);
+  traceMarker.id = "arrow-tip-trace";
+  traceMarker.firstChild.setAttribute("fill", "var(--trace)");
+  defs.appendChild(traceMarker);
   svg.appendChild(defs);
 }
 
@@ -984,8 +1326,9 @@ function drawPolylineEdge(points, label, options = {}) {
     class: "arrow-line",
     d: points.map((point, pointIndex) => `${pointIndex === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" "),
     "marker-end": "url(#arrow-tip)",
+    "data-edge": options.key,
   });
-  svg.appendChild(path);
+  layers.edges.appendChild(path);
 
   const segmentIndex = options.labelSegment == null
     ? longestSegmentIndex(points)
@@ -999,7 +1342,7 @@ function drawPolylineEdge(points, label, options = {}) {
   drawEdgeLabel(label, {
     x: labelPoint.x + (options.labelDx || 0),
     y: labelPoint.y - 8 + (options.labelDy || 0),
-  });
+  }, options.key);
 }
 
 function longestSegmentIndex(points) {
@@ -1016,14 +1359,25 @@ function longestSegmentIndex(points) {
   return longestIndex;
 }
 
-function drawEdgeLabel(label, point) {
+function drawEdgeLabel(label, anchor, key) {
   const labelWidth = Math.max(58, label.length * 8 + 18);
-  svg.appendChild(makeSvg("rect", {
+  const point = labelPlacement.place(anchor, labelWidth);
+  const group = makeSvg("g", { class: "edge-label", "data-edge": key });
+  if (Math.hypot(point.x - anchor.x, point.y - anchor.y) > LABEL_LEADER_MIN_SHIFT) {
+    group.appendChild(makeSvg("line", {
+      class: "arrow-label-leader",
+      x1: anchor.x,
+      y1: anchor.y - LABEL_HEIGHT / 2 + 6,
+      x2: point.x,
+      y2: point.y - LABEL_HEIGHT / 2 + 6,
+    }));
+  }
+  group.appendChild(makeSvg("rect", {
     class: "arrow-label-back",
     x: point.x - labelWidth / 2,
-    y: point.y - 17,
+    y: point.y - LABEL_BASELINE_OFFSET,
     width: labelWidth,
-    height: 23,
+    height: LABEL_HEIGHT,
     rx: "4",
   }));
   const text = makeSvg("text", {
@@ -1033,7 +1387,82 @@ function drawEdgeLabel(label, point) {
     "text-anchor": "middle",
   });
   text.textContent = label;
-  svg.appendChild(text);
+  group.appendChild(text);
+  layers.labels.appendChild(group);
+}
+
+const LABEL_HEIGHT = 23;
+const LABEL_BASELINE_OFFSET = 17;
+const LABEL_NODE_PADDING = 8;
+const LABEL_GAP = 4;
+const LABEL_SEARCH_STEP = 6;
+const LABEL_SEARCH_RADIUS = 150;
+const LABEL_SEARCH_DIRECTIONS = 16;
+const LABEL_LEADER_MIN_SHIFT = 22;
+
+// Edge labels start at their authored position and move to the nearest spot
+// that clears nodes, zone titles, and earlier labels, so a label in a narrow
+// gap is not hidden behind the shapes it connects. Falls back to the
+// least-overlapping candidate when no clear spot is within reach.
+function createLabelPlacement(view) {
+  const [minX, minY, width, height] = (view.viewBox || "0 0 1200 700").split(/\s+/).map(Number);
+  const bounds = { x: minX, y: minY, w: width, h: height };
+  const obstacles = view.nodes.map((node) => padRect(
+    { x: node.x, y: node.y, w: node.w, h: node.h },
+    LABEL_NODE_PADDING,
+  ));
+  svg.querySelectorAll(".zone-label").forEach((text) => {
+    const box = text.getBBox();
+    if (box.width > 0) obstacles.push(padRect({ x: box.x, y: box.y, w: box.width, h: box.height }, LABEL_GAP));
+  });
+  const offsets = labelSearchOffsets();
+
+  return {
+    place(anchor, labelWidth) {
+      let best = null;
+      for (const offset of offsets) {
+        const point = { x: anchor.x + offset.x, y: anchor.y + offset.y };
+        const rect = labelRect(point, labelWidth);
+        if (!containsRect(bounds, rect)) continue;
+        const overlap = obstacles.reduce((total, obstacle) => total + overlapArea(rect, obstacle), 0);
+        if (!best || overlap < best.overlap) best = { point, rect, overlap };
+        if (overlap === 0) break;
+      }
+      const chosen = best || { point: anchor, rect: labelRect(anchor, labelWidth) };
+      obstacles.push(padRect(chosen.rect, LABEL_GAP));
+      return chosen.point;
+    },
+  };
+}
+
+function labelSearchOffsets() {
+  const offsets = [{ x: 0, y: 0 }];
+  for (let radius = LABEL_SEARCH_STEP; radius <= LABEL_SEARCH_RADIUS; radius += LABEL_SEARCH_STEP) {
+    for (let index = 0; index < LABEL_SEARCH_DIRECTIONS; index += 1) {
+      const angle = (index / LABEL_SEARCH_DIRECTIONS) * Math.PI * 2 - Math.PI / 2;
+      offsets.push({ x: Math.round(Math.cos(angle) * radius), y: Math.round(Math.sin(angle) * radius) });
+    }
+  }
+  return offsets;
+}
+
+function labelRect(point, labelWidth) {
+  return { x: point.x - labelWidth / 2, y: point.y - LABEL_BASELINE_OFFSET, w: labelWidth, h: LABEL_HEIGHT };
+}
+
+function padRect(rect, padding) {
+  return { x: rect.x - padding, y: rect.y - padding, w: rect.w + padding * 2, h: rect.h + padding * 2 };
+}
+
+function containsRect(outer, inner) {
+  return inner.x >= outer.x && inner.y >= outer.y
+    && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h;
+}
+
+function overlapArea(a, b) {
+  const width = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const height = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  return width > 0 && height > 0 ? width * height : 0;
 }
 
 function drawNode(node) {
@@ -1071,6 +1500,11 @@ function drawNode(node) {
   sub.textContent = node.sub;
   group.appendChild(sub);
 
+  group.addEventListener("mouseenter", () => setFocusedNode(node.id));
+  group.addEventListener("mouseleave", () => setFocusedNode(null));
+  group.addEventListener("focus", () => setFocusedNode(node.id));
+  group.addEventListener("blur", () => setFocusedNode(null));
+
   if (drillable) {
     group.addEventListener("click", () => drill(node.id));
     group.addEventListener("keydown", (event) => {
@@ -1080,7 +1514,7 @@ function drawNode(node) {
       }
     });
   }
-  svg.appendChild(group);
+  layers.nodes.appendChild(group);
 }
 
 function nodeClass(node, drillable) {
@@ -1198,7 +1632,7 @@ function isActorNode(node) {
 
 function drill(nodeId) {
   if (components[nodeId]) {
-    showView(nodeId);
+    navigateTo(nodeId);
   }
 }
 
@@ -1247,4 +1681,5 @@ function makeSvg(name, attrs = {}) {
   return element;
 }
 
-showView("top");
+restoreSectionState();
+syncViewFromLocation();

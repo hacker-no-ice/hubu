@@ -56,6 +56,58 @@ test("embeds the introduction below the hero without autoplay", async () => {
   assert.ok(html.indexOf('id="intro-video-title"') < html.indexOf('class="warning-band"'));
 });
 
+test("home page offers copyable commands, a mobile menu, and anchored warning", async () => {
+  const html = await (await render()).text();
+  assert.doesNotMatch(html, /--profile …|--stack-profile …/);
+  assert.match(html, /hubu stack init --mode sandbox --profile &quot;\$HOME\/hubu-sandbox&quot;/);
+  assert.equal(html.match(/<button class="copy-code"/g)?.length, 5);
+  assert.match(html, /<details class="site-menu"><summary>Menu<\/summary>/);
+  assert.match(html, /href="\/docs\/overview#project-status"/);
+  assert.match(html, /<link rel="icon" href="\/favicon.svg" type="image\/svg\+xml"/);
+  const favicon = await readFile(new URL("../public/favicon.svg", import.meta.url), "utf8");
+  assert.match(favicon, /linearGradient id="hubu-icon-gradient"/);
+});
+
+test("documentation code blocks carry progressive copy buttons", async () => {
+  const html = await (await render("/docs/local-stack")).text();
+  assert.match(html, /<div class="code-block"><pre><code[^>]*>[\s\S]*?<\/code><\/pre>\s*<button class="copy-code" type="button" data-copy-code hidden>Copy<\/button><\/div>/);
+  assert.match(html, /GitHub repository/);
+  const overview = await (await render("/docs/overview")).text();
+  assert.match(overview, /id="project-status"/);
+});
+
+test("publishes per-page canonical and share metadata", async () => {
+  const home = await (await render()).text();
+  assert.match(home, /<link rel="canonical" href="https:\/\/hubustack.dev"/);
+  assert.match(home, /<meta property="og:title" content="Hubu Docs — Governed spend for AI agents"/);
+
+  const html = await (await render("/docs/local-stack")).text();
+  assert.match(html, /<link rel="canonical" href="https:\/\/hubustack.dev\/docs\/local-stack"/);
+  assert.match(html, /<meta property="og:title" content="Local stack quick start · Hubu Docs"/);
+  assert.match(html, /<meta property="og:url" content="https:\/\/hubustack.dev\/docs\/local-stack"/);
+  assert.match(html, /<meta name="twitter:title" content="Local stack quick start · Hubu Docs"/);
+  assert.match(html, /<meta property="og:image" content="https:\/\/hubustack.dev\/og-wordmark.png"/);
+  const description = html.match(/<meta name="description" content="([^"]*)"/)?.[1];
+  assert.ok(description && description.length <= 160);
+  assert.match(description, /\w…$/);
+  assert.match(html, /← Previous<\/small><strong>Overview<\/strong>/);
+
+  const missing = await render("/docs/nope");
+  assert.equal(missing.status, 404);
+  assert.match(await missing.text(), /<title>Page not found · Hubu Docs<\/title>/);
+});
+
+test("publishes a sitemap of every documentation route", async () => {
+  const [sitemap, robots] = await Promise.all([
+    readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8"),
+    readFile(new URL("../dist/client/robots.txt", import.meta.url), "utf8"),
+  ]);
+  assert.match(robots, /^Sitemap: https:\/\/hubustack.dev\/sitemap.xml$/m);
+  for (const pathname of ["/", "/architecture/", "/docs/overview", "/docs/local-stack", "/configuration/local-stack/v1", "/configuration/local-stack/v1/stack-toml"]) {
+    assert.ok(sitemap.includes(`<loc>https://hubustack.dev${pathname}</loc>`), pathname);
+  }
+});
+
 test("publishes the scalable Hubu wordmark", async () => {
   const svg = await readFile(new URL("../public/brand/hubu-wordmark.svg", import.meta.url), "utf8");
   assert.match(svg, /viewBox="269 286 1168 376"/);

@@ -1,15 +1,26 @@
+import type { Metadata } from "next";
 import { Search } from "./components/Search";
 import { HubuWordmark } from "./components/HubuWordmark";
 import { searchDocuments } from "./lib/docs";
+import { homeMetadata } from "./lib/metadata";
 
 const stackSteps = [
-  ["01", "Initialize a profile", "hubu stack init --profile …", "Create and register operator-owned starter files without starting services."],
-  ["02", "Select and configure", "hubu stack select --profile …", "Select the profile for later commands, then edit stack.toml, credentials.toml, and providers.toml."],
+  ["01", "Initialize a profile", "hubu stack init --mode sandbox --profile \"$HOME/hubu-sandbox\"", "Create and register operator-owned starter files without starting services."],
+  ["02", "Select and configure", "hubu stack select --profile \"$HOME/hubu-sandbox\"", "Select the profile for later commands, then edit stack.toml, credentials.toml, and providers.toml."],
   ["03", "Start in one shot", "hubu stack start", "Validate, render, and start missing managed components in dependency order."],
   ["04", "Check readiness", "hubu stack status", "Inspect the whole stack through one stable, redacted readiness view."],
-  ["05", "Connect your favorite agent harness", "hubu init codex --stack-profile …", "Use the Codex helper shown here, or connect another MCP-capable harness to the unified MCP process."],
+  ["05", "Connect your favorite agent harness", "hubu init codex --stack-profile \"$HOME/hubu-sandbox\"", "Use the Codex helper shown here, or connect another MCP-capable harness to the unified MCP process."],
   ["06", "Run governed work", "authorize → execute → settle, release, or reconcile", "Keep policy and money state in Hubu; provider execution and artifacts in Gongbu."],
 ] as const;
+
+const primaryLinks = [
+  ["Documentation", "/docs/overview"],
+  ["Architecture", "/architecture/"],
+  ["Send feedback", "/docs/feedback"],
+  ["GitHub", "https://github.com/hacker-no-ice/hubu"],
+] as const;
+
+export const metadata: Metadata = homeMetadata;
 
 export default function Home() {
   return (
@@ -19,12 +30,15 @@ export default function Home() {
           <HubuWordmark className="brand-wordmark" decorative />
           <i>/ docs</i>
         </a>
-        <nav aria-label="Primary navigation">
-          <a href="/docs/overview">Documentation</a>
-          <a href="/architecture/">Architecture</a>
-          <a href="/docs/feedback">Send feedback</a>
-          <a href="https://github.com/hacker-no-ice/hubu">GitHub</a>
+        <nav className="primary-nav" aria-label="Primary navigation">
+          {primaryLinks.map(([label, href]) => <a href={href} key={href}>{label}</a>)}
         </nav>
+        <details className="site-menu">
+          <summary>Menu</summary>
+          <nav aria-label="Primary navigation">
+            {primaryLinks.map(([label, href]) => <a href={href} key={href}>{label}</a>)}
+          </nav>
+        </details>
       </header>
 
       <main id="main-content">
@@ -80,7 +94,7 @@ export default function Home() {
         <section className="warning-band" aria-label="Project status warning">
           <span className="warning-mark">!</span>
           <div><strong>Experimental and local-first.</strong><p>Suitable for development, evaluation, and controlled live-provider experiments—not yet for money-grade production workloads.</p></div>
-          <a href="/docs/overview">Read the production warning →</a>
+          <a href="/docs/overview#project-status">Read the production warning →</a>
         </section>
 
         <section className="quickstart section-wrap">
@@ -92,7 +106,14 @@ export default function Home() {
           <div className="steps">
             {stackSteps.map(([number, title, command, copy]) => (
               <article className="step" key={number}>
-                <span>{number}</span><div><h3>{title}</h3><code>{command}</code><p>{copy}</p></div>
+                <span>{number}</span>
+                <div>
+                  <h3>{title}</h3>
+                  {command.startsWith("hubu ") ? (
+                    <div className="code-block"><code>{command}</code><button className="copy-code" type="button" data-copy-code hidden>Copy</button></div>
+                  ) : <code>{command}</code>}
+                  <p>{copy}</p>
+                </div>
               </article>
             ))}
           </div>

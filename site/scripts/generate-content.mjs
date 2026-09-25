@@ -8,6 +8,7 @@ const siteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const repoRoot = path.resolve(siteRoot, "..");
 const docsRoot = path.join(repoRoot, "docs");
 const githubRoot = "https://github.com/hacker-no-ice/hubu/blob/main/";
+const siteOrigin = "https://hubustack.dev";
 
 async function markdownPaths(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -47,6 +48,14 @@ function plainText(markdown) {
     .trim();
 }
 
+// Meta descriptions end on a word boundary instead of mid-word.
+function summarize(text, limit = 160) {
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit - 1);
+  const boundary = cut.lastIndexOf(" ");
+  return `${(boundary > limit / 2 ? cut.slice(0, boundary) : cut).replace(/[\s,;:.]+$/, "")}…`;
+}
+
 function headingId(text) {
   return plainText(text).toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-").replace(/^-|-$/g, "") || "section";
 }
@@ -61,6 +70,10 @@ function renderMarkdown(markdown, sourcePath) {
     usedIds.set(base, count + 1);
     const id = count ? `${base}-${count + 1}` : base;
     return `<h${depth} id="${id}">${inner}<a class="heading-anchor" href="#${id}" aria-label="Link to ${escapeAttribute(plainText(inner))}">#</a></h${depth}>`;
+  };
+  renderer.code = function (token) {
+    const block = Renderer.prototype.code.call(this, token);
+    return `<div class="code-block">${block}<button class="copy-code" type="button" data-copy-code hidden>Copy</button></div>`;
   };
   renderer.link = function ({ href, title, tokens }) {
     const text = this.parser.parseInline(tokens);
@@ -98,6 +111,7 @@ for (const file of sourceFiles) {
     href: publicHref(sourceToSlug.get(sourcePath)),
     title,
     excerpt: plainText(body).slice(0, 190),
+    description: summarize(plainText(body)),
     html: renderMarkdown(markdown, sourcePath),
     headings: [...markdown.matchAll(/^##\s+(.+)$/gm)].map((match) => ({ text: plainText(match[1]), id: headingId(match[1]) })),
     sourcePath,
@@ -110,6 +124,14 @@ await writeFile(
   `// Generated from ../docs/**/*.md. Do not edit.\nexport const documents = ${JSON.stringify(documents)} as const;\n`,
 );
 
+const sitemapPaths = ["/", "/architecture/", ...documents.map((document) => document.href)];
+await writeFile(
+  path.join(siteRoot, "public/sitemap.xml"),
+  `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${sitemapPaths
+    .map((pathname) => `  <url><loc>${siteOrigin}${pathname}</loc></url>`)
+    .join("\n")}\n</urlset>\n`,
+);
+
 const architectureTarget = path.join(siteRoot, "public/architecture");
 await rm(architectureTarget, { recursive: true, force: true });
 await mkdir(architectureTarget, { recursive: true });
@@ -119,4 +141,4 @@ const internalArchitectureTarget = path.join(architectureTarget, "internal");
 await mkdir(internalArchitectureTarget, { recursive: true });
 await cp(path.join(repoRoot, "architecture"), internalArchitectureTarget, { recursive: true });
 
-console.log(`Generated ${documents.length} documentation pages and synced both architecture visualizers.`);
+console.log(`Generated ${documents.length} documentation pages, the sitemap, and both architecture visualizers.`);
