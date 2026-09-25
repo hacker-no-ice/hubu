@@ -398,6 +398,14 @@ a {
   font-weight: 700;
 }
 
+.detail-list li strong {
+  color: var(--ink);
+}
+
+.detail-list li strong::after {
+  content: ".";
+}
+
 .detail-section > p,
 .detail-section > ul {
   margin-top: 8px;
