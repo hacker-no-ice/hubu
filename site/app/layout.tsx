@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { CopyCode } from "./components/CopyCode";
+import { siteMetadata } from "./lib/metadata";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -13,27 +14,7 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-const metadataBase = new URL("https://hubustack.dev");
-const socialImage = new URL("/og-wordmark.png", metadataBase).toString();
-
-export const metadata: Metadata = {
-  metadataBase,
-  title: { default: "Hubu Docs — Governed spend for AI agents", template: "%s · Hubu Docs" },
-  description: "Documentation for Hubu's local-first agent spend control plane and the Gongbu execution plane.",
-  icons: { icon: { url: "/favicon.svg", type: "image/svg+xml" } },
-  openGraph: {
-    title: "Hubu / 户部",
-    description: "Architecture in service of trust · Hubu governs · Gongbu executes",
-    images: [{ url: socialImage, width: 1200, height: 630 }],
-    type: "website",
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "Hubu / 户部",
-    description: "Architecture in service of trust · Hubu governs · Gongbu executes",
-    images: [socialImage],
-  },
-};
+export const metadata: Metadata = siteMetadata;
 
 export default function RootLayout({
   children,
