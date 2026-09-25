@@ -501,7 +501,7 @@ const components = {
       ["Idempotent", "An identical replay returns the original response without paying or writing to the ledger again."],
       ["Token validation", "Checks token, owner, amount, agent, account, scope, and currency before running the rail."],
       ["Ledger on success only", "Successful payments are written to the double-entry ledger, then the token is marked used."],
-      ["Failures write nothing", "The app service then decides whether to release the hold or keep it for retry."],
+      ["Failures move no money", "A failed payment skips the ledger write and token use; the app service records the attempt and releases the hold or keeps it for retry."],
       ["Restart-safe", "Payment attempts store their full scope, so replay stays exact after a restart."],
     ],
     links: [sharedLinks.payment, sharedLinks.paymentAttempt, sharedLinks.rail, sharedLinks.ledger, ["Spend lifecycle", "docs/spend-lifecycle.md"]],
