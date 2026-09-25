@@ -25,6 +25,7 @@ const sharedLinks = {
   spend: ["Spend manager", "crates/hubu-core/src/spend/manager.rs"],
   spendModel: ["Spend model", "crates/hubu-core/src/spend/model.rs"],
   spendExecutor: ["Spend executor contract", "docs/spend-executor-contract.md"],
+  executorConformance: ["Executor conformance suite", "docs/executor-conformance.md"],
   executionScope: ["Spend lifecycle", "docs/spend-lifecycle.md"],
   scopeModel: ["Execution scope model", "crates/hubu-common/src/execution_scope.rs"],
   budget: ["Budget manager", "crates/hubu-core/src/budget/manager.rs"],
@@ -315,7 +316,7 @@ const components = {
       ["Startup recovery", "Loads state from SQLite and reconciles expired budget holds on start."],
       ["Bounded logs", "Writes structured JSONL events with fixed-size rotation and skips successful health-probe noise."],
     ],
-    links: [sharedLinks.api, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, sharedLinks.telemetry],
+    links: [sharedLinks.api, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.persistence, sharedLinks.telemetry],
     nodes: [
       { id: "routes", label: "HTTP framing + routes", sub: "bounded GET/POST JSON", x: 72, y: 92, w: 220, h: 90, tone: "agent" },
       { id: "auth", label: "Local auth", sub: "bearer + owner caps", x: 410, y: 76, w: 220, h: 92, tone: "core" },
@@ -548,7 +549,7 @@ const components = {
       ["Degrades gracefully", "If Temporal or Hubu is unhealthy, new work is refused while reads and recovery continue."],
       ["Installation-level caller", "One service caller can read known executions across the owner's agents; there is no per-agent isolation."],
     ],
-    links: [sharedLinks.gongbuOverview, sharedLinks.gongbuServer, sharedLinks.liveProviders, sharedLinks.gongbuProviderConfig, sharedLinks.fluxProviderContract, sharedLinks.stackProviderContract, sharedLinks.gongbuServerConfig, sharedLinks.gongbuApplication, sharedLinks.gongbuWorkflow, sharedLinks.gongbuTemporal, sharedLinks.gongbuExecution, sharedLinks.gongbuArtifact, sharedLinks.gongbuAttestation, sharedLinks.gongbuProvider, sharedLinks.gongbuPricing, sharedLinks.gongbuProviderContracts, sharedLinks.gongbuFlux, sharedLinks.gongbuHubu, sharedLinks.unifiedMcp, sharedLinks.gongbuConfig, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.api],
+    links: [sharedLinks.gongbuOverview, sharedLinks.gongbuServer, sharedLinks.liveProviders, sharedLinks.gongbuProviderConfig, sharedLinks.fluxProviderContract, sharedLinks.stackProviderContract, sharedLinks.gongbuServerConfig, sharedLinks.gongbuApplication, sharedLinks.gongbuWorkflow, sharedLinks.gongbuTemporal, sharedLinks.gongbuExecution, sharedLinks.gongbuArtifact, sharedLinks.gongbuAttestation, sharedLinks.gongbuProvider, sharedLinks.gongbuPricing, sharedLinks.gongbuProviderContracts, sharedLinks.gongbuFlux, sharedLinks.gongbuHubu, sharedLinks.unifiedMcp, sharedLinks.gongbuConfig, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.executionScope, sharedLinks.api],
     zones: [
       { label: "Gongbu process + owned state", x: 300, y: 44, w: 700, h: 810 },
       { label: "Provider boundary", x: 1025, y: 44, w: 270, h: 410 },

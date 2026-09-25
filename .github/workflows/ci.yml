@@ -73,6 +73,9 @@ jobs:
       - name: Run core integration flow
         run: ./scripts/integration-core-flow.sh
 
+      - name: Run executor-neutral Hubu conformance suite
+        run: ./scripts/integration-executor-conformance.sh
+
       - name: Run Hubu-to-Gongbu executor E2E
         run: ./scripts/integration-hubu-gongbu-executor.sh
 

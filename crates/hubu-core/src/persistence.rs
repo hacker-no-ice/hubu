@@ -2259,11 +2259,19 @@ impl SqliteGovernanceRepository {
             )?;
         }
 
-        self.conn.execute_batch(
-            "CREATE UNIQUE INDEX IF NOT EXISTS spend_decisions_agent_operation_unique
-             ON spend_decisions(agent_id, operation_key);
+        // Once revisions exist, one operation key may journal several
+        // decisions. `migrate_spend_operation_attempts` replaces this index
+        // with a revision-aware one, so recreating it on every reopen would
+        // reject a valid corrected-scope retry history.
+        if !table_has_column(&self.conn, "spend_decisions", "revision")? {
+            self.conn.execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS spend_decisions_agent_operation_unique
+                 ON spend_decisions(agent_id, operation_key);",
+            )?;
+        }
 
-             CREATE UNIQUE INDEX IF NOT EXISTS spend_executor_claims_agent_operation_unique
+        self.conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS spend_executor_claims_agent_operation_unique
              ON spend_executor_claims(agent_id, operation_key);
 
              CREATE TRIGGER IF NOT EXISTS spend_decisions_agent_id_required
@@ -7274,6 +7282,48 @@ mod tests {
             audit[1].final_decision,
             SpendAuthorizationDecision::PendingApproval
         );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn corrected_decision_revisions_survive_repository_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-corrected-attempt-reopen-{}.sqlite",
+            UserId::new()
+        ));
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let mut request = spend_request();
+        for revision in 1..=2 {
+            request.amount_cents += 1;
+            assert_eq!(
+                repo.admit_spend_attempt(
+                    &user_id(),
+                    "corrected-reopen",
+                    &request,
+                    "test:corrected",
+                    Utc::now(),
+                )
+                .unwrap(),
+                SpendAttemptAdmission::Admitted { revision }
+            );
+            let mut denied = denied_spend_decision(revision, request.clone());
+            denied.operation_key = "corrected-reopen".to_string();
+            repo.save_spend_decision(&denied).unwrap();
+            repo.record_spend_attempt_outcome(
+                &denied,
+                SpendAuthorizationDecision::Denied,
+                &denied.evaluation.reasons,
+                Utc::now(),
+            )
+            .unwrap();
+        }
+        drop(repo);
+
+        let history = SqliteGovernanceRepository::open(&path)
+            .expect("two decision revisions under one operation key must reopen")
+            .load_spend_attempt_history(&agent_id(), "corrected-reopen")
+            .unwrap();
+        assert_eq!(history.len(), 2);
         std::fs::remove_file(path).ok();
     }
 

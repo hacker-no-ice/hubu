@@ -367,6 +367,47 @@ mod rejection_tests {
         }
     }
 
+    /// Gongbu consumes the executor-neutral Hubu conformance corpus: every
+    /// retry decision Hubu can return must map to the activity class the
+    /// corpus assigns, so Gongbu never retries a rejected request as if it
+    /// were ambiguous, or abandons an ambiguous one as if it were rejected.
+    #[test]
+    fn hubu_conformance_retry_decisions_map_to_gongbu_activity_classes() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/hubu-executor-conformance-v4.3.json"
+        ))
+        .expect("parse Hubu executor conformance corpus");
+        assert_eq!(corpus["protocol_version"], "hubu-spend-executor-v4.3");
+        let decisions = corpus["retry_decisions"]
+            .as_object()
+            .expect("retry decision table");
+        let mut checked = 0;
+        for (name, decision) in decisions {
+            let class = decision["gongbu_activity_class"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}: missing gongbu_activity_class"));
+            let error = match (&decision["observed"], class) {
+                (_, "not_applicable") => continue,
+                (serde_json::Value::Null, _) => HttpClientError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "response lost",
+                )),
+                (observed, _) => HttpClientError::Status {
+                    status: observed["status"].as_u64().unwrap() as u16,
+                    body: observed["error_contains"].as_str().unwrap_or("").into(),
+                },
+            };
+            let expected = match class {
+                "proven" => ActivityError::Proven("hubu_request_rejected".into()),
+                "ambiguous" => ActivityError::Ambiguous("hubu_transport_ambiguous".into()),
+                other => panic!("{name}: unknown Gongbu activity class {other}"),
+            };
+            assert_eq!(map_activity_error(error), expected, "retry decision {name}");
+            checked += 1;
+        }
+        assert!(checked >= 10, "corpus retry decisions were not exercised");
+    }
+
     #[test]
     fn dependency_transport_loss_remains_ambiguous() {
         let error = HttpClientError::Io(std::io::Error::new(

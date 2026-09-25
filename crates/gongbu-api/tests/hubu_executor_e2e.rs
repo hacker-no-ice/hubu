@@ -981,9 +981,17 @@ impl TestWorkspace {
         let base_url = format!("http://{address}");
         let log_path = directory.path().join("hubu-server.jsonl");
         let lease_config = directory.path().join("lease-config.yaml");
+        // Share the executor-neutral conformance corpus's Hubu server profile
+        // so Gongbu is qualified against the same lease configuration.
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/hubu-executor-conformance-v4.3.json"
+        ))
+        .expect("parse Hubu executor conformance corpus");
         fs::write(
             &lease_config,
-            "authorization_ttl_seconds: 300\ndefault_lease_profile: default\nlease_profiles:\n  default:\n    claim_ttl_seconds: 900\n",
+            corpus["server_profile"]["lease_config_yaml"]
+                .as_str()
+                .expect("corpus lease configuration"),
         )
         .expect("write lease config");
         let log = File::create(&log_path).expect("create Hubu log");
