@@ -2253,6 +2253,11 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "retry": "replay the exact authorization request or read approval status to recover the durable result",
             "mcp": "hubu_resolve_spend_approval is protected by the narrow spend-approval client gate"
         },
+        "validate_request": {
+            "required": ["spend_auth_token_id", "account_id", "amount_cents"],
+            "rejected": ["operation_key", "agent_id"],
+            "note": "read-only scope inspection; it never authorizes irreversible work"
+        },
         "claim_request": {
             "required": [
                 "spend_auth_token_id",
@@ -4204,9 +4209,22 @@ fn spend_at(body: String, state: &ServerState, now: DateTime<Utc>) -> Result<Spe
     })
 }
 
+/// Claim and validate requests share one body shape. Its fields are
+/// flattened, so the retired v4.3 identity would otherwise be silently
+/// ignored instead of rejected.
+fn reject_retired_executor_identity(request: &ExecutorSpendClaimHttpRequest) -> Result<()> {
+    if request.operation_key.is_some() || request.spend.agent_id.is_some() {
+        return Err(anyhow!(
+            "{EXECUTOR_CONTRACT} claim and validate requests are identified by spend_auth_token_id; remove operation_key and agent_id"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_executor_spend(body: String, state: &ServerState) -> Result<ExecutorSpendHttpResponse> {
-    let request: ExecutorSpendHttpRequest = serde_json::from_str(&body)?;
-    let validated = validate_executor_spend_request(request, state)?;
+    let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
+    reject_retired_executor_identity(&request)?;
+    let validated = validate_executor_spend_request(request.spend, state)?;
     Ok(executor_spend_response(&validated))
 }
 
@@ -4333,11 +4351,7 @@ fn claim_executor_spend(
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
-    if request.operation_key.is_some() || request.spend.agent_id.is_some() {
-        return Err(anyhow!(
-            "{EXECUTOR_CONTRACT} claims are identified by spend_auth_token_id; remove operation_key and agent_id"
-        ));
-    }
+    reject_retired_executor_identity(&request)?;
     let mut resolved = resolve_executor_spend_request(request.spend, state)?;
     let (operation_key, _, _) = {
         let spend = state
@@ -9058,14 +9072,25 @@ lease_profiles:
         ] {
             let mut retired = token_identified_claim_request(&agent, &authorization);
             retired[field] = value;
-            let error = claim_executor_spend(retired.to_string(), &state)
-                .expect_err("retired v4.3 claim identity is rejected");
-            assert!(
-                error
-                    .to_string()
-                    .contains("claims are identified by spend_auth_token_id"),
-                "{field}: {error}"
-            );
+            for (route, error) in [
+                (
+                    "claim",
+                    claim_executor_spend(retired.to_string(), &state)
+                        .expect_err("retired v4.3 claim identity is rejected"),
+                ),
+                (
+                    "validate",
+                    validate_executor_spend(retired.to_string(), &state)
+                        .expect_err("retired v4.3 validate identity is rejected"),
+                ),
+            ] {
+                assert!(
+                    error.to_string().contains(
+                        "claim and validate requests are identified by spend_auth_token_id"
+                    ),
+                    "{route} {field}: {error}"
+                );
+            }
         }
         let claim = claim_executor_spend(
             token_identified_claim_request(&agent, &authorization).to_string(),
