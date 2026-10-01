@@ -1342,24 +1342,117 @@ struct ExecutorSpendResolveHttpRequest {
 struct ExecutorSpendClaimHttpRequest {
     #[serde(flatten)]
     spend: ExecutorSpendHttpRequest,
+    /// Optional v4.3 cross-check. A v4.4 claim is identified by the token
+    /// alone and Hubu derives the operation key from the stored decision.
     #[serde(alias = "executor_execution_id")]
-    operation_key: String,
+    operation_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 enum ExecutorSpendFinalizationHttpRequest {
     Executor(ExecutorSpendFinalizeHttpRequest),
     Reconciliation(ExecutorClaimReconciliationHttpRequest),
 }
 
+#[derive(Debug)]
+struct ExecutorSpendFinalizeHttpRequest {
+    identity: ExecutorFinalizationIdentity,
+    receipt: Option<SpendExecutorSettlementReceipt>,
+}
+
+/// How an executor names the claim it settles or releases.
+#[derive(Debug)]
+enum ExecutorFinalizationIdentity {
+    /// v4.3: the agent and the private operation key echoed from resolve.
+    AgentOperation {
+        agent_id: String,
+        operation_key: String,
+    },
+    /// v4.4: the authorization continuation Hubu issued.
+    SpendAuthToken(String),
+    /// v4.4: the claim Hubu returned.
+    Claim(String),
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExecutorSpendFinalizeHttpRequest {
+struct ExecutorSpendAgentOperationFinalizeHttpRequest {
     #[serde(alias = "executor_execution_id")]
     operation_key: String,
     agent_id: String,
     receipt: Option<SpendExecutorSettlementReceipt>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutorSpendTokenFinalizeHttpRequest {
+    spend_auth_token_id: Option<String>,
+    claim_id: Option<String>,
+    receipt: Option<SpendExecutorSettlementReceipt>,
+}
+
+const LEGACY_FINALIZATION_FIELDS: [&str; 3] =
+    ["operation_key", "executor_execution_id", "agent_id"];
+const TOKEN_FINALIZATION_FIELDS: [&str; 2] = ["spend_auth_token_id", "claim_id"];
+const RECONCILIATION_FINALIZATION_FIELDS: [&str; 2] = ["provider_reference", "evidence"];
+
+impl ExecutorSpendFinalizationHttpRequest {
+    /// Classify a settle/release body by its identity fields so a mixed or
+    /// incomplete request gets an actionable error instead of a generic
+    /// "did not match any variant" deserialization failure.
+    fn parse(body: &str) -> Result<Self> {
+        let value: Value = serde_json::from_str(body)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow!("executor finalization request must be a JSON object"))?;
+        let has_any = |fields: &[&str]| fields.iter().any(|field| object.contains_key(*field));
+        let legacy = has_any(&LEGACY_FINALIZATION_FIELDS);
+        let token = has_any(&TOKEN_FINALIZATION_FIELDS);
+        if has_any(&RECONCILIATION_FINALIZATION_FIELDS) {
+            if legacy || object.contains_key("spend_auth_token_id") {
+                return Err(anyhow!(
+                    "executor and human reconciliation request fields must not be mixed"
+                ));
+            }
+            return Ok(Self::Reconciliation(serde_json::from_value(value)?));
+        }
+        match (legacy, token) {
+            (true, true) => Err(anyhow!(
+                "executor finalization must identify the claim by spend_auth_token_id or claim_id, or by agent_id and operation_key, not both"
+            )),
+            (true, false) => {
+                let request: ExecutorSpendAgentOperationFinalizeHttpRequest =
+                    serde_json::from_value(value)?;
+                Ok(Self::Executor(ExecutorSpendFinalizeHttpRequest {
+                    identity: ExecutorFinalizationIdentity::AgentOperation {
+                        agent_id: request.agent_id,
+                        operation_key: request.operation_key,
+                    },
+                    receipt: request.receipt,
+                }))
+            }
+            (false, true) => {
+                let request: ExecutorSpendTokenFinalizeHttpRequest =
+                    serde_json::from_value(value)?;
+                let identity = match (request.spend_auth_token_id, request.claim_id) {
+                    (Some(token), None) => ExecutorFinalizationIdentity::SpendAuthToken(token),
+                    (None, Some(claim_id)) => ExecutorFinalizationIdentity::Claim(claim_id),
+                    _ => {
+                        return Err(anyhow!(
+                            "executor finalization requires exactly one of spend_auth_token_id or claim_id"
+                        ))
+                    }
+                };
+                Ok(Self::Executor(ExecutorSpendFinalizeHttpRequest {
+                    identity,
+                    receipt: request.receipt,
+                }))
+            }
+            (false, false) => Err(anyhow!(
+                "executor finalization requires spend_auth_token_id or claim_id"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -4271,13 +4364,16 @@ fn claim_executor_spend(
 ) -> Result<ExecutorSpendClaimHttpResponse> {
     let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
     let mut resolved = resolve_executor_spend_request(request.spend, state)?;
-    {
+    let (authoritative_operation_key, _, _) = {
         let spend = state
             .spend
             .lock()
             .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-        apply_authoritative_executor_identity(&mut resolved, &spend)?;
-    }
+        apply_authoritative_executor_identity(&mut resolved, &spend)?
+    };
+    // A supplied key stays a cross-check that the claim service rejects on
+    // mismatch; a token-identified claim uses the authorized key.
+    let operation_key = request.operation_key.unwrap_or(authoritative_operation_key);
     let authorization = resolved.payment_validation_request();
     let claim_state = {
         let mut spend_manager = state
@@ -4295,7 +4391,7 @@ fn claim_executor_spend(
         ExecutorClaimService.claim(
             ClaimExecutorSpendRequest {
                 authorization,
-                operation_key: request.operation_key,
+                operation_key,
             },
             &mut spend_manager,
             &mut budget_manager,
@@ -4362,7 +4458,7 @@ fn finalize_executor_spend(
     vendor_billed: bool,
     reconciliation_capability: Option<&str>,
 ) -> Result<Value> {
-    match serde_json::from_str::<ExecutorSpendFinalizationHttpRequest>(&body)? {
+    match ExecutorSpendFinalizationHttpRequest::parse(&body)? {
         ExecutorSpendFinalizationHttpRequest::Executor(request) if vendor_billed => {
             settle_executor_spend_request(request, state).map(to_json)
         }
@@ -4439,8 +4535,14 @@ fn settle_executor_spend(
     body: String,
     state: &ServerState,
 ) -> Result<ExecutorSpendSettlementHttpResponse> {
-    let request: ExecutorSpendFinalizeHttpRequest = serde_json::from_str(&body)?;
-    settle_executor_spend_request(request, state)
+    match ExecutorSpendFinalizationHttpRequest::parse(&body)? {
+        ExecutorSpendFinalizationHttpRequest::Executor(request) => {
+            settle_executor_spend_request(request, state)
+        }
+        ExecutorSpendFinalizationHttpRequest::Reconciliation(_) => Err(anyhow!(
+            "human reconciliation requires the reconciliation capability"
+        )),
+    }
 }
 
 fn settle_executor_spend_request(
@@ -4518,8 +4620,14 @@ fn release_executor_spend(
     body: String,
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
-    let request: ExecutorSpendFinalizeHttpRequest = serde_json::from_str(&body)?;
-    release_executor_spend_request(request, state)
+    match ExecutorSpendFinalizationHttpRequest::parse(&body)? {
+        ExecutorSpendFinalizationHttpRequest::Executor(request) => {
+            release_executor_spend_request(request, state)
+        }
+        ExecutorSpendFinalizationHttpRequest::Reconciliation(_) => Err(anyhow!(
+            "human reconciliation requires the reconciliation capability"
+        )),
+    }
 }
 
 fn release_executor_spend_request(
@@ -4779,18 +4887,71 @@ fn executor_claim_validation_request(
     user: &UserContext,
     state: &ServerState,
 ) -> Result<FinalizeExecutorClaimRequest> {
-    let operation_key = request.operation_key.trim();
-    if operation_key.is_empty() {
-        return Err(anyhow!("executor spend operation_key is required"));
-    }
-    let agent_pub_id = request.agent_id.trim();
-    if agent_pub_id.is_empty() {
-        return Err(anyhow!("executor spend agent_id is required"));
-    }
+    let (agent_id, operation_key) = match request.identity {
+        ExecutorFinalizationIdentity::AgentOperation {
+            agent_id,
+            operation_key,
+        } => {
+            let operation_key = operation_key.trim();
+            if operation_key.is_empty() {
+                return Err(anyhow!("executor spend operation_key is required"));
+            }
+            let agent_pub_id = agent_id.trim();
+            if agent_pub_id.is_empty() {
+                return Err(anyhow!("executor spend agent_id is required"));
+            }
+            (
+                resolve_agent_id_for_user(agent_pub_id, user, state)?,
+                operation_key.to_string(),
+            )
+        }
+        ExecutorFinalizationIdentity::SpendAuthToken(token_id) => {
+            // The token keeps naming its decision after it expires, is used
+            // or is revoked, so an executor that lost the claim response can
+            // still finalize or replay by token.
+            let token_id: SpendAuthTokenId = token_id
+                .trim()
+                .parse()
+                .with_context(|| "parse spend_auth_token_id")?;
+            let spend = state
+                .spend
+                .lock()
+                .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+            let token = spend
+                .auth_token_record(&token_id)
+                .filter(|token| token.owner_user_id == user.user_id)
+                .ok_or_else(|| anyhow!("unknown spend auth token"))?;
+            let decision = spend
+                .decision_record(&token.spend_decision_id)
+                .ok_or_else(|| anyhow!("spend decision is missing"))?;
+            (decision.request.agent_id, decision.operation_key)
+        }
+        ExecutorFinalizationIdentity::Claim(claim_id) => {
+            let claim_id = claim_id
+                .trim()
+                .parse::<SpendExecutorClaimId>()
+                .with_context(|| "parse executor spend claim_id")?;
+            let spend_manager = state
+                .spend
+                .lock()
+                .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+            let budget_manager = state
+                .budgets
+                .lock()
+                .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+            let claim_state = ExecutorClaimService.get(
+                &claim_id,
+                &user.user_id,
+                &spend_manager,
+                &budget_manager,
+            )?;
+            (claim_state.claim.agent_id, claim_state.claim.operation_key)
+        }
+    };
     Ok(FinalizeExecutorClaimRequest {
         owner_user_id: user.user_id.clone(),
-        agent_id: resolve_agent_id_for_user(agent_pub_id, user, state)?,
-        operation_key: operation_key.to_string(),
+        agent_id,
+        operation_key,
     })
 }
 
@@ -8826,6 +8987,181 @@ lease_profiles:
         std::fs::remove_file(path).ok();
     }
 
+    fn token_identified_claim_request(
+        agent: &RegisterAgentHttpResponse,
+        authorization: &SpendHttpResponse,
+    ) -> Value {
+        json!({
+            "spend_auth_token_id": authorization.auth_token_id.clone().expect("token"),
+            "account_id": agent.account_id,
+            "amount_cents": 500,
+            "merchant": "gongbu.image",
+        })
+    }
+
+    #[test]
+    fn token_identified_claim_and_settlement_replay_without_operation_key() {
+        let (path, state, agent, authorization) =
+            setup_executor_authorization("executor-v44-settle");
+        let token = authorization.auth_token_id.clone().expect("token");
+        let claim_request = token_identified_claim_request(&agent, &authorization);
+
+        let claim = claim_executor_spend(claim_request.to_string(), &state)
+            .expect("a token-identified claim should not need the operation key");
+        assert_eq!(claim.status, "claimed");
+        assert_eq!(claim.operation_key, authorization.operation_key);
+        let claim_replay = claim_executor_spend(claim_request.to_string(), &state)
+            .expect("token-identified claim replay");
+        assert_eq!(claim_replay.claim_id, claim.claim_id);
+
+        let settled = settle_executor_spend(
+            json!({"spend_auth_token_id": token, "receipt": settlement_receipt_json(400)})
+                .to_string(),
+            &state,
+        )
+        .expect("settle by token");
+        assert_eq!(settled.claim_id, claim.claim_id);
+        assert_eq!(settled.receipt.budget_charge_cents, 400);
+        assert_eq!(settled.spend.budget_hold.consumed_amount_cents, 400);
+
+        // Every identity form names the same claim and replays the stored
+        // settlement without consuming budget again.
+        for body in [
+            json!({"claim_id": claim.claim_id, "receipt": settlement_receipt_json(400)}),
+            json!({
+                "agent_id": agent.agent_id,
+                "operation_key": authorization.operation_key,
+                "receipt": settlement_receipt_json(400),
+            }),
+        ] {
+            let replay = settle_executor_spend(body.to_string(), &state)
+                .expect("identical settlement replays under any identity form");
+            assert_eq!(replay.settlement_id, settled.settlement_id);
+            assert_eq!(replay.receipt.created_at, settled.receipt.created_at);
+            assert_eq!(replay.spend.budget_hold.consumed_amount_cents, 400);
+        }
+
+        let changed = settle_executor_spend(
+            json!({"spend_auth_token_id": token, "receipt": settlement_receipt_json(399)})
+                .to_string(),
+            &state,
+        )
+        .expect_err("a changed receipt must conflict by token too");
+        assert!(changed
+            .to_string()
+            .contains("settlement receipt does not match the original settlement"));
+        let release =
+            release_executor_spend(json!({"claim_id": claim.claim_id}).to_string(), &state)
+                .expect_err("release cannot erase a settlement");
+        assert!(release.to_string().contains("already been settled"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn token_identified_release_recovers_lost_claim_response_after_token_expiry() {
+        let lease_config = LeaseConfig {
+            authorization_ttl_seconds: 1,
+            ..LeaseConfig::default()
+        };
+        let (path, state, agent, authorization) =
+            setup_executor_authorization_with_lease_config("executor-v44-release", lease_config);
+        let token = authorization.auth_token_id.clone().expect("token");
+        // The executor never observes this claim response.
+        claim_executor_spend(
+            token_identified_claim_request(&agent, &authorization).to_string(),
+            &state,
+        )
+        .expect("claim before authorization expiry");
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+        let released =
+            release_executor_spend(json!({"spend_auth_token_id": token}).to_string(), &state)
+                .expect("an expired token still names its active claim");
+        assert_eq!(released.status, "released");
+        assert_eq!(released.spend.budget_hold.frozen_amount_cents, 0);
+        assert_eq!(released.spend.budget_hold.remaining_amount_cents, 500);
+
+        let replay =
+            release_executor_spend(json!({"claim_id": released.claim_id}).to_string(), &state)
+                .expect("release replays by claim id");
+        assert_eq!(replay.finalized_at, released.finalized_at);
+        assert_eq!(replay.spend.budget_hold.remaining_amount_cents, 500);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn executor_finalization_identity_forms_are_exclusive_and_owner_scoped() {
+        let (path, state, agent, authorization) =
+            setup_executor_authorization("executor-v44-identity");
+        let token = authorization.auth_token_id.clone().expect("token");
+
+        let unclaimed =
+            release_executor_spend(json!({"spend_auth_token_id": token}).to_string(), &state)
+                .expect_err("an unclaimed authorization has nothing to finalize");
+        assert!(unclaimed.to_string().contains("unknown executor claim"));
+
+        let mismatched_key = claim_executor_spend(
+            json!({
+                "operation_key": "some-other-operation",
+                "spend_auth_token_id": token,
+                "account_id": agent.account_id,
+                "amount_cents": 500,
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("a supplied operation key remains a cross-check");
+        assert!(mismatched_key
+            .to_string()
+            .contains("operation key was already authorized with different spend scope"));
+        let claim = claim_executor_spend(
+            token_identified_claim_request(&agent, &authorization).to_string(),
+            &state,
+        )
+        .expect("claim");
+        for (body, expected) in [
+            (
+                json!({"spend_auth_token_id": token, "claim_id": claim.claim_id}),
+                "exactly one of spend_auth_token_id or claim_id",
+            ),
+            (
+                json!({
+                    "spend_auth_token_id": token,
+                    "agent_id": agent.agent_id,
+                    "operation_key": authorization.operation_key,
+                }),
+                "not both",
+            ),
+            (json!({}), "requires spend_auth_token_id or claim_id"),
+            (
+                json!({"spend_auth_token_id": SpendAuthTokenId::new().to_string()}),
+                "unknown spend auth token",
+            ),
+            (
+                json!({"spend_auth_token_id": token, "evidence": "not an executor field"}),
+                "must not be mixed",
+            ),
+        ] {
+            let response = route(
+                authenticated_json_request("/spend/executor/release", body.clone()),
+                &state,
+            );
+            assert_eq!(response.status, 400, "{body}");
+            assert!(
+                response.body["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains(expected)),
+                "{body} -> {}",
+                response.body
+            );
+        }
+        let still_claimed = get_executor_claim(Some(&claim.claim_id), &state).unwrap();
+        assert_eq!(still_claimed.status, "claimed");
+
+        std::fs::remove_file(path).ok();
+    }
+
     #[test]
     fn executor_release_returns_budget_and_blocks_reuse() {
         let (path, state, agent, authorization) = setup_executor_authorization("executor-release");
@@ -8922,7 +9258,7 @@ lease_profiles:
         .expect_err("executor and reconciliation request fields must not be mixed");
         assert!(mixed_mode_error
             .to_string()
-            .contains("did not match any variant"));
+            .contains("executor and human reconciliation request fields must not be mixed"));
         assert!(list_executor_claims_requiring_reconciliation(&state)
             .unwrap()
             .claims

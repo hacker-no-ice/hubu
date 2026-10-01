@@ -66,6 +66,63 @@ remainder of the authorized maximum.
 `POST /spend/executor/validate` remains available for scope inspection, but
 validation alone does not authorize irreversible work.
 
+## Upcoming v4.4: Token-Identified Executor Requests
+
+> Status: accepted by Hubu, **not yet advertised**. `/version` and executor
+> guidance still report `hubu-spend-executor-v4.3` until the cohort cutover
+> (HUB-214). Do not depend on v4.4-only behaviour in a released build until
+> the advertised version changes.
+
+In v4.4 an executor identifies its operation only by values Hubu gave it: the
+authorization continuation (`spend_auth_token_id`) and the `claim_id` that
+claim returns. It no longer reads `operation_key` or `agent_id` from
+`resolve`, and it never sends them back.
+
+| Route | v4.4 identity | v4.3 identity (removed at cutover) |
+| --- | --- | --- |
+| `POST /spend/executor/claim` | `spend_auth_token_id`, plus the account, amount and scope assertions | the same, plus `operation_key` |
+| `POST /spend/executor/settle` | exactly one of `spend_auth_token_id` or `claim_id`, plus `receipt` | `agent_id` + `operation_key`, plus `receipt` |
+| `POST /spend/executor/release` | exactly one of `spend_auth_token_id` or `claim_id` | `agent_id` + `operation_key` |
+
+```json
+{"spend_auth_token_id":"00000000-0000-4000-8000-000000000123","receipt":{"…":"…"}}
+```
+
+Rules:
+
+- **Claim:** Hubu derives the operation key, agent, task and reason from the
+  stored decision. The account, amount and scope assertions remain, so the
+  executor still proves it is claiming exactly the work it priced. During the
+  transition, a supplied `operation_key` is still a cross-check, and a
+  mismatch is rejected.
+- **Settle and release:** the token keeps naming its decision after it
+  expires, is used or is revoked. An executor that lost the claim response can
+  therefore finalize, or replay, by token without ever learning the
+  `claim_id`.
+  - Owner checks apply: another owner's token or claim is reported as unknown.
+  - Supplying both `spend_auth_token_id` and `claim_id`, or mixing either with
+    `agent_id`/`operation_key`, is rejected.
+- **Replay:** every identity form names the same claim. An identical
+  settlement or release returns the stored result. A changed receipt is
+  rejected. Budget, holds and ledger postings are never applied twice.
+- **Human reconciliation:** unchanged. It uses `claim_id`, `provider_reference`
+  and `evidence` with the separate capability. Adding executor identity fields
+  to that shape is rejected.
+- **`resolve`:** keeps returning `operation_key` and `agent_id`. Gongbu and the
+  unified MCP router use them internally to verify their bound normalized
+  operation, and Hubu has no executor-scoped credential (HUB-32) that could
+  tell Gongbu apart from an external executor. External v4.4 executors must
+  not depend on these fields; revisit this projection with HUB-32.
+
+### Migrating a v4.3 executor
+
+1. Persist the `spend_auth_token_id` before claiming, as v4.3 already
+   requires.
+2. Stop sending `operation_key` on claim.
+3. Settle or release with `{"spend_auth_token_id": …}`, or with
+   `{"claim_id": …}` once the claim response is durable, instead of
+   `agent_id` + `operation_key`.
+
 ## Multiple Invocations In One Agent Task
 
 The agent platform orchestrates tasks that need more than one model or provider
