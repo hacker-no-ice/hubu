@@ -26,6 +26,7 @@ const sharedLinks = {
   spendModel: ["Spend model", "crates/hubu-core/src/spend/model.rs"],
   spendExecutor: ["Spend executor contract", "docs/spend-executor-contract.md"],
   executorConformance: ["Executor conformance suite", "docs/executor-conformance.md"],
+  externalExecutor: ["Use Hubu with your own executor", "docs/external-executor.md"],
   executionScope: ["Spend lifecycle", "docs/spend-lifecycle.md"],
   scopeModel: ["Execution scope model", "crates/hubu-common/src/execution_scope.rs"],
   budget: ["Budget manager", "crates/hubu-core/src/budget/manager.rs"],
@@ -316,7 +317,7 @@ const components = {
       ["Startup recovery", "Loads state from SQLite and reconciles expired budget holds on start."],
       ["Bounded logs", "Writes structured JSONL events with fixed-size rotation and skips successful health-probe noise."],
     ],
-    links: [sharedLinks.api, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.persistence, sharedLinks.telemetry],
+    links: [sharedLinks.api, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.externalExecutor, sharedLinks.persistence, sharedLinks.telemetry],
     nodes: [
       { id: "routes", label: "HTTP framing + routes", sub: "bounded GET/POST JSON", x: 72, y: 92, w: 220, h: 90, tone: "agent" },
       { id: "auth", label: "Local auth", sub: "bearer + owner caps", x: 410, y: 76, w: 220, h: 92, tone: "core" },

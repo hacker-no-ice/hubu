@@ -137,11 +137,29 @@ intent. Resuming standalone authorization must not start Gongbu. Exact replay
 must not create a second logical operation or duplicate payment/hold. A
 terminal denial requires a new logical invocation for corrected work.
 
-Router operation status and backend financial history have different scopes.
-A standalone allow can remain `authorized` in the MCP store after external
-execution. Use the executor's durable outcome, claim inspection and
-[workflow/ledger history](ledger-history.md) to inspect settlement; do not poll
-the router handle expecting it to become a managed-execution result.
+A standalone authorization's status comes from Hubu. Any executor may consume
+the continuation through Hubu's executor API without the router seeing it, so
+`hubu_operation_status` reads the operation's Hubu workflow instead of its own
+store. That applies to an allowed `hubu_authorize_spend` operation that was
+never handed to Gongbu:
+
+| Hubu workflow | `state` | `terminal` | `replacement_safe` |
+| --- | --- | --- | --- |
+| authorized, unclaimed | `authorized` | no | yes |
+| claimed by an executor | `executing` | no | **no** |
+| settled | `settled`, with exact cost and budget charge | yes | no |
+| released | `released` | yes | no |
+| expired, never claimed | `expired` | yes | yes, as a new operation |
+| claim lease expired | `reconciliation_required` | no | **no** |
+
+The result carries `authority: {source: "hubu_workflow", verified}`. An
+executor's claim can outlive the authorization itself, so the router never
+reports such an operation as terminal from its own token expiry. If Hubu cannot
+be reached, or returns a status the router cannot interpret, the result is
+`state: "unverified"`. It is non-terminal and never replacement-safe. The
+router does not write financial state; Hubu remains the only writer. See
+[Use Hubu with your own executor](external-executor.md). Gongbu-managed and
+governed operations keep their managed-execution status.
 Ambiguous billing requires evidence-based reconciliation. Claim discovery and
 both reconciliation tools remain available, with their existing human gates
 and separate reconciliation capability.

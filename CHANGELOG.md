@@ -34,6 +34,10 @@ Future release template
   executor side. It covers authorization, claims, settlement, release, lease
   expiry, human reconciliation, restart recovery and budget limits, including
   exactly-once ledger postings. See `docs/executor-conformance.md`.
+- Qualified Hubu-only MCP authorization with your own executor. An agent
+  authorizes through unified MCP and hands the continuation token to any
+  executor, which claims and settles or releases it through the v4.4 executor
+  API. See `docs/external-executor.md`.
 
 ### Breaking or operational changes
 
@@ -68,6 +72,14 @@ Future release template
 
 ### Important fixes
 
+- `hubu_operation_status` now reports a standalone authorization from Hubu's
+  workflow (`authorized`, `executing`, `settled`, `released`, `expired`,
+  `reconciliation_required`). Previously a handle stayed `authorized` and
+  `replacement_safe` after another executor claimed or settled it, and turned
+  `failed` once the authorization expired even while a claim was active. An
+  agent following that answer could submit a replacement and double-spend. If
+  Hubu is unreachable, the status is now `unverified` and never
+  replacement-safe.
 - `hubu-server` no longer fails to start with `UNIQUE constraint failed:
   spend_decisions.agent_id, spend_decisions.operation_key` after an agent
   corrected a denied authorization under the same operation key.

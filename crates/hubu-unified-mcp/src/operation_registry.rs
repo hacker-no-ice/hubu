@@ -941,6 +941,37 @@ impl OperationRegistry {
             .map_err(Into::into)
     }
 
+    /// Hubu workflow identity for a standalone authorization: an allowed
+    /// `hubu_authorize_spend` operation that was never handed to Gongbu or a
+    /// governed dispatch. Any executor may consume its continuation through
+    /// Hubu's executor API without the router observing it, so its status
+    /// must be read from Hubu's authoritative workflow rather than from this
+    /// registry. Selection does not depend on the stored continuation, which
+    /// the registry purges once the authorization expires even though an
+    /// executor may still hold Hubu's claim.
+    pub(crate) fn standalone_authorization_workflow_id(
+        &self,
+        operation_handle: &str,
+    ) -> Result<Option<String>> {
+        validate_public_operation_handle(operation_handle)?;
+        self.connection
+            .query_row(
+                "SELECT COALESCE(decision_id, approval_request_id)
+                 FROM harness_operations
+                 WHERE operation_handle = ?1
+                   AND tool_name = 'hubu_authorize_spend'
+                   AND decision = 'allow'
+                   AND operation_state IS NULL
+                   AND gongbu_execution_id IS NULL
+                   AND gongbu_create_started_at IS NULL",
+                [operation_handle],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(Into::into)
+    }
+
     #[cfg(test)]
     fn approval_sync_target_for_request(
         &self,
@@ -3772,6 +3803,72 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown or expired"));
+    }
+
+    #[test]
+    fn standalone_authorizations_are_selected_for_hubu_workflow_status() {
+        let mut registry = OperationRegistry::open_in_memory().unwrap();
+        let mut record = |call_id: &str, tool: &str, result: Value| {
+            let operation = registry
+                .resolve_or_allocate(&codex(call_id), tool, &json!({"amount": 1}))
+                .unwrap();
+            registry
+                .record_authorization_result(&operation.operation_handle, &result)
+                .unwrap();
+            operation.operation_handle
+        };
+        // An expired authorization is still selected: an executor may hold
+        // Hubu's claim after the authorization itself expires.
+        let standalone = record(
+            "standalone-allow",
+            "hubu_authorize_spend",
+            json!({
+                "decision":"allow",
+                "decision_id":"standalone-decision",
+                "auth_token_id":"standalone-token",
+                "authorization_expires_at":"2000-01-01T00:00:00Z"
+            }),
+        );
+        let denied = record(
+            "standalone-deny",
+            "hubu_authorize_spend",
+            json!({"decision":"deny","decision_id":"denied-decision"}),
+        );
+        let submitted = record(
+            "mock-submit",
+            "hubu_submit_spend",
+            json!({"decision":"allow","decision_id":"submit-decision","auth_token_id":"submit-token"}),
+        );
+        let gongbu_bound = record(
+            "gongbu-bound",
+            "hubu_authorize_spend",
+            json!({
+                "decision":"allow",
+                "decision_id":"gongbu-decision",
+                "auth_token_id":"gongbu-token",
+                "authorization_expires_at":"2999-01-01T00:00:00Z"
+            }),
+        );
+        registry
+            .resolve_gongbu_continuation("gongbu-token", &execution_arguments("gongbu-token"))
+            .unwrap();
+
+        let selected = |handle: &str| {
+            registry
+                .standalone_authorization_workflow_id(handle)
+                .unwrap()
+        };
+        assert_eq!(
+            selected(&standalone).as_deref(),
+            Some("standalone-decision")
+        );
+        assert_eq!(selected(&denied), None);
+        assert_eq!(selected(&submitted), None);
+        assert_eq!(
+            selected(&gongbu_bound),
+            None,
+            "a continuation handed to Gongbu keeps the managed-execution status path"
+        );
     }
 
     #[test]
