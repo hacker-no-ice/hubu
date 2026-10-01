@@ -2,7 +2,7 @@
 """Black-box Hubu spend-executor conformance runner.
 
 The runner replays the versioned fixture corpus in
-``fixtures/hubu-executor-conformance-v4.3.json`` against the public HTTP
+``fixtures/hubu-executor-conformance-v4.4.json`` against the public HTTP
 contract of a real ``hubu-server`` process. It never imports Hubu code or
 opens Hubu storage.
 
@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CORPUS = ROOT / "fixtures" / "hubu-executor-conformance-v4.3.json"
+DEFAULT_CORPUS = ROOT / "fixtures" / "hubu-executor-conformance-v4.4.json"
 CORPUS_SCHEMA = "hubu-executor-conformance-v1"
 PLUGIN_PROTOCOL = "hubu-executor-conformance-plugin-v1"
 RECONCILIATION_HEADER = "X-Hubu-Reconciliation-Capability"
@@ -803,6 +803,7 @@ def validate_corpus(corpus: dict[str, Any]) -> None:
     if len(ids) != len(set(ids)):
         raise ConformanceFailure("duplicate scenario ids")
     known = set(ids)
+    retired_fields = corpus.get("retired_identity_fields", [])
     for scenario in corpus["scenarios"]:
         for included in scenario.get("includes", []):
             if included not in known or ids.index(included) >= ids.index(scenario["id"]):
@@ -821,6 +822,16 @@ def validate_corpus(corpus: dict[str, Any]) -> None:
                 raise ConformanceFailure(f"{scenario['id']}/{step['id']} uses unknown retry decision")
             if step.get("fault") not in (None, "drop_response"):
                 raise ConformanceFailure(f"{scenario['id']}/{step['id']} uses unknown fault")
+            actor = step.get("actor", corpus["operations"][step["operation"]]["actor"])
+            body = step.get("body") or {}
+            retired = [field for field in retired_fields if field in body]
+            if actor == "executor" and retired and not step.get("legacy_identity_probe"):
+                # Executors identify operations only by the token or claim id
+                # Hubu issued; retired identity may appear only in probes that
+                # assert its rejection.
+                raise ConformanceFailure(
+                    f"{scenario['id']}/{step['id']} sends retired executor identity {retired}"
+                )
 
 
 def main() -> int:

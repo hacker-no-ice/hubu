@@ -62,7 +62,9 @@ and take independent cold backups of Hubu state and Gongbu state. An older
 binary that knows only the legacy columns must use its matching pre-upgrade
 backup; do not use an upgraded database as a rollback mechanism.
 
-The executor contract remains v4.3 and accepts the legacy cents receipt shape.
+The precise-receipt migration does not change the executor contract version
+by itself. The current contract, v4.4, still accepts the legacy cents receipt
+shape, and all four binaries must report the same contract version.
 New precise receipts carry exact amount, scale, currency, and the complete
 frozen pricing snapshot. If an older Hubu rejects that additive shape after a
 provider charge, Gongbu retains the receipt and enters reconciliation. Upgrade

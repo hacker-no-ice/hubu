@@ -175,7 +175,7 @@ for required in (
     'actual_target="$(rustc -vV | sed -n',
     '"${actual_target}" != "${TARGET}"',
     "not Developer ID-signed, notarized, or Apple-verified",
-    "hubu-spend-executor-v4.3",
+    "hubu-spend-executor-v4.4",
 ):
     if required not in workflow:
         fail(f"release workflow is missing {required!r}")

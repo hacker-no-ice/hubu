@@ -28,7 +28,7 @@ Future release template
 ### Highlights
 
 - Added an executor-neutral, black-box conformance suite for the
-  `hubu-spend-executor-v4.3` contract: a versioned fixture corpus of
+  `hubu-spend-executor-v4.4` contract: a versioned fixture corpus of
   requests, responses, error codes and retry decisions, and a
   standard-library runner that targets any Hubu base URL with a pluggable
   executor side. It covers authorization, claims, settlement, release, lease
@@ -37,6 +37,19 @@ Future release template
 
 ### Breaking or operational changes
 
+- The executor contract is now `hubu-spend-executor-v4.4`, and it is
+  intentionally startup-incompatible with v4.3. Executors identify an
+  operation only by the `spend_auth_token_id` or `claim_id` Hubu issued:
+  - claim with the token plus the account, amount and scope assertions;
+  - settle or release with exactly one of `spend_auth_token_id` or `claim_id`.
+
+  Hubu rejects `operation_key` and `agent_id` on executor routes. The token
+  still identifies its operation after it expires or is used, so an executor
+  can finalize after losing the claim response. Gongbu, unified MCP and the
+  release tooling move to v4.4 together, and every binary must report the same
+  version. External v4.3 executors must migrate; see the migration notes in
+  `docs/spend-executor-contract.md`. Human reconciliation and the operation
+  key's role in authorization retries are unchanged.
 - Removed recurring-budget creation from core (`CreateBudgetSeriesRequest`,
   `CreateBudgetSeriesResponse`, `BudgetRecurrence`, and the series creation
   methods), HTTP (`POST /budgets/series`), CLI (`hubu budget create-recurring`),

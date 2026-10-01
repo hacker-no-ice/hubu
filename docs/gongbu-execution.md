@@ -29,7 +29,7 @@ Gongbu owns:
 - execution recovery.
 
 The components communicate over
-[`hubu-spend-executor-v4.3`](spend-executor-contract.md).
+[`hubu-spend-executor-v4.4`](spend-executor-contract.md).
 
 ## Admission and execution flow
 

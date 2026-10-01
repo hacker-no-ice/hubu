@@ -337,10 +337,10 @@ mod rejection_tests {
     #[test]
     fn hubu_conformance_retry_decisions_map_to_gongbu_activity_classes() {
         let corpus: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../fixtures/hubu-executor-conformance-v4.3.json"
+            "../../../../fixtures/hubu-executor-conformance-v4.4.json"
         ))
         .expect("parse Hubu executor conformance corpus");
-        assert_eq!(corpus["protocol_version"], "hubu-spend-executor-v4.3");
+        assert_eq!(corpus["protocol_version"], "hubu-spend-executor-v4.4");
         let decisions = corpus["retry_decisions"]
             .as_object()
             .expect("retry decision table");

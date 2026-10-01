@@ -18,7 +18,7 @@ The distribution exposes two independent versions:
 - `product_version` identifies all four production binaries. Stable releases
   use SemVer tags; `main` builds include the source commit.
 - `executor_contract` identifies the Hubu-to-executor protocol and changes only
-  with that protocol. The current value is `hubu-spend-executor-v4.3`.
+  with that protocol. The current value is `hubu-spend-executor-v4.4`.
 
 Every release channel requires an explicit workflow dispatch. A manual canary
 dispatch publishes at most one prerelease for each exact `main` commit, tagged
@@ -138,7 +138,7 @@ done
 ```
 
 Every binary must report the selected tag as its product version, the same
-non-`unknown` full source commit, and `hubu-spend-executor-v4.3`. The installer
+non-`unknown` full source commit, and `hubu-spend-executor-v4.4`. The installer
 performs this verification before replacing the destination files. These
 release-stamped local builds work with the normal managed-stack lineage checks;
 keep `allow_development_builds = false`.

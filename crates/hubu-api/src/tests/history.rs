@@ -11,15 +11,14 @@ fn settle(
     auth: &SpendHttpResponse,
     amount: i64,
 ) -> Value {
-    claim_executor_spend(json!({"operation_key":auth.operation_key,"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":auth.budget_hold.as_ref().unwrap().amount_cents,"merchant":"gongbu.image"}).to_string(),state).unwrap();
+    claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":auth.budget_hold.as_ref().unwrap().amount_cents,"merchant":"gongbu.image"}).to_string(),state).unwrap();
     let mut receipt = precise_settlement_receipt_json(amount, 3);
     receipt["artifact_reference"] =
         json!("https://vendor.example/artifact?token=VERY_PRIVATE_ARTIFACT");
     receipt["provider_request_id"] = json!("Bearer VERY_PRIVATE_PROVIDER");
     receipt["price_model_snapshot"]["credential"] = json!("VERY_PRIVATE_CREDENTIAL");
     finalize_executor_spend(
-        json!({"operation_key":auth.operation_key,"agent_id":agent.agent_id,"receipt":receipt})
-            .to_string(),
+        json!({"spend_auth_token_id":auth.auth_token_id,"receipt":receipt}).to_string(),
         state,
         true,
         None,
@@ -223,9 +222,9 @@ fn workflow_lookup_decodes_private_key_but_returns_only_public_identity() {
         auth.decision_id, agent.agent_id
     );
     assert_ne!(route(authenticated_get_request(&mixed), &state).status, 200);
-    claim_executor_spend(json!({"operation_key":auth.operation_key,"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":500,"merchant":"gongbu.image"}).to_string(),&state).unwrap();
+    claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":500,"merchant":"gongbu.image"}).to_string(),&state).unwrap();
     finalize_executor_spend(
-        json!({"operation_key":auth.operation_key,"agent_id":agent.agent_id}).to_string(),
+        json!({"spend_auth_token_id":auth.auth_token_id}).to_string(),
         &state,
         false,
         None,
@@ -333,8 +332,8 @@ fn workflow_uses_final_authorization_outcome_after_human_approval_or_denial() {
     assert_eq!(shown["workflow"]["decision"], "allow");
     assert_eq!(shown["workflow"]["policy_decision"], "needs_approval");
     assert_eq!(shown["workflow"]["status"], "authorized");
-    claim_executor_spend(json!({"operation_key":"history-approval-operation","spend_auth_token_id":approved.body["auth_token_id"],"account_id":agent.account_id,"amount_cents":600,"merchant":"gongbu.image"}).to_string(),&state).unwrap();
-    finalize_executor_spend(json!({"operation_key":"history-approval-operation","agent_id":agent.agent_id,"receipt":precise_settlement_receipt_json(1,3)}).to_string(),&state,true,None).unwrap();
+    claim_executor_spend(json!({"spend_auth_token_id":approved.body["auth_token_id"],"account_id":agent.account_id,"amount_cents":600,"merchant":"gongbu.image"}).to_string(),&state).unwrap();
+    finalize_executor_spend(json!({"spend_auth_token_id":approved.body["auth_token_id"],"receipt":precise_settlement_receipt_json(1,3)}).to_string(),&state,true,None).unwrap();
     assert_eq!(
         read(
             &state,
@@ -403,7 +402,7 @@ fn budget_denial_is_not_reported_as_authorized_and_expired_claim_requires_reconc
             .len(),
         1
     );
-    claim_executor_spend(json!({"operation_key":auth.operation_key,"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":500,"merchant":"gongbu.image"}).to_string(),&state).unwrap();
+    claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":500,"merchant":"gongbu.image"}).to_string(),&state).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let reconciliation = read(&state, "/spend/workflows?status=reconciliation_required");
     assert_eq!(reconciliation["workflows"].as_array().unwrap().len(), 1);
@@ -524,8 +523,8 @@ fn two_providers_for_one_task_have_independent_receipts_and_postings() {
         let key = format!("independent-private-operation-{index}");
         let selector = scope_as_selector(scope);
         let auth=authorize_spend(json!({"operation_key":key,"account_id":agent.account_id,"amount_cents":100,"execution_scope":selector,"reason":"compare image providers","task_id":"private-shared-task"}).to_string(),&state).unwrap();
-        claim_executor_spend(json!({"operation_key":key,"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":100,"execution_scope":scope}).to_string(),&state).unwrap();
-        finalize_executor_spend(json!({"operation_key":key,"agent_id":agent.agent_id,"receipt":precise_settlement_receipt_json((index+1) as i64,3)}).to_string(),&state,true,None).unwrap();
+        claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":100,"execution_scope":scope}).to_string(),&state).unwrap();
+        finalize_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"receipt":precise_settlement_receipt_json((index+1) as i64,3)}).to_string(),&state,true,None).unwrap();
     }
     let output = read(
         &state,

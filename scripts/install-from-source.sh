@@ -273,7 +273,7 @@ verify_binary() {
     fail "${verification_label} reports the wrong product version"
   [[ "${compact_output}" == *"\"source_commit\":\"${expected_commit}\""* ]] || \
     fail "${verification_label} reports the wrong source commit"
-  [[ "${compact_output}" == *"\"hubu-spend-executor-v4.3\""* ]] || \
+  [[ "${compact_output}" == *"\"hubu-spend-executor-v4.4\""* ]] || \
     fail "${verification_label} reports the wrong executor contract"
   if [[ "${binary_name}" == "gongbu-server" ]]; then
     [[ "${compact_output}" == *"\"build_id\":\"source-${expected_commit:0:12}\""* ]] || \
