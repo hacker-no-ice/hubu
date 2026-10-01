@@ -120,9 +120,12 @@ the same operation and never resets the original absolute deadline.
 
 An ambiguous provider or settlement outcome becomes
 `reconciliation_required`. Gongbu does not blindly retry the provider call or
-release Hubu's hold merely because a response was lost. Finalization uses the
-persisted execution agent and provider receipt and remains idempotent under
-repeated delivery.
+release Hubu's hold merely because a response was lost. Claims and
+finalization use the execution's persisted Hubu authorization token (the v4.4
+token-identified request shape), so they work after a lost claim response and
+for executions created before v4.4. Gongbu never sends its private operation
+key or agent on executor routes. With the persisted provider receipt,
+finalization remains idempotent under repeated delivery.
 
 The same rule applies when an exact vendor charge rounds conservatively above
 the authorization. Gongbu persists the exact integer amount, scale, currency,
