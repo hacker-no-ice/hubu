@@ -832,7 +832,7 @@ def validate_corpus(corpus: dict[str, Any]) -> None:
             body = step.get("body") or {}
             retired = [field for field in retired_fields if field in body]
             if actor == "executor" and retired and not step.get("legacy_identity_probe"):
-                # Executors identify operations only by the token or claim id
+                # Executors claim by token and finalize by claim id only
                 # Hubu issued; retired identity may appear only in probes that
                 # assert its rejection.
                 raise ConformanceFailure(

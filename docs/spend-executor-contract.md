@@ -845,8 +845,8 @@ X-Hubu-Reconciliation-Capability: HUMAN_CAPABILITY
 ```
 
 The existing settle/release endpoints therefore accept one of two exclusive
-request shapes: the normal executor shape identified by exactly one of
-`spend_auth_token_id` or `claim_id`, or the human reconciliation shape with `claim_id`,
+request shapes: the normal executor shape identified by `claim_id`, or the
+human reconciliation shape with `claim_id`,
 `provider_reference`, and `evidence`. Mixing the shapes is rejected. The
 vendor-billed shape also requires the provider receipt; vendor-did-not-bill
 rejects one. Reconciliation requires non-empty evidence fields, accepts only an

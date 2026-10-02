@@ -2168,7 +2168,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "executor resolves the authoritative authorization through POST /spend/executor/resolve and independently verifies its derived price and scope",
             "executor calls POST /spend/executor/claim with the spend_auth_token_id before irreversible work; Hubu derives the operation from the stored decision",
             "executor performs work with its own credentials",
-            "executor settles by spend_auth_token_id or claim_id with a provider receipt after successful irreversible work, or releases before work is performed; it never sends operation_key or agent_id"
+            "executor settles by claim_id with a provider receipt after successful irreversible work, or releases by claim_id before work is performed; it never sends operation_key or agent_id"
         ],
         "routes": {
             "guidance": [
@@ -2200,7 +2200,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             },
             "persistence": [
                 "Hubu is the authoritative store for workflow state under the agent-scoped operation_key",
-                "the client must reuse its stable operation_key for every authorization retry; executors identify the operation by spend_auth_token_id or claim_id instead",
+                "the client must reuse its stable operation_key for every authorization retry; executors claim by spend_auth_token_id and finalize by claim_id instead",
                 "do not rely on model conversation memory for the operation_key"
             ],
             "prohibited": [
@@ -2265,8 +2265,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "currency": "usd in v4"
         },
         "settle_request": {
-            "identity": "exactly one of spend_auth_token_id or claim_id",
-            "rejected": ["operation_key", "agent_id"],
+            "identity": "claim_id",
+            "rejected": ["spend_auth_token_id", "operation_key", "agent_id"],
             "required": [
                 "receipt.actual_vendor_cost.amount",
                 "receipt.actual_vendor_cost.scale",
@@ -2279,8 +2279,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "legacy_v4_3_response": "receipt.actual_vendor_cost_cents remains available as the conservative budget_charge_cents projection; actual_vendor_cost preserves the exact provider decimal"
         },
         "release_request": {
-            "identity": "exactly one of spend_auth_token_id or claim_id",
-            "rejected": ["operation_key", "agent_id", "receipt"]
+            "identity": "claim_id",
+            "rejected": ["spend_auth_token_id", "operation_key", "agent_id", "receipt"]
         },
         "reconciliation_request": {
             "required": [
@@ -2330,7 +2330,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "actual vendor cost is an integer major-unit decimal with scale at most 18; Hubu never uses floating point and rounds fractional budget cents up",
             "normal settlement rejects a conservative budget charge above the authorized maximum; human vendor-billed reconciliation records an already-incurred overrun explicitly",
             "an identical settlement retry returns the original settlement_id and receipt without consuming budget twice; a changed receipt is rejected",
-            "finalization resolves by spend_auth_token_id or claim_id; the token keeps naming its decision after expiry, use, or revocation, so a caller can recover the result even if it lost the claim response",
+            "finalization resolves by claim_id; an executor that lost the claim response replays the identical claim, which returns the existing claim even after the authorization expires",
             "claim expiry is evaluated once when the settlement transaction starts",
             "release atomically marks the claim released and token revoked while returning the reserved amount",
             "settle and release serialize so the first terminal finalization wins",
@@ -4215,7 +4215,7 @@ fn reject_retired_executor_identity(body: &str) -> Result<()> {
     });
     if retired {
         return Err(anyhow!(
-            "{EXECUTOR_CONTRACT} claim and validate requests are identified by spend_auth_token_id; remove operation_key and agent_id"
+            "{EXECUTOR_CONTRACT} claim and validate requests are identified by spend_auth_token_id; the retired v4.3 identity fields operation_key and agent_id are no longer accepted"
         ));
     }
     Ok(())
@@ -4867,29 +4867,24 @@ fn executor_claim_validation_request(
     user: &UserContext,
     state: &ServerState,
 ) -> Result<FinalizeExecutorClaimRequest> {
-    let (agent_id, operation_key) = match request.identity {
-        }
-        ExecutorFinalizationIdentity::Claim(claim_id) => {
-            let claim_id = claim_id
-                .trim()
-                .parse::<SpendExecutorClaimId>()
-                .with_context(|| "parse executor spend claim_id")?;
-            let spend_manager = state
-                .spend
-                .lock()
-                .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-            let budget_manager = state
-                .budgets
-                .lock()
-                .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-            let claim_state = ExecutorClaimService.get(
-                &claim_id,
-                &user.user_id,
-                &spend_manager,
-                &budget_manager,
-            )?;
-            (claim_state.claim.agent_id, claim_state.claim.operation_key)
-        }
+    let ExecutorFinalizationIdentity::Claim(claim_id) = request.identity;
+    let claim_id = claim_id
+        .trim()
+        .parse::<SpendExecutorClaimId>()
+        .with_context(|| "parse executor spend claim_id")?;
+    let (agent_id, operation_key) = {
+        let spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        // The owner-scoped lookup reports another owner's claim as unknown.
+        let claim_state =
+            ExecutorClaimService.get(&claim_id, &user.user_id, &spend_manager, &budget_manager)?;
+        (claim_state.claim.agent_id, claim_state.claim.operation_key)
     };
     Ok(FinalizeExecutorClaimRequest {
         owner_user_id: user.user_id.clone(),
@@ -8500,14 +8495,8 @@ lease_profiles:
                 .expect("authorization required fields should be an array")
                 .iter()
                 .any(|item| item == "operation_key"));
-            assert_eq!(
-                response.body["release_request"]["identity"],
-                "exactly one of spend_auth_token_id or claim_id"
-            );
-            assert_eq!(
-                response.body["settle_request"]["identity"],
-                "exactly one of spend_auth_token_id or claim_id"
-            );
+            assert_eq!(response.body["release_request"]["identity"], "claim_id");
+            assert_eq!(response.body["settle_request"]["identity"], "claim_id");
             assert!(response.body["settle_request"]["required"]
                 .as_array()
                 .expect("settlement fields should be an array")
@@ -8916,7 +8905,7 @@ lease_profiles:
 
         settle_executor_spend(
             json!({
-                "spend_auth_token_id": first_authorization.auth_token_id,
+                "claim_id": first_claim.claim_id,
                 "receipt": settlement_receipt_json(400),
             })
             .to_string(),
@@ -9089,9 +9078,7 @@ lease_profiles:
                 ),
             ] {
                 assert!(
-                    error.to_string().contains(
-                        "claim and validate requests are identified by spend_auth_token_id"
-                    ),
+                    error.to_string().contains("retired v4.3 identity fields"),
                     "{route} {field}: {error}"
                 );
             }

@@ -1,8 +1,8 @@
 {
   "schema": "hubu-executor-conformance-v1",
-  "corpus_version": "2026-10-02.1",
+  "corpus_version": "2026-10-02.2",
   "protocol_version": "hubu-spend-executor-v4.4",
-  "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Executor requests are identified only by the spend_auth_token_id or claim_id Hubu issued; the retired v4.3 agent_id/operation_key identity appears only in steps marked legacy_identity_probe, which must be rejected. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value. Executor responses never carry the private operation key.",
+  "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Executors claim by the spend_auth_token_id and settle or release by the claim_id Hubu issued; the retired v4.3 agent_id/operation_key identity appears only in steps marked legacy_identity_probe, which must be rejected. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value. Executor responses never carry the private operation key.",
   "server_profile": {
     "lease_config_yaml": "authorization_ttl_seconds: 300\ndefault_lease_profile: default\nlease_profiles:\n  default:\n    claim_ttl_seconds: 900\n  conformance_short:\n    claim_ttl_seconds: 1\n",
     "required_lease_profiles": {
@@ -208,18 +208,18 @@
       "trigger": "An executor request carried the retired v4.3 agent_id/operation_key identity.",
       "observed": {
         "status": 400,
-        "error_contains": "identified by spend_auth_token_id"
+        "error_contains": "retired v4.3 identity fields"
       },
-      "executor_action": "Stop. Identify the operation only by spend_auth_token_id, or by claim_id once the claim response is durable.",
+      "executor_action": "Stop. Claim by spend_auth_token_id and settle or release by claim_id.",
       "gongbu_activity_class": "proven"
     },
-    "stop_ambiguous_identity": {
-      "trigger": "A settle/release request named the claim by both spend_auth_token_id and claim_id.",
+    "reject_token_finalization": {
+      "trigger": "Settle or release named the operation by spend_auth_token_id instead of claim_id.",
       "observed": {
         "status": 400,
-        "error_contains": "exactly one of spend_auth_token_id or claim_id"
+        "error_contains": "replay the identical claim with the same spend_auth_token_id"
       },
-      "executor_action": "Stop. Send exactly one identity form.",
+      "executor_action": "Settle or release by claim_id. To recover a lost claim_id, replay the identical claim.",
       "gongbu_activity_class": "proven"
     }
   },
@@ -744,7 +744,7 @@
           "id": "settle-op-a",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token_a}",
+            "claim_id": "${claim_a}",
             "receipt": "${defs.receipts.op_a}"
           },
           "expect": {
@@ -822,7 +822,7 @@
           "id": "changed-provider-reference-rejected",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token_a}",
+            "claim_id": "${claim_a}",
             "receipt": {
               "$merge": "${defs.receipts.op_a}",
               "provider_request_id": "fixture-provider-request:rewritten"
@@ -836,7 +836,7 @@
           "id": "changed-artifact-reference-rejected",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token_a}",
+            "claim_id": "${claim_a}",
             "receipt": {
               "$merge": "${defs.receipts.op_a}",
               "artifact_reference": "artifact://conformance/rewritten.png"
@@ -850,7 +850,7 @@
           "id": "numerically-equal-rescaled-cost-rejected",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token_b}",
+            "claim_id": "${claim_b}",
             "receipt": {
               "$merge": "${defs.receipts.op_b}",
               "actual_vendor_cost": {
@@ -896,7 +896,7 @@
           "id": "identical-replay-returns-original-receipt",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token_a}",
+            "claim_id": "${claim_a}",
             "receipt": "${defs.receipts.op_a}"
           },
           "expect": {
@@ -1213,7 +1213,7 @@
           "operation": "settle",
           "fault": "drop_response",
           "body": {
-            "spend_auth_token_id": "${token}",
+            "claim_id": "${claim}",
             "receipt": "${defs.receipts.op_a}"
           },
           "expect": {}
@@ -1222,7 +1222,7 @@
           "id": "settle-retry",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token}",
+            "claim_id": "${claim}",
             "receipt": "${defs.receipts.op_a}"
           },
           "expect": {
@@ -1247,7 +1247,7 @@
           "id": "settle-second-retry",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token}",
+            "claim_id": "${claim}",
             "receipt": "${defs.receipts.op_a}"
           },
           "expect": {
@@ -1606,10 +1606,34 @@
           }
         },
         {
+          "id": "claim-replay-recovers-claim",
+          "operation": "claim",
+          "body": {
+            "spend_auth_token_id": "${token}",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 300,
+            "execution_scope": "${expanded_scope}"
+          },
+          "expect": {
+            "status": 200,
+            "match": {
+              "status": "claimed",
+              "spend.budget_hold.hold_id": "${hold}"
+            },
+            "capture": {
+              "claim": "claim_id"
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
+          }
+        },
+        {
           "id": "release",
           "operation": "release",
           "body": {
-            "spend_auth_token_id": "${token}"
+            "claim_id": "${claim}"
           },
           "expect": {
             "status": 200,
@@ -1619,10 +1643,10 @@
               "reconciliation_outcome": null,
               "spend.budget_hold.hold_id": "${hold}",
               "spend.budget_hold.status": "released",
-              "spend.spend_auth_token_id": "${token}"
+              "spend.spend_auth_token_id": "${token}",
+              "claim_id": "${claim}"
             },
             "capture": {
-              "claim": "claim_id",
               "finalized_at": "finalized_at"
             },
             "relations": [
@@ -1673,7 +1697,7 @@
           "id": "settle-after-release-rejected",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token}",
+            "claim_id": "${claim}",
             "receipt": "${defs.receipts.op_b}"
           },
           "expect": {
@@ -1801,7 +1825,7 @@
           "operation": "settle",
           "fault": "drop_response",
           "body": {
-            "spend_auth_token_id": "${token}",
+            "claim_id": "${claim}",
             "receipt": "${defs.receipts.op_a}"
           },
           "expect": {}
@@ -1837,21 +1861,20 @@
           }
         },
         {
-          "id": "both-identity-forms-rejected",
+          "id": "token-finalization-rejected",
           "operation": "release",
           "body": {
-            "spend_auth_token_id": "${token}",
-            "claim_id": "${claim}"
+            "spend_auth_token_id": "${token}"
           },
           "expect": {
-            "retry_decision": "stop_ambiguous_identity"
+            "retry_decision": "reject_token_finalization"
           }
         },
         {
           "id": "release-cannot-erase-billed-work",
           "operation": "release",
           "body": {
-            "spend_auth_token_id": "${token}"
+            "claim_id": "${claim}"
           },
           "expect": {
             "retry_decision": "terminal_already_settled"
@@ -1861,7 +1884,7 @@
           "id": "identical-settlement-returns-stored-result",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token}",
+            "claim_id": "${claim}",
             "receipt": "${defs.receipts.op_a}"
           },
           "expect": {
@@ -1886,7 +1909,7 @@
           "id": "changed-cost-after-loss-rejected",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token}",
+            "claim_id": "${claim}",
             "receipt": {
               "$merge": "${defs.receipts.op_a}",
               "actual_vendor_cost": "${defs.exact_cost.reconciled}"
@@ -2047,7 +2070,7 @@
           "id": "normal-settle-rejected",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token}",
+            "claim_id": "${claim}",
             "receipt": "${defs.receipts.op_b}"
           },
           "expect": {
@@ -2058,7 +2081,7 @@
           "id": "normal-release-rejected",
           "operation": "release",
           "body": {
-            "spend_auth_token_id": "${token}"
+            "claim_id": "${claim}"
           },
           "expect": {
             "retry_decision": "await_human_reconciliation_expired"
@@ -2766,7 +2789,7 @@
           "operation": "settle",
           "fault": "drop_response",
           "body": {
-            "spend_auth_token_id": "${token}",
+            "claim_id": "${claim}",
             "receipt": "${defs.receipts.op_a}"
           },
           "expect": {}
@@ -3021,7 +3044,7 @@
           "id": "settle-one-cent-over-maximum-rejected",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token_a}",
+            "claim_id": "${claim_a}",
             "receipt": "${defs.receipts.over_max_600}"
           },
           "expect": {
@@ -3062,7 +3085,7 @@
           "id": "settle-at-exact-maximum",
           "operation": "settle",
           "body": {
-            "spend_auth_token_id": "${token_a}",
+            "claim_id": "${claim_a}",
             "receipt": "${defs.receipts.at_max_600}"
           },
           "expect": {
@@ -3100,14 +3123,17 @@
             "absent": [
               "operation_key",
               "spend.operation_key"
-            ]
+            ],
+            "capture": {
+              "claim_c": "claim_id"
+            }
           }
         },
         {
           "id": "release-op-c",
           "operation": "release",
           "body": {
-            "spend_auth_token_id": "${token_c}"
+            "claim_id": "${claim_c}"
           },
           "expect": {
             "status": 200,

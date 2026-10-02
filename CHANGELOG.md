@@ -39,13 +39,14 @@ Future release template
 
 - The executor contract is now `hubu-spend-executor-v4.4`, and it is
   intentionally startup-incompatible with v4.3. Executors identify an
-  operation only by the `spend_auth_token_id` or `claim_id` Hubu issued:
+  operation only by values Hubu issued:
   - claim with the token plus the account, amount and scope assertions;
-  - settle or release with exactly one of `spend_auth_token_id` or `claim_id`.
+  - settle or release with the `claim_id`; an executor that lost the claim
+    response replays the identical claim to recover it.
 
-  Hubu rejects `operation_key` and `agent_id` on executor routes. The token
-  still identifies its operation after it expires or is used, so an executor
-  can finalize after losing the claim response. Gongbu, unified MCP and the
+  Hubu rejects `operation_key` and `agent_id` on executor routes, and rejects
+  the token on settle and release. A claim replay returns the existing claim
+  even after the authorization expires. Gongbu, unified MCP and the
   release tooling move to v4.4 together, and every binary must report the same
   version. External v4.3 executors must migrate; see the migration notes in
   `docs/spend-executor-contract.md`. Human reconciliation and the operation
